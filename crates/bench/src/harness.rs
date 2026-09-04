@@ -110,6 +110,9 @@ impl StageResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BenchReport {
+    /// JSON contract version; see `cambium_engine::report::SCHEMA_VERSION`.
+    #[serde(default = "schema_version")]
+    pub schema: u32,
     pub tool_version: String,
     pub tool_sha: String,
     pub timestamp_unix: u64,
@@ -117,9 +120,14 @@ pub struct BenchReport {
     pub results: Vec<StageResult>,
 }
 
+const fn schema_version() -> u32 {
+    cambium_engine::report::SCHEMA_VERSION
+}
+
 impl BenchReport {
     pub fn new(results: Vec<StageResult>) -> Self {
         Self {
+            schema: schema_version(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             tool_sha: git_sha(),
             timestamp_unix: std::time::SystemTime::now()

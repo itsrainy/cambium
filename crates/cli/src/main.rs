@@ -8,6 +8,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod cmd;
 
 /// Exit codes (spec 10).
+///
+/// Part of the versioned contract described in the README alongside the JSON
+/// field names: callers branch on these, so a value never changes meaning
+/// without a `SCHEMA_VERSION` bump.
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_ERROR: u8 = 1;
 pub const EXIT_GLOBAL: u8 = 2;
@@ -120,4 +124,43 @@ fn init_logging(level: &str) {
         .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_are_pinned() {
+        // Changing any of these is a contract break: bump SCHEMA_VERSION and
+        // update the JSON contract table in the README.
+        assert_eq!(EXIT_OK, 0);
+        assert_eq!(EXIT_ERROR, 1);
+        assert_eq!(EXIT_GLOBAL, 2);
+        assert_eq!(EXIT_BAZEL, 3);
+        assert_eq!(EXIT_NO_BASELINE, 4);
+    }
+
+    #[test]
+    fn engine_errors_map_onto_the_documented_codes() {
+        let map = |e: cambium_engine::EngineError| e.exit_code() as u8;
+        assert_eq!(
+            map(cambium_engine::EngineError::BaselineUnavailable { base: "x".into() }),
+            EXIT_NO_BASELINE
+        );
+        assert_eq!(
+            map(cambium_engine::EngineError::BazelQuery {
+                what: "x".into(),
+                code: Some(1),
+                stderr: String::new(),
+            }),
+            EXIT_BAZEL
+        );
+    }
+
+    #[test]
+    fn the_cli_parses() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
 }

@@ -497,6 +497,7 @@ impl Engine {
         let explanations = req.explain.then(|| explain(hv, &result, &reasons));
 
         let report = AffectedReport {
+            schema: crate::report::SCHEMA_VERSION,
             base: req.base.clone(),
             head: req.head.clone(),
             global: false,
@@ -551,6 +552,7 @@ fn global_report(
     stats: Stats,
 ) -> AffectedReport {
     AffectedReport {
+        schema: crate::report::SCHEMA_VERSION,
         base: req.base.clone(),
         head: req.head.clone(),
         global: true,

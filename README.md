@@ -92,8 +92,57 @@ $ bazel test $(cambium affected --base origin/main --tests-only --output query)
 change and why that starting point was direct — the answer to "why is this
 test running?".
 
-Exit codes: `0` success, `1` error, `2` global invalidation (stdout is
-`//...`), `3` Bazel failure, `4` no baseline and `--no-full-build` was given.
+## The JSON contract
+
+Everything cambium prints as JSON is meant to be parsed by something that is
+not cambium, so the field names, their shapes, and the exit codes are a
+versioned contract. Every JSON document carries the version it was written
+against:
+
+```json
+{ "schema": 1, "base": "...", "head": "...", ... }
+```
+
+Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
+notice the difference — a renamed, removed or retyped field, an added field, or
+an exit code changing meaning. `crates/engine/tests/json_contract.rs` pins the
+affected report's shape and fails with instructions if it moves without a bump;
+`crates/cli/src/main.rs` pins the exit codes.
+
+### Exit codes
+
+| code | meaning |
+|---:|---|
+| 0 | success |
+| 1 | error |
+| 2 | global invalidation — everything is affected; stdout is `//...` |
+| 3 | Bazel failed |
+| 4 | no baseline available and `--no-full-build` was given |
+
+### `cambium affected --output json`
+
+| field | type | meaning |
+|---|---|---|
+| `schema` | int | contract version |
+| `base`, `head` | string | resolved revisions |
+| `global` | bool | everything is affected; `affected` and `tests` are empty and the answer is `//...` |
+| `global_reason` | string, optional | why, when `global` |
+| `dirty_packages` | \[string] | packages re-queried, without the leading `//` |
+| `direct` | \[string] | labels whose own definition or inputs changed |
+| `affected` | \[string] | `direct` plus its reverse closure; sorted |
+| `tests` | \[string] | the subset of `affected` that is a test |
+| `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files` |
+| `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
+
+`reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
+`package`), `file` (with `path`), `deleted_dep` (with `label`).
+
+Optional fields are omitted rather than null, so absence is meaningful. A
+document with no `schema` key predates the field and is version 1.
+
+`cambium index ... --output json` and `cambium bench` results carry `schema`
+on the same terms.
 
 ### Configuration
 

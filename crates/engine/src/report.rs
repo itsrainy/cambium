@@ -2,6 +2,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Version of cambium's JSON contract.
+///
+/// Every JSON document any subcommand emits carries this as its `schema` field.
+/// The contract covers the field names and shapes of those documents *and* the
+/// CLI's exit codes: callers parse both, and both are documented together in
+/// the README. Bump it whenever either changes in a way a consumer could
+/// notice — a renamed or removed field, a changed type, a repurposed exit code.
+/// Adding an optional field is still a bump, because a consumer validating the
+/// document against a known shape will see it.
+///
+/// `crates/engine/tests/json_contract.rs` pins the affected report's shape, so
+/// a change that forgets to bump this fails there with instructions.
+pub const SCHEMA_VERSION: u32 = 1;
+
+const fn schema_version() -> u32 {
+    SCHEMA_VERSION
+}
+
 /// Per-stage wall time, in milliseconds (spec 10, JSON schema).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Timings {
@@ -68,8 +86,11 @@ pub struct Stats {
 }
 
 /// The answer, in the shape the CLI serialises (spec 10).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AffectedReport {
+    /// JSON contract version; see [`SCHEMA_VERSION`].
+    #[serde(default = "schema_version")]
+    pub schema: u32,
     pub base: String,
     pub head: String,
     /// Everything is affected; `affected` and `tests` are empty and callers
@@ -85,6 +106,25 @@ pub struct AffectedReport {
     pub stats: Stats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanations: Option<Vec<Explanation>>,
+}
+
+impl Default for AffectedReport {
+    fn default() -> Self {
+        Self {
+            schema: SCHEMA_VERSION,
+            base: String::new(),
+            head: String::new(),
+            global: false,
+            global_reason: None,
+            dirty_packages: Vec::new(),
+            direct: Vec::new(),
+            affected: Vec::new(),
+            tests: Vec::new(),
+            timings_ms: Timings::default(),
+            stats: Stats::default(),
+            explanations: None,
+        }
+    }
 }
 
 impl AffectedReport {
