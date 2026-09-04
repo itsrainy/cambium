@@ -54,6 +54,7 @@ impl Fixture {
             include_manual: true,
             explain: false,
             no_full_build: true,
+            materialize: true,
             publish_base: false,
         }
     }
@@ -105,7 +106,8 @@ fn a_missing_baseline_is_replayed_forward_from_an_ancestor() {
         "it should walk back to the nearest ancestor that has one"
     );
     assert_eq!(
-        index.provenance.commit, base,
+        index.view().commit,
+        base,
         "the replayed index describes the base commit"
     );
 
@@ -116,12 +118,12 @@ fn a_missing_baseline_is_replayed_forward_from_an_ancestor() {
         .full_build_with(&base, &SynthQuerier::new(&f.graphs[2]))
         .unwrap();
     assert_eq!(
-        edges(&index),
-        edges(&fresh),
+        edges(index.view()),
+        edges(fresh.view()),
         "the replayed index disagrees with a build at the same commit"
     );
     assert_eq!(
-        index.header.lineage,
+        index.view().lineage,
         IndexFile::open(&f.engine.fetch_baseline(&f.commits[0]).unwrap().unwrap())
             .unwrap()
             .view()
@@ -160,7 +162,7 @@ fn no_baseline_at_all_falls_back_to_a_cold_build() {
         .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[1]))
         .unwrap();
     assert_eq!(origin, BaselineOrigin::ColdBuild);
-    assert_eq!(index.provenance.commit, base);
+    assert_eq!(index.view().commit, base);
 }
 
 #[test]
@@ -180,11 +182,11 @@ fn publish_base_publishes_the_replayed_index_under_the_base_commit() {
         .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[2]))
         .unwrap();
     assert!(matches!(origin, BaselineOrigin::Replayed { .. }));
-    f.engine.publish_base_index(&index).unwrap();
+    f.engine.publish_baseline_for_test(&index).unwrap();
 
     let after = f.store_keys();
     assert_eq!(after.len(), 2, "the replayed base should now be published");
-    let key = cambium_index::index_key(&index.header.lineage, &base);
+    let key = cambium_index::index_key(&index.view().lineage, &base);
     assert!(after.contains(&key), "expected {key} in {after:?}");
 
     // ...and the next run finds it rather than replaying again.
@@ -214,12 +216,17 @@ fn affected_never_publishes_the_head_index() {
         .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[1]))
         .unwrap();
     assert!(matches!(origin, BaselineOrigin::Replayed { .. }));
-    f.engine.publish_base_index(&base_index).unwrap();
+    f.engine.publish_baseline_for_test(&base_index).unwrap();
 
     let changes = f.engine.repo.diff(&base, &head).unwrap();
     let out = f
         .engine
-        .compute(base_index, &changes, &SynthQuerier::new(&f.graphs[2]), &req)
+        .compute(
+            base_index.view(),
+            &changes,
+            &SynthQuerier::new(&f.graphs[2]),
+            &req,
+        )
         .unwrap();
     assert!(out.index.is_some(), "the run produced a head index");
 
@@ -255,8 +262,7 @@ fn publish_base_does_nothing_when_the_baseline_was_already_published() {
     assert_eq!(f.store_keys(), before);
 }
 
-fn edges(index: &cambium_index::IndexData) -> std::collections::BTreeSet<(String, String)> {
-    let v = index.view();
+fn edges(v: cambium_index::IndexRef<'_>) -> std::collections::BTreeSet<(String, String)> {
     let mut out = std::collections::BTreeSet::new();
     for id in 0..v.num_nodes() {
         if v.is_tombstone(id) {

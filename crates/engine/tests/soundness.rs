@@ -39,6 +39,7 @@ fn engine_never_under_approximates() {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        materialize: true,
         publish_base: false,
     };
 
@@ -72,9 +73,31 @@ fn engine_never_under_approximates() {
                 empty += 1;
                 continue;
             }
+            // Both paths, every revision: the delta overlay must answer
+            // exactly what the materialised index answers. It is the cheaper
+            // path and the one a pull-request run takes, so it gets the same
+            // scrutiny as the one whose output gets published.
+            let overlay = e
+                .compute(
+                    index.view(),
+                    &c.changes,
+                    &SynthQuerier::new(&g),
+                    &AffectedRequest {
+                        materialize: false,
+                        ..req.clone()
+                    },
+                )
+                .unwrap_or_else(|e| panic!("seed {seed} rev {rev} ({preset_name}) overlay: {e}"));
             let out = e
-                .compute(index, &c.changes, &SynthQuerier::new(&g), &req)
+                .compute(index.view(), &c.changes, &SynthQuerier::new(&g), &req)
                 .unwrap_or_else(|e| panic!("seed {seed} rev {rev} ({preset_name}): {e}"));
+            assert_eq!(
+                overlay.report.affected, out.report.affected,
+                "seed {seed} rev {rev} ({preset_name}): overlay and materialised disagree"
+            );
+            assert_eq!(overlay.report.direct, out.report.direct);
+            assert_eq!(overlay.report.tests, out.report.tests);
+            assert!(overlay.index.is_none());
             if out.report.global {
                 // "Everything is affected" trivially contains the reference, so
                 // this is sound; it is counted rather than compared because the

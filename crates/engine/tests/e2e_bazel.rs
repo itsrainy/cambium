@@ -219,11 +219,12 @@ impl Golden {
             // and not merely that it was.
             explain: true,
             no_full_build: true,
+            materialize: true,
             publish_base: false,
         };
         let out = engine
             .compute(
-                self.base_index.clone(),
+                self.base_index.view(),
                 &engine.repo.diff(&self.base, &head).expect("git diff"),
                 &engine.bazel_querier(&head),
                 &req,
@@ -669,10 +670,11 @@ fn synthetic_workspace_through_real_bazel() {
             include_manual: true,
             explain: false,
             no_full_build: true,
+            materialize: true,
             publish_base: false,
         };
         let out = engine
-            .run_incremental(index.clone(), &req)
+            .run_incremental(index.view(), &req)
             .unwrap_or_else(|e| panic!("commit {i}: {e}"));
         if out.report.global {
             index = engine.full_build(head).unwrap();

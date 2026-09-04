@@ -42,17 +42,19 @@ Median of 5 runs (3 at `large`).
 
 | stage | small | medium | large |
 |---|---:|---:|---:|
-| `build_index` | 3.8 ms | 192 ms | 4.03 s |
+| `build_index` | 3.8 ms | 192 ms | 4.50 s |
 | `load_index`, mmap only | 0.01 ms | 0.01 ms | 0.01 ms |
 | `load_index`, + label map | 0.21 ms | 8.7 ms | 279 ms |
 | `classify` | 1.1 ms | 31 ms | 63 ms |
 | `parse_proto` | 8.1 ms | 239 ms | — |
 | `rule_hash` | 4.7 ms | 141 ms | — |
-| `splice`, 8 dirty packages | 0.46 ms | 16 ms | 449 ms |
+| `splice`, 8 dirty packages (materialised) | 0.46 ms | 16 ms | 308 ms |
+| `splice`, 42 dirty packages (delta overlay) | — | — | 32 ms |
 | `reverse_rebuild` | 0.06 ms | 3.0 ms | 82 ms |
 | `walk`, 10 starting points | 0.00 ms | 0.01 ms | 11 ms |
 | `walk`, hub starting point | — | — | 34 ms |
-| `e2e_memory`, `typical-pr` | 3.9 ms | 37 ms | 822 ms |
+| `e2e_memory`, `typical-pr` (overlay) | 3.9 ms | 22 ms | 207 ms |
+| `e2e_materialize`, `typical-pr` | — | 31 ms | 541 ms |
 
 Throughputs at `large`: 623k targets/s indexed, 757k paths/s classified, 61M
 edges/s for the reverse rebuild. At `medium`, 150 MB/s of streamed proto and
@@ -75,69 +77,96 @@ affected targets — a quarter of the graph — at about 90 ns each. The 0.01 ms
 |---|---|---|---|
 | `walk` on `large`, non-hub start | < 5 ms | 11 ms, 121k affected | see above |
 | `walk` on `large`, hub start | < 50 ms, ~40% affected | 34 ms, 50% affected | ✅ |
-| `splice` + `reverse_rebuild` on `large` | < 300 ms | 449 + 82 ms | ❌ see below |
+| `splice` + `reverse_rebuild` on `large` | < 300 ms | 32 ms (overlay) / 308 + 82 ms (materialised) | ✅ on the path that matters |
 | `load_index` on `large`, warm | < 20 ms | 0.01 ms | ✅ the label map is separate and off the walk path |
-| `build_index` on `xl` | < 60 s, < 6 GiB | ~16 s, ~7 GiB (extrapolated) | time ✅, memory over |
-| `e2e_memory` `typical-pr` on `xl` | < 1 s | ~3 s (extrapolated) | ❌ dominated by the splice |
+| `build_index` on `xl` | < 60 s, < 6 GiB | ~18 s, ~7 GiB (extrapolated) | time ✅, memory over |
+| `e2e_memory` `typical-pr` on `xl` | < 1 s | ~0.8 s (extrapolated) | ✅ with the overlay |
 
-On four cores, with the splice accounting for both misses.
+On four cores. The two targets the splice used to miss are met now that the
+`affected` path no longer materialises an index; `build_index` peak memory is
+the one still over, and it is a cold-build cost paid once per lineage.
 
 ## Where the time actually goes
 
 End-to-end on `large`, for a typical pull request: ten changed files, one of
 them a `.bzl` that 42 packages load.
 
-| stage | ms | proportional to |
-|---|---:|---|
-| dirty set | 42 | changed files (plus one `rbuildfiles` call) |
-| query | 4 | targets in dirty packages — synthetic here; a real Bazel query is the dominant cost |
-| splice | 425 | **the whole graph** |
-| direct set | 2 | dirty targets and changed files |
-| walk | 40 | the answer (280k targets) |
-| **total** | **822** | |
+| stage | delta overlay | materialised | proportional to |
+|---|---:|---:|---|
+| dirty set | 40 | 40 | changed files (plus one `rbuildfiles` call) |
+| query | 4 | 4 | targets in dirty packages — synthetic here; a real Bazel query dominates |
+| splice | **24** | **~1200** | the change / **the whole graph** |
+| direct set | 1 | 1 | dirty targets and changed files |
+| walk | 45 | 40 | the answer (280k targets) |
+| **total** | **207 ms** | **541 ms** | |
 
-Everything except the splice sums to ~88 ms, and each of those stages is
-proportional to the change or to the answer, which is the property the whole
-design exists to get. The splice is proportional to the graph and is 52% of
-the run.
+The splice was 52% of a run and is now 12%. Measured on its own, over 42 dirty
+packages of a 2.5M-node index:
 
-It is not the CSR memcpy the spec budgeted for. v1 produces a *complete new
-index* at head, so `IndexBuilder::from_view` copies the label bytes (~110 MB at
-this size), the per-node hashes (80 MB) and the edges (40 MB), and rebuilds the
-interner's hash table over 2.5M labels. The edge memcpy the spec estimated at
-"tens of milliseconds" is indeed tens of milliseconds; the rest is the cost of
-materialising everything else.
+```
+from_view                 8 ms     borrow the base, copy only the small tables
+from_view + apply        25 ms     intern, stamp metadata, stage edges
+finish_overlay            7 ms     diff replaced rows into reverse corrections
+                     -------
+delta overlay            32 ms
 
-The fix is the one the spec already anticipates (section 15, *delta overlays*):
-a pull-request run does not need a new index at all. It needs the base reverse
-CSR plus a small in-memory delta for the dirty packages. That would take this
-run from ~820 ms to under 100 ms.
+from_view + apply + finish     1216 ms    materialise a complete new index
+```
 
-**It is an addition, not a replacement**, and the distinction matters enough to
-state plainly, because the tempting change is the wrong one:
+Two things made that possible:
 
-- **`affected` is where the overlay belongs.** Nobody reads the index it
-  produces; the answer is the deliverable.
-- **`baseline update` must keep materialising.** Its output *is* the published
-  artifact, the thing the next run splices onto. It is also where "a spliced
-  index equals a full rebuild" gets exercised — the property two of the four
-  correctness oracles check on every commit. Make the shared path lazy to speed
-  up `affected` and the published artifact goes with it, along with the oracle
-  that would have caught the mistake.
+- **The builder borrows its base.** It used to copy the label table, the node
+  columns and the forward CSR up front. Now existing entries are read straight
+  from the mmapped index and only what the splice touches is stored, so a
+  splice is proportional to the change until something asks for a whole index.
+- **Labels are found by binary search.** The index carries node ids ordered by
+  label (4 bytes per node), so resolving the couple of thousand labels a dirty
+  query mentions costs microseconds instead of the ~280 ms an O(labels) hash
+  map build costs at a few million nodes.
 
-The materialising splice being on the hot path in v1 is what made that property
-cheap to check while the engine was being built. Keep it; put the overlay
-beside it. The same note is at `IndexBuilder::from_view`, where an implementer
-will actually land.
+Which finalizer runs is the caller's choice, and the choice is not
+interchangeable:
+
+- **`affected` takes the overlay.** It answers a question and throws the graph
+  away; nobody reads the index it would have built. A fetched baseline is not
+  even deserialised — the run walks the mmap.
+- **`baseline update` materialises.** Its output *is* the published artifact,
+  and it is where "a spliced index equals a full rebuild" gets exercised, which
+  two of the four correctness oracles check. Making the shared path lazy to
+  speed up `affected` would take the published artifact with it, along with the
+  oracle that would have caught the mistake.
+
+The two must answer identically, and that is enforced rather than assumed:
+every scenario in the property tests and every revision of the soundness sweep
+computes the answer both ways and requires the affected, direct and test sets —
+and the `--explain` paths — to match.
+
+Costs elsewhere, for honesty:
+
+- The sorted-label index adds ~470 ms to a cold build at `large` (4.0 s → 4.5 s)
+  and 4% to the index on disk. A cold build happens once per lineage; the
+  binary search it buys happens on every run.
+- The materialised splice got *faster* too (449 ms → 308 ms), because the base
+  is no longer copied twice — once into the builder, once into the output.
 
 Two smaller things, both found by measuring rather than reading:
 
 - The direct-set stage was rebuilding a label map over the finished index
   (340 ms at `large`) to resolve changed file paths to node ids. It now
   resolves them through the builder's interner, before the index is finalised:
-  340 ms → 2 ms.
+  340 ms → 1 ms.
 - `FixedBitSet::grow` reallocates to exactly the requested size, so growing it
   one node at a time made a cold build quadratic. It now doubles.
+
+### What is left
+
+Of the 207 ms an `affected` run now costs on `large`, the walk is 45 ms (the
+answer is 280k targets — that is the work), the dirty set is 40 ms, and the
+splice is 32 ms. The remainder is the small tables `IndexBuilder::from_view`
+still copies: the package-to-nodes lists, and the package-name and rule-class
+interners. At 45k packages that is tens of milliseconds and the same treatment
+would remove it. It is the next thing to do here, and it is worth doing only
+once something needs the last 20%.
 
 ## Scaling
 

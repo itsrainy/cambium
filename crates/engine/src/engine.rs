@@ -7,7 +7,7 @@ use cambium_bazel::Bazel;
 use cambium_classify::{DirtySet, Matchers, PackageSet};
 use cambium_diff::Repo;
 use cambium_index::{
-    format, walk, IndexBuilder, IndexData, IndexFile, IndexRef, NodeKind, WalkOptions,
+    format, walk, GraphView, IndexBuilder, IndexData, IndexFile, IndexRef, NodeKind, WalkOptions,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -26,6 +26,13 @@ pub struct AffectedRequest {
     pub explain: bool,
     /// Refuse to fall back to a cold full build when no baseline is found.
     pub no_full_build: bool,
+    /// Produce a complete head index rather than a delta overlay.
+    ///
+    /// `affected` does not need one — it answers a question and throws the
+    /// graph away — and materialising is the most expensive step in a run, so
+    /// this is off by default. `baseline update` sets it, because its output is
+    /// what gets published.
+    pub materialize: bool,
     /// Publish the *base* index when this run had to compute it — because the
     /// store had no index for `base` and one was replayed forward from an
     /// ancestor, or built cold. The head-side index is never published from
@@ -41,7 +48,46 @@ impl AffectedRequest {
             include_manual: false,
             explain: false,
             no_full_build: false,
+            materialize: false,
             publish_base: false,
+        }
+    }
+}
+
+/// A base index, however it was obtained.
+///
+/// A fetched index stays mmapped rather than being deserialised into owned
+/// memory: the `affected` path only ever reads it, and copying a few hundred
+/// megabytes to read it would undo what the delta overlay bought.
+impl std::fmt::Debug for Baseline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let v = self.view();
+        f.debug_struct("Baseline")
+            .field("commit", &v.commit)
+            .field("nodes", &v.num_nodes())
+            .finish()
+    }
+}
+
+pub enum Baseline {
+    Mapped(IndexFile),
+    Owned(Box<IndexData>),
+}
+
+impl Baseline {
+    pub fn view(&self) -> IndexRef<'_> {
+        match self {
+            Baseline::Mapped(f) => f.view(),
+            Baseline::Owned(d) => d.view(),
+        }
+    }
+
+    /// The owned index, deserialising the mapping only if that is what the
+    /// caller actually needs.
+    pub fn into_owned(self) -> Result<IndexData> {
+        match self {
+            Baseline::Mapped(f) => Ok(f.deserialize()?),
+            Baseline::Owned(d) => Ok(*d),
         }
     }
 }
@@ -221,7 +267,7 @@ impl Engine {
         &self,
         base: &str,
         req: &AffectedRequest,
-    ) -> Result<(IndexData, BaselineOrigin)> {
+    ) -> Result<(Baseline, BaselineOrigin)> {
         // The replay's head is `base`, so its querier is the one built for
         // `base` — not the one the outer run uses for its own head.
         self.resolve_baseline_with(base, req, &self.bazel_querier(base))
@@ -235,12 +281,12 @@ impl Engine {
         base: &str,
         req: &AffectedRequest,
         querier: &dyn PackageQuerier,
-    ) -> Result<(IndexData, BaselineOrigin)> {
+    ) -> Result<(Baseline, BaselineOrigin)> {
         if let Some(path) = self.fetch_baseline(base)? {
             let f = IndexFile::open(&path)?;
             self.check_compatible(f.view(), &path)?;
             tracing::info!(%base, path = %path.display(), "loaded baseline index");
-            return Ok((f.deserialize()?, BaselineOrigin::Fetched));
+            return Ok((Baseline::Mapped(f), BaselineOrigin::Fetched));
         }
 
         let max = self.cfg.baseline.max_ancestor_walk;
@@ -260,12 +306,17 @@ impl Engine {
             let inner = AffectedRequest {
                 base: anc.clone(),
                 head: base.to_string(),
+                // The replay's whole purpose is to produce the base index.
+                materialize: true,
                 ..req.clone()
             };
             let changes = self.repo.diff(&anc, base)?;
-            let out = self.compute(f.deserialize()?, &changes, querier, &inner)?;
+            let out = self.compute(f.view(), &changes, querier, &inner)?;
             return match out.index {
-                Some(idx) => Ok((idx, BaselineOrigin::Replayed { from: anc })),
+                Some(idx) => Ok((
+                    Baseline::Owned(Box::new(idx)),
+                    BaselineOrigin::Replayed { from: anc },
+                )),
                 // The ancestor..base range invalidated everything, so the
                 // ancestor's index cannot be brought forward.
                 None => {
@@ -275,7 +326,7 @@ impl Engine {
                         })
                     } else {
                         Ok((
-                            self.full_build_with(base, querier)?,
+                            Baseline::Owned(Box::new(self.full_build_with(base, querier)?)),
                             BaselineOrigin::ColdBuild,
                         ))
                     }
@@ -289,7 +340,7 @@ impl Engine {
             });
         }
         Ok((
-            self.full_build_with(base, querier)?,
+            Baseline::Owned(Box::new(self.full_build_with(base, querier)?)),
             BaselineOrigin::ColdBuild,
         ))
     }
@@ -310,6 +361,22 @@ impl Engine {
         let names = self.publish_index(&path, &index.header.lineage, &commit)?;
         let _ = std::fs::remove_file(&path);
         Ok(names)
+    }
+
+    /// Publishes a base index that is already a file on disk (a mapped
+    /// baseline), or one held in memory.
+    pub fn publish_baseline_for_test(&self, base: &Baseline) -> Result<Vec<String>> {
+        self.publish_baseline(base)
+    }
+
+    fn publish_baseline(&self, base: &Baseline) -> Result<Vec<String>> {
+        match base {
+            Baseline::Owned(d) => self.publish_base_index(d),
+            Baseline::Mapped(f) => {
+                let v = f.view();
+                self.publish_index(f.path(), &v.lineage, v.commit)
+            }
+        }
     }
 
     /// An index may only be spliced onto if the config that produced it still
@@ -349,7 +416,7 @@ impl Engine {
                 BaselineOrigin::Fetched => {
                     tracing::debug!(%base, "base index came from the store; nothing to publish")
                 }
-                origin => match self.publish_base_index(&base_index) {
+                origin => match self.publish_baseline(&base_index) {
                     Ok(names) => tracing::info!(
                         %base, ?origin, published = ?names,
                         "published the computed base index"
@@ -363,7 +430,7 @@ impl Engine {
         }
         let load_ms = sw.lap();
 
-        let mut out = self.run_incremental(base_index, &req)?;
+        let mut out = self.run_incremental(base_index.view(), &req)?;
         out.report.timings_ms.load += load_ms;
         out.report.timings_ms.total = total.elapsed_ms();
         Ok(out)
@@ -373,11 +440,11 @@ impl Engine {
     /// what changed and queries Bazel for the dirty packages.
     pub fn run_incremental(
         &self,
-        base_index: IndexData,
+        base_view: IndexRef<'_>,
         req: &AffectedRequest,
     ) -> Result<RunOutcome> {
         let changes = self.repo.diff(&req.base, &req.head)?;
-        self.compute(base_index, &changes, &self.bazel_querier(&req.head), req)
+        self.compute(base_view, &changes, &self.bazel_querier(&req.head), req)
     }
 
     /// The pipeline proper: dirty set, query, splice, direct set, walk.
@@ -386,17 +453,17 @@ impl Engine {
     /// be exercised without git or Bazel (spec 12.4).
     pub fn compute(
         &self,
-        base_index: IndexData,
+        base_view: IndexRef<'_>,
         changes: &[cambium_diff::Change],
         querier: &dyn PackageQuerier,
         req: &AffectedRequest,
     ) -> Result<RunOutcome> {
         let mut sw = Stopwatch::start();
         let mut timings = Timings::default();
-        let mut stats = Stats::default();
-
-        let base_view = base_index.view();
-        stats.base_nodes = base_view.num_nodes();
+        let mut stats = Stats {
+            base_nodes: base_view.num_nodes(),
+            ..Default::default()
+        };
 
         // ---- dirty set ----
         stats.changed_files = changes.len();
@@ -457,12 +524,16 @@ impl Engine {
             let ids = builder.delete_package(p);
             deleted_by_package.push((p.clone(), ids));
         }
-        let report = builder.apply_packages(&updates);
+        let splice = builder.apply_packages(&updates);
 
         // Resolve changed source files to node ids while the builder still has
         // its interner: rebuilding a label map over a finished index costs
         // O(labels), and at a few million labels that is the single most
         // expensive thing in an otherwise change-proportional run.
+        let wopts = WalkOptions {
+            include_manual: req.include_manual,
+            explain: req.explain,
+        };
         let mut changed_file_ids: Vec<(u32, String)> = Vec::with_capacity(dirty.direct_files.len());
         for path in &dirty.direct_files {
             let Some(pkg) = packages.owner_of(path) else {
@@ -477,143 +548,213 @@ impl Engine {
             }
         }
 
-        let head_index = builder.finish(&req.head);
-        let hv = head_index.view();
-        stats.head_nodes = hv.num_nodes();
-        stats.head_edges = hv.num_edges() as u64;
-        timings.splice = sw.lap();
+        // Materialise a whole new index, or take only the delta.
+        //
+        // Both answer the same question over the same graph — one implements it
+        // as a complete index, the other as the base plus corrections — and the
+        // property tests compute every synthetic revision both ways and require
+        // the answers to be identical.
+        let (report, index) = if req.materialize {
+            let head_index = builder.finish(&req.head);
+            let hv = head_index.view();
+            stats.head_nodes = hv.num_nodes();
+            stats.head_edges = hv.num_edges() as u64;
+            timings.splice = sw.lap();
 
-        // ---- direct set (spec 6.7) ----
-        let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
-        let mut direct: FxHashSet<u32> = FxHashSet::default();
-        let add = |id: u32,
-                   reason: DirectReason,
-                   direct: &mut FxHashSet<u32>,
-                   reasons: &mut FxHashMap<u32, DirectReason>| {
-            if direct.insert(id) {
-                reasons.insert(id, reason);
-            }
+            let (direct, reasons) = derive_direct(
+                &hv,
+                &splice,
+                &deleted_by_package,
+                &changed_file_ids,
+                &bzl_dirty,
+            );
+            stats.direct_targets = direct.len();
+            timings.direct = sw.lap();
+
+            let result = walk::walk_view(&hv, &direct, &wopts);
+            stats.affected_targets = result.affected.len();
+            timings.walk = sw.lap();
+
+            (
+                finish_report(&hv, req, &dirty, &direct, &result, &reasons, timings, stats),
+                Some(head_index),
+            )
+        } else {
+            let overlay = builder.finish_overlay();
+            stats.head_nodes = overlay.num_nodes();
+            // The overlay never counts the graph's edges; it only knows the
+            // ones it changed.
+            stats.head_edges = base_view.num_edges() as u64;
+            timings.splice = sw.lap();
+            tracing::debug!(delta = ?overlay.delta_size(), "walking a delta overlay");
+
+            let (direct, reasons) = derive_direct(
+                &overlay,
+                &splice,
+                &deleted_by_package,
+                &changed_file_ids,
+                &bzl_dirty,
+            );
+            stats.direct_targets = direct.len();
+            timings.direct = sw.lap();
+
+            let result = walk::walk_view(&overlay, &direct, &wopts);
+            stats.affected_targets = result.affected.len();
+            timings.walk = sw.lap();
+
+            (
+                finish_report(
+                    &overlay, req, &dirty, &direct, &result, &reasons, timings, stats,
+                ),
+                None,
+            )
         };
 
-        for pd in &report.packages {
-            if bzl_dirty.contains(&pd.package) {
-                // This is spec 6.7's "bzl closure hash changed" branch, keyed
-                // on `rbuildfiles` membership instead of a stored hash, and it
-                // is load-bearing rather than an optimisation.
-                //
-                // A `.bzl` edit that changes a rule implementation without
-                // changing any BUILD attribute leaves every rule proto in the
-                // loading packages byte-identical — Bazel folds a rule's
-                // definition environment into the proto, not the loading BUILD
-                // file's load closure. So every rule hash comes back unchanged
-                // and `pd.changed` is empty. Marking every rule in the package
-                // direct regardless of its hash is the only thing that catches
-                // it. `Packages::bzl_closure_hash` is written as zero for
-                // exactly this reason: `rbuildfiles` names the same set the
-                // hash comparison would have, so the hash would be a second,
-                // redundant answer to a question already answered.
-                // (Covered by the `edit bzl` end-to-end scenario, which asserts
-                // that this is the reason those targets are reported.)
-                for &id in &pd.current {
-                    if hv.is_rule(id) {
-                        add(
-                            id,
-                            DirectReason::BzlClosure {
-                                package: pd.package.clone(),
-                            },
-                            &mut direct,
-                            &mut reasons,
-                        );
-                    }
-                }
-            } else {
-                for &id in &pd.changed {
-                    add(id, DirectReason::RuleHash, &mut direct, &mut reasons);
-                }
-            }
-            for &id in &pd.deleted {
-                let label = hv.label(id).to_string();
-                for &consumer in hv.reverse.row(id) {
-                    add(
-                        consumer,
-                        DirectReason::DeletedDep {
-                            label: label.clone(),
-                        },
-                        &mut direct,
-                        &mut reasons,
-                    );
-                }
-            }
-        }
-        for (pkg, ids) in &deleted_by_package {
-            for &id in ids {
-                let label = hv.label(id).to_string();
-                tracing::debug!(package = %pkg, %label, "package deleted");
-                for &consumer in hv.reverse.row(id) {
-                    add(
-                        consumer,
-                        DirectReason::DeletedDep {
-                            label: label.clone(),
-                        },
-                        &mut direct,
-                        &mut reasons,
-                    );
-                }
-            }
-        }
+        Ok(RunOutcome { report, index })
+    }
+}
 
-        for (id, path) in changed_file_ids {
-            for &consumer in hv.file_consumers(id) {
+/// The direct set (spec 6.7), over either a materialised index or an overlay.
+///
+/// One implementation for both, so the two paths cannot disagree about what a
+/// change made direct.
+fn derive_direct<V: GraphView + ?Sized>(
+    view: &V,
+    splice: &cambium_index::SpliceReport,
+    deleted_by_package: &[(String, Vec<u32>)],
+    changed_file_ids: &[(u32, String)],
+    bzl_dirty: &BTreeSet<String>,
+) -> (Vec<u32>, FxHashMap<u32, DirectReason>) {
+    let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
+    let mut direct: FxHashSet<u32> = FxHashSet::default();
+    let mut scratch: Vec<u32> = Vec::new();
+    let add = |id: u32,
+               reason: DirectReason,
+               direct: &mut FxHashSet<u32>,
+               reasons: &mut FxHashMap<u32, DirectReason>| {
+        if direct.insert(id) {
+            reasons.insert(id, reason);
+        }
+    };
+
+    for pd in &splice.packages {
+        if bzl_dirty.contains(&pd.package) {
+            // Spec 6.7's "bzl closure hash changed" branch, keyed on
+            // `rbuildfiles` membership instead of a stored hash, and
+            // load-bearing rather than an optimisation.
+            //
+            // A `.bzl` edit that changes a rule implementation without changing
+            // any BUILD attribute leaves every rule proto in the loading
+            // packages byte-identical — Bazel folds a rule's definition
+            // environment into the proto, not the loading BUILD file's load
+            // closure. So every rule hash comes back unchanged and `pd.changed`
+            // is empty. Marking every rule in the package direct regardless of
+            // its hash is the only thing that catches it, and
+            // `Packages::bzl_closure_hash` is written as zero for exactly that
+            // reason: `rbuildfiles` names the same set the hash comparison
+            // would have. (Covered by the `edit bzl` end-to-end scenario, which
+            // asserts this is *why* those targets are reported.)
+            for &id in &pd.current {
+                if view.is_rule(id) {
+                    add(
+                        id,
+                        DirectReason::BzlClosure {
+                            package: pd.package.clone(),
+                        },
+                        &mut direct,
+                        &mut reasons,
+                    );
+                }
+            }
+        } else {
+            for &id in &pd.changed {
+                add(id, DirectReason::RuleHash, &mut direct, &mut reasons);
+            }
+        }
+        for &id in &pd.deleted {
+            let label = view.label(id).to_string();
+            let consumers = view.reverse_row(id, &mut scratch).to_vec();
+            for consumer in consumers {
                 add(
                     consumer,
-                    DirectReason::File { path: path.clone() },
+                    DirectReason::DeletedDep {
+                        label: label.clone(),
+                    },
                     &mut direct,
                     &mut reasons,
                 );
             }
         }
+    }
 
-        let mut direct: Vec<u32> = direct.into_iter().collect();
-        direct.sort_unstable();
-        stats.direct_targets = direct.len();
-        timings.direct = sw.lap();
+    for (pkg, ids) in deleted_by_package {
+        for &id in ids {
+            let label = view.label(id).to_string();
+            tracing::debug!(package = %pkg, %label, "package deleted");
+            let consumers = view.reverse_row(id, &mut scratch).to_vec();
+            for consumer in consumers {
+                add(
+                    consumer,
+                    DirectReason::DeletedDep {
+                        label: label.clone(),
+                    },
+                    &mut direct,
+                    &mut reasons,
+                );
+            }
+        }
+    }
 
-        // ---- walk ----
-        let wopts = WalkOptions {
-            include_manual: req.include_manual,
-            explain: req.explain,
-        };
-        let result = walk::walk(hv, &direct, &wopts);
-        stats.affected_targets = result.affected.len();
-        timings.walk = sw.lap();
+    // A file node's in-edges all come from rules, so its reverse row is its
+    // consumer list.
+    for (id, path) in changed_file_ids {
+        let consumers = view.reverse_row(*id, &mut scratch).to_vec();
+        for consumer in consumers {
+            add(
+                consumer,
+                DirectReason::File { path: path.clone() },
+                &mut direct,
+                &mut reasons,
+            );
+        }
+    }
 
-        let explanations = req.explain.then(|| explain(hv, &result, &reasons));
+    let mut direct: Vec<u32> = direct.into_iter().collect();
+    direct.sort_unstable();
+    (direct, reasons)
+}
 
-        let report = AffectedReport {
-            schema: crate::report::SCHEMA_VERSION,
-            base: req.base.clone(),
-            head: req.head.clone(),
-            global: false,
-            global_reason: None,
-            dirty_packages: dirty.dirty.iter().cloned().collect(),
-            direct: walk::labels_sorted(hv, &direct),
-            affected: walk::labels_sorted(hv, &result.affected),
-            tests: walk::labels_sorted(hv, &result.tests),
-            timings_ms: timings,
-            stats,
-            explanations,
-        };
-        Ok(RunOutcome {
-            report,
-            index: Some(head_index),
-        })
+#[allow(clippy::too_many_arguments)]
+fn finish_report<V: GraphView + ?Sized>(
+    view: &V,
+    req: &AffectedRequest,
+    dirty: &DirtySet,
+    direct: &[u32],
+    result: &walk::WalkResult,
+    reasons: &FxHashMap<u32, DirectReason>,
+    timings: Timings,
+    stats: Stats,
+) -> AffectedReport {
+    AffectedReport {
+        schema: crate::report::SCHEMA_VERSION,
+        base: req.base.clone(),
+        head: req.head.clone(),
+        global: false,
+        global_reason: None,
+        dirty_packages: dirty.dirty.iter().cloned().collect(),
+        direct: cambium_index::view::labels_sorted(view, direct),
+        affected: cambium_index::view::labels_sorted(view, &result.affected),
+        tests: cambium_index::view::labels_sorted(view, &result.tests),
+        timings_ms: timings,
+        stats,
+        explanations: req.explain.then(|| explain(view, result, reasons)),
     }
 }
 
 /// `--explain`: for each affected target, the shortest path back to the direct
 /// member that reached it, and why that member was direct.
-fn explain(
-    index: IndexRef<'_>,
+fn explain<V: GraphView + ?Sized>(
+    view: &V,
     result: &walk::WalkResult,
     reasons: &FxHashMap<u32, DirectReason>,
 ) -> Vec<Explanation> {
@@ -628,9 +769,9 @@ fn explain(
             .cloned()
             .unwrap_or(DirectReason::RuleHash);
         out.push(Explanation {
-            target: index.label(id).to_string(),
-            path: path.iter().map(|&i| index.label(i).to_string()).collect(),
-            direct: index.label(seed).to_string(),
+            target: view.label(id).to_string(),
+            path: path.iter().map(|&i| view.label(i).to_string()).collect(),
+            direct: view.label(seed).to_string(),
             reason,
         });
     }

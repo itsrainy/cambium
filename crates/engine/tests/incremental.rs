@@ -32,8 +32,122 @@ fn request() -> AffectedRequest {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        materialize: true,
         publish_base: false,
     }
+}
+
+/// The overlay's explanations must match too — they are produced from the same
+/// walk's parent pointers, over a graph one path never built.
+#[test]
+fn the_overlay_explains_the_same_way() {
+    let e = engine();
+    let before = generate(&GraphSpec::preset("small").unwrap());
+    let base = build(&e, &before, "c0");
+    let t = (0..before.targets.len() as u32)
+        .find(|&i| !before.targets[i as usize].srcs.is_empty())
+        .unwrap();
+    let slot = before.targets[t as usize].srcs[0];
+    let mut after = before.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+
+    let overlay = overlay_answer(&e, &after, base.clone(), &changes, true);
+    let materialised = e
+        .compute(
+            base.view(),
+            &changes,
+            &SynthQuerier::new(&after),
+            &AffectedRequest {
+                explain: true,
+                ..request()
+            },
+        )
+        .unwrap()
+        .report;
+
+    let a = overlay.explanations.expect("overlay explanations");
+    let b = materialised
+        .explanations
+        .expect("materialised explanations");
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        assert_eq!(x.target, y.target);
+        assert_eq!(x.path, y.path);
+        assert_eq!(x.direct, y.direct);
+        assert_eq!(x.reason, y.reason);
+    }
+}
+
+/// The overlay must stay proportional to the change, not to the graph.
+#[test]
+fn the_overlay_stays_small() {
+    use cambium_index::{GraphView, IndexBuilder};
+
+    let e = engine();
+    let mut g = generate(&GraphSpec::preset("medium").unwrap());
+    let base = build(&e, &g, "c0");
+    let base_nodes = base.view().num_nodes();
+    let spec = cambium_synth::ChangeSpec::preset("typical-pr").unwrap();
+    let c = cambium_synth::commit(&mut g, &spec, 0);
+
+    let base_view = base.view();
+    let mut builder = IndexBuilder::from_view(base_view);
+    let dirty: Vec<String> = c
+        .changes
+        .iter()
+        .filter_map(|ch| {
+            cambium_classify::PackageSet::from_index(base_view)
+                .owner_of(&ch.path)
+                .map(String::from)
+        })
+        .collect();
+    let updates: Vec<_> = dirty
+        .iter()
+        .filter_map(|p| g.pkg_by_path.get(p).map(|&i| g.package_update(i)))
+        .collect();
+    builder.apply_packages(&updates);
+    let overlay = builder.finish_overlay();
+    let size = overlay.delta_size();
+
+    assert_eq!(
+        overlay.num_nodes(),
+        base_nodes + size.new_nodes as u32,
+        "the overlay's node space is the base plus what it appended"
+    );
+    let touched = size.changed_nodes + size.rows_gaining_edges + size.rows_losing_edges;
+    assert!(
+        touched < base_nodes as usize / 10,
+        "the overlay touched {touched} of {base_nodes} nodes; it should be \
+         proportional to the change, not the graph: {size:?}"
+    );
+}
+
+/// The same run with the delta overlay instead of a materialised index.
+///
+/// The overlay exists so a pull-request run does not build a whole new index it
+/// will throw away. It has to answer exactly the question the materialised path
+/// answers, and this is what enforces that: every scenario below computes both
+/// and requires them to be identical, down to the explanations.
+fn overlay_answer(
+    e: &Engine,
+    after: &SynthGraph,
+    base_index: IndexData,
+    changes: &[cambium_diff::Change],
+    explain: bool,
+) -> cambium_engine::AffectedReport {
+    let req = AffectedRequest {
+        materialize: false,
+        explain,
+        ..request()
+    };
+    let out = e
+        .compute(base_index.view(), changes, &SynthQuerier::new(after), &req)
+        .expect("overlay run");
+    assert!(
+        out.index.is_none(),
+        "an overlay run must not materialise an index"
+    );
+    out.report
 }
 
 /// Runs one synthetic revision through the engine and returns
@@ -45,9 +159,29 @@ fn step(
     base_index: IndexData,
     changes: &[cambium_diff::Change],
 ) -> (BTreeSet<String>, BTreeSet<String>, Option<IndexData>) {
+    let overlay = overlay_answer(e, after, base_index.clone(), changes, false);
     let out = e
-        .compute(base_index, changes, &SynthQuerier::new(after), &request())
+        .compute(
+            base_index.view(),
+            changes,
+            &SynthQuerier::new(after),
+            &request(),
+        )
         .expect("engine run");
+
+    // Every scenario is a gate on the overlay: it must produce the same report
+    // the materialised path does.
+    assert_eq!(
+        overlay.affected, out.report.affected,
+        "the overlay and the materialised index disagree about what is affected"
+    );
+    assert_eq!(overlay.direct, out.report.direct, "direct sets disagree");
+    assert_eq!(overlay.tests, out.report.tests, "test sets disagree");
+    assert_eq!(
+        overlay.dirty_packages, out.report.dirty_packages,
+        "dirty package sets disagree"
+    );
+
     let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
     let theirs = reference_affected(before, after);
     (ours, theirs, out.index)
@@ -277,7 +411,7 @@ fn a_global_invalidator_short_circuits() {
         "MODULE.bazel",
     )];
     let out = e
-        .compute(base, &changes, &SynthQuerier::new(&g), &request())
+        .compute(base.view(), &changes, &SynthQuerier::new(&g), &request())
         .unwrap();
     assert!(out.report.global);
     assert!(out.index.is_none());
@@ -290,7 +424,7 @@ fn an_empty_diff_affects_nothing() {
     let g = generate(&GraphSpec::preset("small").unwrap());
     let base = build(&e, &g, "c0");
     let out = e
-        .compute(base, &[], &SynthQuerier::new(&g), &request())
+        .compute(base.view(), &[], &SynthQuerier::new(&g), &request())
         .unwrap();
     assert!(out.report.affected.is_empty());
     assert!(out.report.dirty_packages.is_empty());
@@ -320,7 +454,7 @@ fn explain_reports_a_path_back_to_the_change() {
         ..request()
     };
     let out = e
-        .compute(base, &changes, &SynthQuerier::new(&after), &req)
+        .compute(base.view(), &changes, &SynthQuerier::new(&after), &req)
         .unwrap();
     let explanations = out.report.explanations.expect("explanations requested");
     let root = after.target_label(t);
