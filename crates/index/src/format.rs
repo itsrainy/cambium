@@ -46,11 +46,7 @@ pub enum IndexError {
     #[error("{path} was written on a big-endian host")]
     BadEndian { path: PathBuf },
     #[error("{path} is truncated: payload wants {want} bytes, file has {have}")]
-    Truncated {
-        path: PathBuf,
-        want: u64,
-        have: u64,
-    },
+    Truncated { path: PathBuf, want: u64, have: u64 },
     #[error("serialising index: {0}")]
     Serialize(String),
 }

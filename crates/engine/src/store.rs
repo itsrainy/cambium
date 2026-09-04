@@ -263,7 +263,12 @@ pub struct CommandStore {
 }
 
 impl CommandStore {
-    fn run(cmd: &[String], name: &str, path: &Path, op: &'static str) -> Result<std::process::Output> {
+    fn run(
+        cmd: &[String],
+        name: &str,
+        path: &Path,
+        op: &'static str,
+    ) -> Result<std::process::Output> {
         if cmd.is_empty() {
             return Err(StoreError::Unsupported(op));
         }
@@ -325,19 +330,16 @@ impl ArtifactStore for CommandStore {
         }
         Ok(String::from_utf8_lossy(&out.stdout)
             .lines()
-            .map(|l| {
-                l.trim()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
+            .map(|l| l.trim().rsplit('/').next().unwrap_or_default().to_string())
             .filter(|l| !l.is_empty())
             .collect())
     }
 
     fn describe(&self) -> String {
-        format!("command:{}", self.fetch_cmd.first().cloned().unwrap_or_default())
+        format!(
+            "command:{}",
+            self.fetch_cmd.first().cloned().unwrap_or_default()
+        )
     }
 }
 
@@ -394,7 +396,12 @@ mod tests {
         let dest = dir.path().join("out.bin");
         assert!(store.fetch("cambium-index-x-1.bin", &dest).unwrap());
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
-        assert!(!store.fetch("missing.bin", &dir.path().join("no.bin")).unwrap());
-        assert!(store.list().unwrap().contains(&"cambium-index-x-1.bin".to_string()));
+        assert!(!store
+            .fetch("missing.bin", &dir.path().join("no.bin"))
+            .unwrap());
+        assert!(store
+            .list()
+            .unwrap()
+            .contains(&"cambium-index-x-1.bin".to_string()));
     }
 }

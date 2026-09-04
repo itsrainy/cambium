@@ -19,5 +19,5 @@ pub use config::Config;
 pub use engine::{AffectedRequest, Engine, RunOutcome};
 pub use error::{EngineError, Result};
 pub use query::{BazelQuerier, PackageQuerier};
-pub use synthq::SynthQuerier;
 pub use report::{AffectedReport, DirectReason, Explanation, Stats, Timings};
+pub use synthq::SynthQuerier;

@@ -15,7 +15,9 @@ use cambium_proto::reader::{read_frames, ReadError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BazelError {
-    #[error("no Bazel workspace found: walked up from {0} without finding MODULE.bazel or WORKSPACE")]
+    #[error(
+        "no Bazel workspace found: walked up from {0} without finding MODULE.bazel or WORKSPACE"
+    )]
     NoWorkspace(PathBuf),
     #[error("failed to run {binary}: {source}")]
     Spawn {

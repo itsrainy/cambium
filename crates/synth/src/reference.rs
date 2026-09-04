@@ -16,7 +16,9 @@ pub fn deep_hashes(g: &SynthGraph) -> BTreeMap<String, [u8; 32]> {
 
     // Deps always point to strictly lower layers, so computing in layer order
     // means every dependency is memoised before it is needed.
-    let mut order: Vec<u32> = (0..n as u32).filter(|&i| g.targets[i as usize].alive).collect();
+    let mut order: Vec<u32> = (0..n as u32)
+        .filter(|&i| g.targets[i as usize].alive)
+        .collect();
     order.sort_by_key(|&i| g.targets[i as usize].layer);
 
     let mut out = BTreeMap::new();

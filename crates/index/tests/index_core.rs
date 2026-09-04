@@ -83,7 +83,12 @@ fn rows_are_sorted_and_deduped() {
             TargetRow::rule(
                 "//x:x",
                 "synth_lib",
-                vec!["//x:c".into(), "//x:a".into(), "//x:c".into(), "//x:b".into()],
+                vec![
+                    "//x:c".into(),
+                    "//x:a".into(),
+                    "//x:c".into(),
+                    "//x:b".into(),
+                ],
             ),
             TargetRow::source_file("//x:a"),
             TargetRow::source_file("//x:b"),
@@ -136,7 +141,7 @@ fn walk_from_source_file_reaches_consumers() {
     let m = v.labels.build_map();
     let src = m["//b:b.src"];
     assert_eq!(
-        v.file_consumers(src).iter().copied().collect::<Vec<_>>(),
+        v.file_consumers(src).to_vec(),
         vec![m["//b:b"]]
     );
     let r = walk(v, &[src], &WalkOptions::default());
@@ -323,7 +328,9 @@ fn manual_targets_are_excluded_by_default() {
 fn round_trips_through_the_on_disk_format() {
     let d = sample();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(index_file_name(&d.header.lineage, "deadbeef"));
+    let path = dir
+        .path()
+        .join(index_file_name(&d.header.lineage, "deadbeef"));
     format::write_index(&path, &d).unwrap();
 
     let f = IndexFile::open(&path).unwrap();
@@ -370,8 +377,5 @@ fn serialised_output_is_deterministic() {
     // created_unix is the only wall-clock field; normalise it.
     x.header.created_unix = 0;
     y.header.created_unix = 0;
-    assert_eq!(
-        format::to_bytes(&x).unwrap(),
-        format::to_bytes(&y).unwrap()
-    );
+    assert_eq!(format::to_bytes(&x).unwrap(), format::to_bytes(&y).unwrap());
 }

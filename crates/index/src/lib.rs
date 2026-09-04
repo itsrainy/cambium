@@ -25,7 +25,9 @@ pub mod label;
 pub mod strtab;
 pub mod walk;
 
-pub use builder::{new_lineage, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow};
+pub use builder::{
+    new_lineage, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
+};
 pub use csr::{Csr, CsrRef};
 pub use data::{flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, NO_ID};
 pub use format::{index_file_name, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION};

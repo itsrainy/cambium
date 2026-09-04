@@ -235,8 +235,11 @@ impl IndexBuilder {
             self.class.push(NO_ID);
             self.hash.push([0; 32]);
             self.is_test.push(false);
-            self.flags
-                .push(if label::is_external(label) { flags::EXTERNAL } else { 0 });
+            self.flags.push(if label::is_external(label) {
+                flags::EXTERNAL
+            } else {
+                0
+            });
         }
         id
     }
@@ -440,9 +443,12 @@ impl IndexBuilder {
             offsets[src as usize + 1] = (j - i) as u32;
             i = j;
         }
-        for u in 0..n {
+        // Written at u + 1 while the row length is read from the base CSR at u,
+        // so this iterates the offsets rather than the range.
+        for (u, slot) in offsets.iter_mut().enumerate().skip(1) {
+            let u = u - 1;
             if !self.rebuilt.contains(u) {
-                offsets[u + 1] = base.row_len(u as u32) as u32;
+                *slot = base.row_len(u as u32) as u32;
             }
         }
         crate::csr::prefix_sum(&mut offsets);
@@ -463,7 +469,10 @@ impl IndexBuilder {
             }
             i = j;
         }
-        // Carried rows.
+        // Carried rows. Indexed rather than iterated: the loop reads a row from
+        // the base CSR, its destination offset from `offsets`, and writes a
+        // slice of `edges` — three arrays keyed by the same index.
+        #[allow(clippy::needless_range_loop)]
         for u in 0..n {
             if !self.rebuilt.contains(u) {
                 let row = base.row(u as u32);

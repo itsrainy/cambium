@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly, for the tiers that are too slow for a pull request.
+    - cron: "17 5 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  soundness:
+    name: soundness sweep (small)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The oracle that matters: the engine's answer must contain everything a
+      # full rebuild reports, over many seeds and every change preset.
+      - run: cargo test --release -p cambium-engine --test soundness -- --nocapture
+        env:
+          CAMBIUM_SOUNDNESS_SIZE: small
+          CAMBIUM_SOUNDNESS_SEEDS: "24"
+          CAMBIUM_SOUNDNESS_REVISIONS: "10"
+
+  e2e:
+    name: end-to-end against Bazel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: bazel-contrib/setup-bazel@0.9.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
+        env:
+          CAMBIUM_E2E: "1"
+
+  bench:
+    name: benchmarks (small, medium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p cambium-cli
+      - run: |
+          ./target/release/cambium bench run \
+            --preset small,medium --runs 5 \
+            --out bench-results/ci.json --markdown bench-results/ci.md
+      # Machine fingerprints differ between runners, so gating only makes sense
+      # against a baseline captured on the same runner class; `bench compare`
+      # refuses to compare across machines rather than reporting noise.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results/
+
+  nightly:
+    name: nightly (medium soundness, large benchmarks)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release -p cambium-engine --test soundness -- --nocapture
+        env:
+          CAMBIUM_SOUNDNESS_SIZE: medium
+          CAMBIUM_SOUNDNESS_SEEDS: "8"
+          CAMBIUM_SOUNDNESS_REVISIONS: "10"
+      - run: cargo build --release -p cambium-cli
+      - run: |
+          ./target/release/cambium bench run --preset large --runs 3 \
+            --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
+            --out bench-results/nightly.json --markdown bench-results/nightly.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bench-results
+          path: bench-results/

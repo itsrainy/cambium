@@ -1,6 +1,6 @@
 //! `cambium index inspect|verify`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use cambium_index::{walk, IndexFile, NodeKind, WalkOptions};
@@ -61,7 +61,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 }
 
 fn inspect(
-    file: &PathBuf,
+    file: &Path,
     label: Option<String>,
     package: Option<String>,
     rdeps: Option<String>,
@@ -123,7 +123,10 @@ fn inspect(
         let map = v.labels.build_map();
         let id = *map.get(l.as_str()).context("label not found in index")?;
         let r = walk::walk(v, &[id], &WalkOptions::default());
-        println!("\n{} targets affected by a change to {l}:", r.affected.len());
+        println!(
+            "\n{} targets affected by a change to {l}:",
+            r.affected.len()
+        );
         for lbl in walk::labels_sorted(v, &r.affected) {
             println!("  {lbl}");
         }
@@ -138,7 +141,7 @@ fn inspect(
 /// of `bazel query rdeps(//..., label)`. Missing targets are soundness bugs and
 /// fail the check; extra targets are the over-approximation the design accepts,
 /// and are reported as a precision percentage.
-fn verify(ctx: &Context, file: &PathBuf, sample: usize, seed: u64) -> Result<u8> {
+fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
     use std::process::Command;
 
     let engine = ctx.engine()?;

@@ -17,22 +17,50 @@ use crate::spec::Dist;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mutation {
     /// Edit a file's contents. Cannot change the graph.
-    ModifySource { target: u32, slot: u32 },
+    ModifySource {
+        target: u32,
+        slot: u32,
+    },
     /// Add a file that the target's glob picks up.
-    AddSource { target: u32 },
-    DeleteSource { target: u32, slot: u32 },
+    AddSource {
+        target: u32,
+    },
+    DeleteSource {
+        target: u32,
+        slot: u32,
+    },
     /// Change an attribute that is neither deps nor srcs.
-    EditRuleAttr { target: u32 },
-    AddDep { target: u32, dep: u32 },
-    RemoveDep { target: u32, dep: u32 },
-    AddTarget { package: u32, deps: Vec<u32> },
-    DeleteTarget { target: u32 },
+    EditRuleAttr {
+        target: u32,
+    },
+    AddDep {
+        target: u32,
+        dep: u32,
+    },
+    RemoveDep {
+        target: u32,
+        dep: u32,
+    },
+    AddTarget {
+        package: u32,
+        deps: Vec<u32>,
+    },
+    DeleteTarget {
+        target: u32,
+    },
     /// Bump a `.bzl` file, changing the rule implementations that load it.
-    EditBzl { bzl: u32 },
+    EditBzl {
+        bzl: u32,
+    },
     /// Move some of a package's targets into a new sub-package.
-    SplitPackage { package: u32, targets: Vec<u32> },
+    SplitPackage {
+        package: u32,
+        targets: Vec<u32>,
+    },
     /// Fold a sub-package back into its parent.
-    MergePackage { package: u32 },
+    MergePackage {
+        package: u32,
+    },
     /// Touch a global invalidator.
     Global,
 }
@@ -143,7 +171,16 @@ impl ChangeSpec {
         let mut c = ChangeSpec::default();
         match name {
             "typical-pr" => {
+                // Mostly file edits, some BUILD churn. Structural changes are
+                // deliberately absent: splitting a package rewrites every
+                // dependent's BUILD file, which is a refactor, not a typical
+                // pull request, and it belongs in the presets named for it.
                 c.files_changed = Dist::Uniform { lo: 3, hi: 20 };
+                c.weights = MutationWeights {
+                    split_package: 0,
+                    merge_package: 0,
+                    ..MutationWeights::default()
+                };
             }
             "build-edit" => {
                 c.files_changed = Dist::Uniform { lo: 1, hi: 5 };
@@ -220,7 +257,8 @@ pub struct Commit {
 pub fn commit(g: &mut SynthGraph, spec: &ChangeSpec, revision: u64) -> Commit {
     // Seeding per revision keeps a sequence of commits reproducible whether it
     // is replayed from the start or resumed.
-    let mut rng = ChaCha8Rng::seed_from_u64(spec.seed ^ (revision.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
+    let mut rng =
+        ChaCha8Rng::seed_from_u64(spec.seed ^ (revision.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
     let n = spec.files_changed.sample(&mut rng).max(1);
     let table = spec.weights.table();
     let total: u32 = table.iter().map(|(_, w)| w).sum();
@@ -345,12 +383,13 @@ fn generate<R: Rng>(
         MutKind::AddTarget => {
             let anchor = pick_target(g, spec, rng)?;
             let package = g.targets[anchor as usize].package;
-            let deps = if g.targets[anchor as usize].layer > 0 {
-                vec![]
-            } else {
-                vec![]
-            };
-            Mutation::AddTarget { package, deps }
+            // A generated new target starts with no deps; `apply` gives it a
+            // layer above everything already in the package, so a hand-written
+            // scenario can add deps and still keep the DAG.
+            Mutation::AddTarget {
+                package,
+                deps: Vec::new(),
+            }
         }
         MutKind::DeleteTarget => Mutation::DeleteTarget {
             target: pick_target(g, spec, rng)?,
@@ -524,7 +563,9 @@ fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
             let moved: Vec<u32> = targets
                 .iter()
                 .copied()
-                .filter(|&t| g.targets[t as usize].alive && g.targets[t as usize].package == *package)
+                .filter(|&t| {
+                    g.targets[t as usize].alive && g.targets[t as usize].package == *package
+                })
                 .collect();
             move_targets(g, &moved, new_id, changes);
             changes.push(Change::new(Status::Added, g.build_path(new_id)));

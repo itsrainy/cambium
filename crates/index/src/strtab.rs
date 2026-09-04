@@ -43,8 +43,7 @@ impl<'a> StrTabRef<'a> {
 
     /// Rebuilds the `entry -> id` map. O(len); ~50 ms at 1M labels.
     pub fn build_map(&self) -> FxHashMap<&'a str, u32> {
-        let mut m =
-            FxHashMap::with_capacity_and_hasher(self.len(), rustc_hash::FxBuildHasher);
+        let mut m = FxHashMap::with_capacity_and_hasher(self.len(), rustc_hash::FxBuildHasher);
         for i in 0..self.len() as u32 {
             m.insert(self.get(i), i);
         }
@@ -101,9 +100,7 @@ impl Interner {
         let mut table = hashbrown::HashTable::with_capacity(n);
         for i in 0..n as u32 {
             let h = hash_str(entry_at(&bytes, &offsets, i));
-            table.insert_unique(h, i, |&other| {
-                hash_str(entry_at(&bytes, &offsets, other))
-            });
+            table.insert_unique(h, i, |&other| hash_str(entry_at(&bytes, &offsets, other)));
         }
         Self {
             bytes,

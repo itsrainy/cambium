@@ -106,7 +106,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 .store
                 .as_ref()
                 .context("no baseline store is configured")?;
-            let removed = store.gc(engine.cfg.baseline.retention_days, keep.as_deref().unwrap_or(""))?;
+            let removed = store.gc(
+                engine.cfg.baseline.retention_days,
+                keep.as_deref().unwrap_or(""),
+            )?;
             println!("removed {removed} index files");
             Ok(crate::EXIT_OK)
         }

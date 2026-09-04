@@ -36,8 +36,8 @@ pub struct StageContext {
 
 impl StageContext {
     pub fn new(preset: &str, runs: usize) -> anyhow::Result<Self> {
-        let spec = GraphSpec::preset(preset)
-            .ok_or_else(|| anyhow::anyhow!("unknown preset {preset}"))?;
+        let spec =
+            GraphSpec::preset(preset).ok_or_else(|| anyhow::anyhow!("unknown preset {preset}"))?;
         Ok(Self {
             preset: preset.to_string(),
             spec,
@@ -112,7 +112,9 @@ pub fn build_index(ctx: &StageContext) -> StageResult {
         b.apply_packages(&updates);
         b.finish("bench")
     };
-    let bytes = cambium_index::format::to_bytes(&index).map(|b| b.len()).unwrap_or(0);
+    let bytes = cambium_index::format::to_bytes(&index)
+        .map(|b| b.len())
+        .unwrap_or(0);
     let mut extra = BTreeMap::new();
     extra.insert("targets_per_s".into(), targets as f64 / (median / 1000.0));
     extra.insert("nodes".into(), index.header.counts.nodes as f64);
@@ -144,7 +146,9 @@ pub fn load_index(ctx: &StageContext) -> StageResult {
     extra.insert("labels".into(), index.header.counts.nodes as f64);
     extra.insert(
         "file_bytes".into(),
-        std::fs::metadata(&path).map(|m| m.len() as f64).unwrap_or(0.0),
+        std::fs::metadata(&path)
+            .map(|m| m.len() as f64)
+            .unwrap_or(0.0),
     );
     ctx.result("load_index", map_median, map_p90, extra)
 }
@@ -156,7 +160,12 @@ pub fn classify(ctx: &StageContext) -> StageResult {
     let matchers = Matchers::compile(&Config::default().rules()).expect("globs compile");
     let changes: Vec<Change> = (0..g.targets.len().min(50_000) as u32)
         .filter(|&i| !g.targets[i as usize].srcs.is_empty())
-        .map(|i| Change::new(Status::Modified, g.src_path(i, g.targets[i as usize].srcs[0])))
+        .map(|i| {
+            Change::new(
+                Status::Modified,
+                g.src_path(i, g.targets[i as usize].srcs[0]),
+            )
+        })
         .collect();
     let n = changes.len();
     let (median, p90) = time(ctx.runs, || {
@@ -170,6 +179,10 @@ pub fn classify(ctx: &StageContext) -> StageResult {
 }
 
 /// streamed_proto bytes -> index rows, including the rule hash.
+///
+/// Materialises the whole proto stream, so peak memory is a multiple of the
+/// index size: run it on `small` and `medium`, not on `large` and above, where
+/// the interesting question is the graph work rather than the parse rate.
 pub fn parse_proto(ctx: &StageContext) -> StageResult {
     let g = graph(ctx);
     let bytes = cambium_synth::proto::to_streamed_proto(&g);
@@ -192,6 +205,8 @@ pub fn parse_proto(ctx: &StageContext) -> StageResult {
 }
 
 /// Canonicalisation plus blake3 over rule protos.
+///
+/// Holds every rule proto in memory; see the note on [`parse_proto`].
 pub fn rule_hash(ctx: &StageContext) -> StageResult {
     let g = graph(ctx);
     let targets = cambium_synth::proto::to_targets(&g);
@@ -304,7 +319,10 @@ pub fn e2e_memory_with(ctx: &StageContext, change_preset: &str) -> StageResult {
     let out = e.compute(base, &c.changes, &q, &req).expect("run");
     let mut extra = BTreeMap::new();
     extra.insert("changed_files".into(), c.changes.len() as f64);
-    extra.insert("dirty_packages".into(), out.report.stats.dirty_packages as f64);
+    extra.insert(
+        "dirty_packages".into(),
+        out.report.stats.dirty_packages as f64,
+    );
     extra.insert("affected".into(), out.report.stats.affected_targets as f64);
     for (k, v) in [
         ("stage_dirty_ms", out.report.timings_ms.dirty),

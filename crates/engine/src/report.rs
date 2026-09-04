@@ -93,7 +93,11 @@ impl AffectedReport {
         if self.global {
             return "//...".to_string();
         }
-        let items = if tests_only { &self.tests } else { &self.affected };
+        let items = if tests_only {
+            &self.tests
+        } else {
+            &self.affected
+        };
         if items.is_empty() {
             // `set()` is a valid empty expression; bazel accepts it and builds
             // nothing, which is what callers want in a pipeline.

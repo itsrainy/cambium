@@ -99,7 +99,12 @@ fn single_mutations_match_the_reference() {
         .find(|&i| before.targets[i as usize].deps.len() > 1)
         .unwrap();
     let consumed = (0..before.targets.len() as u32)
-        .find(|&i| before.targets.iter().any(|t| t.alive && t.deps.contains(&i)))
+        .find(|&i| {
+            before
+                .targets
+                .iter()
+                .any(|t| t.alive && t.deps.contains(&i))
+        })
         .unwrap();
 
     let scenarios: Vec<(&str, Mutation)> = vec![
@@ -299,7 +304,10 @@ fn explain_reports_a_path_back_to_the_change() {
     let t = (0..before.targets.len() as u32)
         .find(|&i| {
             !before.targets[i as usize].srcs.is_empty()
-                && before.targets.iter().any(|x| x.alive && x.deps.contains(&i))
+                && before
+                    .targets
+                    .iter()
+                    .any(|x| x.alive && x.deps.contains(&i))
         })
         .unwrap();
     let slot = before.targets[t as usize].srcs[0];
