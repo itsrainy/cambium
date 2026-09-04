@@ -1,0 +1,29 @@
+[package]
+name = "cambium-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Benchmark harness for cambium: stage timings, sweeps and regression gating"
+
+[dependencies]
+cambium-bazel.workspace = true
+cambium-classify.workspace = true
+cambium-diff.workspace = true
+cambium-engine.workspace = true
+cambium-index.workspace = true
+cambium-proto.workspace = true
+cambium-synth.workspace = true
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+cambium-bench = { path = "." }
+
+[[bench]]
+name = "stages"
+harness = false

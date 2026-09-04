@@ -12,6 +12,7 @@ name = "cambium"
 path = "src/main.rs"
 
 [dependencies]
+cambium-bench.workspace = true
 cambium-engine.workspace = true
 cambium-index.workspace = true
 cambium-synth.workspace = true

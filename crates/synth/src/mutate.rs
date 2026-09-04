@@ -591,22 +591,34 @@ fn dependent_packages(g: &SynthGraph, targets: &[u32]) -> Vec<u32> {
     pkgs
 }
 
-/// Sorts and deduplicates a change list the way `git diff` would present it.
+/// Folds a sequence of per-mutation edits into the diff `git` would report
+/// between the two revisions.
+///
+/// Order matters, and getting it wrong hides bugs: a file added and then edited
+/// in the same range is *added* as far as `git diff base head` is concerned,
+/// not modified, and only the added form dirties the package that globs it. A
+/// file added and then deleted never existed at either end and is not reported
+/// at all.
 fn normalise(changes: &mut Vec<Change>) {
-    changes.sort_by(|a, b| a.path.cmp(&b.path).then((a.status as u8).cmp(&(b.status as u8))));
-    let mut out: Vec<Change> = Vec::with_capacity(changes.len());
+    use std::collections::BTreeMap;
+    let mut first: BTreeMap<String, Status> = BTreeMap::new();
+    let mut last: BTreeMap<String, Status> = BTreeMap::new();
     for c in changes.drain(..) {
-        match out.last_mut() {
-            Some(prev) if prev.path == c.path => {
-                // A path both added and deleted in one commit is a modification.
-                if prev.status != c.status {
-                    prev.status = Status::Modified;
-                }
-            }
-            _ => out.push(c),
-        }
+        first.entry(c.path.clone()).or_insert(c.status);
+        last.insert(c.path, c.status);
     }
-    *changes = out;
+    for (path, first_status) in first {
+        let existed_at_base = first_status != Status::Added;
+        let exists_at_head = last[&path] != Status::Deleted;
+        let status = match (existed_at_base, exists_at_head) {
+            (false, false) => continue,
+            (false, true) => Status::Added,
+            (true, false) => Status::Deleted,
+            (true, true) => Status::Modified,
+        };
+        changes.push(Change { status, path });
+    }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
 }
 
 #[cfg(test)]
@@ -727,6 +739,61 @@ mod tests {
         assert!(changes
             .iter()
             .any(|c| c.status == Status::Deleted && c.path.ends_with("BUILD.bazel")));
+    }
+
+    #[test]
+    fn change_folding_matches_git_semantics() {
+        let mut g = graph();
+        let t = (0..g.targets.len() as u32)
+            .find(|&i| !g.targets[i as usize].srcs.is_empty())
+            .unwrap();
+        // Add a file and then edit it: git reports an add.
+        let mut changes = Vec::new();
+        apply(&mut g, &Mutation::AddSource { target: t }, &mut changes);
+        let slot = *g.targets[t as usize].srcs.last().unwrap();
+        apply(
+            &mut g,
+            &Mutation::ModifySource { target: t, slot },
+            &mut changes,
+        );
+        normalise(&mut changes);
+        let path = g.src_path(t, slot);
+        assert_eq!(
+            changes.iter().find(|c| c.path == path).map(|c| c.status),
+            Some(Status::Added)
+        );
+
+        // Add a file and then delete it: git reports nothing.
+        let mut changes = Vec::new();
+        apply(&mut g, &Mutation::AddSource { target: t }, &mut changes);
+        let slot = *g.targets[t as usize].srcs.last().unwrap();
+        apply(
+            &mut g,
+            &Mutation::DeleteSource { target: t, slot },
+            &mut changes,
+        );
+        normalise(&mut changes);
+        assert!(changes.iter().all(|c| c.path != g.src_path(t, slot)));
+
+        // Edit and then delete: git reports a delete.
+        let slot = g.targets[t as usize].srcs[0];
+        let path = g.src_path(t, slot);
+        let mut changes = Vec::new();
+        apply(
+            &mut g,
+            &Mutation::ModifySource { target: t, slot },
+            &mut changes,
+        );
+        apply(
+            &mut g,
+            &Mutation::DeleteSource { target: t, slot },
+            &mut changes,
+        );
+        normalise(&mut changes);
+        assert_eq!(
+            changes.iter().find(|c| c.path == path).map(|c| c.status),
+            Some(Status::Deleted)
+        );
     }
 
     #[test]

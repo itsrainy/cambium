@@ -10,6 +10,7 @@ description = "Deterministic synthetic Bazel graph generator for cambium tests a
 [dependencies]
 cambium-diff.workspace = true
 cambium-index.workspace = true
+cambium-proto.workspace = true
 blake3.workspace = true
 rand.workspace = true
 rayon.workspace = true
@@ -17,7 +18,9 @@ rand_chacha.workspace = true
 rand_distr.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true }
+thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true

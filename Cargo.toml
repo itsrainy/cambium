@@ -9,6 +9,7 @@ members = [
     "crates/classify",
     "crates/engine",
     "crates/cli",
+    "crates/bench",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ cambium-diff = { path = "crates/diff" }
 cambium-classify = { path = "crates/classify" }
 cambium-engine = { path = "crates/engine" }
 cambium-synth = { path = "crates/synth" }
+cambium-bench = { path = "crates/bench" }
 
 anyhow = "1"
 thiserror = "2"
