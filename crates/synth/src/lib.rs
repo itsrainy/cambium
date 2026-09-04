@@ -5,11 +5,14 @@
 //! libraries, layered DAG), and can emit either index rows directly or a real
 //! Bazel workspace so the same graph can be measured against `bazel query`.
 
+pub mod emit;
 pub mod graph;
 pub mod mutate;
+pub mod proto;
 pub mod reference;
 pub mod spec;
 
+pub use emit::{emit_git_history, emit_workspace, EmittedRepo};
 pub use graph::{generate, Kind, SynthBzl, SynthGraph, SynthPackage, SynthTarget};
 pub use mutate::{apply_one, commit, ChangeSpec, Commit, Mutation, MutationWeights};
 pub use reference::{deep_hashes, reference_affected};

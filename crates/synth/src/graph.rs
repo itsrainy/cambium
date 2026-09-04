@@ -492,7 +492,14 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             } else {
                 Kind::Lib
             };
-            let n_srcs = spec.srcs_per_target.sample(&mut rng) as u32;
+            // An `alias` rule has exactly one attribute that matters, so it
+            // carries no sources; keeping the in-memory model in step with what
+            // the Bazel emitter can express is what makes the two comparable.
+            let n_srcs = if kind == Kind::Alias {
+                0
+            } else {
+                spec.srcs_per_target.sample(&mut rng) as u32
+            };
             targets.push(SynthTarget {
                 package: pkg as u32,
                 kind,
@@ -636,7 +643,9 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         } else {
             0
         };
-        let ext = if rng.gen::<f64>() < spec.external_dep_ratio {
+        let ext = if targets[id as usize].kind != Kind::Alias
+            && rng.gen::<f64>() < spec.external_dep_ratio
+        {
             1 + (rng.gen::<u16>() % 2)
         } else {
             0
@@ -700,7 +709,12 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         if consumer_pkg == exporter {
             continue;
         }
-        let Some(&ct) = packages[consumer_pkg].targets.first() else {
+        // Aliases and test_suites have no srcs attribute to hang the file on.
+        let Some(&ct) = packages[consumer_pkg]
+            .targets
+            .iter()
+            .find(|&&t| matches!(targets[t as usize].kind, Kind::Lib | Kind::Bin | Kind::Test))
+        else {
             continue;
         };
         packages[exporter].exported.push((et, slot));

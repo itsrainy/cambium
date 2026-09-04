@@ -54,6 +54,12 @@ enum Command {
     /// Inspect and check index files.
     #[command(subcommand)]
     Index(cmd::index::Args),
+    /// Generate synthetic repositories and run benchmarks.
+    #[command(subcommand)]
+    Bench(cmd::bench::Args),
+    /// Generate synthetic Bazel workspaces.
+    #[command(subcommand)]
+    Synth(cmd::bench::SynthArgs),
     /// Print the effective configuration and its hash.
     Config,
 }
@@ -86,6 +92,8 @@ fn main() -> ExitCode {
         Command::Affected(args) => cmd::affected::run(&ctx, args),
         Command::Baseline(args) => cmd::baseline::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
+        Command::Bench(args) => cmd::bench::run(&ctx, args),
+        Command::Synth(args) => cmd::bench::run_synth(&ctx, args),
         Command::Config => cmd::config_show(&ctx),
     };
 

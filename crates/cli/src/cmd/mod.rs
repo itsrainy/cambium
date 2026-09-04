@@ -1,4 +1,5 @@
 pub mod affected;
+pub mod bench;
 pub mod baseline;
 pub mod index;
 
