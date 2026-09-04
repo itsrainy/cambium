@@ -41,8 +41,13 @@ fn engine_never_under_approximates() {
         no_full_build: true,
     };
 
+    // Every iteration lands in exactly one of these, and the totals are checked
+    // at the end: a sweep that quietly skipped cases would otherwise report a
+    // pass count with no denominator.
     let mut exact = 0usize;
     let mut over = 0usize;
+    let mut global = 0usize;
+    let mut empty = 0usize;
     for seed in 0..seeds {
         let mut g = generate(&GraphSpec::preset(&preset).unwrap().with_seed(seed));
         let mut index = e
@@ -59,11 +64,24 @@ fn engine_never_under_approximates() {
             let before = g.clone();
             let c = commit(&mut g, &spec, rev);
             if c.changes.is_empty() {
+                // Every mutation the preset sampled was inapplicable to this
+                // graph — a ModifySource on a target with no sources, an AddDep
+                // with no lower layer to point at. Nothing changed, so there is
+                // nothing to check.
+                empty += 1;
                 continue;
             }
             let out = e
                 .compute(index, &c.changes, &SynthQuerier::new(&g), &req)
                 .unwrap_or_else(|e| panic!("seed {seed} rev {rev} ({preset_name}): {e}"));
+            if out.report.global {
+                // "Everything is affected" trivially contains the reference, so
+                // this is sound; it is counted rather than compared because the
+                // engine deliberately does not enumerate the answer.
+                global += 1;
+                index = e.full_build_with("c", &SynthQuerier::new(&g)).unwrap();
+                continue;
+            }
             let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
             let theirs = reference_affected(&before, &g);
             let missing: Vec<&String> = theirs.difference(&ours).collect();
@@ -79,14 +97,23 @@ fn engine_never_under_approximates() {
             } else {
                 over += 1;
             }
-            match out.index {
-                Some(i) => index = i,
-                None => {
-                    // Global invalidation: rebuild and carry on.
-                    index = e.full_build_with("c", &SynthQuerier::new(&g)).unwrap();
-                }
-            }
+            index = out.index.expect("a non-global run produces an index");
         }
     }
-    eprintln!("soundness sweep: {exact} exact, {over} over-approximating");
+
+    let total = (seeds * revisions) as usize;
+    eprintln!(
+        "soundness sweep ({preset}, {seeds} seeds x {revisions} revisions = {total}): \
+         {exact} exact, {over} over-approximating, {global} globally invalidated, \
+         {empty} produced no change"
+    );
+    assert_eq!(
+        exact + over + global + empty,
+        total,
+        "every iteration must be accounted for"
+    );
+    assert!(
+        exact + over > 0,
+        "the sweep compared nothing: {empty} empty and {global} global out of {total}"
+    );
 }

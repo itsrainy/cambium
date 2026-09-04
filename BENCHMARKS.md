@@ -110,12 +110,25 @@ materialising everything else.
 
 The fix is the one the spec already anticipates (section 15, *delta overlays*):
 a pull-request run does not need a new index at all. It needs the base reverse
-CSR plus a small in-memory delta for the dirty packages, and only
-`baseline update` needs to write a spliced index. That would take this run from
-~820 ms to under 100 ms. It is deliberately not in v1, because the splice is
-what makes the incremental index equal to a full rebuild — the property the
-correctness oracles check on every commit — and it was worth having that before
-optimising it away.
+CSR plus a small in-memory delta for the dirty packages. That would take this
+run from ~820 ms to under 100 ms.
+
+**It is an addition, not a replacement**, and the distinction matters enough to
+state plainly, because the tempting change is the wrong one:
+
+- **`affected` is where the overlay belongs.** Nobody reads the index it
+  produces; the answer is the deliverable.
+- **`baseline update` must keep materialising.** Its output *is* the published
+  artifact, the thing the next run splices onto. It is also where "a spliced
+  index equals a full rebuild" gets exercised — the property two of the four
+  correctness oracles check on every commit. Make the shared path lazy to speed
+  up `affected` and the published artifact goes with it, along with the oracle
+  that would have caught the mistake.
+
+The materialising splice being on the hot path in v1 is what made that property
+cheap to check while the engine was being built. Keep it; put the overlay
+beside it. The same note is at `IndexBuilder::from_view`, where an implementer
+will actually land.
 
 Two smaller things, both found by measuring rather than reading:
 
