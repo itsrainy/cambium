@@ -1,0 +1,16 @@
+[package]
+name = "cambium-bazel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bazel process invocation for cambium: query, rbuildfiles, workspace detection"
+
+[dependencies]
+cambium-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
