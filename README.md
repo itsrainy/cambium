@@ -233,4 +233,7 @@ index, which the spec lists as a v2 candidate.
 
 ## License
 
-Apache-2.0.
+MIT. See [LICENSE](LICENSE).
+
+One exception, as you would expect: `crates/cambium-proto/proto/build.proto` is
+vendored from Bazel and stays under its own Apache-2.0 header.
