@@ -168,6 +168,81 @@ interners. At 45k packages that is tens of milliseconds and the same treatment
 would remove it. It is the next thing to do here, and it is worth doing only
 once something needs the last 20%.
 
+## What an index spends its bytes on
+
+`cambium index stats` accounts for every byte in the file. Two indexes built
+straight from the generators — no Bazel needed:
+
+```console
+$ cambium synth build-index --spec large --out large.bin
+$ cambium index stats large.bin
+```
+
+| component | `large` (258.6 MiB) | `xl` (1.03 GiB) |
+|---|---:|---:|
+| label table | 29.3% | 30.5% |
+| label sort index | 3.7% | 3.6% |
+| rule hashes | 29.6% | 29.1% |
+| node columns | 10.2% | 10.0% |
+| forward edges + offsets | 11.0% | 10.8% |
+| reverse edges + offsets | 11.0% | 10.8% |
+| package table | 5.1% | 5.1% |
+| framing/padding | 0.0% (390 B) | 0.0% (379 B) |
+
+### Labels: 33%, and not compressed
+
+**Labels are 33.0% of a `large` index and 34.1% of an `xl` one** — the table
+plus the sort index that `id_of` binary-searches, which is 4 bytes a node and
+belongs in the same total. That is under the 40% at which it would be worth
+storing labels as `(package_id, relative_name)` instead of whole strings, so
+they are still whole strings.
+
+The saving is worth stating, because it is the thing not being taken. Every
+label is `//package:name`, and the node columns already carry each node's
+package id, so the `//package:` prefix is stored twice and dropping it from the
+label table would cost nothing extra. `index stats` reports the projection:
+
+```
+labels:            85.3 MiB   33.0% of the file (table + sort index)
+  packed           47.0 MiB   18.2% would remain, storing (package, name)
+  saving           38.3 MiB   14.8% of the file, 64 labels not packable
+```
+
+15% of the file, for a change that touches the format, the builder, the
+overlay, every lookup path, and the two finalizers — while the external API
+goes on returning full labels, so every caller-facing path grows a
+concatenation. Not at 33%.
+
+The reason to report the projection rather than delete the question: **the
+threshold is about ten bytes of package path away.** These graphs have short
+paths (`d3/d17/p842`, averaging 16 bytes of `//package:` prefix). A repository
+whose packages look like `src/main/java/com/example/service` has labels 10-15
+bytes longer, and labels are then over 40%:
+
+| | avg `//package:` prefix | label share | crosses 40% at |
+|---|---:|---:|---|
+| `large` | 16.0 B | 33.0% | +12.8 B of package path |
+| `xl` | 17.3 B | 34.1% | +10.9 B of package path |
+
+The extrapolation is arithmetic — a byte added to a package path lands once in
+each of its nodes' labels and once in the package name table, and nowhere else
+— and `label_share_grows_with_package_path_length_as_predicted` in
+`crates/engine/tests/index_queries.rs` checks that the file actually behaves
+that way rather than taking the arithmetic on trust. So: run `index stats` on
+an index of your own repository. If the label line is over 40% there, the
+projection tells you what packing would give back before anyone writes it.
+
+One thing the accounting turned up on the way: the sort index was 3.7% of the
+file and was landing in `framing/padding`, which is why that row now reads
+390 bytes instead of 9.6 MiB. Nothing changed in the format; the reported
+framing was 3.7% of unattributed bytes.
+
+`rule_hashes` at ~29% is the other large component, and it is 32 bytes per node
+including the 80% of nodes that are source files and carry a zero hash. That is
+a bigger saving than label packing and a much smaller change. It was not on
+this list, so it is not done, but it is the first thing to look at if an index
+needs to get smaller.
+
 ## Scaling
 
 `bench sweep` varies one parameter and plots the result on log-log axes, where

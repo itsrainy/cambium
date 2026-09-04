@@ -17,12 +17,16 @@ use cambium_engine::report::{
 use cambium_engine::EngineError;
 use serde_json::Value;
 
-/// The shape of `cambium affected --output json` at schema version 1.
+/// The shape of `cambium affected --output json`.
+///
+/// Unchanged since schema version 1; the contract version has moved on because
+/// it is shared with the other documents, and `index stats` changed shape at
+/// version 2.
 ///
 /// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
 /// recurse through `[]`. Optional fields are listed — the fixture below
 /// populates every one of them.
-const AFFECTED_SCHEMA_V1: &[&str] = &[
+const AFFECTED_SCHEMA: &[&str] = &[
     "affected[]",
     "base",
     "direct[]",
@@ -146,7 +150,7 @@ fn walk_value(v: &Value, prefix: &str, out: &mut BTreeSet<String>) {
 fn affected_report_shape_is_pinned() {
     let json = serde_json::to_value(fixture()).expect("report serialises");
     let actual = key_paths(&json);
-    let expected: BTreeSet<String> = AFFECTED_SCHEMA_V1.iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = AFFECTED_SCHEMA.iter().map(|s| s.to_string()).collect();
 
     let added: Vec<&String> = actual.difference(&expected).collect();
     let removed: Vec<&String> = expected.difference(&actual).collect();
@@ -155,7 +159,7 @@ fn affected_report_shape_is_pinned() {
         "the affected report's JSON shape changed.\n  \
          added:   {added:?}\n  removed: {removed:?}\n\n\
          This is a contract change: bump SCHEMA_VERSION in crates/engine/src/report.rs, \
-         update AFFECTED_SCHEMA_V1 (and its name) here, and update the JSON contract \
+         update AFFECTED_SCHEMA here, and update the JSON contract \
          table in the README."
     );
 }
@@ -167,13 +171,14 @@ fn every_document_declares_its_schema() {
         json["schema"], SCHEMA_VERSION,
         "the report must declare the schema version it was written against"
     );
-    // A document produced by an older cambium has no `schema` key; it is
-    // implicitly version 1, so parsing must not require the field.
+    // A document produced by a cambium from before the field existed has no
+    // `schema` key. Parsing must not require it, and must read it as what it
+    // is — version 1 — rather than stamping it with today's version.
     let mut without = json.clone();
     without.as_object_mut().unwrap().remove("schema");
     let parsed: AffectedReport =
         serde_json::from_value(without).expect("schema is optional on read");
-    assert_eq!(parsed.schema, SCHEMA_VERSION);
+    assert_eq!(parsed.schema, 1);
 }
 
 #[test]

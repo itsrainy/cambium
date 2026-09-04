@@ -14,10 +14,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// `crates/engine/tests/json_contract.rs` pins the affected report's shape, so
 /// a change that forgets to bump this fails there with instructions.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+///
+/// - **1** — the first published contract.
+/// - **2** — `index stats` gained `bytes.label_sorted`, `bytes.label_total_share`
+///   and `bytes.label_packing`. The affected report is unchanged between the
+///   two, but the version is shared across every document, so a consumer
+///   pinning `schema == 1` sees the bump.
+pub const SCHEMA_VERSION: u32 = 2;
 
-const fn schema_version() -> u32 {
-    SCHEMA_VERSION
+/// What a document with no `schema` field is: version 1 predates the field, so
+/// reading one back must not claim it was written against today's contract.
+pub(crate) const fn schema_version_of_a_document_without_one() -> u32 {
+    1
 }
 
 /// Per-stage wall time, in milliseconds (spec 10, JSON schema).
@@ -89,7 +99,7 @@ pub struct Stats {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AffectedReport {
     /// JSON contract version; see [`SCHEMA_VERSION`].
-    #[serde(default = "schema_version")]
+    #[serde(default = "schema_version_of_a_document_without_one")]
     pub schema: u32,
     pub base: String,
     pub head: String,

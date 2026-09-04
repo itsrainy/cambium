@@ -203,6 +203,18 @@ pub enum SynthArgs {
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
+    /// Build an index from a generated graph and write it to a file.
+    ///
+    /// The graph never goes near Bazel, so this is the cheap way to get an
+    /// index of a given size to point `index stats` at.
+    BuildIndex {
+        #[arg(long, default_value = "small")]
+        spec: String,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+    },
     /// List the available graph and change presets.
     Presets,
 }
@@ -248,6 +260,21 @@ pub fn run_synth(_ctx: &Context, args: SynthArgs) -> Result<u8> {
             println!("index edges:{}", c.edges);
             println!("rules:      {}", c.rules);
             println!("tests:      {}", c.tests);
+            Ok(crate::EXIT_OK)
+        }
+        SynthArgs::BuildIndex { spec, out, seed } => {
+            let s = cambium_synth::GraphSpec::preset(&spec)
+                .ok_or_else(|| anyhow::anyhow!("unknown preset {spec}"))?
+                .with_seed(seed);
+            let g = cambium_synth::generate(&s);
+            let index = g.build_index("synthetic");
+            cambium_index::format::write_index(&out, &index)?;
+            let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            println!("wrote {} ({} bytes)", out.display(), bytes);
+            println!(
+                "nodes: {} edges: {}",
+                index.header.counts.nodes, index.header.counts.edges
+            );
             Ok(crate::EXIT_OK)
         }
         SynthArgs::Presets => {
