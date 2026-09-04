@@ -311,6 +311,7 @@ pub fn e2e_memory_with(ctx: &StageContext, change_preset: &str) -> StageResult {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        publish_base: false,
     };
     let q = SynthQuerier::new(&g);
     let (median, p90) = time(ctx.runs, || {

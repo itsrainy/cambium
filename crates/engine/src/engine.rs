@@ -26,6 +26,11 @@ pub struct AffectedRequest {
     pub explain: bool,
     /// Refuse to fall back to a cold full build when no baseline is found.
     pub no_full_build: bool,
+    /// Publish the *base* index when this run had to compute it — because the
+    /// store had no index for `base` and one was replayed forward from an
+    /// ancestor, or built cold. The head-side index is never published from
+    /// `affected`; only `baseline update` publishes that.
+    pub publish_base: bool,
 }
 
 impl AffectedRequest {
@@ -36,8 +41,20 @@ impl AffectedRequest {
             include_manual: false,
             explain: false,
             no_full_build: false,
+            publish_base: false,
         }
     }
+}
+
+/// How a run came by its base index. Only a computed one is worth publishing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaselineOrigin {
+    /// Read from the artifact store; already published by definition.
+    Fetched,
+    /// No index for `base`, so an ancestor's was replayed forward to it.
+    Replayed { from: String },
+    /// No usable ancestor either, so it was built from scratch.
+    ColdBuild,
 }
 
 /// A completed run: the answer, plus the head index it produced.
@@ -200,12 +217,30 @@ impl Engine {
 
     /// Locates a usable baseline for `base` (spec 6.5): the store, then
     /// first-parent ancestors brought forward, then a cold build.
-    fn resolve_baseline(&self, base: &str, req: &AffectedRequest) -> Result<(IndexData, String)> {
+    fn resolve_baseline(
+        &self,
+        base: &str,
+        req: &AffectedRequest,
+    ) -> Result<(IndexData, BaselineOrigin)> {
+        // The replay's head is `base`, so its querier is the one built for
+        // `base` — not the one the outer run uses for its own head.
+        self.resolve_baseline_with(base, req, &self.bazel_querier(base))
+    }
+
+    /// As [`Engine::resolve_baseline`], with the row source for the replay step
+    /// supplied. Taking the querier is what lets the ancestor walk be tested
+    /// without Bazel.
+    pub fn resolve_baseline_with(
+        &self,
+        base: &str,
+        req: &AffectedRequest,
+        querier: &dyn PackageQuerier,
+    ) -> Result<(IndexData, BaselineOrigin)> {
         if let Some(path) = self.fetch_baseline(base)? {
             let f = IndexFile::open(&path)?;
             self.check_compatible(f.view(), &path)?;
             tracing::info!(%base, path = %path.display(), "loaded baseline index");
-            return Ok((f.deserialize()?, base.to_string()));
+            return Ok((f.deserialize()?, BaselineOrigin::Fetched));
         }
 
         let max = self.cfg.baseline.max_ancestor_walk;
@@ -215,16 +250,22 @@ impl Engine {
             };
             let f = IndexFile::open(&path)?;
             self.check_compatible(f.view(), &path)?;
-            tracing::info!(ancestor = %anc, "no baseline at base; bringing an ancestor forward");
-            // Same code path as a normal run: update the ancestor to `base`.
+            tracing::info!(
+                ancestor = %anc,
+                "no baseline at base; bringing an ancestor forward"
+            );
+            // One replay from the nearest ancestor that has an index, not one
+            // per commit: the dirty set over the whole range is the union, and
+            // re-querying a package twice would buy nothing.
             let inner = AffectedRequest {
                 base: anc.clone(),
                 head: base.to_string(),
                 ..req.clone()
             };
-            let out = self.run_incremental(f.deserialize()?, &inner)?;
+            let changes = self.repo.diff(&anc, base)?;
+            let out = self.compute(f.deserialize()?, &changes, querier, &inner)?;
             return match out.index {
-                Some(idx) => Ok((idx, base.to_string())),
+                Some(idx) => Ok((idx, BaselineOrigin::Replayed { from: anc })),
                 // The ancestor..base range invalidated everything, so the
                 // ancestor's index cannot be brought forward.
                 None => {
@@ -233,7 +274,10 @@ impl Engine {
                             base: base.to_string(),
                         })
                     } else {
-                        Ok((self.full_build(base)?, base.to_string()))
+                        Ok((
+                            self.full_build_with(base, querier)?,
+                            BaselineOrigin::ColdBuild,
+                        ))
                     }
                 }
             };
@@ -244,7 +288,28 @@ impl Engine {
                 base: base.to_string(),
             });
         }
-        Ok((self.full_build(base)?, base.to_string()))
+        Ok((
+            self.full_build_with(base, querier)?,
+            BaselineOrigin::ColdBuild,
+        ))
+    }
+
+    /// Publishes a base index this run had to compute, under the base commit.
+    ///
+    /// Only ever the base. The head-side index of an `affected` run is not
+    /// published: a pull-request head is not on the main line, and publishing
+    /// it would fill the store with indexes nothing will ever ask for again —
+    /// and, once the delta overlay lands, an `affected` run will not even
+    /// materialise one. `baseline update` is what publishes head indexes.
+    pub fn publish_base_index(&self, index: &IndexData) -> Result<Vec<String>> {
+        let commit = index.provenance.commit.clone();
+        let dir = self.cache_dir.join("publish");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{commit}.bin"));
+        cambium_index::format::write_index(&path, index)?;
+        let names = self.publish_index(&path, &index.header.lineage, &commit)?;
+        let _ = std::fs::remove_file(&path);
+        Ok(names)
     }
 
     /// An index may only be spliced onto if the config that produced it still
@@ -278,7 +343,24 @@ impl Engine {
             ..req.clone()
         };
 
-        let (base_index, _) = self.resolve_baseline(&base, &req)?;
+        let (base_index, origin) = self.resolve_baseline(&base, &req)?;
+        if req.publish_base {
+            match &origin {
+                BaselineOrigin::Fetched => {
+                    tracing::debug!(%base, "base index came from the store; nothing to publish")
+                }
+                origin => match self.publish_base_index(&base_index) {
+                    Ok(names) => tracing::info!(
+                        %base, ?origin, published = ?names,
+                        "published the computed base index"
+                    ),
+                    // A run that produced the right answer should not fail
+                    // because the store was unwritable; the next run will
+                    // simply have to compute the base again.
+                    Err(e) => tracing::warn!(%base, error = %e, "could not publish the base index"),
+                },
+            }
+        }
         let load_ms = sw.lap();
 
         let mut out = self.run_incremental(base_index, &req)?;

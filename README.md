@@ -232,6 +232,18 @@ runs almost always find their merge base directly:
 $ cambium baseline update --from <parent-sha> --to <merge-sha> --publish
 ```
 
+When a run does not find one, it walks back up to `max_ancestor_walk`
+first-parent ancestors, takes the nearest index it finds, and replays it
+forward to the base in a single update — the dirty set over the whole range is
+the union, so re-querying a package once per commit would buy nothing. Failing
+that, it builds cold.
+
+`cambium affected --publish-base` publishes that computed base index under the
+base revision, so the next run on the same base finds it instead of replaying
+again. Only the base: the head-side index of an `affected` run is never
+published, because a pull-request head is not on the main line and nothing will
+ask for it again.
+
 Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop the
 accumulated tombstones:
 

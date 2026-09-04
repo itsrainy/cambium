@@ -32,6 +32,7 @@ fn request() -> AffectedRequest {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        publish_base: false,
     }
 }
 

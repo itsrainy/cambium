@@ -27,6 +27,12 @@ pub struct Args {
     /// Fail instead of falling back to a cold full build.
     #[arg(long)]
     pub no_full_build: bool,
+    /// If this run had to compute the base index — because the store had none
+    /// for --base and one was replayed forward from an ancestor, or built cold
+    /// — publish it under the base revision, so the next run finds it. The
+    /// head-side index is never published from `affected`.
+    #[arg(long)]
+    pub publish_base: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,
     /// Write the head index produced by this run to a file.
@@ -42,6 +48,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         include_manual: args.include_manual,
         explain: args.explain,
         no_full_build: args.no_full_build,
+        publish_base: args.publish_base,
     };
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
