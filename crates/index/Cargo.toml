@@ -1,0 +1,22 @@
+[package]
+name = "cambium-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CSR target graph, interning, on-disk index format and splice for cambium"
+
+[dependencies]
+blake3.workspace = true
+fixedbitset.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+rkyv.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+blake3.workspace = true
