@@ -372,7 +372,7 @@ fn serialised_output_is_deterministic() {
     b.apply_packages(&[pkg("a", vec![rule("a", "a", &[], &[])])]);
     let (mut x, mut y) = (a.finish("c"), b.finish("c"));
     // created_unix is the only wall-clock field; normalise it.
-    x.header.created_unix = 0;
-    y.header.created_unix = 0;
+    x.provenance.created_unix = 0;
+    y.provenance.created_unix = 0;
     assert_eq!(format::to_bytes(&x).unwrap(), format::to_bytes(&y).unwrap());
 }
