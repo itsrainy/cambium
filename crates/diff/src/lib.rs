@@ -1,0 +1,280 @@
+//! Git plumbing: what changed between two revisions, and how to find an
+//! ancestor with a published baseline.
+//!
+//! We shell out to `git` rather than linking a library: the operations are few,
+//! the output formats are stable, and it keeps cambium honest about running in
+//! whatever checkout CI produced (worktrees, shallow clones, alternates).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Debug, thiserror::Error)]
+pub enum GitError {
+    #[error("failed to run git: {0}")]
+    Spawn(#[source] std::io::Error),
+    #[error("git {args} failed with {status}: {stderr}")]
+    Failed {
+        args: String,
+        status: String,
+        stderr: String,
+    },
+    #[error("git output was not valid UTF-8")]
+    NotUtf8,
+    #[error("unrecognised diff status {0:?}")]
+    BadStatus(String),
+}
+
+type Result<T> = std::result::Result<T, GitError>;
+
+/// What happened to one path between two revisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Added,
+    Modified,
+    Deleted,
+    /// Mode or type change (symlink <-> file). Treated as a modification of the
+    /// content, which is the conservative reading.
+    TypeChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub status: Status,
+    pub path: String,
+}
+
+impl Change {
+    pub fn new(status: Status, path: impl Into<String>) -> Self {
+        Self {
+            status,
+            path: path.into(),
+        }
+    }
+}
+
+/// A repository we run git commands in.
+#[derive(Clone, Debug)]
+pub struct Repo {
+    root: PathBuf,
+}
+
+impl Repo {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Finds the repository root containing `start`.
+    pub fn discover(start: &Path) -> Result<Self> {
+        let out = run(start, &["rev-parse", "--show-toplevel"])?;
+        Ok(Self::new(PathBuf::from(out.trim())))
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Resolves a revision to a full object id.
+    pub fn rev_parse(&self, rev: &str) -> Result<String> {
+        Ok(run(&self.root, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])?
+            .trim()
+            .to_string())
+    }
+
+    pub fn exists(&self, rev: &str) -> bool {
+        self.rev_parse(rev).is_ok()
+    }
+
+    /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself
+    /// (spec 6.5: walk back looking for a published baseline).
+    pub fn first_parent_ancestors(&self, rev: &str, max: usize) -> Result<Vec<String>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let out = run(
+            &self.root,
+            &[
+                "rev-list",
+                "--first-parent",
+                &format!("--max-count={}", max + 1),
+                rev,
+            ],
+        )?;
+        Ok(out.lines().skip(1).map(|s| s.to_string()).collect())
+    }
+
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
+        Ok(run(&self.root, &["merge-base", a, b])?.trim().to_string())
+    }
+
+    /// `git diff --name-status -M -z base head`, with renames and copies
+    /// expanded into a delete plus an add (spec 6.2).
+    pub fn diff(&self, base: &str, head: &str) -> Result<Vec<Change>> {
+        let out = run(
+            &self.root,
+            &["diff", "--name-status", "-M", "-z", "--no-renames-empty", base, head],
+        );
+        // --no-renames-empty is not a real flag on older gits; retry without it.
+        let out = match out {
+            Ok(o) => o,
+            Err(_) => run(&self.root, &["diff", "--name-status", "-M", "-z", base, head])?,
+        };
+        parse_name_status_z(&out)
+    }
+
+    /// Files changed by a single commit relative to its first parent.
+    pub fn diff_commit(&self, commit: &str) -> Result<Vec<Change>> {
+        self.diff(&format!("{commit}^"), commit)
+    }
+
+    /// Reads a blob at a revision. `None` if the path does not exist there.
+    pub fn read_at(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
+        let out = Command::new("git")
+            .current_dir(&self.root)
+            .args(["show", &format!("{rev}:{path}")])
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+}
+
+/// Parses the NUL-separated form of `--name-status`.
+///
+/// Rename and copy records carry two paths (`R100\0old\0new`); both become a
+/// delete of the old path and an add of the new one, which is what makes the
+/// dirty-set rules in spec 6.2 uniform.
+pub fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut changes = Vec::new();
+    while let Some(status) = fields.next() {
+        let code = status.as_bytes()[0];
+        match code {
+            b'R' | b'C' => {
+                let from = fields.next().ok_or(GitError::BadStatus(status.into()))?;
+                let to = fields.next().ok_or(GitError::BadStatus(status.into()))?;
+                if code == b'R' {
+                    changes.push(Change::new(Status::Deleted, from));
+                }
+                changes.push(Change::new(Status::Added, to));
+            }
+            _ => {
+                let path = fields.next().ok_or(GitError::BadStatus(status.into()))?;
+                let s = match code {
+                    b'A' => Status::Added,
+                    b'M' => Status::Modified,
+                    b'D' => Status::Deleted,
+                    b'T' => Status::TypeChanged,
+                    // U (unmerged), X (unknown), B (broken pairing): be
+                    // conservative and treat as a modification.
+                    _ => Status::Modified,
+                };
+                changes.push(Change::new(s, path));
+            }
+        }
+    }
+    Ok(changes)
+}
+
+fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(GitError::Spawn)?;
+    if !out.status.success() {
+        return Err(GitError::Failed {
+            args: args.join(" "),
+            status: out.status.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    String::from_utf8(out.stdout).map_err(|_| GitError::NotUtf8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_statuses() {
+        let out = "M\0a/BUILD\0A\0b/x.cc\0D\0c/y.cc\0";
+        assert_eq!(
+            parse_name_status_z(out).unwrap(),
+            vec![
+                Change::new(Status::Modified, "a/BUILD"),
+                Change::new(Status::Added, "b/x.cc"),
+                Change::new(Status::Deleted, "c/y.cc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_renames_into_delete_plus_add() {
+        let out = "R100\0old/x.cc\0new/x.cc\0";
+        assert_eq!(
+            parse_name_status_z(out).unwrap(),
+            vec![
+                Change::new(Status::Deleted, "old/x.cc"),
+                Change::new(Status::Added, "new/x.cc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn copies_only_add_the_destination() {
+        let out = "C75\0src/x.cc\0dst/x.cc\0";
+        assert_eq!(
+            parse_name_status_z(out).unwrap(),
+            vec![Change::new(Status::Added, "dst/x.cc")]
+        );
+    }
+
+    #[test]
+    fn handles_paths_with_spaces_and_quotes() {
+        let out = "M\0a dir/with \"quotes\".cc\0";
+        assert_eq!(
+            parse_name_status_z(out).unwrap(),
+            vec![Change::new(Status::Modified, "a dir/with \"quotes\".cc")]
+        );
+    }
+
+    #[test]
+    fn drives_a_real_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(st.status.success(), "git {args:?}: {:?}", String::from_utf8_lossy(&st.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/a.cc"), "one").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        std::fs::write(root.join("lib/a.cc"), "two").unwrap();
+        std::fs::write(root.join("lib/b.cc"), "new").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "two"]);
+
+        let repo = Repo::new(root);
+        let changes = repo.diff("HEAD~1", "HEAD").unwrap();
+        assert_eq!(
+            changes,
+            vec![
+                Change::new(Status::Modified, "lib/a.cc"),
+                Change::new(Status::Added, "lib/b.cc"),
+            ]
+        );
+        let head = repo.rev_parse("HEAD").unwrap();
+        assert_eq!(head.len(), 40);
+        let anc = repo.first_parent_ancestors("HEAD", 5).unwrap();
+        assert_eq!(anc.len(), 1);
+        assert_eq!(repo.read_at("HEAD~1", "lib/a.cc").unwrap(), b"one");
+        assert!(repo.read_at("HEAD~1", "lib/b.cc").is_none());
+    }
+}

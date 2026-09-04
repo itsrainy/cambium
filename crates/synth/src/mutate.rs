@@ -1,0 +1,738 @@
+//! Mutations and commits (spec 13.3).
+//!
+//! A `Commit` is a set of mutations plus the `git diff --name-status` the same
+//! edit would have produced. Applying one to a `SynthGraph` yields the graph at
+//! the next revision, which is what lets the property tests compare the
+//! incremental engine against a full rebuild without ever running git or Bazel.
+
+use rand::prelude::*;
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+
+use cambium_diff::{Change, Status};
+
+use crate::graph::{Kind, SynthGraph, SynthPackage, SynthTarget};
+use crate::spec::Dist;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mutation {
+    /// Edit a file's contents. Cannot change the graph.
+    ModifySource { target: u32, slot: u32 },
+    /// Add a file that the target's glob picks up.
+    AddSource { target: u32 },
+    DeleteSource { target: u32, slot: u32 },
+    /// Change an attribute that is neither deps nor srcs.
+    EditRuleAttr { target: u32 },
+    AddDep { target: u32, dep: u32 },
+    RemoveDep { target: u32, dep: u32 },
+    AddTarget { package: u32, deps: Vec<u32> },
+    DeleteTarget { target: u32 },
+    /// Bump a `.bzl` file, changing the rule implementations that load it.
+    EditBzl { bzl: u32 },
+    /// Move some of a package's targets into a new sub-package.
+    SplitPackage { package: u32, targets: Vec<u32> },
+    /// Fold a sub-package back into its parent.
+    MergePackage { package: u32 },
+    /// Touch a global invalidator.
+    Global,
+}
+
+/// Relative frequencies for the mutation kinds.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MutationWeights {
+    pub modify_source: u32,
+    pub add_source: u32,
+    pub delete_source: u32,
+    pub edit_rule_attr: u32,
+    pub add_dep: u32,
+    pub remove_dep: u32,
+    pub add_target: u32,
+    pub delete_target: u32,
+    pub edit_bzl: u32,
+    pub split_package: u32,
+    pub merge_package: u32,
+    pub global: u32,
+}
+
+impl Default for MutationWeights {
+    fn default() -> Self {
+        // Roughly the mix of a real pull request: mostly file edits, some BUILD
+        // churn, the structural changes rare but present.
+        Self {
+            modify_source: 60,
+            add_source: 8,
+            delete_source: 5,
+            edit_rule_attr: 8,
+            add_dep: 6,
+            remove_dep: 4,
+            add_target: 3,
+            delete_target: 2,
+            edit_bzl: 2,
+            split_package: 1,
+            merge_package: 1,
+            global: 0,
+        }
+    }
+}
+
+impl MutationWeights {
+    fn table(&self) -> Vec<(MutKind, u32)> {
+        use MutKind::*;
+        vec![
+            (ModifySource, self.modify_source),
+            (AddSource, self.add_source),
+            (DeleteSource, self.delete_source),
+            (EditRuleAttr, self.edit_rule_attr),
+            (AddDep, self.add_dep),
+            (RemoveDep, self.remove_dep),
+            (AddTarget, self.add_target),
+            (DeleteTarget, self.delete_target),
+            (EditBzl, self.edit_bzl),
+            (SplitPackage, self.split_package),
+            (MergePackage, self.merge_package),
+            (Global, self.global),
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MutKind {
+    ModifySource,
+    AddSource,
+    DeleteSource,
+    EditRuleAttr,
+    AddDep,
+    RemoveDep,
+    AddTarget,
+    DeleteTarget,
+    EditBzl,
+    SplitPackage,
+    MergePackage,
+    Global,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChangeSpec {
+    pub seed: u64,
+    /// Mutations per commit.
+    pub files_changed: Dist,
+    pub weights: MutationWeights,
+    /// Probability that a mutation picks a hub target rather than a random one.
+    pub hub_bias: f64,
+}
+
+impl Default for ChangeSpec {
+    fn default() -> Self {
+        Self {
+            seed: 1,
+            files_changed: Dist::LogNormal {
+                median: 6.0,
+                sigma: 0.9,
+                min: 1,
+                max: 200,
+            },
+            weights: MutationWeights::default(),
+            hub_bias: 0.05,
+        }
+    }
+}
+
+impl ChangeSpec {
+    /// Named presets from spec 13.3.
+    pub fn preset(name: &str) -> Option<ChangeSpec> {
+        let mut c = ChangeSpec::default();
+        match name {
+            "typical-pr" => {
+                c.files_changed = Dist::Uniform { lo: 3, hi: 20 };
+            }
+            "build-edit" => {
+                c.files_changed = Dist::Uniform { lo: 1, hi: 5 };
+                c.weights = MutationWeights {
+                    modify_source: 0,
+                    edit_rule_attr: 40,
+                    add_dep: 30,
+                    remove_dep: 20,
+                    add_target: 10,
+                    ..MutationWeights::default()
+                };
+            }
+            "bzl-edit" => {
+                c.files_changed = Dist::Uniform { lo: 1, hi: 3 };
+                c.weights = MutationWeights {
+                    modify_source: 0,
+                    edit_bzl: 100,
+                    ..MutationWeights::default()
+                };
+            }
+            "hub-touch" => {
+                c.files_changed = Dist::Uniform { lo: 1, hi: 4 };
+                c.hub_bias = 1.0;
+            }
+            "refactor" => {
+                c.files_changed = Dist::Uniform { lo: 150, hi: 250 };
+            }
+            "package-split" => {
+                c.files_changed = Dist::Uniform { lo: 1, hi: 2 };
+                c.weights = MutationWeights {
+                    modify_source: 0,
+                    split_package: 60,
+                    merge_package: 40,
+                    ..MutationWeights::default()
+                };
+            }
+            "pathological" => {
+                c.files_changed = Dist::Uniform { lo: 20, hi: 40 };
+                c.hub_bias = 1.0;
+                c.weights = MutationWeights {
+                    modify_source: 30,
+                    edit_bzl: 40,
+                    edit_rule_attr: 30,
+                    ..MutationWeights::default()
+                };
+            }
+            "mixed" => {}
+            _ => return None,
+        }
+        Some(c)
+    }
+
+    pub const PRESETS: &'static [&'static str] = &[
+        "typical-pr",
+        "build-edit",
+        "bzl-edit",
+        "hub-touch",
+        "refactor",
+        "package-split",
+        "pathological",
+        "mixed",
+    ];
+}
+
+/// One synthetic revision.
+#[derive(Clone, Debug, Default)]
+pub struct Commit {
+    pub mutations: Vec<Mutation>,
+    /// What `git diff --name-status base head` would report.
+    pub changes: Vec<Change>,
+}
+
+/// Generates and applies a commit, returning what changed on disk.
+pub fn commit(g: &mut SynthGraph, spec: &ChangeSpec, revision: u64) -> Commit {
+    // Seeding per revision keeps a sequence of commits reproducible whether it
+    // is replayed from the start or resumed.
+    let mut rng = ChaCha8Rng::seed_from_u64(spec.seed ^ (revision.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
+    let n = spec.files_changed.sample(&mut rng).max(1);
+    let table = spec.weights.table();
+    let total: u32 = table.iter().map(|(_, w)| w).sum();
+
+    let mut out = Commit::default();
+    if total == 0 {
+        return out;
+    }
+    for _ in 0..n {
+        let mut pick = rng.gen_range(0..total);
+        let mut kind = table[0].0;
+        for (k, w) in &table {
+            if pick < *w {
+                kind = *k;
+                break;
+            }
+            pick -= *w;
+        }
+        if let Some(m) = generate(g, kind, spec, &mut rng) {
+            apply(g, &m, &mut out.changes);
+            out.mutations.push(m);
+        }
+    }
+    normalise(&mut out.changes);
+    out
+}
+
+/// Applies a specific mutation, for hand-written scenarios.
+pub fn apply_one(g: &mut SynthGraph, m: &Mutation) -> Vec<Change> {
+    let mut changes = Vec::new();
+    apply(g, m, &mut changes);
+    normalise(&mut changes);
+    changes
+}
+
+fn pick_target<R: Rng>(g: &SynthGraph, spec: &ChangeSpec, rng: &mut R) -> Option<u32> {
+    if g.targets.is_empty() {
+        return None;
+    }
+    // Hubs are the layer-0 targets everything depends on; biasing towards them
+    // is how the `hub-touch` and `pathological` presets get their blast radius.
+    if rng.gen::<f64>() < spec.hub_bias {
+        let hubs: Vec<u32> = (0..g.targets.len() as u32)
+            .filter(|&i| g.targets[i as usize].alive && g.targets[i as usize].layer == 0)
+            .take(64)
+            .collect();
+        if !hubs.is_empty() {
+            return Some(hubs[rng.gen_range(0..hubs.len())]);
+        }
+    }
+    for _ in 0..32 {
+        let i = rng.gen_range(0..g.targets.len()) as u32;
+        if g.targets[i as usize].alive {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn generate<R: Rng>(
+    g: &SynthGraph,
+    kind: MutKind,
+    spec: &ChangeSpec,
+    rng: &mut R,
+) -> Option<Mutation> {
+    Some(match kind {
+        MutKind::ModifySource => {
+            let t = pick_target(g, spec, rng)?;
+            let srcs = &g.targets[t as usize].srcs;
+            if srcs.is_empty() {
+                return None;
+            }
+            Mutation::ModifySource {
+                target: t,
+                slot: srcs[rng.gen_range(0..srcs.len())],
+            }
+        }
+        MutKind::AddSource => Mutation::AddSource {
+            target: pick_target(g, spec, rng)?,
+        },
+        MutKind::DeleteSource => {
+            let t = pick_target(g, spec, rng)?;
+            let srcs = &g.targets[t as usize].srcs;
+            if srcs.is_empty() {
+                return None;
+            }
+            Mutation::DeleteSource {
+                target: t,
+                slot: srcs[rng.gen_range(0..srcs.len())],
+            }
+        }
+        MutKind::EditRuleAttr => Mutation::EditRuleAttr {
+            target: pick_target(g, spec, rng)?,
+        },
+        MutKind::AddDep => {
+            let t = pick_target(g, spec, rng)?;
+            let layer = g.targets[t as usize].layer;
+            if layer == 0 {
+                return None;
+            }
+            // Keep the DAG: only depend on strictly lower layers.
+            for _ in 0..32 {
+                let d = rng.gen_range(0..g.targets.len()) as u32;
+                let dt = &g.targets[d as usize];
+                if dt.alive && dt.layer < layer && !g.targets[t as usize].deps.contains(&d) {
+                    return Some(Mutation::AddDep { target: t, dep: d });
+                }
+            }
+            return None;
+        }
+        MutKind::RemoveDep => {
+            let t = pick_target(g, spec, rng)?;
+            let deps = &g.targets[t as usize].deps;
+            if deps.is_empty() {
+                return None;
+            }
+            Mutation::RemoveDep {
+                target: t,
+                dep: deps[rng.gen_range(0..deps.len())],
+            }
+        }
+        MutKind::AddTarget => {
+            let anchor = pick_target(g, spec, rng)?;
+            let package = g.targets[anchor as usize].package;
+            let deps = if g.targets[anchor as usize].layer > 0 {
+                vec![]
+            } else {
+                vec![]
+            };
+            Mutation::AddTarget { package, deps }
+        }
+        MutKind::DeleteTarget => Mutation::DeleteTarget {
+            target: pick_target(g, spec, rng)?,
+        },
+        MutKind::EditBzl => {
+            if g.bzl.is_empty() {
+                return None;
+            }
+            Mutation::EditBzl {
+                bzl: rng.gen_range(0..g.bzl.len()) as u32,
+            }
+        }
+        MutKind::SplitPackage => {
+            let anchor = pick_target(g, spec, rng)?;
+            let package = g.targets[anchor as usize].package;
+            let live: Vec<u32> = g.packages[package as usize]
+                .targets
+                .iter()
+                .copied()
+                .filter(|&t| g.targets[t as usize].alive)
+                .collect();
+            if live.len() < 2 {
+                return None;
+            }
+            let take = (live.len() / 2).max(1);
+            Mutation::SplitPackage {
+                package,
+                targets: live[..take].to_vec(),
+            }
+        }
+        MutKind::MergePackage => {
+            let anchor = pick_target(g, spec, rng)?;
+            let package = g.targets[anchor as usize].package;
+            // Only a package with a live parent package can be merged upward.
+            let path = g.packages[package as usize].path.clone();
+            let parent = cambium_index::label::parent_package(&path)?;
+            if !g.pkg_by_path.contains_key(parent) {
+                return None;
+            }
+            Mutation::MergePackage { package }
+        }
+        MutKind::Global => Mutation::Global,
+    })
+}
+
+fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
+    match m {
+        Mutation::ModifySource { target, slot } => {
+            let path = g.src_path(*target, *slot);
+            let t = &mut g.targets[*target as usize];
+            if let Some(i) = t.srcs.iter().position(|s| s == slot) {
+                t.src_versions[i] += 1;
+                changes.push(Change::new(Status::Modified, path));
+            }
+        }
+        Mutation::AddSource { target } => {
+            let t = &mut g.targets[*target as usize];
+            let slot = t.srcs.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+            t.srcs.push(slot);
+            t.src_versions.push(0);
+            changes.push(Change::new(Status::Added, g.src_path(*target, slot)));
+        }
+        Mutation::DeleteSource { target, slot } => {
+            let path = g.src_path(*target, *slot);
+            let t = &mut g.targets[*target as usize];
+            if let Some(i) = t.srcs.iter().position(|s| s == slot) {
+                t.srcs.remove(i);
+                t.src_versions.remove(i);
+                changes.push(Change::new(Status::Deleted, path));
+            }
+        }
+        Mutation::EditRuleAttr { target } => {
+            g.targets[*target as usize].attr_salt += 1;
+            let pkg = g.targets[*target as usize].package;
+            changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+        }
+        Mutation::AddDep { target, dep } => {
+            let t = &mut g.targets[*target as usize];
+            if !t.deps.contains(dep) {
+                t.deps.push(*dep);
+            }
+            let pkg = g.targets[*target as usize].package;
+            changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+        }
+        Mutation::RemoveDep { target, dep } => {
+            let t = &mut g.targets[*target as usize];
+            t.deps.retain(|d| d != dep);
+            let pkg = g.targets[*target as usize].package;
+            changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+        }
+        Mutation::AddTarget { package, deps } => {
+            let id = g.targets.len() as u32;
+            let layer = g.packages[*package as usize]
+                .targets
+                .iter()
+                .filter(|&&t| g.targets[t as usize].alive)
+                .map(|&t| g.targets[t as usize].layer)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let deps: Vec<u32> = deps
+                .iter()
+                .copied()
+                .filter(|&d| g.targets[d as usize].alive && g.targets[d as usize].layer < layer)
+                .collect();
+            g.targets.push(SynthTarget {
+                package: *package,
+                kind: Kind::Lib,
+                layer,
+                deps,
+                select_deps: 0,
+                ext_deps: 0,
+                srcs: vec![0],
+                src_versions: vec![0],
+                foreign_srcs: Vec::new(),
+                attr_salt: 0,
+                tags: 0,
+                alive: true,
+            });
+            g.packages[*package as usize].targets.push(id);
+            changes.push(Change::new(Status::Added, g.src_path(id, 0)));
+            changes.push(Change::new(Status::Modified, g.build_path(*package)));
+        }
+        Mutation::DeleteTarget { target } => {
+            let pkg = g.targets[*target as usize].package;
+            let srcs = g.targets[*target as usize].srcs.clone();
+            g.targets[*target as usize].alive = false;
+            // Dependents keep a dangling dep until they are rebuilt; the
+            // package_update filters dead deps, which is what a real BUILD edit
+            // would have done.
+            for &s in &srcs {
+                changes.push(Change::new(Status::Deleted, g.src_path(*target, s)));
+            }
+            changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+            // Every package holding a dependent had to drop the reference.
+            for p in dependent_packages(g, &[*target]) {
+                changes.push(Change::new(Status::Modified, g.build_path(p)));
+            }
+        }
+        Mutation::EditBzl { bzl } => {
+            g.bzl[*bzl as usize].version += 1;
+            changes.push(Change::new(
+                Status::Modified,
+                g.bzl[*bzl as usize].path.clone(),
+            ));
+        }
+        Mutation::SplitPackage { package, targets } => {
+            let parent_path = g.packages[*package as usize].path.clone();
+            let mut i = 0;
+            let new_path = loop {
+                let p = format!("{parent_path}/sub{i}");
+                if !g.pkg_by_path.contains_key(&p) {
+                    break p;
+                }
+                i += 1;
+            };
+            let new_id = g.packages.len() as u32;
+            let bzl = g.packages[*package as usize].bzl.clone();
+            g.packages.push(SynthPackage {
+                path: new_path.clone(),
+                targets: Vec::new(),
+                bzl: bzl.clone(),
+                exported: Vec::new(),
+                alive: true,
+            });
+            for &b in &bzl {
+                g.bzl[b as usize].loaded_by.push(new_id);
+            }
+            g.pkg_by_path.insert(new_path.clone(), new_id);
+
+            let moved: Vec<u32> = targets
+                .iter()
+                .copied()
+                .filter(|&t| g.targets[t as usize].alive && g.targets[t as usize].package == *package)
+                .collect();
+            move_targets(g, &moved, new_id, changes);
+            changes.push(Change::new(Status::Added, g.build_path(new_id)));
+            changes.push(Change::new(Status::Modified, g.build_path(*package)));
+        }
+        Mutation::MergePackage { package } => {
+            let path = g.packages[*package as usize].path.clone();
+            let Some(parent) = cambium_index::label::parent_package(&path) else {
+                return;
+            };
+            let Some(&parent_id) = g.pkg_by_path.get(parent) else {
+                return;
+            };
+            let moved: Vec<u32> = g.packages[*package as usize]
+                .targets
+                .iter()
+                .copied()
+                .filter(|&t| g.targets[t as usize].alive)
+                .collect();
+            changes.push(Change::new(Status::Deleted, g.build_path(*package)));
+            move_targets(g, &moved, parent_id, changes);
+            g.packages[*package as usize].alive = false;
+            g.packages[*package as usize].targets.clear();
+            g.pkg_by_path.remove(&path);
+            changes.push(Change::new(Status::Modified, g.build_path(parent_id)));
+        }
+        Mutation::Global => {
+            changes.push(Change::new(Status::Modified, "MODULE.bazel".to_string()));
+        }
+    }
+}
+
+/// Moves targets (and their source files) into another package.
+fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<Change>) {
+    for &t in moved {
+        let srcs = g.targets[t as usize].srcs.clone();
+        let old_paths: Vec<String> = srcs.iter().map(|&s| g.src_path(t, s)).collect();
+        let from = g.targets[t as usize].package;
+        g.packages[from as usize].targets.retain(|&x| x != t);
+        g.targets[t as usize].package = dest;
+        g.packages[dest as usize].targets.push(t);
+        for (i, &s) in srcs.iter().enumerate() {
+            changes.push(Change::new(Status::Deleted, old_paths[i].clone()));
+            changes.push(Change::new(Status::Added, g.src_path(t, s)));
+        }
+    }
+    // Anyone referring to a moved target now refers to a different label, so
+    // their BUILD files changed too.
+    for p in dependent_packages(g, moved) {
+        changes.push(Change::new(Status::Modified, g.build_path(p)));
+    }
+}
+
+fn dependent_packages(g: &SynthGraph, targets: &[u32]) -> Vec<u32> {
+    let set: std::collections::HashSet<u32> = targets.iter().copied().collect();
+    let mut pkgs: Vec<u32> = g
+        .targets
+        .iter()
+        .filter(|t| t.alive && t.deps.iter().any(|d| set.contains(d)))
+        .map(|t| t.package)
+        .collect();
+    pkgs.sort_unstable();
+    pkgs.dedup();
+    pkgs
+}
+
+/// Sorts and deduplicates a change list the way `git diff` would present it.
+fn normalise(changes: &mut Vec<Change>) {
+    changes.sort_by(|a, b| a.path.cmp(&b.path).then((a.status as u8).cmp(&(b.status as u8))));
+    let mut out: Vec<Change> = Vec::with_capacity(changes.len());
+    for c in changes.drain(..) {
+        match out.last_mut() {
+            Some(prev) if prev.path == c.path => {
+                // A path both added and deleted in one commit is a modification.
+                if prev.status != c.status {
+                    prev.status = Status::Modified;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    *changes = out;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::GraphSpec;
+
+    fn graph() -> SynthGraph {
+        crate::generate(&GraphSpec::preset("small").unwrap())
+    }
+
+    #[test]
+    fn commits_are_deterministic() {
+        let spec = ChangeSpec::default();
+        let (mut a, mut b) = (graph(), graph());
+        for rev in 0..5 {
+            let ca = commit(&mut a, &spec, rev);
+            let cb = commit(&mut b, &spec, rev);
+            assert_eq!(ca.changes, cb.changes, "revision {rev}");
+            assert_eq!(ca.mutations, cb.mutations);
+        }
+    }
+
+    #[test]
+    fn mutations_preserve_the_dag() {
+        let spec = ChangeSpec {
+            weights: MutationWeights {
+                add_dep: 100,
+                ..MutationWeights::default()
+            },
+            ..Default::default()
+        };
+        let mut g = graph();
+        for rev in 0..10 {
+            commit(&mut g, &spec, rev);
+        }
+        for t in g.targets.iter().filter(|t| t.alive) {
+            for &d in &t.deps {
+                assert!(g.targets[d as usize].layer < t.layer);
+            }
+        }
+    }
+
+    #[test]
+    fn modify_source_bumps_content_only() {
+        let mut g = graph();
+        let t = (0..g.targets.len() as u32)
+            .find(|&i| !g.targets[i as usize].srcs.is_empty())
+            .unwrap();
+        let slot = g.targets[t as usize].srcs[0];
+        let before = g.target_hash(t);
+        let changes = apply_one(&mut g, &Mutation::ModifySource { target: t, slot });
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, Status::Modified);
+        // The rule definition is untouched: only the file content moved.
+        assert_eq!(before, g.target_hash(t));
+        assert_eq!(g.src_version(t, slot), 1);
+    }
+
+    #[test]
+    fn add_source_changes_the_rule_hash() {
+        let mut g = graph();
+        let before = g.target_hash(0);
+        let changes = apply_one(&mut g, &Mutation::AddSource { target: 0 });
+        assert_eq!(changes[0].status, Status::Added);
+        assert_ne!(before, g.target_hash(0));
+    }
+
+    #[test]
+    fn splitting_a_package_moves_targets_and_files() {
+        let mut g = graph();
+        let pkg = g.targets[0].package;
+        let live: Vec<u32> = g.packages[pkg as usize]
+            .targets
+            .iter()
+            .copied()
+            .filter(|&t| g.targets[t as usize].alive)
+            .collect();
+        if live.len() < 2 {
+            return;
+        }
+        let moved = live[..1].to_vec();
+        let changes = apply_one(
+            &mut g,
+            &Mutation::SplitPackage {
+                package: pkg,
+                targets: moved.clone(),
+            },
+        );
+        let new_pkg = g.targets[moved[0] as usize].package;
+        assert_ne!(new_pkg, pkg);
+        assert!(g.package_path(new_pkg).starts_with(g.package_path(pkg)));
+        assert!(changes
+            .iter()
+            .any(|c| c.status == Status::Added && c.path.ends_with("BUILD.bazel")));
+    }
+
+    #[test]
+    fn merging_a_package_deletes_its_build_file() {
+        let mut g = graph();
+        let pkg = g.targets[0].package;
+        let live: Vec<u32> = g.packages[pkg as usize].targets.clone();
+        apply_one(
+            &mut g,
+            &Mutation::SplitPackage {
+                package: pkg,
+                targets: live,
+            },
+        );
+        let sub = *g
+            .pkg_by_path
+            .iter()
+            .find(|(p, _)| p.ends_with("/sub0"))
+            .unwrap()
+            .1;
+        let changes = apply_one(&mut g, &Mutation::MergePackage { package: sub });
+        assert!(!g.packages[sub as usize].alive);
+        assert!(changes
+            .iter()
+            .any(|c| c.status == Status::Deleted && c.path.ends_with("BUILD.bazel")));
+    }
+
+    #[test]
+    fn presets_resolve() {
+        for p in ChangeSpec::PRESETS {
+            assert!(ChangeSpec::preset(p).is_some(), "{p}");
+        }
+    }
+}

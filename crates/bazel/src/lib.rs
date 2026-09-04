@@ -212,8 +212,12 @@ impl Bazel {
             cmd.arg(f);
         }
 
-        let args = format!("query {}", truncate(expr, 200));
-        tracing::debug!(binary = %self.binary.display(), expr_len = expr.len(), "running bazel query");
+        tracing::debug!(
+            binary = %self.binary.display(),
+            expr_len = expr.len(),
+            query = %truncate(expr, 200),
+            "running bazel query"
+        );
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

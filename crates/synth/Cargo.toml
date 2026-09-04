@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Deterministic synthetic Bazel graph generator for cambium tests and benchmarks"
 
 [dependencies]
+cambium-diff.workspace = true
 cambium-index.workspace = true
 blake3.workspace = true
 rand.workspace = true
