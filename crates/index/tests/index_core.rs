@@ -140,10 +140,7 @@ fn walk_from_source_file_reaches_consumers() {
     let v = d.view();
     let m = v.labels.build_map();
     let src = m["//b:b.src"];
-    assert_eq!(
-        v.file_consumers(src).to_vec(),
-        vec![m["//b:b"]]
-    );
+    assert_eq!(v.file_consumers(src).to_vec(), vec![m["//b:b"]]);
     let r = walk(v, &[src], &WalkOptions::default());
     assert_eq!(
         walk::labels_sorted(v, &r.affected),

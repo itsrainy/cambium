@@ -95,8 +95,6 @@ pub enum StoreConfig {
     },
 }
 
-
-
 impl Default for Invalidators {
     fn default() -> Self {
         Self {
@@ -165,7 +163,6 @@ impl Default for Limits {
         }
     }
 }
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
