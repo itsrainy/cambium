@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/index",
     "crates/synth",
+    "crates/cambium-proto",
+    "crates/bazel",
 ]
 
 [workspace.package]
