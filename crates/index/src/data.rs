@@ -106,25 +106,48 @@ pub struct Counts {
     pub tests: u32,
 }
 
-/// Index provenance. Ids are only comparable between indexes sharing a lineage.
+/// What the index *is*: everything that a caller could derive from the
+/// repository's content at some revision.
+///
+/// Deliberately not what revision that was. Two commits whose graphs are
+/// identical — a README edit, a comment, a revert — must produce byte-identical
+/// payloads, so that the store can eventually address blobs by content hash
+/// without a format change. The revision lives in [`Provenance`], which is
+/// written to the file's trailer rather than into the archive.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub struct Header {
     pub format_version: u32,
-    /// Git revision this index describes, as lowercase hex.
-    pub commit: String,
     /// Random per-lineage id. Splices preserve it; full builds mint a new one.
     pub lineage: [u8; 16],
     pub bazel_version: String,
     /// Hash of the `cambium.toml` that produced this index.
     pub config_hash: [u8; 32],
-    pub created_unix: u64,
     pub counts: Counts,
+}
+
+/// Which revision an index describes, and when it was built.
+///
+/// Kept out of the payload (see [`Header`]) and written to the file's trailer.
+/// Skipped by rkyv rather than merely unset, so it cannot accidentally
+/// contribute bytes: `crates/index/tests/index_core.rs` asserts that two
+/// indexes built from the same graph at different commits have identical
+/// payloads.
+#[derive(Archive, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Provenance {
+    /// Git revision this index describes, as lowercase hex.
+    pub commit: String,
+    pub created_unix: u64,
 }
 
 /// The serialised payload. Every field is a flat array addressable from mmap.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub struct IndexData {
     pub header: Header,
+
+    /// Which revision this describes. Excluded from the archive so the payload
+    /// is a function of the graph alone.
+    #[rkyv(with = rkyv::with::Skip)]
+    pub provenance: Provenance,
 
     // ---- labels ----
     pub label_bytes: Vec<u8>,
@@ -303,11 +326,11 @@ impl IndexData {
     pub fn view(&self) -> IndexRef<'_> {
         IndexRef {
             format_version: self.header.format_version,
-            commit: &self.header.commit,
+            commit: &self.provenance.commit,
             lineage: self.header.lineage,
             bazel_version: &self.header.bazel_version,
             config_hash: self.header.config_hash,
-            created_unix: self.header.created_unix,
+            created_unix: self.provenance.created_unix,
             labels: StrTabRef {
                 bytes: &self.label_bytes,
                 offsets: &self.label_offsets,
@@ -354,14 +377,16 @@ impl IndexData {
 }
 
 impl ArchivedIndexData {
-    pub fn view(&self) -> IndexRef<'_> {
+    /// A view over the archive. Provenance is not in the archive — it comes
+    /// from the file's trailer — so the caller supplies it.
+    pub fn view_with<'a>(&'a self, provenance: &'a Provenance) -> IndexRef<'a> {
         IndexRef {
             format_version: self.header.format_version.into(),
-            commit: &self.header.commit,
+            commit: &provenance.commit,
             lineage: self.header.lineage,
             bazel_version: &self.header.bazel_version,
             config_hash: self.header.config_hash,
-            created_unix: self.header.created_unix.into(),
+            created_unix: provenance.created_unix,
             labels: StrTabRef {
                 bytes: &self.label_bytes,
                 offsets: le::u32s(&self.label_offsets),

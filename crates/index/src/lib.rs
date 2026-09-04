@@ -29,7 +29,12 @@ pub use builder::{
     new_lineage, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
 };
 pub use csr::{Csr, CsrRef};
-pub use data::{flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, NO_ID};
-pub use format::{index_file_name, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION};
+pub use data::{
+    flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, Provenance, NO_ID,
+};
+pub use format::{
+    index_file_name, index_key, parse_index_key, temp_suffix, IndexError, IndexFile,
+    OwnedIndexBytes, FORMAT_VERSION,
+};
 pub use strtab::{Interner, StrTabRef};
 pub use walk::{walk, walk_deps, walk_edges, WalkOptions, WalkResult};

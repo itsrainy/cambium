@@ -9,7 +9,9 @@ use fixedbitset::FixedBitSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::csr::{sort_dedup_pairs, Csr};
-use crate::data::{flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, NO_ID};
+use crate::data::{
+    flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, Provenance, NO_ID,
+};
 use crate::label;
 use crate::strtab::Interner;
 
@@ -549,15 +551,17 @@ impl IndexBuilder {
         IndexData {
             header: Header {
                 format_version: crate::format::FORMAT_VERSION,
-                commit: commit.into(),
                 lineage: self.lineage,
                 bazel_version: self.bazel_version,
                 config_hash: self.config_hash,
+                counts,
+            },
+            provenance: Provenance {
+                commit: commit.into(),
                 created_unix: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
-                counts,
             },
             label_bytes,
             label_offsets,

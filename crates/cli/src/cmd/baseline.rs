@@ -132,7 +132,8 @@ fn emit(
     out: Option<&std::path::Path>,
     publish: bool,
 ) -> Result<()> {
-    let name = cambium_index::index_file_name(&index.header.lineage, &index.header.commit);
+    let key = cambium_index::index_key(&index.header.lineage, &index.provenance.commit);
+    let name = key.rsplit('/').next().unwrap_or(&key).to_string();
     let path = match out {
         Some(p) => p.to_path_buf(),
         None => std::env::temp_dir().join(&name),
@@ -148,7 +149,7 @@ fn emit(
         hex(&index.header.lineage)
     );
     if publish {
-        let names = engine.publish_index(&path, &index.header.lineage, &index.header.commit)?;
+        let names = engine.publish_index(&path, &index.header.lineage, &index.provenance.commit)?;
         for n in names {
             eprintln!("cambium: published {n}");
         }

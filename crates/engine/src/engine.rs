@@ -141,33 +141,44 @@ impl Engine {
     // ------------------------------------------------------------- baselines
 
     /// Finds an index for `commit` in the artifact store.
+    ///
+    /// Keys are `indexes/<lineage>/<commit>.bin`, and a run does not know the
+    /// lineage before it has an index, so a store that can enumerate is asked
+    /// for the key ending in this commit. A store that cannot enumerate (plain
+    /// HTTP) is asked for the lineage-less fallback key the publisher also
+    /// writes; the lineage is in the file either way.
     pub fn fetch_baseline(&self, commit: &str) -> Result<Option<PathBuf>> {
         let Some(store) = &self.store else {
             return Ok(None);
         };
         std::fs::create_dir_all(&self.cache_dir)?;
-        let suffix = format!("-{commit}.bin");
-        // Stores that can enumerate let us find the artifact whatever lineage
-        // produced it. Those that cannot (plain HTTP) use a commit-addressed
-        // name instead; the lineage is still recorded in the header.
+        let suffix = format!("/{commit}.bin");
+        let legacy_suffix = format!("-{commit}.bin");
         if let Ok(names) = store.list() {
-            if let Some(name) = names.iter().find(|n| n.ends_with(&suffix)) {
-                let dest = self.cache_dir.join(name);
+            if let Some(name) = names
+                .iter()
+                .find(|n| n.ends_with(&suffix) || n.ends_with(&legacy_suffix))
+            {
+                let dest = self.cache_dir.join(cache_name(name));
                 if store.fetch(name, &dest)? {
                     return Ok(Some(dest));
                 }
             }
         }
-        let name = commit_addressed_name(commit);
-        let dest = self.cache_dir.join(&name);
+        let name = commit_addressed_key(commit);
+        let dest = self.cache_dir.join(cache_name(&name));
         if store.fetch(&name, &dest)? {
             return Ok(Some(dest));
         }
         Ok(None)
     }
 
-    /// Publishes an index under its canonical name, plus a commit-addressed
-    /// name when the store cannot be listed.
+    /// Publishes an index under `indexes/<lineage>/<commit>.bin`, plus a
+    /// commit-addressed key when the store cannot be listed.
+    ///
+    /// Idempotent: the payload is a function of the graph, so republishing the
+    /// same commit rewrites identical bytes and concurrent publishers cannot
+    /// disagree.
     pub fn publish_index(
         &self,
         path: &Path,
@@ -177,9 +188,9 @@ impl Engine {
         let Some(store) = &self.store else {
             return Err(EngineError::NoStore);
         };
-        let mut names = vec![format::index_file_name(lineage, commit)];
+        let mut names = vec![format::index_key(lineage, commit)];
         if store.list().is_err() {
-            names.push(commit_addressed_name(commit));
+            names.push(commit_addressed_key(commit));
         }
         for n in &names {
             store.publish(n, path)?;
@@ -567,8 +578,15 @@ fn global_report(
     }
 }
 
-fn commit_addressed_name(commit: &str) -> String {
-    format!("cambium-index-{commit}.bin")
+/// Fallback key for stores that cannot be listed: no lineage in the path,
+/// because a fetcher has no way to learn it first.
+fn commit_addressed_key(commit: &str) -> String {
+    format!("indexes/by-commit/{commit}.bin")
+}
+
+/// Local cache file name for a store key.
+fn cache_name(key: &str) -> String {
+    key.replace('/', "_")
 }
 
 /// Counts by node kind, for `index inspect`.

@@ -217,8 +217,11 @@ lineage instead.
 
 Store backends: `dir` (a local directory), `http` (GET/PUT against a base
 URL), and `command`, whose argument templates get `{name}` and `{path}`
-substituted so `gsutil`, `aws s3`, `curl` or an internal CLI can be plugged in
-without touching Rust.
+substituted so `aws s3`, `gsutil`, `curl` or an internal CLI can be plugged in
+without touching Rust. Keys are `indexes/<lineage>/<commit>.bin`, writes are
+idempotent, and concurrent publishers of the same commit are safe — see
+[docs/STORE.md](docs/STORE.md), which also has the exact S3 and GCS templates
+and the design note for content-addressed blobs.
 
 ### Keeping baselines warm
 

@@ -1,9 +1,23 @@
 //! Baseline artifact store (spec 8).
 //!
+//! Keys are `indexes/<lineage>/<commit>.bin`. Lineage comes first because node
+//! ids are only comparable within one, which makes a lineage the unit you list,
+//! garbage-collect and retire; putting it in the path means a store can be
+//! swept a lineage at a time with a prefix.
+//!
+//! Writes are idempotent. An index's payload is a pure function of the graph,
+//! so two workers publishing the same commit write the same bytes, and each
+//! backend either renames a complete temp file into place (directory) or
+//! performs a whole-object PUT (HTTP, command). A reader therefore sees either
+//! the previous object or a complete new one, never a partial write, and two
+//! concurrent publishers of the same commit cannot produce a corrupt or
+//! disagreeing artifact.
+//!
 //! Three backends cover the ground: a local directory for developer machines
 //! and single-runner CI, HTTP GET/PUT for a plain object store, and a generic
-//! command backend whose templates can drive `gsutil`, `aws s3`, `curl` or an
-//! internal CLI without any Rust changes.
+//! command backend whose templates can drive `aws s3`, `gsutil`, `curl` or an
+//! internal CLI without any Rust changes. `docs/STORE.md` has the exact
+//! templates for S3 and GCS, and the design note for content-addressed blobs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -80,6 +94,38 @@ impl DirStore {
     }
 }
 
+/// Walks a store directory, reporting index keys relative to `root`.
+fn collect_keys(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(StoreError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            collect_keys(root, &path, out)?;
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(key) = rel.to_str() else { continue };
+        let key = key.replace('\\', "/");
+        let is_index = cambium_index::parse_index_key(&key).is_some()
+            || (key.starts_with("cambium-index-") && key.ends_with(".bin"));
+        if is_index {
+            out.push(key);
+        }
+    }
+    Ok(())
+}
+
 impl ArtifactStore for DirStore {
     fn fetch(&self, name: &str, dest: &Path) -> Result<bool> {
         let src = self.root.join(name);
@@ -103,17 +149,22 @@ impl ArtifactStore for DirStore {
     }
 
     fn publish(&self, name: &str, src: &Path) -> Result<()> {
-        std::fs::create_dir_all(&self.root).map_err(|source| StoreError::Io {
-            path: self.root.clone(),
+        let dest = self.root.join(name);
+        let dir = dest.parent().unwrap_or(&self.root).to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|source| StoreError::Io {
+            path: dir.clone(),
             source,
         })?;
-        let dest = self.root.join(name);
         if src == dest {
             return Ok(());
         }
         // Write next to the target and rename, so a concurrent reader never
-        // sees a half-written index.
-        let tmp = dest.with_extension("bin.publishing");
+        // sees a half-written index and two concurrent publishers of the same
+        // commit (writing identical bytes) cannot interleave.
+        let tmp = dest.with_extension(format!(
+            "bin.publishing.{}",
+            cambium_index::format::temp_suffix()
+        ));
         std::fs::copy(src, &tmp).map_err(|source| StoreError::Io {
             path: tmp.clone(),
             source,
@@ -123,23 +174,11 @@ impl ArtifactStore for DirStore {
 
     fn list(&self) -> Result<Vec<String>> {
         let mut out = Vec::new();
-        let rd = match std::fs::read_dir(&self.root) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(source) => {
-                return Err(StoreError::Io {
-                    path: self.root.clone(),
-                    source,
-                })
-            }
-        };
-        for e in rd.flatten() {
-            if let Some(n) = e.file_name().to_str() {
-                if n.starts_with("cambium-index-") && n.ends_with(".bin") {
-                    out.push(n.to_string());
-                }
-            }
-        }
+        // Keys are nested (`indexes/<lineage>/<commit>.bin`), so listing walks
+        // the tree and reports keys relative to the root. Flat names from an
+        // older store are still recognised, so an upgrade does not orphan
+        // artifacts that are otherwise still usable.
+        collect_keys(&self.root, &self.root, &mut out)?;
         out.sort();
         Ok(out)
     }
