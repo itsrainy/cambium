@@ -51,6 +51,18 @@ const HYGIENE: &[&str] = &[
 ];
 
 /// Flags that define the graph we index (spec 7.1).
+///
+/// Note `--proto:flatten_selects=false`, where the spec calls for `true`.
+/// (It has to be passed explicitly: Bazel defaults it to true.) Flattening is
+/// not needed for the edges — `rule_input` already carries
+/// the union over every `select` branch, plus the `config_setting` labels the
+/// branches key on — and it actively costs soundness: with it on, an attribute
+/// is reported as that same union, so editing one branch to a value another
+/// branch already names leaves the rule hash unchanged and the target is
+/// silently reported as unaffected. Unflattened, the attribute keeps its
+/// per-branch entries, the hash sees the edit, and the edges are identical.
+/// (Verified against Bazel 7.4.1; covered by the `change select branch` case in
+/// the end-to-end tests.)
 const QUERY_FLAGS: &[&str] = &[
     "--output=streamed_proto",
     "--noimplicit_deps",
@@ -58,7 +70,7 @@ const QUERY_FLAGS: &[&str] = &[
     "--keep_going",
     "--proto:locations=false",
     "--proto:default_values=false",
-    "--proto:flatten_selects=true",
+    "--proto:flatten_selects=false",
 ];
 
 /// Result of a query that ran to completion, successfully or not.
@@ -173,12 +185,18 @@ impl Bazel {
         self.run_query(&expr, on_batch)
     }
 
-    /// Runs `bazel query //...` for a cold build (spec 6.9).
+    /// Runs the whole-repository query for a cold build (spec 6.9).
+    ///
+    /// `//...:*`, not `//...`: the latter is shorthand for `//...:all`, which
+    /// matches rules only. A cold index built from it would carry file labels
+    /// as unknown nodes while an incremental `//pkg:*` query records them as
+    /// source files — the same graph described two different ways, which makes
+    /// a cold index and a spliced one incomparable.
     pub fn query_universe(
         &self,
         on_batch: impl FnMut(&[u8], &[(usize, usize)]) -> std::result::Result<(), ReadError>,
     ) -> Result<QueryOutcome> {
-        self.run_query("//...", on_batch)
+        self.run_query("//...:*", on_batch)
     }
 
     fn run_query(
