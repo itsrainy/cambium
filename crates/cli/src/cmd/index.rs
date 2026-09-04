@@ -1,4 +1,4 @@
-//! `cambium index` — queries against a built index.
+//! `cambi index` — queries against a built index.
 //!
 //! Every subcommand reads one index file and answers one question, in text for
 //! a person or JSON for a program. The graph work is

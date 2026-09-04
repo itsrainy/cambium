@@ -32,7 +32,7 @@ pub enum EngineError {
     BaselineUnavailable { base: String },
     #[error(
         "{path} was built with a different cambium.toml; splicing onto it could \
-         disagree with a full build. Run `cambium baseline build` to mint a new lineage."
+         disagree with a full build. Run `cambi baseline build` to mint a new lineage."
     )]
     ConfigHashMismatch { path: PathBuf },
     #[error("no baseline store is configured; set [baseline].store in cambium.toml")]

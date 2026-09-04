@@ -2,7 +2,7 @@
 //!
 //! Each stage is a function that builds its own inputs and returns a
 //! [`StageResult`]. Keeping them here rather than inside criterion means the
-//! same code serves `cambium bench run`, the sweeps, and the criterion
+//! same code serves `cambi bench run`, the sweeps, and the criterion
 //! harness.
 
 use std::collections::BTreeMap;

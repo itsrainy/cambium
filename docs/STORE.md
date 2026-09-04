@@ -25,7 +25,7 @@ because a run looking for a baseline knows the commit but not yet the lineage,
 and cannot discover it without either listing or a fetch. Everything else keys
 off the canonical path.
 
-`cambium baseline list` prints keys; `cambium baseline gc` deletes those older
+`cambi baseline list` prints keys; `cambi baseline gc` deletes those older
 than `retention_days`, walking the tree.
 
 ## Writes are idempotent, and concurrent writers are safe
@@ -132,5 +132,5 @@ Why it is a clean change:
 
 The reason to wait is that it adds a round trip to every fetch and a
 reachability problem to every delete, and neither is worth paying before the
-duplication is measured. `cambium baseline list` plus the payload hashes will
+duplication is measured. `cambi baseline list` plus the payload hashes will
 say how much is actually duplicated in a given repository; do that first.

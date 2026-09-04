@@ -1,4 +1,4 @@
-//! `cambium baseline build|update|gc` (spec 8).
+//! `cambi baseline build|update|gc` (spec 8).
 
 use anyhow::{Context as _, Result};
 use cambium_engine::AffectedRequest;

@@ -20,7 +20,7 @@ pub const EXIT_NO_BASELINE: u8 = 4;
 
 #[derive(Parser)]
 #[command(
-    name = "cambium",
+    name = "cambi",
     version,
     about = "Incremental changed-target computation for large Bazel monorepos",
     long_about = "Computes the set of Bazel targets whose outputs could differ between two \
