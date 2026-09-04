@@ -1,0 +1,231 @@
+//! Pins cambium's JSON contract.
+//!
+//! Every JSON document the CLI emits is parsed by something that is not
+//! cambium — CI glue, and shortly a service that shells out to the binary. The
+//! field names, their shapes, and the exit codes are therefore a contract, and
+//! `SCHEMA_VERSION` is how a consumer knows which one it is looking at.
+//!
+//! This test fails if the affected report's shape changes at all. That is the
+//! point: the failure is the reminder to bump `SCHEMA_VERSION` and update the
+//! list below, so a shape change cannot reach a consumer silently.
+
+use std::collections::BTreeSet;
+
+use cambium_engine::report::{
+    AffectedReport, DirectReason, Explanation, Stats, Timings, SCHEMA_VERSION,
+};
+use cambium_engine::EngineError;
+use serde_json::Value;
+
+/// The shape of `cambium affected --output json` at schema version 1.
+///
+/// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
+/// recurse through `[]`. Optional fields are listed — the fixture below
+/// populates every one of them.
+const AFFECTED_SCHEMA_V1: &[&str] = &[
+    "affected[]",
+    "base",
+    "direct[]",
+    "dirty_packages[]",
+    "explanations[].direct",
+    "explanations[].path[]",
+    "explanations[].reason.kind",
+    "explanations[].reason.path",
+    "explanations[].target",
+    "global",
+    "global_reason",
+    "head",
+    "schema",
+    "stats.affected_targets",
+    "stats.base_nodes",
+    "stats.changed_files",
+    "stats.direct_targets",
+    "stats.dirty_packages",
+    "stats.head_edges",
+    "stats.head_nodes",
+    "stats.ignored_files",
+    "stats.queried_targets",
+    "tests[]",
+    "timings_ms.dirty",
+    "timings_ms.direct",
+    "timings_ms.load",
+    "timings_ms.query",
+    "timings_ms.splice",
+    "timings_ms.total",
+    "timings_ms.walk",
+];
+
+/// A report with every field populated, including the optional ones.
+fn fixture() -> AffectedReport {
+    AffectedReport {
+        schema: SCHEMA_VERSION,
+        base: "aaaa".into(),
+        head: "bbbb".into(),
+        global: false,
+        global_reason: Some("only set when global".into()),
+        dirty_packages: vec!["lib/core".into()],
+        direct: vec!["//lib/core:core".into()],
+        affected: vec!["//lib/core:core".into(), "//app:main".into()],
+        tests: vec!["//app:main_test".into()],
+        timings_ms: Timings {
+            load: 1,
+            dirty: 2,
+            query: 3,
+            splice: 4,
+            direct: 5,
+            walk: 6,
+            total: 7,
+        },
+        stats: Stats {
+            base_nodes: 1,
+            head_nodes: 2,
+            head_edges: 3,
+            dirty_packages: 4,
+            queried_targets: 5,
+            direct_targets: 6,
+            affected_targets: 7,
+            changed_files: 8,
+            ignored_files: 9,
+        },
+        explanations: Some(vec![Explanation {
+            target: "//app:main".into(),
+            path: vec!["//app:main".into(), "//lib/core:core".into()],
+            direct: "//lib/core:core".into(),
+            reason: DirectReason::File {
+                path: "lib/core/a.cc".into(),
+            },
+        }]),
+    }
+}
+
+/// Every field path in a JSON document, in a form that is stable to compare.
+fn key_paths(v: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    walk_value(v, "", &mut out);
+    out
+}
+
+fn walk_value(v: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                match child {
+                    Value::Object(_) | Value::Array(_) => walk_value(child, &path, out),
+                    _ => {
+                        out.insert(path);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            let path = format!("{prefix}[]");
+            if items
+                .iter()
+                .all(|i| !matches!(i, Value::Object(_) | Value::Array(_)))
+            {
+                // An array of scalars is one leaf; its length is not shape.
+                out.insert(path);
+            } else {
+                for item in items {
+                    walk_value(item, &path, out);
+                }
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string());
+        }
+    }
+}
+
+#[test]
+fn affected_report_shape_is_pinned() {
+    let json = serde_json::to_value(fixture()).expect("report serialises");
+    let actual = key_paths(&json);
+    let expected: BTreeSet<String> = AFFECTED_SCHEMA_V1.iter().map(|s| s.to_string()).collect();
+
+    let added: Vec<&String> = actual.difference(&expected).collect();
+    let removed: Vec<&String> = expected.difference(&actual).collect();
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "the affected report's JSON shape changed.\n  \
+         added:   {added:?}\n  removed: {removed:?}\n\n\
+         This is a contract change: bump SCHEMA_VERSION in crates/engine/src/report.rs, \
+         update AFFECTED_SCHEMA_V1 (and its name) here, and update the JSON contract \
+         table in the README."
+    );
+}
+
+#[test]
+fn every_document_declares_its_schema() {
+    let json = serde_json::to_value(fixture()).unwrap();
+    assert_eq!(
+        json["schema"], SCHEMA_VERSION,
+        "the report must declare the schema version it was written against"
+    );
+    // A document produced by an older cambium has no `schema` key; it is
+    // implicitly version 1, so parsing must not require the field.
+    let mut without = json.clone();
+    without.as_object_mut().unwrap().remove("schema");
+    let parsed: AffectedReport =
+        serde_json::from_value(without).expect("schema is optional on read");
+    assert_eq!(parsed.schema, SCHEMA_VERSION);
+}
+
+#[test]
+fn a_global_report_still_carries_the_contract() {
+    // The global case takes a different construction path in the engine, and
+    // its consumers key off the same fields.
+    let report = AffectedReport {
+        global: true,
+        global_reason: Some("MODULE.bazel matches an invalidator".into()),
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["schema"], SCHEMA_VERSION);
+    assert_eq!(json["global"], true);
+    assert_eq!(report.as_query_expression(false), "//...");
+}
+
+#[test]
+fn optional_fields_are_omitted_rather_than_null() {
+    // Consumers distinguish "absent" from "null"; skip_serializing_if keeps the
+    // documents small and the absence meaningful.
+    let report = AffectedReport::default();
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(!json.as_object().unwrap().contains_key("global_reason"));
+    assert!(!json.as_object().unwrap().contains_key("explanations"));
+}
+
+/// Exit codes are as much a contract as the field names, and are documented in
+/// the same README table.
+#[test]
+fn exit_codes_are_pinned() {
+    use std::path::PathBuf;
+    assert_eq!(
+        EngineError::BaselineUnavailable { base: "x".into() }.exit_code(),
+        4,
+        "4 means: no baseline and --no-full-build was given"
+    );
+    assert_eq!(
+        EngineError::BazelQuery {
+            what: "x".into(),
+            code: Some(1),
+            stderr: String::new()
+        }
+        .exit_code(),
+        3,
+        "3 means: Bazel failed"
+    );
+    assert_eq!(
+        EngineError::NoWorkspace(PathBuf::from("/nowhere")).exit_code(),
+        1,
+        "1 is the generic failure"
+    );
+    // 0 (success) and 2 (global invalidation) are produced by the CLI rather
+    // than by an error, and are pinned in crates/cli/src/main.rs.
+}
