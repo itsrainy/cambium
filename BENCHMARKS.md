@@ -6,14 +6,16 @@ Everything below is from one machine — an **Intel Xeon @ 2.10 GHz, 4 cores,
 16 GiB**, a shared cloud VM rather than a build fleet worker. The spec's
 absolute targets assume 16 cores, so treat these as a lower bound on what the
 design delivers, and as a baseline for regression gating rather than as
-headline performance numbers. Raw results are in `bench-results/`. Reproduce
-with:
+headline performance numbers. The raw results behind them are checked in
+under `docs/benchmarks/`, and double as a baseline for `bench compare`.
+Reproduce with:
 
 ```console
 $ cargo build --release -p cambium-cli
 $ ./target/release/cambium bench run --preset small,medium,large --runs 5 \
     --out bench-results/mine.json --markdown bench-results/mine.md
-$ ./target/release/cambium bench compare --baseline bench-results/known-good.json \
+$ ./target/release/cambium bench compare \
+    --baseline docs/benchmarks/inmemory-small-medium.json \
     --current bench-results/mine.json --threshold 15
 ```
 
@@ -183,7 +185,8 @@ results carry a machine fingerprint, gating works by comparing against a
 baseline captured on the same runner class:
 
 ```console
-$ cambium bench compare --baseline known-good.json --current ci.json --threshold 15
+$ cambium bench compare --baseline docs/benchmarks/inmemory-small-medium.json \
+    --current ci.json --threshold 15
  SLOWER  +22.4%  splice@medium  16.31 ms -> 19.95 ms
 ```
 

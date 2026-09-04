@@ -1,0 +1,73 @@
+{
+  "tool_version": "0.1.0",
+  "tool_sha": "0debb96",
+  "timestamp_unix": 1788531760,
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cores": 4,
+    "ram_gb": 15.69845962524414,
+    "os": "linux x86_64"
+  },
+  "results": [
+    {
+      "stage": "splice",
+      "preset": "medium",
+      "spec_hash": "86e630b72f531573",
+      "param": 10000,
+      "runs": 3,
+      "median_ms": 4.938731,
+      "p90_ms": 5.818290999999999,
+      "peak_rss_mb": 35.453125,
+      "extra": {
+        "dirty_packages": 8.0,
+        "edges": 98777.0,
+        "nodes": 49884.0
+      }
+    },
+    {
+      "stage": "splice",
+      "preset": "medium",
+      "spec_hash": "f6c4d54b7f7ed899",
+      "param": 50000,
+      "runs": 3,
+      "median_ms": 30.153423,
+      "p90_ms": 30.629258,
+      "peak_rss_mb": 160.72265625,
+      "extra": {
+        "dirty_packages": 8.0,
+        "edges": 495011.0,
+        "nodes": 250883.0
+      }
+    },
+    {
+      "stage": "splice",
+      "preset": "medium",
+      "spec_hash": "1682fbe76daf372f",
+      "param": 200000,
+      "runs": 3,
+      "median_ms": 157.78768100000002,
+      "p90_ms": 158.102769,
+      "peak_rss_mb": 655.23046875,
+      "extra": {
+        "dirty_packages": 8.0,
+        "edges": 1983575.0,
+        "nodes": 1004827.0
+      }
+    },
+    {
+      "stage": "splice",
+      "preset": "medium",
+      "spec_hash": "23f7240d41eb9fbf",
+      "param": 1000000,
+      "runs": 3,
+      "median_ms": 1028.453225,
+      "p90_ms": 2763.173211,
+      "peak_rss_mb": 3274.87890625,
+      "extra": {
+        "dirty_packages": 8.0,
+        "edges": 9910483.0,
+        "nodes": 5020810.0
+      }
+    }
+  ]
+}

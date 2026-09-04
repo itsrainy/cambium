@@ -1,0 +1,73 @@
+{
+  "tool_version": "0.1.0",
+  "tool_sha": "0debb96",
+  "timestamp_unix": 1788531777,
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cores": 4,
+    "ram_gb": 15.69845962524414,
+    "os": "linux x86_64"
+  },
+  "results": [
+    {
+      "stage": "walk_hub",
+      "preset": "medium",
+      "spec_hash": "86e630b72f531573",
+      "param": 10000,
+      "runs": 3,
+      "median_ms": 0.272891,
+      "p90_ms": 0.35753199999999996,
+      "peak_rss_mb": 31.86328125,
+      "extra": {
+        "affected": 6101.0,
+        "affected_fraction": 0.6080932921359513,
+        "direct": 1.0
+      }
+    },
+    {
+      "stage": "walk_hub",
+      "preset": "medium",
+      "spec_hash": "f6c4d54b7f7ed899",
+      "param": 50000,
+      "runs": 3,
+      "median_ms": 2.064601,
+      "p90_ms": 2.766092,
+      "peak_rss_mb": 146.6171875,
+      "extra": {
+        "affected": 29522.0,
+        "affected_fraction": 0.5883103166537136,
+        "direct": 1.0
+      }
+    },
+    {
+      "stage": "walk_hub",
+      "preset": "medium",
+      "spec_hash": "1682fbe76daf372f",
+      "param": 200000,
+      "runs": 3,
+      "median_ms": 11.385297000000001,
+      "p90_ms": 15.091147,
+      "peak_rss_mb": 600.3984375,
+      "extra": {
+        "affected": 119710.0,
+        "affected_fraction": 0.5964386073300516,
+        "direct": 1.0
+      }
+    },
+    {
+      "stage": "walk_hub",
+      "preset": "medium",
+      "spec_hash": "23f7240d41eb9fbf",
+      "param": 1000000,
+      "runs": 3,
+      "median_ms": 116.86062799999999,
+      "p90_ms": 123.44015399999999,
+      "peak_rss_mb": 2810.45703125,
+      "extra": {
+        "affected": 587272.0,
+        "affected_fraction": 0.5852312984622621,
+        "direct": 1.0
+      }
+    }
+  ]
+}
