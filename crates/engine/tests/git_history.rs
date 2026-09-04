@@ -46,10 +46,16 @@ fn walks_a_real_git_history() {
             include_manual: true,
             explain: false,
             no_full_build: true,
+            materialize: true,
             publish_base: false,
         };
         let out = engine
-            .compute(index, &changes, &SynthQuerier::new(&repo.graphs[i]), &req)
+            .compute(
+                index.view(),
+                &changes,
+                &SynthQuerier::new(&repo.graphs[i]),
+                &req,
+            )
             .unwrap_or_else(|e| panic!("commit {i}: {e}"));
 
         let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();

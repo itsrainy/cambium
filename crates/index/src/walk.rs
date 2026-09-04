@@ -4,6 +4,7 @@ use fixedbitset::FixedBitSet;
 use std::collections::VecDeque;
 
 use crate::data::{IndexRef, NodeKind, NO_ID};
+use crate::view::GraphView;
 
 /// Options controlling which nodes reach the output.
 #[derive(Clone, Debug, Default)]
@@ -55,7 +56,69 @@ impl WalkResult {
 /// never touches the rest of the graph. Terminates on cyclic input even though
 /// Bazel's target graph is acyclic.
 pub fn walk(index: IndexRef<'_>, direct: &[u32], opts: &WalkOptions) -> WalkResult {
-    walk_edges(index, index.reverse, direct, opts)
+    walk_view(&index, direct, opts)
+}
+
+/// The reverse walk over any [`GraphView`] — a complete index, or a base plus a
+/// delta overlay.
+///
+/// One implementation, so the overlay cannot answer a different question from
+/// the materialised index; the property tests check that it does not.
+pub fn walk_view<V: GraphView + ?Sized>(
+    view: &V,
+    direct: &[u32],
+    opts: &WalkOptions,
+) -> WalkResult {
+    let n = view.num_nodes() as usize;
+    let mut visited = FixedBitSet::with_capacity(n);
+    let mut parent = opts.explain.then(|| vec![NO_ID; n]);
+    let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));
+    let mut scratch: Vec<u32> = Vec::new();
+
+    for &d in direct {
+        if (d as usize) < n && !visited.put(d as usize) {
+            queue.push_back(d);
+        }
+    }
+
+    while let Some(u) = queue.pop_front() {
+        // The row is copied out before the loop body so `scratch` is free for
+        // the next iteration; rows are small (mean in-degree under 2 in real
+        // graphs) and untouched rows are borrowed rather than copied.
+        let row = view.reverse_row(u, &mut scratch);
+        let row: Vec<u32> = row.to_vec();
+        for v in row {
+            if (v as usize) < n && !visited.put(v as usize) {
+                if let Some(p) = parent.as_mut() {
+                    p[v as usize] = u;
+                }
+                queue.push_back(v);
+            }
+        }
+    }
+
+    let mut affected = Vec::new();
+    let mut tests = Vec::new();
+    for id in visited.ones() {
+        let id = id as u32;
+        if view.kind_of(id) != NodeKind::Rule || view.is_tombstone(id) {
+            continue;
+        }
+        if !opts.include_manual && view.is_manual(id) {
+            continue;
+        }
+        affected.push(id);
+        if view.is_test(id) {
+            tests.push(id);
+        }
+    }
+
+    WalkResult {
+        visited,
+        affected,
+        tests,
+        parent,
+    }
 }
 
 /// The same walk over the forward edges: everything the seeds depend on.
@@ -74,7 +137,7 @@ pub fn walk_edges(
     direct: &[u32],
     opts: &WalkOptions,
 ) -> WalkResult {
-    let n = index.num_nodes() as usize;
+    let n = IndexRef::num_nodes(&index) as usize;
     let mut visited = FixedBitSet::with_capacity(n);
     let mut parent = opts.explain.then(|| vec![NO_ID; n]);
     let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));

@@ -26,6 +26,7 @@ pub const IN_MEMORY_STAGES: &[&str] = &[
     "reverse_rebuild",
     "walk",
     "e2e_memory",
+    "e2e_materialize",
 ];
 
 pub struct StageContext {
@@ -89,6 +90,7 @@ pub fn run_stage(ctx: &StageContext, stage: &str) -> anyhow::Result<StageResult>
         "walk" => Ok(walk_stage(ctx, false)),
         "walk_hub" => Ok(walk_stage(ctx, true)),
         "e2e_memory" => Ok(e2e_memory(ctx)),
+        "e2e_materialize" => Ok(e2e_materialize(ctx)),
         other => anyhow::bail!("unknown stage {other}"),
     }
 }
@@ -299,7 +301,19 @@ pub fn e2e_memory(ctx: &StageContext) -> StageResult {
     e2e_memory_with(ctx, "typical-pr")
 }
 
+/// The same pipeline, materialising a full head index instead of walking a
+/// delta overlay. The difference between the two is what item 6 bought.
+pub fn e2e_materialize(ctx: &StageContext) -> StageResult {
+    let mut r = e2e_memory_inner(ctx, "typical-pr", true);
+    r.stage = "e2e_materialize".into();
+    r
+}
+
 pub fn e2e_memory_with(ctx: &StageContext, change_preset: &str) -> StageResult {
+    e2e_memory_inner(ctx, change_preset, false)
+}
+
+fn e2e_memory_inner(ctx: &StageContext, change_preset: &str, materialize: bool) -> StageResult {
     let e = engine();
     let mut g = graph(ctx);
     let base = g.build_index("c0");
@@ -311,13 +325,14 @@ pub fn e2e_memory_with(ctx: &StageContext, change_preset: &str) -> StageResult {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        materialize,
         publish_base: false,
     };
     let q = SynthQuerier::new(&g);
     let (median, p90) = time(ctx.runs, || {
-        e.compute(base.clone(), &c.changes, &q, &req).expect("run")
+        e.compute(base.view(), &c.changes, &q, &req).expect("run")
     });
-    let out = e.compute(base, &c.changes, &q, &req).expect("run");
+    let out = e.compute(base.view(), &c.changes, &q, &req).expect("run");
     let mut extra = BTreeMap::new();
     extra.insert("changed_files".into(), c.changes.len() as f64);
     extra.insert(

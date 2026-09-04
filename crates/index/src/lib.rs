@@ -22,7 +22,10 @@ pub mod csr;
 pub mod data;
 pub mod format;
 pub mod label;
+pub mod overlay;
+pub mod space;
 pub mod strtab;
+pub mod view;
 pub mod walk;
 
 pub use builder::{
@@ -36,5 +39,7 @@ pub use format::{
     index_file_name, index_key, parse_index_key, temp_suffix, IndexError, IndexFile,
     OwnedIndexBytes, FORMAT_VERSION,
 };
+pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
-pub use walk::{walk, walk_deps, walk_edges, WalkOptions, WalkResult};
+pub use view::GraphView;
+pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};

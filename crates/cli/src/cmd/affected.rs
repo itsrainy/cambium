@@ -47,6 +47,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         head: args.head.clone(),
         include_manual: args.include_manual,
         explain: args.explain,
+        // Only materialise a head index when the caller asked for the file;
+        // otherwise the run walks a delta overlay and never builds one.
+        materialize: args.write_index.is_some(),
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
     };

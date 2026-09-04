@@ -182,9 +182,9 @@ pub fn e2e_bazel(opts: &BazelE2eOptions) -> Result<Vec<StageResult>> {
 
     let req = AffectedRequest::new(&base_sha, &opts.head);
     let (median, p90) = time(opts.runs, || {
-        engine.run_incremental(index.clone(), &req).expect("run")
+        engine.run_incremental(index.view(), &req).expect("run")
     });
-    let out = engine.run_incremental(index.clone(), &req)?;
+    let out = engine.run_incremental(index.view(), &req)?;
     let mut extra = BTreeMap::from([
         (
             "dirty_packages".to_string(),

@@ -12,7 +12,8 @@ use crate::csr::{sort_dedup_pairs, Csr};
 use crate::data::{
     flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, Provenance, NO_ID,
 };
-use crate::label;
+use crate::overlay::Overlay;
+use crate::space::{LabelSpace, NodeMeta, NodeSpace};
 use crate::strtab::Interner;
 
 /// A target as parsed from `bazel query` output (or synthesised in tests).
@@ -103,26 +104,29 @@ impl SpliceReport {
     }
 }
 
-/// Mutable index. Built empty for a full build, or from a loaded index for a splice.
-pub struct IndexBuilder {
-    labels: Interner,
+/// Mutable index. Built empty for a full build, or over a loaded index for a
+/// splice.
+///
+/// A splice *borrows* its base rather than copying it: the label table and node
+/// columns of a large index are hundreds of megabytes, and copying them is the
+/// single most expensive step in a pull-request run. Which of the two
+/// finalizers you call decides whether that copy happens at all —
+/// [`IndexBuilder::finish`] materialises a complete new index, and
+/// [`IndexBuilder::finish_overlay`] produces only the delta.
+pub struct IndexBuilder<'a> {
+    base: Option<IndexRef<'a>>,
+    labels: LabelSpace<'a>,
+    nodes: NodeSpace<'a>,
+
+    // Small tables: copied even for a splice, because they are thousands of
+    // entries rather than millions and the copy is not measurable.
     classes: Interner,
     pkg_names: Interner,
-
-    kind: Vec<u8>,
-    package: Vec<u32>,
-    class: Vec<u32>,
-    hash: Vec<[u8; 32]>,
-    is_test: Vec<bool>,
-    flags: Vec<u8>,
-
     pkg_nodes: Vec<Vec<u32>>,
     pkg_bzl_hash: Vec<[u8; 32]>,
     pkg_build_hash: Vec<[u8; 32]>,
     pkg_flags: Vec<u8>,
 
-    /// Forward rows carried over from the base index.
-    base_forward: Csr,
     /// Rows replaced by this generation.
     rebuilt: FixedBitSet,
     /// Staged `(src, dst)` edges for rebuilt rows.
@@ -135,24 +139,19 @@ pub struct IndexBuilder {
     config_hash: [u8; 32],
 }
 
-impl IndexBuilder {
+impl<'a> IndexBuilder<'a> {
     /// Empty index for a cold build. `lineage` should be freshly minted.
     pub fn new(lineage: [u8; 16]) -> Self {
         Self {
-            labels: Interner::new(),
+            base: None,
+            labels: LabelSpace::empty(),
+            nodes: NodeSpace::empty(),
             classes: Interner::new(),
             pkg_names: Interner::new(),
-            kind: Vec::new(),
-            package: Vec::new(),
-            class: Vec::new(),
-            hash: Vec::new(),
-            is_test: Vec::new(),
-            flags: Vec::new(),
             pkg_nodes: Vec::new(),
             pkg_bzl_hash: Vec::new(),
             pkg_build_hash: Vec::new(),
             pkg_flags: Vec::new(),
-            base_forward: Csr::empty(0),
             rebuilt: FixedBitSet::with_capacity(0),
             pairs: Vec::new(),
             gen_rule: FxHashMap::default(),
@@ -180,8 +179,7 @@ impl IndexBuilder {
     /// Making the shared path lazy to speed up `affected` would take the
     /// published artifact with it. Add the overlay alongside this, not instead
     /// of it.
-    pub fn from_view(v: IndexRef<'_>) -> Self {
-        let (lb, lo) = (v.labels.bytes.to_vec(), v.labels.offsets.to_vec());
+    pub fn from_view(v: IndexRef<'a>) -> Self {
         let (cb, co) = (v.classes.bytes.to_vec(), v.classes.offsets.to_vec());
         let (pb, po) = (v.pkg_names.bytes.to_vec(), v.pkg_names.offsets.to_vec());
         let n = v.num_nodes() as usize;
@@ -191,23 +189,15 @@ impl IndexBuilder {
             pkg_nodes.push(v.package_nodes(p).to_vec());
         }
         Self {
-            labels: Interner::from_parts(lb, lo),
+            base: Some(v),
+            labels: LabelSpace::over(v.labels, v.label_sorted),
+            nodes: NodeSpace::over(v),
             classes: Interner::from_parts(cb, co),
             pkg_names: Interner::from_parts(pb, po),
-            kind: v.kind.to_vec(),
-            package: v.package.to_vec(),
-            class: v.class.to_vec(),
-            hash: v.hash.to_vec(),
-            is_test: v.is_test.to_vec(),
-            flags: v.flags.to_vec(),
             pkg_nodes,
             pkg_bzl_hash: v.pkg_bzl_hash.to_vec(),
             pkg_build_hash: v.pkg_build_hash.to_vec(),
             pkg_flags: v.pkg_flags.to_vec(),
-            base_forward: Csr {
-                offsets: v.forward.offsets.to_vec(),
-                edges: v.forward.edges.to_vec(),
-            },
             rebuilt: FixedBitSet::with_capacity(n),
             pairs: Vec::new(),
             gen_rule: FxHashMap::default(),
@@ -230,7 +220,7 @@ impl IndexBuilder {
     }
 
     pub fn num_nodes(&self) -> u32 {
-        self.kind.len() as u32
+        self.nodes.len()
     }
 
     pub fn label_id(&self, label: &str) -> Option<u32> {
@@ -241,6 +231,15 @@ impl IndexBuilder {
         self.labels.get(id)
     }
 
+    /// Forward row of `id` in the base, or empty for a node this generation
+    /// created.
+    fn base_forward_row(&self, id: u32) -> &[u32] {
+        match self.base {
+            Some(b) if id < self.nodes.base_len() => b.forward.row(id),
+            _ => &[],
+        }
+    }
+
     pub fn package_id(&self, package: &str) -> Option<u32> {
         self.pkg_names.lookup(package)
     }
@@ -249,16 +248,7 @@ impl IndexBuilder {
     fn node_for(&mut self, label: &str) -> u32 {
         let (id, is_new) = self.labels.intern_new(label);
         if is_new {
-            self.kind.push(NodeKind::Unknown as u8);
-            self.package.push(NO_ID);
-            self.class.push(NO_ID);
-            self.hash.push([0; 32]);
-            self.is_test.push(false);
-            self.flags.push(if label::is_external(label) {
-                flags::EXTERNAL
-            } else {
-                0
-            });
+            self.nodes.push(NodeMeta::unknown(label));
         }
         id
     }
@@ -302,24 +292,30 @@ impl IndexBuilder {
 
             for t in &up.targets {
                 let id = self.node_for(&t.label);
-                let i = id as usize;
-                let was_known = self.kind[i] != NodeKind::Unknown as u8
-                    && self.flags[i] & flags::TOMBSTONE == 0;
-                let hash_changed = self.hash[i] != t.rule_hash;
+                let old = self.nodes.get(id);
+                let was_known =
+                    old.kind != NodeKind::Unknown as u8 && old.flags & flags::TOMBSTONE == 0;
+                let hash_changed = old.hash != t.rule_hash;
 
-                self.kind[i] = t.kind as u8;
-                self.package[i] = pkg_id;
-                self.class[i] = match &t.rule_class {
+                let class = match &t.rule_class {
                     Some(c) => self.classes.intern(c),
                     None => NO_ID,
                 };
-                self.hash[i] = t.rule_hash;
-                self.is_test[i] = t.is_test;
-                let mut f = self.flags[i] & !(flags::TOMBSTONE | flags::MANUAL);
+                let mut f = old.flags & !(flags::TOMBSTONE | flags::MANUAL);
                 if t.manual {
                     f |= flags::MANUAL;
                 }
-                self.flags[i] = f;
+                self.nodes.set(
+                    id,
+                    NodeMeta {
+                        kind: t.kind as u8,
+                        package: pkg_id,
+                        class,
+                        hash: t.rule_hash,
+                        is_test: t.is_test,
+                        flags: f,
+                    },
+                );
 
                 self.mark_rebuilt(id);
                 current.push(id);
@@ -334,12 +330,7 @@ impl IndexBuilder {
             let mut deleted: Vec<u32> = old_ids.difference(&new_set).copied().collect();
             deleted.sort_unstable();
             for &d in &deleted {
-                let i = d as usize;
-                self.kind[i] = NodeKind::Tombstone as u8;
-                self.flags[i] |= flags::TOMBSTONE;
-                self.class[i] = NO_ID;
-                self.hash[i] = [0; 32];
-                self.is_test[i] = false;
+                self.tombstone(d);
                 self.mark_rebuilt(d); // clears the forward row
             }
 
@@ -403,7 +394,7 @@ impl IndexBuilder {
     /// Generated files stand in for their generating rule so the reverse walk
     /// does not need an extra hop through the file node.
     fn redirect(&mut self, id: u32) -> u32 {
-        if self.kind[id as usize] != NodeKind::GeneratedFile as u8 {
+        if self.nodes.get(id).kind != NodeKind::GeneratedFile as u8 {
             return id;
         }
         if let Some(&r) = self.gen_rule.get(&id) {
@@ -411,13 +402,25 @@ impl IndexBuilder {
         }
         // Fall back to the base index: a generated file's forward row is exactly
         // its generating rule.
-        match self.base_forward.as_ref().row(id).first() {
+        match self.base_forward_row(id).first() {
             Some(&r) => {
                 self.gen_rule.insert(id, r);
                 r
             }
             None => id,
         }
+    }
+
+    /// Marks a node as gone: kind, flags and everything derived from its
+    /// definition are cleared, but the id is never reused.
+    fn tombstone(&mut self, id: u32) {
+        let mut m = self.nodes.get(id);
+        m.kind = NodeKind::Tombstone as u8;
+        m.flags |= flags::TOMBSTONE;
+        m.class = NO_ID;
+        m.hash = [0; 32];
+        m.is_test = false;
+        self.nodes.set(id, m);
     }
 
     /// Marks a package as gone: tombstones everything it owned.
@@ -428,12 +431,7 @@ impl IndexBuilder {
         };
         let ids = std::mem::take(&mut self.pkg_nodes[pkg_id as usize]);
         for &d in &ids {
-            let i = d as usize;
-            self.kind[i] = NodeKind::Tombstone as u8;
-            self.flags[i] |= flags::TOMBSTONE;
-            self.class[i] = NO_ID;
-            self.hash[i] = [0; 32];
-            self.is_test[i] = false;
+            self.tombstone(d);
             self.mark_rebuilt(d);
         }
         self.pkg_flags[pkg_id as usize] = pkg_flags::TOMBSTONE;
@@ -445,13 +443,13 @@ impl IndexBuilder {
     /// Builds the forward CSR: staged rows for everything rebuilt this
     /// generation, base rows copied verbatim for everything else.
     fn finish_forward(&mut self) -> Csr {
-        let n = self.kind.len();
+        let n = self.nodes.len() as usize;
         let mut pairs = std::mem::take(&mut self.pairs);
         sort_dedup_pairs(&mut pairs);
 
         // Row lengths.
         let mut offsets = vec![0u32; n + 1];
-        let base = self.base_forward.as_ref();
+        let base = self.base.map(|b| b.forward).unwrap_or(crate::CsrRef::EMPTY);
         let mut i = 0usize;
         while i < pairs.len() {
             let src = pairs[i].0;
@@ -505,10 +503,96 @@ impl IndexBuilder {
         Csr { offsets, edges }
     }
 
+    /// Finalises as a delta over the base, without materialising a new index.
+    ///
+    /// This is the `affected` path. It costs the staged rows and the reverse
+    /// corrections they imply — proportional to the change — where
+    /// [`IndexBuilder::finish`] costs the whole graph. What it cannot do is
+    /// produce something to publish, which is why `baseline update` still
+    /// materialises.
+    pub fn finish_overlay(mut self) -> Overlay<'a> {
+        let mut pairs = std::mem::take(&mut self.pairs);
+        sort_dedup_pairs(&mut pairs);
+
+        // Group the staged rows by source so each rebuilt node's new row can be
+        // diffed against the one it replaced.
+        let mut staged: FxHashMap<u32, &[u32]> = FxHashMap::default();
+        let mut flat: Vec<u32> = Vec::with_capacity(pairs.len());
+        {
+            let mut runs: Vec<(u32, usize, usize)> = Vec::new();
+            let mut i = 0usize;
+            while i < pairs.len() {
+                let src = pairs[i].0;
+                let start = flat.len();
+                let mut j = i;
+                while j < pairs.len() && pairs[j].0 == src {
+                    flat.push(pairs[j].1);
+                    j += 1;
+                }
+                runs.push((src, start, flat.len()));
+                i = j;
+            }
+            // `flat` is complete by here and is not touched again, so the
+            // slices stay valid for as long as the map does.
+            for (src, a, b) in runs {
+                staged.insert(src, &flat[a..b]);
+            }
+        }
+
+        let mut rev_added: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let mut rev_removed: FxHashMap<u32, FxHashSet<u32>> = FxHashMap::default();
+        for u in self.rebuilt.ones().map(|i| i as u32) {
+            let old = self.base_forward_row(u);
+            let new: &[u32] = staged.get(&u).copied().unwrap_or(&[]);
+            // Both sides are sorted and deduplicated, so the difference is a
+            // linear merge rather than two set builds.
+            let (mut i, mut j) = (0usize, 0usize);
+            while i < old.len() || j < new.len() {
+                match (old.get(i), new.get(j)) {
+                    (Some(&a), Some(&b)) if a == b => {
+                        i += 1;
+                        j += 1;
+                    }
+                    (Some(&a), Some(&b)) if a < b => {
+                        rev_removed.entry(a).or_default().insert(u);
+                        i += 1;
+                    }
+                    (Some(_), Some(&b)) => {
+                        rev_added.entry(b).or_default().push(u);
+                        j += 1;
+                    }
+                    (Some(&a), None) => {
+                        rev_removed.entry(a).or_default().insert(u);
+                        i += 1;
+                    }
+                    (None, Some(&b)) => {
+                        rev_added.entry(b).or_default().push(u);
+                        j += 1;
+                    }
+                    (None, None) => unreachable!("loop guard"),
+                }
+            }
+        }
+
+        let (base_labels, base_n, new_labels) = self.labels.into_overlay_parts();
+        let base_sorted = self.base.map(|b| b.label_sorted).unwrap_or(&[]);
+        Overlay {
+            base: self.base,
+            base_labels,
+            base_sorted,
+            base_n,
+            new_labels,
+            new_meta: self.nodes.appended().to_vec(),
+            over_meta: self.nodes.overridden().clone(),
+            rev_added,
+            rev_removed,
+        }
+    }
+
     /// Finalises the index for `commit`.
     pub fn finish(mut self, commit: impl Into<String>) -> IndexData {
         let forward = self.finish_forward();
-        let n = self.kind.len();
+        let n = self.nodes.len() as usize;
         let reverse = if forward.edges.len() > 1 << 20 {
             Csr::reverse_of_parallel(forward.as_ref(), n)
         } else {
@@ -525,7 +609,8 @@ impl IndexBuilder {
             pkg_nodes_flat.extend_from_slice(r);
         }
 
-        let (label_bytes, label_offsets) = self.labels.into_parts();
+        let columns = self.nodes.finish();
+        let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
         let (class_bytes, class_offsets) = self.classes.into_parts();
         let (pkg_name_bytes, pkg_name_offsets) = self.pkg_names.into_parts();
 
@@ -536,10 +621,10 @@ impl IndexBuilder {
             ..Default::default()
         };
         for i in 0..n {
-            match NodeKind::from_u8(self.kind[i]) {
+            match NodeKind::from_u8(columns.kind[i]) {
                 NodeKind::Rule => {
                     counts.rules += 1;
-                    if self.is_test[i] {
+                    if columns.is_test[i] {
                         counts.tests += 1;
                     }
                 }
@@ -565,14 +650,15 @@ impl IndexBuilder {
             },
             label_bytes,
             label_offsets,
+            label_sorted,
             class_bytes,
             class_offsets,
-            node_kind: self.kind,
-            node_package: self.package,
-            node_class: self.class,
-            node_hash: self.hash,
-            node_is_test: self.is_test,
-            node_flags: self.flags,
+            node_kind: columns.kind,
+            node_package: columns.package,
+            node_class: columns.class,
+            node_hash: columns.hash,
+            node_is_test: columns.is_test,
+            node_flags: columns.flags,
             fwd_offsets: forward.offsets,
             fwd_edges: forward.edges,
             rev_offsets: reverse.offsets,

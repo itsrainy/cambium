@@ -152,6 +152,13 @@ pub struct IndexData {
     // ---- labels ----
     pub label_bytes: Vec<u8>,
     pub label_offsets: Vec<u32>,
+    /// Node ids ordered by their label, so a label can be found by binary
+    /// search without building a hash map over every label in the index.
+    ///
+    /// Four bytes per node, and it is what lets the `affected` path resolve the
+    /// couple of thousand labels a dirty query mentions in microseconds instead
+    /// of the ~280 ms an O(labels) map build costs at a few million nodes.
+    pub label_sorted: Vec<u32>,
 
     // ---- rule class names ----
     pub class_bytes: Vec<u8>,
@@ -194,6 +201,8 @@ pub struct IndexRef<'a> {
     pub created_unix: u64,
 
     pub labels: StrTabRef<'a>,
+    /// Node ids ordered by label; see [`IndexData::label_sorted`].
+    pub label_sorted: &'a [u32],
     pub classes: StrTabRef<'a>,
 
     pub kind: &'a [u8],
@@ -232,6 +241,18 @@ impl<'a> IndexRef<'a> {
     #[inline]
     pub fn label(&self, id: u32) -> &'a str {
         self.labels.get(id)
+    }
+
+    /// Finds a label's node id by binary search over [`IndexRef::label_sorted`].
+    ///
+    /// O(log n) and touches a handful of cache lines, where building the whole
+    /// `label -> id` map is O(n) and touches everything. Use this when looking
+    /// up a few labels; use `labels.build_map()` when looking up most of them.
+    pub fn id_of(&self, label: &str) -> Option<u32> {
+        self.label_sorted
+            .binary_search_by(|&id| self.labels.get(id).cmp(label))
+            .ok()
+            .map(|i| self.label_sorted[i])
     }
 
     #[inline]
@@ -335,6 +356,7 @@ impl IndexData {
                 bytes: &self.label_bytes,
                 offsets: &self.label_offsets,
             },
+            label_sorted: &self.label_sorted,
             classes: StrTabRef {
                 bytes: &self.class_bytes,
                 offsets: &self.class_offsets,
@@ -391,6 +413,7 @@ impl ArchivedIndexData {
                 bytes: &self.label_bytes,
                 offsets: le::u32s(&self.label_offsets),
             },
+            label_sorted: le::u32s(&self.label_sorted),
             classes: StrTabRef {
                 bytes: &self.class_bytes,
                 offsets: le::u32s(&self.class_offsets),
