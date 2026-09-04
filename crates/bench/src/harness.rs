@@ -27,7 +27,10 @@ impl Machine {
 
     /// Stable identity used to refuse cross-machine comparisons.
     pub fn fingerprint(&self) -> String {
-        format!("{}|{}c|{:.0}g|{}", self.cpu, self.cores, self.ram_gb, self.os)
+        format!(
+            "{}|{}c|{:.0}g|{}",
+            self.cpu, self.cores, self.ram_gb, self.os
+        )
     }
 }
 
@@ -53,11 +56,7 @@ fn total_ram_gb() -> f64 {
         if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
             for line in s.lines() {
                 if let Some(v) = line.strip_prefix("MemTotal:") {
-                    let kb: f64 = v
-                        .trim()
-                        .trim_end_matches(" kB")
-                        .parse()
-                        .unwrap_or(0.0);
+                    let kb: f64 = v.trim().trim_end_matches(" kB").parse().unwrap_or(0.0);
                     return kb / 1024.0 / 1024.0;
                 }
             }

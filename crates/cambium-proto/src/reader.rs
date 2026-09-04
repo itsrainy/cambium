@@ -164,7 +164,9 @@ mod tests {
 
     #[test]
     fn round_trips_a_stream() {
-        let targets: Vec<Target> = (0..1000).map(|i| rule_target(&format!("//p:t{i}"))).collect();
+        let targets: Vec<Target> = (0..1000)
+            .map(|i| rule_target(&format!("//p:t{i}")))
+            .collect();
         let bytes = encode_stream(&targets);
         let got = decode_all(&bytes[..]).unwrap();
         assert_eq!(got.len(), 1000);
@@ -173,7 +175,9 @@ mod tests {
 
     #[test]
     fn batches_respect_the_frame_limit() {
-        let targets: Vec<Target> = (0..100).map(|i| rule_target(&format!("//p:t{i}"))).collect();
+        let targets: Vec<Target> = (0..100)
+            .map(|i| rule_target(&format!("//p:t{i}")))
+            .collect();
         let bytes = encode_stream(&targets);
         let mut sizes = Vec::new();
         let n = read_frames(&bytes[..], 32, |_, ranges| {

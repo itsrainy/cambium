@@ -7,6 +7,7 @@ use crate::data::{IndexRef, NodeKind, NO_ID};
 
 /// Options controlling which nodes reach the output.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct WalkOptions {
     /// Keep `manual`-tagged rules in the result.
     pub include_manual: bool,
@@ -15,14 +16,6 @@ pub struct WalkOptions {
     pub explain: bool,
 }
 
-impl Default for WalkOptions {
-    fn default() -> Self {
-        Self {
-            include_manual: false,
-            explain: false,
-        }
-    }
-}
 
 /// Result of a reverse walk.
 pub struct WalkResult {

@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 pub enum Dist {
     Const(u64),
     /// Uniform over `[lo, hi]`.
-    Uniform { lo: u64, hi: u64 },
+    Uniform {
+        lo: u64,
+        hi: u64,
+    },
     /// Log-normal with the given median and shape, clamped to `[min, max]`.
     /// Median rather than mu because that is the number people reason about.
     LogNormal {
@@ -163,8 +166,8 @@ impl GraphSpec {
             "large" => 16,
             _ => 20,
         };
-        spec.bzl_files = ((spec.targets / 200).max(4)).min(4_000) as u32;
-        spec.hub_count = ((spec.targets / 5_000).max(4)).min(200) as u32;
+        spec.bzl_files = (spec.targets / 200).clamp(4, 4_000) as u32;
+        spec.hub_count = (spec.targets / 5_000).clamp(4, 200) as u32;
         match shape {
             None => {}
             Some("hubby") => {
@@ -173,7 +176,7 @@ impl GraphSpec {
                 spec.hub_count = spec.hub_count.max(16);
             }
             Some("deep") => {
-                spec.layers = spec.layers * 4;
+                spec.layers *= 4;
                 spec.deps_per_target = Dist::lognormal(3.0, 0.7, 1, 100);
             }
             Some("flat") => {

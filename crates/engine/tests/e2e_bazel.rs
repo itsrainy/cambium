@@ -233,7 +233,8 @@ impl Golden {
         // expectations to go stale.
         if !out.report.global {
             let head_index = engine.full_build(&head).expect("full build at head");
-            let legacy = legacy_affected(&self.root, &self.base, &head, &self.base_index, &head_index);
+            let legacy =
+                legacy_affected(&self.root, &self.base, &head, &self.base_index, &head_index);
             let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
             let missing: Vec<&String> = legacy.difference(&ours).collect();
             assert!(
@@ -316,9 +317,8 @@ fn deep_hashes(root: &Path, rev: &str, v: IndexRef<'_>) -> BTreeMap<String, [u8;
                         // A cycle would leave a dep unresolved; Bazel's graph
                         // has none, and falling back to the label keeps this
                         // terminating rather than wrong.
-                        let digest = memo[d as usize].unwrap_or_else(|| {
-                            *blake3::hash(v.label(d).as_bytes()).as_bytes()
-                        });
+                        let digest = memo[d as usize]
+                            .unwrap_or_else(|| *blake3::hash(v.label(d).as_bytes()).as_bytes());
                         deps.push((v.label(d), digest));
                     }
                     deps.sort_unstable();
@@ -365,7 +365,10 @@ fn golden_scenarios() {
         write(root, "lib/a.cc", "// a v2\n");
     });
     assert_eq!(set(&r), downstream, "modify source");
-    assert!(r.dirty_packages.is_empty(), "a content edit dirties no package");
+    assert!(
+        r.dirty_packages.is_empty(),
+        "a content edit dirties no package"
+    );
     assert_eq!(r.tests, vec!["//app:all_tests", "//app:main_test"]);
 
     // 2. A file added under an existing glob changes the target's inputs.
@@ -418,7 +421,10 @@ fn golden_scenarios() {
         )
         .unwrap();
     });
-    assert_eq!(set(&r), ["//app:extra"].into_iter().collect::<BTreeSet<_>>());
+    assert_eq!(
+        set(&r),
+        ["//app:extra"].into_iter().collect::<BTreeSet<_>>()
+    );
 
     // 7. Deleting a target makes its consumers direct.
     let r = g.scenario("delete target", |root| {
@@ -449,10 +455,14 @@ fn golden_scenarios() {
     });
     let affected = set(&r);
     for t in &downstream {
-        assert!(affected.contains(t), "edit bzl should reach {t}: {affected:?}");
+        assert!(
+            affected.contains(t),
+            "edit bzl should reach {t}: {affected:?}"
+        );
     }
     assert!(
-        r.dirty_packages.contains(&"lib".to_string()) && r.dirty_packages.contains(&"app".to_string()),
+        r.dirty_packages.contains(&"lib".to_string())
+            && r.dirty_packages.contains(&"app".to_string()),
         "rbuildfiles should report both loading packages: {:?}",
         r.dirty_packages
     );
@@ -481,7 +491,11 @@ fn golden_scenarios() {
         )
         .unwrap();
     });
-    assert!(set(&r).contains("//app:main"), "select branch change: {:?}", r.affected);
+    assert!(
+        set(&r).contains("//app:main"),
+        "select branch change: {:?}",
+        r.affected
+    );
 
     // 11. Splitting a package: the parent's glob shrinks, so it changes too.
     let r = g.scenario("add sub package", |root| {
@@ -494,8 +508,14 @@ fn golden_scenarios() {
         );
     });
     let affected = set(&r);
-    assert!(affected.contains("//lib:core"), "parent package loses globbed files");
-    assert!(affected.contains("//lib/nested:deep"), "new package's target is new");
+    assert!(
+        affected.contains("//lib:core"),
+        "parent package loses globbed files"
+    );
+    assert!(
+        affected.contains("//lib/nested:deep"),
+        "new package's target is new"
+    );
     assert!(
         r.dirty_packages.contains(&"lib".to_string())
             && r.dirty_packages.contains(&"lib/nested".to_string()),
@@ -578,7 +598,10 @@ fn differential_check_against_bazel_rdeps() {
         );
         checked += 1;
     }
-    assert!(checked > 5, "expected several rule targets, checked {checked}");
+    assert!(
+        checked > 5,
+        "expected several rule targets, checked {checked}"
+    );
 }
 
 /// A synthetic workspace, driven through real Bazel over a generated history.

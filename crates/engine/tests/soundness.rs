@@ -23,7 +23,7 @@ fn engine() -> Engine {
     )
 }
 
-fn env_or<'a>(key: &str, default: &'a str) -> String {
+fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
@@ -50,7 +50,8 @@ fn engine_never_under_approximates() {
             .expect("full build");
         // Cycle the change presets so every mutation kind is exercised.
         for rev in 0..revisions {
-            let preset_name = ChangeSpec::PRESETS[(rev as usize + seed as usize) % ChangeSpec::PRESETS.len()];
+            let preset_name =
+                ChangeSpec::PRESETS[(rev as usize + seed as usize) % ChangeSpec::PRESETS.len()];
             let spec = ChangeSpec {
                 seed: seed * 1000 + rev,
                 ..ChangeSpec::preset(preset_name).unwrap()

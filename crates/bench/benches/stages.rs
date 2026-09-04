@@ -40,7 +40,9 @@ fn bench_walk(c: &mut Criterion) {
             .take(10)
             .filter_map(|i| map.get(graph.target_label(i).as_str()).copied())
             .collect();
-        let affected = walk::walk(v, &direct, &WalkOptions::default()).affected.len();
+        let affected = walk::walk(v, &direct, &WalkOptions::default())
+            .affected
+            .len();
         g.throughput(Throughput::Elements(affected as u64));
         g.bench_with_input(BenchmarkId::from_parameter(preset), &direct, |b, d| {
             b.iter(|| walk::walk(v, d, &WalkOptions::default()))

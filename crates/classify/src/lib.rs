@@ -361,11 +361,7 @@ mod tests {
     }
 
     fn packages() -> PackageSet {
-        PackageSet::new(
-            ["", "lib", "lib/core", "app"]
-                .into_iter()
-                .map(String::from),
-        )
+        PackageSet::new(["", "lib", "lib/core", "app"].into_iter().map(String::from))
     }
 
     #[test]
@@ -382,7 +378,10 @@ mod tests {
     fn classifies_paths() {
         let p = packages();
         let m = matchers();
-        assert_eq!(classify("MODULE.bazel", &p, &m), Classification::Invalidator);
+        assert_eq!(
+            classify("MODULE.bazel", &p, &m),
+            Classification::Invalidator
+        );
         assert_eq!(
             classify("tools/toolchains/cc.bzl", &p, &m),
             Classification::Invalidator
@@ -445,7 +444,10 @@ mod tests {
     #[test]
     fn modified_build_dirties_only_its_package() {
         let d = run(vec![Change::new(Status::Modified, "lib/core/BUILD.bazel")]);
-        assert_eq!(d.dirty.iter().cloned().collect::<Vec<_>>(), vec!["lib/core"]);
+        assert_eq!(
+            d.dirty.iter().cloned().collect::<Vec<_>>(),
+            vec!["lib/core"]
+        );
     }
 
     #[test]
@@ -463,7 +465,10 @@ mod tests {
     #[test]
     fn deleted_package_dirties_parent_and_itself() {
         let d = run(vec![Change::new(Status::Deleted, "lib/core/BUILD.bazel")]);
-        assert_eq!(d.dirty.iter().cloned().collect::<Vec<_>>(), vec!["lib", "lib/core"]);
+        assert_eq!(
+            d.dirty.iter().cloned().collect::<Vec<_>>(),
+            vec!["lib", "lib/core"]
+        );
         assert_eq!(
             d.deleted_packages.iter().cloned().collect::<Vec<_>>(),
             vec!["lib/core"]

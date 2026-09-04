@@ -17,7 +17,10 @@ fn walks_a_real_git_history() {
     };
     let repo = cambium_synth::emit_git_history(graph, &change_spec, 6, dir.path(), true)
         .expect("emitting a synthetic repository");
-    assert!(repo.commits.len() > 1, "history should have several commits");
+    assert!(
+        repo.commits.len() > 1,
+        "history should have several commits"
+    );
 
     // The emitted workspace carries its own cambium.toml; load it, so the test
     // exercises the same invalidator rules a user of the emitter would get.
@@ -45,12 +48,7 @@ fn walks_a_real_git_history() {
             no_full_build: true,
         };
         let out = engine
-            .compute(
-                index,
-                &changes,
-                &SynthQuerier::new(&repo.graphs[i]),
-                &req,
-            )
+            .compute(index, &changes, &SynthQuerier::new(&repo.graphs[i]), &req)
             .unwrap_or_else(|e| panic!("commit {i}: {e}"));
 
         let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();

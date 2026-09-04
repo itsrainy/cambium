@@ -87,10 +87,7 @@ pub fn sweep(opts: &SweepOptions) -> Result<BenchReport> {
     let report = BenchReport::new(results);
     emit(&report, opts.out.as_deref(), None)?;
     if let Some(p) = &opts.plot {
-        let svg = crate::harness::plot_svg(
-            &format!("{} vs {}", opts.stage, opts.param),
-            &points,
-        );
+        let svg = crate::harness::plot_svg(&format!("{} vs {}", opts.stage, opts.param), &points);
         std::fs::write(p, svg).with_context(|| format!("writing {}", p.display()))?;
         eprintln!("cambium bench: wrote {}", p.display());
     }
@@ -106,7 +103,11 @@ pub fn compare_files(baseline: &Path, current: &Path, threshold_pct: f64) -> Res
     let diffs = compare(&b, &c, threshold_pct)?;
     let mut regressions = 0;
     for d in &diffs {
-        let arrow = if d.change_pct > 0.0 { "SLOWER" } else { "faster" };
+        let arrow = if d.change_pct > 0.0 {
+            "SLOWER"
+        } else {
+            "faster"
+        };
         println!(
             "{arrow:>7} {:+6.1}%  {}  {:.2} ms -> {:.2} ms",
             d.change_pct, d.key, d.baseline_ms, d.current_ms
@@ -189,7 +190,10 @@ pub fn e2e_bazel(opts: &BazelE2eOptions) -> Result<Vec<StageResult>> {
             "dirty_packages".to_string(),
             out.report.stats.dirty_packages as f64,
         ),
-        ("affected".to_string(), out.report.stats.affected_targets as f64),
+        (
+            "affected".to_string(),
+            out.report.stats.affected_targets as f64,
+        ),
         ("query_ms".to_string(), out.report.timings_ms.query as f64),
         ("splice_ms".to_string(), out.report.timings_ms.splice as f64),
         ("walk_ms".to_string(), out.report.timings_ms.walk as f64),
@@ -199,7 +203,10 @@ pub fn e2e_bazel(opts: &BazelE2eOptions) -> Result<Vec<StageResult>> {
         // What the previous approach costs: dump the entire graph twice.
         let (legacy_ms, _) = time(1, || legacy_double_dump(&engine, &opts.base, &opts.head));
         extra.insert("legacy_double_dump_ms".to_string(), legacy_ms);
-        extra.insert("speedup_vs_legacy".to_string(), legacy_ms / median.max(1e-9));
+        extra.insert(
+            "speedup_vs_legacy".to_string(),
+            legacy_ms / median.max(1e-9),
+        );
     }
 
     results.push(StageResult {

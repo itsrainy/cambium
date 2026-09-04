@@ -156,16 +156,14 @@ impl Csr {
             // Each slot is claimed exactly once via fetch_add, so the writes are
             // disjoint; the atomics are only used to hand out the slots.
             let slots = edges.as_mut_ptr() as usize;
-            (0..fwd.len().min(n) as u32)
-                .into_par_iter()
-                .for_each(|u| {
-                    for &d in fwd.row(u) {
-                        if (d as usize) < n {
-                            let at = cursor[d as usize].fetch_add(1, Ordering::Relaxed) as usize;
-                            unsafe { *(slots as *mut u32).add(at) = u };
-                        }
+            (0..fwd.len().min(n) as u32).into_par_iter().for_each(|u| {
+                for &d in fwd.row(u) {
+                    if (d as usize) < n {
+                        let at = cursor[d as usize].fetch_add(1, Ordering::Relaxed) as usize;
+                        unsafe { *(slots as *mut u32).add(at) = u };
                     }
-                });
+                }
+            });
         }
         let mut out = Self { offsets, edges };
         out.sort_rows_parallel();

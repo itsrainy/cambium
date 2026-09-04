@@ -14,6 +14,7 @@ pub const CONFIG_FILE: &str = "cambium.toml";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     pub bazel: BazelConfig,
     pub invalidators: Invalidators,
@@ -25,6 +26,7 @@ pub struct Config {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct BazelConfig {
     /// Binary to run. Empty means: `$BAZEL_REAL`, then `$BAZEL`, then
     /// `bazelisk` if on PATH, then `bazel`.
@@ -71,8 +73,10 @@ pub struct Limits {
 /// substituted, which is enough to drive gsutil, aws s3, or curl.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum StoreConfig {
     /// No baseline store configured; every run must build or be handed an index.
+    #[default]
     None,
     Dir {
         path: PathBuf,
@@ -91,20 +95,7 @@ pub enum StoreConfig {
     },
 }
 
-impl Default for StoreConfig {
-    fn default() -> Self {
-        StoreConfig::None
-    }
-}
 
-impl Default for BazelConfig {
-    fn default() -> Self {
-        Self {
-            binary: String::new(),
-            extra_query_flags: Vec::new(),
-        }
-    }
-}
 
 impl Default for Invalidators {
     fn default() -> Self {
@@ -125,10 +116,14 @@ impl Default for Invalidators {
             .into_iter()
             .map(String::from)
             .collect(),
-            globs: ["tools/toolchains/**", "platforms/**", "third_party/**/*.bzl"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            globs: [
+                "tools/toolchains/**",
+                "platforms/**",
+                "third_party/**/*.bzl",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         }
     }
 }
@@ -171,18 +166,6 @@ impl Default for Limits {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            bazel: BazelConfig::default(),
-            invalidators: Invalidators::default(),
-            ignore: Ignore::default(),
-            output: Output::default(),
-            baseline: Baseline::default(),
-            limits: Limits::default(),
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

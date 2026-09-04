@@ -105,7 +105,9 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         ));
     }
     if p.bzl.is_empty() {
-        build.push_str("load(\"//rules:synth.bzl\", \"synth_lib\", \"synth_test\", \"synth_bin\")\n");
+        build.push_str(
+            "load(\"//rules:synth.bzl\", \"synth_lib\", \"synth_test\", \"synth_bin\")\n",
+        );
     }
     build.push('\n');
 
@@ -128,12 +130,15 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         // adding a file really does change the target's inputs.
         for &slot in &t.srcs {
             let name = SynthGraph::src_name(tid, slot);
-            let mut f = std::fs::File::create(dir.join(&name)).or_else(|_| {
-                std::fs::create_dir_all(&dir).and_then(|_| std::fs::File::create(dir.join(&name)))
-            }).map_err(|source| EmitError::Io {
-                path: dir.join(&name),
-                source,
-            })?;
+            let mut f = std::fs::File::create(dir.join(&name))
+                .or_else(|_| {
+                    std::fs::create_dir_all(&dir)
+                        .and_then(|_| std::fs::File::create(dir.join(&name)))
+                })
+                .map_err(|source| EmitError::Io {
+                    path: dir.join(&name),
+                    source,
+                })?;
             // Content version goes in the file so that a ModifySource commit
             // produces a real diff.
             let version = t
@@ -205,7 +210,14 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         let mut ext: Vec<String> = (0..t.ext_deps)
             .map(|k| format!("\"{}\"", SynthGraph::ext_label(tid, k)))
             .collect();
-        let mut dep_expr = format!("[{}]", plain.into_iter().chain(ext.drain(..)).collect::<Vec<_>>().join(", "));
+        let mut dep_expr = format!(
+            "[{}]",
+            plain
+                .into_iter()
+                .chain(ext.drain(..))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if !selected.is_empty() {
             // The union over select branches is what --proto:flatten_selects
             // reports, and that union is the over-approximation we want.
@@ -312,50 +324,6 @@ synth_bin = rule(implementation = _synth_bin_impl, attrs = _ATTRS, executable = 
 synth_test = rule(implementation = _synth_bin_impl, attrs = _ATTRS, test = True)
 "##;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::spec::GraphSpec;
-
-    #[test]
-    fn emits_a_plausible_workspace() {
-        let g = crate::generate(&GraphSpec::preset("tiny").unwrap());
-        let dir = tempfile::tempdir().unwrap();
-        emit_workspace(&g, dir.path()).unwrap();
-
-        assert!(dir.path().join("MODULE.bazel").exists());
-        assert!(dir.path().join("rules/synth.bzl").exists());
-        assert!(dir.path().join("external/synth_ext/ext/BUILD.bazel").exists());
-
-        let pkg = g.package_path(0);
-        let build = std::fs::read_to_string(dir.path().join(pkg).join("BUILD.bazel")).unwrap();
-        assert!(build.contains("name = \"t0\""), "{build}");
-        assert!(build.contains("glob(["), "{build}");
-        for &slot in &g.targets[0].srcs {
-            assert!(dir
-                .path()
-                .join(g.src_path(0, slot))
-                .exists());
-        }
-    }
-
-    #[test]
-    fn re_emitting_removes_stale_files() {
-        let mut g = crate::generate(&GraphSpec::preset("tiny").unwrap());
-        let dir = tempfile::tempdir().unwrap();
-        emit_workspace(&g, dir.path()).unwrap();
-        let t = (0..g.targets.len() as u32)
-            .find(|&i| !g.targets[i as usize].srcs.is_empty())
-            .unwrap();
-        let slot = g.targets[t as usize].srcs[0];
-        let path = dir.path().join(g.src_path(t, slot));
-        assert!(path.exists());
-        crate::apply_one(&mut g, &crate::Mutation::DeleteSource { target: t, slot });
-        emit_workspace(&g, dir.path()).unwrap();
-        assert!(!path.exists());
-    }
-}
-
 // ------------------------------------------------------------------- history
 
 /// A workspace with one git commit per synthetic revision.
@@ -441,4 +409,48 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::GraphSpec;
+
+    #[test]
+    fn emits_a_plausible_workspace() {
+        let g = crate::generate(&GraphSpec::preset("tiny").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        emit_workspace(&g, dir.path()).unwrap();
+
+        assert!(dir.path().join("MODULE.bazel").exists());
+        assert!(dir.path().join("rules/synth.bzl").exists());
+        assert!(dir
+            .path()
+            .join("external/synth_ext/ext/BUILD.bazel")
+            .exists());
+
+        let pkg = g.package_path(0);
+        let build = std::fs::read_to_string(dir.path().join(pkg).join("BUILD.bazel")).unwrap();
+        assert!(build.contains("name = \"t0\""), "{build}");
+        assert!(build.contains("glob(["), "{build}");
+        for &slot in &g.targets[0].srcs {
+            assert!(dir.path().join(g.src_path(0, slot)).exists());
+        }
+    }
+
+    #[test]
+    fn re_emitting_removes_stale_files() {
+        let mut g = crate::generate(&GraphSpec::preset("tiny").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        emit_workspace(&g, dir.path()).unwrap();
+        let t = (0..g.targets.len() as u32)
+            .find(|&i| !g.targets[i as usize].srcs.is_empty())
+            .unwrap();
+        let slot = g.targets[t as usize].srcs[0];
+        let path = dir.path().join(g.src_path(t, slot));
+        assert!(path.exists());
+        crate::apply_one(&mut g, &crate::Mutation::DeleteSource { target: t, slot });
+        emit_workspace(&g, dir.path()).unwrap();
+        assert!(!path.exists());
+    }
 }

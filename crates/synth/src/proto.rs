@@ -53,7 +53,11 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                 .srcs
                 .iter()
                 .map(|&s| g.src_label(tid, s))
-                .chain(t.foreign_srcs.iter().map(|&(_, ft, fs)| g.src_label(ft, fs)))
+                .chain(
+                    t.foreign_srcs
+                        .iter()
+                        .map(|&(_, ft, fs)| g.src_label(ft, fs)),
+                )
                 .collect();
             let mut rule_input: Vec<String> = deps.iter().chain(srcs.iter()).cloned().collect();
             rule_input.sort();
@@ -113,10 +117,7 @@ mod tests {
         let bytes = to_streamed_proto(&g);
         let decoded = cambium_proto::decode_all(&bytes[..]).unwrap();
         assert_eq!(decoded.len(), to_targets(&g).len());
-        let rules = decoded
-            .iter()
-            .filter(|t| t.rule.is_some())
-            .count();
+        let rules = decoded.iter().filter(|t| t.rule.is_some()).count();
         assert_eq!(rules, g.num_alive_targets());
     }
 

@@ -134,7 +134,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(if regressions == 0 {
                 crate::EXIT_OK
             } else {
-                eprintln!("cambium bench: {regressions} stage(s) regressed by more than {threshold}%");
+                eprintln!(
+                    "cambium bench: {regressions} stage(s) regressed by more than {threshold}%"
+                );
                 crate::EXIT_ERROR
             })
         }

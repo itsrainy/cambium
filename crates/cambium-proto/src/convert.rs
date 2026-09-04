@@ -54,8 +54,7 @@ pub fn convert(t: &Target, opts: &ConvertOptions) -> Option<ParsedTarget> {
                 .any(|x| tags.iter().any(|t| t == x));
             // A `*_test` class or an explicit `test` tag both make a target a
             // test as far as the output filter is concerned (spec 6.7).
-            let is_test =
-                opts.is_test_class(&r.rule_class) || tags.iter().any(|t| t == "test");
+            let is_test = opts.is_test_class(&r.rule_class) || tags.iter().any(|t| t == "test");
             TargetRow {
                 label: r.name.clone(),
                 kind: NodeKind::Rule,
@@ -108,7 +107,9 @@ pub fn convert(t: &Target, opts: &ConvertOptions) -> Option<ParsedTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blaze_query::{attribute::Discriminator as AttrKind, Attribute, GeneratedFile, Rule};
+    use crate::blaze_query::{
+        attribute::Discriminator as AttrKind, Attribute, GeneratedFile, Rule,
+    };
 
     fn tagged_rule(class: &str, tags: &[&str]) -> Target {
         Target {
@@ -141,16 +142,30 @@ mod tests {
     #[test]
     fn recognises_tests_and_manual() {
         let o = ConvertOptions::default();
-        assert!(convert(&tagged_rule("cc_test", &[]), &o).unwrap().row.is_test);
-        assert!(convert(&tagged_rule("test_suite", &[]), &o).unwrap().row.is_test);
-        assert!(convert(&tagged_rule("sh_binary", &["test"]), &o)
-            .unwrap()
-            .row
-            .is_test);
-        assert!(convert(&tagged_rule("cc_test", &["manual"]), &o)
-            .unwrap()
-            .row
-            .manual);
+        assert!(
+            convert(&tagged_rule("cc_test", &[]), &o)
+                .unwrap()
+                .row
+                .is_test
+        );
+        assert!(
+            convert(&tagged_rule("test_suite", &[]), &o)
+                .unwrap()
+                .row
+                .is_test
+        );
+        assert!(
+            convert(&tagged_rule("sh_binary", &["test"]), &o)
+                .unwrap()
+                .row
+                .is_test
+        );
+        assert!(
+            convert(&tagged_rule("cc_test", &["manual"]), &o)
+                .unwrap()
+                .row
+                .manual
+        );
     }
 
     #[test]

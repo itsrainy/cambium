@@ -107,7 +107,11 @@ impl SynthGraph {
     }
 
     pub fn target_label(&self, id: u32) -> String {
-        format!("//{}:t{}", self.package_path(self.targets[id as usize].package), id)
+        format!(
+            "//{}:t{}",
+            self.package_path(self.targets[id as usize].package),
+            id
+        )
     }
 
     pub fn src_name(target: u32, slot: u32) -> String {
@@ -279,7 +283,12 @@ impl SynthGraph {
         let mut entries: Vec<(&str, u32)> = p
             .bzl
             .iter()
-            .map(|&b| (self.bzl[b as usize].path.as_str(), self.bzl[b as usize].version))
+            .map(|&b| {
+                (
+                    self.bzl[b as usize].path.as_str(),
+                    self.bzl[b as usize].version,
+                )
+            })
             .collect();
         entries.sort();
         let mut h = blake3::Hasher::new();
@@ -511,7 +520,11 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
                 src_versions: vec![0; n_srcs as usize],
                 foreign_srcs: Vec::new(),
                 attr_salt: 0,
-                tags: if rng.gen::<f64>() < 0.02 { TAG_MANUAL } else { 0 },
+                tags: if rng.gen::<f64>() < 0.02 {
+                    TAG_MANUAL
+                } else {
+                    0
+                },
                 alive: true,
             });
             packages[pkg].targets.push(id);
@@ -534,8 +547,8 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
     let mut lower_offsets: Vec<usize> = Vec::with_capacity(layers as usize + 1);
     let mut flat_by_layer: Vec<u32> = Vec::with_capacity(targets.len());
     lower_offsets.push(0);
-    for l in 0..layers as usize {
-        flat_by_layer.extend_from_slice(&layer_members[l]);
+    for members in layer_members.iter().take(layers as usize) {
+        flat_by_layer.extend_from_slice(members);
         lower_offsets.push(flat_by_layer.len());
     }
 
@@ -603,9 +616,11 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             let mut cands: Vec<u32> = Vec::new();
             for l in 0..layer {
                 if let Some(v) = pkg_layer_members[pkg].get(&l) {
-                    cands.extend(v.iter().copied().filter(|&c| {
-                        matches!(targets[c as usize].kind, Kind::Lib | Kind::Bin)
-                    }));
+                    cands.extend(
+                        v.iter()
+                            .copied()
+                            .filter(|&c| matches!(targets[c as usize].kind, Kind::Lib | Kind::Bin)),
+                    );
                 }
             }
             if !cands.is_empty() {

@@ -14,9 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::config::Config;
 use crate::error::{EngineError, Result};
 use crate::query::{BazelQuerier, FileSource, PackageQuerier};
-use crate::report::{
-    AffectedReport, DirectReason, Explanation, Stats, Stopwatch, Timings,
-};
+use crate::report::{AffectedReport, DirectReason, Explanation, Stats, Stopwatch, Timings};
 use crate::store::{self, ArtifactStore};
 
 /// What the caller asked for.
@@ -60,7 +58,11 @@ pub struct Engine {
 
 impl Engine {
     /// Opens an engine rooted at the Bazel workspace containing `start`.
-    pub fn open(start: &Path, config_path: Option<&Path>, bazel_binary: Option<&str>) -> Result<Self> {
+    pub fn open(
+        start: &Path,
+        config_path: Option<&Path>,
+        bazel_binary: Option<&str>,
+    ) -> Result<Self> {
         let workspace = cambium_bazel::find_workspace_root(start)
             .ok_or_else(|| EngineError::NoWorkspace(start.to_path_buf()))?;
         let cfg = match config_path {
@@ -166,7 +168,12 @@ impl Engine {
 
     /// Publishes an index under its canonical name, plus a commit-addressed
     /// name when the store cannot be listed.
-    pub fn publish_index(&self, path: &Path, lineage: &[u8; 16], commit: &str) -> Result<Vec<String>> {
+    pub fn publish_index(
+        &self,
+        path: &Path,
+        lineage: &[u8; 16],
+        commit: &str,
+    ) -> Result<Vec<String>> {
         let Some(store) = &self.store else {
             return Err(EngineError::NoStore);
         };
@@ -246,8 +253,14 @@ impl Engine {
     pub fn affected(&self, req: &AffectedRequest) -> Result<RunOutcome> {
         let mut sw = Stopwatch::start();
         let total = Stopwatch::start();
-        let base = self.repo.rev_parse(&req.base).unwrap_or_else(|_| req.base.clone());
-        let head = self.repo.rev_parse(&req.head).unwrap_or_else(|_| req.head.clone());
+        let base = self
+            .repo
+            .rev_parse(&req.base)
+            .unwrap_or_else(|_| req.base.clone());
+        let head = self
+            .repo
+            .rev_parse(&req.head)
+            .unwrap_or_else(|_| req.head.clone());
         let req = AffectedRequest {
             base: base.clone(),
             head: head.clone(),
@@ -265,7 +278,11 @@ impl Engine {
 
     /// The incremental pipeline, given a base index already in hand. Asks git
     /// what changed and queries Bazel for the dirty packages.
-    pub fn run_incremental(&self, base_index: IndexData, req: &AffectedRequest) -> Result<RunOutcome> {
+    pub fn run_incremental(
+        &self,
+        base_index: IndexData,
+        req: &AffectedRequest,
+    ) -> Result<RunOutcome> {
         let changes = self.repo.diff(&req.base, &req.head)?;
         self.compute(base_index, &changes, &self.bazel_querier(&req.head), req)
     }
@@ -303,7 +320,10 @@ impl Engine {
         let mut bzl_dirty: BTreeSet<String> = BTreeSet::new();
         if !dirty.global && !dirty.changed_bzl.is_empty() {
             let paths: Vec<String> = dirty.changed_bzl.iter().cloned().collect();
-            tracing::debug!(count = paths.len(), "resolving changed .bzl files with rbuildfiles");
+            tracing::debug!(
+                count = paths.len(),
+                "resolving changed .bzl files with rbuildfiles"
+            );
             let pkgs = querier.rbuildfiles(&paths)?;
             for p in pkgs {
                 bzl_dirty.insert(p.clone());
@@ -345,6 +365,25 @@ impl Engine {
             deleted_by_package.push((p.clone(), ids));
         }
         let report = builder.apply_packages(&updates);
+
+        // Resolve changed source files to node ids while the builder still has
+        // its interner: rebuilding a label map over a finished index costs
+        // O(labels), and at a few million labels that is the single most
+        // expensive thing in an otherwise change-proportional run.
+        let mut changed_file_ids: Vec<(u32, String)> = Vec::with_capacity(dirty.direct_files.len());
+        for path in &dirty.direct_files {
+            let Some(pkg) = packages.owner_of(path) else {
+                continue;
+            };
+            let label = cambium_index::label::source_label(pkg, path);
+            match builder.label_id(&label) {
+                Some(id) => changed_file_ids.push((id, path.clone())),
+                // The most common "why wasn't my test run?" question: a file
+                // no rule references cannot affect anything.
+                None => tracing::debug!(%label, "changed file is not referenced by any rule"),
+            }
+        }
+
         let head_index = builder.finish(&req.head);
         let hv = head_index.view();
         stats.head_nodes = hv.num_nodes();
@@ -354,7 +393,10 @@ impl Engine {
         // ---- direct set (spec 6.7) ----
         let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
         let mut direct: FxHashSet<u32> = FxHashSet::default();
-        let add = |id: u32, reason: DirectReason, direct: &mut FxHashSet<u32>, reasons: &mut FxHashMap<u32, DirectReason>| {
+        let add = |id: u32,
+                   reason: DirectReason,
+                   direct: &mut FxHashSet<u32>,
+                   reasons: &mut FxHashMap<u32, DirectReason>| {
             if direct.insert(id) {
                 reasons.insert(id, reason);
             }
@@ -412,29 +454,14 @@ impl Engine {
             }
         }
 
-        if !dirty.direct_files.is_empty() {
-            let labels = hv.labels.build_map();
-            for path in &dirty.direct_files {
-                let Some(pkg) = packages.owner_of(path) else {
-                    continue;
-                };
-                let label = cambium_index::label::source_label(pkg, path);
-                let Some(&id) = labels.get(label.as_str()) else {
-                    // The most common "why wasn't my test run?" question: a file
-                    // no rule references cannot affect anything.
-                    tracing::debug!(%label, "changed file is not referenced by any rule");
-                    continue;
-                };
-                for &consumer in hv.file_consumers(id) {
-                    add(
-                        consumer,
-                        DirectReason::File {
-                            path: path.clone(),
-                        },
-                        &mut direct,
-                        &mut reasons,
-                    );
-                }
+        for (id, path) in changed_file_ids {
+            for &consumer in hv.file_consumers(id) {
+                add(
+                    consumer,
+                    DirectReason::File { path: path.clone() },
+                    &mut direct,
+                    &mut reasons,
+                );
             }
         }
 
