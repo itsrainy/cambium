@@ -75,8 +75,15 @@ $ cambium affected --base <sha> --head <sha> [--tests-only] [--include-manual]
 $ cambium baseline build  [--commit <sha>] [--publish]
 $ cambium baseline update --from <sha> --to <sha> [--publish]
 $ cambium baseline gc | list
-$ cambium index inspect <file> [--label //x:y] [--package p] [--rdeps //x:y]
-$ cambium index verify  <file> --against-bazel
+$ cambium index inspect   <file> [--label //x:y] [--package p]
+$ cambium index rdeps     <file> //x:y  [--transitive] [--tests-only]
+$ cambium index deps      <file> //x:y  [--transitive]
+$ cambium index path      <file> //from:a //to:b
+$ cambium index consumers <file> <path>...  [--transitive]
+$ cambium index owner     <file> <path>...
+$ cambium index targets   <file> <package> [--kind rule]
+$ cambium index stats     <file>
+$ cambium index verify    <file> --against-bazel
 $ cambium bench run|sweep|compare|bazel
 $ cambium synth emit-bazel|describe|presets
 $ cambium config
@@ -91,6 +98,33 @@ $ bazel test $(cambium affected --base origin/main --tests-only --output query)
 `--explain` prints, for each affected target, the shortest path back to the
 change and why that starting point was direct — the answer to "why is this
 test running?".
+
+### Querying an index
+
+The `index` subcommands answer the same questions against an index that
+already exists, in text or JSON (`--output json`, carrying `schema`):
+
+```console
+$ cambium index consumers idx.bin lib/core/parser.cc --transitive
+lib/core/parser.cc	//lib/core:core
+lib/core/parser.cc	//app:main
+lib/core/parser.cc	//app:main_test
+
+$ cambium index path idx.bin //app:main_test //lib/core:core
+//app:main_test
+  -> //app:main
+  -> //lib/core:core
+```
+
+`rdeps` and `deps` are one hop by default and transitive with `--transitive`;
+the transitive form includes the subject itself, matching
+`bazel query rdeps`. `path` exits non-zero when there is no path, and says so
+if one exists the other way round. `stats` reports counts, the in-degree
+distribution, and per-component byte sizes — which is how you find out what an
+index is actually spending its bytes on.
+
+They share the engine's walk and the same package-ownership lookup the dirty
+set uses, so an `index` answer and an `affected` answer cannot disagree.
 
 ## The JSON contract
 

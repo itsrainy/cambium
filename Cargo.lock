@@ -225,6 +225,7 @@ dependencies = [
  "cambium-index",
  "cambium-synth",
  "clap",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
