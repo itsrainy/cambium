@@ -241,6 +241,18 @@ impl IndexBuilder {
         id
     }
 
+    /// Marks a forward row as replaced this generation. Grows the bitset by
+    /// doubling: `FixedBitSet::grow` reallocates to exactly the requested size,
+    /// so growing by one per node would make a full build quadratic.
+    #[inline]
+    fn mark_rebuilt(&mut self, id: u32) {
+        let need = id as usize + 1;
+        if need > self.rebuilt.len() {
+            self.rebuilt.grow(need.max(self.rebuilt.len() * 2).max(64));
+        }
+        self.rebuilt.insert(id as usize);
+    }
+
     fn package_slot(&mut self, name: &str) -> u32 {
         let (id, is_new) = self.pkg_names.intern_new(name);
         if is_new {
@@ -287,8 +299,7 @@ impl IndexBuilder {
                 }
                 self.flags[i] = f;
 
-                self.rebuilt.grow(self.kind.len());
-                self.rebuilt.insert(i);
+                self.mark_rebuilt(id);
                 current.push(id);
                 if t.kind == NodeKind::Rule && (!was_known || hash_changed) {
                     changed.push(id);
@@ -307,8 +318,7 @@ impl IndexBuilder {
                 self.class[i] = NO_ID;
                 self.hash[i] = [0; 32];
                 self.is_test[i] = false;
-                self.rebuilt.grow(self.kind.len());
-                self.rebuilt.insert(i); // clears the forward row
+                self.mark_rebuilt(d); // clears the forward row
             }
 
             self.pkg_nodes[pkg_id as usize] = current.clone();
@@ -402,8 +412,7 @@ impl IndexBuilder {
             self.class[i] = NO_ID;
             self.hash[i] = [0; 32];
             self.is_test[i] = false;
-            self.rebuilt.grow(self.kind.len());
-            self.rebuilt.insert(i);
+            self.mark_rebuilt(d);
         }
         self.pkg_flags[pkg_id as usize] = pkg_flags::TOMBSTONE;
         self.pkg_build_hash[pkg_id as usize] = [0; 32];
