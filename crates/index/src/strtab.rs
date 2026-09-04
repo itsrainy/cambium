@@ -53,11 +53,37 @@ impl<'a> StrTabRef<'a> {
 }
 
 /// Owned, growable string table with an interning map.
-#[derive(Default, Clone)]
+///
+/// The map is a `hashbrown::HashTable<u32>` keyed by hash rather than a
+/// `HashMap<Box<str>, u32>`: entries point back into `bytes`, so a label is
+/// stored exactly once. At a million labels that is 40 MB instead of 90 MB and
+/// a million fewer allocations.
+#[derive(Default)]
 pub struct Interner {
     bytes: Vec<u8>,
     offsets: Vec<u32>,
-    map: FxHashMap<Box<str>, u32>,
+    table: hashbrown::HashTable<u32>,
+}
+
+impl Clone for Interner {
+    fn clone(&self) -> Self {
+        Self::from_parts(self.bytes.clone(), self.offsets.clone())
+    }
+}
+
+#[inline]
+fn hash_str(s: &str) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = rustc_hash::FxBuildHasher.build_hasher();
+    h.write(s.as_bytes());
+    h.finish()
+}
+
+#[inline]
+fn entry_at<'a>(bytes: &'a [u8], offsets: &[u32], i: u32) -> &'a str {
+    let s = offsets[i as usize] as usize;
+    let e = offsets[i as usize + 1] as usize;
+    std::str::from_utf8(&bytes[s..e]).expect("string table holds UTF-8")
 }
 
 impl Interner {
@@ -65,24 +91,25 @@ impl Interner {
         Self {
             bytes: Vec::new(),
             offsets: vec![0],
-            map: FxHashMap::default(),
+            table: hashbrown::HashTable::new(),
         }
     }
 
     /// Rebuilds an interner from serialised arrays, preserving ids.
     pub fn from_parts(bytes: Vec<u8>, offsets: Vec<u32>) -> Self {
-        let mut me = Self {
+        let n = offsets.len() - 1;
+        let mut table = hashbrown::HashTable::with_capacity(n);
+        for i in 0..n as u32 {
+            let h = hash_str(entry_at(&bytes, &offsets, i));
+            table.insert_unique(h, i, |&other| {
+                hash_str(entry_at(&bytes, &offsets, other))
+            });
+        }
+        Self {
             bytes,
             offsets,
-            map: FxHashMap::default(),
-        };
-        let n = me.len();
-        me.map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
-        for i in 0..n as u32 {
-            let s: Box<str> = me.get(i).into();
-            me.map.insert(s, i);
+            table,
         }
-        me
     }
 
     #[inline]
@@ -97,33 +124,38 @@ impl Interner {
 
     #[inline]
     pub fn get(&self, i: u32) -> &str {
-        let s = self.offsets[i as usize] as usize;
-        let e = self.offsets[i as usize + 1] as usize;
-        std::str::from_utf8(&self.bytes[s..e]).expect("string table holds UTF-8")
+        entry_at(&self.bytes, &self.offsets, i)
     }
 
     #[inline]
     pub fn lookup(&self, s: &str) -> Option<u32> {
-        self.map.get(s).copied()
+        let h = hash_str(s);
+        self.table
+            .find(h, |&id| entry_at(&self.bytes, &self.offsets, id) == s)
+            .copied()
     }
 
     /// Interns `s`, returning its existing id or appending a new one.
     pub fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&id) = self.map.get(s) {
-            return id;
-        }
-        let id = self.len() as u32;
-        self.bytes.extend_from_slice(s.as_bytes());
-        self.offsets.push(self.bytes.len() as u32);
-        self.map.insert(s.into(), id);
-        id
+        self.intern_new(s).0
     }
 
     /// Interns `s` and reports whether it was newly added.
     pub fn intern_new(&mut self, s: &str) -> (u32, bool) {
-        let before = self.len();
-        let id = self.intern(s);
-        (id, id as usize == before)
+        let Self {
+            bytes,
+            offsets,
+            table,
+        } = self;
+        let h = hash_str(s);
+        if let Some(&id) = table.find(h, |&id| entry_at(bytes, offsets, id) == s) {
+            return (id, false);
+        }
+        let id = (offsets.len() - 1) as u32;
+        bytes.extend_from_slice(s.as_bytes());
+        offsets.push(bytes.len() as u32);
+        table.insert_unique(h, id, |&other| hash_str(entry_at(bytes, offsets, other)));
+        (id, true)
     }
 
     pub fn as_ref(&self) -> StrTabRef<'_> {
@@ -140,6 +172,11 @@ impl Interner {
 
     pub fn parts(&self) -> (&[u8], &[u32]) {
         (&self.bytes, &self.offsets)
+    }
+
+    /// Bytes held by the table itself, for memory reporting.
+    pub fn byte_size(&self) -> usize {
+        self.bytes.len() + self.offsets.len() * 4 + self.table.capacity() * 4
     }
 }
 

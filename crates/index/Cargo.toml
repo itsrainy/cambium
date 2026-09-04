@@ -10,6 +10,7 @@ description = "CSR target graph, interning, on-disk index format and splice for 
 [dependencies]
 blake3.workspace = true
 fixedbitset.workspace = true
+hashbrown = "0.15"
 memmap2.workspace = true
 rayon.workspace = true
 rkyv.workspace = true
