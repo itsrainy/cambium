@@ -121,7 +121,18 @@ the transitive form includes the subject itself, matching
 `bazel query rdeps`. `path` exits non-zero when there is no path, and says so
 if one exists the other way round. `stats` reports counts, the in-degree
 distribution, and per-component byte sizes — which is how you find out what an
-index is actually spending its bytes on.
+index is actually spending its bytes on. It also projects what labels would
+cost stored as `(package_id, relative_name)`, which is the measurement behind
+[not doing that](BENCHMARKS.md#labels-33-and-not-compressed); run it on an index
+of your own repository, where package paths are longer than the generators'
+and the answer may well come out differently.
+
+To get an index to point it at without going near Bazel:
+
+```console
+$ cambium synth build-index --spec large --out large.bin
+$ cambium index stats large.bin
+```
 
 They share the engine's walk and the same package-ownership lookup the dirty
 set uses, so an `index` answer and an `affected` answer cannot disagree.
@@ -177,6 +188,16 @@ document with no `schema` key predates the field and is version 1.
 
 `cambium index ... --output json` and `cambium bench` results carry `schema`
 on the same terms.
+
+### Contract versions
+
+| version | change |
+|---:|---|
+| 1 | the first published contract |
+| 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
+
+The version is shared by every document, so a bump made for one of them moves
+all of them. The affected report has not changed shape between 1 and 2.
 
 ### Configuration
 

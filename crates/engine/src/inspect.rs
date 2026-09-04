@@ -31,9 +31,7 @@ pub enum QueryError {
 
 type Result<T> = std::result::Result<T, QueryError>;
 
-const fn schema_version() -> u32 {
-    SCHEMA_VERSION
-}
+use crate::report::schema_version_of_a_document_without_one as schema_version;
 
 /// Queries over one index.
 #[derive(Clone, Copy)]
@@ -189,6 +187,12 @@ pub struct ByteStats {
     pub file_total: u64,
     pub label_table: u64,
     pub label_table_share: f64,
+    /// Node ids ordered by label — the array `IndexRef::id_of` binary-searches.
+    /// Part of what labels cost, and not free: 4 bytes per node.
+    pub label_sorted: u64,
+    /// `label_table` + `label_sorted` over the file. This is the number to
+    /// compare against a threshold for "are labels worth compressing".
+    pub label_total_share: f64,
     pub rule_class_table: u64,
     pub forward_offsets: u64,
     pub forward_edges: u64,
@@ -203,6 +207,32 @@ pub struct ByteStats {
     pub node_columns: u64,
     pub package_table: u64,
     pub framing: i64,
+    /// What labels would cost stored as `(package_id, relative_name)` instead
+    /// of whole strings. See [`LabelPacking`].
+    pub label_packing: LabelPacking,
+}
+
+/// A projection, not a measurement of anything that exists.
+///
+/// Every label is `//package:name` (or `@repo//package:name`), and the node
+/// columns already carry each node's package id, so the `//package:` prefix is
+/// stored twice: once in the package table, once at the head of every label.
+/// Dropping it from the label table would cost nothing extra — the package id
+/// is already there — so the saving is exactly the prefix bytes.
+///
+/// This is here so the "is it worth it" question can be answered on a real
+/// repository rather than on the synthetic graphs, where labels are short and
+/// the answer comes out lower than it would for deep source trees.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LabelPacking {
+    /// Label bytes that are the `//package:` prefix.
+    pub prefix_bytes: u64,
+    /// Nodes with no package id, whose labels would have to stay whole.
+    pub unpackable_nodes: u32,
+    /// `label_table` after packing.
+    pub packed_label_table: u64,
+    /// Fraction of the whole file that packing would remove.
+    pub file_saving_share: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -506,6 +536,7 @@ impl<'a> IndexQuery<'a> {
         }
 
         let label_table = (v.labels.bytes.len() + v.labels.offsets.len() * 4) as u64;
+        let label_sorted = (v.label_sorted.len() * 4) as u64;
         let rule_class_table = (v.classes.bytes.len() + v.classes.offsets.len() * 4) as u64;
         let forward_offsets = (v.forward.offsets.len() * 4) as u64;
         let forward_edges = (v.forward.edges.len() * 4) as u64;
@@ -520,7 +551,32 @@ impl<'a> IndexQuery<'a> {
             + v.pkg_nodes.edges.len() * 4
             + np * 32 * 2
             + np) as u64;
+        // The prefix a packed label table would not have to store: for each
+        // node whose package is known, the `//pkg:` (or `@repo//pkg:`) head of
+        // its label. Offsets stay as they are, so the saving is prefix bytes.
+        let mut prefix_bytes = 0u64;
+        let mut unpackable_nodes = 0u32;
+        for id in 0..v.num_nodes() {
+            let label = v.labels.get(id);
+            let pkg = v.package[id as usize];
+            match (pkg != cambium_index::NO_ID, label.rfind(':')) {
+                (true, Some(colon)) => prefix_bytes += colon as u64 + 1,
+                _ => unpackable_nodes += 1,
+            }
+        }
+        let label_packing = LabelPacking {
+            prefix_bytes,
+            unpackable_nodes,
+            packed_label_table: label_table - prefix_bytes,
+            file_saving_share: if file_total > 0 {
+                prefix_bytes as f64 / file_total as f64
+            } else {
+                0.0
+            },
+        };
+
         let accounted = label_table
+            + label_sorted
             + rule_class_table
             + forward_offsets
             + forward_edges
@@ -538,6 +594,12 @@ impl<'a> IndexQuery<'a> {
             } else {
                 0.0
             },
+            label_sorted,
+            label_total_share: if file_total > 0 {
+                (label_table + label_sorted) as f64 / file_total as f64
+            } else {
+                0.0
+            },
             rule_class_table,
             forward_offsets,
             forward_edges,
@@ -548,6 +610,7 @@ impl<'a> IndexQuery<'a> {
             node_columns,
             package_table,
             framing: file_total as i64 - accounted as i64,
+            label_packing,
         };
 
         let mut degrees: Vec<u32> = (0..v.num_nodes())

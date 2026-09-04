@@ -298,8 +298,9 @@ fn print_stats(s: &inspect::IndexStats) {
     println!();
     let b = &s.bytes;
     println!("bytes:           {} total", human(b.file_total));
-    let rows: [(&str, i64); 10] = [
+    let rows: [(&str, i64); 11] = [
         ("label table", b.label_table as i64),
+        ("label sort index", b.label_sorted as i64),
         ("rule class table", b.rule_class_table as i64),
         ("forward offsets", b.forward_offsets as i64),
         ("forward edges", b.forward_edges as i64),
@@ -322,6 +323,27 @@ fn print_stats(s: &inspect::IndexStats) {
         "framing/padding",
         human(b.framing.max(0) as u64),
         share(b.framing, b.file_total)
+    );
+    println!();
+    let lp = &b.label_packing;
+    println!(
+        "labels:          {:>10}  {:>5.1}% of the file (table + sort index)",
+        human(b.label_table + b.label_sorted),
+        b.label_total_share * 100.0
+    );
+    println!(
+        "  packed         {:>10}  {:>5.1}% would remain, storing (package, name)",
+        human(lp.packed_label_table + b.label_sorted),
+        share(
+            (lp.packed_label_table + b.label_sorted) as i64,
+            b.file_total
+        )
+    );
+    println!(
+        "  saving         {:>10}  {:>5.1}% of the file, {} labels not packable",
+        human(lp.prefix_bytes),
+        lp.file_saving_share * 100.0,
+        lp.unpackable_nodes
     );
 }
 
