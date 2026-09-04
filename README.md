@@ -6,8 +6,10 @@ Given a repository at two commits, cambium reports the build and test targets
 whose outputs could differ between them — at a cost proportional to the size of
 the change and the size of the answer, not the size of the repository.
 
+The project is cambium; the binary it installs is `cambi`.
+
 ```console
-$ cambium affected --base origin/main --head HEAD --tests-only
+$ cambi affected --base origin/main --head HEAD --tests-only
 //app:main_test
 //lib/core:core_test
 ```
@@ -62,7 +64,10 @@ output is what gets published — is described in
 
 ```console
 $ cargo install --path crates/cli    # or: cargo build --release
+$ cambi --version
 ```
+
+The crate is `cambium-cli`; the binary it installs is `cambi`.
 
 No `protoc` needed — the vendored `build.proto` is compiled by `protox`, a
 pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
@@ -70,29 +75,29 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ## Usage
 
 ```console
-$ cambium affected --base <sha> --head <sha> [--tests-only] [--include-manual]
+$ cambi affected --base <sha> --head <sha> [--tests-only] [--include-manual]
                    [--output text|json|query] [--explain]
-$ cambium baseline build  [--commit <sha>] [--publish]
-$ cambium baseline update --from <sha> --to <sha> [--publish]
-$ cambium baseline gc | list
-$ cambium index inspect   <file> [--label //x:y] [--package p]
-$ cambium index rdeps     <file> //x:y  [--transitive] [--tests-only]
-$ cambium index deps      <file> //x:y  [--transitive]
-$ cambium index path      <file> //from:a //to:b
-$ cambium index consumers <file> <path>...  [--transitive]
-$ cambium index owner     <file> <path>...
-$ cambium index targets   <file> <package> [--kind rule]
-$ cambium index stats     <file>
-$ cambium index verify    <file> --against-bazel
-$ cambium bench run|sweep|compare|bazel
-$ cambium synth emit-bazel|describe|presets
-$ cambium config
+$ cambi baseline build  [--commit <sha>] [--publish]
+$ cambi baseline update --from <sha> --to <sha> [--publish]
+$ cambi baseline gc | list
+$ cambi index inspect   <file> [--label //x:y] [--package p]
+$ cambi index rdeps     <file> //x:y  [--transitive] [--tests-only]
+$ cambi index deps      <file> //x:y  [--transitive]
+$ cambi index path      <file> //from:a //to:b
+$ cambi index consumers <file> <path>...  [--transitive]
+$ cambi index owner     <file> <path>...
+$ cambi index targets   <file> <package> [--kind rule]
+$ cambi index stats     <file>
+$ cambi index verify    <file> --against-bazel
+$ cambi bench run|sweep|compare|bazel
+$ cambi synth emit-bazel|describe|presets
+$ cambi config
 ```
 
 `--output query` emits a `set(...)` expression you can hand straight to Bazel:
 
 ```console
-$ bazel test $(cambium affected --base origin/main --tests-only --output query)
+$ bazel test $(cambi affected --base origin/main --tests-only --output query)
 ```
 
 `--explain` prints, for each affected target, the shortest path back to the
@@ -105,12 +110,12 @@ The `index` subcommands answer the same questions against an index that
 already exists, in text or JSON (`--output json`, carrying `schema`):
 
 ```console
-$ cambium index consumers idx.bin lib/core/parser.cc --transitive
+$ cambi index consumers idx.bin lib/core/parser.cc --transitive
 lib/core/parser.cc	//lib/core:core
 lib/core/parser.cc	//app:main
 lib/core/parser.cc	//app:main_test
 
-$ cambium index path idx.bin //app:main_test //lib/core:core
+$ cambi index path idx.bin //app:main_test //lib/core:core
 //app:main_test
   -> //app:main
   -> //lib/core:core
@@ -130,8 +135,8 @@ and the answer may well come out differently.
 To get an index to point it at without going near Bazel:
 
 ```console
-$ cambium synth build-index --spec large --out large.bin
-$ cambium index stats large.bin
+$ cambi synth build-index --spec large --out large.bin
+$ cambi index stats large.bin
 ```
 
 They share the engine's walk and the same package-ownership lookup the dirty
@@ -164,7 +169,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | 3 | Bazel failed |
 | 4 | no baseline available and `--no-full-build` was given |
 
-### `cambium affected --output json`
+### `cambi affected --output json`
 
 | field | type | meaning |
 |---|---|---|
@@ -186,7 +191,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 Optional fields are omitted rather than null, so absence is meaningful. A
 document with no `schema` key predates the field and is version 1.
 
-`cambium index ... --output json` and `cambium bench` results carry `schema`
+`cambi index ... --output json` and `cambi bench` results carry `schema`
 on the same terms.
 
 ### Contract versions
@@ -233,7 +238,7 @@ max_changed_files = 5000     # larger diffs fall back to global invalidation
 
 The config is hashed into every index it produces. An index built under a
 different config cannot be spliced onto, because the invalidator rules that
-produced it may no longer hold — `cambium baseline build` mints a fresh
+produced it may no longer hold — `cambi baseline build` mints a fresh
 lineage instead.
 
 Store backends: `dir` (a local directory), `http` (GET/PUT against a base
@@ -250,7 +255,7 @@ A post-merge job on the main branch keeps the store populated, so pull-request
 runs almost always find their merge base directly:
 
 ```console
-$ cambium baseline update --from <parent-sha> --to <merge-sha> --publish
+$ cambi baseline update --from <parent-sha> --to <merge-sha> --publish
 ```
 
 When a run does not find one, it walks back up to `max_ancestor_walk`
@@ -259,7 +264,7 @@ forward to the base in a single update — the dirty set over the whole range is
 the union, so re-querying a package once per commit would buy nothing. Failing
 that, it builds cold.
 
-`cambium affected --publish-base` publishes that computed base index under the
+`cambi affected --publish-base` publishes that computed base index under the
 base revision, so the next run on the same base finds it instead of replaying
 again. Only the base: the head-side index of an `affected` run is never
 published, because a pull-request head is not on the main line and nothing will
@@ -269,7 +274,7 @@ Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop the
 accumulated tombstones:
 
 ```console
-$ cambium baseline build --publish && cambium baseline gc
+$ cambi baseline build --publish && cambi baseline gc
 ```
 
 ## Layout
@@ -284,7 +289,7 @@ crates/
   engine/          a run: load, dirty, query, splice, direct set, walk
   synth/           synthetic graph generator, mutations, Bazel repo emitter
   bench/           stage benchmarks, sweeps, regression gating
-  cli/             the `cambium` binary
+  cli/             the `cambi` binary
 ```
 
 `index` and `synth` do not depend on `bazel`. `engine` is the only crate that
@@ -316,7 +321,7 @@ much they cost to run:
    `exports_files` across packages, a `select` branch change, a package split,
    a global invalidator, an ignored path. Each is also checked against a full
    rebuild, so the expectations cannot drift.
-4. **`cambium index verify --against-bazel`** — for a sample of targets, our
+4. **`cambi index verify --against-bazel`** — for a sample of targets, our
    reverse closure must contain everything `bazel query rdeps(//..., target)`
    reports. This is the soundness oracle, and it runs against production
    indexes too, reporting precision as a percentage.

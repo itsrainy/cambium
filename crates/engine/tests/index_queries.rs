@@ -234,7 +234,7 @@ fn consumers_transitive_matches_the_affected_walk() {
         .consumers(&["lib/a.cc".to_string()], &transitive())
         .unwrap();
     // Editing lib/a.cc affects //lib:core and everything above it — the same
-    // answer `cambium affected` gives for that file.
+    // answer `cambi affected` gives for that file.
     assert_eq!(
         r.files[0].consumers,
         vec!["//app:main", "//app:main_test", "//lib:core"]

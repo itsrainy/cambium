@@ -17,7 +17,7 @@ use cambium_engine::report::{
 use cambium_engine::EngineError;
 use serde_json::Value;
 
-/// The shape of `cambium affected --output json`.
+/// The shape of `cambi affected --output json`.
 ///
 /// Unchanged since schema version 1; the contract version has moved on because
 /// it is shared with the other documents, and `index stats` changed shape at

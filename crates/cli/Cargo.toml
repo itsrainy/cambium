@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "cambium command line interface"
+description = "cambi, the cambium command line interface"
 
 [[bin]]
-name = "cambium"
+name = "cambi"
 path = "src/main.rs"
 
 [dependencies]

@@ -65,7 +65,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p cambium-cli
       - run: |
-          ./target/release/cambium bench run \
+          ./target/release/cambi bench run \
             --preset small,medium --runs 5 \
             --out bench-results/ci.json --markdown bench-results/ci.md
       # Machine fingerprints differ between runners, so gating only makes sense
@@ -91,7 +91,7 @@ jobs:
           CAMBIUM_SOUNDNESS_REVISIONS: "10"
       - run: cargo build --release -p cambium-cli
       - run: |
-          ./target/release/cambium bench run --preset large --runs 3 \
+          ./target/release/cambi bench run --preset large --runs 3 \
             --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
             --out bench-results/nightly.json --markdown bench-results/nightly.md
       - uses: actions/upload-artifact@v4

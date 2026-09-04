@@ -1,4 +1,4 @@
-//! `cambium bench` and `cambium synth` (spec 13).
+//! `cambi bench` and `cambi synth` (spec 13).
 
 use std::path::PathBuf;
 
@@ -61,7 +61,7 @@ pub enum Args {
     },
     /// End-to-end timing against a real Bazel, on an emitted workspace.
     Bazel {
-        /// Repository to run in (typically one from `cambium synth emit-bazel`).
+        /// Repository to run in (typically one from `cambi synth emit-bazel`).
         #[arg(long)]
         repo: PathBuf,
         #[arg(long)]
@@ -135,7 +135,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 crate::EXIT_OK
             } else {
                 eprintln!(
-                    "cambium bench: {regressions} stage(s) regressed by more than {threshold}%"
+                    "cambi bench: {regressions} stage(s) regressed by more than {threshold}%"
                 );
                 crate::EXIT_ERROR
             })

@@ -12,9 +12,9 @@ Reproduce with:
 
 ```console
 $ cargo build --release -p cambium-cli
-$ ./target/release/cambium bench run --preset small,medium,large --runs 5 \
+$ ./target/release/cambi bench run --preset small,medium,large --runs 5 \
     --out bench-results/mine.json --markdown bench-results/mine.md
-$ ./target/release/cambium bench compare \
+$ ./target/release/cambi bench compare \
     --baseline docs/benchmarks/inmemory-small-medium.json \
     --current bench-results/mine.json --threshold 15
 ```
@@ -34,7 +34,7 @@ runs from different machines rather than reporting noise as a regression.
 
 Index nodes exceed the target count because source files are nodes too. Shape
 variants (`-hubby`, `-deep`, `-flat`, `-wide-packages`) keep the size and change
-the topology; `cambium synth presets` lists them all.
+the topology; `cambi synth presets` lists them all.
 
 ## In-memory stages
 
@@ -170,12 +170,12 @@ once something needs the last 20%.
 
 ## What an index spends its bytes on
 
-`cambium index stats` accounts for every byte in the file. Two indexes built
+`cambi index stats` accounts for every byte in the file. Two indexes built
 straight from the generators — no Bazel needed:
 
 ```console
-$ cambium synth build-index --spec large --out large.bin
-$ cambium index stats large.bin
+$ cambi synth build-index --spec large --out large.bin
+$ cambi index stats large.bin
 ```
 
 | component | `large` (258.6 MiB) | `xl` (1.03 GiB) |
@@ -279,7 +279,7 @@ independent of how many packages are dirty.
 
 ## Against the approach this replaces
 
-`cambium bench bazel --repo <emitted> --base <sha> --head <sha> --legacy` runs
+`cambi bench bazel --repo <emitted> --base <sha> --head <sha> --legacy` runs
 both paths on the same commits with a real Bazel: the incremental run, and the
 "dump the whole graph at both commits and diff every target's hash" baseline it
 replaces. Both sides pay the same Bazel loading costs where they need them; the
@@ -291,8 +291,8 @@ startup and are not informative. Run it on `medium` or larger, on a worker with
 a warm Bazel server, to get a ratio meaningful for your own repository:
 
 ```console
-$ cambium synth emit-bazel --spec medium --out /tmp/synth --revisions 5
-$ cambium bench bazel --repo /tmp/synth --base <first> --head <last> --legacy
+$ cambi synth emit-bazel --spec medium --out /tmp/synth --revisions 5
+$ cambi bench bazel --repo /tmp/synth --base <first> --head <last> --legacy
 ```
 
 ## Reproducing and gating
@@ -302,7 +302,7 @@ results carry a machine fingerprint, gating works by comparing against a
 baseline captured on the same runner class:
 
 ```console
-$ cambium bench compare --baseline docs/benchmarks/inmemory-small-medium.json \
+$ cambi bench compare --baseline docs/benchmarks/inmemory-small-medium.json \
     --current ci.json --threshold 15
  SLOWER  +22.4%  splice@medium  16.31 ms -> 19.95 ms
 ```

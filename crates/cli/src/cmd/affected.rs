@@ -1,4 +1,4 @@
-//! `cambium affected`.
+//! `cambi affected`.
 
 use anyhow::Result;
 use cambium_engine::AffectedRequest;
