@@ -10,6 +10,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod inspect;
 pub mod query;
 pub mod report;
 pub mod store;
@@ -18,6 +19,7 @@ pub mod synthq;
 pub use config::Config;
 pub use engine::{AffectedRequest, Engine, RunOutcome};
 pub use error::{EngineError, Result};
+pub use inspect::{IndexQuery, QueryOptions};
 pub use query::{BazelQuerier, PackageQuerier};
 pub use report::{AffectedReport, DirectReason, Explanation, Stats, Timings};
 pub use synthq::SynthQuerier;

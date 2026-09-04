@@ -32,4 +32,4 @@ pub use csr::{Csr, CsrRef};
 pub use data::{flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, NO_ID};
 pub use format::{index_file_name, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION};
 pub use strtab::{Interner, StrTabRef};
-pub use walk::{walk, WalkOptions, WalkResult};
+pub use walk::{walk, walk_deps, walk_edges, WalkOptions, WalkResult};

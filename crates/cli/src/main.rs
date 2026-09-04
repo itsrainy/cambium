@@ -68,6 +68,16 @@ enum Command {
     Config,
 }
 
+/// Output format for the data-returning queries, which have no Bazel
+/// expression form.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DataFormat {
+    /// Human-readable lines.
+    Text,
+    /// A JSON document carrying the schema version.
+    Json,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     /// One label per line.

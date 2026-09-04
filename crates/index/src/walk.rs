@@ -47,13 +47,33 @@ impl WalkResult {
     }
 }
 
-/// Breadth-first walk over the reverse edges from `direct`.
+/// Breadth-first walk over the reverse edges from `direct`: everything that
+/// depends on the seeds.
 ///
 /// The queue is a plain FIFO over a bitset of visited ids, so a node is
 /// enqueued at most once and the walk is O(affected + their in-edges) — it
 /// never touches the rest of the graph. Terminates on cyclic input even though
 /// Bazel's target graph is acyclic.
 pub fn walk(index: IndexRef<'_>, direct: &[u32], opts: &WalkOptions) -> WalkResult {
+    walk_edges(index, index.reverse, direct, opts)
+}
+
+/// The same walk over the forward edges: everything the seeds depend on.
+pub fn walk_deps(index: IndexRef<'_>, seeds: &[u32], opts: &WalkOptions) -> WalkResult {
+    walk_edges(index, index.forward, seeds, opts)
+}
+
+/// Breadth-first walk over an arbitrary edge set of the index.
+///
+/// Both directions are the same traversal; which CSR is handed in decides
+/// whether the question is "what depends on this" or "what does this depend
+/// on". Keeping one implementation is what stops the two answers from drifting.
+pub fn walk_edges(
+    index: IndexRef<'_>,
+    edges: crate::CsrRef<'_>,
+    direct: &[u32],
+    opts: &WalkOptions,
+) -> WalkResult {
     let n = index.num_nodes() as usize;
     let mut visited = FixedBitSet::with_capacity(n);
     let mut parent = opts.explain.then(|| vec![NO_ID; n]);
@@ -66,7 +86,7 @@ pub fn walk(index: IndexRef<'_>, direct: &[u32], opts: &WalkOptions) -> WalkResu
     }
 
     while let Some(u) = queue.pop_front() {
-        for &v in index.reverse.row(u) {
+        for &v in edges.row(u) {
             if (v as usize) < n && !visited.put(v as usize) {
                 if let Some(p) = parent.as_mut() {
                     p[v as usize] = u;
