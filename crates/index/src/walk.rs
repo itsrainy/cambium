@@ -6,8 +6,7 @@ use std::collections::VecDeque;
 use crate::data::{IndexRef, NodeKind, NO_ID};
 
 /// Options controlling which nodes reach the output.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WalkOptions {
     /// Keep `manual`-tagged rules in the result.
     pub include_manual: bool,
@@ -15,7 +14,6 @@ pub struct WalkOptions {
     /// can be reconstructed (`--explain`). Off by default: it costs 4n bytes.
     pub explain: bool,
 }
-
 
 /// Result of a reverse walk.
 pub struct WalkResult {

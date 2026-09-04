@@ -313,7 +313,15 @@ pub fn plot_svg(title: &str, points: &[(f64, f64)]) -> String {
             fmt_num(points[i].0)
         ));
     }
-    s.push_str("<text x=\"20\" y=\"{}\" fill=\"#666\">ms (log)</text>\n");
+    s.push_str(&format!(
+        "<text x=\"14\" y=\"{:.1}\" fill=\"#666\" \
+         transform=\"rotate(-90 14 {:.1})\">median ms (log)</text>\n\
+         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" fill=\"#666\">size (log)</text>\n",
+        H / 2.0,
+        H / 2.0,
+        W / 2.0,
+        H - 14.0
+    ));
     s.push_str("</svg>\n");
     s
 }
