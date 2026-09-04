@@ -54,6 +54,10 @@ pub struct SynthTarget {
     pub ext_deps: u16,
     /// Source file slots owned by this target: `t<id>_<slot>.src`.
     pub srcs: Vec<u32>,
+    /// Content version per entry of `srcs`, bumped by `ModifySource`. Not part
+    /// of the target hash: editing a file's contents cannot change the graph,
+    /// only mark the file's consumers direct (spec section 2).
+    pub src_versions: Vec<u32>,
     /// `(package, target, slot)` triples for files consumed via `exports_files`.
     pub foreign_srcs: Vec<(u32, u32, u32)>,
     /// Bumped by `EditRuleAttr`; folded into the content hash.
@@ -142,6 +146,16 @@ impl SynthGraph {
         format!("@synth_ext//ext:lib{h}")
     }
 
+    /// Content version of one source file, for the reference algorithm.
+    pub fn src_version(&self, target: u32, slot: u32) -> u32 {
+        let t = &self.targets[target as usize];
+        t.srcs
+            .iter()
+            .position(|&s| s == slot)
+            .and_then(|i| t.src_versions.get(i).copied())
+            .unwrap_or(0)
+    }
+
     pub fn num_alive_targets(&self) -> usize {
         self.targets.iter().filter(|t| t.alive).count()
     }
@@ -196,9 +210,14 @@ impl SynthGraph {
         h.update(t.kind.rule_class().as_bytes());
         h.update(&t.attr_salt.to_le_bytes());
         h.update(&[t.tags]);
+        // Dead deps are filtered out of the emitted rule inputs, so they must
+        // not contribute to the hash either: deleting a target has to move its
+        // consumers' hashes.
         for &d in &t.deps {
-            self.write_target_label(d, scratch);
-            h.update(scratch.as_bytes());
+            if self.targets[d as usize].alive {
+                self.write_target_label(d, scratch);
+                h.update(scratch.as_bytes());
+            }
         }
         // Slots are kept sorted, so hashing them in order is order-independent
         // with respect to the order files were added.
@@ -482,6 +501,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
                 select_deps: 0,
                 ext_deps: 0,
                 srcs: (0..n_srcs).collect(),
+                src_versions: vec![0; n_srcs as usize],
                 foreign_srcs: Vec::new(),
                 attr_salt: 0,
                 tags: if rng.gen::<f64>() < 0.02 { TAG_MANUAL } else { 0 },
@@ -655,6 +675,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             select_deps: 0,
             ext_deps: 0,
             srcs: Vec::new(),
+            src_versions: Vec::new(),
             foreign_srcs: Vec::new(),
             attr_salt: 0,
             tags: 0,

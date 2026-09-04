@@ -5,6 +5,10 @@ members = [
     "crates/synth",
     "crates/cambium-proto",
     "crates/bazel",
+    "crates/diff",
+    "crates/classify",
+    "crates/engine",
+    "crates/cli",
 ]
 
 [workspace.package]
