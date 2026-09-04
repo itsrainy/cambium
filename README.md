@@ -53,7 +53,10 @@ whose inputs did not change. A run is:
 | walk | O(affected + their in-edges) |
 
 Only the splice touches the whole index, and only because v1 writes a complete
-new one; see [BENCHMARKS.md](BENCHMARKS.md).
+new one. It is ~52% of a run on a 500k-target graph. The fix — a delta overlay
+for the `affected` path, leaving `baseline update` materialising, since its
+output is what gets published — is described in
+[BENCHMARKS.md](BENCHMARKS.md#where-the-time-actually-goes).
 
 ## Install
 
@@ -226,10 +229,27 @@ repositories and synthetic revision ids both fit; and `bench sweep --plot`
 writes its log-log chart with a small hand-rolled SVG writer rather than
 pulling in a plotting crate and its font stack for two dozen line segments.
 
-And one deferral: `Packages::bzl_closure_hash` exists in the format but is
-written as zero. v1 resolves `.bzl` edits with `rbuildfiles`, which answers the
-same question exactly; computing the hash statically needs a Starlark load-graph
-index, which the spec lists as a v2 candidate.
+And one deferral, which is worth being precise about because it looks like a
+soundness question: `Packages::bzl_closure_hash` exists in the format but is
+written as zero.
+
+The hash exists in the spec to drive one branch of the direct-set rule — when a
+package's `.bzl` load closure changed, every rule in it is direct regardless of
+its own hash. That branch is load-bearing, not a nicety: a `.bzl` edit that
+changes a rule implementation without changing any BUILD attribute leaves every
+rule proto in the loading packages byte-identical, so every rule hash matches
+and nothing would be reported. cambium takes that branch on `rbuildfiles`
+membership instead — the packages `rbuildfiles` names are exactly the packages
+whose closure hash would have moved — so the behaviour is the spec's, and the
+stored hash would be a second, redundant answer to a question already answered.
+Computing it statically needs a Starlark load-graph index, which the spec lists
+as a v2 candidate and which would let us skip the `rbuildfiles` call on cold
+Bazel servers.
+
+The `edit bzl` end-to-end scenario pins this: it edits a constant nothing uses,
+asserts the whole downstream closure is reported, and asserts that every one of
+those targets is reported *because of the load closure* rather than a rule hash
+— so if the coverage ever moves to the other branch, the test says so.
 
 ## License
 

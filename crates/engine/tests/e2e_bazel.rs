@@ -215,7 +215,9 @@ impl Golden {
             base: self.base.clone(),
             head: head.clone(),
             include_manual: true,
-            explain: false,
+            // On always, so a scenario can assert *why* a target was reported
+            // and not merely that it was.
+            explain: true,
             no_full_build: true,
         };
         let out = engine
@@ -448,6 +450,17 @@ fn golden_scenarios() {
     );
 
     // 8. A .bzl edit reaches every package that loads it.
+    //
+    // The edited constant is used by nothing, so every rule proto in the
+    // loading packages comes back byte-identical and no rule hash moves: Bazel
+    // folds a rule's *definition* environment into the proto, not the loading
+    // BUILD file's load closure. (Verified against Bazel 7.4.1.) So this
+    // scenario isolates the only mechanism that can catch a changed rule
+    // implementation — every rule in a package `rbuildfiles` names is direct
+    // regardless of its hash — and the reason assertion below is what keeps it
+    // isolated. Should it ever start passing through the rule-hash path
+    // instead, that assertion fails and says so, rather than the coverage
+    // quietly evaporating.
     let r = g.scenario("edit bzl", |root| {
         let p = root.join("lib/defs.bzl");
         let s = std::fs::read_to_string(&p).unwrap();
@@ -466,6 +479,25 @@ fn golden_scenarios() {
         "rbuildfiles should report both loading packages: {:?}",
         r.dirty_packages
     );
+    let explanations = r
+        .explanations
+        .as_ref()
+        .expect("explanations were requested");
+    assert!(!explanations.is_empty(), "edit bzl reported nothing");
+    for e in explanations {
+        assert!(
+            matches!(
+                &e.reason,
+                cambium_engine::DirectReason::BzlClosure { package }
+                    if package == "lib" || package == "app"
+            ),
+            "edit bzl: {} was reported because {:?}. No rule hash moves for this \
+             edit, so the bzl-closure branch is the only thing that can catch \
+             it; any other reason means this scenario has stopped covering it.",
+            e.target,
+            e.reason
+        );
+    }
 
     // 9. A file exported by one package and consumed by another.
     let r = g.scenario("modify exported file", |root| {

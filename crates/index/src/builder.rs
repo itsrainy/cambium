@@ -161,6 +161,23 @@ impl IndexBuilder {
     }
 
     /// Loads a base index into mutable form, preserving every id and the lineage.
+    ///
+    /// This copies the whole index — labels, hashes, edges — and rebuilds the
+    /// interner's table, which is the single most expensive step in a
+    /// pull-request run (see BENCHMARKS.md). Before optimising it, note which
+    /// path you are optimising:
+    ///
+    /// - `baseline update` **must** keep materialising. Its output is the index
+    ///   that gets published and spliced onto next time, and the property that
+    ///   a spliced index equals a full rebuild is what the correctness oracles
+    ///   check on every commit.
+    /// - `affected` does not need a new index at all. It needs the base reverse
+    ///   CSR plus a small delta for the dirty packages — the overlay the design
+    ///   spec defers to v2 — and that is where the win is.
+    ///
+    /// Making the shared path lazy to speed up `affected` would take the
+    /// published artifact with it. Add the overlay alongside this, not instead
+    /// of it.
     pub fn from_view(v: IndexRef<'_>) -> Self {
         let (lb, lo) = (v.labels.bytes.to_vec(), v.labels.offsets.to_vec());
         let (cb, co) = (v.classes.bytes.to_vec(), v.classes.offsets.to_vec());
