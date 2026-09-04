@@ -46,6 +46,7 @@ fn walks_a_real_git_history() {
             include_manual: true,
             explain: false,
             no_full_build: true,
+            publish_base: false,
         };
         let out = engine
             .compute(index, &changes, &SynthQuerier::new(&repo.graphs[i]), &req)

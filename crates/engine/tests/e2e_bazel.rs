@@ -219,6 +219,7 @@ impl Golden {
             // and not merely that it was.
             explain: true,
             no_full_build: true,
+            publish_base: false,
         };
         let out = engine
             .compute(
@@ -668,6 +669,7 @@ fn synthetic_workspace_through_real_bazel() {
             include_manual: true,
             explain: false,
             no_full_build: true,
+            publish_base: false,
         };
         let out = engine
             .run_incremental(index.clone(), &req)

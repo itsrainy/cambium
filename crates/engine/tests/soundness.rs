@@ -39,6 +39,7 @@ fn engine_never_under_approximates() {
         include_manual: true,
         explain: false,
         no_full_build: true,
+        publish_base: false,
     };
 
     // Every iteration lands in exactly one of these, and the totals are checked
