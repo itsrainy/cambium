@@ -1,0 +1,17 @@
+# The toolchain CI runs and the one a contributor gets, in one place.
+#
+# `cargo clippy -D warnings` against a floating `stable` fails on Rust release
+# day for reasons unrelated to any commit: a new lint lands, and main goes red
+# with nothing changed. That is what happened here — every CI run from the
+# first was red on lints that did not exist when the code was written, and a
+# contributor on an older stable could not reproduce it.
+#
+# So the lint gate runs against a version, and moving that version is a commit
+# with the fixes in it. The `lint-next` job in .github/workflows/ci.yml watches
+# floating stable without blocking, so new lints are still visible.
+#
+# This is not the MSRV. That is `rust-version` in the workspace Cargo.toml.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

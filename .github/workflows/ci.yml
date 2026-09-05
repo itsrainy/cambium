@@ -18,20 +18,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rust-toolchain.toml names the version; installing it here rather than
+      # letting the first cargo call auto-install keeps the step that fails
+      # legible.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  lint-next:
+    name: clippy on the next toolchain (advisory)
+    runs-on: ubuntu-latest
+    # Never blocks. Its job is to say "the next stable adds a lint" while the
+    # pinned gate keeps main green, so bumping rust-toolchain.toml is a commit
+    # with the fixes in it rather than an emergency.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `+stable` on the command line is the one form that outranks
+      # rust-toolchain.toml, so this really does run the newer clippy.
+      - run: cargo +stable clippy --workspace --all-targets -- -D warnings
 
   soundness:
     name: soundness sweep (small)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # The oracle that matters: the engine's answer must contain everything a
       # full rebuild reports, over many seeds and every change preset.
@@ -46,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: bazel-contrib/setup-bazel@0.9.1
         with:
@@ -61,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p cambium-cli
       - run: |
@@ -82,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release -p cambium-engine --test soundness -- --nocapture
         env:

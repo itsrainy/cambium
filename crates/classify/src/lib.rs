@@ -129,17 +129,14 @@ impl PackageSet {
     pub fn owner_of(&self, path: &str) -> Option<&str> {
         let mut end = path.rfind('/');
         loop {
-            let dir = match end {
-                Some(i) => &path[..i],
-                None => "",
-            };
+            // `None` is the root package, which is the last candidate rather
+            // than the end of the walk.
+            let dir = end.map_or("", |i| &path[..i]);
             if let Some(p) = self.packages.get(dir) {
                 return Some(p.as_str());
             }
-            match end {
-                None => return None,
-                Some(i) => end = path[..i].rfind('/'),
-            }
+            let i = end?;
+            end = path[..i].rfind('/');
         }
     }
 }

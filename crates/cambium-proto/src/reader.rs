@@ -47,10 +47,7 @@ pub fn read_frames<R: Read>(
 
     loop {
         // Parse as many complete frames as the buffer holds.
-        loop {
-            let Some((len, header)) = read_varint(&buf[cursor..]) else {
-                break;
-            };
+        while let Some((len, header)) = read_varint(&buf[cursor..]) {
             if len > MAX_MESSAGE {
                 return Err(ReadError::TooLarge(len, MAX_MESSAGE));
             }
