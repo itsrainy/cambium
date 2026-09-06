@@ -175,8 +175,14 @@ impl Run {
             Some(p) => CorpusDir::new(p.clone()),
             None => CorpusDir::from_env(),
         };
+        // Absolute, always. Producers and Bazel run as child processes with a
+        // different working directory (the corpus worktree, a scratch
+        // worktree), so a relative `--results-dir corpus-results` would name a
+        // different directory in each of them — which is exactly how
+        // bazel-diff came to be handed a base worktree that did not exist.
         let results = cambium_corpus::results_dir(&c.results_dir, &c.id);
         std::fs::create_dir_all(&results)?;
+        let results = cambium_compare::threeway::absolute(&results);
         Ok(Self {
             entry,
             corpus,
@@ -568,7 +574,7 @@ fn open_producer(name: &str) -> Result<Option<Box<dyn cambium_compare::Producer>
             Ok(Some(p))
         }
         Err(e) => {
-            eprintln!("cambium: corpus compare: skipping {name}: {e}");
+            eprintln!("cambium: corpus compare: skipping {name}: {e:#}");
             Ok(None)
         }
     }
@@ -672,11 +678,12 @@ fn parse_kinds(kinds: &[String]) -> Result<Vec<pairs::PairKind>> {
 fn print_compare_summary(result: &cambium_compare::CompareResult) {
     let s = &result.summary;
     println!(
-        "\n{} {}  pairs {}  passed {}  min recall {:.1}%",
+        "\n{} {}  pairs {}  passed {}  global {}  min recall {:.1}%",
         result.repo,
         &result.pin[..result.pin.len().min(12)],
         s.pairs,
         s.passed,
+        s.globals,
         s.min_recall * 100.0
     );
     println!(

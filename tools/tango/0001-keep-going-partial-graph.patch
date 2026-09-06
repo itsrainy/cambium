@@ -1,0 +1,70 @@
+diff --git a/core/bazel/query.go b/core/bazel/query.go
+index 29b8bd6..6198af1 100644
+--- a/core/bazel/query.go
++++ b/core/bazel/query.go
+@@ -18,9 +18,11 @@ import (
+ 	"bytes"
+ 	"compress/gzip"
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"os"
++	"os/exec"
+ 	"strings"
+ 
+ 	buildpb "github.com/bazelbuild/buildtools/build_proto"
+@@ -97,8 +99,22 @@ func (b *BazelClient) executeQueryInternal(ctx context.Context, query string, st
+ 	// Drain both streams first so a fast-exiting Bazel process cannot close a
+ 	// pipe while a reader is still consuming its buffered output.
+ 	waitErr := cmd.Wait()
++	// cambium patch: `bazel query --keep_going` exits 3 when it finished but
++	// could not load part of the graph — routine on a real repository whose
++	// external repositories cannot all be fetched on this machine. Bazel has
++	// already streamed the proto for everything that did load, and that answer
++	// is what every tool in the comparison is being held to, so exit 3 is
++	// accepted with a warning instead of losing the whole revision. Any other
++	// non-zero exit still fails.
+ 	if waitErr != nil {
+-		return queryResults, b.wrapQueryFailure(cmdCtx, "bazel query failed", waitErr, &stderrBuf)
++		var exitErr *exec.ExitError
++		partial := errors.As(waitErr, &exitErr) && exitErr.ExitCode() == 3 && streamErr == nil && queryResults != nil
++		if !partial {
++			return queryResults, b.wrapQueryFailure(cmdCtx, "bazel query failed", waitErr, &stderrBuf)
++		}
++		b.logger.Warn("bazel query exited 3 under --keep_going; the graph is a lower bound",
++			zap.Int("target_count", len(queryResults.Target)))
++		return queryResults, nil
+ 	}
+ 	if streamErr != nil {
+ 		return nil, b.wrapQueryFailure(cmdCtx, "stream processing failed", streamErr, &stderrBuf)
+diff --git a/core/targethasher/graph.go b/core/targethasher/graph.go
+index 52fb0b5..0083921 100644
+--- a/core/targethasher/graph.go
++++ b/core/targethasher/graph.go
+@@ -625,7 +625,24 @@ func HashRecursively(ctx context.Context, p HashParam) ([]byte, error) {
+ 		// //third_party/github.com/docker/docker:com_github_docker_docker_invalid_host_fix.patch
+ 
+ 		if l.Repository != "" {
+-			return nil, fmt.Errorf("unexpected repository from target %s", p.TargetName)
++			// cambium patch: under `--keep_going` (see
++			// 0001-keep-going-exit-3.patch) the query result is missing every
++			// target in a repository Bazel could not load — on macOS,
++			// bazel/bazel's `@rbe_ubuntu2404` (needs Docker) and
++			// `@graalvm_oracle` (no macos-x64 build). A rule that loaded can
++			// still name one of those as a dep, and erroring here throws the
++			// whole revision away. Register it as an opaque external node with
++			// an empty hash instead: it is the same missing repository at both
++			// revisions, so the node is constant and cannot manufacture or
++			// hide a difference between the targets that did load.
++			p.Targets[p.TargetName] = &Target{
++				Name:            p.TargetName,
++				RuleType:        ExternalRuleType,
++				External:        true,
++				Hash:            []byte{},
++				HashWithoutDeps: []byte{},
++			}
++			return []byte{}, nil
+ 		}
+ 
+ 		path := filepath.Join(p.WorkspaceRoot, l.Package, l.Target)

@@ -48,6 +48,31 @@ so an upgrade does not orphan a warm store; they are no longer written.
 `cambi baseline list` prints keys; `cambi baseline gc` deletes those older
 than `retention_days`, walking the tree.
 
+## What makes an index incompatible
+
+Three separate things, and they are not interchangeable:
+
+- **`FORMAT_VERSION`** (`crates/index/src/format.rs`) versions the *file
+  layout*. A bump makes older files unreadable — `index inspect` can still name
+  their version, nothing else can touch them. Bump it only when the bytes move.
+- **`config_hash`**, stamped into the index header from
+  `cambium_engine::Config::hash`, versions the *meaning of the rows*. An index
+  whose `config_hash` differs from the running config is refused for splicing
+  and the run mints a new lineage; the file stays readable. This is the knob for
+  anything that changes what a hash or an edge means without moving the layout.
+- **`lineage`**, a random 16 bytes minted per full build, is what makes node
+  ids comparable. It is a consequence of the other two, never bumped by hand.
+
+`Config::hash` therefore covers more than `cambium.toml`: it mixes in
+[`cambium_proto::RULE_HASH_VERSION`], the version of the canonical rule
+hashing in `crates/cambium-proto/src/hash.rs`. Dropping `generator_location`
+from the canonical rule (a macro's BUILD line, which shifts whenever a line is
+inserted above it, and which bazel-diff and Tango both ignore) took that
+constant to **2**. Every index published by an older cambium has the old
+`config_hash`, so it can never be spliced against rows hashed the new way —
+the run says so and rebuilds. Any future change to `canonical_rule` bumps the
+same constant.
+
 ## Writes are idempotent, and concurrent writers are safe
 
 An index file is a 64-byte prefix, a payload, and a trailer. The **payload is a

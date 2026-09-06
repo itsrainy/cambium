@@ -24,10 +24,23 @@ tag and commit in `$DIR/VERSION`, copies `cmd/tango-cli/*.go` into
 
 Pinned at **v0.0.46** = `005b0dec444d956cda42ebb62cce227362783948`.
 
-No patches to upstream are needed: plain `go build` works, `go.sum` is
-complete, and the generated protos in `tangopb/` are checked in. `fetch.sh`
-still applies any `tools/tango/*.patch` if one is ever added, so a future
-change is recorded as a patch rather than a hand edit of the cache.
+One patch to upstream is applied, `0001-keep-going-partial-graph.patch`: Tango's
+Bazel client fails a query on any non-zero exit, and `bazel query
+--keep_going` exits **3** when it finished but could not load part of the
+graph. On a real repository that is routine — `bazel/bazel` at its pin
+references a GraalVM distribution with no macOS x86_64 build and an RBE
+config that shells out to Docker — and Bazel has already streamed the proto
+for everything that did load, which is the same universe bazel-diff (`-k`)
+and cambium's own indexer see. The patch accepts exit 3 when the stream
+parsed, warns, and uses the partial graph. It also stops the target hasher
+erroring on a dep that names one of those unloadable repositories
+(`@rbe_ubuntu2404//config:platform`), registering it as an opaque external
+node with an empty hash: the repository is missing at both revisions, so the
+node is constant and can neither manufacture nor hide a difference between
+the targets that did load. Everything else builds unchanged:
+`go.sum` is complete and the generated protos in `tangopb/` are checked in.
+`fetch.sh` resets the checkout before applying `tools/tango/*.patch`, so
+rerunning it is idempotent.
 
 ## Usage
 

@@ -584,6 +584,35 @@ impl Engine {
                 Err(e) => return Err(e),
             }
         }
+        // A deleted `BUILD` does not always delete the package. `bazel/bazel`
+        // spent several commits carrying both `docs/BUILD` and
+        // `docs/BUILD.bazel`, and the commit that removed the old one reads,
+        // in the diff alone, exactly like a package deletion — after which
+        // the package is dropped from the index and every target in it
+        // becomes invisible to every later revision. (The corpus comparison
+        // found this: `//docs:docs` and `//docs:srcs` were reported by both
+        // bazel-diff and Tango, on pairs where cambium's index no longer had
+        // a `docs` package at all.) The diff cannot tell the two cases apart,
+        // but the head worktree can: if either BUILD file is still on disk,
+        // the package lives and is merely dirty.
+        if !dirty.global && !dirty.deleted_packages.is_empty() {
+            let ws = self.bazel.workspace().to_path_buf();
+            let survivors: Vec<String> = dirty
+                .deleted_packages
+                .iter()
+                .filter(|p| {
+                    let dir = ws.join(p.as_str());
+                    dir.join("BUILD").exists() || dir.join("BUILD.bazel").exists()
+                })
+                .cloned()
+                .collect();
+            for p in survivors {
+                tracing::debug!(package = %p, "a BUILD file went away but the package did not");
+                dirty.deleted_packages.remove(&p);
+                dirty.dirty.insert(p);
+            }
+        }
+
         stats.ignored_files = dirty.ignored;
         timings.dirty = sw.lap();
 

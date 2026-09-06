@@ -44,6 +44,27 @@ fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
         .collect()
 }
 
+/// The BUILD line a target's macro call would sit on.
+///
+/// Real Bazel reports `generator_location` as `pkg/BUILD:line:col` for every
+/// macro-instantiated rule, and its value is a function of *position in the
+/// file*, so inserting or deleting a target shifts every later target's value
+/// without changing anything those targets build. Reproducing that here is what
+/// lets the synthetic sweeps exercise the attribute — `canonical_rule` drops
+/// it, so a shift must move no hash.
+///
+/// `LINES_PER_TARGET` is a plausible stanza height; the column is 1 because a
+/// top-level macro call starts at the margin.
+const LINES_PER_TARGET: usize = 7;
+
+fn generator_location(g: &SynthGraph, pkg: u32, ordinal: usize) -> String {
+    format!(
+        "{}/BUILD.bazel:{}:1",
+        g.package_path(pkg),
+        ordinal * LINES_PER_TARGET + 1
+    )
+}
+
 /// Every target in the graph, as Bazel would report it.
 pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
     let mut out = Vec::with_capacity(g.num_alive_targets() * 2);
@@ -51,11 +72,14 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
         if !g.packages[pkg as usize].alive {
             continue;
         }
+        let mut ordinal = 0usize;
         for &tid in &g.packages[pkg as usize].targets {
             let t = &g.targets[tid as usize];
             if !t.alive {
                 continue;
             }
+            let location = generator_location(g, pkg, ordinal);
+            ordinal += 1;
             let deps: Vec<String> = t
                 .deps
                 .iter()
@@ -81,6 +105,13 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                 string_list("deps", deps),
                 string_list("srcs", srcs),
                 string_attr("salt", t.attr_salt.to_string()),
+                // The `generator_*` family a macro-made rule carries. Bazel
+                // reports all three as explicitly specified even under
+                // `--proto:default_values=false`, so a dump without them would
+                // not exercise the canonicalisation that drops the location.
+                string_attr("generator_location", location),
+                string_attr("generator_name", format!("t{tid}")),
+                string_attr("generator_function", t.kind.rule_class().to_string()),
             ];
             if t.is_manual() {
                 attribute.push(string_list("tags", vec!["manual".to_string()]));

@@ -68,3 +68,52 @@ extra_query_flags = []
 invalidators = ["third_party/**", "tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]
 skip = true
 notes = "largest public Bazel graph; stretch target, monthly or on demand; hours, very large fetch"
+
+# The Bazel version matrix (spec 3.2). Running a HEAD pin under an older major
+# does not work: bazel@HEAD needs 9.x (under 8.x the BUILD files use
+# `exec_group_compatible_with`, under 7.x the `.bazelrc` uses
+# `--downloader_config`), and envoy@HEAD needs 8.7.0. So each major gets its
+# own entry, pinned to the last first-parent commit on the default branch whose
+# own `.bazelversion` is that major, with `mirror` pointing at the parent entry
+# so the 1.7 GB clone is not paid for twice.
+
+[[repo]]
+id = "bazel-7"
+url = "https://github.com/bazelbuild/bazel.git"
+mirror = "bazel"
+# 2025-01-17, .bazelversion 7.4.1; the next first-parent .bazelversion change
+# (3f9f26f5, 2025-01-20) is the move to 8.0.1.
+pin = "7d50755cf12e40838096ad5142bf1f41e96789e9"
+# 150, not 300: pin~300 (2024-11-27) reaches back past 51afbd68 (2024-12-11),
+# a two-day window where .bazelversion said 8.0.0 before being reverted.
+# pin~150 is 2024-12-16, safely inside the 7.4.1 run.
+replay_range = 150
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+notes = "bazel under 7.x for the version matrix; shares the bazel mirror"
+
+[[repo]]
+id = "bazel-8"
+url = "https://github.com/bazelbuild/bazel.git"
+mirror = "bazel"
+# 2026-01-21, .bazelversion 8.5.1; the next change (b3004111, same day) is 9.0.0.
+pin = "8584d864876062a15dd11423717b0412f3d1fd8d"
+replay_range = 150
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+notes = "bazel under 8.x for the version matrix; shares the bazel mirror"
+
+[[repo]]
+id = "envoy-7"
+url = "https://github.com/envoyproxy/envoy.git"
+mirror = "envoy"
+# 2026-05-21, .bazelversion 7.7.1; the next change (6d26e341, same day) is 8.7.0.
+# envoy has never pinned a 9.x, so there is no envoy-9 entry.
+pin = "10840c2643bbbcaef5aa781c696c4f2aa6b27909"
+replay_range = 150
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["bazel/repositories.bzl", "bazel/repository_locations.bzl", "api/bazel/**"]
+notes = "envoy under 7.x for the version matrix; shares the envoy mirror"

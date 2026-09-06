@@ -30,6 +30,10 @@ fi
 
 git -C "$SRC" fetch --quiet --tags origin || true
 git -C "$SRC" checkout --quiet --detach "$TANGO_COMMIT"
+# Hard reset, not just a checkout: the patches below are applied to the
+# worktree, so a second run would otherwise try to apply them on top of
+# themselves and fail.
+git -C "$SRC" reset --quiet --hard "$TANGO_COMMIT"
 git -C "$SRC" clean -qfd -e cmd
 
 have="$(git -C "$SRC" rev-parse HEAD)"

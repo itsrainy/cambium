@@ -111,6 +111,7 @@ do not.
 | `cambium_extra_visibility` | the two producers' canonical rules differ only in `visibility`/`tags`, which cambium's hash intentionally ignores | none — over-approximation |
 | `bazeldiff_extra_content` | bazel-diff reports a changed path with no consumer in cambium's head index (e.g. a file outside any package, or a hash-only artifact) | none — bazel-diff hashes source content cambium's graph does not name |
 | `bazeldiff_extra_external` | the disagreement is confined to `@external//...` labels, which the tools may canonicalise differently (`@ext//:x` vs `@@ext~//:x`) | none — canonicalisation only, not a graph difference |
+| `bazeldiff_extra_external_content` | a `//...` label whose own rule (modulo `visibility`/`tags`), source inputs and transitive `//...` dependencies are all unchanged, and which depends on something external. bazel-diff's digests include the external graph, and on `bazel/bazel` under `--keep_going` how much of that graph loads varies between invocations | none — external load nondeterminism in the producer, not a graph difference. All four conditions must hold; drop any one and the label stays `cambium_missing` |
 | `cambium_missing` | a label the oracle or a producer says is impacted, that cambium's `affected` does not report | **fail** — this is unsoundness |
 | `unclassified` | a disagreement none of the above rules explain | **fail** — needs a new class or a real bug fix before it can be waved through |
 

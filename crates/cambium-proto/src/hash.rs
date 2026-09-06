@@ -16,6 +16,40 @@ use crate::blaze_query::Rule;
 /// Attributes whose list order carries no meaning.
 const ORDER_INSENSITIVE: &[&str] = &["tags", "visibility", "features"];
 
+/// Attributes Bazel reports that describe *where* a rule was written rather
+/// than *what* it builds.
+///
+/// `generator_location` is the `pkg/BUILD:line:col` of the macro call that
+/// instantiated the rule, so every rule below an inserted line in a BUILD file
+/// gets a new value on a commit that changed nothing about it. On the
+/// `bazel/bazel` corpus that alone produced thousands of `rule definition
+/// changed` direct targets per line-shifting commit. bazel-diff drops it
+/// (`DEFAULT_IGNORED_ATTRS`) and so does Uber's Tango (`sourcehasher.go`);
+/// cambium now does too.
+///
+/// `generator_name` and `generator_function` are deliberately *kept*: they name
+/// the macro and the symbol that made the rule, they do not move when a line
+/// does, and a rule that switched macros really is a different rule.
+///
+/// Note that these attributes survive `--proto:default_values=false`: for a
+/// macro-instantiated rule Bazel reports the whole `generator_*` family as
+/// explicitly specified, so `explicitly_specified` retention does not filter
+/// them out and this list has to.
+const LOCATION_ATTRS: &[&str] = &["generator_location"];
+
+/// Version of the canonicalisation this module implements.
+///
+/// It is mixed into the engine's config hash (`cambium_engine::Config::hash`),
+/// which is stamped into every index and checked before a splice. Bumping it
+/// therefore makes every index built by an older cambium incompatible with this
+/// one, so hashes computed under two different canonicalisations can never be
+/// compared against each other. Bump it whenever [`canonical_rule`] starts or
+/// stops keeping a field.
+///
+/// - 1: the original canonicalisation.
+/// - 2: `generator_location` dropped.
+pub const RULE_HASH_VERSION: u32 = 2;
+
 /// Returns the canonical form of `rule` used for hashing.
 pub fn canonical_rule(rule: &Rule) -> Rule {
     let mut r = rule.clone();
@@ -35,6 +69,10 @@ pub fn canonical_rule(rule: &Rule) -> Rule {
     // which case every attribute present was specified.
     r.attribute
         .retain(|a| a.explicitly_specified.unwrap_or(true));
+
+    // Positional, but carried as an attribute rather than in `location`.
+    r.attribute
+        .retain(|a| !LOCATION_ATTRS.contains(&a.name.as_str()));
 
     for a in &mut r.attribute {
         a.explicitly_specified = None;
@@ -93,6 +131,32 @@ mod tests {
         b.definition_stack = vec!["rules.bzl:9".into()];
         b.rule_class_key = Some("key".into());
         assert_eq!(rule_hash(&a), rule_hash(&b));
+    }
+
+    #[test]
+    fn a_line_shift_in_the_generator_location_does_not_move_the_hash() {
+        // The BUILD line a macro was called on is not a property of what the
+        // rule builds; a line inserted above it must not mark it changed.
+        let mut a = base();
+        a.attribute
+            .push(attr("generator_location", &["pkg/BUILD:12:1"]));
+        a.attribute.push(attr("generator_name", &["t"]));
+        let mut b = base();
+        b.attribute
+            .push(attr("generator_location", &["pkg/BUILD:41:1"]));
+        b.attribute.push(attr("generator_name", &["t"]));
+        assert_eq!(rule_hash(&a), rule_hash(&b));
+    }
+
+    #[test]
+    fn the_generating_macro_still_moves_the_hash() {
+        let mut a = base();
+        a.attribute
+            .push(attr("generator_function", &["cc_wrapper"]));
+        let mut b = base();
+        b.attribute
+            .push(attr("generator_function", &["cc_wrapper_v2"]));
+        assert_ne!(rule_hash(&a), rule_hash(&b));
     }
 
     #[test]

@@ -48,6 +48,16 @@ pub struct OracleResult {
     /// Roots whose query failed (a broken package, say) and were skipped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_roots: Vec<String>,
+    /// At least one batch came back from a `--keep_going` query that exited 3:
+    /// Bazel could not load everything (an external repository that will not
+    /// fetch on this machine, say) but answered for what did load. The oracle
+    /// is a *lower bound* on what cambium must contain, so a partial answer is
+    /// still sound to check against — it just proves less.
+    #[serde(default)]
+    pub partial: bool,
+    /// How many batches came back partial.
+    #[serde(default)]
+    pub partial_batches: usize,
 }
 
 impl OracleResult {
@@ -116,12 +126,18 @@ impl RdepsOracle {
         }
         for batch in roots.chunks(self.chunk.max(1)) {
             match query_rdeps(bazel, batch) {
-                Ok(labels) => result.oracle_set.extend(labels),
+                Ok(Batch { labels, partial }) => {
+                    result.oracle_set.extend(labels);
+                    if partial {
+                        result.partial = true;
+                        result.partial_batches += 1;
+                    }
+                }
                 Err(e) => {
                     // One unqueryable root must not lose the whole pair's
                     // oracle; record what was dropped so a suspiciously small
                     // oracle set is explainable.
-                    tracing::warn!(roots = ?batch, error = %e, "rdeps query failed; skipping the batch");
+                    tracing::warn!(roots = ?batch, error = format!("{e:#}"), "rdeps query failed; skipping the batch");
                     result
                         .skipped_roots
                         .extend(batch.iter().map(String::to_string));
@@ -198,7 +214,25 @@ pub fn walk_from_roots(head: IndexRef<'_>, roots: &[String]) -> BTreeSet<String>
         .collect()
 }
 
-fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<BTreeSet<String>> {
+/// One batch's answer, and whether Bazel had to give up on part of the graph.
+struct Batch {
+    labels: BTreeSet<String>,
+    partial: bool,
+}
+
+/// Runs one batched `rdeps` query.
+///
+/// **Exit 3 is accepted.** Under `--keep_going` Bazel exits 3 when it finished
+/// but hit errors — on a real repository that is routine: `bazel/bazel` at
+/// these pins references external repositories that cannot be fetched on macOS
+/// (a GraalVM distribution with no macos-x64 build, an RBE config that needs
+/// Docker), so the transitive closure of `//...` cannot be completed. Bazel
+/// still prints the reverse dependencies of everything that *did* load. Since
+/// the oracle only ever asserts "cambium must contain all of this", a smaller
+/// answer weakens the check but never makes it wrong, so the batch is kept and
+/// flagged [`OracleResult::partial`]. Any other non-zero exit is a real
+/// failure and takes the batch out.
+fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     let expr = rdeps_expression(roots);
     let out = bazel
         .command("query")
@@ -215,14 +249,23 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<BTreeSet<String>> {
         ])
         .output()
         .context("spawning bazel query rdeps")?;
+    let partial = out.status.code() == Some(3);
     anyhow::ensure!(
-        out.status.success(),
+        out.status.success() || partial,
         "bazel query {} failed with {}\n{}",
         crate::producer::tail(&expr, 1),
         out.status,
         crate::producer::tail(&String::from_utf8_lossy(&out.stderr), 20)
     );
-    Ok(parse_labels(&String::from_utf8_lossy(&out.stdout)))
+    let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
+    if partial {
+        tracing::warn!(
+            roots = roots.len(),
+            labels = labels.len(),
+            "the rdeps query exited 3 under --keep_going; the oracle answer for this batch is a lower bound"
+        );
+    }
+    Ok(Batch { labels, partial })
 }
 
 /// One label per line, blank lines dropped.

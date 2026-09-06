@@ -60,20 +60,51 @@ pub struct CompareOptions {
     pub examples: usize,
 }
 
+/// Makes a path absolute without requiring it to exist.
+///
+/// Every path in a run is handed to a *child process* — bazel-diff, tango-cli,
+/// Bazel — that runs with its own working directory (the corpus worktree, a
+/// scratch worktree), so a relative `--results-dir corpus-results` resolves
+/// somewhere else in each of them. `canonicalize` is used where it can be
+/// (it also resolves the macOS `/var` -> `/private/var` symlink, which keeps
+/// paths comparable across processes) and falls back to joining the current
+/// directory for a path that does not exist yet.
+pub fn absolute(p: &Path) -> PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p),
+        Err(_) => p.to_path_buf(),
+    }
+}
+
 impl CompareOptions {
     pub fn new(repo_id: impl Into<String>, pin: impl Into<String>, results_dir: PathBuf) -> Self {
         let repo_id = repo_id.into();
         Self {
-            scratch: std::env::temp_dir().join(format!("cambium-compare/{repo_id}")),
+            scratch: absolute(&std::env::temp_dir().join(format!("cambium-compare/{repo_id}"))),
             repo_id,
             pin: pin.into(),
-            results_dir,
+            results_dir: absolute(&results_dir),
             bazel_version: None,
             oracle_k: 100,
             seed: 0,
             resume: true,
             examples: DEFAULT_EXAMPLES,
         }
+    }
+
+    /// Forces `results_dir` and `scratch` absolute. Called at the top of
+    /// [`compare_pairs`] and [`compare_pair_with`], so a caller that built the
+    /// options by hand from a relative CLI flag cannot hand a producer a path
+    /// that means something different in the child's working directory.
+    pub fn make_absolute(&mut self) {
+        self.results_dir = absolute(&self.results_dir);
+        self.scratch = absolute(&self.scratch);
     }
 
     /// `compare-<pin>.json`, or `compare-<pin>-<bazel_version>.json` when the
@@ -108,6 +139,9 @@ pub struct CambiumRun {
     pub affected: usize,
     pub tests: usize,
     pub global: bool,
+    /// Why, when `global`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_reason: Option<String>,
     /// Wall time with the base index resolved from scratch.
     pub cold_wall_ms: u64,
     /// Wall time with the base index already in the store.
@@ -143,6 +177,13 @@ pub struct ProducerComparison {
     pub counts: BTreeMap<String, usize>,
     /// A capped sample of the disagreements, failures first.
     pub examples: Vec<Disagreement>,
+    /// Why cambium reached the labels the producer did not report, counted by
+    /// `--explain` reason kind (`rule_hash`, `file src/.../BUILD`,
+    /// `deleted_dep //x:y`, ...). Without this a `unclassified` count is a
+    /// number with no way in: the classifier says "nothing explains these",
+    /// and this says what cambium itself thought it was doing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cambium_only_reasons: BTreeMap<String, usize>,
     pub pass: bool,
     /// Set when the producer itself failed; the pair is then not counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +205,10 @@ pub struct PairComparison {
     pub oracle: Option<OracleResult>,
     /// Recall against the oracle; must be 1.0.
     pub recall: f64,
+    /// cambium answered `//...`: no producer ran, nothing was classified, and
+    /// the pair is excluded from the precision means (see [`summarise`]).
+    #[serde(default)]
+    pub global: bool,
     pub pass: bool,
 }
 
@@ -185,6 +230,11 @@ pub struct WallStats {
 pub struct CompareSummary {
     pub pairs: usize,
     pub passed: usize,
+    /// Pairs on which cambium answered `//...`. They pass by construction and
+    /// contribute to no precision, class or wall-clock statistic, so a corpus
+    /// full of `MODULE.bazel` bumps cannot flatter (or ruin) the numbers.
+    #[serde(default)]
+    pub globals: usize,
     /// Total labels in each disagreement class, over every pair and producer.
     pub by_class: BTreeMap<String, usize>,
     /// Mean precision per producer.
@@ -284,6 +334,10 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
         if p.pass {
             s.passed += 1;
         }
+        if p.global {
+            s.globals += 1;
+            continue;
+        }
         s.min_recall = s.min_recall.min(p.recall);
         for pr in &p.producers {
             if pr.error.is_some() {
@@ -317,8 +371,9 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
         .collect();
     s.producer_cold = cold.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
     s.producer_warm = warm.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
-    s.cambium_cold = wall_stats(pairs.iter().map(|p| p.cambium.cold_wall_ms).collect());
-    s.cambium_warm = wall_stats(pairs.iter().map(|p| p.cambium.warm_wall_ms).collect());
+    let timed = || pairs.iter().filter(|p| !p.global);
+    s.cambium_cold = wall_stats(timed().map(|p| p.cambium.cold_wall_ms).collect());
+    s.cambium_warm = wall_stats(timed().map(|p| p.cambium.warm_wall_ms).collect());
     s.pass = s.passed == s.pairs && s.min_recall >= 1.0;
     s
 }
@@ -376,9 +431,40 @@ pub fn run_context(engine: &Engine, scratch: &Path, base_worktree: &Path) -> Run
         bazel_binary: engine.bazel.binary().to_path_buf(),
         startup_flags: engine.bazel.startup_flags().to_vec(),
         env: engine.bazel.env().to_vec(),
-        scratch: scratch.to_path_buf(),
-        base_worktree: base_worktree.to_path_buf(),
+        scratch: absolute(scratch),
+        base_worktree: absolute(base_worktree),
     }
+}
+
+/// How many of `labels` cambium reached for each `--explain` reason.
+fn reason_histogram<'a>(
+    labels: impl IntoIterator<Item = &'a String>,
+    explanations: &[cambium_engine::report::Explanation],
+) -> BTreeMap<String, usize> {
+    let wanted: BTreeSet<&str> = labels.into_iter().map(String::as_str).collect();
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    for e in explanations {
+        if wanted.contains(e.target.as_str()) {
+            *out.entry(e.reason.describe()).or_default() += 1;
+        }
+    }
+    out
+}
+
+/// The labels themselves plus every label on their `--explain` path: the set
+/// the classifier will ask Bazel about, so it can be fetched in one batch.
+fn with_paths<'a>(
+    labels: impl IntoIterator<Item = &'a String>,
+    explanations: &[cambium_engine::report::Explanation],
+) -> Vec<String> {
+    let wanted: BTreeSet<&str> = labels.into_iter().map(String::as_str).collect();
+    let mut out: BTreeSet<String> = wanted.iter().map(|s| s.to_string()).collect();
+    for e in explanations {
+        if wanted.contains(e.target.as_str()) {
+            out.extend(e.path.iter().cloned());
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// One pair, with defaults for scratch and the example cap.
@@ -410,6 +496,9 @@ pub fn compare_pair_with(
     producers: &[&dyn Producer],
     opts: &CompareOptions,
 ) -> Result<PairComparison> {
+    let mut owned = opts.clone();
+    owned.make_absolute();
+    let opts = &owned;
     std::fs::create_dir_all(&opts.scratch)?;
 
     // ---- cambium, cold then warm ----
@@ -422,6 +511,9 @@ pub fn compare_pair_with(
         include_manual: true,
         materialize: true,
         publish_base: true,
+        // The classifier needs the per-target reason to explain the largest
+        // cambium-side class on a deletion commit (`cambium_extra_deleted`).
+        explain: true,
         ..AffectedRequest::new(pair.base.clone(), pair.head.clone())
     };
     let t = Instant::now();
@@ -447,26 +539,84 @@ pub fn compare_pair_with(
         affected: report.affected.len(),
         tests: report.tests.len(),
         global: report.global,
+        global_reason: report.global_reason.clone(),
         cold_wall_ms,
         warm_wall_ms,
         dirty_packages: report.stats.dirty_packages,
         queried_targets: report.stats.queried_targets,
         changed_files: report.stats.changed_files,
     };
-    let index = out
-        .index
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no head index: the pair was globally invalidated"))?;
+    // A globally invalidated pair (MODULE.bazel moved, a `.bazelrc` changed,
+    // anything on the invalidator list) has no head index and no affected set:
+    // cambium's answer is `//...`. There is nothing to classify — every label
+    // any producer could name is trivially inside "everything" — and nothing
+    // the oracle could disprove, so the pair is recorded as global, marked
+    // passing, and the run carries on. The producers are **skipped**: on a
+    // global pair each one costs two whole-repository `bazel query` passes to
+    // produce numbers that no classification consumes, and the timing series
+    // would be dominated by exactly the pairs cambium does not do work for.
+    let Some(index) = out.index.as_ref() else {
+        let reason = report
+            .global_reason
+            .clone()
+            .unwrap_or_else(|| "globally invalidated".to_string());
+        tracing::info!(
+            %reason,
+            "the pair is globally invalidated: cambium answers //..., so producers and the oracle are skipped"
+        );
+        return Ok(PairComparison {
+            schema: cambium_engine::report::SCHEMA_VERSION,
+            base: pair.base.clone(),
+            head: pair.head.clone(),
+            kind: pair.kind.name().to_string(),
+            category: pair.category.clone(),
+            cambium: CambiumRun {
+                global: true,
+                global_reason: Some(reason),
+                ..cambium
+            },
+            producers: Vec::new(),
+            oracle: None,
+            recall: 1.0,
+            global: true,
+            pass: true,
+        });
+    };
 
     // ---- the facts a classification needs ----
     let base_wt = BaseWorktree::create(&checkout.dir, &pair.base, &opts.scratch)?;
     let changed = BazelFacts::changed_paths(&checkout.dir, &pair.base, &pair.head)?;
+    use cambium_engine::report::DirectReason;
+    let reasoned = |f: fn(&DirectReason) -> bool| -> Vec<String> {
+        report
+            .explanations
+            .iter()
+            .flatten()
+            .filter(|e| f(&e.reason))
+            .map(|e| e.target.clone())
+            .collect()
+    };
+    let paths: Vec<(String, Vec<String>)> = report
+        .explanations
+        .iter()
+        .flatten()
+        .map(|e| (e.target.clone(), e.path.clone()))
+        .collect();
+    let deleted_dep = reasoned(|r| matches!(r, DirectReason::DeletedDep { .. }));
+    let from_build_file = reasoned(|r| match r {
+        DirectReason::File { path } => cambium_classify::is_build_file(path),
+        _ => false,
+    });
     let facts = BazelFacts::new(
         &engine.bazel,
         index.view(),
         direct.iter().cloned(),
         changed.iter().cloned(),
     )
+    .with_paths(paths)
+    .with_affected(cambium_set.iter().cloned())
+    .with_deleted_dep(deleted_dep)
+    .with_build_file(from_build_file)
     .with_base(bazel_at(engine, base_wt.path()));
 
     // ---- the producers ----
@@ -481,6 +631,13 @@ pub fn compare_pair_with(
                 // `cambium_missing`, so the answer is restricted to the
                 // universe cambium reports on and the drop is counted.
                 run.restrict_to_rules(index.view());
+                // One batched Bazel query for every label in the symmetric
+                // difference, before the classifier asks about them one by
+                // one; see `BazelFacts::prefetch`.
+                facts.prefetch(with_paths(
+                    cambium_set.symmetric_difference(&run.labels),
+                    report.explanations.as_deref().unwrap_or_default(),
+                ));
                 let (counts, examples) =
                     classify_difference(&cambium_set, &run.labels, &facts, opts.examples);
                 let failures: usize = counts
@@ -508,12 +665,20 @@ pub fn compare_pair_with(
                     producer_only: run.labels.difference(&cambium_set).count(),
                     counts,
                     examples,
+                    cambium_only_reasons: reason_histogram(
+                        cambium_set.difference(&run.labels),
+                        report.explanations.as_deref().unwrap_or_default(),
+                    ),
                     pass: failures == 0,
                     error: None,
                 }
             }
             Err(e) => {
-                tracing::warn!(producer = p.name(), error = %e, "producer failed on this pair");
+                tracing::warn!(
+                    producer = p.name(),
+                    error = format!("{e:#}"),
+                    "producer failed on this pair"
+                );
                 ProducerComparison {
                     name: p.name().to_string(),
                     version: p.version(),
@@ -527,8 +692,13 @@ pub fn compare_pair_with(
                     producer_only: 0,
                     counts: BTreeMap::new(),
                     examples: Vec::new(),
+                    cambium_only_reasons: BTreeMap::new(),
                     pass: true,
-                    error: Some(e.to_string()),
+                    // `{:#}` and not `{}`: anyhow's `Display` prints only the
+                    // outermost context, so `hashing <sha> in <dir>` would
+                    // arrive without the exit status and stderr tail the
+                    // producer attached underneath it.
+                    error: Some(format!("{e:#}")),
                 }
             }
         };
@@ -558,6 +728,7 @@ pub fn compare_pair_with(
         producers: results,
         oracle,
         recall: oracle_recall,
+        global: false,
         pass,
     })
 }
@@ -574,6 +745,9 @@ pub fn compare_pairs(
     producers: &[&dyn Producer],
     opts: &CompareOptions,
 ) -> Result<CompareResult> {
+    let mut owned = opts.clone();
+    owned.make_absolute();
+    let opts = &owned;
     let path = opts.output_path();
     let mut state = State::load(&opts.results_dir, &opts.repo_id, &opts.pin)?;
     let mut result = match (opts.resume, CompareResult::read(&path)) {
@@ -640,6 +814,24 @@ mod tests {
             false
         }
         fn changed_path_without_consumer(&self, _: &str) -> bool {
+            false
+        }
+        fn reached_via_deleted_dep(&self, l: &str) -> bool {
+            l.ends_with(":orphaned")
+        }
+        fn reached_via_build_file(&self, l: &str) -> bool {
+            l.ends_with(":globbed")
+        }
+        fn rule_unchanged_modulo_visibility(&self, _: &str) -> bool {
+            false
+        }
+        fn no_changed_source_inputs(&self, _: &str) -> bool {
+            false
+        }
+        fn no_affected_deps(&self, _: &str) -> bool {
+            false
+        }
+        fn has_external_input(&self, _: &str) -> bool {
             false
         }
     }
@@ -723,11 +915,13 @@ mod tests {
                 producer_only: 0,
                 counts,
                 examples: Vec::new(),
+                cambium_only_reasons: BTreeMap::new(),
                 pass,
                 error: None,
             }],
             oracle: None,
             recall: if pass { 1.0 } else { 0.75 },
+            global: false,
             pass,
         }
     }
@@ -772,6 +966,47 @@ mod tests {
         let s = summarise(&pairs);
         assert_eq!(s.mean_precision["bazel-diff-rust"], 1.0);
         assert_eq!(s.producer_cold["bazel-diff-rust"].samples, 1);
+    }
+
+    fn global_pair(name: &str) -> PairComparison {
+        let mut p = pair_comparison(name, 1.0, 999, 999, true);
+        p.producers.clear();
+        p.cambium.global = true;
+        p.cambium.global_reason = Some("MODULE.bazel".into());
+        p.global = true;
+        p
+    }
+
+    #[test]
+    fn a_global_pair_is_counted_apart_and_leaves_the_statistics_alone() {
+        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), global_pair("2")]);
+        assert_eq!((s.pairs, s.passed, s.globals), (2, 2, 1));
+        assert!(s.pass, "answering //... is not a failure");
+        assert_eq!(
+            s.mean_precision["bazel-diff-rust"], 0.5,
+            "the global pair contributes no precision"
+        );
+        assert_eq!(
+            s.cambium_cold.samples, 1,
+            "and no wall time: cambium did not do the work"
+        );
+        assert_eq!(s.by_class["cambium_extra_select"], 2);
+    }
+
+    #[test]
+    fn options_are_forced_absolute() {
+        let opts = CompareOptions::new("bazel", "abc", PathBuf::from("corpus-results/bazel"));
+        assert!(opts.results_dir.is_absolute(), "{opts:?}");
+        assert!(opts.scratch.is_absolute(), "{opts:?}");
+        let mut hand_built = CompareOptions {
+            results_dir: "corpus-results/bazel".into(),
+            scratch: "corpus-results/bazel/scratch".into(),
+            ..opts
+        };
+        hand_built.make_absolute();
+        assert!(hand_built.results_dir.is_absolute());
+        assert!(hand_built.scratch.is_absolute());
+        assert!(hand_built.output_path().is_absolute());
     }
 
     #[test]
