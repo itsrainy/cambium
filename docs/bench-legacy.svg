@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" font-family="system-ui, sans-serif" font-size="12">
+<rect width="720" height="420" fill="#fff"/>
+<text x="60" y="28" font-size="15" font-weight="600">legacy_bazel_diff vs targets</text>
+<line x1="60" y1="360" x2="660" y2="360" stroke="#999"/>
+<line x1="60" y1="60" x2="60" y2="360" stroke="#999"/>
+<line x1="60.0" y1="135.7" x2="660.0" y2="60.4" stroke="#bbb" stroke-dasharray="4 4"/>
+<text x="620.0" y="54.4" fill="#999">linear</text>
+<polyline fill="none" stroke="#2b6cb0" stroke-width="2" points="60.0,135.7 660.0,60.0"/>
+<circle cx="60.0" cy="135.7" r="3.5" fill="#2b6cb0"/>
+<text x="60.0" y="125.7" text-anchor="middle" fill="#444">7.6k</text>
+<text x="60.0" y="378.0" text-anchor="middle" fill="#666">10.0k</text>
+<circle cx="660.0" cy="60.0" r="3.5" fill="#2b6cb0"/>
+<text x="660.0" y="50.0" text-anchor="middle" fill="#444">76.9k</text>
+<text x="660.0" y="378.0" text-anchor="middle" fill="#666">100.0k</text>
+<line x1="510.0" y1="72.0" x2="532.0" y2="72.0" stroke="#2b6cb0" stroke-width="2"/>
+<text x="538.0" y="76.0" fill="#444">bazel-diff (cold)</text>
+<polyline fill="none" stroke="#c05621" stroke-width="2" points="60.0,185.0 660.0,83.6"/>
+<circle cx="60.0" cy="185.0" r="3.5" fill="#c05621"/>
+<text x="60.0" y="175.0" text-anchor="middle" fill="#444">1.7k</text>
+<circle cx="660.0" cy="83.6" r="3.5" fill="#c05621"/>
+<text x="660.0" y="73.6" text-anchor="middle" fill="#444">37.3k</text>
+<line x1="510.0" y1="88.0" x2="532.0" y2="88.0" stroke="#c05621" stroke-width="2"/>
+<text x="538.0" y="92.0" fill="#444">bazel-diff (warm)</text>
+<polyline fill="none" stroke="#2f855a" stroke-width="2" points="60.0,360.0 660.0,290.4"/>
+<circle cx="60.0" cy="360.0" r="3.5" fill="#2f855a"/>
+<text x="60.0" y="350.0" text-anchor="middle" fill="#444">7.95</text>
+<circle cx="660.0" cy="290.4" r="3.5" fill="#2f855a"/>
+<text x="660.0" y="280.4" text-anchor="middle" fill="#444">66.92</text>
+<line x1="510.0" y1="104.0" x2="532.0" y2="104.0" stroke="#2f855a" stroke-width="2"/>
+<text x="538.0" y="108.0" fill="#444">cambium</text>
+<text x="14" y="210.0" fill="#666" transform="rotate(-90 14 210.0)">median ms (log)</text>
+<text x="360.0" y="406.0" text-anchor="middle" fill="#666">size (log)</text>
+</svg>

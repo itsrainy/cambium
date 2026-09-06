@@ -221,12 +221,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cambium-bench",
+ "cambium-compare",
+ "cambium-corpus",
  "cambium-engine",
  "cambium-index",
  "cambium-synth",
  "clap",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

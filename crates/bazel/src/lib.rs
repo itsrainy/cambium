@@ -31,6 +31,11 @@ pub enum BazelError {
         status: String,
         stderr: String,
     },
+    /// Bazel exited 3: `--keep_going` let it finish, but some package or
+    /// external repository failed to load, so the answer is incomplete.
+    /// Callers that need a complete answer (`rbuildfiles`) must not trust it.
+    #[error("bazel {args} finished with errors under --keep_going (exit 3); the answer is incomplete\n--- last stderr ---\n{stderr}")]
+    Partial { args: String, stderr: String },
     #[error("reading bazel output: {0}")]
     Read(#[from] ReadError),
     #[error("io error: {0}")]
@@ -350,6 +355,17 @@ impl Bazel {
             .read_to_string(&mut out)?;
         let status = child.wait()?;
         let stderr_tail = stderr_rx.recv().unwrap_or_default();
+        // Exit 3 is "finished with errors" under --keep_going. For rbuildfiles
+        // a partial answer is unusable: a package that failed to load may be
+        // exactly the one that loads the changed .bzl, and it is not in the
+        // output. Report it as Partial so the engine can fall back to a full
+        // rebuild instead of silently under-approximating.
+        if status.code() == Some(3) {
+            return Err(BazelError::Partial {
+                args: truncate(&expr, 200),
+                stderr: stderr_tail,
+            });
+        }
         if !status.success() {
             return Err(BazelError::Failed {
                 args: truncate(&expr, 200),

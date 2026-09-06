@@ -6,6 +6,7 @@
 //! "dump the whole graph at both commits" baseline the design replaces.
 
 pub mod harness;
+pub mod legacy;
 pub mod runner;
 pub mod stages;
 

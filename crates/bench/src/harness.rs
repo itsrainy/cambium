@@ -97,6 +97,10 @@ pub struct StageResult {
     /// Stage-specific numbers: targets/s, bytes, ratios.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, f64>,
+    /// Stage-specific facts that are not numbers, such as the version of an
+    /// external tool a comparison stage ran against.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, String>,
 }
 
 impl StageResult {
@@ -153,6 +157,7 @@ impl BenchReport {
                 .extra
                 .iter()
                 .map(|(k, v)| format!("{k}={}", fmt_num(*v)))
+                .chain(r.notes.iter().map(|(k, v)| format!("{k}={v}")))
                 .collect();
             s.push_str(&format!(
                 "| {} | {} | {} | {:.2} | {:.2} | {:.0} | {} |\n",
@@ -257,16 +262,34 @@ pub fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (f64, f64) {
 /// see at a glance whether a stage is linear, and a straight line on log-log
 /// axes says exactly that.
 pub fn plot_svg(title: &str, points: &[(f64, f64)]) -> String {
+    plot_svg_series(title, &[("", points)])
+}
+
+/// The same chart with several labelled series on shared axes, so two
+/// approaches to the same problem can be read against each other.
+pub fn plot_svg_series(title: &str, series: &[(&str, &[(f64, f64)])]) -> String {
     const W: f64 = 720.0;
     const H: f64 = 420.0;
     const PAD: f64 = 60.0;
-    if points.len() < 2 {
+    const COLORS: [&str; 4] = ["#2b6cb0", "#c05621", "#2f855a", "#6b46c1"];
+    let usable: Vec<(&str, &[(f64, f64)])> = series
+        .iter()
+        .copied()
+        .filter(|(_, p)| p.len() >= 2)
+        .collect();
+    if usable.is_empty() {
         return format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{W}\" height=\"{H}\"><text x=\"20\" y=\"30\">{title}: not enough points</text></svg>");
     }
-    let lx: Vec<f64> = points.iter().map(|p| p.0.max(1.0).log10()).collect();
-    let ly: Vec<f64> = points.iter().map(|p| p.1.max(1e-3).log10()).collect();
-    let (x0, x1) = (min(&lx), max(&lx));
-    let (y0, y1) = (min(&ly), max(&ly));
+    let all_x: Vec<f64> = usable
+        .iter()
+        .flat_map(|(_, p)| p.iter().map(|q| q.0.max(1.0).log10()))
+        .collect();
+    let all_y: Vec<f64> = usable
+        .iter()
+        .flat_map(|(_, p)| p.iter().map(|q| q.1.max(1e-3).log10()))
+        .collect();
+    let (x0, x1) = (min(&all_x), max(&all_x));
+    let (y0, y1) = (min(&all_y), max(&all_y));
     let sx = |v: f64| PAD + (v - x0) / (x1 - x0).max(1e-9) * (W - 2.0 * PAD);
     let sy = |v: f64| H - PAD - (v - y0) / (y1 - y0).max(1e-9) * (H - 2.0 * PAD);
 
@@ -282,44 +305,65 @@ pub fn plot_svg(title: &str, points: &[(f64, f64)]) -> String {
         H - PAD,
         H - PAD
     );
-    // A reference line of exact linear scaling through the first point, so a
-    // reader can see super-linear behaviour immediately.
-    let ideal_end = ly[0] + (x1 - lx[0]);
+    // A reference line of exact linear scaling through the first series' first
+    // point, so a reader can see super-linear behaviour immediately.
+    let first = usable[0].1;
+    let (fx, fy) = (first[0].0.max(1.0).log10(), first[0].1.max(1e-3).log10());
+    let ideal_end = fy + (x1 - fx);
     s.push_str(&format!(
         "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#bbb\" \
          stroke-dasharray=\"4 4\"/>\n<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#999\">linear</text>\n",
-        sx(lx[0]),
-        sy(ly[0]),
+        sx(fx),
+        sy(fy),
         sx(x1),
         sy(ideal_end),
         sx(x1) - 40.0,
         sy(ideal_end) - 6.0
     ));
-    let path: Vec<String> = lx
-        .iter()
-        .zip(&ly)
-        .map(|(x, y)| format!("{:.1},{:.1}", sx(*x), sy(*y)))
-        .collect();
-    s.push_str(&format!(
-        "<polyline fill=\"none\" stroke=\"#2b6cb0\" stroke-width=\"2\" points=\"{}\"/>\n",
-        path.join(" ")
-    ));
-    for (i, (x, y)) in lx.iter().zip(&ly).enumerate() {
+    for (i, (name, points)) in usable.iter().enumerate() {
+        let color = COLORS[i % COLORS.len()];
+        let lx: Vec<f64> = points.iter().map(|p| p.0.max(1.0).log10()).collect();
+        let ly: Vec<f64> = points.iter().map(|p| p.1.max(1e-3).log10()).collect();
+        let path: Vec<String> = lx
+            .iter()
+            .zip(&ly)
+            .map(|(x, y)| format!("{:.1},{:.1}", sx(*x), sy(*y)))
+            .collect();
         s.push_str(&format!(
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" fill=\"#2b6cb0\"/>\n\
-             <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" fill=\"#444\">{}</text>\n",
-            sx(*x),
-            sy(*y),
-            sx(*x),
-            sy(*y) - 10.0,
-            fmt_num(points[i].1)
+            "<polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" points=\"{}\"/>\n",
+            path.join(" ")
         ));
-        s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" fill=\"#666\">{}</text>\n",
-            sx(*x),
-            H - PAD + 18.0,
-            fmt_num(points[i].0)
-        ));
+        for (j, (x, y)) in lx.iter().zip(&ly).enumerate() {
+            s.push_str(&format!(
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" fill=\"{color}\"/>\n\
+                 <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" fill=\"#444\">{}</text>\n",
+                sx(*x),
+                sy(*y),
+                sx(*x),
+                sy(*y) - 10.0,
+                fmt_num(points[j].1)
+            ));
+            if i == 0 {
+                s.push_str(&format!(
+                    "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" fill=\"#666\">{}</text>\n",
+                    sx(*x),
+                    H - PAD + 18.0,
+                    fmt_num(points[j].0)
+                ));
+            }
+        }
+        if !name.is_empty() {
+            let ly_legend = PAD + 12.0 + i as f64 * 16.0;
+            s.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{ly_legend:.1}\" x2=\"{:.1}\" y2=\"{ly_legend:.1}\" \
+                 stroke=\"{color}\" stroke-width=\"2\"/>\n\
+                 <text x=\"{:.1}\" y=\"{:.1}\" fill=\"#444\">{name}</text>\n",
+                W - PAD - 150.0,
+                W - PAD - 128.0,
+                W - PAD - 122.0,
+                ly_legend + 4.0
+            ));
+        }
     }
     s.push_str(&format!(
         "<text x=\"14\" y=\"{:.1}\" fill=\"#666\" \
@@ -357,6 +401,7 @@ mod tests {
             p90_ms: ms,
             peak_rss_mb: 10.0,
             extra: BTreeMap::new(),
+            notes: BTreeMap::new(),
         }]);
         r.machine = Machine {
             cpu: "test".into(),

@@ -94,6 +94,57 @@ jobs:
           name: bench-results
           path: bench-results/
 
+  synthetic-threeway:
+    name: synthetic three-way vs bazel-diff (small, typical-pr)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache bazel-diff build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/bazel-diff
+          # Keyed on the pinned commit in the fetch script, so a bump of
+          # BAZEL_DIFF_COMMIT/BAZEL_DIFF_TAG invalidates the cache and forces
+          # a rebuild rather than silently reusing the old binary.
+          key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
+      - run: tools/bazel-diff/fetch.sh
+      - run: cargo build --release -p cambium-cli
+      - name: bench legacy (small, typical-pr)
+        run: |
+          ./target/release/cambi bench legacy --preset small --changes typical-pr \
+            --output json | tee bench-legacy.json
+      - name: fail on any disagreement
+        # `bench legacy` itself already fails when bazel-diff reports a label
+        # cambium does not (unsoundness). This step is the CI-side belt: it
+        # reads the same JSON `extra` fields (crates/bench/src/legacy.rs) and
+        # fails if `cambium_only`/`bazel_diff_only` show anything other than
+        # the documented select()-only asymmetry, or if `agreed` is zero.
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+
+          with open("bench-legacy.json") as f:
+              doc = json.load(f)
+
+          stages = doc.get("stages", doc if isinstance(doc, list) else [doc])
+          for stage in stages:
+              extra = stage.get("extra", stage)
+              agreed = extra.get("agreed")
+              bd_only = extra.get("bazel_diff_only")
+              cam_only = extra.get("cambium_only")
+              if agreed is None or bd_only is None:
+                  continue
+              print(f"agreed={agreed} cambium_only={cam_only} bazel_diff_only={bd_only}")
+              if bd_only:
+                  print("::error::bazel-diff reported labels cambium missed (unsoundness)")
+                  sys.exit(1)
+              if not agreed and not cam_only:
+                  print("::error::no agreement at all between cambium and bazel-diff")
+                  sys.exit(1)
+          EOF
+
   nightly:
     name: nightly (medium soundness, large benchmarks)
     if: github.event_name == 'schedule'

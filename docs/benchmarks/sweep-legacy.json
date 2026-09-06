@@ -1,0 +1,74 @@
+{
+  "schema": 3,
+  "tool_version": "0.1.0",
+  "tool_sha": "e3a4bb4",
+  "timestamp_unix": 1788708899,
+  "machine": {
+    "cpu": "unknown",
+    "cores": 8,
+    "ram_gb": 0.0,
+    "os": "macos x86_64"
+  },
+  "results": [
+    {
+      "stage": "legacy_bazel_diff",
+      "preset": "medium",
+      "spec_hash": "48da8151d6b715ac",
+      "param": 10000,
+      "runs": 3,
+      "median_ms": 7.9522580000000005,
+      "p90_ms": 7.994653,
+      "peak_rss_mb": 0.0,
+      "extra": {
+        "agreed": 7526.0,
+        "bazel_diff_cold_ms": 7592.874461,
+        "bazel_diff_impacted": 7526.0,
+        "bazel_diff_only": 0.0,
+        "bazel_diff_warm_ms": 1678.261791,
+        "cambium_affected": 7526.0,
+        "cambium_ms": 7.9522580000000005,
+        "cambium_only": 0.0,
+        "cambium_p90_ms": 7.994653,
+        "changed_files": 13.0,
+        "speedup_vs_cold": 954.8073592431232,
+        "speedup_vs_warm": 211.0421707897304,
+        "targets": 10039.0
+      },
+      "notes": {
+        "bazel_diff_binary": "/Users/rainy/.cache/cambium/bazel-diff/bin/bazel-diff-rust",
+        "bazel_diff_version": "27ce213b8b090792e06057bff96e37bd284ece8e v46.1.0",
+        "change_preset": "typical-pr"
+      }
+    },
+    {
+      "stage": "legacy_bazel_diff",
+      "preset": "medium",
+      "spec_hash": "d4f1bfda207ebc71",
+      "param": 100000,
+      "runs": 3,
+      "median_ms": 66.919585,
+      "p90_ms": 126.79537499999999,
+      "peak_rss_mb": 0.0,
+      "extra": {
+        "agreed": 66298.0,
+        "bazel_diff_cold_ms": 76868.163311,
+        "bazel_diff_impacted": 66298.0,
+        "bazel_diff_only": 0.0,
+        "bazel_diff_warm_ms": 37315.119400999996,
+        "cambium_affected": 66298.0,
+        "cambium_ms": 66.919585,
+        "cambium_only": 0.0,
+        "cambium_p90_ms": 126.79537499999999,
+        "changed_files": 11.0,
+        "speedup_vs_cold": 1148.6646743401054,
+        "speedup_vs_warm": 557.6113390571684,
+        "targets": 100377.0
+      },
+      "notes": {
+        "bazel_diff_binary": "/Users/rainy/.cache/cambium/bazel-diff/bin/bazel-diff-rust",
+        "bazel_diff_version": "27ce213b8b090792e06057bff96e37bd284ece8e v46.1.0",
+        "change_preset": "typical-pr"
+      }
+    }
+  ]
+}

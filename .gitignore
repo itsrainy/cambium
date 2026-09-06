@@ -2,3 +2,4 @@
 **/*.rs.bk
 /bench-results
 *.bin.tmp
+corpus-results/

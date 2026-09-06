@@ -1,0 +1,334 @@
+//! The sampled `rdeps` oracle.
+//!
+//! bazel-diff is a *comparison*, not a ground truth: where the two tools
+//! disagree, neither is authoritative. Bazel itself is. So for every pair the
+//! suite samples k members of cambium's direct set, asks Bazel
+//! `rdeps(//..., <root>)` for each, and requires cambium's own reverse walk
+//! from the same roots to be a **superset** of the union. Extra targets on
+//! cambium's side are over-approximation (allowed, and measured as precision);
+//! a target Bazel reaches that cambium does not is unsoundness, and fails.
+//!
+//! Two details that are load-bearing:
+//!
+//! - **The sample is seeded** (`rand_chacha`, a stable algorithm across
+//!   releases unlike `rand`'s thread rng), so a nightly failure can be
+//!   reproduced exactly from the run's seed.
+//! - **Roots are batched.** One Bazel invocation per root is the obvious
+//!   implementation and is unusably slow at k = 100 on a repository the size
+//!   of Envoy — each call re-walks the universe. `rdeps(//..., a + b + c)` is
+//!   the union of the individual answers, which is exactly what the oracle
+//!   needs, so roots go out in chunks and k costs `k / CHUNK` invocations.
+//!   Chunks stay small because one bad root (a label Bazel refuses to
+//!   evaluate) takes its whole chunk down.
+
+use std::collections::BTreeSet;
+
+use anyhow::{Context as _, Result};
+use cambium_bazel::Bazel;
+use cambium_index::{IndexRef, WalkOptions};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+
+/// How many roots go into one `rdeps` query.
+pub const DEFAULT_CHUNK: usize = 25;
+
+/// What the oracle found.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OracleResult {
+    /// The sampled direct-set members the queries started from.
+    pub roots: Vec<String>,
+    /// The union of `rdeps(//..., root)` over the roots, as Bazel reports it.
+    pub oracle_set: BTreeSet<String>,
+    /// cambium's reverse closure over the head index from the same roots.
+    pub cambium_set_from_roots: BTreeSet<String>,
+    /// `oracle_set - cambium_set_from_roots`: unsoundness. Empty means pass.
+    pub missing: Vec<String>,
+    /// Roots whose query failed (a broken package, say) and were skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_roots: Vec<String>,
+}
+
+impl OracleResult {
+    pub fn ok(&self) -> bool {
+        self.missing.is_empty()
+    }
+
+    /// Fraction of the oracle's answer cambium reproduces. 1.0 is required.
+    pub fn recall(&self) -> f64 {
+        recall(&self.cambium_set_from_roots, &self.oracle_set)
+    }
+}
+
+/// `|ours ∩ theirs| / |theirs|`, and 1.0 when there is nothing to recall — an
+/// empty oracle is not evidence of unsoundness.
+pub fn recall(ours: &BTreeSet<String>, theirs: &BTreeSet<String>) -> f64 {
+    if theirs.is_empty() {
+        return 1.0;
+    }
+    ours.intersection(theirs).count() as f64 / theirs.len() as f64
+}
+
+/// The oracle's configuration.
+#[derive(Clone, Debug)]
+pub struct RdepsOracle {
+    /// How many roots to sample. 0 disables the oracle.
+    pub k: usize,
+    pub seed: u64,
+    /// Roots per Bazel invocation.
+    pub chunk: usize,
+}
+
+impl Default for RdepsOracle {
+    fn default() -> Self {
+        Self {
+            k: 100,
+            seed: 0,
+            chunk: DEFAULT_CHUNK,
+        }
+    }
+}
+
+impl RdepsOracle {
+    pub fn new(k: usize, seed: u64) -> Self {
+        Self {
+            k,
+            seed,
+            chunk: DEFAULT_CHUNK,
+        }
+    }
+
+    /// Runs the oracle over the head index. `direct` is cambium's depth-0 set.
+    pub fn run(
+        &self,
+        bazel: &Bazel,
+        head: IndexRef<'_>,
+        direct: &[String],
+    ) -> Result<OracleResult> {
+        let roots = sample(direct, self.k, self.seed);
+        let mut result = OracleResult {
+            roots: roots.clone(),
+            ..Default::default()
+        };
+        if roots.is_empty() {
+            return Ok(result);
+        }
+        for batch in roots.chunks(self.chunk.max(1)) {
+            match query_rdeps(bazel, batch) {
+                Ok(labels) => result.oracle_set.extend(labels),
+                Err(e) => {
+                    // One unqueryable root must not lose the whole pair's
+                    // oracle; record what was dropped so a suspiciously small
+                    // oracle set is explainable.
+                    tracing::warn!(roots = ?batch, error = %e, "rdeps query failed; skipping the batch");
+                    result
+                        .skipped_roots
+                        .extend(batch.iter().map(String::to_string));
+                }
+            }
+        }
+        result.cambium_set_from_roots = walk_from_roots(head, &roots);
+        result.missing = result
+            .oracle_set
+            .difference(&result.cambium_set_from_roots)
+            .cloned()
+            .collect();
+        Ok(result)
+    }
+}
+
+/// A deterministic sample of at most `k` labels, sorted so the JSON is stable.
+pub fn sample(direct: &[String], k: usize, seed: u64) -> Vec<String> {
+    let mut all: Vec<String> = direct.to_vec();
+    all.sort();
+    all.dedup();
+    if k == 0 {
+        return Vec::new();
+    }
+    if all.len() <= k {
+        return all;
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut idx: Vec<usize> = (0..all.len()).collect();
+    idx.shuffle(&mut rng);
+    let mut chosen: Vec<usize> = idx.into_iter().take(k).collect();
+    chosen.sort_unstable();
+    chosen.into_iter().map(|i| all[i].clone()).collect()
+}
+
+/// `kind(rule, rdeps(//..., a + b + c))`: the union of the roots' reverse
+/// closures, restricted to rules.
+///
+/// The `kind(rule, ...)` wrapper is not cosmetic. Bazel's `rdeps` answer
+/// includes *file* targets — the generated `//lib:lib.out` of a genrule, the
+/// `//pkg:BUILD.bazel` of a package — while cambium's walk emits rules only
+/// (`cambium_index::walk` filters on `NodeKind::Rule`). Without the wrapper
+/// every genrule output in the sample reads as a target Bazel reached and
+/// cambium missed, which is the one thing this oracle is supposed to detect,
+/// and the failure would be pure vocabulary. The same restriction is applied
+/// to the producers' answers (`ProducerRun::restrict_to_rules`), so all three
+/// tools are compared over one universe.
+pub fn rdeps_expression(roots: &[String]) -> String {
+    let union = roots.join(" + ");
+    format!("kind(rule, rdeps(//..., {union}))")
+}
+
+/// cambium's reverse closure from `roots`, over the head index. Roots the
+/// index does not know are skipped: they cannot contribute rdeps here, and
+/// their absence shows up as `missing` if Bazel disagrees.
+pub fn walk_from_roots(head: IndexRef<'_>, roots: &[String]) -> BTreeSet<String> {
+    let ids: Vec<u32> = roots.iter().filter_map(|l| head.id_of(l)).collect();
+    if ids.is_empty() {
+        return BTreeSet::new();
+    }
+    let r = cambium_index::walk::walk(
+        head,
+        &ids,
+        &WalkOptions {
+            // Bazel's `rdeps` does not know about `manual`, so neither may the
+            // set we compare against it.
+            include_manual: true,
+            explain: false,
+            max_depth: None,
+        },
+    );
+    cambium_index::walk::labels_sorted(head, &r.affected)
+        .into_iter()
+        .collect()
+}
+
+fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<BTreeSet<String>> {
+    let expr = rdeps_expression(roots);
+    let out = bazel
+        .command("query")
+        .args([
+            expr.as_str(),
+            "--output=label",
+            // The index is built with --noimplicit_deps; the oracle has to ask
+            // the same question or every toolchain edge reads as unsoundness.
+            "--noimplicit_deps",
+            "--order_output=no",
+            "--keep_going",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ])
+        .output()
+        .context("spawning bazel query rdeps")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "bazel query {} failed with {}\n{}",
+        crate::producer::tail(&expr, 1),
+        out.status,
+        crate::producer::tail(&String::from_utf8_lossy(&out.stderr), 20)
+    );
+    Ok(parse_labels(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// One label per line, blank lines dropped.
+pub fn parse_labels(out: &str) -> BTreeSet<String> {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cambium_index::{IndexBuilder, PackageUpdate, TargetRow};
+
+    fn labels(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("//p:t{i}")).collect()
+    }
+
+    #[test]
+    fn the_sample_is_seeded_and_capped() {
+        let all = labels(50);
+        let a = sample(&all, 5, 7);
+        assert_eq!(a.len(), 5);
+        assert_eq!(a, sample(&all, 5, 7), "the same seed picks the same roots");
+        assert_ne!(a, sample(&all, 5, 8));
+        assert!(a.windows(2).all(|w| w[0] < w[1]), "sorted: {a:?}");
+        assert_eq!(sample(&all, 100, 7).len(), 50, "k above the population");
+        assert!(sample(&all, 0, 7).is_empty(), "k = 0 disables the oracle");
+    }
+
+    #[test]
+    fn duplicate_roots_are_sampled_once() {
+        let all = vec!["//a:a".to_string(), "//a:a".to_string()];
+        assert_eq!(sample(&all, 5, 0), vec!["//a:a"]);
+    }
+
+    #[test]
+    fn roots_batch_into_one_union_query() {
+        assert_eq!(
+            rdeps_expression(&["//a:a".into(), "//b:b".into()]),
+            "kind(rule, rdeps(//..., //a:a + //b:b))"
+        );
+    }
+
+    #[test]
+    fn labels_parse_from_query_output() {
+        let got = parse_labels("//a:a\n\n  //b:b \n");
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["//a:a", "//b:b"]);
+    }
+
+    #[test]
+    fn recall_is_one_when_the_oracle_is_empty_and_a_fraction_otherwise() {
+        let ours: BTreeSet<String> = ["//a:a".to_string()].into_iter().collect();
+        assert_eq!(recall(&ours, &BTreeSet::new()), 1.0);
+        let theirs: BTreeSet<String> = ["//a:a".to_string(), "//b:b".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(recall(&ours, &theirs), 0.5);
+        assert_eq!(recall(&theirs, &theirs), 1.0);
+    }
+
+    fn index() -> cambium_index::IndexData {
+        let mut b = IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[PackageUpdate {
+            package: "lib".into(),
+            targets: vec![
+                TargetRow::rule("//lib:core", "cc_library", vec!["//lib:a.cc".into()]),
+                TargetRow::rule("//lib:mid", "cc_library", vec!["//lib:core".into()]),
+                TargetRow::rule("//lib:top", "cc_library", vec!["//lib:mid".into()]),
+                TargetRow::source_file("//lib:a.cc"),
+            ],
+            ..Default::default()
+        }]);
+        b.finish("c")
+    }
+
+    #[test]
+    fn the_cambium_side_walks_the_whole_reverse_closure_from_the_roots() {
+        let idx = index();
+        let got = walk_from_roots(idx.view(), &["//lib:core".into(), "//nope:nope".into()]);
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            vec!["//lib:core", "//lib:mid", "//lib:top"],
+            "unknown roots are skipped, known ones bring their rdeps"
+        );
+        assert!(walk_from_roots(idx.view(), &["//nope:nope".into()]).is_empty());
+    }
+
+    #[test]
+    fn missing_targets_are_the_ones_bazel_reaches_and_cambium_does_not() {
+        let idx = index();
+        let mut r = OracleResult {
+            roots: vec!["//lib:core".into()],
+            oracle_set: parse_labels("//lib:core\n//lib:mid\n//lib:top\n//other:x\n"),
+            cambium_set_from_roots: walk_from_roots(idx.view(), &["//lib:core".into()]),
+            ..Default::default()
+        };
+        r.missing = r
+            .oracle_set
+            .difference(&r.cambium_set_from_roots)
+            .cloned()
+            .collect();
+        assert_eq!(r.missing, vec!["//other:x"]);
+        assert!(!r.ok());
+        assert_eq!(r.recall(), 0.75);
+    }
+}

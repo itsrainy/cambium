@@ -1,0 +1,98 @@
+name: corpus-nightly
+
+# Nightly real-repository validation for the two cheapest corpus entries
+# (docs/CORPUS.md, spec §3-§6). `bazel` and `envoy` are the only repos small
+# enough, and cheap enough to fetch, to run every night across the whole
+# Bazel version matrix; the rest are weekly or monthly (corpus-weekly.yml).
+#
+# Machine requirement: this needs a real Bazel build of each repo at several
+# commits, so a standard GitHub-hosted runner will not do. Point
+# CORPUS_RUNNER (an Actions variable) at a self-hosted or larger runner label
+# with at least 16 cores, 64 GB RAM and 500 GB disk; until that is set this
+# falls back to ubuntu-latest, where the bazel/envoy jobs are expected to be
+# slow or to fail on disk space.
+
+on:
+  schedule:
+    - cron: "5 4 * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Corpus repo id to run (default: both bazel and envoy)"
+        required: false
+        type: choice
+        options: [both, bazel, envoy]
+        default: both
+      bazel_version:
+        description: "Single --bazel-version to run (default: the full matrix)"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  corpus:
+    name: corpus ${{ matrix.repo }} (bazel ${{ matrix.bazel_version }})
+    if: github.event_name == 'schedule' || inputs.repo == 'both' || inputs.repo == matrix.repo
+    runs-on: ${{ vars.CORPUS_RUNNER || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [bazel, envoy]
+        bazel_version: ["7.x", "8.x", "9.x"]
+    env:
+      CAMBIUM_CORPUS_DIR: ${{ github.workspace }}/.cache/cambium/corpus
+      CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
+      CAMBIUM_TANGO_DIR: ${{ github.workspace }}/.cache/cambium/tango
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache bazel-diff build
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CAMBIUM_BAZEL_DIFF_DIR }}
+          key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
+      - run: tools/bazel-diff/fetch.sh
+
+      - name: Cache tango build
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CAMBIUM_TANGO_DIR }}
+          key: tango-${{ hashFiles('tools/tango/fetch.sh', 'tools/tango/cmd/**') }}
+      - run: tools/tango/fetch.sh
+
+      - name: Cache per-repo Bazel repository/disk cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CAMBIUM_CORPUS_DIR }}/repository_cache
+            ${{ env.CAMBIUM_CORPUS_DIR }}/disk_cache
+          key: corpus-cache-${{ matrix.repo }}-${{ matrix.bazel_version }}-${{ github.run_id }}
+          restore-keys: |
+            corpus-cache-${{ matrix.repo }}-${{ matrix.bazel_version }}-
+
+      - run: cargo build --release -p cambium-cli
+
+      - name: corpus fetch
+        run: ./target/release/cambi corpus fetch ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+      - name: corpus build
+        run: ./target/release/cambi corpus build ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+      - name: corpus replay --range 50
+        run: ./target/release/cambi corpus replay ${{ matrix.repo }} --range 50 --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+      - name: corpus pairs
+        run: ./target/release/cambi corpus pairs ${{ matrix.repo }} --kind adjacent --kind stress --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+      - name: corpus compare
+        run: ./target/release/cambi corpus compare ${{ matrix.repo }} --kind adjacent --kind stress --oracle-sample 100 --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+      - name: corpus report
+        if: always()
+        run: ./target/release/cambi corpus report ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-results-${{ matrix.repo }}-${{ matrix.bazel_version }}
+          path: corpus-results/

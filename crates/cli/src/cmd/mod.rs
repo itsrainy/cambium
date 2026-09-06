@@ -1,6 +1,7 @@
 pub mod affected;
 pub mod baseline;
 pub mod bench;
+pub mod corpus;
 pub mod index;
 
 use std::path::PathBuf;

@@ -64,6 +64,9 @@ enum Command {
     /// Generate synthetic Bazel workspaces.
     #[command(subcommand)]
     Synth(cmd::bench::SynthArgs),
+    /// Run the real-repository corpus suite.
+    #[command(subcommand)]
+    Corpus(cmd::corpus::Args),
     /// Print the effective configuration and its hash.
     Config,
 }
@@ -108,6 +111,7 @@ fn main() -> ExitCode {
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Bench(args) => cmd::bench::run(&ctx, args),
         Command::Synth(args) => cmd::bench::run_synth(&ctx, args),
+        Command::Corpus(args) => cmd::corpus::run(&ctx, args),
         Command::Config => cmd::config_show(&ctx),
     };
 
