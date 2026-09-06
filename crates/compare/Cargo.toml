@@ -9,6 +9,7 @@ description = "Three-way comparison of cambium against bazel-diff and Bazel's ow
 
 [dependencies]
 cambium-bazel.workspace = true
+cambium-classify.workspace = true
 cambium-corpus.workspace = true
 cambium-diff.workspace = true
 cambium-engine.workspace = true

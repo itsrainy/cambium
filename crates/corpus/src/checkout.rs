@@ -4,6 +4,8 @@
 //!
 //! ```text
 //! <id>.git/              bare mirror, fetched once and updated on demand
+//!                        (an entry with `mirror = "<other>"` shares
+//!                        <other>.git and clones nothing of its own)
 //! <id>/                  worktree, checked out at whatever commit a step needs
 //! store/<id>/            the corpus lineage's baseline store (dir backend)
 //! output/<id>[-<ver>]/   per-repo (and per Bazel version) --output_base
@@ -25,7 +27,7 @@ use anyhow::{Context as _, Result};
 use cambium_diff::Repo;
 use cambium_engine::{Config, Engine};
 
-use crate::manifest::RepoEntry;
+use crate::manifest::{Manifest, RepoEntry};
 
 pub const CORPUS_DIR_ENV: &str = "CAMBIUM_CORPUS_DIR";
 
@@ -55,7 +57,14 @@ impl CorpusDir {
         &self.root
     }
 
-    pub fn mirror(&self, id: &str) -> PathBuf {
+    /// The bare mirror `entry` uses. Entries that set `mirror = "<id>"` share
+    /// that entry's clone (same url, older pin) instead of paying for a second
+    /// one; they still get their own worktree, store and output base below.
+    pub fn mirror(&self, entry: &RepoEntry) -> PathBuf {
+        self.mirror_by_id(Manifest::mirror_id(entry))
+    }
+
+    pub fn mirror_by_id(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.git"))
     }
 
@@ -99,7 +108,11 @@ impl CorpusDir {
              common --disk_cache={}\n\
              # Loading only; never let a corpus query start fetching toolchains it\n\
              # does not need for analysis.\n\
-             common --noshow_progress\n",
+             common --noshow_progress\n\
+             # Bazel rewrites MODULE.bazel.lock on load when the lockfile is\n\
+             # stale, which dirties the worktree and makes the next checkout\n\
+             # refuse to move. The suite never needs the lockfile.\n\
+             common --lockfile_mode=off\n",
             self.repository_cache().display(),
             self.disk_cache().display()
         );
@@ -113,7 +126,7 @@ impl CorpusDir {
     /// fetched, an existing worktree is moved to `pin`.
     pub fn fetch(&self, entry: &RepoEntry) -> Result<Checkout> {
         std::fs::create_dir_all(&self.root)?;
-        let mirror = self.mirror(&entry.id);
+        let mirror = self.mirror(entry);
         if !mirror.join("HEAD").exists() {
             tracing::info!(url = %entry.url, dest = %mirror.display(), "cloning mirror");
             git(
@@ -191,7 +204,7 @@ impl Checkout {
         Ok(Self {
             id: entry.id.clone(),
             dir: dir.clone(),
-            mirror: corpus.mirror(&entry.id),
+            mirror: corpus.mirror(entry),
             repo: Repo::new(dir),
             corpus: corpus.clone(),
         })
@@ -202,13 +215,18 @@ impl Checkout {
     }
 
     /// Moves the worktree to `rev`. Untracked files (the generated
-    /// `cambium.toml`) survive; tracked files are never edited by the suite,
-    /// so a detached checkout is always clean.
+    /// `cambium.toml`) survive. Tracked files are forced: nothing in this
+    /// worktree is ever edited on purpose, but Bazel may rewrite a lockfile
+    /// and a case-insensitive filesystem can show two same-named files as a
+    /// deletion, and neither is worth stopping a 300-commit replay over.
     pub fn checkout(&self, rev: &str) -> Result<()> {
         if self.head().ok().as_deref() == Some(rev) {
             return Ok(());
         }
-        git(&self.dir, &["checkout", "--quiet", "--detach", rev])?;
+        git(
+            &self.dir,
+            &["checkout", "--quiet", "--force", "--detach", rev],
+        )?;
         Ok(())
     }
 

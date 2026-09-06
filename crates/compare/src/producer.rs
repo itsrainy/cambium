@@ -241,8 +241,20 @@ impl BaseWorktree {
         let path = scratch.join("base-worktree");
         if path.join(".git").exists() {
             git(repo_worktree, &["worktree", "prune"]).ok();
-            git(&path, &["checkout", "--quiet", "--detach", base_sha])
-                .with_context(|| format!("moving the base worktree to {base_sha}"))?;
+            // `--force`, like `BaseWorktree::checkout`. A plain checkout keeps
+            // local modifications, and on a case-insensitive filesystem this
+            // worktree acquires them without anyone editing anything: two
+            // `bazel/bazel` paths that differ only in case collide, and git
+            // leaves one of them reported as deleted. bazel-diff then hashes a
+            // `glob(["**"])` filegroup over a directory that is missing a
+            // file, and reports `//docs:srcs` (and everything embedding it) as
+            // impacted on a commit that never touched `docs/` — a
+            // `cambium_missing` failure manufactured entirely by the harness.
+            git(
+                &path,
+                &["checkout", "--quiet", "--force", "--detach", base_sha],
+            )
+            .with_context(|| format!("moving the base worktree to {base_sha}"))?;
             return Ok(Self {
                 path,
                 owner: repo_worktree.to_path_buf(),
@@ -279,7 +291,10 @@ impl BaseWorktree {
 
     /// Moves this worktree to another revision, for the next pair.
     pub fn checkout(&self, sha: &str) -> Result<()> {
-        git(&self.path, &["checkout", "--quiet", "--detach", sha])?;
+        git(
+            &self.path,
+            &["checkout", "--quiet", "--force", "--detach", sha],
+        )?;
         Ok(())
     }
 

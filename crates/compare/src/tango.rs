@@ -28,6 +28,28 @@
 //!   0.5 on that pair, with neither tool wrong. The number is there to make
 //!   that drift visible and measurable, not to gate anything.
 //!
+//! # Flags
+//!
+//! Tango's driver runs `bazel query 'deps(//...:all-targets)'` once per
+//! revision, and on a real repository at a real pin that query does not load
+//! cleanly — `bazel/bazel` on macOS pulls in a GraalVM distribution with no
+//! `macos-x64` build and an RBE config that needs Docker — so without
+//! `--keep_going` Bazel exits 3 and tango-cli fails the pair. So
+//! [`Tango::DEFAULT_EXTRA_ARGS`] passes `--keep_going` through tango-cli's
+//! `-extra-args`, which places it after the `query` word. The result is the
+//! same universe bazel-diff (run with `-k`) and the `rdeps` oracle see:
+//! everything that loaded. [`Tango::with_extra_args`] replaces the list.
+//!
+//! `--keep_going` alone is not enough: upstream Tango's Bazel client treats
+//! *any* non-zero exit as a failed query, and `--keep_going` turns a load
+//! error into exit **3** rather than into no error at all. So
+//! `tools/tango/0001-keep-going-partial-graph.patch` — applied by `fetch.sh`, which
+//! is the supported way to carry a local change to upstream — accepts exit 3
+//! when the proto stream parsed, logs a warning, and uses the partial graph;
+//! it also registers a dep that names an unloadable repository as an opaque
+//! zero-hash node instead of failing the revision, which is sound here because
+//! that repository is equally missing at base and at head.
+//!
 //! [Tango]: https://github.com/uber/tango
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,6 +110,8 @@ pub struct Tango {
     /// and hiding it inside the producer would hide how much of the answer it
     /// is.
     exclude_external: bool,
+    /// `-extra-args`: extra `bazel query` arguments. See the module docs.
+    extra_args: Vec<String>,
 }
 
 impl Tango {
@@ -108,13 +132,30 @@ impl Tango {
         Ok(Self::at(bin, version))
     }
 
+    /// The `bazel query` arguments every run passes unless told otherwise.
+    pub const DEFAULT_EXTRA_ARGS: &'static [&'static str] = &["--keep_going"];
+
     pub fn at(bin: PathBuf, version: String) -> Self {
         Self {
             bin,
             version,
             max_distance: None,
             exclude_external: false,
+            extra_args: Self::DEFAULT_EXTRA_ARGS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
+    }
+
+    /// Replaces the `-extra-args` list (default: `--keep_going`).
+    pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
+        self.extra_args = args;
+        self
+    }
+
+    pub fn extra_args(&self) -> &[String] {
+        &self.extra_args
     }
 
     pub fn with_max_distance(mut self, d: Option<u32>) -> Self {
@@ -173,6 +214,9 @@ impl Producer for Tango {
             .arg(&out);
         if !ctx.startup_flags.is_empty() {
             cmd.arg("-startup-options").arg(ctx.startup_flags_arg());
+        }
+        if !self.extra_args.is_empty() {
+            cmd.arg("-extra-args").arg(self.extra_args.join(" "));
         }
         if let Some(d) = self.max_distance {
             cmd.arg("-max-distance").arg(d.to_string());

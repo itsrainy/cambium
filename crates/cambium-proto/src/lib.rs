@@ -15,5 +15,5 @@ pub mod hash;
 pub mod reader;
 
 pub use convert::{convert, ConvertOptions, ParsedTarget};
-pub use hash::{canonical_rule, rule_hash};
+pub use hash::{canonical_rule, rule_hash, RULE_HASH_VERSION};
 pub use reader::{decode_all, encode_stream, read_frames, ReadError, DEFAULT_BATCH};

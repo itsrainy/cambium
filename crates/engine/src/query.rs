@@ -90,7 +90,25 @@ pub struct BazelQuerier<'a> {
 impl PackageQuerier for BazelQuerier<'_> {
     fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, crate::error::EngineError> {
         let q = query_packages(self.bazel, packages, &self.opts, &self.files)?;
-        // A failed load is not a partial answer: if any requested package
+        // Exit 3 is `--keep_going` finishing with errors: every package that
+        // could load is in the output, and the ones that could not are the
+        // ones a cold build would also drop (the universe query runs with
+        // `--keep_going` too, so they are absent from a fresh index). Their
+        // empty updates tombstone their rows, and consumers become direct via
+        // `DeletedDep`. Envoy's `.bazelrc` lists `--deleted_packages` that still
+        // have BUILD files on disk; that is where this shows up in practice.
+        if q.outcome.exit_code == Some(3) {
+            if q.packages_seen < packages.len() {
+                tracing::warn!(
+                    requested = packages.len(),
+                    loaded = q.packages_seen,
+                    stderr = %q.outcome.stderr_tail,
+                    "some dirty packages failed to load under --keep_going; tombstoning them, as a cold build would"
+                );
+            }
+            return Ok(q.updates);
+        }
+        // Any other failure is not a partial answer: if a requested package
         // produced nothing while Bazel reported failure, the honest answer is
         // "we do not know", and the safe one is "everything" (spec 7.1).
         if !q.outcome.success && q.packages_seen < packages.len() {

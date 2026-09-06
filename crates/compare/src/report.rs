@@ -473,11 +473,13 @@ mod tests {
                 producer_only: 0,
                 counts,
                 examples: Vec::new(),
+                cambium_only_reasons: Default::default(),
                 pass: true,
                 error: None,
             }],
             oracle: None,
             recall: 1.0,
+            global: false,
             pass: true,
         };
         let mut c = CompareResult {

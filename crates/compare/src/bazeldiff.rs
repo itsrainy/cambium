@@ -14,6 +14,20 @@
 //! Both implementations (the Rust binary and the Kotlin jar) take the same
 //! flags, so they differ here only in how the process is spawned and in the
 //! version string.
+//!
+//! # Flags
+//!
+//! `generate-hashes` is run with **`-k` (`--keep_going`)** by default. On a
+//! real repository at a real pin, `bazel query '//...:all-targets'` does not
+//! load cleanly: `bazel/bazel` on macOS references a GraalVM distribution with
+//! no `macos-x64` build and an RBE config that shells out to Docker, so the
+//! query exits 3 and bazel-diff, without `-k`, fails the pair outright. With
+//! `-k` it hashes everything that loaded — the same universe cambium indexes
+//! with its own `--keep_going`, and the same universe the `rdeps` oracle sees
+//! (see [`crate::oracle`]). Turn it off with
+//! [`BazelDiff::with_keep_going`] if a repository loads cleanly and a partial
+//! answer should be an error instead. No `--useCquery` and no
+//! `--fineGrainedHashExternalRepos`: both change what "affected" means.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -68,6 +82,8 @@ pub struct BazelDiff {
     exec: Exec,
     version: String,
     name: String,
+    /// `-k`, on by default; see the module docs.
+    keep_going: bool,
 }
 
 /// `~/.cache/cambium/bazel-diff`, where `tools/bazel-diff/fetch.sh` installs.
@@ -142,7 +158,18 @@ impl BazelDiff {
             exec,
             version,
             name: imp.name().to_string(),
+            keep_going: true,
         }
+    }
+
+    /// Whether to pass `-k` to `generate-hashes`. On by default.
+    pub fn with_keep_going(mut self, yes: bool) -> Self {
+        self.keep_going = yes;
+        self
+    }
+
+    pub fn keep_going(&self) -> bool {
+        self.keep_going
     }
 
     pub fn implementation(&self) -> Implementation {
@@ -164,9 +191,8 @@ impl BazelDiff {
     ///
     /// The startup options are the corpus ones, so bazel-diff talks to the
     /// same server (and therefore the same analysis cache and external
-    /// repository fetches) cambium used. No `--useCquery` and no
-    /// `--fineGrainedHashExternalRepos`: both change what "affected" means,
-    /// and the comparison is only meaningful against bazel-diff's defaults.
+    /// repository fetches) cambium used. `-k` rides along unless it was turned
+    /// off; see the module docs for why it is the default.
     pub fn generate_hashes(
         &self,
         ws: &Path,
@@ -180,6 +206,9 @@ impl BazelDiff {
             .arg(ws)
             .arg("-b")
             .arg(&ctx.bazel_binary);
+        if self.keep_going {
+            cmd.arg("-k");
+        }
         if !ctx.startup_flags.is_empty() {
             cmd.arg("--bazelStartupOptions")
                 .arg(ctx.startup_flags_arg());

@@ -202,6 +202,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         // A local path is a perfectly good git remote, which is what keeps
         // this test off the network for everything but Bazel itself.
         url: format!("file://{}", src.display()),
+        mirror: None,
         pin: pin.clone(),
         replay_range: shas.len(),
         bazel: bazel.display().to_string(),
@@ -258,6 +259,13 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         ..CompareOptions::new("smoke", pin, results)
     };
     let result = compare_pairs(&engine, &checkout, &selected.pairs, &refs, &opts).unwrap();
+
+    // The rendered section, so a run of this test by hand shows the same table
+    // the corpus suite would write into docs/CORPUS.md.
+    println!(
+        "{}",
+        cambium_compare::report::render_repo_section(None, std::slice::from_ref(&result), None)
+    );
 
     for pair in &result.pairs {
         for p in &pair.producers {

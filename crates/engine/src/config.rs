@@ -214,10 +214,25 @@ impl Config {
 
     /// Hash of the *normalised* config, so that comments and key order do not
     /// invalidate a lineage but a changed invalidator does.
+    ///
+    /// [`cambium_proto::RULE_HASH_VERSION`] is mixed in as well. It is not
+    /// configuration, but it decides what a target's rule hash means, and the
+    /// index carries this value as its `config_hash`: an index whose
+    /// `config_hash` does not match is refused for splicing
+    /// ([`crate::EngineError::ConfigHashMismatch`]) and the run mints a new
+    /// lineage. That is exactly the guarantee a canonicalisation change needs —
+    /// rows hashed one way are never compared against rows hashed another —
+    /// and it is cheaper than a format break, which would make old indexes
+    /// unreadable rather than merely unspliceable.
     pub fn hash(&self) -> [u8; 32] {
         let mut graph_relevant = self.clone();
         graph_relevant.bazel.startup_flags.clear();
-        *blake3::hash(graph_relevant.to_toml().as_bytes()).as_bytes()
+        let mut h = blake3::Hasher::new();
+        h.update(b"cambium-rule-hash-v");
+        h.update(&cambium_proto::RULE_HASH_VERSION.to_le_bytes());
+        h.update(b"\n");
+        h.update(graph_relevant.to_toml().as_bytes());
+        *h.finalize().as_bytes()
     }
 
     pub fn rules(&self) -> Rules {
@@ -270,6 +285,28 @@ mod tests {
         assert!(!a.to_toml().contains("startup_flags"));
         let back: Config = toml::from_str(&b.to_toml()).unwrap();
         assert_eq!(back, b);
+    }
+
+    #[test]
+    fn the_rule_hash_version_is_part_of_the_config_hash() {
+        // Not a config field, but it decides what a rule hash means, so an
+        // index built under a different canonicalisation must not be
+        // spliceable. Pinned by value so bumping the version is a deliberate
+        // act with a visible test to update.
+        let expected = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"cambium-rule-hash-v");
+            h.update(&2u32.to_le_bytes());
+            h.update(b"\n");
+            h.update(Config::default().to_toml().as_bytes());
+            *h.finalize().as_bytes()
+        };
+        assert_eq!(
+            Config::default().hash(),
+            expected,
+            "RULE_HASH_VERSION moved: old indexes are now a different lineage, \
+             which is the point — update this test"
+        );
     }
 
     #[test]

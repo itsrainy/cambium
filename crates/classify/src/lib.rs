@@ -284,9 +284,22 @@ pub fn dirty_set(
             }
             // A modified BUILD file dirties only its own package: the package
             // boundaries did not move.
+            //
+            // It is also a changed *source file*. That is not a technicality:
+            // `filegroup(name = "srcs", srcs = glob(["**"]))` — the shape every
+            // package in `bazel/bazel` uses to feed the distfile — has the
+            // BUILD file itself among its inputs, and its rule proto does not
+            // move when the BUILD file's text does. Re-querying the package
+            // therefore finds nothing changed, and without this the filegroup
+            // and everything above it (`//src:srcs`, `//:bazel-srcs`, the
+            // distribution tarball) are missed. The first corpus run against
+            // bazel/bazel caught it: both bazel-diff and Tango reported
+            // `//src/main/java/com/google/devtools/build/lib:srcs` and
+            // `//src:srcs` on a BUILD-only commit and cambium did not.
             Status::Modified | Status::TypeChanged => {
                 packages.insert(pkg.clone());
-                out.dirty.insert(pkg);
+                out.dirty.insert(pkg.clone());
+                out.direct_files.insert(c.path.clone());
             }
         }
     }
@@ -444,6 +457,10 @@ mod tests {
         assert_eq!(
             d.dirty.iter().cloned().collect::<Vec<_>>(),
             vec!["lib/core"]
+        );
+        assert!(
+            d.direct_files.contains("lib/core/BUILD.bazel"),
+            "a BUILD file is also a source file: a glob(['**']) filegroup consumes it"
         );
     }
 
