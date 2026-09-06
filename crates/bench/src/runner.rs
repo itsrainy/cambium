@@ -59,6 +59,8 @@ pub fn sweep(opts: &SweepOptions) -> Result<BenchReport> {
         .with_context(|| format!("unknown preset {}", opts.base_preset))?;
     let mut results = Vec::new();
     let mut points = Vec::new();
+    let mut rival_cold: Vec<(f64, f64)> = Vec::new();
+    let mut rival_warm: Vec<(f64, f64)> = Vec::new();
     for &v in &opts.values {
         let mut spec = base.clone();
         match opts.param.as_str() {
@@ -82,12 +84,34 @@ pub fn sweep(opts: &SweepOptions) -> Result<BenchReport> {
         r.preset = opts.base_preset.clone();
         r.param = Some(v);
         points.push((v as f64, r.median_ms));
+        // Comparison stages carry a second curve: the tool being compared
+        // against, measured on the very same graph.
+        for (key, series) in [
+            ("bazel_diff_cold_ms", &mut rival_cold),
+            ("bazel_diff_warm_ms", &mut rival_warm),
+        ] {
+            if let Some(ms) = r.extra.get(key) {
+                series.push((v as f64, *ms));
+            }
+        }
         results.push(r);
     }
     let report = BenchReport::new(results);
     emit(&report, opts.out.as_deref(), None)?;
     if let Some(p) = &opts.plot {
-        let svg = crate::harness::plot_svg(&format!("{} vs {}", opts.stage, opts.param), &points);
+        let title = format!("{} vs {}", opts.stage, opts.param);
+        let svg = if rival_cold.is_empty() {
+            crate::harness::plot_svg(&title, &points)
+        } else {
+            crate::harness::plot_svg_series(
+                &title,
+                &[
+                    ("bazel-diff (cold)", &rival_cold),
+                    ("bazel-diff (warm)", &rival_warm),
+                    ("cambium", &points),
+                ],
+            )
+        };
         std::fs::write(p, svg).with_context(|| format!("writing {}", p.display()))?;
         eprintln!("cambi bench: wrote {}", p.display());
     }
@@ -178,6 +202,7 @@ pub fn e2e_bazel(opts: &BazelE2eOptions) -> Result<Vec<StageResult>> {
             ("nodes".to_string(), index.header.counts.nodes as f64),
             ("edges".to_string(), index.header.counts.edges as f64),
         ]),
+        notes: BTreeMap::new(),
     });
 
     let req = AffectedRequest::new(&base_sha, &opts.head);
@@ -219,6 +244,7 @@ pub fn e2e_bazel(opts: &BazelE2eOptions) -> Result<Vec<StageResult>> {
         p90_ms: p90,
         peak_rss_mb: peak_rss_mb(),
         extra,
+        notes: BTreeMap::new(),
     });
     Ok(results)
 }

@@ -89,7 +89,12 @@ $ cambi index owner     <file> <path>...
 $ cambi index targets   <file> <package> [--kind rule]
 $ cambi index stats     <file>
 $ cambi index verify    <file> --against-bazel
-$ cambi bench run|sweep|compare|bazel
+$ cambi bench run|sweep|legacy|compare|bazel
+$ cambi corpus fetch|build|replay|pairs|compare|report|all <id>
+                   [--bazel-version v] [--manifest corpus.toml] [--corpus-dir d]
+$ cambi corpus compare <id> [--pairs f.json] [--kind adjacent|pr|stress] [--cap n]
+                   [--oracle-sample k] [--bazel-diff rust|kotlin|none] [--no-tango]
+                   [--producers bazel-diff-rust,tango]
 $ cambi synth emit-bazel|describe|presets
 $ cambi config
 ```
@@ -283,6 +288,26 @@ accumulated tombstones:
 $ cambi baseline build --publish && cambi baseline gc
 ```
 
+## Benchmarks
+
+`cambi bench run` and `cambi bench sweep` measure each stage of the pipeline
+against synthetic graphs at sizes no real repository reaches, and
+`cambi bench legacy` puts cambium and bazel-diff on the identical graph and
+change — a `bazel` shim replays the graph dump the generator already produces,
+so the measured time is each tool's own work rather than a Bazel server's, and
+the two label sets have to agree. See [docs/BENCH.md](docs/BENCH.md).
+
+## Validation against real repositories
+
+`cambi bench legacy` is a like-for-like comparison against bazel-diff, but it
+runs on a synthetic graph. The corpus suite (`cambi corpus ...`,
+`crates/corpus`, `crates/compare`) runs the same kind of three-way comparison
+— cambium vs bazel-diff vs Tango vs a from-scratch `rdeps` oracle — against
+real Bazel monorepos (bazel, envoy, sourcegraph, apollo, xla, tensorflow), plus
+an updater replay over each repository's real commit history. See
+[docs/CORPUS.md](docs/CORPUS.md) for what it proves, how to run it locally,
+the disagreement classes, and the current results.
+
 ## Layout
 
 ```
@@ -294,7 +319,7 @@ crates/
   classify/        path -> package, invalidator rules, dirty-set computation
   engine/          a run: load, dirty, query, splice, direct set, walk
   synth/           synthetic graph generator, mutations, Bazel repo emitter
-  bench/           stage benchmarks, sweeps, regression gating
+  bench/           stage benchmarks, sweeps, regression gating, bazel-diff comparison
   cli/             the `cambi` binary
 ```
 

@@ -114,8 +114,12 @@ fn replays_a_history_and_the_oracle_holds() {
         );
     }
     // The results file is the same document the function returned.
-    let on_disk =
-        ReplayResult::read(&ReplayResult::path(&f.results, &opts(&f, false).pin)).unwrap();
+    let on_disk = ReplayResult::read(&ReplayResult::path_versioned(
+        &f.results,
+        &opts(&f, false).pin,
+        Some("synth"),
+    ))
+    .unwrap();
     assert_eq!(on_disk.commits.len(), r.commits.len());
     assert!(on_disk.done);
     let st = State::load(&f.results, "synth", &opts(&f, false).pin).unwrap();
@@ -142,7 +146,7 @@ fn a_replay_resumes_from_its_last_published_index() {
     // A genuinely interrupted run: truncate the results file to three commits
     // and mark it unfinished, then resume. The remaining commits are replayed
     // from the published index of the third, not from the cold build.
-    let path = ReplayResult::path(&f.results, &o.pin);
+    let path = ReplayResult::path_versioned(&f.results, &o.pin, Some("synth"));
     let mut truncated = ReplayResult::read(&path).unwrap();
     truncated.commits.truncate(3);
     truncated.done = false;

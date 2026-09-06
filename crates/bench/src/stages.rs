@@ -63,11 +63,12 @@ impl StageContext {
             p90_ms: p90,
             peak_rss_mb: peak_rss_mb(),
             extra,
+            notes: BTreeMap::new(),
         }
     }
 }
 
-fn engine() -> Engine {
+pub(crate) fn engine() -> Engine {
     let dir = std::env::temp_dir().join("cambium-bench");
     let _ = std::fs::create_dir_all(&dir);
     Engine::with_parts(
@@ -91,6 +92,9 @@ pub fn run_stage(ctx: &StageContext, stage: &str) -> anyhow::Result<StageResult>
         "walk_hub" => Ok(walk_stage(ctx, true)),
         "e2e_memory" => Ok(e2e_memory(ctx)),
         "e2e_materialize" => Ok(e2e_materialize(ctx)),
+        "legacy_bazel_diff" => {
+            Ok(crate::legacy::run(ctx, &crate::legacy::LegacyOptions::default())?.result)
+        }
         other => anyhow::bail!("unknown stage {other}"),
     }
 }

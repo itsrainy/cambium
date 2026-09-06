@@ -555,11 +555,33 @@ impl Engine {
                 count = paths.len(),
                 "resolving changed .bzl files with rbuildfiles"
             );
-            let pkgs = querier.rbuildfiles(&paths)?;
             stats.rbuildfiles_called = true;
-            for p in pkgs {
-                bzl_dirty.insert(p.clone());
-                dirty.dirty.insert(p);
+            match querier.rbuildfiles(&paths) {
+                Ok(pkgs) => {
+                    for p in pkgs {
+                        bzl_dirty.insert(p.clone());
+                        dirty.dirty.insert(p);
+                    }
+                }
+                // Sky Query loads the whole universe, external repositories
+                // included, so on a machine where some of those cannot be
+                // fetched it finishes with errors (exit 3) even though the
+                // package query itself is fine. The rbuildfiles answer is
+                // then incomplete, and the only sound move is to treat the
+                // commit as global: over-approximate rather than miss a
+                // package that loads the changed .bzl.
+                Err(EngineError::Bazel(cambium_bazel::BazelError::Partial { stderr, .. })) => {
+                    tracing::warn!(
+                        stderr = %stderr,
+                        "rbuildfiles finished with errors; treating the change as global"
+                    );
+                    dirty.global = true;
+                    dirty.global_reason = Some(
+                        "rbuildfiles finished with errors under --keep_going (bazel exit 3)"
+                            .to_string(),
+                    );
+                }
+                Err(e) => return Err(e),
             }
         }
         stats.ignored_files = dirty.ignored;

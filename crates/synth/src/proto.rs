@@ -30,6 +30,20 @@ fn string_attr(name: &str, value: String) -> Attribute {
     }
 }
 
+/// The `.bzl` files a package's BUILD file loads, as instantiation frames.
+///
+/// Mirrors what `emit_package` writes: a package with generated `.bzl` loads
+/// those, and a package with none loads the shared `//rules:synth.bzl`.
+fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
+    let bzl = &g.packages[pkg as usize].bzl;
+    if bzl.is_empty() {
+        return vec!["rules/synth.bzl:1:1".to_string()];
+    }
+    bzl.iter()
+        .map(|&b| format!("{}:1:1", g.bzl[b as usize].path))
+        .collect()
+}
+
 /// Every target in the graph, as Bazel would report it.
 pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
     let mut out = Vec::with_capacity(g.num_alive_targets() * 2);
@@ -79,6 +93,13 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                     // Locations are what a real query reports and what the
                     // canonical hash has to strip, so emit them.
                     location: Some(format!("/repo/{}/BUILD.bazel:1:1", g.package_path(pkg))),
+                    // The macro frames a real `--proto:instantiation_stack`
+                    // query reports. cambium's canonical hash strips them, but
+                    // they are how a consumer of this dump learns which `.bzl`
+                    // defined a rule — bazel-diff seeds each rule's digest from
+                    // exactly these paths — so a dump without them would hide
+                    // every `.bzl` edit from anything measured against it.
+                    instantiation_stack: instantiation_stack(g, pkg),
                     attribute,
                     rule_input,
                     ..Default::default()

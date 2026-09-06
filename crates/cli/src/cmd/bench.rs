@@ -8,6 +8,12 @@ use clap::Subcommand;
 
 use crate::cmd::Context;
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
 #[derive(Subcommand)]
 pub enum Args {
     /// Run stage benchmarks against synthetic graphs.
@@ -58,6 +64,31 @@ pub enum Args {
         /// Percentage a stage may slow down before it counts as a regression.
         #[arg(long, default_value_t = 15.0)]
         threshold: f64,
+    },
+    /// Compare against bazel-diff on the same synthetic change (spec 7).
+    ///
+    /// Bazel is replaced by a shim that replays the graph dump cambium's
+    /// generator already produces, so the measured time is each tool's own
+    /// work rather than a Bazel server's.
+    Legacy {
+        #[arg(long, default_value = "small")]
+        preset: String,
+        /// Change preset applied to reach the head revision.
+        #[arg(long, default_value = "typical-pr")]
+        changes: String,
+        /// bazel-diff binary; defaults to $CAMBIUM_BAZEL_DIFF, then the path
+        /// tools/bazel-diff/fetch.sh writes.
+        #[arg(long = "bazel-diff")]
+        bazel_diff: Option<PathBuf>,
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// Keep the emitted workspaces here instead of a temporary directory.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        #[arg(long, default_value = "text")]
+        output: OutputFormat,
     },
     /// End-to-end timing against a real Bazel, on an emitted workspace.
     Bazel {
@@ -114,6 +145,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 .map(|v| parse_size(v))
                 .collect::<Result<Vec<u64>>>()?;
             anyhow::ensure!(!values.is_empty(), "--values is required");
+            let plot = plot.or_else(|| {
+                (stage == cambium_bench::legacy::STAGE).then(|| PathBuf::from("bench-legacy.svg"))
+            });
             runner::sweep(&SweepOptions {
                 stage,
                 param,
@@ -140,6 +174,34 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 crate::EXIT_ERROR
             })
         }
+        Args::Legacy {
+            preset,
+            changes,
+            bazel_diff,
+            runs,
+            seed,
+            workdir,
+            output,
+        } => {
+            let ctx = cambium_bench::StageContext::new(&preset, runs)?;
+            let run = cambium_bench::legacy::run(
+                &ctx,
+                &cambium_bench::legacy::LegacyOptions {
+                    change_preset: changes,
+                    seed,
+                    binary: bazel_diff,
+                    workdir,
+                },
+            )?;
+            match output {
+                OutputFormat::Json => {
+                    let report = cambium_bench::BenchReport::new(vec![run.result]);
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                OutputFormat::Text => print_legacy(&run),
+            }
+            Ok(crate::EXIT_OK)
+        }
         Args::Bazel {
             repo,
             base,
@@ -160,6 +222,34 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
     }
+}
+
+fn print_legacy(run: &cambium_bench::legacy::LegacyRun) {
+    let e = &run.result.extra;
+    let get = |k: &str| e.get(k).copied().unwrap_or(0.0);
+    println!(
+        "preset:          {} ({} targets)",
+        run.result.preset,
+        get("targets") as u64
+    );
+    println!("bazel-diff:      {}", run.bazel_diff_version);
+    println!("changed files:   {}", get("changed_files") as u64);
+    println!();
+    println!("bazel-diff cold: {:>10.1} ms", get("bazel_diff_cold_ms"));
+    println!("bazel-diff warm: {:>10.1} ms", get("bazel_diff_warm_ms"));
+    println!("cambium:         {:>10.1} ms", get("cambium_ms"));
+    println!(
+        "speedup:         {:>10.1}x cold, {:.1}x warm",
+        get("speedup_vs_cold"),
+        get("speedup_vs_warm")
+    );
+    println!();
+    println!("agreed:          {}", run.agreed.len());
+    println!(
+        "cambium only:    {} (select-reachable over-approximation)",
+        run.cambium_only.len()
+    );
+    println!("bazel-diff only: {}", run.bazel_diff_only.len());
 }
 
 /// Accepts `1000`, `1e6`, `2M`, `500k`.

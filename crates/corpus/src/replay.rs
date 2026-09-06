@@ -153,6 +153,19 @@ impl ReplayResult {
         results_dir.join(format!("replay-{pin}.json"))
     }
 
+    /// The result file for one Bazel version of the matrix; `None` (or an
+    /// empty version) is the repo's own `.bazelversion` and keeps the plain
+    /// name.
+    pub fn path_versioned(results_dir: &Path, pin: &str, version: Option<&str>) -> PathBuf {
+        match version.filter(|v| !v.is_empty()) {
+            Some(v) => results_dir.join(format!(
+                "replay-{pin}-{}.json",
+                v.replace(['/', ' ', ':'], "_")
+            )),
+            None => Self::path(results_dir, pin),
+        }
+    }
+
     pub fn read(path: &Path) -> Result<Self> {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
@@ -297,7 +310,11 @@ pub fn replay(
     anyhow::ensure!(commits.len() >= 2, "a replay needs at least two commits");
     let from = commits[0].clone();
     let to = commits[commits.len() - 1].clone();
-    let path = ReplayResult::path(&opts.results_dir, &opts.pin);
+    let path = ReplayResult::path_versioned(
+        &opts.results_dir,
+        &opts.pin,
+        Some(opts.bazel_version.as_str()),
+    );
     let mut state = State::load(&opts.results_dir, &opts.repo_id, &opts.pin)?;
 
     // ---- resume, or start ----
@@ -458,7 +475,11 @@ fn start(
         summary: Summary::default(),
         done: false,
     };
-    result.write(&ReplayResult::path(&opts.results_dir, &opts.pin))?;
+    result.write(&ReplayResult::path_versioned(
+        &opts.results_dir,
+        &opts.pin,
+        Some(opts.bazel_version.as_str()),
+    ))?;
     Ok((result, index, 1))
 }
 
