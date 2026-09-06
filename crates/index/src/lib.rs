@@ -36,8 +36,8 @@ pub use data::{
     flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, Provenance, NO_ID,
 };
 pub use format::{
-    index_file_name, index_key, parse_index_key, temp_suffix, IndexError, IndexFile,
-    OwnedIndexBytes, FORMAT_VERSION,
+    commit_pointer_key, index_file_name, index_key, parse_commit_pointer_key, parse_index_key,
+    temp_suffix, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION,
 };
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};

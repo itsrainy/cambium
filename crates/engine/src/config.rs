@@ -32,6 +32,13 @@ pub struct BazelConfig {
     /// `bazelisk` if on PATH, then `bazel`.
     pub binary: String,
     pub extra_query_flags: Vec<String>,
+    /// Startup options placed before the command word (`--output_base=...`,
+    /// `--bazelrc=...`). They choose *which server* answers, not what the
+    /// graph is, so they are excluded from the config hash: a corpus run on a
+    /// different machine, with a different output base, still shares the
+    /// lineage.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub startup_flags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -208,7 +215,9 @@ impl Config {
     /// Hash of the *normalised* config, so that comments and key order do not
     /// invalidate a lineage but a changed invalidator does.
     pub fn hash(&self) -> [u8; 32] {
-        *blake3::hash(self.to_toml().as_bytes()).as_bytes()
+        let mut graph_relevant = self.clone();
+        graph_relevant.bazel.startup_flags.clear();
+        *blake3::hash(graph_relevant.to_toml().as_bytes()).as_bytes()
     }
 
     pub fn rules(&self) -> Rules {
@@ -246,6 +255,21 @@ mod tests {
         assert_eq!(a.hash(), b.hash());
         b.invalidators.globs.push("extra/**".into());
         assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn startup_flags_do_not_reach_the_hash_or_the_default_serialisation() {
+        let a = Config::default();
+        let mut b = Config::default();
+        b.bazel.startup_flags.push("--output_base=/tmp/x".into());
+        assert_eq!(
+            a.hash(),
+            b.hash(),
+            "startup flags pick a server, not a graph"
+        );
+        assert!(!a.to_toml().contains("startup_flags"));
+        let back: Config = toml::from_str(&b.to_toml()).unwrap();
+        assert_eq!(back, b);
     }
 
     #[test]

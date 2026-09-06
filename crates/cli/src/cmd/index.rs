@@ -37,6 +37,9 @@ pub struct Reach {
     /// Report only test targets.
     #[arg(long)]
     pub tests_only: bool,
+    /// With --transitive, stop after this many hops.
+    #[arg(long)]
+    pub max_depth: Option<u32>,
 }
 
 impl From<&Reach> for QueryOptions {
@@ -45,6 +48,7 @@ impl From<&Reach> for QueryOptions {
             transitive: r.transitive,
             include_manual: r.include_manual,
             tests_only: r.tests_only,
+            max_depth: r.max_depth,
         }
     }
 }
@@ -295,6 +299,12 @@ fn print_stats(s: &inspect::IndexStats) {
         "                 p99 {}  p50 {}  mean {:.2}",
         s.in_degree.p99, s.in_degree.p50, s.in_degree.mean
     );
+    if !s.in_degree.top.is_empty() {
+        println!("hubs (rules by in-degree):");
+        for h in &s.in_degree.top {
+            println!("  {:>8}  {}", h.in_degree, h.label);
+        }
+    }
     println!();
     let b = &s.bytes;
     println!("bytes:           {} total", human(b.file_total));
@@ -435,8 +445,6 @@ fn print_detail(d: &inspect::TargetDetail) {
 /// fail the check; extra targets are the over-approximation the design accepts,
 /// and are reported as a precision percentage.
 fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
-    use std::process::Command;
-
     let engine = ctx.engine()?;
     let f = IndexFile::open(file)?;
     let v = f.view();
@@ -462,10 +470,10 @@ fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
 
     for id in picked {
         let label = v.label(id);
-        let out = Command::new(engine.bazel.binary())
-            .current_dir(engine.workspace())
+        let out = engine
+            .bazel
+            .command("query")
             .args([
-                "query",
                 &format!("rdeps(//..., {label})"),
                 "--output=label",
                 "--noimplicit_deps",
@@ -490,6 +498,7 @@ fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
             &cambium_index::WalkOptions {
                 include_manual: true,
                 explain: false,
+                max_depth: None,
             },
         );
         let ours: std::collections::HashSet<String> =

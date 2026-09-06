@@ -14,6 +14,9 @@ pub struct WalkOptions {
     /// Record a parent pointer per visited node so paths back to the direct set
     /// can be reconstructed (`--explain`). Off by default: it costs 4n bytes.
     pub explain: bool,
+    /// Stop after this many hops from the seeds. `None` walks to the fixpoint;
+    /// `Some(0)` reports only the seeds themselves.
+    pub max_depth: Option<u32>,
 }
 
 /// Result of a reverse walk.
@@ -26,6 +29,11 @@ pub struct WalkResult {
     pub tests: Vec<u32>,
     /// `parent[v]` is the node that first reached `v`, or `NO_ID` for seeds.
     pub parent: Option<Vec<u32>>,
+    /// `depth[v]` is the number of hops at which `v` was first reached — 0 for
+    /// a seed, `NO_ID` for a node the walk never visited. Every visited node
+    /// counts as a hop, tombstones included: a target reached through a
+    /// deleted dependency is one hop further than the deletion itself.
+    pub depth: Vec<u32>,
 }
 
 impl WalkResult {
@@ -45,6 +53,12 @@ impl WalkResult {
             }
         }
         Some(path)
+    }
+
+    /// Hops from the nearest seed, for a visited node.
+    pub fn depth_of(&self, id: u32) -> Option<u32> {
+        let d = *self.depth.get(id as usize)?;
+        (d != NO_ID).then_some(d)
     }
 }
 
@@ -72,16 +86,22 @@ pub fn walk_view<V: GraphView + ?Sized>(
     let n = view.num_nodes() as usize;
     let mut visited = FixedBitSet::with_capacity(n);
     let mut parent = opts.explain.then(|| vec![NO_ID; n]);
+    let mut depth = vec![NO_ID; n];
     let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));
     let mut scratch: Vec<u32> = Vec::new();
 
     for &d in direct {
         if (d as usize) < n && !visited.put(d as usize) {
+            depth[d as usize] = 0;
             queue.push_back(d);
         }
     }
 
     while let Some(u) = queue.pop_front() {
+        let du = depth[u as usize];
+        if opts.max_depth.is_some_and(|m| du >= m) {
+            continue;
+        }
         // The row is copied out before the loop body so `scratch` is free for
         // the next iteration; rows are small (mean in-degree under 2 in real
         // graphs) and untouched rows are borrowed rather than copied.
@@ -92,6 +112,7 @@ pub fn walk_view<V: GraphView + ?Sized>(
                 if let Some(p) = parent.as_mut() {
                     p[v as usize] = u;
                 }
+                depth[v as usize] = du + 1;
                 queue.push_back(v);
             }
         }
@@ -118,6 +139,7 @@ pub fn walk_view<V: GraphView + ?Sized>(
         affected,
         tests,
         parent,
+        depth,
     }
 }
 
@@ -140,20 +162,27 @@ pub fn walk_edges(
     let n = IndexRef::num_nodes(&index) as usize;
     let mut visited = FixedBitSet::with_capacity(n);
     let mut parent = opts.explain.then(|| vec![NO_ID; n]);
+    let mut depth = vec![NO_ID; n];
     let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));
 
     for &d in direct {
         if (d as usize) < n && !visited.put(d as usize) {
+            depth[d as usize] = 0;
             queue.push_back(d);
         }
     }
 
     while let Some(u) = queue.pop_front() {
+        let du = depth[u as usize];
+        if opts.max_depth.is_some_and(|m| du >= m) {
+            continue;
+        }
         for &v in edges.row(u) {
             if (v as usize) < n && !visited.put(v as usize) {
                 if let Some(p) = parent.as_mut() {
                     p[v as usize] = u;
                 }
+                depth[v as usize] = du + 1;
                 queue.push_back(v);
             }
         }
@@ -180,6 +209,7 @@ pub fn walk_edges(
         affected,
         tests,
         parent,
+        depth,
     }
 }
 

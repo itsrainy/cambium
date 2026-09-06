@@ -6,7 +6,8 @@ this layout should be.
 ## Layout
 
 ```
-indexes/<lineage>/<commit>.bin
+indexes/<lineage>/<tree>.bin       the index, keyed by git tree hash
+commits/<lineage>/<sha>            a pointer: the tree hash, as text
 ```
 
 Lineage first. Node ids are only comparable within a lineage, so a lineage is
@@ -14,16 +15,35 @@ the unit you list, garbage-collect and retire; putting it in the path means a
 store can be swept one lineage at a time with a prefix, and an abandoned
 lineage is one `rm -r` or one `aws s3 rm --recursive`.
 
+**Tree hash, not commit sha.** Two commits with identical content have the same
+tree whatever their history, so keying by tree means a rebased branch, a
+squash-merge, a cherry-pick or an amended message all find the index built for
+their twin. (Uber's Tango keys its cache the same way, for the same reason.)
+The client resolves `git rev-parse <sha>^{tree}` before asking the store, and
+the ancestor walk resolves each ancestor's tree and stops at the first hit —
+which now also hits on rebased history, where no ancestor *sha* would have
+matched. The index payload was already sha-independent (see below), so this is
+a key-layout change only; the provenance trailer still records which commit
+wrote the file.
+
+The `commits/<lineage>/<sha>` pointer exists for tooling that has a sha and no
+repository to resolve it in — a shallow clone, a service without a checkout.
+It holds the tree hash and nothing else. A run that can resolve the tree never
+reads it.
+
 Stores that cannot be listed — a plain HTTP bucket behind a CDN, say — also get
-a second key:
+lineage-less copies of both:
 
 ```
-indexes/by-commit/<commit>.bin
+indexes/by-tree/<tree>.bin
+commits/by-commit/<sha>
 ```
 
-because a run looking for a baseline knows the commit but not yet the lineage,
-and cannot discover it without either listing or a fetch. Everything else keys
-off the canonical path.
+because a run looking for a baseline knows the revision but not yet the
+lineage, and cannot discover it without either listing or a fetch. Everything
+else keys off the canonical path. Keys from the earlier sha-addressed layout
+(`indexes/<lineage>/<sha>.bin`, `indexes/by-commit/<sha>.bin`) are still read
+so an upgrade does not orphan a warm store; they are no longer written.
 
 `cambi baseline list` prints keys; `cambi baseline gc` deletes those older
 than `retention_days`, walking the tree.
@@ -49,16 +69,18 @@ Given that, concurrent publishing is safe rather than merely tolerated:
   the same bytes, "last" does not matter.
 
 What is *not* safe, in any backend, is two writers publishing **different**
-content under the same key — but that cannot happen for a fixed commit, because
+content under the same key — but that cannot happen for a fixed tree, because
 the payload is determined by the graph, and the graph is determined by the
-commit.
+tree. Two commits with the same tree write the same payload under the same
+key; only the provenance trailer differs, and it records whichever commit
+wrote last.
 
 ## S3 and GCS
 
 There is no S3-specific backend, and there does not need to be one: the
 `command` backend covers it exactly, with no credential handling of our own and
 no AWS SDK in the dependency tree. `{name}` is substituted with the store key
-(`indexes/<lineage>/<commit>.bin`) and `{path}` with the local file.
+(`indexes/<lineage>/<tree>.bin`, or a `commits/...` pointer) and `{path}` with the local file.
 
 ```toml
 [baseline]
@@ -99,17 +121,18 @@ behind a feature flag, and these templates should keep working.
 
 Not implemented, deliberately, but the format is already arranged for it.
 
-Today every commit gets its own file, even when the graph did not change. On a
-busy main branch most commits touch no BUILD file and no globbed path, so most
-published indexes are byte-identical to their parent's — and the payload is
-identical, by construction. A repository publishing an index per merge stores
-the same 260 MB over and over.
+Today every distinct tree gets its own file, even when the graph did not
+change. Tree keying already folds the no-op cases — an empty commit, a rebase,
+a squash — but on a busy main branch most commits touch no BUILD file and no
+globbed path, so most published indexes are still byte-identical to their
+parent's — and the payload is identical, by construction. A repository
+publishing an index per merge stores the same 260 MB over and over.
 
 The non-breaking next step is a pointer and a blob:
 
 ```
 blobs/<blake3 of payload>.bin        the index itself, written once
-indexes/<lineage>/<commit>           a small pointer file: the blob hash,
+indexes/<lineage>/<tree>             a small pointer file: the blob hash,
                                      plus the provenance for that commit
 ```
 
@@ -124,9 +147,10 @@ Why it is a clean change:
   `identical_graphs_at_different_commits_have_identical_payloads` pins it.
 - **The provenance is already separate**, so a pointer can carry it without the
   blob knowing which commits reference it.
-- **The key layout does not move.** `indexes/<lineage>/<commit>` stays the
+- **The key layout does not move.** `indexes/<lineage>/<tree>` stays the
   thing a run asks for; only what is behind it changes, so a fetcher can be
-  taught to follow a pointer while still handling a direct `.bin`.
+  taught to follow a pointer while still handling a direct `.bin` — and the
+  `commits/` pointers are already that shape.
 - **Garbage collection stays lineage-scoped**: sweep pointers by age as now,
   then delete unreferenced blobs.
 

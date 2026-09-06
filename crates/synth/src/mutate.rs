@@ -350,9 +350,21 @@ fn generate<R: Rng>(
                 slot: srcs[rng.gen_range(0..srcs.len())],
             }
         }
-        MutKind::EditRuleAttr => Mutation::EditRuleAttr {
-            target: pick_target(g, spec, rng)?,
-        },
+        MutKind::EditRuleAttr => {
+            // An alias or a test_suite has no attribute the emitted BUILD file
+            // carries the salt in, so editing one would move the in-memory
+            // hash without changing anything git can see — an edit no real
+            // repository can make. Pick a rule that has attributes.
+            let target = (0..8)
+                .filter_map(|_| pick_target(g, spec, rng))
+                .find(|&t| {
+                    !matches!(
+                        g.targets[t as usize].kind,
+                        crate::graph::Kind::Alias | crate::graph::Kind::TestSuite
+                    )
+                })?;
+            Mutation::EditRuleAttr { target }
+        }
         MutKind::AddDep => {
             let t = pick_target(g, spec, rng)?;
             let layer = g.targets[t as usize].layer;

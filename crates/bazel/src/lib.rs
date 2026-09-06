@@ -89,6 +89,12 @@ pub struct Bazel {
     binary: PathBuf,
     workspace: PathBuf,
     extra_query_flags: Vec<String>,
+    /// Startup options (`--output_base=...`, `--bazelrc=...`), placed before
+    /// the command word on every invocation.
+    startup_flags: Vec<String>,
+    /// Extra environment for every invocation (`USE_BAZEL_VERSION` for a
+    /// bazelisk wrapper, for example).
+    env: Vec<(String, String)>,
     /// Directory for `--query_file` scratch files.
     scratch: PathBuf,
 }
@@ -120,6 +126,8 @@ impl Bazel {
             binary,
             workspace,
             extra_query_flags: Vec::new(),
+            startup_flags: Vec::new(),
+            env: Vec::new(),
             scratch,
         }
     }
@@ -127,6 +135,37 @@ impl Bazel {
     pub fn with_extra_query_flags(mut self, flags: Vec<String>) -> Self {
         self.extra_query_flags = flags;
         self
+    }
+
+    pub fn with_startup_flags(mut self, flags: Vec<String>) -> Self {
+        self.startup_flags = flags;
+        self
+    }
+
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    pub fn startup_flags(&self) -> &[String] {
+        &self.startup_flags
+    }
+
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
+    }
+
+    /// A `bazel <command>` invocation in the workspace, carrying the startup
+    /// flags and environment every call here uses. Callers that need a query
+    /// shape this crate does not offer (`rdeps` for verification, say) build
+    /// on this rather than on a bare `Command`, so they run the same server.
+    pub fn command(&self, subcommand: &str) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.current_dir(&self.workspace);
+        cmd.args(&self.startup_flags);
+        cmd.arg(subcommand);
+        cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        cmd
     }
 
     pub fn with_scratch_dir(mut self, dir: PathBuf) -> Self {
@@ -145,9 +184,8 @@ impl Bazel {
     /// `bazel --version`, e.g. `bazel 7.4.1`. Empty string if it cannot be
     /// determined; the version is recorded in the index header, not acted on.
     pub fn version(&self) -> String {
-        let out = Command::new(&self.binary)
-            .arg("--version")
-            .current_dir(&self.workspace)
+        let out = self
+            .command("--version")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output();
@@ -206,8 +244,7 @@ impl Bazel {
         expr: &str,
         on_batch: impl FnMut(&[u8], &[(usize, usize)]) -> std::result::Result<(), ReadError>,
     ) -> Result<QueryOutcome> {
-        let mut cmd = Command::new(&self.binary);
-        cmd.current_dir(&self.workspace).arg("query");
+        let mut cmd = self.command("query");
 
         // Long expressions go in a file: argv limits are OS-dependent and a
         // dirty set of thousands of packages will exceed them.
@@ -286,10 +323,8 @@ impl Bazel {
             return Ok(Vec::new());
         }
         let expr = format!("rbuildfiles({})", bzl_paths.join(", "));
-        let mut cmd = Command::new(&self.binary);
-        cmd.current_dir(&self.workspace)
-            .arg("query")
-            .arg(&expr)
+        let mut cmd = self.command("query");
+        cmd.arg(&expr)
             // rbuildfiles needs Sky Query mode, which --universe_scope enables.
             .arg("--universe_scope=//...")
             .arg("--order_output=no")

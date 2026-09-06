@@ -38,6 +38,9 @@ pub struct AffectedRequest {
     /// ancestor, or built cold. The head-side index is never published from
     /// `affected`; only `baseline update` publishes that.
     pub publish_base: bool,
+    /// Stop the reverse walk after this many hops from the direct set.
+    /// `None` reports the whole closure.
+    pub max_depth: Option<u32>,
 }
 
 impl AffectedRequest {
@@ -50,6 +53,7 @@ impl AffectedRequest {
             no_full_build: false,
             materialize: false,
             publish_base: false,
+            max_depth: None,
         }
     }
 }
@@ -136,7 +140,8 @@ impl Engine {
             .map(str::to_string)
             .or_else(|| (!cfg.bazel.binary.is_empty()).then(|| cfg.bazel.binary.clone()));
         let bazel = Bazel::at(workspace.clone(), binary.as_deref())
-            .with_extra_query_flags(cfg.bazel.extra_query_flags.clone());
+            .with_extra_query_flags(cfg.bazel.extra_query_flags.clone())
+            .with_startup_flags(cfg.bazel.startup_flags.clone());
         let repo = Repo::discover(&workspace).unwrap_or_else(|_| Repo::new(workspace.clone()));
         let store = store::from_config(&cfg.baseline.store);
         let cache_dir = std::env::temp_dir().join("cambium-cache");
@@ -203,45 +208,93 @@ impl Engine {
 
     // ------------------------------------------------------------- baselines
 
+    /// The git tree a revision points at, or the revision string itself when
+    /// git cannot resolve it (synthetic revision ids in tests, a sha the local
+    /// clone does not have).
+    pub fn tree_of(&self, rev: &str) -> String {
+        self.repo.tree_of(rev).unwrap_or_else(|_| rev.to_string())
+    }
+
     /// Finds an index for `commit` in the artifact store.
     ///
-    /// Keys are `indexes/<lineage>/<commit>.bin`, and a run does not know the
-    /// lineage before it has an index, so a store that can enumerate is asked
-    /// for the key ending in this commit. A store that cannot enumerate (plain
-    /// HTTP) is asked for the lineage-less fallback key the publisher also
-    /// writes; the lineage is in the file either way.
+    /// Indexes are keyed by tree hash — `indexes/<lineage>/<tree>.bin` — so the
+    /// commit is first resolved to its tree, and any commit with the same
+    /// content (a rebase, a squash-merge, a cherry-pick) hits the same blob. A
+    /// run does not know the lineage before it has an index, so a store that
+    /// can enumerate is asked for the key ending in this tree; failing that,
+    /// for the `commits/<lineage>/<sha>` pointer, which names the tree when
+    /// git could not. A store that cannot enumerate (plain HTTP) is asked for
+    /// the lineage-less fallback keys the publisher also writes. Keys from the
+    /// sha-addressed layout this replaces are still recognised.
     pub fn fetch_baseline(&self, commit: &str) -> Result<Option<PathBuf>> {
         let Some(store) = &self.store else {
             return Ok(None);
         };
         std::fs::create_dir_all(&self.cache_dir)?;
-        let suffix = format!("/{commit}.bin");
-        let legacy_suffix = format!("-{commit}.bin");
+        let tree = self.tree_of(commit);
+        let mut suffixes = vec![format!("/{tree}.bin")];
+        if tree != commit {
+            suffixes.push(format!("/{commit}.bin"));
+        }
+        suffixes.push(format!("-{commit}.bin"));
         if let Ok(names) = store.list() {
             if let Some(name) = names
                 .iter()
-                .find(|n| n.ends_with(&suffix) || n.ends_with(&legacy_suffix))
+                .find(|n| suffixes.iter().any(|s| n.ends_with(s)))
             {
                 let dest = self.cache_dir.join(cache_name(name));
                 if store.fetch(name, &dest)? {
                     return Ok(Some(dest));
                 }
             }
+            // Tooling that only has a sha: follow the pointer to the tree.
+            let pointer_suffix = format!("/{commit}");
+            if let Some(name) = names
+                .iter()
+                .find(|n| n.starts_with("commits/") && n.ends_with(&pointer_suffix))
+            {
+                let dest = self.cache_dir.join(cache_name(name));
+                if store.fetch(name, &dest)? {
+                    let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
+                    let suffix = format!("/{pointed}.bin");
+                    if let Some(name) = names.iter().find(|n| n.ends_with(&suffix)) {
+                        let dest = self.cache_dir.join(cache_name(name));
+                        if store.fetch(name, &dest)? {
+                            return Ok(Some(dest));
+                        }
+                    }
+                }
+            }
+            return Ok(None);
         }
-        let name = commit_addressed_key(commit);
-        let dest = self.cache_dir.join(cache_name(&name));
-        if store.fetch(&name, &dest)? {
-            return Ok(Some(dest));
+        for name in [tree_addressed_key(&tree), commit_addressed_key(commit)] {
+            let dest = self.cache_dir.join(cache_name(&name));
+            if store.fetch(&name, &dest)? {
+                return Ok(Some(dest));
+            }
+        }
+        let pointer = commit_addressed_pointer(commit);
+        let dest = self.cache_dir.join(cache_name(&pointer));
+        if store.fetch(&pointer, &dest)? {
+            let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
+            let name = tree_addressed_key(&pointed);
+            let dest = self.cache_dir.join(cache_name(&name));
+            if store.fetch(&name, &dest)? {
+                return Ok(Some(dest));
+            }
         }
         Ok(None)
     }
 
-    /// Publishes an index under `indexes/<lineage>/<commit>.bin`, plus a
-    /// commit-addressed key when the store cannot be listed.
+    /// Publishes an index under `indexes/<lineage>/<tree>.bin`, with a
+    /// `commits/<lineage>/<sha>` pointer naming the tree, plus lineage-less
+    /// copies of both when the store cannot be listed.
     ///
     /// Idempotent: the payload is a function of the graph, so republishing the
-    /// same commit rewrites identical bytes and concurrent publishers cannot
-    /// disagree.
+    /// same tree rewrites identical bytes and concurrent publishers cannot
+    /// disagree. Two commits with the same tree publish to the same key and
+    /// differ only in the provenance trailer, which records whichever commit
+    /// wrote last.
     pub fn publish_index(
         &self,
         path: &Path,
@@ -251,12 +304,30 @@ impl Engine {
         let Some(store) = &self.store else {
             return Err(EngineError::NoStore);
         };
-        let mut names = vec![format::index_key(lineage, commit)];
-        if store.list().is_err() {
-            names.push(commit_addressed_key(commit));
+        let tree = self.tree_of(commit);
+        let listable = store.list().is_ok();
+        let mut names = vec![format::index_key(lineage, &tree)];
+        if !listable {
+            names.push(tree_addressed_key(&tree));
         }
         for n in &names {
             store.publish(n, path)?;
+        }
+        if tree != commit {
+            let pointer_file = self
+                .cache_dir
+                .join(format!("pointer.{}", format::temp_suffix()));
+            std::fs::create_dir_all(&self.cache_dir)?;
+            std::fs::write(&pointer_file, format!("{tree}\n"))?;
+            let mut pointers = vec![format::commit_pointer_key(lineage, commit)];
+            if !listable {
+                pointers.push(commit_addressed_pointer(commit));
+            }
+            for p in &pointers {
+                store.publish(p, &pointer_file)?;
+            }
+            let _ = std::fs::remove_file(&pointer_file);
+            names.extend(pointers);
         }
         Ok(names)
     }
@@ -485,6 +556,7 @@ impl Engine {
                 "resolving changed .bzl files with rbuildfiles"
             );
             let pkgs = querier.rbuildfiles(&paths)?;
+            stats.rbuildfiles_called = true;
             for p in pkgs {
                 bzl_dirty.insert(p.clone());
                 dirty.dirty.insert(p);
@@ -533,6 +605,7 @@ impl Engine {
         let wopts = WalkOptions {
             include_manual: req.include_manual,
             explain: req.explain,
+            max_depth: req.max_depth,
         };
         let mut changed_file_ids: Vec<(u32, String)> = Vec::with_capacity(dirty.direct_files.len());
         for path in &dirty.direct_files {
@@ -743,12 +816,31 @@ fn finish_report<V: GraphView + ?Sized>(
         global_reason: None,
         dirty_packages: dirty.dirty.iter().cloned().collect(),
         direct: cambium_index::view::labels_sorted(view, direct),
-        affected: cambium_index::view::labels_sorted(view, &result.affected),
+        affected: affected_targets(view, result),
         tests: cambium_index::view::labels_sorted(view, &result.tests),
         timings_ms: timings,
         stats,
         explanations: req.explain.then(|| explain(view, result, reasons)),
     }
+}
+
+/// The affected list with each target's BFS depth, sorted by label.
+fn affected_targets<V: GraphView + ?Sized>(
+    view: &V,
+    result: &walk::WalkResult,
+) -> Vec<crate::report::AffectedTarget> {
+    let mut out: Vec<crate::report::AffectedTarget> = result
+        .affected
+        .iter()
+        .map(|&id| crate::report::AffectedTarget {
+            label: view.label(id).to_string(),
+            depth: result.depth_of(id).unwrap_or(0),
+            test: view.is_test(id),
+        })
+        .collect();
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out.dedup_by(|a, b| a.label == b.label);
+    out
 }
 
 /// `--explain`: for each affected target, the shortest path back to the direct
@@ -803,6 +895,17 @@ fn global_report(
 
 /// Fallback key for stores that cannot be listed: no lineage in the path,
 /// because a fetcher has no way to learn it first.
+fn tree_addressed_key(tree: &str) -> String {
+    format!("indexes/by-tree/{tree}.bin")
+}
+
+/// The sha-addressed pointer for unlistable stores.
+fn commit_addressed_pointer(commit: &str) -> String {
+    format!("commits/by-commit/{commit}")
+}
+
+/// The key the previous, sha-addressed layout wrote for unlistable stores.
+/// Still read, never written.
 fn commit_addressed_key(commit: &str) -> String {
     format!("indexes/by-commit/{commit}.bin")
 }

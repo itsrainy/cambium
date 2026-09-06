@@ -12,22 +12,24 @@
 use std::collections::BTreeSet;
 
 use cambium_engine::report::{
-    AffectedReport, DirectReason, Explanation, Stats, Timings, SCHEMA_VERSION,
+    AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings, SCHEMA_VERSION,
 };
 use cambium_engine::EngineError;
 use serde_json::Value;
 
 /// The shape of `cambi affected --output json`.
 ///
-/// Unchanged since schema version 1; the contract version has moved on because
-/// it is shared with the other documents, and `index stats` changed shape at
-/// version 2.
+/// Version 3 turned `affected` into `{label, depth, test}` objects and added
+/// `stats.rbuildfiles_called`; the version is shared with the other documents,
+/// and `index stats` changed shape at version 2 and again at 3.
 ///
 /// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
 /// recurse through `[]`. Optional fields are listed — the fixture below
 /// populates every one of them.
 const AFFECTED_SCHEMA: &[&str] = &[
-    "affected[]",
+    "affected[].depth",
+    "affected[].label",
+    "affected[].test",
     "base",
     "direct[]",
     "dirty_packages[]",
@@ -49,6 +51,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.head_nodes",
     "stats.ignored_files",
     "stats.queried_targets",
+    "stats.rbuildfiles_called",
     "tests[]",
     "timings_ms.dirty",
     "timings_ms.direct",
@@ -69,7 +72,18 @@ fn fixture() -> AffectedReport {
         global_reason: Some("only set when global".into()),
         dirty_packages: vec!["lib/core".into()],
         direct: vec!["//lib/core:core".into()],
-        affected: vec!["//lib/core:core".into(), "//app:main".into()],
+        affected: vec![
+            AffectedTarget {
+                label: "//app:main".into(),
+                depth: 1,
+                test: false,
+            },
+            AffectedTarget {
+                label: "//lib/core:core".into(),
+                depth: 0,
+                test: false,
+            },
+        ],
         tests: vec!["//app:main_test".into()],
         timings_ms: Timings {
             load: 1,
@@ -90,6 +104,7 @@ fn fixture() -> AffectedReport {
             affected_targets: 7,
             changed_files: 8,
             ignored_files: 9,
+            rbuildfiles_called: true,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
