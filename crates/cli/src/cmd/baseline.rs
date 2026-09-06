@@ -77,6 +77,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 // `baseline update` publishes its own output below; there is
                 // nothing for the base-side publish to add.
                 publish_base: false,
+                max_depth: None,
             };
             let outcome = engine.affected(&req)?;
             let index = match outcome.index {

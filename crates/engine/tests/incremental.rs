@@ -34,6 +34,7 @@ fn request() -> AffectedRequest {
         no_full_build: true,
         materialize: true,
         publish_base: false,
+        max_depth: None,
     }
 }
 
@@ -182,7 +183,7 @@ fn step(
         "dirty package sets disagree"
     );
 
-    let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
+    let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
     let theirs = reference_affected(before, after);
     (ours, theirs, out.index)
 }
@@ -473,4 +474,62 @@ fn explain_reports_a_path_back_to_the_change() {
         assert_eq!(e.path.first().unwrap(), &e.target);
         assert_eq!(e.path.last().unwrap(), &e.direct);
     }
+}
+
+/// Schema 3: every affected target carries the depth at which the walk first
+/// reached it, and `--max-depth` truncates the closure at that depth.
+#[test]
+fn affected_targets_carry_their_depth() {
+    let e = engine();
+    let before = generate(&GraphSpec::preset("small").unwrap());
+    let base = build(&e, &before, "c0");
+    let t = (0..before.targets.len() as u32)
+        .find(|&i| !before.targets[i as usize].srcs.is_empty())
+        .unwrap();
+    let slot = before.targets[t as usize].srcs[0];
+    let mut after = before.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+
+    let full = e
+        .compute(
+            base.view(),
+            &changes,
+            &SynthQuerier::new(&after),
+            &request(),
+        )
+        .unwrap()
+        .report;
+    let direct: BTreeSet<&str> = full.direct.iter().map(String::as_str).collect();
+    for a in &full.affected {
+        assert_eq!(
+            a.depth == 0,
+            direct.contains(a.label.as_str()),
+            "{}: depth 0 iff direct",
+            a.label
+        );
+        assert_eq!(a.test, full.tests.contains(&a.label));
+    }
+    assert!(
+        full.affected.iter().any(|a| a.depth > 0),
+        "a source edit should reach something transitively"
+    );
+
+    let capped = e
+        .compute(
+            base.view(),
+            &changes,
+            &SynthQuerier::new(&after),
+            &AffectedRequest {
+                max_depth: Some(1),
+                ..request()
+            },
+        )
+        .unwrap()
+        .report;
+    let want: Vec<_> = full.affected_within(1).cloned().collect();
+    assert_eq!(
+        capped.affected, want,
+        "--max-depth 1 is the depth<=1 prefix"
+    );
+    assert!(capped.affected.iter().all(|a| a.depth <= 1));
 }

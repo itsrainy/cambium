@@ -48,6 +48,8 @@ pub struct QueryOptions {
     pub include_manual: bool,
     /// Report only test targets.
     pub tests_only: bool,
+    /// With `transitive`, stop after this many hops.
+    pub max_depth: Option<u32>,
 }
 
 /// A list of labels, with enough context to know what produced it.
@@ -242,7 +244,21 @@ pub struct DegreeStats {
     pub p99: u32,
     pub p50: u32,
     pub mean: f64,
+    /// The rules with the most direct consumers, highest first: the hubs an
+    /// edit to which reaches the largest share of the graph.
+    #[serde(default)]
+    pub top: Vec<HubTarget>,
 }
+
+/// One entry of the in-degree leaderboard.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubTarget {
+    pub label: String,
+    pub in_degree: u32,
+}
+
+/// How many hubs `index stats` lists.
+pub const TOP_IN_DEGREE: usize = 20;
 
 impl<'a> IndexQuery<'a> {
     pub fn new(view: IndexRef<'a>) -> Self {
@@ -266,6 +282,7 @@ impl<'a> IndexQuery<'a> {
         WalkOptions {
             include_manual: o.include_manual,
             explain: false,
+            max_depth: o.max_depth,
         }
     }
 
@@ -345,6 +362,7 @@ impl<'a> IndexQuery<'a> {
         let opts = WalkOptions {
             include_manual: true,
             explain: true,
+            max_depth: None,
         };
 
         let forward = walk::walk_deps(self.view, &[from_id], &opts);
@@ -628,6 +646,19 @@ impl<'a> IndexQuery<'a> {
                 degrees[((degrees.len() as f64 * q) as usize).min(degrees.len() - 1)]
             }
         };
+        let mut ranked: Vec<(u32, u32)> = (0..v.num_nodes())
+            .filter(|&id| v.is_rule(id) && !v.is_tombstone(id))
+            .map(|id| (id, v.reverse.row_len(id) as u32))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| v.label(a.0).cmp(v.label(b.0))));
+        let top = ranked
+            .iter()
+            .take(TOP_IN_DEGREE)
+            .map(|&(id, d)| HubTarget {
+                label: v.label(id).to_string(),
+                in_degree: d,
+            })
+            .collect();
         let in_degree = DegreeStats {
             max: degrees.last().copied().unwrap_or(0),
             max_label: if v.num_nodes() > 0 {
@@ -638,6 +669,7 @@ impl<'a> IndexQuery<'a> {
             p99: at(0.99),
             p50: at(0.50),
             mean: if n > 0 { sum as f64 / n as f64 } else { 0.0 },
+            top,
         };
 
         IndexStats {

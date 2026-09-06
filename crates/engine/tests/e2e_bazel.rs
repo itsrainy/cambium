@@ -221,6 +221,7 @@ impl Golden {
             no_full_build: true,
             materialize: true,
             publish_base: false,
+            max_depth: None,
         };
         let out = engine
             .compute(
@@ -239,7 +240,7 @@ impl Golden {
             let head_index = engine.full_build(&head).expect("full build at head");
             let legacy =
                 legacy_affected(&self.root, &self.base, &head, &self.base_index, &head_index);
-            let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
+            let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
             let missing: Vec<&String> = legacy.difference(&ours).collect();
             assert!(
                 missing.is_empty(),
@@ -342,7 +343,7 @@ fn deep_hashes(root: &Path, rev: &str, v: IndexRef<'_>) -> BTreeMap<String, [u8;
 }
 
 fn set(report: &cambium_engine::AffectedReport) -> BTreeSet<&str> {
-    report.affected.iter().map(|s| s.as_str()).collect()
+    report.affected.iter().map(|t| t.label.as_str()).collect()
 }
 
 // ------------------------------------------------------------------ scenarios
@@ -620,6 +621,7 @@ fn differential_check_against_bazel_rdeps() {
             &cambium_index::WalkOptions {
                 include_manual: true,
                 explain: false,
+                max_depth: None,
             },
         );
         let ours: BTreeSet<String> = cambium_index::walk::labels_sorted(v, &r.affected)
@@ -672,6 +674,7 @@ fn synthetic_workspace_through_real_bazel() {
             no_full_build: true,
             materialize: true,
             publish_base: false,
+            max_depth: None,
         };
         let out = engine
             .run_incremental(index.view(), &req)
@@ -683,7 +686,7 @@ fn synthetic_workspace_through_real_bazel() {
 
         let fresh = engine.full_build(head).expect("full build at head");
         let legacy = legacy_affected(root, base, head, &index, &fresh);
-        let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
+        let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
         let missing: Vec<&String> = legacy.difference(&ours).collect();
         assert!(
             missing.is_empty(),

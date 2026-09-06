@@ -21,5 +21,5 @@ pub use engine::{AffectedRequest, BaselineOrigin, Engine, RunOutcome};
 pub use error::{EngineError, Result};
 pub use inspect::{IndexQuery, QueryOptions};
 pub use query::{BazelQuerier, PackageQuerier};
-pub use report::{AffectedReport, DirectReason, Explanation, Stats, Timings};
+pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
 pub use synthq::SynthQuerier;

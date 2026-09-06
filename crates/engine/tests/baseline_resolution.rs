@@ -56,6 +56,7 @@ impl Fixture {
             no_full_build: true,
             materialize: true,
             publish_base: false,
+            max_depth: None,
         }
     }
 
@@ -68,8 +69,18 @@ impl Fixture {
         self.engine.publish_base_index(&index).unwrap();
     }
 
+    /// The index blobs in the store. Each publish also writes a
+    /// `commits/<lineage>/<sha>` pointer; those are not counted here.
     fn store_keys(&self) -> Vec<String> {
-        self.engine.store.as_ref().unwrap().list().unwrap()
+        self.engine
+            .store
+            .as_ref()
+            .unwrap()
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|k| k.starts_with("indexes/"))
+            .collect()
     }
 }
 
@@ -186,7 +197,7 @@ fn publish_base_publishes_the_replayed_index_under_the_base_commit() {
 
     let after = f.store_keys();
     assert_eq!(after.len(), 2, "the replayed base should now be published");
-    let key = cambium_index::index_key(&index.view().lineage, &base);
+    let key = cambium_index::index_key(&index.view().lineage, &f.engine.tree_of(&base));
     assert!(after.contains(&key), "expected {key} in {after:?}");
 
     // ...and the next run finds it rather than replaying again.
@@ -231,7 +242,10 @@ fn affected_never_publishes_the_head_index() {
     assert!(out.index.is_some(), "the run produced a head index");
 
     let keys = f.store_keys();
-    let head_key = cambium_index::index_key(&out.index.as_ref().unwrap().header.lineage, &head);
+    let head_key = cambium_index::index_key(
+        &out.index.as_ref().unwrap().header.lineage,
+        &f.engine.tree_of(&head),
+    );
     assert!(
         !keys.contains(&head_key),
         "affected must not publish the head index: {keys:?}"

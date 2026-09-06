@@ -87,6 +87,53 @@ impl Repo {
         self.rev_parse(rev).is_ok()
     }
 
+    /// The tree object a revision points at.
+    ///
+    /// Two commits with identical content have identical trees whatever their
+    /// shas, which is what lets the baseline store key indexes by tree: a
+    /// rebased or squash-merged commit finds the index built for its
+    /// pre-rebase twin.
+    pub fn tree_of(&self, rev: &str) -> Result<String> {
+        Ok(run(
+            &self.root,
+            &["rev-parse", "--verify", &format!("{rev}^{{tree}}")],
+        )?
+        .trim()
+        .to_string())
+    }
+
+    /// First-parent history of `rev`, oldest first, at most `max` commits
+    /// (including `rev`).
+    pub fn first_parent_log(&self, rev: &str, max: usize) -> Result<Vec<String>> {
+        let out = run(
+            &self.root,
+            &[
+                "rev-list",
+                "--first-parent",
+                &format!("--max-count={max}"),
+                rev,
+            ],
+        )?;
+        let mut v: Vec<String> = out.lines().map(|s| s.to_string()).collect();
+        v.reverse();
+        Ok(v)
+    }
+
+    /// Parents of a commit, in order.
+    pub fn parents(&self, rev: &str) -> Result<Vec<String>> {
+        let out = run(&self.root, &["rev-list", "--parents", "-n", "1", rev])?;
+        Ok(out
+            .split_whitespace()
+            .skip(1)
+            .map(|s| s.to_string())
+            .collect())
+    }
+
+    /// Runs an arbitrary git command in the repository and returns stdout.
+    pub fn git(&self, args: &[&str]) -> Result<String> {
+        run(&self.root, args)
+    }
+
     /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself
     /// (spec 6.5: walk back looking for a published baseline).
     pub fn first_parent_ancestors(&self, rev: &str, max: usize) -> Result<Vec<String>> {
@@ -292,6 +339,11 @@ mod tests {
         assert_eq!(head.len(), 40);
         let anc = repo.first_parent_ancestors("HEAD", 5).unwrap();
         assert_eq!(anc.len(), 1);
+        let tree = repo.tree_of("HEAD").unwrap();
+        assert_eq!(tree.len(), 40);
+        assert_ne!(tree, head);
+        assert_eq!(repo.first_parent_log("HEAD", 10).unwrap().len(), 2);
+        assert_eq!(repo.parents("HEAD").unwrap(), vec![anc[0].clone()]);
         assert_eq!(repo.read_at("HEAD~1", "lib/a.cc").unwrap(), b"one");
         assert!(repo.read_at("HEAD~1", "lib/b.cc").is_none());
     }

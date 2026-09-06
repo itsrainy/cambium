@@ -66,12 +66,31 @@ pub enum IndexError {
 
 type Result<T> = std::result::Result<T, IndexError>;
 
-/// Store key for an index: `indexes/<lineage>/<commit>.bin`.
+/// Store key for an index: `indexes/<lineage>/<tree>.bin`.
 ///
 /// Lineage first because ids are only comparable within one, so a lineage is
-/// the unit you list, garbage-collect, and retire.
-pub fn index_key(lineage: &[u8; 16], commit: &str) -> String {
-    format!("indexes/{}/{}.bin", hex(lineage), commit)
+/// the unit you list, garbage-collect, and retire. The second component is the
+/// git *tree* hash of the revision the index describes, not the commit sha:
+/// two commits with the same tree have the same graph, so a rebased or
+/// squash-merged commit finds the index its pre-rebase twin published.
+/// `commit_pointer_key` is the sha-addressed pointer for tooling that only has
+/// a sha.
+pub fn index_key(lineage: &[u8; 16], tree: &str) -> String {
+    format!("indexes/{}/{}.bin", hex(lineage), tree)
+}
+
+/// Store key of the small pointer file `commits/<lineage>/<sha>`, whose
+/// content is the tree hash the index for that commit is keyed under.
+pub fn commit_pointer_key(lineage: &[u8; 16], commit: &str) -> String {
+    format!("commits/{}/{}", hex(lineage), commit)
+}
+
+/// The lineage and commit a pointer key refers to, if it is one.
+pub fn parse_commit_pointer_key(key: &str) -> Option<(String, String)> {
+    let rest = key.strip_prefix("commits/")?;
+    let (lineage, commit) = rest.split_once('/')?;
+    (!lineage.is_empty() && !commit.is_empty() && !commit.contains('/'))
+        .then(|| (lineage.to_string(), commit.to_string()))
 }
 
 /// The lineage and commit a store key refers to, if it is one.

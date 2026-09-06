@@ -48,6 +48,7 @@ fn walks_a_real_git_history() {
             no_full_build: true,
             materialize: true,
             publish_base: false,
+            max_depth: None,
         };
         let out = engine
             .compute(
@@ -58,7 +59,7 @@ fn walks_a_real_git_history() {
             )
             .unwrap_or_else(|e| panic!("commit {i}: {e}"));
 
-        let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
+        let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
         let theirs = reference_affected(&repo.graphs[i - 1], &repo.graphs[i]);
         let missing: Vec<&String> = theirs.difference(&ours).collect();
         assert!(

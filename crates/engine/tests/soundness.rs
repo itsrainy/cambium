@@ -41,6 +41,7 @@ fn engine_never_under_approximates() {
         no_full_build: true,
         materialize: true,
         publish_base: false,
+        max_depth: None,
     };
 
     // Every iteration lands in exactly one of these, and the totals are checked
@@ -106,7 +107,7 @@ fn engine_never_under_approximates() {
                 index = e.full_build_with("c", &SynthQuerier::new(&g)).unwrap();
                 continue;
             }
-            let ours: BTreeSet<String> = out.report.affected.iter().cloned().collect();
+            let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
             let theirs = reference_affected(&before, &g);
             let missing: Vec<&String> = theirs.difference(&ours).collect();
             assert!(

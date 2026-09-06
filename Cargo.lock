@@ -232,6 +232,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "cambium-compare"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cambium-bazel",
+ "cambium-corpus",
+ "cambium-diff",
+ "cambium-engine",
+ "cambium-index",
+ "cambium-proto",
+ "prost",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "cambium-corpus"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cambium-bazel",
+ "cambium-diff",
+ "cambium-engine",
+ "cambium-index",
+ "cambium-synth",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "cambium-diff"
 version = "0.1.0"
 dependencies = [

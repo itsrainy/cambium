@@ -76,12 +76,12 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 
 ```console
 $ cambi affected --base <sha> --head <sha> [--tests-only] [--include-manual]
-                   [--output text|json|query] [--explain]
+                   [--output text|json|query] [--explain] [--max-depth n]
 $ cambi baseline build  [--commit <sha>] [--publish]
 $ cambi baseline update --from <sha> --to <sha> [--publish]
 $ cambi baseline gc | list
 $ cambi index inspect   <file> [--label //x:y] [--package p]
-$ cambi index rdeps     <file> //x:y  [--transitive] [--tests-only]
+$ cambi index rdeps     <file> //x:y  [--transitive] [--tests-only] [--max-depth n]
 $ cambi index deps      <file> //x:y  [--transitive]
 $ cambi index path      <file> //from:a //to:b
 $ cambi index consumers <file> <path>...  [--transitive]
@@ -150,7 +150,7 @@ versioned contract. Every JSON document carries the version it was written
 against:
 
 ```json
-{ "schema": 1, "base": "...", "head": "...", ... }
+{ "schema": 3, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -179,10 +179,10 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `global_reason` | string, optional | why, when `global` |
 | `dirty_packages` | \[string] | packages re-queried, without the leading `//` |
 | `direct` | \[string] | labels whose own definition or inputs changed |
-| `affected` | \[string] | `direct` plus its reverse closure; sorted |
+| `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -200,9 +200,13 @@ on the same terms.
 |---:|---|
 | 1 | the first published contract |
 | 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
+| 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
 
 The version is shared by every document, so a bump made for one of them moves
-all of them. The affected report has not changed shape between 1 and 2.
+all of them. The affected report did not change shape between 1 and 2; it did
+at 3, and `--max-depth n` (on `affected` and `index rdeps --transitive`)
+truncates the walk at `n` hops, which is what the per-target `depth` makes
+meaningful.
 
 ### Configuration
 
@@ -244,8 +248,10 @@ lineage instead.
 Store backends: `dir` (a local directory), `http` (GET/PUT against a base
 URL), and `command`, whose argument templates get `{name}` and `{path}`
 substituted so `aws s3`, `gsutil`, `curl` or an internal CLI can be plugged in
-without touching Rust. Keys are `indexes/<lineage>/<commit>.bin`, writes are
-idempotent, and concurrent publishers of the same commit are safe — see
+without touching Rust. Keys are `indexes/<lineage>/<tree>.bin` — the git
+*tree* hash, so a rebased or squash-merged commit finds the index its twin
+published — with a `commits/<lineage>/<sha>` pointer for callers that only
+have a sha. Writes are idempotent, and concurrent publishers are safe — see
 [docs/STORE.md](docs/STORE.md), which also has the exact S3 and GCS templates
 and the design note for content-addressed blobs.
 

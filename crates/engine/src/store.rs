@@ -1,9 +1,11 @@
 //! Baseline artifact store (spec 8).
 //!
-//! Keys are `indexes/<lineage>/<commit>.bin`. Lineage comes first because node
-//! ids are only comparable within one, which makes a lineage the unit you list,
-//! garbage-collect and retire; putting it in the path means a store can be
-//! swept a lineage at a time with a prefix.
+//! Keys are `indexes/<lineage>/<tree>.bin`, keyed by git tree hash so commits
+//! with identical content share one index, plus a `commits/<lineage>/<sha>`
+//! pointer holding the tree for tooling that only has a sha. Lineage comes
+//! first because node ids are only comparable within one, which makes a
+//! lineage the unit you list, garbage-collect and retire; putting it in the
+//! path means a store can be swept a lineage at a time with a prefix.
 //!
 //! Writes are idempotent. An index's payload is a pure function of the graph,
 //! so two workers publishing the same commit write the same bytes, and each
@@ -118,6 +120,7 @@ fn collect_keys(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
         let Some(key) = rel.to_str() else { continue };
         let key = key.replace('\\', "/");
         let is_index = cambium_index::parse_index_key(&key).is_some()
+            || cambium_index::parse_commit_pointer_key(&key).is_some()
             || (key.starts_with("cambium-index-") && key.ends_with(".bin"));
         if is_index {
             out.push(key);

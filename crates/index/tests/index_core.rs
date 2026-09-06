@@ -376,3 +376,58 @@ fn serialised_output_is_deterministic() {
     y.provenance.created_unix = 0;
     assert_eq!(format::to_bytes(&x).unwrap(), format::to_bytes(&y).unwrap());
 }
+
+#[test]
+fn walk_records_depth_and_honours_max_depth() {
+    let d = sample();
+    let v = d.view();
+    let m = v.labels.build_map();
+    let r = walk(v, &[m["//a:a"]], &WalkOptions::default());
+    assert_eq!(r.depth_of(m["//a:a"]), Some(0));
+    assert_eq!(r.depth_of(m["//b:b"]), Some(1));
+    assert_eq!(r.depth_of(m["//c:c"]), Some(2));
+    assert_eq!(r.depth_of(m["//c:c_test"]), Some(3));
+    assert_eq!(r.depth_of(m["//a:a.src"]), None, "never visited");
+
+    let r = walk(
+        v,
+        &[m["//a:a"]],
+        &WalkOptions {
+            max_depth: Some(1),
+            ..Default::default()
+        },
+    );
+    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//a:a", "//b:b"]);
+    let r = walk(
+        v,
+        &[m["//a:a"]],
+        &WalkOptions {
+            max_depth: Some(0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//a:a"]);
+}
+
+/// A consumer of a deleted target is reached *through* the tombstone, so the
+/// tombstone is a hop: the consumer sits at depth 1 from the deletion, not 0.
+#[test]
+fn a_tombstoned_dependency_counts_as_a_hop() {
+    let base = sample();
+    let mut b = IndexBuilder::from_view(base.view());
+    // Delete //b:b; //c:c keeps depending on the (now tombstoned) label.
+    b.apply_packages(&[pkg("b", vec![TargetRow::source_file("//b:b.src")])]);
+    let head = b.finish("head");
+    let hv = head.view();
+    let m = hv.labels.build_map();
+    assert!(hv.is_tombstone(m["//b:b"]));
+    let r = walk(hv, &[m["//b:b"]], &WalkOptions::default());
+    assert_eq!(r.depth_of(m["//b:b"]), Some(0));
+    assert_eq!(r.depth_of(m["//c:c"]), Some(1));
+    assert_eq!(r.depth_of(m["//c:c_test"]), Some(2));
+    // The tombstone itself is never reported.
+    assert_eq!(
+        walk::labels_sorted(hv, &r.affected),
+        vec!["//c:c", "//c:c_test"]
+    );
+}

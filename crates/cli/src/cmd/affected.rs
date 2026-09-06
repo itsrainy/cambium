@@ -33,6 +33,10 @@ pub struct Args {
     /// head-side index is never published from `affected`.
     #[arg(long)]
     pub publish_base: bool,
+    /// Report only targets within this many reverse-dependency hops of the
+    /// change (0 = the direct set).
+    #[arg(long)]
+    pub max_depth: Option<u32>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,
     /// Write the head index produced by this run to a file.
@@ -52,6 +56,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         materialize: args.write_index.is_some(),
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
+        max_depth: args.max_depth,
     };
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
@@ -76,10 +81,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                     eprintln!("cambium: everything is affected: {r}");
                 }
             } else {
-                let items = if args.tests_only {
-                    &report.tests
+                let items: Vec<&str> = if args.tests_only {
+                    report.tests.iter().map(String::as_str).collect()
                 } else {
-                    &report.affected
+                    report.affected.iter().map(|t| t.label.as_str()).collect()
                 };
                 for l in items {
                     println!("{l}");
@@ -105,7 +110,7 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
     let wanted: std::collections::HashSet<&str> = if tests_only {
         report.tests.iter().map(|s| s.as_str()).collect()
     } else {
-        report.affected.iter().map(|s| s.as_str()).collect()
+        report.affected.iter().map(|t| t.label.as_str()).collect()
     };
     eprintln!("\n--- why ---");
     for e in explanations {

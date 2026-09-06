@@ -1,0 +1,70 @@
+# The real-repository corpus (docs/CORPUS.md, spec §3).
+#
+# Pins are bumped deliberately, in a PR that regenerates that repo's section
+# of docs/CORPUS.md. Order is the order the repos were brought up.
+
+[[repo]]
+id = "bazel"
+url = "https://github.com/bazelbuild/bazel.git"
+pin = "948b8c70e281c2fe42aa5468dad543c7af9f0ccc"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+bazel_versions = ["7.x", "8.x"]
+notes = "small, clean, macro-heavy Java; fast first target"
+
+[[repo]]
+id = "envoy"
+url = "https://github.com/envoyproxy/envoy.git"
+pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["bazel/repositories.bzl", "bazel/repository_locations.bzl", "api/bazel/**"]
+bazel_versions = ["7.x", "8.x"]
+notes = "C++, tens of thousands of targets, deep .bzl layering, heavy select; external fetch ~6 GB"
+
+[[repo]]
+id = "sourcegraph"
+# sourcegraph/sourcegraph went private in 2024; this is the archived public
+# snapshot (last push 2024-09-02), which still has the busy Gazelle-generated
+# history the replay wants.
+url = "https://github.com/sourcegraph/sourcegraph-public-snapshot.git"
+pin = "c864f15af264f0f456a6d8a83290b5c940715349"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["dev/bazel/**", "go.mod", "go.sum", "pnpm-lock.yaml"]
+notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updater replay"
+
+[[repo]]
+id = "apollo"
+url = "https://github.com/ApolloAuto/apollo.git"
+pin = "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["tools/**", "third_party/**"]
+notes = "C++ AV stack; graph shape closest to the target production repo"
+
+[[repo]]
+id = "xla"
+url = "https://github.com/openxla/xla.git"
+pin = "076fe93fad26cb2555e3bb86defa6a772d11cf35"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["third_party/**", "xla/tsl/**/*.bzl", "workspace*.bzl"]
+notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loading, large fetch"
+
+[[repo]]
+id = "tensorflow"
+url = "https://github.com/tensorflow/tensorflow.git"
+pin = "01990a8ef1f82e62ffffc77ac0d1adc78dc5ee69"
+replay_range = 300
+bazel = "bazelisk"
+extra_query_flags = []
+invalidators = ["third_party/**", "tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]
+skip = true
+notes = "largest public Bazel graph; stretch target, monthly or on demand; hours, very large fetch"

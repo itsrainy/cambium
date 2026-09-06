@@ -22,7 +22,13 @@ use serde::{Deserialize, Serialize};
 ///   and `bytes.label_packing`. The affected report is unchanged between the
 ///   two, but the version is shared across every document, so a consumer
 ///   pinning `schema == 1` sees the bump.
-pub const SCHEMA_VERSION: u32 = 2;
+/// - **3** — `affected` is a list of `{label, depth, test}` objects rather than
+///   labels: `depth` is the number of reverse-dependency hops from the change
+///   at which the target was first reached (0 for the direct set). `stats`
+///   gained `rbuildfiles_called`; `index stats` gained
+///   `in_degree.top`. `direct` and `tests` stay lists of labels, and the `text`
+///   and `query` outputs are unchanged.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -93,6 +99,21 @@ pub struct Stats {
     pub affected_targets: usize,
     pub changed_files: usize,
     pub ignored_files: usize,
+    /// A `.bzl` file changed, so Bazel was asked which packages load it.
+    #[serde(default)]
+    pub rbuildfiles_called: bool,
+}
+
+/// One affected target, with how far from the change it sits.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AffectedTarget {
+    pub label: String,
+    /// Reverse-dependency hops from the nearest direct-set member: 0 means the
+    /// target's own inputs changed. A hop through a tombstoned (deleted)
+    /// dependency counts, so a consumer of a deleted target sits at depth 1.
+    pub depth: u32,
+    /// Whether the target is a test rule.
+    pub test: bool,
 }
 
 /// The answer, in the shape the CLI serialises (spec 10).
@@ -110,7 +131,9 @@ pub struct AffectedReport {
     pub global_reason: Option<String>,
     pub dirty_packages: Vec<String>,
     pub direct: Vec<String>,
-    pub affected: Vec<String>,
+    /// `direct` plus its reverse closure, sorted by label.
+    pub affected: Vec<AffectedTarget>,
+    /// The labels of the affected targets that are tests, sorted.
     pub tests: Vec<String>,
     pub timings_ms: Timings,
     pub stats: Stats,
@@ -143,10 +166,10 @@ impl AffectedReport {
         if self.global {
             return "//...".to_string();
         }
-        let items = if tests_only {
-            &self.tests
+        let items: Vec<&str> = if tests_only {
+            self.tests.iter().map(String::as_str).collect()
         } else {
-            &self.affected
+            self.affected.iter().map(|t| t.label.as_str()).collect()
         };
         if items.is_empty() {
             // `set()` is a valid empty expression; bazel accepts it and builds
@@ -154,6 +177,16 @@ impl AffectedReport {
             return "set()".to_string();
         }
         format!("set({})", items.join(" "))
+    }
+
+    /// The affected labels, in the order they are reported (sorted).
+    pub fn affected_labels(&self) -> Vec<String> {
+        self.affected.iter().map(|t| t.label.clone()).collect()
+    }
+
+    /// Affected labels no deeper than `max_depth` hops from the change.
+    pub fn affected_within(&self, max_depth: u32) -> impl Iterator<Item = &AffectedTarget> {
+        self.affected.iter().filter(move |t| t.depth <= max_depth)
     }
 }
 
