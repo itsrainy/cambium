@@ -57,7 +57,9 @@ precision; see [What is not measured](#what-is-not-measured).
     `merge-base(parents)..commit`. For a squash- or rebase-merged history,
     where every first-parent commit *is* a pull request, `parent..commit` for
     commits whose message carries a PR reference (`(#1234)`, `PR #1234`,
-    `Merge pull request`). This is the primary kind and the one the headline
+    `Merge pull request`, or a trailing
+    `(https://github.com/<owner>/<repo>/pull/1234)`, the form bazel's own
+    import tooling writes). This is the primary kind and the one the headline
     numbers are drawn from.
   - **adjacent** — `parent..commit` for first-parent commits with no PR
     reference. Same shape as a squash-merged PR; kept separate so the

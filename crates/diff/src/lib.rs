@@ -133,6 +133,14 @@ impl Repo {
             .collect())
     }
 
+    /// The commit's subject line (the first line of its message), for
+    /// PR-reference detection in the change-set workload.
+    pub fn subject(&self, rev: &str) -> Result<String> {
+        Ok(run(&self.root, &["log", "-1", "--format=%s", rev])?
+            .trim()
+            .to_string())
+    }
+
     /// True when the working tree has uncommitted changes to tracked files.
     ///
     /// A dirty tree is not an error: `cambi affected` on a developer's
