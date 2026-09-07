@@ -236,10 +236,7 @@ impl Run {
     /// configuration is generated, not read from the worktree, so this costs
     /// no Bazel.
     fn state(&self) -> Result<State> {
-        let cfg = self
-            .corpus
-            .open(&self.entry)?
-            .config_for(&self.entry, self.version());
+        let cfg = self.corpus.config_for(&self.entry, self.version());
         State::load_for(
             &self.results,
             &self.entry.id,
