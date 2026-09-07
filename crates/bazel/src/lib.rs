@@ -3,8 +3,8 @@
 //! Everything here is deliberately thin: two query shapes (a package set and
 //! the whole repo), one `rbuildfiles` call, and version detection. The flags
 //! are pinned to what the spec's core invariant needs — unconfigured graph,
-//! flattened selects, no implicit deps — and are the only Bazel surface cambium
-//! depends on.
+//! unflattened selects, implicit deps left in — and are the only Bazel surface
+//! cambium depends on.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -70,9 +70,36 @@ const HYGIENE: &[&str] = &[
 /// per-branch entries, the hash sees the edit, and the edges are identical.
 /// (Verified against Bazel 7.4.1; covered by the `change select branch` case in
 /// the end-to-end tests.)
+///
+/// Note also that `--noimplicit_deps` is *not* passed, where it used to be.
+///
+/// Implicit deps were dropped to keep the toolchain graph — which is external,
+/// enormous and never changes — out of the index. It also dropped every
+/// implicit edge that points *into the main repository*, and those are real
+/// build inputs. sourcegraph's schema generator is the clean example:
+///
+/// ```text
+/// generate_schemas = rule(attrs = {
+///     "_sg": attr.label(executable = True, default = "//dev/sg:sg", cfg = "exec"),
+/// })
+/// ```
+///
+/// `somepath(//internal/database:generate_schemas, //dev/sg/internal/cloud:cloud)`
+/// answers with a three-hop path, and the same query under `--noimplicit_deps`
+/// answers "Empty results" — so a commit touching only `dev/sg/internal/cloud`
+/// left the generated schemas, and the eleven targets downstream of them,
+/// out of cambium's affected set. That is unsoundness, not
+/// over-approximation, and no invalidator can name it.
+///
+/// The cost of keeping them turned out to be nearly nothing, measured on both
+/// corpus repositories at their pins: the `//...` proto stream grows 3% on
+/// sourcegraph (36.4 -> 37.5 MB) and 4% on envoy (53.5 -> 55.6 MB), the wall
+/// time does not move, and neither repository reports a single extra load
+/// error. The toolchain labels the flag was there to exclude arrive as
+/// external `Unknown` nodes with no outgoing edges: a handful of leaves that
+/// never appear in a diff.
 const QUERY_FLAGS: &[&str] = &[
     "--output=streamed_proto",
-    "--noimplicit_deps",
     "--order_output=no",
     "--keep_going",
     "--proto:locations=false",
@@ -87,6 +114,109 @@ pub struct QueryOutcome {
     pub success: bool,
     pub stderr_tail: String,
     pub targets_read: usize,
+    /// Packages Bazel reported as failing to load, counted over the *whole*
+    /// stderr stream rather than the 40-line tail.
+    pub load_errors: LoadErrors,
+}
+
+/// What `--keep_going` could not load, scraped from stderr.
+///
+/// Bazel does not report this in the proto stream — a package that failed to
+/// load simply is not there — so the only machine-readable trace of an
+/// incomplete answer is the `ERROR:` lines. `count` is every such line;
+/// `packages` keeps the first [`MAX_ERROR_PACKAGES`] names, which is enough to
+/// tell "one broken package" from "the whole repository failed to resolve its
+/// external deps" when reading an index's provenance months later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoadErrors {
+    pub count: u32,
+    pub packages: Vec<String>,
+}
+
+impl LoadErrors {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn push(&mut self, package: &str) {
+        self.count += 1;
+        if self.packages.len() < MAX_ERROR_PACKAGES {
+            self.packages.push(package.to_string());
+        }
+    }
+}
+
+/// How many failing package names an outcome keeps.
+pub const MAX_ERROR_PACKAGES: usize = 32;
+
+/// The package named by one Bazel load-error line, if it is one.
+///
+/// Two shapes, both emitted under `--keep_going`, and both interleaved with the
+/// ANSI colour codes Bazel writes even when stderr is a pipe:
+///
+/// ```text
+/// ERROR: error loading package 'modules/planning': at /...: ...
+/// ERROR: package contains errors: third_party/bazel: name 'py_library' ...
+/// ERROR: no such package '@@local_config_cuda//cuda': ...
+/// ```
+///
+/// The root package comes back as `""`, which is a real package name, so the
+/// answer is an `Option` rather than a non-empty string.
+pub fn parse_load_error_line(line: &str) -> Option<String> {
+    let l = strip_ansi(line);
+    let rest = l.trim().strip_prefix("ERROR: ")?.trim_start();
+    if let Some(r) = rest.strip_prefix("error loading package ") {
+        // `'pkg': msg` — quoted, and the message itself may contain quotes.
+        let r = r.trim_start().strip_prefix('\'')?;
+        let end = r.find('\'')?;
+        return Some(r[..end].to_string());
+    }
+    if let Some(r) = rest.strip_prefix("no such package ") {
+        // `'@@repo//pkg': msg` — an external repository that failed to fetch
+        // or configure. Counted as a load error like any other: every package
+        // that depended on it is missing from the answer. Apollo's
+        // `@@local_config_cuda//cuda` on a host with no CUDA is the example.
+        let r = r.trim_start().strip_prefix('\'')?;
+        let end = r.find('\'')?;
+        return Some(r[..end].to_string());
+    }
+    if let Some(r) = rest.strip_prefix("package contains errors: ") {
+        // `pkg: msg` — unquoted; a package name never contains a colon.
+        return Some(r.split(':').next().unwrap_or(r).trim().to_string());
+    }
+    None
+}
+
+/// Every load error in a stderr buffer. Used on a tail in tests, and on the
+/// live stream by [`drain_stderr`].
+pub fn parse_load_errors(stderr: &str) -> LoadErrors {
+    let mut e = LoadErrors::default();
+    for line in stderr.lines() {
+        if let Some(p) = parse_load_error_line(line) {
+            e.push(&p);
+        }
+    }
+    e
+}
+
+/// Drops ANSI SGR sequences (`ESC [ ... m`), which Bazel emits unconditionally
+/// and, on an error line, in the middle of the text as well as at the front.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // Skip up to and including the sequence's final byte.
+        for c in chars.by_ref() {
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +349,7 @@ impl Bazel {
                 success: true,
                 stderr_tail: String::new(),
                 targets_read: 0,
+                load_errors: LoadErrors::default(),
             });
         }
         let mut expr = String::from("set(");
@@ -302,7 +433,7 @@ impl Bazel {
         );
 
         let status = child.wait()?;
-        let stderr_tail = stderr_rx.recv().unwrap_or_default();
+        let (stderr_tail, load_errors) = stderr_rx.recv().unwrap_or_default();
 
         // A read error usually means bazel died mid-stream; the stderr tail is
         // the useful part of that story, so report it rather than the truncation.
@@ -322,6 +453,7 @@ impl Bazel {
             success: status.success(),
             stderr_tail,
             targets_read,
+            load_errors,
         })
     }
 
@@ -359,7 +491,7 @@ impl Bazel {
             .expect("stdout piped")
             .read_to_string(&mut out)?;
         let status = child.wait()?;
-        let stderr_tail = stderr_rx.recv().unwrap_or_default();
+        let (stderr_tail, _) = stderr_rx.recv().unwrap_or_default();
         // Exit 3 is "finished with errors" under --keep_going. For rbuildfiles
         // a partial answer is unusable: a package that failed to load may be
         // exactly the one that loads the changed .bzl, and it is not in the
@@ -510,22 +642,29 @@ impl Drop for ScratchFile {
 
 /// Drains the child's stderr on a thread (otherwise a chatty Bazel can fill the
 /// pipe and deadlock us), keeping only the tail.
-fn drain_stderr(child: &mut Child) -> mpsc::Receiver<String> {
+fn drain_stderr(child: &mut Child) -> mpsc::Receiver<(String, LoadErrors)> {
     let (tx, rx) = mpsc::channel();
     let Some(stderr) = child.stderr.take() else {
-        let _ = tx.send(String::new());
+        let _ = tx.send((String::new(), LoadErrors::default()));
         return rx;
     };
     std::thread::spawn(move || {
         let mut tail: std::collections::VecDeque<String> =
             std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
+        // Counted here rather than from `tail`: a repository whose external
+        // deps do not resolve produces hundreds of these, and the tail keeps
+        // forty lines.
+        let mut errors = LoadErrors::default();
         for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            if let Some(p) = parse_load_error_line(&line) {
+                errors.push(&p);
+            }
             if tail.len() == STDERR_TAIL_LINES {
                 tail.pop_front();
             }
             tail.push_back(line);
         }
-        let _ = tx.send(tail.into_iter().collect::<Vec<_>>().join("\n"));
+        let _ = tx.send((tail.into_iter().collect::<Vec<_>>().join("\n"), errors));
     });
     rx
 }
@@ -556,6 +695,68 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim from a `bazel 9.2.0 query //...:*` over ApolloAuto/apollo,
+    /// colour codes and all: the repository's deps live in WORKSPACE, which
+    /// Bazel 9 no longer reads, so nearly every package fails to load.
+    const APOLLO_STDERR: &str = concat!(
+        "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0merror loading package 'modules/planning/traffic_rules/crosswalk': at /w/tools/cpplint.bzl:3:6: Unable to find package for @@[unknown repo 'rules_python' requested from @@]//python:defs.bzl\n",
+        "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0merror loading package '': compilation of module 'tools/install/install.bzl' failed\n",
+        "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0mpackage contains errors: third_party/bazel: name 'py_library' is not defined (did you mean 'cc_library'?)\n",
+        "\u{1b}[35mWARNING: \u{1b}[0m--keep_going specified, ignoring errors. Results may be inaccurate\n",
+    );
+
+    #[test]
+    fn parses_load_errors_from_coloured_stderr() {
+        let e = parse_load_errors(APOLLO_STDERR);
+        assert_eq!(e.count, 3);
+        assert_eq!(
+            e.packages,
+            vec![
+                "modules/planning/traffic_rules/crosswalk".to_string(),
+                // The root package is a real package name, not "no package".
+                String::new(),
+                "third_party/bazel".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_lines_that_are_not_load_errors() {
+        for line in [
+            "INFO: Elapsed time: 3.2s",
+            "WARNING: --keep_going specified, ignoring errors.",
+            "ERROR: Skipping '//foo:bar': no such target",
+            "ERROR: Analysis of target '//x:y' failed",
+            "",
+        ] {
+            assert_eq!(parse_load_error_line(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn counts_an_external_repository_that_would_not_load() {
+        assert_eq!(
+            parse_load_error_line(
+                "\u{1b}[31mERROR: \u{1b}[0mno such package '@@local_config_cuda//cuda': \
+                 Cuda Configuration Error"
+            )
+            .as_deref(),
+            Some("@@local_config_cuda//cuda")
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_first_n_package_names_but_counts_them_all() {
+        let mut s = String::new();
+        for i in 0..(MAX_ERROR_PACKAGES + 5) {
+            s.push_str(&format!("ERROR: error loading package 'p{i}': boom\n"));
+        }
+        let e = parse_load_errors(&s);
+        assert_eq!(e.count as usize, MAX_ERROR_PACKAGES + 5);
+        assert_eq!(e.packages.len(), MAX_ERROR_PACKAGES);
+        assert_eq!(e.packages[0], "p0");
+    }
 
     #[test]
     fn finds_the_workspace_root() {

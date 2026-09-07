@@ -747,6 +747,22 @@ fn render_replay(rep: &ReplayResult) -> String {
     let mut s = String::new();
     let c = &rep.cold;
     s.push_str("#### Cold build\n\n");
+    if c.partial.partial {
+        // Said before the numbers, not after: every count in this section is
+        // of a repository minus the packages Bazel refused to load.
+        s.push_str(&format!(
+            "> **Loaded with {} packages in error.** `bazel query //...` finished \
+             under `--keep_going` with load errors, so the graph below omits them; \
+             the incremental path omits the same packages, which is why the two \
+             still agree.{}\n\n",
+            c.partial.packages_in_error,
+            if c.partial.packages.is_empty() {
+                String::new()
+            } else {
+                format!(" First: `{}`.", c.partial.packages.join("`, `"))
+            }
+        ));
+    }
     s.push_str("| targets | edges | packages | index bytes | wall |\n");
     s.push_str("|---:|---:|---:|---:|---:|\n");
     s.push_str(&format!(
@@ -1013,6 +1029,8 @@ fn render_compare(r: &RepoResults) -> String {
     let mut partial_batches = 0usize;
     let mut skipped_roots = 0usize;
     let mut missing = 0usize;
+    let mut missing_external = 0usize;
+    let mut external_route = 0usize;
     for c in compares {
         for p in &c.pairs {
             if let Some(o) = &p.oracle {
@@ -1020,6 +1038,8 @@ fn render_compare(r: &RepoResults) -> String {
                 roots += o.roots.len();
                 skipped_roots += o.skipped_roots.len();
                 missing += o.missing.len();
+                missing_external += o.missing_external.len();
+                external_route += o.external_route.len();
                 if o.partial {
                     partial_pairs += 1;
                     partial_batches += o.partial_batches;
@@ -1031,17 +1051,22 @@ fn render_compare(r: &RepoResults) -> String {
     if with_oracle == 0 {
         s.push_str("No pair ran the oracle (`--oracle-sample 0`, or every pair was global).\n\n");
     } else {
-        s.push_str("| pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels |\n");
-        s.push_str("|---:|---:|---:|---:|---:|---:|\n");
+        s.push_str("| pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels | of those, external route | external labels not counted |\n");
+        s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
-            "| {with_oracle} | {roots} | {skipped_roots} | {partial_pairs} | {partial_batches} | {missing} |\n\n"
+            "| {with_oracle} | {roots} | {skipped_roots} | {partial_pairs} | {partial_batches} | {missing} | {external_route} | {missing_external} |\n\n"
         ));
         s.push_str(
             "A *partial* batch is a `--keep_going` query that exited 3: Bazel \
              answered for what loaded. The oracle is a lower bound on what \
              cambium must contain, so a partial answer is still sound to check \
              against — it just proves less. `missing labels` is the count that \
-             gates the run, and must be zero.\n\n",
+             gates the run, and must be zero. *external route* is the subset \
+             `somepath` shows Bazel reaching only by leaving `//...` and coming \
+             back (see [Externals and soundness](#externals-and-soundness)); it \
+             is a label on a failure, not an excuse for one. The last column is \
+             the `@repo//...` half of the difference, which cambium does not \
+             index by construction and which recall therefore ignores.\n\n",
         );
     }
     s
@@ -1193,6 +1218,7 @@ mod tests {
     fn cold() -> ColdBuild {
         ColdBuild {
             commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            partial: Default::default(),
             wall_ms: 19_540,
             index_bytes: 3_754_856,
             nodes: 24_519,
@@ -1303,6 +1329,8 @@ mod tests {
                 oracle_set: Default::default(),
                 cambium_set_from_roots: Default::default(),
                 missing: Vec::new(),
+                missing_external: Vec::new(),
+                external_route: Vec::new(),
                 skipped_roots: Vec::new(),
                 partial: true,
                 partial_batches: 2,

@@ -52,7 +52,10 @@ const LOCATION_ATTRS: &[&str] = &["generator_location"];
 /// - 3: `build_setting_default` became a dependency edge
 ///   (see [`crate::convert`]), so older indexes are missing every edge out of
 ///   a `label_flag` or `label_setting`.
-pub const RULE_HASH_VERSION: u32 = 3;
+/// - 4: that edge actually fires. Version 3 gated on the attribute's type
+///   being `LABEL`; Bazel types `build_setting_default` as `STRING`, so no
+///   index built under 3 has the edge either.
+pub const RULE_HASH_VERSION: u32 = 4;
 
 /// Returns the canonical form of `rule` used for hashing.
 pub fn canonical_rule(rule: &Rule) -> Rule {

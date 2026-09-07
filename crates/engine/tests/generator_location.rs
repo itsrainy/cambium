@@ -48,8 +48,8 @@ impl PackageQuerier for Canned {
             .collect())
     }
 
-    fn universe(&self) -> cambium_engine::Result<Vec<PackageUpdate>> {
-        Ok(self.0.values().cloned().collect())
+    fn universe(&self) -> cambium_engine::Result<cambium_engine::query::Universe> {
+        Ok(self.0.values().cloned().collect::<Vec<_>>().into())
     }
 
     fn rbuildfiles(

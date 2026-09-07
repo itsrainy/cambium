@@ -124,7 +124,7 @@ into each repository's section.
 | class | meaning | action |
 |---|---|---|
 | `cambium_extra_select` | cambium reports a label because it keeps `select()` branches a *configured* Bazel query resolves away | none — documented over-approximation (see [BENCH.md](BENCH.md#legacy_bazel_diff-like-for-like-against-bazel-diff)) |
-| `cambium_extra_implicit` | cambium reports a label reachable only through an implicit dependency (e.g. a toolchain) the other producer does not walk | none — over-approximation |
+| `cambium_extra_implicit` | cambium reports a label reachable only through an implicit (`$`-prefixed, rule-supplied) attribute edge the other producer does not walk | none — over-approximation |
 | `cambium_extra_visibility` | the two producers' canonical rules differ only in `visibility`/`tags`, which cambium's hash intentionally ignores | none — over-approximation |
 | `cambium_extra_bzl` | the target's own rule proto is byte-identical at both revisions, but a `.bzl` its package loads changed, so cambium marked the whole loading package direct | none — over-approximation; on a real repository this is the largest cambium-side class |
 | `cambium_extra_deleted` | a dependency of the target was deleted between base and head | none — not an approximation: a target whose dep vanished really may build differently |
@@ -132,6 +132,7 @@ into each repository's section.
 | `bazeldiff_extra_content` | bazel-diff reports a changed path with no consumer in cambium's head index (e.g. a file outside any package, or a hash-only artifact) | none — bazel-diff hashes source content cambium's graph does not name |
 | `bazeldiff_extra_external` | the disagreement is confined to `@external//...` labels, which the tools may canonicalise differently (`@ext//:x` vs `@@ext~//:x`) | none — canonicalisation only, not a graph difference |
 | `bazeldiff_extra_external_content` | a `//...` label whose own rule (modulo `visibility`/`tags`), source inputs and transitive `//...` dependencies are all unchanged, and which depends on something external. bazel-diff's digests include the external graph, and on `bazel/bazel` under `--keep_going` how much of that graph loads varies between invocations | none — external load nondeterminism in the producer, not a graph difference. All four conditions must hold; drop any one and the label stays `cambium_missing` |
+| `bazeldiff_extra_workspace_path` | a `//...` label whose rule is byte-identical at the two revisions once each side's own absolute workspace root is normalised away, with no changed source input and no affected dependency | none — a harness artifact: the producers hash base in a second git worktree while cambium carries its base index forward inside one checkout, so a rule that bakes the workspace root into `args`/`cmd`/`env` reads as changed to them and unchanged to cambium. All three conditions must hold |
 | `cambium_missing` | a label the oracle or a producer says is impacted, that cambium's `affected` does not report | **fail** — this is unsoundness |
 | `unclassified` | a disagreement none of the above rules explain | **fail** — needs a new class or a real bug fix before it can be waved through |
 
@@ -166,6 +167,48 @@ reads to pick dependency versions: a commit that touches only that file
 changes what gets fetched, while the graph says nothing changed. The fix is
 configuration, not inference — add the path to `[invalidators] paths` (or a
 glob) in `cambium.toml`, so the commit is global.
+
+**A dependency path that leaves `//...` and comes back is invisible.** This is
+the sharpest limitation, and the `rdeps` oracle is what found it. cambium
+queries `//...`, so an external label exists in the index as a leaf: it is
+there, it can be walked *to*, and it has no outgoing edges. When the real graph
+routes back into the main repository through such a node, cambium's reverse
+walk stops. envoy has two instances at its pin:
+
+```
+$ bazel query 'somepath(//distribution/dockerhub:readme_json, //changelogs:changelogs)'
+//distribution/dockerhub:readme_json
+@envoy_repo//:project
+//changelogs:changelogs
+```
+
+— `@envoy_repo` is generated from the repository's own git state and its
+`:project` filegroup re-exports `//changelogs:changelogs` — and, at revisions
+where envoy still shipped quiche's `BUILD` file itself,
+`//source/common/quic:*` -> `@quiche//:*` ->
+`@envoy//source/common/quic/platform:*`, which is how an edit to
+`source/common/common/win32/thread_impl.cc` reaches sixteen quic libraries that
+cambium reported as unaffected (oracle recall 0.964).
+
+Indexing external repositories is the precise answer and is not implemented.
+Where the *changed* side of the round trip is a nameable path, an invalidator is
+the sound one, and that is why `corpus.toml` lists `api/**` and `changelogs/**`
+for envoy. Where it is not — the quiche case, where the change is anywhere
+under `source/common/` — there is no cheap invalidator, and the pair keeps
+failing. Such a failure is reported as
+`OracleResult::external_route` (`crates/compare/src/oracle.rs`), which probes
+each missing label with `somepath` and says whether the shortest path Bazel
+found passes through an external node. It is a label on a failure, never a
+pass.
+
+Two related notes on what the oracle does *not* count. Bazel expands
+`rdeps(//..., root)`'s universe to its transitive closure, so the answer
+contains external targets; those are split out into
+`OracleResult::missing_external` and excluded from recall, because cambium
+indexes `//...` by construction and the difference is the same vocabulary gap
+`bazeldiff_extra_external` names. And implicit deps are *not* excluded: the
+index and the oracle both keep them, since dropping them dropped real
+main-repo tool edges (`crates/bazel/src/lib.rs`, `QUERY_FLAGS`).
 
 **Unpinned externals are invisible to every tool in this comparison.** A
 `local_path_override` pointing at a sibling checkout, a git dependency on a
@@ -210,9 +253,12 @@ latency tables, and a result file written before a field existed says so.
 <!-- corpus:top:begin -->
 | repo | pin | Bazel | targets | cold build | replay p50/p90 | globals | pairs | pass/fail | min recall | precision | producer cold p50 vs cambium warm p50 |
 |---|---|---|---:|---:|---:|---|---:|---:|---:|---|---|
-| [bazel](#bazel) | `948b8c70e281` | n/a | 24,519 | 20 s | 2 ms / 324 ms | **16**<br>8× `MODULE.bazel` matches an invalidator<br>2× `src/main/starlark/builtins_bzl/common/buil…<br>1× `.bazelrc` matches an invalidator | 2 | 2 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 29.0 s vs 196 ms (148×)<br>tango 72.9 s vs 196 ms (372×) |
-| [envoy](#envoy) | `7ba51266cc60` | n/a | 28,449 | 78 s | 4 ms / 1648 ms | **8**<br>3× `api/bazel/deps.yaml` matches an invalidator<br>2× `api/bazel/api_build_system.bzl` matches an…<br>1× `api/bazel/repositories.bzl` matches an inv… | 0 | 0 / 0 | n/a | n/a | n/a |
-| [bazel-8](#bazel-8) | `8584d8648760` | n/a | 19,552 | 46 s | 2 ms / 306 ms | **6**<br>2× `src/main/starlark/builtins_bzl/common/buil…<br>2× rbuildfiles finished with errors under --ke…<br>1× `MODULE.bazel` matches an invalidator | 0 | 0 / 0 | n/a | n/a | n/a |
+| [bazel](#bazel) | `948b8c70e281` | 9.2.0 | 24,519 | 23 s | 2 ms / 400 ms | **16**<br>8× `MODULE.bazel` matches an invalidator<br>2× `src/main/starlark/builtins_bzl/common/buil…<br>1× `.bazelrc` matches an invalidator | 40 | 40 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 10.7 s vs 10.1 s (1×)<br>tango 43.1 s vs 10.1 s (4×) |
+| [envoy](#envoy) | `7ba51266cc60` | 8.7.0 | 28,449 | 48 s | 977 ms / 1415 ms | **93**<br>13× `.bazelrc` matches an invalidator<br>10× rbuildfiles finished with errors under --ke…<br>8× `api/bazel/deps.yaml` matches an invalidator | 40 | 11 / 29 | 87.3% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 16.7 s vs 7937 ms (2×)<br>tango 151.6 s vs 7937 ms (19×) |
+| [sourcegraph](#sourcegraph) | `c864f15af264` | aspect 5.8.19 | 58,855 | 34 s | 8 ms / 1405 ms | **25**<br>8× `go.mod` matches an invalidator<br>7× `pnpm-lock.yaml` matches an invalidator<br>6× `WORKSPACE` matches an invalidator | 40 | 31 / 9 | 100.0% | tango 100.0% | tango 87.1 s vs 8332 ms (10×) |
+| [bazel-7](#bazel-7) | `7d50755cf12e` | 7.4.1 | 16,695 | 35 s | 3 ms / 515 ms | **21**<br>5× rbuildfiles finished with errors under --ke…<br>3× `MODULE.bazel` matches an invalidator<br>2× `src/main/starlark/builtins_bzl/common/buil… | 40 | 40 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 7735 ms vs 8960 ms (1×)<br>tango 42.4 s vs 8960 ms (5×) |
+| [bazel-8](#bazel-8) | `8584d8648760` | 8.5.0 | 19,552 | 34 s | 2 ms / 346 ms | **17**<br>4× `.bazelrc` matches an invalidator<br>4× `MODULE.bazel` matches an invalidator<br>4× `src/main/starlark/builtins_bzl/common/buil… | 40 | 40 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 7788 ms vs 7141 ms (1×)<br>tango 38.9 s vs 7141 ms (5×) |
+| [envoy-7](#envoy-7) | `10840c2643bb` | 7.7.1 | 26,888 | 76 s | 5 ms / 1275 ms | **18**<br>6× `bazel/repository_locations.bzl` matches an…<br>5× rbuildfiles finished with errors under --ke…<br>3× `.github/config.yml` matches an invalidator | 40 | 9 / 31 | 96.7% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 9903 ms vs 6416 ms (2×)<br>tango 114.4 s vs 6416 ms (18×) |
 
 Replay p50/p90 are over **non-global** commits (the ones an updater actually walks); the per-repo sections give both distributions. `pass/fail` counts compared pairs. Precision against a producer is informational; recall against the `rdeps` oracle is the gate.
 <!-- corpus:top:end -->
@@ -224,10 +270,11 @@ Does cambium load, and agree, under each Bazel major? The `mirror` field in
 pins whose own `.bazelversion` is the major under test.
 
 <!-- corpus:matrix:begin -->
-| repository | unrecorded | Bazel 8.x |
-|---|---|---|
-| **bazel** | `bazel`<br>loads: 24,519 targets<br>agrees: 2/2 pairs, recall 100.0% | `bazel-8`<br>loads: 19,552 targets<br>agrees: not compared |
-| **envoy** | `envoy`<br>loads: 28,449 targets<br>agrees: not compared | not run |
+| repository | Bazel 5.x | Bazel 7.x | Bazel 8.x | Bazel 9.x |
+|---|---|---|---|---|
+| **bazel** | not run | `bazel-7`<br>loads: 16,695 targets<br>agrees: 40/40 pairs, recall 100.0%<br>`7.4.1` | `bazel-8`<br>loads: 19,552 targets<br>agrees: 40/40 pairs, recall 100.0%<br>`8.5.0` | `bazel`<br>loads: 24,519 targets<br>agrees: 40/40 pairs, recall 100.0%<br>`9.2.0` |
+| **envoy** | not run | `envoy-7`<br>loads: 26,888 targets<br>agrees: 9/40 pairs, recall 96.7%<br>`7.7.1` | `envoy`<br>loads: 28,449 targets<br>agrees: 11/40 pairs, recall 87.3%<br>`8.7.0` | not run |
+| **sourcegraph** | `sourcegraph`<br>loads: 58,855 targets<br>agrees: 31/40 pairs, recall 100.0%<br>`aspect 5.8.19` | not run | not run | not run |
 
 Each cell is the manifest entry that covers that major, whether its index loaded, and whether the producers agreed. "loads" is a cold `bazel query //...` that built an index; "agrees" is pairs passed out of pairs compared, with the worst oracle recall seen.
 <!-- corpus:matrix:end -->
@@ -257,29 +304,29 @@ TODO: what the runs above actually taught us.
 
 <!-- corpus:bazel:begin -->
 - pin: `948b8c70e281`
-- Bazel: n/a
-- generated: 2026-09-06
-- tool: `5ba03a4`
+- Bazel: 9.2.0
+- generated: 2026-09-07
+- tool: `4da6e60`
 
 #### Cold build
 
 | targets | edges | packages | index bytes | wall |
 |---:|---:|---:|---:|---:|
-| 24,519 | 53,242 | 524 | 3,754,856 | 19.5 s |
+| 24,519 | 53,242 | 524 | 3,754,856 | 23.1 s |
 
 #### Replay (300 commits, `ac3a6d70e804..948b8c70e281`)
 
 | over | commits | p50 | p90 | p99 | max |
 |---|---:|---:|---:|---:|---:|
-| all commits | 300 | 2 ms | 495 ms | 25.3 s | 41.0 s |
-| non-global commits | 284 | 2 ms | 324 ms | 3307 ms | 25.3 s |
+| all commits | 300 | 2 ms | 502 ms | 28.1 s | 35.8 s |
+| non-global commits | 284 | 2 ms | 400 ms | 3107 ms | 14.6 s |
 
 A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
 
-- zero-dirty commits (a diff that dirtied no package): **63.3%**
+- zero-dirty commits (a diff that dirtied no package): **63.0%**
 - largest dirty set: **377 packages** at `0859dab4a7b2`
 - `rbuildfiles` calls: 1 of 300 commits
-- mean affected targets: 851
+- mean affected targets: 852
 
 Global commits: **16**
 
@@ -298,20 +345,20 @@ Incremental-equals-full oracle at the pin: **pass**
 
 #### Three-way comparison
 
-2 pairs compared, 2 passed, 0 failed (1 of them global, which pass by construction). Worst oracle recall: **100.0%**.
+40 pairs compared, 40 passed, 0 failed (2 of them global, which pass by construction). Worst oracle recall: **100.0%**.
 
 | Bazel | producer | pairs | passed | precision | min recall |
 |---|---|---:|---:|---:|---:|
-| `n/a` | bazel-diff-rust | 2 | 2 | 100.0% | 100.0% |
-| `n/a` | tango | 2 | 2 | 100.0% | 100.0% |
+| `n/a` | bazel-diff-rust | 40 | 40 | 100.0% | 100.0% |
+| `n/a` | tango | 40 | 40 | 100.0% | 100.0% |
 
 #### Timings (p50 / p90 over the compared pairs)
 
 | Bazel | tool | cold | warm |
 |---|---|---:|---:|
-| `n/a` | bazel-diff-rust | 29.0 s / 29.0 s | 14.2 s / 14.2 s |
-| `n/a` | tango | 72.9 s / 72.9 s | n/a |
-| `n/a` | **cambium** | 293 ms / 293 ms | 196 ms / 196 ms |
+| `n/a` | bazel-diff-rust | 10.7 s / 20.5 s | 5991 ms / 9987 ms |
+| `n/a` | tango | 43.1 s / 74.5 s | n/a |
+| `n/a` | **cambium** | 11.9 s / 19.7 s | 10.1 s / 16.5 s |
 
 cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`.
 
@@ -326,21 +373,21 @@ cambium's *cold* is a full index build from `bazel query //...`; its *warm* is a
 | `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
 | `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
 | `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
-| `bazeldiff_extra_external` | 0 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
-| `bazeldiff_extra_external_content` | 0 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the producer's runs |
+| `bazeldiff_extra_external` | 76 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 304 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the producer's runs |
 | `cambium_missing` | 0 | **yes** | **fails**: the oracle or a producer reached something cambium did not — unsoundness |
 | `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
 
 Counts are labels, summed over every pair and producer.
 
-- `bazel-diff-rust`: no distances reported; 546 file-target rows dropped to match cambium's universe.
-- `tango`: depth agrees on 27.3% of shared labels (1 pair); 545 file-target rows dropped to match cambium's universe.
+- `bazel-diff-rust`: no distances reported; 97,043 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 69.3% of shared labels (38 pairs); 97,759 file-target rows dropped to match cambium's universe.
 
 #### `rdeps` oracle
 
 | pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 6 | 0 | 1 | 1 | 0 |
+| 38 | 173 | 0 | 38 | 38 | 0 |
 
 A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero.
 <!-- corpus:bazel:end -->
@@ -389,13 +436,189 @@ _No three-way comparison for this repository yet: no `compare-*.json`, so there 
 ### bazel-8
 
 <!-- corpus:bazel-8:begin -->
-not yet run
+- pin: `8584d8648760`
+- Bazel: 8.5.0
+- generated: 2026-09-07
+- tool: `4da6e60`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 19,552 | 47,184 | 518 | 3,109,576 | 34.3 s |
+
+#### Replay (150 commits, `0645a89f4362..8584d8648760`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 150 | 2 ms | 23.9 s | 43.4 s | 47.4 s |
+| non-global commits | 133 | 2 ms | 346 ms | 908 ms | 1047 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **70.0%**
+- largest dirty set: **7 packages** at `a1a9148d1e3e`
+- `rbuildfiles` calls: 2 of 150 commits
+- mean affected targets: 772
+
+Global commits: **17**
+
+| reason | commits |
+|---|---:|
+| `.bazelrc` matches an invalidator | 4 |
+| `MODULE.bazel` matches an invalidator | 4 |
+| `src/main/starlark/builtins_bzl/common/builtin_exec_platforms.bzl` matches an invalidator | 4 |
+| rbuildfiles finished with errors under --keep_going (bazel exit 3) | 2 |
+| `.bazelversion` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/common/cc/action_names.bzl` matches an invalidator | 1 |
+| `tools/build_defs/repo/utils.bzl` matches an invalidator | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 pairs compared, 40 passed, 0 failed (1 of them global, which pass by construction). Worst oracle recall: **100.0%**.
+
+| Bazel | producer | pairs | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 40 | 100.0% | 100.0% |
+| `n/a` | tango | 40 | 40 | 100.0% | 100.0% |
+
+#### Timings (p50 / p90 over the compared pairs)
+
+| Bazel | tool | cold | warm |
+|---|---|---:|---:|
+| `n/a` | bazel-diff-rust | 7788 ms / 17.0 s | 4766 ms / 9509 ms |
+| `n/a` | tango | 38.9 s / 66.2 s | n/a |
+| `n/a` | **cambium** | 7806 ms / 14.1 s | 7141 ms / 18.6 s |
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 0 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_implicit` | 0 | no | reached only through an implicit (`$`-prefixed) attribute edge the producer does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 0 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 78 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 308 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the producer's runs |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a producer reached something cambium did not — unsoundness |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every pair and producer.
+
+- `bazel-diff-rust`: no distances reported; 98,147 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 73.4% of shared labels (38 pairs); 98,844 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels |
+|---:|---:|---:|---:|---:|---:|
+| 39 | 210 | 0 | 38 | 38 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero.
 <!-- corpus:bazel-8:end -->
 
 ### bazel-7
 
 <!-- corpus:bazel-7:begin -->
-not yet run
+- pin: `7d50755cf12e`
+- Bazel: 7.4.1
+- generated: 2026-09-07
+- tool: `48b4bb6`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 16,695 | 41,656 | 520 | 2,661,688 | 34.6 s |
+
+#### Replay (150 commits, `7780975ca106..7d50755cf12e`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 150 | 3 ms | 30.0 s | 51.3 s | 63.9 s |
+| non-global commits | 129 | 3 ms | 515 ms | 1727 ms | 1924 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **60.7%**
+- largest dirty set: **11 packages** at `aee948b9ef8a`
+- `rbuildfiles` calls: 5 of 150 commits
+- mean affected targets: 769
+
+Global commits: **21**
+
+| reason | commits |
+|---|---:|
+| rbuildfiles finished with errors under --keep_going (bazel exit 3) | 5 |
+| `MODULE.bazel` matches an invalidator | 3 |
+| `src/main/starlark/builtins_bzl/common/builtin_exec_platforms.bzl` matches an invalidator | 2 |
+| `src/main/starlark/builtins_bzl/common/cc/attrs.bzl` matches an invalidator | 2 |
+| `.bazelrc` matches an invalidator | 1 |
+| `BUILD` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/BUILD` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/bazel/exports.bzl` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/common/cc/cc_binary.bzl` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/common/cc/cc_helper.bzl` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/common/objc/attrs.bzl` matches an invalidator | 1 |
+| `src/main/starlark/builtins_bzl/common/objc/compilation_support.bzl` matches an invalidator | 1 |
+| `tools/build_defs/repo/local.bzl` matches an invalidator | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 pairs compared, 40 passed, 0 failed (9 of them global, which pass by construction). Worst oracle recall: **100.0%**.
+
+| Bazel | producer | pairs | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 40 | 100.0% | 100.0% |
+| `n/a` | tango | 40 | 40 | 100.0% | 100.0% |
+
+#### Timings (p50 / p90 over the compared pairs)
+
+| Bazel | tool | cold | warm |
+|---|---|---:|---:|
+| `n/a` | bazel-diff-rust | 7735 ms / 20.1 s | 4260 ms / 9731 ms |
+| `n/a` | tango | 42.4 s / 70.4 s | n/a |
+| `n/a` | **cambium** | 8569 ms / 17.5 s | 8960 ms / 14.3 s |
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 0 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_implicit` | 0 | no | reached only through an implicit (`$`-prefixed) attribute edge the producer does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 0 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 31 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 253 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the producer's runs |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a producer reached something cambium did not — unsoundness |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every pair and producer.
+
+- `bazel-diff-rust`: no distances reported; 50,102 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 63.1% of shared labels (31 pairs); 50,694 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels |
+|---:|---:|---:|---:|---:|---:|
+| 31 | 194 | 0 | 31 | 31 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero.
 <!-- corpus:bazel-7:end -->
 
 ### envoy-7

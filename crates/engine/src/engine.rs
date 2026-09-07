@@ -243,11 +243,14 @@ impl Engine {
 
     /// Full build from an arbitrary row source.
     pub fn full_build_with(&self, commit: &str, q: &dyn PackageQuerier) -> Result<IndexData> {
-        let updates = q.universe()?;
+        let u = q.universe()?;
         let mut b = IndexBuilder::new(cambium_index::new_lineage());
         b.set_bazel_version(q.version());
         b.set_config_hash(self.cfg.hash());
-        b.apply_packages(&updates);
+        if let Some(e) = &u.partial {
+            b.set_partial(e.count, e.packages.clone());
+        }
+        b.apply_packages(&u.updates);
         Ok(b.finish(commit))
     }
 

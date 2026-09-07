@@ -300,7 +300,7 @@ mod tests {
         let expected = {
             let mut h = blake3::Hasher::new();
             h.update(b"cambium-rule-hash-v");
-            h.update(&3u32.to_le_bytes());
+            h.update(&4u32.to_le_bytes());
             h.update(b"\n");
             h.update(Config::default().to_toml().as_bytes());
             *h.finalize().as_bytes()

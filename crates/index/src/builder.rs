@@ -137,6 +137,9 @@ pub struct IndexBuilder<'a> {
     lineage: [u8; 16],
     bazel_version: String,
     config_hash: [u8; 32],
+    partial: bool,
+    packages_in_error: u32,
+    error_packages: Vec<String>,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -158,6 +161,9 @@ impl<'a> IndexBuilder<'a> {
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
+            partial: false,
+            packages_in_error: 0,
+            error_packages: Vec::new(),
         }
     }
 
@@ -204,11 +210,26 @@ impl<'a> IndexBuilder<'a> {
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
+            partial: v.partial,
+            packages_in_error: v.packages_in_error,
+            error_packages: v.error_packages.to_vec(),
         }
     }
 
     pub fn set_bazel_version(&mut self, v: impl Into<String>) {
         self.bazel_version = v.into();
+    }
+
+    /// Records that the query behind these rows finished with load errors, so
+    /// the index describes a repository minus the packages Bazel could not
+    /// load. Carried through splices by [`IndexBuilder::from_view`]: an
+    /// incremental update over a partial base is still partial.
+    pub fn set_partial(&mut self, packages_in_error: u32, error_packages: Vec<String>) {
+        self.partial = true;
+        self.packages_in_error = self.packages_in_error.max(packages_in_error);
+        if self.error_packages.is_empty() {
+            self.error_packages = error_packages;
+        }
     }
 
     pub fn set_config_hash(&mut self, h: [u8; 32]) {
@@ -643,6 +664,9 @@ impl<'a> IndexBuilder<'a> {
             },
             provenance: Provenance {
                 commit: commit.into(),
+                partial: self.partial,
+                packages_in_error: self.packages_in_error,
+                error_packages: self.error_packages,
                 created_unix: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())

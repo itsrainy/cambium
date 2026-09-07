@@ -273,6 +273,23 @@ fn print_package_targets(r: &inspect::PackageTargets) {
 }
 
 fn print_stats(s: &inspect::IndexStats) {
+    if let Some(w) = s.partial.warning() {
+        println!("WARNING:         {w}");
+        if !s.partial.packages.is_empty() {
+            println!("  packages in error (first {}):", s.partial.packages.len());
+            for p in &s.partial.packages {
+                // Main-repo packages are bare names; an external repository
+                // that failed to configure comes back already qualified.
+                let label = if p.starts_with('@') {
+                    p.clone()
+                } else {
+                    format!("//{p}")
+                };
+                println!("    {label}");
+            }
+        }
+        println!();
+    }
     println!("commit:          {}", s.commit);
     println!("lineage:         {}", s.lineage);
     println!("format version:  {}", s.format_version);
@@ -406,6 +423,9 @@ fn inspect_cmd(
             println!("bazel:           {}", v.bazel_version);
             println!("config hash:     {}", inspect::hex(&v.config_hash));
             println!("created:         {}", v.created_unix);
+            if let Some(w) = inspect::PartialLoad::from(v).warning() {
+                println!("WARNING:         {w}");
+            }
             println!("size on disk:    {}", human(f.file_size() as u64));
             println!("nodes:           {}", v.num_nodes());
             println!("edges:           {}", v.num_edges());
@@ -476,7 +496,8 @@ fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
             .args([
                 &format!("rdeps(//..., {label})"),
                 "--output=label",
-                "--noimplicit_deps",
+                // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
+                // implicit edges, so the cross-check must too.
                 "--order_output=no",
                 "--keep_going",
                 "--noshow_progress",

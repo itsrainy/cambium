@@ -19,6 +19,7 @@
 //! | `bazeldiff_extra_content` | producer only | a changed file whose content bazel-diff hashes but which no target in the index consumes |
 //! | `bazeldiff_extra_external` | producer only | an `@repo//...` label; cambium indexes `//...` only |
 //! | `bazeldiff_extra_external_content` | producer only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
+//! | `bazeldiff_extra_workspace_path` | producer only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the producer's base checkout is a different directory from head |
 //! | `cambium_missing` | producer only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
 //!
@@ -60,6 +61,9 @@ pub enum Class {
     /// A `//...` label the producer reported only because an external
     /// dependency of it hashed differently between the two runs.
     BazeldiffExtraExternalContent,
+    /// A `//...` label whose rule differs between the producer's two checkouts
+    /// only in the absolute workspace path it embeds.
+    BazeldiffExtraWorkspacePath,
     /// A failure: the other tool found something cambium missed.
     CambiumMissing,
     /// A failure: no predicate explained the disagreement.
@@ -78,6 +82,7 @@ impl Class {
             Class::BazeldiffExtraContent => "bazeldiff_extra_content",
             Class::BazeldiffExtraExternal => "bazeldiff_extra_external",
             Class::BazeldiffExtraExternalContent => "bazeldiff_extra_external_content",
+            Class::BazeldiffExtraWorkspacePath => "bazeldiff_extra_workspace_path",
             Class::CambiumMissing => "cambium_missing",
             Class::Unclassified => "unclassified",
         }
@@ -120,6 +125,10 @@ impl Class {
                 "an unchanged `//...` rule that depends on something external; how much of the \
                  external graph loads varies between the producer's runs"
             }
+            Class::BazeldiffExtraWorkspacePath => {
+                "the rule is identical at both revisions once each checkout's own absolute \
+                 workspace root is normalised away"
+            }
             Class::CambiumMissing => {
                 "**fails**: the oracle or a producer reached something cambium did not — \
                  unsoundness"
@@ -135,7 +144,7 @@ impl Class {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
 
-    pub const ALL: [Class; 11] = [
+    pub const ALL: [Class; 12] = [
         Class::CambiumExtraSelect,
         Class::CambiumExtraImplicit,
         Class::CambiumExtraVisibility,
@@ -145,6 +154,7 @@ impl Class {
         Class::BazeldiffExtraContent,
         Class::BazeldiffExtraExternal,
         Class::BazeldiffExtraExternalContent,
+        Class::BazeldiffExtraWorkspacePath,
         Class::CambiumMissing,
         Class::Unclassified,
     ];
@@ -243,6 +253,28 @@ pub trait Facts {
     /// target in the head index consumes — a file bazel-diff hashes and
     /// cambium correctly has no consumer for.
     fn changed_path_without_consumer(&self, label: &str) -> bool;
+
+    /// The target's rule differs between base and head *only* in the absolute
+    /// workspace path it embeds.
+    ///
+    /// The producers hash base in a second git worktree
+    /// ([`crate::producer::BaseWorktree`]) while cambium carries its base
+    /// index forward inside the one checkout, so any rule that bakes the
+    /// workspace root into an attribute reads as changed to them and unchanged
+    /// to cambium. envoy does this to eleven targets through
+    /// `@envoy_repo//:path.bzl`:
+    ///
+    /// ```text
+    /// sh_binary(name = "replace", srcs = ["replace.sh"], args = [PATH])
+    /// #   args = ["/…/corpus/envoy"] at head, ["/…/scratch/base-worktree"] at base
+    /// ```
+    ///
+    /// and the same constant reaches `//tools/code:check`'s `args`,
+    /// `//tools/code:checked`'s `cmd`, `//tools/clang-tidy:collect_fixes`'s
+    /// `--workspace_root=`, and the rest. It is a property of the *harness*,
+    /// not of either tool: run both sides in the same directory and the
+    /// difference is gone.
+    fn workspace_path_only_change(&self, label: &str) -> bool;
 }
 
 /// Classifies one label of the symmetric difference.
@@ -277,6 +309,8 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
                 Class::BazeldiffExtraExternal
             } else if facts.changed_path_without_consumer(label) {
                 Class::BazeldiffExtraContent
+            } else if workspace_path_artefact(label, facts) {
+                Class::BazeldiffExtraWorkspacePath
             } else if external_load_nondeterminism(label, facts) {
                 Class::BazeldiffExtraExternalContent
             } else {
@@ -284,6 +318,33 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
             }
         }
     }
+}
+
+/// The conjunction behind `bazeldiff_extra_workspace_path`.
+///
+/// Three facts, and all three are needed. The first is the explanation; the
+/// other two are the same "nothing else could have impacted it" pair the
+/// external-content class insists on, because a rule that embeds the workspace
+/// path can *also* have a changed source or a changed dependency, and then the
+/// producer is right and cambium is wrong for an unrelated reason.
+///
+/// 1. base and head agree once each side's own workspace root is normalised
+///    away, and disagree before that — so the path is the whole difference;
+/// 2. no source file it consumes changed;
+/// 3. nothing it transitively depends on inside `//...` is in cambium's
+///    affected set.
+fn workspace_path_artefact(label: &str, facts: &dyn Facts) -> bool {
+    let path_only = facts.workspace_path_only_change(label);
+    let no_srcs = path_only && facts.no_changed_source_inputs(label);
+    let no_deps = no_srcs && facts.no_affected_deps(label);
+    tracing::debug!(
+        label,
+        path_only,
+        no_srcs,
+        no_deps,
+        "workspace-path conditions"
+    );
+    no_deps
 }
 
 /// The conjunction behind `bazeldiff_extra_external_content`.
@@ -312,8 +373,8 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
 ///    explanation for the difference. "Depends on" here means Bazel's full
 ///    dependency set, implicit edges included: a target's toolchains are
 ///    external and reached only implicitly, and asking the
-///    `--noimplicit_deps` index alone answered "no external dependency" for
-///    every plain `java_binary` in the repository.
+///    index answered "no external dependency" for every plain `java_binary`
+///    in the repository when it was built with `--noimplicit_deps`.
 ///
 /// Without (4) the class would be "cambium missed a label and we cannot see
 /// why", which is exactly the failure `cambium_missing` exists to report.
@@ -355,8 +416,8 @@ use cambium_proto::blaze_query::{attribute::Discriminator, Rule, Target};
 /// about the same handful of packages repeatedly, and each miss is a Bazel
 /// query.
 ///
-/// **On `cambium_extra_implicit`.** The index is built with `--noimplicit_deps`
-/// and records no edge kind, so there is no "implicit" edge to test directly.
+/// **On `cambium_extra_implicit`.** The index records no edge kind, so there is
+/// no "implicit" edge to test directly.
 /// The heuristic used instead: fetch the target's own rule and split its
 /// declared dependency labels into explicit ones (attributes whose names do
 /// not start with `$` or `:`) and the full `rule_input` set, which Bazel
@@ -389,9 +450,10 @@ pub struct BazelFacts<'a> {
     paths: HashMap<String, Vec<String>>,
     cache: RefCell<HashMap<String, Option<Rule>>>,
     base_cache: RefCell<HashMap<String, Option<Rule>>>,
-    /// Rule protos fetched *with* implicit deps, for
-    /// [`Facts::has_external_input`] only. Everything else in this file speaks
-    /// the `--noimplicit_deps` vocabulary the index was built from.
+    /// Rule protos fetched for [`Facts::has_external_input`]'s closure sweep,
+    /// kept apart from `cache` because that one is populated by `prefetch`
+    /// from the symmetric difference and this one from whole dependency
+    /// closures.
     implicit_cache: RefCell<HashMap<String, Option<Rule>>>,
     /// One forward walk per label, memoised: `bazeldiff_extra_external_content`
     /// asks two questions of the same traversal.
@@ -542,21 +604,13 @@ impl<'a> BazelFacts<'a> {
         }
         // A dependency named in the rule but absent from the index still
         // counts: the index is `//...`, so an external label the walk cannot
-        // reach is exactly the case this looks for.
-        //
-        // Both of those views come from `--noimplicit_deps`, and that is
-        // exactly the wrong question to ask about external content. The whole
-        // toolchain graph — `@bazel_tools//tools/jdk:jdk`,
-        // `@local_jdk//:jdk`, the C++ toolchain — reaches a target only
-        // through implicit attributes, so under `--noimplicit_deps` a plain
-        // `java_binary(srcs = ["Greeter.java"])` names nothing external at
-        // all. The producers hash it anyway, and when a JDK resolves
-        // differently between their base and head runs the target's digest
-        // moves with it: on `bazel/bazel` that is Tango reporting
-        // `//examples/java-starlark/...:hello-world` together with
-        // `@bazel_tools//tools/jdk:jdk` on every single pair. So when neither
-        // `//...` view finds anything external, ask Bazel once more with the
-        // implicit edges left in.
+        // reach is exactly the case this looks for. The toolchain graph —
+        // `@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
+        // toolchain — is exactly what a producer's two runs disagree about
+        // most often, and it is reached through implicit attributes; the index
+        // now carries those (`cambium_bazel::QUERY_FLAGS`), so the walk above
+        // usually settles it and this is the fallback for a label the index
+        // does not know.
         if !out.has_external {
             if let Some(rule) = self.head_rule(label) {
                 out.has_external = names_external_input(&rule);
@@ -565,9 +619,9 @@ impl<'a> BazelFacts<'a> {
         // And when the label's own inputs say nothing either, ask the same
         // question of every rule in the closure the walk just enumerated.
         // `//:srcs` reaches `@async_profiler//file:file` only several
-        // filegroups down, through an implicit edge on a target inside its
-        // closure; bazel-diff reported it on a pair whose only changed files
-        // were `.github/workflows/*.yml`, which no rule consumes at all.
+        // filegroups down, through an edge on a target inside its closure;
+        // bazel-diff reported it on a pair whose only changed files were
+        // `.github/workflows/*.yml`, which no rule consumes at all.
         if !out.has_external {
             let mut closure: Vec<String> = walk
                 .visited
@@ -586,8 +640,7 @@ impl<'a> BazelFacts<'a> {
         out
     }
 
-    /// Does any rule in `labels` name an external label among its inputs once
-    /// the implicit edges are left in?
+    /// Does any rule in `labels` name an external label among its inputs?
     ///
     /// Batched and memoised: the closures overlap heavily between the handful
     /// of labels one pair asks about, and one `query 'set(...)'` answers five
@@ -609,7 +662,7 @@ impl<'a> BazelFacts<'a> {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-                if let Some(rules) = query_rules_with_implicit(self.head, &expr) {
+                if let Some(rules) = query_rules(self.head, &expr) {
                     let mut c = self.implicit_cache.borrow_mut();
                     for r in rules {
                         c.insert(r.name.clone(), Some(r));
@@ -708,7 +761,9 @@ fn query_rules(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
             "--output=streamed_proto",
             "--proto:flatten_selects=false",
             "--proto:locations=false",
-            "--noimplicit_deps",
+            // No `--noimplicit_deps`, matching `cambium_bazel::QUERY_FLAGS`:
+            // the index carries implicit edges, so a proto compared against it
+            // has to carry them too.
             "--order_output=no",
             "--keep_going",
             "--noshow_progress",
@@ -733,39 +788,6 @@ pub fn names_external_input(rule: &Rule) -> bool {
         .any(|l| l.starts_with('@') || l.starts_with("//external:"))
 }
 
-/// Every rule proto an expression yields, with implicit (`$`-prefixed,
-/// toolchain) deps left in.
-///
-/// Only [`Facts::has_external_input`] wants this. A target's toolchains are
-/// external and reached only implicitly, so the `--noimplicit_deps` protos the
-/// rest of this file uses — and the index built from them — cannot answer
-/// "does this depend on an external repository" at all: under them a plain
-/// `java_binary(srcs = ["Greeter.java"])` names nothing external, while every
-/// producer hashes it together with `@bazel_tools//tools/jdk:jdk` and moves
-/// its digest whenever a JDK resolves differently between their two runs.
-fn query_rules_with_implicit(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
-    let out = bazel
-        .command("query")
-        .args([
-            expr,
-            "--output=streamed_proto",
-            "--proto:flatten_selects=false",
-            "--proto:locations=false",
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() && out.status.code() != Some(3) {
-        tracing::debug!(expr, "the implicit-deps rule query failed");
-        return None;
-    }
-    let targets: Vec<Target> = cambium_proto::decode_all(out.stdout.as_slice()).ok()?;
-    Some(targets.into_iter().filter_map(|t| t.rule).collect())
-}
-
 /// One rule's proto at a revision, or `None` when Bazel cannot produce it.
 ///
 /// `--proto:flatten_selects=false` is the point of the call: flattened, an
@@ -780,7 +802,7 @@ fn query_rule(bazel: &Bazel, label: &str) -> Option<Rule> {
             "--output=streamed_proto",
             "--proto:flatten_selects=false",
             "--proto:locations=false",
-            "--noimplicit_deps",
+            // See `query_rules`.
             "--order_output=no",
             "--keep_going",
             "--noshow_progress",
@@ -847,6 +869,51 @@ pub fn rule_without_visibility(rule: &Rule) -> Rule {
     let mut r = cambium_proto::canonical_rule(rule);
     r.attribute
         .retain(|a| a.name != "visibility" && a.name != "tags");
+    r
+}
+
+/// A rule with every occurrence of `from` in its string-valued attributes
+/// replaced by `to`.
+///
+/// Only the fields that can carry a workspace path matter: `string_value`
+/// (a `genrule`'s `cmd`), `string_list_value` (an `args` list), the values of
+/// a `string_dict` (a test's `env`), and the same three inside every branch of
+/// a `selector_list`. Anything the substitution does not reach simply keeps
+/// its bytes, and the comparison this feeds then reports "not equal", which is
+/// the safe direction: the label stays `cambium_missing`.
+pub fn substitute_paths(rule: &Rule, from: &str, to: &str) -> Rule {
+    fn fix(v: &mut String, from: &str, to: &str) {
+        if v.contains(from) {
+            *v = v.replace(from, to);
+        }
+    }
+    let mut r = rule.clone();
+    for a in &mut r.attribute {
+        if let Some(v) = a.string_value.as_mut() {
+            fix(v, from, to);
+        }
+        for v in &mut a.string_list_value {
+            fix(v, from, to);
+        }
+        for e in &mut a.string_dict_value {
+            fix(&mut e.value, from, to);
+        }
+        if let Some(sel) = a.selector_list.as_mut() {
+            for s in &mut sel.elements {
+                for e in &mut s.entries {
+                    if let Some(v) = e.string_value.as_mut() {
+                        fix(v, from, to);
+                    }
+                    for v in &mut e.string_list_value {
+                        fix(v, from, to);
+                    }
+                    for d in &mut e.string_dict_value {
+                        fix(&mut d.value, from, to);
+                    }
+                }
+            }
+        }
+    }
     r
 }
 
@@ -992,6 +1059,53 @@ impl Facts for BazelFacts<'_> {
         self.dep_facts(label).has_external
     }
 
+    fn workspace_path_only_change(&self, label: &str) -> bool {
+        let Some(base) = self.base.as_ref() else {
+            return false;
+        };
+        // Both spellings of each root. Bazel prints the path it resolved the
+        // workspace to, which on macOS is `/private/var/...` where the
+        // worktree was created under `/var/...`; substituting the unresolved
+        // spelling would then find nothing and the label would stay
+        // `cambium_missing` for a reason that is pure path formatting.
+        let roots = |b: &Bazel| {
+            let p = b.workspace().to_path_buf();
+            let mut v = vec![p.to_string_lossy().into_owned()];
+            if let Ok(c) = p.canonicalize() {
+                let c = c.to_string_lossy().into_owned();
+                if !v.contains(&c) {
+                    v.push(c);
+                }
+            }
+            v
+        };
+        let (base_roots, head_roots) = (roots(base), roots(self.head));
+        // Same directory on both sides: there is no artefact to explain, and
+        // the substitution would be the identity.
+        if base_roots == head_roots {
+            return false;
+        }
+        let (Some(h), Some(b)) = (
+            self.head_rule(label),
+            self.rule(base, &self.base_cache, label),
+        ) else {
+            return false;
+        };
+        use prost::Message as _;
+        let (h, b) = (rule_without_visibility(&h), rule_without_visibility(&b));
+        let (hb, bb) = (h.encode_to_vec(), b.encode_to_vec());
+        // Equal already: this is not what happened, and the external-content
+        // class is the one that should speak for it.
+        if hb == bb {
+            return false;
+        }
+        base_roots.iter().any(|from| {
+            head_roots
+                .iter()
+                .any(|to| substitute_paths(&b, from, to).encode_to_vec() == hb)
+        })
+    }
+
     fn changed_path_without_consumer(&self, label: &str) -> bool {
         let Some(path) = label_to_path(label) else {
             return false;
@@ -1024,7 +1138,7 @@ mod tests {
         };
         assert!(
             !names_external_input(&rule),
-            "the --noimplicit_deps proto names nothing external"
+            "a proto naming only main-repo inputs names nothing external"
         );
         rule.rule_input.push("@bazel_tools//tools/jdk:jdk".into());
         assert!(names_external_input(&rule));
@@ -1056,6 +1170,7 @@ mod tests {
         no_changed_srcs: BTreeSet<String>,
         no_affected_deps: BTreeSet<String>,
         external_input: BTreeSet<String>,
+        workspace_path: BTreeSet<String>,
     }
 
     impl Hand {
@@ -1102,6 +1217,9 @@ mod tests {
         }
         fn has_external_input(&self, l: &str) -> bool {
             self.external_input.contains(l)
+        }
+        fn workspace_path_only_change(&self, l: &str) -> bool {
+            self.workspace_path.contains(l)
         }
     }
 
@@ -1185,6 +1303,101 @@ mod tests {
         );
     }
 
+    /// All three conditions of `bazeldiff_extra_workspace_path`.
+    fn workspace_path_facts() -> Hand {
+        Hand::with(|h| {
+            h.workspace_path.insert("//a:b".into());
+            h.no_changed_srcs.insert("//a:b".into());
+            h.no_affected_deps.insert("//a:b".into());
+        })
+    }
+
+    #[test]
+    fn an_embedded_workspace_path_explains_a_producer_extra() {
+        let c = classify("//a:b", Side::Producer, &workspace_path_facts());
+        assert_eq!(c, Class::BazeldiffExtraWorkspacePath);
+        assert!(!c.is_failure());
+    }
+
+    #[test]
+    fn every_condition_of_the_workspace_path_class_is_load_bearing() {
+        for drop in [
+            (|h: &mut Hand| h.workspace_path.clear()) as fn(&mut Hand),
+            |h: &mut Hand| h.no_changed_srcs.clear(),
+            |h: &mut Hand| h.no_affected_deps.clear(),
+        ] {
+            let mut h = workspace_path_facts();
+            drop(&mut h);
+            assert_eq!(
+                classify("//a:b", Side::Producer, &h),
+                Class::CambiumMissing,
+                "one condition short must not be waved through"
+            );
+        }
+    }
+
+    /// The substitution reaches an `args` list, a `cmd` string and a `select`
+    /// branch — the three shapes envoy's `@envoy_repo//:path.bzl` constant
+    /// lands in.
+    #[test]
+    fn substitution_normalises_every_string_shape() {
+        use cambium_proto::blaze_query::attribute::{
+            Discriminator as D, Selector, SelectorEntry, SelectorList,
+        };
+        use cambium_proto::blaze_query::Attribute;
+        let rule = Rule {
+            name: "//tools/sha:replace".into(),
+            attribute: vec![
+                Attribute {
+                    name: "args".into(),
+                    r#type: D::StringList as i32,
+                    string_list_value: vec!["/base/wt".into()],
+                    ..Default::default()
+                },
+                Attribute {
+                    name: "cmd".into(),
+                    r#type: D::String as i32,
+                    string_value: Some("git -C /base/wt ls-files".into()),
+                    ..Default::default()
+                },
+                Attribute {
+                    name: "copts".into(),
+                    r#type: D::SelectorList as i32,
+                    selector_list: Some(SelectorList {
+                        r#type: Some(D::StringList as i32),
+                        elements: vec![Selector {
+                            entries: vec![SelectorEntry {
+                                label: Some("//conditions:default".into()),
+                                string_list_value: vec!["-I/base/wt/include".into()],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let got = substitute_paths(&rule, "/base/wt", "/head/wt");
+        assert_eq!(got.attribute[0].string_list_value, vec!["/head/wt"]);
+        assert_eq!(
+            got.attribute[1].string_value.as_deref(),
+            Some("git -C /head/wt ls-files")
+        );
+        assert_eq!(
+            got.attribute[2].selector_list.as_ref().unwrap().elements[0].entries[0]
+                .string_list_value,
+            vec!["-I/head/wt/include"]
+        );
+        // A rule with nothing to substitute comes back untouched.
+        use prost::Message as _;
+        assert_eq!(
+            substitute_paths(&rule, "/elsewhere", "/x").encode_to_vec(),
+            rule.encode_to_vec()
+        );
+    }
+
     #[test]
     fn external_load_nondeterminism_explains_a_producer_extra() {
         let c = classify("//a:b", Side::Producer, &external_content_facts());
@@ -1247,7 +1460,7 @@ mod tests {
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(c.name().contains("extra"), "{c}");
         }
-        assert_eq!(Class::ALL.len(), 11);
+        assert_eq!(Class::ALL.len(), 12);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
     }
 

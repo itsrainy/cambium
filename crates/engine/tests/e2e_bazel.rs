@@ -598,7 +598,6 @@ fn differential_check_against_bazel_rdeps() {
                 "query",
                 &format!("rdeps(//..., {label})"),
                 "--output=label",
-                "--noimplicit_deps",
                 "--order_output=no",
                 "--noshow_progress",
                 "--ui_event_filters=-info",

@@ -863,6 +863,9 @@ mod tests {
         fn has_external_input(&self, _: &str) -> bool {
             false
         }
+        fn workspace_path_only_change(&self, _: &str) -> bool {
+            false
+        }
     }
 
     #[test]
