@@ -155,7 +155,7 @@ versioned contract. Every JSON document carries the version it was written
 against:
 
 ```json
-{ "schema": 4, "base": "...", "head": "...", ... }
+{ "schema": 5, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -182,12 +182,13 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `base`, `head` | string | resolved revisions |
 | `global` | bool | everything is affected; `affected` and `tests` are empty and the answer is `//...` |
 | `global_reason` | string, optional | why, when `global` |
+| `cold_rebuild_reason` | string, optional | why the run re-indexed the whole repository, when `stats.cold_rebuild` |
 | `dirty_packages` | \[string] | packages re-queried, without the leading `//` |
 | `direct` | \[string] | labels whose own definition or inputs changed |
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `cold_rebuild` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -206,6 +207,7 @@ on the same terms.
 | 1 | the first published contract |
 | 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
+| 5 | `stats.cold_rebuild` and `cold_rebuild_reason`: past `limits.max_dirty_packages` a run re-queries `//...` at head instead of splicing the dirty set. It is not a global invalidation — `affected` is still exact — and `limits.max_changed_files`, which used to make that case global, is gone |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
 
 The version is shared by every document, so a bump made for one of them moves
@@ -245,8 +247,17 @@ max_ancestor_walk = 20
 retention_days = 30
 
 [limits]
-max_changed_files = 5000     # larger diffs fall back to global invalidation
+max_dirty_packages = 500     # past this many dirty packages, re-index `//...`
+                             # at head instead of splicing; 0 disables it
 ```
+
+`max_dirty_packages` bounds the only part of a run whose cost grows with the
+diff: the per-package re-query. Past it the run asks Bazel for the whole
+repository once, splices all of it onto the baseline, and reports
+`stats.cold_rebuild` with `cold_rebuild_reason`. The answer is exact either
+way — a cold rebuild is a slower route to the same affected set, not a
+surrender to `//...`. (`limits.max_changed_files`, which *did* surrender, is
+gone; a config that still sets it loads with a warning and the key ignored.)
 
 The config is hashed into every index it produces. An index built under a
 different config cannot be spliced onto, because the invalidator rules that

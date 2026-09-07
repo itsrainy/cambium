@@ -21,9 +21,10 @@ use serde_json::Value;
 ///
 /// Version 3 turned `affected` into `{label, depth, test}` objects and added
 /// `stats.rbuildfiles_called`; version 4 added `stats.bzl_closure_hits`, and
-/// `stats.rbuildfiles_called` is now always false. The version is shared with
-/// the other documents, and `index stats` changed shape at version 2 and
-/// again at 3.
+/// `stats.rbuildfiles_called` is now always false; version 5 added
+/// `stats.cold_rebuild` and the optional `cold_rebuild_reason`. The version is
+/// shared with the other documents, and `index stats` changed shape at version
+/// 2 and again at 3.
 ///
 /// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
 /// recurse through `[]`. Optional fields are listed — the fixture below
@@ -33,6 +34,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "affected[].label",
     "affected[].test",
     "base",
+    "cold_rebuild_reason",
     "direct[]",
     "dirty_packages[]",
     "explanations[].direct",
@@ -48,6 +50,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.base_nodes",
     "stats.bzl_closure_hits",
     "stats.changed_files",
+    "stats.cold_rebuild",
     "stats.direct_targets",
     "stats.dirty_packages",
     "stats.head_edges",
@@ -73,6 +76,7 @@ fn fixture() -> AffectedReport {
         head: "bbbb".into(),
         global: false,
         global_reason: Some("only set when global".into()),
+        cold_rebuild_reason: Some("only set when the run re-indexed at head".into()),
         dirty_packages: vec!["lib/core".into()],
         direct: vec!["//lib/core:core".into()],
         affected: vec![
@@ -109,6 +113,7 @@ fn fixture() -> AffectedReport {
             ignored_files: 9,
             rbuildfiles_called: false,
             bzl_closure_hits: 10,
+            cold_rebuild: true,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),

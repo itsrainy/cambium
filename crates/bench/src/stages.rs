@@ -178,13 +178,7 @@ pub fn classify(ctx: &StageContext) -> StageResult {
         let mut p = PackageSet::new(packages.iter().map(String::from));
         // The synthetic sources are `.cc`, so no ignore glob matches and the
         // consumption oracle is never consulted.
-        cambium_classify::dirty_set(
-            &changes,
-            &mut p,
-            &matchers,
-            0,
-            &cambium_classify::NoConsumers,
-        )
+        cambium_classify::dirty_set(&changes, &mut p, &matchers, &cambium_classify::NoConsumers)
     });
     let mut extra = BTreeMap::new();
     extra.insert("paths".into(), n as f64);

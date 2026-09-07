@@ -32,7 +32,14 @@ use serde::{Deserialize, Serialize};
 ///   because a changed `.bzl` is in their static load closure.
 ///   `stats.rbuildfiles_called` stays in the document and is now always
 ///   `false`: the closure is read from the index instead of from Bazel.
-pub const SCHEMA_VERSION: u32 = 4;
+/// - **5** — `stats.cold_rebuild` and the optional `cold_rebuild_reason`: a run
+///   whose dirty set exceeded `limits.max_dirty_packages` re-indexed the whole
+///   repository at head instead of splicing. It is *not* a global
+///   invalidation — `affected` is still exact — so a consumer that treats
+///   `global` as "run everything" needs no change, and one that reports why a
+///   run was slow now has the answer. `limits.max_changed_files`, which used
+///   to make that case global, is gone.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -114,6 +121,12 @@ pub struct Stats {
     /// Packages dirtied because a changed `.bzl` is in their load closure.
     #[serde(default)]
     pub bzl_closure_hits: usize,
+    /// The dirty set was larger than `limits.max_dirty_packages`, so the run
+    /// re-queried `//...` at head rather than the dirty packages alone. The
+    /// answer is exact either way; only the cost differs, and
+    /// `dirty_packages` still reports the count that triggered it.
+    #[serde(default)]
+    pub cold_rebuild: bool,
 }
 
 /// One affected target, with how far from the change it sits.
@@ -141,6 +154,9 @@ pub struct AffectedReport {
     pub global: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_reason: Option<String>,
+    /// Why the run re-indexed the whole repository, when `stats.cold_rebuild`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_rebuild_reason: Option<String>,
     pub dirty_packages: Vec<String>,
     pub direct: Vec<String>,
     /// `direct` plus its reverse closure, sorted by label.
@@ -161,6 +177,7 @@ impl Default for AffectedReport {
             head: String::new(),
             global: false,
             global_reason: None,
+            cold_rebuild_reason: None,
             dirty_packages: Vec::new(),
             direct: Vec::new(),
             affected: Vec::new(),
