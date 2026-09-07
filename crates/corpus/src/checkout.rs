@@ -202,7 +202,7 @@ impl CorpusDir {
         // lineage and cold-build the very pairs the quick profile exists to
         // make cheap. A quick range is a slice of the full one, so a bound
         // that covers the full range covers it too.
-        cfg.baseline.max_ancestor_walk = entry.replay_range.max(20);
+        cfg.baseline.max_ancestor_walk = entry.history_window.max(20);
         cfg
     }
 
@@ -353,7 +353,7 @@ mod tests {
             id: "r".into(),
             url: "u".into(),
             pin: "0".repeat(40),
-            replay_range: range,
+            history_window: range,
             bazel: "bazelisk".into(),
             bazel_version: None,
             extra_query_flags: Vec::new(),
@@ -380,7 +380,7 @@ mod tests {
             let cfg = checkout().config_for(&entry(range), None);
             for profile in [Profile::Full, Profile::Quick] {
                 assert!(
-                    cfg.baseline.max_ancestor_walk >= profile.replay_range(range),
+                    cfg.baseline.max_ancestor_walk >= profile.history_window(range),
                     "{profile} at range {range}"
                 );
             }

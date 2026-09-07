@@ -20,9 +20,9 @@ use crate::DataFormat;
 /// Flags every corpus subcommand shares.
 #[derive(ClapArgs, Clone)]
 pub struct Common {
-    /// Corpus repository id, as in corpus.toml.
+    /// Corpus repository id, as in subject_repos.toml.
     pub id: String,
-    /// Path to corpus.toml (default: discovered upward from the cwd).
+    /// Path to subject_repos.toml (default: discovered upward from the cwd).
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Where results go: <results-dir>/<id>/.
@@ -206,7 +206,7 @@ impl Run {
         if profile.is_quick() {
             tracing::info!(
                 results = %results.display(),
-                replay_range = cambium_corpus::profile::QUICK_REPLAY_RANGE,
+                history_window = cambium_corpus::profile::QUICK_REPLAY_RANGE,
                 pairs = cambium_corpus::profile::QUICK_PAIR_CAP,
                 tango_pairs = cambium_corpus::profile::QUICK_TANGO_PAIRS,
                 "quick profile: local evidence, not the published numbers"
@@ -455,7 +455,7 @@ fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
     let engine = checkout.engine(&run.entry, run.version())?;
     let range = run
         .profile
-        .replay_range(range.unwrap_or(run.entry.replay_range));
+        .history_window(range.unwrap_or(run.entry.history_window));
     let commits = pairs::range_commits(&checkout.repo, &run.entry.pin, range)?;
     tracing::info!(
         commits = commits.len(),
@@ -527,7 +527,7 @@ fn do_pairs(run: &Run, kinds: &[String], cap: usize, output: DataFormat) -> Resu
     let opts = pairs::PairOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
-        replay_range: run.entry.replay_range,
+        history_window: run.entry.history_window,
         seed: run.seed,
         cap,
         profile: run.profile,
@@ -734,7 +734,7 @@ fn load_pairs(
     let opts = pairs::PairOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
-        replay_range: run.entry.replay_range,
+        history_window: run.entry.history_window,
         seed: run.seed,
         cap: args.cap,
         profile: run.profile,
@@ -1082,7 +1082,7 @@ mod tests {
         let deep = dir.path().join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(
-            dir.path().join("corpus.toml"),
+            dir.path().join("subject_repos.toml"),
             format!(
                 "[[repo]]\nid = \"bazel\"\nurl = \"u\"\npin = \"{}\"\n",
                 "a".repeat(40)
@@ -1090,8 +1090,8 @@ mod tests {
         )
         .unwrap();
         let (path, m) = Manifest::discover(&deep).unwrap();
-        assert_eq!(path, dir.path().join("corpus.toml"));
-        assert_eq!(m.get("bazel").unwrap().replay_range, 300);
+        assert_eq!(path, dir.path().join("subject_repos.toml"));
+        assert_eq!(m.get("bazel").unwrap().history_window, 300);
         assert!(Manifest::discover(Path::new("/")).is_err());
     }
 

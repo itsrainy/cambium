@@ -2,7 +2,7 @@ name: corpus-weekly
 
 # The three expensive corpus repos (docs/CORPUS.md, spec §3-§6):
 # sourcegraph, apollo and xla run weekly; tensorflow — the biggest, and the
-# one entry that carries `skip = true` in corpus.toml — runs monthly (or on
+# one entry that carries `skip = true` in subject_repos.toml — runs monthly (or on
 # demand) and is asked to ignore that flag.
 #
 # Machine requirement: same as corpus-nightly.yml — at least 16 cores, 64 GB
@@ -114,7 +114,7 @@ jobs:
             corpus-cache-tensorflow-
 
       - run: cargo build --release -p cambium-cli
-      # tensorflow carries `skip = true` in corpus.toml. As of this writing
+      # tensorflow carries `skip = true` in subject_repos.toml. As of this writing
       # `cambi corpus` has no `--force`-the-manifest flag to ignore that, so
       # this step will fail fast until either such a flag is added or the
       # manifest's `skip` is flipped for a manual, deliberate run. Whoever

@@ -91,7 +91,7 @@ $ cambi index stats     <file>
 $ cambi index verify    <file> --against-bazel
 $ cambi bench run|sweep|legacy|compare|bazel
 $ cambi corpus fetch|build|replay|pairs|compare|report|all <id>
-                   [--bazel-version v] [--manifest corpus.toml] [--corpus-dir d]
+                   [--bazel-version v] [--manifest subject_repos.toml] [--corpus-dir d]
 $ cambi corpus compare <id> [--pairs f.json] [--kind adjacent|pr|stress] [--cap n]
                    [--oracle-sample k] [--bazel-diff rust|kotlin|none] [--no-tango]
                    [--producers bazel-diff-rust,tango]

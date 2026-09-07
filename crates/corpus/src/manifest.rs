@@ -1,11 +1,11 @@
-//! `corpus.toml`: which repositories, at which commits.
+//! `subject_repos.toml`: the real subjects, and the commit each is pinned at.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// The manifest file name at the cambium repository root.
-pub const MANIFEST_FILE: &str = "corpus.toml";
+pub const MANIFEST_FILE: &str = "subject_repos.toml";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -14,18 +14,19 @@ pub struct Manifest {
     pub repos: Vec<RepoEntry>,
 }
 
-/// One corpus repository, pinned.
+/// One real subject: an open-source Bazel repository, pinned.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RepoEntry {
     pub id: String,
     pub url: String,
     /// Baseline commit. Bumped deliberately, in a PR that regenerates the
-    /// repo's `docs/CORPUS.md` section.
+    /// repo's `docs/RESULTS.md` section.
     pub pin: String,
-    /// First-parent commits before `pin` to replay.
-    #[serde(default = "default_replay_range")]
-    pub replay_range: usize,
+    /// The history window: how many first-parent commits before `pin` a
+    /// workload may use.
+    #[serde(default = "default_history_window")]
+    pub history_window: usize,
     /// Bazel binary; `bazelisk` honours `.bazelversion`.
     #[serde(default = "default_bazel")]
     pub bazel: String,
@@ -38,7 +39,7 @@ pub struct RepoEntry {
     ///
     /// It is not a version *matrix*: every entry runs under one Bazel, its
     /// own. That cambium reads 7.x, 8.x and 9.x graphs alike is CI's
-    /// `bazel-version-matrix` job over the synthetic corpus.
+    /// `bazel-version-matrix` job over the synthetic subjects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bazel_version: Option<String>,
     #[serde(default)]
@@ -63,7 +64,7 @@ pub struct RepoEntry {
     pub notes: String,
 }
 
-fn default_replay_range() -> usize {
+fn default_history_window() -> usize {
     300
 }
 
@@ -101,18 +102,18 @@ impl Manifest {
     pub fn validate(&self) -> anyhow::Result<()> {
         let mut seen = std::collections::BTreeSet::new();
         for r in &self.repos {
-            anyhow::ensure!(!r.id.is_empty(), "a corpus entry has no id");
+            anyhow::ensure!(!r.id.is_empty(), "a subject entry has no id");
             anyhow::ensure!(
                 r.id.chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                "corpus id {:?} must be [A-Za-z0-9_-]",
+                "subject id {:?} must be [A-Za-z0-9_-]",
                 r.id
             );
-            anyhow::ensure!(seen.insert(r.id.clone()), "duplicate corpus id {}", r.id);
-            anyhow::ensure!(!r.url.is_empty(), "corpus {} has no url", r.id);
+            anyhow::ensure!(seen.insert(r.id.clone()), "duplicate subject id {}", r.id);
+            anyhow::ensure!(!r.url.is_empty(), "subject {} has no url", r.id);
             anyhow::ensure!(
                 r.pin.len() == 40 && r.pin.chars().all(|c| c.is_ascii_hexdigit()),
-                "corpus {}: pin must be a full 40-hex commit sha, got {:?}",
+                "subject {}: pin must be a full 40-hex commit sha, got {:?}",
                 r.id,
                 r.pin
             );
@@ -123,7 +124,7 @@ impl Manifest {
     pub fn get(&self, id: &str) -> anyhow::Result<&RepoEntry> {
         self.repos.iter().find(|r| r.id == id).ok_or_else(|| {
             anyhow::anyhow!(
-                "no corpus repo named {id}; known: {}",
+                "no subject named {id}; known: {}",
                 self.repos
                     .iter()
                     .map(|r| r.id.as_str())
@@ -163,7 +164,7 @@ mod tests {
 id = "envoy"
 url = "https://github.com/envoyproxy/envoy.git"
 pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["bazel/repositories.bzl", "api/bazel/**"]
@@ -174,7 +175,7 @@ notes = "external fetch ~6 GB; needs --repository_cache"
         .unwrap();
         m.validate().unwrap();
         let e = m.get("envoy").unwrap();
-        assert_eq!(e.replay_range, 300);
+        assert_eq!(e.history_window, 300);
         assert_eq!(
             e.invalidator_rules(),
             (
@@ -200,7 +201,7 @@ notes = "external fetch ~6 GB; needs --repository_cache"
 
     #[test]
     fn the_checked_in_manifest_is_valid() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus.toml");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../subject_repos.toml");
         let m = Manifest::load(&path).unwrap();
         assert!(m.repos.iter().any(|r| r.id == "bazel"));
         for r in &m.repos {

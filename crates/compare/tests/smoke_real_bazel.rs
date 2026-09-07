@@ -232,7 +232,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         // this test off the network for everything but Bazel itself.
         url: format!("file://{}", src.display()),
         pin: pin.clone(),
-        replay_range: shas.len(),
+        history_window: shas.len(),
         bazel: bazel.display().to_string(),
         bazel_version: None,
         extra_query_flags: Vec::new(),
@@ -276,7 +276,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         &pairs::PairOptions {
             repo_id: entry.id.clone(),
             pin: pin.clone(),
-            replay_range: shas.len(),
+            history_window: shas.len(),
             seed: 0,
             cap: 20,
             profile: cambium_corpus::Profile::Full,
