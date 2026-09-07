@@ -101,8 +101,11 @@ pub enum Args {
         /// rdeps, load, or none. Comma-separated; default: both.
         #[arg(long = "oracle", value_delimiter = ',', default_value = "rdeps,load")]
         oracles: Vec<String>,
-        /// Roots the rdeps oracle samples per change set.
-        #[arg(long, default_value_t = 100)]
+        /// Cap on the source labels the rdeps oracle queries per change set.
+        /// 0, the default, is the full oracle: every changed file. A positive
+        /// value is an escape hatch for a subject whose change sets are too
+        /// large to query whole, and weakens the check.
+        #[arg(long, default_value_t = 0)]
         oracle_sample: usize,
         /// A change-set JSON to run, instead of selecting one.
         #[arg(long = "change-set-file")]
@@ -941,7 +944,8 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let results = run.workload("changes")?;
     let opts = cambium_bench::ChangesOptions {
         bazel_version: run.version.clone(),
-        oracle_k: if rdeps { args.oracle_sample } else { 0 },
+        rdeps_oracle: rdeps,
+        oracle_k: args.oracle_sample,
         load_oracle: load,
         seed: run.seed,
         resume: !args.restart,

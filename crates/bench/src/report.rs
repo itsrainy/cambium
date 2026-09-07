@@ -1075,6 +1075,7 @@ fn render_compare(r: &SubjectResults) -> String {
     let mut skipped_roots = 0usize;
     let mut missing = 0usize;
     let mut missing_external = 0usize;
+    let mut deleted_missing = 0usize;
     let mut external_route = 0usize;
     for c in compares {
         for p in &c.change_sets {
@@ -1084,6 +1085,7 @@ fn render_compare(r: &SubjectResults) -> String {
                 skipped_roots += o.skipped_roots.len();
                 missing += o.missing.len();
                 missing_external += o.missing_external.len();
+                deleted_missing += o.deleted_missing.len();
                 external_route += o.external_route.len();
                 if o.partial {
                     partial_change_sets += 1;
@@ -1094,12 +1096,12 @@ fn render_compare(r: &SubjectResults) -> String {
     }
     s.push_str("#### `rdeps` oracle\n\n");
     if with_oracle == 0 {
-        s.push_str("No change_set ran the oracle (`--oracle-sample 0`, or every change_set was global).\n\n");
+        s.push_str("No change set ran the oracle (`--oracle` without `rdeps`, or every change set was global).\n\n");
     } else {
-        s.push_str("| change sets with an oracle | roots sampled | roots skipped | partial change sets | partial batches | missing labels | of those, external route | external labels not counted |\n");
-        s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        s.push_str("| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |\n");
+        s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
-            "| {with_oracle} | {roots} | {skipped_roots} | {partial_change_sets} | {partial_batches} | {missing} | {external_route} | {missing_external} |\n\n"
+            "| {with_oracle} | {roots} | {skipped_roots} | {partial_change_sets} | {partial_batches} | {missing} | {deleted_missing} | {external_route} | {missing_external} |\n\n"
         ));
         s.push_str(
             "A *partial* batch is a `--keep_going` query that exited 3: Bazel \
@@ -1109,9 +1111,13 @@ fn render_compare(r: &SubjectResults) -> String {
              gates the run, and must be zero. *external route* is the subset \
              `somepath` shows Bazel reaching only by leaving `//...` and coming \
              back (see [Externals and soundness](#externals-and-soundness)); it \
-             is a label on a failure, not an excuse for one. The last column is \
-             the `@repo//...` half of the difference, which cambium does not \
-             index by construction and which recall therefore ignores.\n\n",
+             is a label on a failure, not an excuse for one. *deleted-file \
+             consumers* is the other half of the check: a file that is gone at \
+             head has no label to query, so its consumers come from the base \
+             index and must appear in cambium's answer by label or by package. \
+             The last column is the `@repo//...` half of the difference, which \
+             cambium does not index by construction and which recall therefore \
+             ignores.\n\n",
         );
     }
 
@@ -1409,15 +1415,10 @@ mod tests {
             }],
             load_oracle: None,
             oracle: Some(crate::oracles::rdeps::RdepsResult {
-                roots: vec!["//a:a".into(), "//b:b".into()],
-                oracle_set: Default::default(),
-                cambium_set_from_roots: Default::default(),
-                missing: Vec::new(),
-                missing_external: Vec::new(),
-                external_route: Vec::new(),
-                skipped_roots: Vec::new(),
+                roots: vec!["//a:a.cc".into(), "//b:b.cc".into()],
                 partial: true,
                 partial_batches: 2,
+                ..Default::default()
             }),
             recall: 1.0,
             global: false,
@@ -1430,7 +1431,7 @@ mod tests {
             bazel_version: Some("7.x".into()),
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 0,
-            oracle_k: 100,
+            oracle_k: 0,
             tango_change_sets: None,
             change_sets: vec![change_set, global_change_set()],
             summary: ChangesSummary::default(),
@@ -1542,7 +1543,7 @@ mod tests {
     #[test]
     fn the_section_reports_the_oracles_partial_batches() {
         let s = render_subject_section(&bazel_results(), None);
-        assert!(s.contains("| 1 | 2 | 0 | 1 | 2 | 0 |"), "{s}");
+        assert!(s.contains("| 1 | 2 | 0 | 1 | 2 | 0 | 0 |"), "{s}");
         assert!(s.contains("rule definition changed | 233"), "{s}");
     }
 

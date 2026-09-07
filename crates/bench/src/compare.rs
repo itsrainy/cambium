@@ -8,7 +8,8 @@
 //!    argument for cambium is the warm number, and quoting it without the cold
 //!    one would be dishonest.
 //! 2. **each tool** ([`crate::tools::Tool`]), typically bazel-diff.
-//! 3. **the oracle** ([`crate::oracles::rdeps`]), a sampled `bazel query rdeps`.
+//! 3. **the oracle** ([`crate::oracles::rdeps`]), one `bazel query rdeps` over
+//!    every changed file.
 //!
 //! cambium vs tool is a *symmetric difference*, classified label by label
 //! (see [`crate::classify`]). cambium vs oracle is one-sided and absolute:
@@ -34,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::classify::{classify, BazelFacts, Class, Facts, Side};
 use crate::oracles::load::{LoadOracleResult, LoadOracleSummary};
-use crate::oracles::rdeps::{RdepsOracle, RdepsResult};
+use crate::oracles::rdeps::{OracleInputs, RdepsOracle, RdepsResult};
 use crate::tools::{BaseWorktree, RunContext, Tool};
 
 /// How many example labels of each class are kept in the JSON. The counts are
@@ -53,7 +54,13 @@ pub struct ChangesOptions {
     pub state_dir: PathBuf,
     /// Bazel version this run pinned, for the file name and the JSON.
     pub bazel_version: Option<String>,
-    /// Roots the rdeps oracle samples per change set; 0 disables it.
+    /// Run the reverse-dependency oracle on every incremental change set.
+    /// `--oracle` without `rdeps` turns it off.
+    pub rdeps_oracle: bool,
+    /// Cap on the source labels the rdeps oracle queries per change set.
+    /// 0 — the default — is the full change set, which is the oracle the
+    /// methodology specifies; a positive value is the documented escape hatch
+    /// for a subject whose change sets are too big to query whole.
     pub oracle_k: usize,
     /// Run the `.bzl` load-closure oracle on every change set that touches a
     /// `.bzl`. `--oracle` without `load` turns it off.
@@ -107,7 +114,8 @@ impl ChangesOptions {
             state_dir: absolute(results_dir.parent().unwrap_or(&results_dir)),
             results_dir: absolute(&results_dir),
             bazel_version: None,
-            oracle_k: 100,
+            rdeps_oracle: true,
+            oracle_k: 0,
             load_oracle: true,
             seed: 0,
             resume: true,
@@ -802,10 +810,10 @@ pub fn compare_change_set_with(
     //
     // The two oracles do not run, and cannot:
     //
-    // - the rdeps oracle samples its roots from cambium's *direct* set, which
-    //   a global report leaves empty; with no roots there is no query to make,
-    //   and any answer it did produce would be contained in `//...` by
-    //   construction, proving nothing.
+    // - the rdeps oracle asks which rules the changed files reach and requires
+    //   cambium's answer to contain them; a global answer is `//...`, which
+    //   contains every rule by construction, so the check is vacuous and there
+    //   is no head index to seed it from anyway.
     // - the `.bzl` load-closure oracle checks `rbuildfiles` against the dirty
     //   packages cambium named, and a global names none — running it would
     //   report every package as missed, which is the opposite of the truth.
@@ -1049,14 +1057,30 @@ pub fn compare_change_set_with(
     }
 
     // ---- the oracle ----
-    let oracle = if opts.oracle_k > 0 {
-        Some(
-            RdepsOracle::new(opts.oracle_k, opts.seed)
-                .run(&engine.bazel, index.view(), &direct)
-                .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
-        )
-    } else {
-        None
+    //
+    // The base index is wanted only for the deleted half of the change set
+    // (see `crate::oracles::rdeps`): a file that is gone at head has no label
+    // to ask Bazel about, and the base index's `file -> consumers` rows are the
+    // only record of who read it. The run above published it, so this is a
+    // store read; when it is not there the oracle says so and checks the rest.
+    let oracle = match opts.rdeps_oracle {
+        true => {
+            let base_index = base_index_for_oracle(engine, &change_set.base);
+            Some(
+                RdepsOracle::new(opts.oracle_k, opts.seed)
+                    .run(
+                        &engine.bazel,
+                        &OracleInputs {
+                            head: index.view(),
+                            base: base_index.as_ref().map(|f| f.view()),
+                            changed: &changed,
+                            cambium: &cambium_set,
+                        },
+                    )
+                    .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
+            )
+        }
+        false => None,
     };
     let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
 
@@ -1102,6 +1126,34 @@ pub fn compare_change_set_with(
         global: false,
         pass,
     })
+}
+
+/// The base index, for the oracle's deleted half, or `None`.
+///
+/// Best effort by design: the oracle is a check, and a check that cannot be
+/// made is reported ([`crate::oracles::rdeps::RdepsResult::deleted_checked`]),
+/// not raised. The index is in the store because the run above published it;
+/// a store that will not read, or a base whose index was never published,
+/// costs the deleted half of one change set and nothing else.
+fn base_index_for_oracle(engine: &Engine, base: &str) -> Option<cambium_index::IndexFile> {
+    let rev = engine
+        .repo
+        .rev_parse(base)
+        .unwrap_or_else(|_| base.to_string());
+    let path = match engine.fetch_baseline(&rev) {
+        Ok(p) => p?,
+        Err(e) => {
+            tracing::warn!(%base, error = format!("{e:#}"), "no base index for the oracle's deleted half");
+            return None;
+        }
+    };
+    match cambium_index::IndexFile::open(&path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::warn!(%base, error = format!("{e:#}"), "could not open the base index for the oracle");
+            None
+        }
+    }
 }
 
 /// Every change set, resumable, writing after each one.
@@ -1623,7 +1675,7 @@ mod tests {
             bazel_version: Some("7.4.1".into()),
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 7,
-            oracle_k: 100,
+            oracle_k: 0,
             tango_change_sets: None,
             change_sets: vec![change_set_comparison("1", 1.0, 100, 10, true)],
             summary: ChangesSummary::default(),
