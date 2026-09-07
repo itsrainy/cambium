@@ -1,16 +1,15 @@
 //! `cambi corpus` — the real-repository validation suite (spec §3-§6).
 //!
 //! Every subcommand is idempotent and resumable: what finished is recorded in
-//! `corpus-results/<id>/state.json`, and rerunning picks up from there rather
+//! `bench-results/<id>/state.json`, and rerunning picks up from there rather
 //! than redoing an hour of `bazel query`. Progress is logged at `info`, so a
 //! long run is followable with `--log info`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use cambium_corpus::manifest::{Manifest, RepoEntry};
-use cambium_corpus::profile::Profile;
-use cambium_corpus::{pairs, replay, CorpusDir, State};
+use cambium_bench::manifest::{Manifest, RepoEntry};
+use cambium_bench::{changes, history, State, SubjectsDir};
 use cambium_engine::inspect::{IndexQuery, IndexStats};
 use clap::{Args as ClapArgs, Subcommand};
 
@@ -26,7 +25,7 @@ pub struct Common {
     #[arg(long)]
     pub manifest: Option<PathBuf>,
     /// Where results go: <results-dir>/<id>/.
-    #[arg(long, default_value = "corpus-results")]
+    #[arg(long, default_value = "bench-results")]
     pub results_dir: PathBuf,
     /// Mirrors, worktrees and caches (default: $CAMBIUM_CORPUS_DIR, else
     /// ~/.cache/cambium/corpus).
@@ -36,14 +35,9 @@ pub struct Common {
     /// result file names. Default: whatever the repo's .bazelversion says.
     #[arg(long)]
     pub bazel_version: Option<String>,
-    /// Seed for the deterministic pair sampling.
+    /// Seed for the deterministic change set sampling.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
-    /// How much of the repository to cover: `full` (the published numbers,
-    /// hours on a big machine) or `quick` (a bounded, deterministic slice that
-    /// finishes on a laptop, written under `<results-dir>/<id>/quick/`).
-    #[arg(long, default_value = "full", env = cambium_corpus::profile::PROFILE_ENV)]
-    pub profile: String,
 }
 
 #[derive(Subcommand)]
@@ -64,25 +58,25 @@ pub enum Args {
         #[arg(long)]
         force: bool,
     },
-    /// Replay the updater over the first-parent range ending at the pin.
-    Replay {
+    /// History the updater over the first-parent range ending at the pin.
+    History {
         #[command(flatten)]
         common: Common,
         /// First-parent commits before the pin. Defaults to the manifest's.
         #[arg(long)]
         range: Option<usize>,
-        /// Start over rather than resuming the recorded replay.
+        /// Start over rather than resuming the recorded history.
         #[arg(long)]
         restart: bool,
     },
-    /// Select the deterministic (base, head) comparison pairs.
+    /// Select the deterministic (base, head) comparison change sets.
     Pairs {
         #[command(flatten)]
         common: Common,
         /// adjacent, pr, or stress. Repeatable; default: all three.
         #[arg(long = "kind")]
         kinds: Vec<String>,
-        /// Stress pairs per category.
+        /// Stress change sets per category.
         #[arg(long, default_value_t = 20)]
         cap: usize,
         #[arg(long, value_enum, default_value_t = DataFormat::Text)]
@@ -92,35 +86,35 @@ pub enum Args {
     Compare {
         #[command(flatten)]
         common: Common,
-        /// A pairs JSON to compare (default: the one `corpus pairs` wrote, or
+        /// A change sets JSON to compare (default: the one `corpus change_sets` wrote, or
         /// a fresh selection).
         #[arg(long)]
-        pairs: Option<PathBuf>,
-        /// Pair kinds to select when there is no pairs file. Repeatable.
+        change_sets: Option<PathBuf>,
+        /// ChangeSet kinds to select when there is no change sets file. Repeatable.
         #[arg(long = "kind")]
         kinds: Vec<String>,
-        /// Roots the rdeps oracle samples per pair; 0 disables it.
+        /// Roots the rdeps oracle samples per change set; 0 disables it.
         #[arg(long, default_value_t = 100)]
         oracle_sample: usize,
         /// Which bazel-diff to run: rust, kotlin, or none.
         #[arg(long, default_value = "rust")]
         bazel_diff: String,
         /// Run Tango. It is in the default set already; pass this to add it
-        /// to an explicit `--producers` list.
+        /// to an explicit `--tools` list.
         #[arg(long)]
         tango: bool,
         /// Do not run Tango.
         #[arg(long, conflicts_with = "tango")]
         no_tango: bool,
-        /// The exact producer list, overriding the two flags above:
+        /// The exact tool list, overriding the two flags above:
         /// `bazel-diff-rust`, `bazel-diff-kotlin`, `tango`.
         #[arg(long, value_delimiter = ',')]
-        producers: Vec<String>,
-        /// Stress pairs per category when selecting, and the cap on how many
-        /// pairs are compared in one run.
-        #[arg(long, default_value_t = cambium_corpus::profile::FULL_PAIR_CAP)]
+        tools: Vec<String>,
+        /// Stress change sets per category when selecting, and the cap on how many
+        /// change sets are compared in one run.
+        #[arg(long, default_value_t = cambium_bench::DEFAULT_CHANGE_SETS)]
         cap: usize,
-        /// Compare every pair again rather than resuming.
+        /// Compare every change set again rather than resuming.
         #[arg(long)]
         restart: bool,
     },
@@ -132,7 +126,7 @@ pub enum Args {
         #[arg(long)]
         doc: Option<PathBuf>,
     },
-    /// fetch, build, replay, pairs, compare, report.
+    /// fetch, build, history, change sets, compare, report.
     All {
         #[command(flatten)]
         common: Common,
@@ -144,7 +138,7 @@ impl Args {
         match self {
             Args::Fetch { common }
             | Args::Build { common, .. }
-            | Args::Replay { common, .. }
+            | Args::History { common, .. }
             | Args::Pairs { common, .. }
             | Args::Compare { common, .. }
             | Args::Report { common, .. }
@@ -160,7 +154,7 @@ struct Run {
     /// The whole manifest, not just this entry: the report's top table is
     /// rebuilt from every entry that has results, not only this one.
     manifest: Manifest,
-    corpus: CorpusDir,
+    corpus: SubjectsDir,
     /// `--results-dir` itself, absolute: the parent every repository's results
     /// hang off, which the report walks to rebuild the cross-repo tables.
     results_root: PathBuf,
@@ -168,7 +162,6 @@ struct Run {
     results: PathBuf,
     version: Option<String>,
     seed: u64,
-    profile: Profile,
 }
 
 impl Run {
@@ -186,32 +179,21 @@ impl Run {
         entry.bazel = resolve_bazel(&requested)?;
         tracing::info!(bazel = %entry.bazel, "resolved the bazel binary");
         let corpus = match &c.corpus_dir {
-            Some(p) => CorpusDir::new(p.clone()),
-            None => CorpusDir::from_env(),
+            Some(p) => SubjectsDir::new(p.clone()),
+            None => SubjectsDir::from_env(),
         };
-        // Absolute, always. Producers and Bazel run as child processes with a
+        // Absolute, always. Tools and Bazel run as child processes with a
         // different working directory (the corpus worktree, a scratch
-        // worktree), so a relative `--results-dir corpus-results` would name a
+        // worktree), so a relative `--results-dir bench-results` would name a
         // different directory in each of them — which is exactly how
         // bazel-diff came to be handed a base worktree that did not exist.
-        let profile = Profile::parse(&c.profile)
-            .ok_or_else(|| anyhow::anyhow!("--profile {:?}: expected quick or full", c.profile))?;
         std::fs::create_dir_all(&c.results_dir)?;
-        let results_root = cambium_compare::threeway::absolute(&c.results_dir);
+        let results_root = cambium_bench::compare::absolute(&c.results_dir);
         // A quick run's files sit in their own directory so they can never be
         // read as, or write over, the published full-profile numbers.
-        let results = profile.results_dir(&results_root, &c.id);
+        let results = results_root.join(&c.id);
         std::fs::create_dir_all(&results)?;
-        let results = cambium_compare::threeway::absolute(&results);
-        if profile.is_quick() {
-            tracing::info!(
-                results = %results.display(),
-                history_window = cambium_corpus::profile::QUICK_REPLAY_RANGE,
-                pairs = cambium_corpus::profile::QUICK_PAIR_CAP,
-                tango_pairs = cambium_corpus::profile::QUICK_TANGO_PAIRS,
-                "quick profile: local evidence, not the published numbers"
-            );
-        }
+        let results = cambium_bench::compare::absolute(&results);
         // The flag wins; the manifest's own pin is the fallback for a repo
         // that needs a specific Bazel and has no `.bazelversion` to say so.
         let version = c
@@ -227,7 +209,6 @@ impl Run {
             results,
             version,
             seed: c.seed,
-            profile,
         })
     }
 
@@ -321,37 +302,37 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             build(&run, at.as_deref(), force)?;
             Ok(crate::EXIT_OK)
         }
-        Args::Replay { range, restart, .. } => {
+        Args::History { range, restart, .. } => {
             do_replay(&run, range, !restart)?;
             Ok(crate::EXIT_OK)
         }
         Args::Pairs {
             kinds, cap, output, ..
         } => {
-            do_pairs(&run, &kinds, cap, output)?;
+            do_change_sets(&run, &kinds, cap, output)?;
             Ok(crate::EXIT_OK)
         }
         Args::Compare {
-            pairs,
+            change_sets,
             kinds,
             oracle_sample,
             bazel_diff,
             tango,
             no_tango,
-            producers,
+            tools,
             cap,
             restart,
             ..
         } => do_compare(
             &run,
             &CompareArgs {
-                pairs,
+                change_sets,
                 kinds,
                 oracle_sample,
                 bazel_diff,
                 tango,
                 no_tango,
-                producers,
+                tools,
                 cap,
                 restart,
             },
@@ -361,10 +342,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             fetch(&run)?;
             build(&run, None, false)?;
             do_replay(&run, None, true)?;
-            do_pairs(
+            do_change_sets(
                 &run,
                 &[],
-                cambium_corpus::profile::FULL_PAIR_CAP,
+                cambium_bench::DEFAULT_CHANGE_SETS,
                 DataFormat::Text,
             )?;
             let code = do_compare(&run, &CompareArgs::default())?;
@@ -453,32 +434,30 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
 fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
     let checkout = run.corpus.open(&run.entry)?;
     let engine = checkout.engine(&run.entry, run.version())?;
-    let range = run
-        .profile
-        .history_window(range.unwrap_or(run.entry.history_window));
-    let commits = pairs::range_commits(&checkout.repo, &run.entry.pin, range)?;
+    let range = range.unwrap_or(run.entry.history_window);
+    let commits = changes::range_commits(&checkout.repo, &run.entry.pin, range)?;
     tracing::info!(
         commits = commits.len(),
         from = %commits.first().cloned().unwrap_or_default(),
         to = %run.entry.pin,
-        "replaying"
+        "running the history"
     );
-    let opts = replay::ReplayOptions {
+    let opts = history::HistoryOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
         results_dir: run.results.clone(),
+        state_dir: run.results.clone(),
         publish: true,
         resume,
         bazel_version: run.version().unwrap_or_default().to_string(),
         diff_cap: 50,
-        profile: run.profile,
     };
-    let driver = replay::BazelDriver {
+    let driver = history::BazelDriver {
         checkout: &checkout,
         engine: &engine,
     };
-    let result = replay::replay(&engine, &driver, &commits, &opts)?;
-    let path = replay::ReplayResult::path_versioned(&run.results, &run.entry.pin, run.version());
+    let result = history::history(&engine, &driver, &commits, &opts)?;
+    let path = history::HistoryResult::path_versioned(&run.results, &run.entry.pin, run.version());
     tracing::info!(
         commits = result.summary.commits,
         p50_ms = result.summary.p50_total_ms,
@@ -489,60 +468,61 @@ fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
         partial = result.cold.partial.partial,
         packages_in_error = result.cold.partial.packages_in_error,
         path = %path.display(),
-        "replay done"
+        "history done"
     );
     println!("{}", path.display());
     if let Some(o) = &result.oracle {
         if !o.ok {
-            anyhow::bail!("replay oracle failed: {}", o.diff.summary());
+            anyhow::bail!("history oracle failed: {}", o.diff.summary());
         }
     }
     Ok(())
 }
 
-fn do_pairs(run: &Run, kinds: &[String], cap: usize, output: DataFormat) -> Result<()> {
+fn do_change_sets(run: &Run, kinds: &[String], cap: usize, output: DataFormat) -> Result<()> {
     let kinds = if kinds.is_empty() {
         vec![
-            pairs::PairKind::Adjacent,
-            pairs::PairKind::Pr,
-            pairs::PairKind::Stress,
+            changes::ChangeSetKind::Adjacent,
+            changes::ChangeSetKind::Pr,
+            changes::ChangeSetKind::Stress,
         ]
     } else {
         kinds
             .iter()
             .map(|k| {
-                pairs::PairKind::parse(k)
-                    .ok_or_else(|| anyhow::anyhow!("unknown pair kind {k:?}: adjacent, pr, stress"))
+                changes::ChangeSetKind::parse(k).ok_or_else(|| {
+                    anyhow::anyhow!("unknown change_set kind {k:?}: adjacent, pr, stress")
+                })
             })
             .collect::<Result<Vec<_>>>()?
     };
     let checkout = run.corpus.open(&run.entry)?;
-    let wants_hubs = kinds.contains(&pairs::PairKind::Stress);
+    let wants_hubs = kinds.contains(&changes::ChangeSetKind::Stress);
     let hub_packages = if wants_hubs {
         hub_packages(run)?
     } else {
         Vec::new()
     };
     let (paths, globs) = run.entry.invalidator_rules();
-    let opts = pairs::PairOptions {
+    let opts = changes::ChangeSetOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
         history_window: run.entry.history_window,
         seed: run.seed,
         cap,
-        profile: run.profile,
+        total_cap: Some(cap),
         hub_packages,
         invalidator_paths: paths,
         invalidator_globs: globs,
     };
-    let set = pairs::select(&checkout.repo, &kinds, &opts)?;
-    let path = run.result_path(&format!("pairs-{}", run.entry.pin), "json");
+    let set = changes::select(&checkout.repo, &kinds, &opts)?;
+    let path = run.result_path(&format!("change_sets-{}", run.entry.pin), "json");
     set.write(&path)?;
-    tracing::info!(pairs = set.pairs.len(), path = %path.display(), "selected pairs");
+    tracing::info!(change_sets = set.change_sets.len(), path = %path.display(), "selected change_sets");
     match output {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(&set)?),
         DataFormat::Text => {
-            for p in &set.pairs {
+            for p in &set.change_sets {
                 println!(
                     "{}\t{}\t{}\t{}",
                     p.kind.name(),
@@ -559,13 +539,13 @@ fn do_pairs(run: &Run, kinds: &[String], cap: usize, output: DataFormat) -> Resu
 /// What `corpus compare` was asked to do, defaulted the way `all` wants it.
 #[derive(Clone, Debug)]
 struct CompareArgs {
-    pairs: Option<PathBuf>,
+    change_sets: Option<PathBuf>,
     kinds: Vec<String>,
     oracle_sample: usize,
     bazel_diff: String,
     tango: bool,
     no_tango: bool,
-    producers: Vec<String>,
+    tools: Vec<String>,
     cap: usize,
     restart: bool,
 }
@@ -573,34 +553,34 @@ struct CompareArgs {
 impl Default for CompareArgs {
     fn default() -> Self {
         Self {
-            pairs: None,
+            change_sets: None,
             kinds: Vec::new(),
             oracle_sample: 100,
             bazel_diff: "rust".into(),
             tango: false,
             no_tango: false,
-            producers: Vec::new(),
-            cap: cambium_corpus::profile::FULL_PAIR_CAP,
+            tools: Vec::new(),
+            cap: cambium_bench::DEFAULT_CHANGE_SETS,
             restart: false,
         }
     }
 }
 
 impl CompareArgs {
-    /// The producer names to run, before any of them is looked for on disk.
+    /// The tool names to run, before any of them is looked for on disk.
     ///
-    /// `--producers` is the exact list when given; otherwise the default is
+    /// `--tools` is the exact list when given; otherwise the default is
     /// "both tools" — a bazel-diff (`--bazel-diff rust|kotlin|none`) and
     /// Tango (`--no-tango` to drop it) — because a comparison against one tool
     /// only tells you which of the two disagrees with cambium, not which of
     /// the three is the odd one out.
     fn wanted(&self) -> Result<Vec<String>> {
-        if !self.producers.is_empty() {
-            let mut out = self.producers.clone();
-            // `--producers` is the list, but `--tango` alongside it still
+        if !self.tools.is_empty() {
+            let mut out = self.tools.clone();
+            // `--tools` is the list, but `--tango` alongside it still
             // means "and Tango": the flag never silently does nothing.
-            if self.tango && !out.iter().any(|p| p == cambium_compare::tango::NAME) {
-                out.push(cambium_compare::tango::NAME.to_string());
+            if self.tango && !out.iter().any(|p| p == cambium_bench::tools::tango::NAME) {
+                out.push(cambium_bench::tools::tango::NAME.to_string());
             }
             return Ok(out);
         }
@@ -608,29 +588,29 @@ impl CompareArgs {
         match self.bazel_diff.as_str() {
             "none" | "off" | "" => {}
             other => {
-                let imp = cambium_compare::Implementation::parse(other).ok_or_else(|| {
+                let imp = cambium_bench::Implementation::parse(other).ok_or_else(|| {
                     anyhow::anyhow!("--bazel-diff {other:?}: expected rust, kotlin, or none")
                 })?;
                 out.push(imp.name().to_string());
             }
         }
         if !self.no_tango {
-            out.push(cambium_compare::tango::NAME.to_string());
+            out.push(cambium_bench::tools::tango::NAME.to_string());
         }
-        anyhow::ensure!(!out.is_empty(), "no producers selected");
+        anyhow::ensure!(!out.is_empty(), "no tools selected");
         Ok(out)
     }
 }
 
-/// Locates one producer by name, or explains why it is being skipped.
+/// Locates one tool by name, or explains why it is being skipped.
 ///
 /// A missing binary is a warning, not an error: the machine that runs the
 /// nightly corpus job may have bazel-diff and no Go toolchain, and a run that
 /// refuses to compare anything because one of two optional tools is absent is
 /// worse than a run that says so and compares the other.
-fn open_producer(name: &str) -> Result<Option<Box<dyn cambium_compare::Producer>>> {
-    use cambium_compare::{BazelDiff, Implementation, Tango};
-    let found: Result<Box<dyn cambium_compare::Producer>> = match name {
+fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::Tool>>> {
+    use cambium_bench::{BazelDiff, Implementation, Tango};
+    let found: Result<Box<dyn cambium_bench::Tool>> = match name {
         "tango" => Tango::discover().map(|t| Box::new(t) as _),
         "bazel-diff-rust" | "rust" => {
             BazelDiff::discover(Implementation::Rust).map(|b| Box::new(b) as _)
@@ -639,12 +619,12 @@ fn open_producer(name: &str) -> Result<Option<Box<dyn cambium_compare::Producer>
             BazelDiff::discover(Implementation::Kotlin).map(|b| Box::new(b) as _)
         }
         other => {
-            anyhow::bail!("unknown producer {other:?}: bazel-diff-rust, bazel-diff-kotlin, tango")
+            anyhow::bail!("unknown tool {other:?}: bazel-diff-rust, bazel-diff-kotlin, tango")
         }
     };
     match found {
         Ok(p) => {
-            tracing::info!(producer = p.name(), version = %p.version(), "producer");
+            tracing::info!(tool = p.name(), version = %p.version(), "tool");
             Ok(Some(p))
         }
         Err(e) => {
@@ -656,55 +636,50 @@ fn open_producer(name: &str) -> Result<Option<Box<dyn cambium_compare::Producer>
 
 fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let wanted = args.wanted()?;
-    let owned: Vec<Box<dyn cambium_compare::Producer>> = wanted
+    let owned: Vec<Box<dyn cambium_bench::Tool>> = wanted
         .iter()
-        .map(|n| open_producer(n))
+        .map(|n| open_tool(n))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
         .collect();
     if owned.is_empty() {
-        eprintln!("cambium: corpus compare: no producer is installed; nothing to compare");
+        eprintln!("cambium: corpus compare: no tool is installed; nothing to compare");
         return Ok(crate::EXIT_ERROR);
     }
-    let producers: Vec<&dyn cambium_compare::Producer> = owned.iter().map(|p| p.as_ref()).collect();
+    let tools: Vec<&dyn cambium_bench::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
     let checkout = run.corpus.open(&run.entry)?;
-    let set = load_pairs(run, &checkout, args)?;
-    // The quick profile's pair set is already capped at its own total, so the
+    let set = load_change_sets(run, &checkout, args)?;
+    // The quick profile's change set set is already capped at its own total, so the
     // per-run `--cap` (`FULL_PAIR_CAP` by default, meant to bound an EC2 job's
     // tail) must not shave it down further.
-    let cap = match run.profile.pair_cap() {
-        Some(c) => args.cap.max(c),
-        None => args.cap,
-    };
-    let pairs: Vec<_> = set.pairs.iter().take(cap.max(1)).cloned().collect();
-    anyhow::ensure!(!pairs.is_empty(), "no pairs to compare");
+    let cap = args.cap;
+    let change_sets: Vec<_> = set.change_sets.iter().take(cap.max(1)).cloned().collect();
+    anyhow::ensure!(!change_sets.is_empty(), "no change_sets to compare");
 
     let engine = checkout.engine(&run.entry, run.version())?;
-    let opts = cambium_compare::CompareOptions {
+    let opts = cambium_bench::ChangesOptions {
         bazel_version: run.version.clone(),
         oracle_k: args.oracle_sample,
         seed: run.seed,
         resume: !args.restart,
         scratch: run.results.join("scratch"),
-        profile: run.profile,
-        tango_pairs: run.profile.tango_pairs(),
-        ..cambium_compare::CompareOptions::new(
+        ..cambium_bench::ChangesOptions::new(
             run.entry.id.clone(),
             run.entry.pin.clone(),
             run.results.clone(),
         )
     };
     tracing::info!(
-        pairs = pairs.len(),
-        producers = producers.len(),
+        change_sets = change_sets.len(),
+        tools = tools.len(),
         oracle_k = opts.oracle_k,
-        profile = run.profile.name(),
-        tango_pairs = opts.tango_pairs.unwrap_or(pairs.len()),
+        tango_change_sets = opts.tango_change_sets.unwrap_or(change_sets.len()),
         "comparing"
     );
-    let result = cambium_compare::compare_pairs(&engine, &checkout, &pairs, &producers, &opts)?;
+    let result =
+        cambium_bench::compare_change_sets(&engine, &checkout, &change_sets, &tools, &opts)?;
     print_compare_summary(&result);
     println!("{}", opts.output_path().display());
     Ok(if result.summary.pass {
@@ -714,72 +689,73 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     })
 }
 
-/// The pairs to compare: an explicit file, else the one `corpus pairs` wrote
+/// The change sets to compare: an explicit file, else the one `corpus change_sets` wrote
 /// for this pin, else a fresh selection with the requested kinds.
-fn load_pairs(
+fn load_change_sets(
     run: &Run,
-    checkout: &cambium_corpus::Checkout,
+    checkout: &cambium_bench::Checkout,
     args: &CompareArgs,
-) -> Result<pairs::PairSet> {
-    if let Some(p) = &args.pairs {
-        return pairs::PairSet::read(p).with_context(|| format!("reading {}", p.display()));
+) -> Result<changes::ChangeSetSet> {
+    if let Some(p) = &args.change_sets {
+        return changes::ChangeSetSet::read(p).with_context(|| format!("reading {}", p.display()));
     }
-    let default = run.result_path(&format!("pairs-{}", run.entry.pin), "json");
+    let default = run.result_path(&format!("change_sets-{}", run.entry.pin), "json");
     if args.kinds.is_empty() && default.exists() {
-        tracing::info!(path = %default.display(), "using the recorded pairs");
-        return pairs::PairSet::read(&default);
+        tracing::info!(path = %default.display(), "using the recorded change_sets");
+        return changes::ChangeSetSet::read(&default);
     }
     let kinds = parse_kinds(&args.kinds)?;
     let (paths, globs) = run.entry.invalidator_rules();
-    let opts = pairs::PairOptions {
+    let opts = changes::ChangeSetOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
         history_window: run.entry.history_window,
         seed: run.seed,
         cap: args.cap,
-        profile: run.profile,
+        total_cap: Some(args.cap),
         hub_packages: Vec::new(),
         invalidator_paths: paths,
         invalidator_globs: globs,
     };
-    let set = pairs::select(&checkout.repo, &kinds, &opts)?;
+    let set = changes::select(&checkout.repo, &kinds, &opts)?;
     set.write(&default)?;
     Ok(set)
 }
 
-fn parse_kinds(kinds: &[String]) -> Result<Vec<pairs::PairKind>> {
+fn parse_kinds(kinds: &[String]) -> Result<Vec<changes::ChangeSetKind>> {
     if kinds.is_empty() {
-        return Ok(vec![pairs::PairKind::Adjacent]);
+        return Ok(vec![changes::ChangeSetKind::Adjacent]);
     }
     kinds
         .iter()
         .map(|k| {
-            pairs::PairKind::parse(k)
-                .ok_or_else(|| anyhow::anyhow!("unknown pair kind {k:?}: adjacent, pr, stress"))
+            changes::ChangeSetKind::parse(k).ok_or_else(|| {
+                anyhow::anyhow!("unknown change_set kind {k:?}: adjacent, pr, stress")
+            })
         })
         .collect()
 }
 
 /// The table a person reads before opening the JSON.
-fn print_compare_summary(result: &cambium_compare::CompareResult) {
+fn print_compare_summary(result: &cambium_bench::ChangesResult) {
     let s = &result.summary;
     println!(
-        "\n{} {}  pairs {}  passed {}  global {}  min recall {:.1}%",
+        "\n{} {}  change_sets {}  passed {}  global {}  min recall {:.1}%",
         result.repo,
         &result.pin[..result.pin.len().min(12)],
-        s.pairs,
+        s.change_sets,
         s.passed,
         s.globals,
         s.min_recall * 100.0
     );
     println!(
         "{:<20} {:>10} {:>12} {:>12}",
-        "producer", "precision", "cold p50", "warm p50"
+        "tool", "precision", "cold p50", "warm p50"
     );
     for (name, p) in &s.mean_precision {
-        let cold = s.producer_cold.get(name).map(|w| w.p50_ms).unwrap_or(0);
+        let cold = s.tool_cold.get(name).map(|w| w.p50_ms).unwrap_or(0);
         let warm = s
-            .producer_warm
+            .tool_warm
             .get(name)
             .map(|w| format!("{} ms", w.p50_ms))
             .unwrap_or_else(|| "—".into());
@@ -811,44 +787,40 @@ fn do_report(ctx: &Context, run: &Run, doc: Option<&std::path::Path>) -> Result<
     // `docs/CORPUS.md` is the published document, and a quick run's numbers are
     // a laptop's slice: they go to a file of their own next to the results they
     // came from, unless the caller names a document explicitly.
-    let doc = doc.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        if run.profile.is_quick() {
-            run.results.join("CORPUS-quick.md")
-        } else {
-            ctx.root.join("docs/CORPUS.md")
-        }
-    });
+    let doc = doc
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ctx.root.join("docs/CORPUS.md"));
 
     // Every repository at once, not just this one: a per-repo nightly job
     // rewrites the top table and the synthetic headline wholesale, and must
     // not drop the other repos' rows on the way. Within
     // one profile, though: quick and full numbers never share a table.
     let parent = run.results_root.clone();
-    let repos = collect_repos(&run.manifest, &parent, &run.corpus, run.profile)?;
+    let repos = collect_repos(&run.manifest, &parent, &run.corpus)?;
     let mine = repos
         .iter()
         .find(|r| r.id == run.entry.id)
         .cloned()
-        .unwrap_or_else(|| cambium_compare::RepoResults::new(&run.entry.id));
+        .unwrap_or_else(|| cambium_bench::SubjectResults::new(&run.entry.id));
     if mine.is_empty() {
         eprintln!(
-            "cambium: corpus report: no replay-*.json or compare-*.json in {}",
+            "cambium: corpus report: no history-*.json or compare-*.json in {}",
             run.results.display()
         );
         return Ok(crate::EXIT_ERROR);
     }
 
     let bench = read_bench_legacy(&ctx.root.join("docs/benchmarks/sweep-legacy.json"))?;
-    cambium_compare::update_doc(
+    cambium_bench::update_doc(
         &doc,
         &run.entry.id,
-        &cambium_compare::render_repo_section(&mine, None),
+        &cambium_bench::render_subject_section(&mine, None),
     )?;
-    cambium_compare::update_doc(&doc, "top", &cambium_compare::render_top_table(&repos))?;
-    cambium_compare::update_doc(
+    cambium_bench::update_doc(&doc, "top", &cambium_bench::render_top_table(&repos))?;
+    cambium_bench::update_doc(
         &doc,
         "bench",
-        &cambium_compare::render_bench_section(&bench, Some("bench-legacy.svg")),
+        &cambium_bench::render_bench_section(&bench, Some("bench-legacy.svg")),
     )?;
     tracing::info!(doc = %doc.display(), repos = repos.len(), "report written");
     println!("{}", doc.display());
@@ -861,22 +833,21 @@ fn do_report(ctx: &Context, run: &Run, doc: Option<&std::path::Path>) -> Result<
 fn collect_repos(
     manifest: &Manifest,
     parent: &std::path::Path,
-    corpus: &CorpusDir,
-    profile: Profile,
-) -> Result<Vec<cambium_compare::RepoResults>> {
+    corpus: &SubjectsDir,
+) -> Result<Vec<cambium_bench::SubjectResults>> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for entry in &manifest.repos {
-        let dir = profile.results_dir(parent, &entry.id);
+        let dir = parent.join(&entry.id);
         seen.insert(entry.id.clone());
         if !dir.is_dir() {
             continue;
         }
-        let (mut replay, compares) = read_results(&dir)?;
-        // A replay written before `bazel_version_used` existed, with no
+        let (mut history, compares) = read_results(&dir)?;
+        // A history written before `bazel_version_used` existed, with no
         // version override, ran whatever the worktree's `.bazelversion`
         // asked bazelisk for; that file is the honest record.
-        if let Some(r) = replay.as_mut() {
+        if let Some(r) = history.as_mut() {
             if r.bazel_version_used.is_empty() && r.bazel_version.is_empty() {
                 let path = corpus.worktree(&entry.id).join(".bazelversion");
                 if let Ok(v) = std::fs::read_to_string(path) {
@@ -884,8 +855,8 @@ fn collect_repos(
                 }
             }
         }
-        let r = cambium_compare::RepoResults::new(&entry.id)
-            .with_replay(replay)
+        let r = cambium_bench::SubjectResults::new(&entry.id)
+            .with_replay(history)
             .with_compares(compares);
         if !r.is_empty() {
             out.push(r);
@@ -906,10 +877,9 @@ fn collect_repos(
         if seen.contains(id) {
             continue;
         }
-        let dir = profile.within(&dir);
-        let (replay, compares) = read_results(&dir)?;
-        let r = cambium_compare::RepoResults::new(id)
-            .with_replay(replay)
+        let (history, compares) = read_results(&dir)?;
+        let r = cambium_bench::SubjectResults::new(id)
+            .with_replay(history)
             .with_compares(compares);
         if !r.is_empty() {
             out.push(r);
@@ -923,7 +893,7 @@ fn collect_repos(
 /// Missing or unparseable is not an error: the synthetic section then says the
 /// sweep has not been recorded, which is true and better than failing a corpus
 /// report over a benchmark file.
-fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_compare::BenchLegacy>> {
+fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_bench::BenchLegacy>> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(Vec::new());
     };
@@ -959,7 +929,7 @@ fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_compare::Benc
         };
         let cambium_only = n("cambium_only");
         let legacy_only = n("bazel_diff_only");
-        rows.push(cambium_compare::BenchLegacy {
+        rows.push(cambium_bench::BenchLegacy {
             preset: r
                 .get("preset")
                 .and_then(|p| p.as_str())
@@ -986,16 +956,16 @@ fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_compare::Benc
     Ok(rows)
 }
 
-/// Every `replay-*.json` and `compare-*.json` in one results directory.
+/// Every `history-*.json` and `compare-*.json` in one results directory.
 ///
-/// More than one replay can be present (a repository whose `bazel_version` was
+/// More than one history can be present (a repository whose `bazel_version` was
 /// changed leaves the older file behind); the newest by name wins for the
-/// section's replay tables, while every compare is rendered.
+/// section's history tables, while every compare is rendered.
 fn read_results(
     dir: &std::path::Path,
 ) -> Result<(
-    Option<cambium_corpus::ReplayResult>,
-    Vec<cambium_compare::CompareResult>,
+    Option<cambium_bench::HistoryResult>,
+    Vec<cambium_bench::ChangesResult>,
 )> {
     let mut replays: Vec<PathBuf> = Vec::new();
     let mut compares: Vec<PathBuf> = Vec::new();
@@ -1007,7 +977,7 @@ fn read_results(
         if !name.ends_with(".json") {
             continue;
         }
-        if name.starts_with("replay-") {
+        if name.starts_with("history-") {
             replays.push(path);
         } else if name.starts_with("compare-") {
             compares.push(path);
@@ -1015,26 +985,26 @@ fn read_results(
     }
     replays.sort();
     compares.sort();
-    let replay = replays
+    let history = replays
         .last()
         .map(|p| {
-            cambium_corpus::ReplayResult::read(p)
+            cambium_bench::HistoryResult::read(p)
                 .with_context(|| format!("reading {}", p.display()))
         })
         .transpose()?;
     let compares = compares
         .iter()
         .map(|p| {
-            cambium_compare::CompareResult::read(p)
+            cambium_bench::ChangesResult::read(p)
                 .with_context(|| format!("reading {}", p.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((replay, compares))
+    Ok((history, compares))
 }
 
 /// The packages of the built index's busiest targets: an edit anywhere in one
 /// of these reaches the largest share of the graph, which is what the stress
-/// pairs are for.
+/// change sets are for.
 fn hub_packages(run: &Run) -> Result<Vec<String>> {
     let state = run.state()?;
     let path = state
@@ -1044,7 +1014,7 @@ fn hub_packages(run: &Run) -> Result<Vec<String>> {
         .unwrap_or_else(|| run.index_path(&run.entry.pin));
     anyhow::ensure!(
         path.exists(),
-        "stress pairs need the index at the pin; run `cambi corpus build {}` first",
+        "stress change_sets need the index at the pin; run `cambi corpus build {}` first",
         run.entry.id
     );
     let file = cambium_index::IndexFile::open(&path)?;
@@ -1100,8 +1070,8 @@ mod tests {
         assert_eq!(suffixed("index-abc", None, "bin"), "index-abc.bin");
         assert_eq!(suffixed("index-abc", Some(""), "bin"), "index-abc.bin");
         assert_eq!(
-            suffixed("replay-abc", Some("7.x"), "json"),
-            "replay-abc-7.x.json"
+            suffixed("history-abc", Some("7.x"), "json"),
+            "history-abc-7.x.json"
         );
         assert_eq!(
             suffixed("index-abc", Some("last/green"), "bin"),

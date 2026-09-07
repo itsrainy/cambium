@@ -1,26 +1,26 @@
-//! What a "producer" is, and how the suite runs one.
+//! What a "tool" is, and how the suite runs one.
 //!
 //! The three-way comparison is not specific to bazel-diff. It asks: given a
-//! `(base, head)` pair, which targets does *tool X* say are affected, and how
+//! `(base, head)` change set, which targets does *tool X* say are affected, and how
 //! long did it take to say it? Anything that can answer that — bazel-diff's
 //! Rust binary, its Kotlin jar, Uber's Tango, a shell script — plugs in here
-//! by implementing [`Producer`], and [`crate::threeway`] compares whatever it
+//! by implementing [`Tool`], and [`crate::compare`] compares whatever it
 //! is handed against cambium and against the `rdeps` oracle without knowing
 //! which tool it is talking to.
 //!
 //! Two things every such tool needs, and which is why they live in
 //! [`RunContext`] rather than in each implementation:
 //!
-//! - **The same Bazel.** The corpus startup flags and the environment
+//! - **The same Bazel.** The run's startup flags and the environment
 //!   (`USE_BAZEL_VERSION` where a repository pins one) travel with the request, so
-//!   a producer runs the same binary and the same `.bazelrc` cambium does.
+//!   a tool runs the same binary and the same `.bazelrc` cambium does.
 //!   `--output_base` is the one flag that must *not* be shared: see
-//!   [`RunContext::producer_startup_flags`].
+//!   [`RunContext::tool_startup_flags`].
 //! - **A checkout at base.** bazel-diff-shaped tools hash the workspace at
-//!   each end of the pair, which means the base revision has to be on disk.
+//!   each end of the change set, which means the base revision has to be on disk.
 //!   Moving cambium's own checkout there and back would invalidate the Bazel
-//!   analysis cache twice per pair and race with anything else reading the
-//!   worktree, so the suite hands producers a *second* git worktree pinned at
+//!   analysis cache twice per change set and race with anything else reading the
+//!   worktree, so the suite hands tools a *second* git worktree pinned at
 //!   base ([`BaseWorktree`]) and leaves the head checkout alone.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,9 +30,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
-/// One producer's answer for one commit pair.
+pub mod bazeldiff;
+pub mod cambium;
+pub mod tango;
+
+/// One tool's answer for one commit change set.
 #[derive(Clone, Debug, Default)]
-pub struct ProducerRun {
+pub struct ToolRun {
     /// The affected labels, as the tool printed them.
     pub labels: BTreeSet<String>,
     /// Wall time for the answer with nothing cached: for a hash-diffing tool,
@@ -51,7 +55,7 @@ pub struct ProducerRun {
     /// depth in the report; `None` when the tool reports no such number, which
     /// is not the same as "every depth is zero".
     pub depths: Option<BTreeMap<String, u32>>,
-    /// How many rows were dropped by [`ProducerRun::restrict_to_rules`]
+    /// How many rows were dropped by [`ToolRun::restrict_to_rules`]
     /// because they name a *file*, not a rule. Both bazel-diff and Tango emit
     /// source-file targets (`//pkg:BUILD.bazel`) that cambium's affected set
     /// never contains, so counting them keeps the universe honest instead of
@@ -59,12 +63,12 @@ pub struct ProducerRun {
     pub dropped_file_targets: usize,
 }
 
-impl ProducerRun {
+impl ToolRun {
     /// Restricts the answer to the universe cambium reports on: rules in the
     /// head index.
     ///
     /// cambium's walk emits `NodeKind::Rule` nodes only (see
-    /// `cambium_index::walk`), so a producer's source-file rows would show up
+    /// `cambium_index::walk`), so a tool's source-file rows would show up
     /// as `cambium_missing` — a *failure* — for a difference that is purely
     /// one of vocabulary. A label the index does not know at all is kept: that
     /// is a real disagreement (an external label, or something cambium never
@@ -90,13 +94,13 @@ impl ProducerRun {
     /// The same restriction, against an explicit set of rule labels rather
     /// than an index.
     ///
-    /// A *globally invalidated* pair has no head index — that is the whole
-    /// point of it — so [`ProducerRun::restrict_to_rules`] has nothing to ask.
-    /// The producers still run there (their cost, and the size of the precise
-    /// answer they found, are exactly what a global pair has to report), and
+    /// A *globally invalidated* change set has no head index — that is the whole
+    /// point of it — so [`ToolRun::restrict_to_rules`] has nothing to ask.
+    /// The tools still run there (their cost, and the size of the precise
+    /// answer they found, are exactly what a global change set has to report), and
     /// their answers still have to be counted in cambium's vocabulary, so the
     /// rule universe comes from one `kind(rule, //...)` query instead
-    /// ([`crate::oracle::rule_universe`]).
+    /// ([`crate::oracles::rdeps::rule_universe`]).
     ///
     /// A main-repository label the universe does not name is a file target and
     /// is dropped; an `@repo//...` label is kept, for the same reason
@@ -104,7 +108,7 @@ impl ProducerRun {
     pub fn restrict_to_rule_set(&mut self, rules: &BTreeSet<String>) {
         let mut dropped = 0usize;
         self.labels.retain(|label| {
-            let keep = crate::oracle::is_external(label) || rules.contains(label);
+            let keep = crate::oracles::rdeps::is_external(label) || rules.contains(label);
             if !keep {
                 dropped += 1;
             }
@@ -117,14 +121,14 @@ impl ProducerRun {
     }
 }
 
-/// One label, in the spelling every producer and cambium can be compared in.
+/// One label, in the spelling every tool and cambium can be compared in.
 ///
 /// Three tools print the same target three ways. Bazel's query proto under
 /// bzlmod uses *canonical* repository names — `@@rules_cc+//:x`, or
 /// `@@rules_cc~//:x` on Bazel 7 — while Tango prints whatever the proto said
 /// and bazel-diff prints the apparent name `@rules_cc//:x`. Left alone, every
 /// external label in the run would appear on both sides of the symmetric
-/// difference at once, drowning the classes that matter. So each producer runs
+/// difference at once, drowning the classes that matter. So each tool runs
 /// its labels through this on the way in:
 ///
 /// - `@@repo//pkg:t` and `@repo//pkg:t` collapse to `@repo//pkg:t`;
@@ -153,17 +157,17 @@ pub fn normalise_label(label: &str) -> String {
     format!("@{module}//{path}")
 }
 
-/// Everything a producer needs from the run besides the pair itself.
+/// Everything a tool needs from the run besides the change set itself.
 #[derive(Clone, Debug)]
 pub struct RunContext {
     /// The Bazel (or bazelisk) binary the whole comparison uses.
     pub bazel_binary: PathBuf,
-    /// Startup options placed before the command word, so a producer joins the
+    /// Startup options placed before the command word, so a tool joins the
     /// same server as cambium.
     pub startup_flags: Vec<String>,
     /// Extra environment for every child process (`USE_BAZEL_VERSION`, ...).
     pub env: Vec<(String, String)>,
-    /// A directory the producer may litter: hash files, raw outputs, logs.
+    /// A directory the tool may litter: hash files, raw outputs, logs.
     pub scratch: PathBuf,
     /// A checkout of the *base* revision, distinct from the head worktree.
     pub base_worktree: PathBuf,
@@ -176,7 +180,7 @@ impl RunContext {
         self.startup_flags.join(" ")
     }
 
-    /// The startup flags a producer may use: the corpus ones *minus*
+    /// The startup flags a tool may use: the run's *minus*
     /// `--output_base`.
     ///
     /// An output base is only safe to share between invocations that run in
@@ -184,10 +188,10 @@ impl RunContext {
     /// into the external tree — envoy's `envoy_api` repo symlinks every entry
     /// of `api/` into the workspace it was fetched from — and the fetch marker
     /// does not mention the workspace, so Bazel never refetches. Point a
-    /// second workspace (a producer's base worktree, tango's own scratch
+    /// second workspace (a tool's base worktree, tango's own scratch
     /// checkouts) at the same output base and it inherits the *first*
     /// workspace's symlinks; delete that first workspace and every one of them
-    /// dangles. That is how a corpus run ended with
+    /// dangles. That is how a benchmark run ended with
     /// `Error computing the main repository mapping: ... '@@envoy_api//bazel'
     /// does not have [a package]` on every subsequent query — a hard exit 1,
     /// raised before the query is evaluated, so `--keep_going` cannot soften
@@ -196,9 +200,9 @@ impl RunContext {
     /// Dropping the flag lets Bazel derive the output base from the workspace
     /// path, which is exactly the one-per-workspace invariant we need. The
     /// cost is one cold fetch per distinct workspace directory, amortised over
-    /// every pair in the run, in exchange for producers that cannot corrupt
+    /// every change set in the run, in exchange for tools that cannot corrupt
     /// each other or us.
-    pub fn producer_startup_flags(&self) -> Vec<String> {
+    pub fn tool_startup_flags(&self) -> Vec<String> {
         self.startup_flags
             .iter()
             .filter(|f| !f.starts_with("--output_base"))
@@ -206,9 +210,9 @@ impl RunContext {
             .collect()
     }
 
-    /// [`Self::producer_startup_flags`], space-joined.
-    pub fn producer_startup_flags_arg(&self) -> String {
-        self.producer_startup_flags().join(" ")
+    /// [`Self::tool_startup_flags`], space-joined.
+    pub fn tool_startup_flags_arg(&self) -> String {
+        self.tool_startup_flags().join(" ")
     }
 
     /// A child process carrying this context's environment.
@@ -226,16 +230,16 @@ impl RunContext {
     /// Makes `cmd` unable to block on a prompt: stdin is nulled, and `CI=1`
     /// is set unless `env` already names `CI`.
     ///
-    /// A producer never has a terminal to prompt against — it runs
-    /// unattended, in a batch of hundreds of pairs — but some of them assume
+    /// A tool never has a terminal to prompt against — it runs
+    /// unattended, in a batch of hundreds of change sets — but some of them assume
     /// one anyway. The Aspect CLI (`bazelisk` resolves to it wherever a
     /// repository's `.bazeliskrc` pins `USE_BAZEL_VERSION=aspect/...`, as
     /// sourcegraph/sourcegraph does) asks a one-time "Would you like to
     /// continue?" confirmation the first time a workspace directory runs a
     /// `//...:all-targets`-shaped query — exactly what bazel-diff's
     /// `generate-hashes` issues — and records the answer in
-    /// `~/.aspect/cli/config.yaml` so later runs skip it. A producer's base
-    /// worktree is a fresh scratch directory on every corpus run, so it hits
+    /// `~/.aspect/cli/config.yaml` so later runs skip it. A tool's base
+    /// worktree is a fresh scratch directory on every run, so it hits
     /// this prompt new every time; reading it from a child process with no
     /// controlling terminal gets an immediate EOF, which the Aspect CLI's
     /// `readline`-based prompt renders as a literal `^D` and then fails the
@@ -243,7 +247,7 @@ impl RunContext {
     /// supplied the child's stdin, since it is never a terminal a human could
     /// answer through. Nulling it removes any ambiguity about where that EOF
     /// came from. `CI=1` is the general signal most such CLIs (Aspect's
-    /// plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the corpus
+    /// plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the benchmark's subject
     /// repositories) already check to skip interactive behaviour rather than
     /// wait on a prompt no one will answer.
     fn apply_noninteractive(cmd: &mut Command, env: &[(String, String)]) {
@@ -260,9 +264,9 @@ impl RunContext {
 
 /// A tool that answers "what is affected between base and head".
 ///
-/// Object-safe on purpose: [`crate::threeway`] takes `&[&dyn Producer]` so a
+/// Object-safe on purpose: [`crate::compare`] takes `&[&dyn Tool]` so a
 /// run can compare against several tools at once.
-pub trait Producer {
+pub trait Tool {
     /// Stable identifier used in JSON keys and report columns
     /// (`bazel-diff-rust`, `bazel-diff-kotlin`, `tango`).
     fn name(&self) -> &str;
@@ -273,7 +277,7 @@ pub trait Producer {
 
     /// Runs the tool. `ws` is the head worktree; the base checkout is
     /// `ctx.base_worktree`.
-    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ProducerRun>;
+    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun>;
 }
 
 /// Output of a child process that was expected to succeed.
@@ -285,7 +289,7 @@ pub struct Captured {
 }
 
 /// Runs `cmd`, timing it, and turns a non-zero exit into an error that carries
-/// the tail of stderr — a producer failing on one pair out of two hundred is
+/// the tail of stderr — a tool failing on one change set out of two hundred is
 /// only debuggable if the message says why.
 pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
     let t = Instant::now();
@@ -328,13 +332,13 @@ pub struct BaseWorktree {
 
 /// Copies the workspace's generated `cambium.toml` into the base worktree.
 ///
-/// The corpus writes that file into the repository root and excludes it from
+/// The benchmark writes that file into the repository root and excludes it from
 /// git, so a fresh `git worktree add` does not have it — and on `bazel/bazel`
 /// the root package is `filegroup(name = "srcs", srcs = glob(["*"]))`, which
 /// swallows it. The head tree's `//:srcs` then lists `//:cambium.toml` and the
-/// base tree's does not, so the producers see the filegroup change on every
-/// pair while cambium (whose base index was built in a tree that had the file)
-/// sees nothing. That surfaced as `//:srcs` in `cambium_missing` on a pair
+/// base tree's does not, so the tools see the filegroup change on every
+/// change set while cambium (whose base index was built in a tree that had the file)
+/// sees nothing. That surfaced as `//:srcs` in `cambium_missing` on a change set
 /// whose only changed files were `.github/workflows/*.yml`, which no rule
 /// consumes at all: a disagreement manufactured entirely by the harness, in
 /// the same family as the case-collision one above.
@@ -365,8 +369,8 @@ fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
 
 impl BaseWorktree {
     /// Adds (or reuses) a worktree of `repo_worktree` at `base_sha`, under
-    /// `scratch`. Reuse matters: consecutive pairs in an adjacent-pair sweep
-    /// share revisions, and re-adding a worktree per pair would dominate.
+    /// `scratch`. Reuse matters: consecutive change sets in an adjacent-change set sweep
+    /// share revisions, and re-adding a worktree per change set would dominate.
     pub fn create(repo_worktree: &Path, base_sha: &str, scratch: &Path) -> Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let path = scratch.join("base-worktree");
@@ -380,7 +384,7 @@ impl BaseWorktree {
         self.inner.path()
     }
 
-    /// Moves this worktree to another revision, for the next pair.
+    /// Moves this worktree to another revision, for the next change set.
     pub fn checkout(&self, sha: &str) -> Result<()> {
         self.inner.checkout(sha)?;
         mirror_untracked_config(self.inner.owner(), self.inner.path())?;
@@ -474,7 +478,7 @@ mod tests {
             ],
         }]);
         let index = b.finish("head");
-        let mut run = ProducerRun {
+        let mut run = ToolRun {
             labels: ["//pkg:t", "//pkg:a.txt", "@ext//:x"]
                 .iter()
                 .map(|s| s.to_string())
@@ -499,10 +503,10 @@ mod tests {
 
     #[test]
     fn the_rule_filter_also_works_from_a_bare_universe() {
-        // What a global pair has instead of an index: the answer to
+        // What a global change set has instead of an index: the answer to
         // `kind(rule, //...)`.
         let universe: BTreeSet<String> = ["//pkg:t".to_string()].into_iter().collect();
-        let mut run = ProducerRun {
+        let mut run = ToolRun {
             labels: ["//pkg:t", "//pkg:a.txt", "@ext//:x"]
                 .iter()
                 .map(|s| s.to_string())
@@ -533,29 +537,29 @@ mod tests {
         );
     }
 
-    /// An output base is per workspace directory; producers run in other
+    /// An output base is per workspace directory; tools run in other
     /// workspaces, so they must not inherit ours.
     #[test]
-    fn producers_do_not_inherit_the_output_base() {
-        assert_eq!(ctx().producer_startup_flags_arg(), "--bazelrc=/tmp/rc");
+    fn tools_do_not_inherit_the_output_base() {
+        assert_eq!(ctx().tool_startup_flags_arg(), "--bazelrc=/tmp/rc");
         assert!(!ctx()
-            .producer_startup_flags()
+            .tool_startup_flags()
             .iter()
             .any(|f| f.contains("output_base")));
     }
 
-    /// A producer's stdin must never be a terminal a prompt could wait on —
+    /// A tool's stdin must never be a terminal a prompt could wait on —
     /// see [`RunContext::apply_noninteractive`]. `cat` on a null stdin sees
     /// EOF immediately and produces no output.
     #[test]
-    fn a_producer_command_gets_no_stdin() {
+    fn a_tool_command_gets_no_stdin() {
         let out = ctx().command("cat").output().unwrap();
         assert!(out.status.success());
         assert!(out.stdout.is_empty());
     }
 
     #[test]
-    fn a_producer_command_gets_ci_1_by_default() {
+    fn a_tool_command_gets_ci_1_by_default() {
         let out = ctx()
             .command("sh")
             .arg("-c")

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Benchmark harness for cambium: stage timings, sweeps and regression gating"
+description = "The cambium benchmark: subjects, tools, oracles, workloads, and the report"
 
 [dependencies]
 cambium-bazel.workspace = true
@@ -16,6 +16,11 @@ cambium-index.workspace = true
 cambium-proto.workspace = true
 cambium-synth.workspace = true
 anyhow.workspace = true
+prost.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+toml.workspace = true
+tracing.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tempfile.workspace = true

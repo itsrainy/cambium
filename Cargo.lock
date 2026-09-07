@@ -197,9 +197,14 @@ dependencies = [
  "cambium-proto",
  "cambium-synth",
  "criterion",
+ "prost",
+ "rand",
+ "rand_chacha",
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -221,8 +226,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cambium-bench",
- "cambium-compare",
- "cambium-corpus",
  "cambium-engine",
  "cambium-index",
  "cambium-synth",
@@ -232,46 +235,6 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "cambium-compare"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cambium-bazel",
- "cambium-classify",
- "cambium-corpus",
- "cambium-diff",
- "cambium-engine",
- "cambium-index",
- "cambium-proto",
- "prost",
- "rand",
- "rand_chacha",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "cambium-corpus"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cambium-bazel",
- "cambium-diff",
- "cambium-engine",
- "cambium-index",
- "cambium-synth",
- "rand",
- "rand_chacha",
- "serde",
- "serde_json",
- "tempfile",
- "toml",
- "tracing",
 ]
 
 [[package]]

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-use crate::checkout::{git, CorpusDir};
+use crate::checkout::{git, SubjectsDir};
 use crate::manifest::{Manifest, RepoEntry};
 
 /// What a synthetic subject's name starts with: `synth:small`.
@@ -76,7 +76,7 @@ impl Synthetic {
     }
 
     /// Where the emitted workspace lives under the subjects cache.
-    pub fn source_dir(&self, subjects: &CorpusDir) -> PathBuf {
+    pub fn source_dir(&self, subjects: &SubjectsDir) -> PathBuf {
         subjects.root().join("synthetic").join(format!(
             "{}-{}-{}-{}",
             self.preset, self.changes, self.commits, self.seed
@@ -88,7 +88,7 @@ impl Synthetic {
     ///
     /// Idempotent: an existing directory with a git history is reused, so the
     /// second `cambi bench changes synth:small` of the day costs nothing.
-    pub fn emit(&self, subjects: &CorpusDir) -> Result<(PathBuf, Vec<String>)> {
+    pub fn emit(&self, subjects: &SubjectsDir) -> Result<(PathBuf, Vec<String>)> {
         let dir = self.source_dir(subjects);
         if dir.join(".git").exists() {
             let shas = first_parent(&dir)?;
@@ -122,7 +122,7 @@ impl Synthetic {
     }
 
     /// The manifest entry an emitted synthetic subject looks like.
-    pub fn entry(&self, subjects: &CorpusDir) -> Result<RepoEntry> {
+    pub fn entry(&self, subjects: &SubjectsDir) -> Result<RepoEntry> {
         let (dir, shas) = self.emit(subjects)?;
         let pin = shas
             .last()
@@ -186,7 +186,7 @@ impl Subject {
 
     /// The manifest entry for this subject, emitting the workspace first if it
     /// is synthetic.
-    pub fn entry(&self, subjects: &CorpusDir) -> Result<RepoEntry> {
+    pub fn entry(&self, subjects: &SubjectsDir) -> Result<RepoEntry> {
         match self {
             Self::Real(e) => Ok(e.clone()),
             Self::Synthetic(s) => s.entry(subjects),
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn an_emitted_subject_is_reused() {
         let tmp = tempfile::tempdir().unwrap();
-        let subjects = CorpusDir::new(tmp.path().to_path_buf());
+        let subjects = SubjectsDir::new(tmp.path().to_path_buf());
         let s = Synthetic {
             commits: 2,
             ..Synthetic::new("tiny")

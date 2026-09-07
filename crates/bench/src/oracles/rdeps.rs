@@ -1,7 +1,7 @@
 //! The sampled `rdeps` oracle.
 //!
 //! bazel-diff is a *comparison*, not a ground truth: where the two tools
-//! disagree, neither is authoritative. Bazel itself is. So for every pair the
+//! disagree, neither is authoritative. Bazel itself is. So for every change set the
 //! suite samples k members of cambium's direct set, asks Bazel
 //! `rdeps(//..., <root>)` for each, and requires cambium's own reverse walk
 //! from the same roots to be a **superset** of the union. Extra targets on
@@ -36,7 +36,7 @@ pub const DEFAULT_CHUNK: usize = 25;
 
 /// What the oracle found.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OracleResult {
+pub struct RdepsResult {
     /// The sampled direct-set members the queries started from.
     pub roots: Vec<String>,
     /// The union of `rdeps(//..., root)` over the roots, as Bazel reports it.
@@ -51,18 +51,18 @@ pub struct OracleResult {
     /// `rdeps(//..., root)` takes `//...` as the *universe expression*, and
     /// Bazel expands a universe to its transitive closure — so the answer
     /// contains external targets that depend on the root, and on envoy that is
-    /// most of it (157 of the 173 labels on one pair, all `@quiche//...`).
+    /// most of it (157 of the 173 labels on one change set, all `@quiche//...`).
     /// cambium indexes `//...` by construction and can never contain them, so
     /// counting them as unsoundness measures the vocabulary difference the
-    /// `bazeldiff_extra_external` class already names on the producer side.
+    /// `bazeldiff_extra_external` class already names on the tool side.
     /// They are kept here so the number is visible rather than silently
     /// dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_external: Vec<String>,
-    /// The subset of [`OracleResult::missing`] that Bazel reaches only by
+    /// The subset of [`RdepsResult::missing`] that Bazel reaches only by
     /// leaving `//...` and coming back.
     ///
-    /// This is a real cambium miss and it fails the pair; the field says
+    /// This is a real cambium miss and it fails the change set; the field says
     /// *why*, so a failure that is the known external-route limitation is
     /// distinguishable from one that is a walk bug. envoy has two instances at
     /// the pin:
@@ -99,7 +99,7 @@ pub struct OracleResult {
     pub partial_batches: usize,
 }
 
-impl OracleResult {
+impl RdepsResult {
     pub fn ok(&self) -> bool {
         self.missing.is_empty()
     }
@@ -107,7 +107,7 @@ impl OracleResult {
     /// Fraction of the oracle's answer cambium reproduces. 1.0 is required.
     ///
     /// Over the main repository only, for the reason
-    /// [`OracleResult::missing_external`] gives.
+    /// [`RdepsResult::missing_external`] gives.
     pub fn recall(&self) -> f64 {
         let theirs: BTreeSet<String> = self
             .oracle_set
@@ -158,14 +158,9 @@ impl RdepsOracle {
     }
 
     /// Runs the oracle over the head index. `direct` is cambium's depth-0 set.
-    pub fn run(
-        &self,
-        bazel: &Bazel,
-        head: IndexRef<'_>,
-        direct: &[String],
-    ) -> Result<OracleResult> {
+    pub fn run(&self, bazel: &Bazel, head: IndexRef<'_>, direct: &[String]) -> Result<RdepsResult> {
         let roots = sample(direct, self.k, self.seed);
-        let mut result = OracleResult {
+        let mut result = RdepsResult {
             roots: roots.clone(),
             ..Default::default()
         };
@@ -182,7 +177,7 @@ impl RdepsOracle {
                     }
                 }
                 Err(e) => {
-                    // One unqueryable root must not lose the whole pair's
+                    // One unqueryable root must not lose the whole change set's
                     // oracle; record what was dropped so a suspiciously small
                     // oracle set is explainable.
                     tracing::warn!(roots = ?batch, error = format!("{e:#}"), "rdeps query failed; skipping the batch");
@@ -211,7 +206,7 @@ pub fn is_external(label: &str) -> bool {
 }
 
 /// How many missing labels the external-route probe is willing to ask Bazel
-/// about. A failing pair's missing set is tens of labels and one `somepath` on
+/// about. A failing change set's missing set is tens of labels and one `somepath` on
 /// envoy is seconds; the probe is diagnosis, not a gate, so it is capped.
 pub const MAX_ROUTE_PROBES: usize = 25;
 
@@ -222,7 +217,7 @@ pub const MAX_ROUTE_PROBES: usize = 25;
 /// this target down to a root is through an external repository, which is
 /// exactly the edge cambium's `//...`-only index does not carry. A path with
 /// no external node means something else is wrong and the label is left
-/// unexplained — the safe direction, since either way it fails the pair.
+/// unexplained — the safe direction, since either way it fails the change set.
 fn external_routes(bazel: &Bazel, roots: &[String], missing: &[String]) -> Vec<String> {
     let union = roots.join(" + ");
     let mut out = Vec::new();
@@ -284,7 +279,7 @@ pub fn sample(direct: &[String], k: usize, seed: u64) -> Vec<String> {
 /// every genrule output in the sample reads as a target Bazel reached and
 /// cambium missed, which is the one thing this oracle is supposed to detect,
 /// and the failure would be pure vocabulary. The same restriction is applied
-/// to the producers' answers (`ProducerRun::restrict_to_rules`), so all three
+/// to the tools' answers (`ToolRun::restrict_to_rules`), so all three
 /// tools are compared over one universe.
 pub fn rdeps_expression(roots: &[String]) -> String {
     let union = roots.join(" + ");
@@ -331,7 +326,7 @@ struct Batch {
 /// still prints the reverse dependencies of everything that *did* load. Since
 /// the oracle only ever asserts "cambium must contain all of this", a smaller
 /// answer weakens the check but never makes it wrong, so the batch is kept and
-/// flagged [`OracleResult::partial`]. Any other non-zero exit is a real
+/// flagged [`RdepsResult::partial`]. Any other non-zero exit is a real
 /// failure and takes the batch out.
 fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     let expr = rdeps_expression(roots);
@@ -356,9 +351,9 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     anyhow::ensure!(
         out.status.success() || partial,
         "bazel query {} failed with {}\n{}",
-        crate::producer::tail(&expr, 1),
+        crate::tools::tail(&expr, 1),
         out.status,
-        crate::producer::tail(&String::from_utf8_lossy(&out.stderr), 20)
+        crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 20)
     );
     let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
     if partial {
@@ -373,14 +368,14 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
 
 /// Every rule target `//...` names, at whatever revision the workspace is on.
 ///
-/// This is the *size of cambium's answer* on a globally invalidated pair: it
+/// This is the *size of cambium's answer* on a globally invalidated change set: it
 /// says `//...`, and `//...` is this set. Without the number the report can
 /// only say "cambium went global", which hides the thing a reader actually
 /// wants — bazel-diff found M targets, cambium is asking the user to build N,
 /// and N/M is what a global costs.
 ///
-/// It doubles as the rule filter for that pair's producers
-/// ([`crate::producer::ProducerRun::restrict_to_rule_set`]), so the one query
+/// It doubles as the rule filter for that change set's tools
+/// ([`crate::tools::ToolRun::restrict_to_rule_set`]), so the one query
 /// serves both and the two sides stay in one vocabulary.
 ///
 /// Exit 3 is accepted for the reason [`query_rdeps`] gives: a partial universe
@@ -404,7 +399,7 @@ pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
         out.status.success() || partial,
         "bazel query kind(rule, //...) failed with {}\n{}",
         out.status,
-        crate::producer::tail(&String::from_utf8_lossy(&out.stderr), 20)
+        crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 20)
     );
     let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
     if partial {
@@ -468,7 +463,7 @@ mod tests {
 
     #[test]
     fn external_labels_are_split_off_and_left_out_of_recall() {
-        let mut r = OracleResult {
+        let mut r = RdepsResult {
             oracle_set: parse_labels("//lib:a\n//lib:b\n@quiche//:x\n//external:y\n"),
             cambium_set_from_roots: parse_labels("//lib:a\n"),
             ..Default::default()
@@ -531,7 +526,7 @@ mod tests {
     #[test]
     fn missing_targets_are_the_ones_bazel_reaches_and_cambium_does_not() {
         let idx = index();
-        let mut r = OracleResult {
+        let mut r = RdepsResult {
             roots: vec!["//lib:core".into()],
             oracle_set: parse_labels("//lib:core\n//lib:mid\n//lib:top\n//other:x\n"),
             cambium_set_from_roots: walk_from_roots(idx.view(), &["//lib:core".into()]),

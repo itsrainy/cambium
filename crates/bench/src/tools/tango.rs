@@ -1,4 +1,4 @@
-//! Uber's [Tango] as a [`Producer`], through the `tango-cli` driver in
+//! Uber's [Tango] as a [`Tool`], through the `tango-cli` driver in
 //! `tools/tango`.
 //!
 //! Tango is the third shape in the comparison. bazel-diff hashes each
@@ -12,11 +12,11 @@
 //! Two consequences for this file:
 //!
 //! - **No warm mode.** Tango's server caches graph blobs; the driver does not,
-//!   and computes both graphs on every invocation. So [`ProducerRun::warm_wall`]
+//!   and computes both graphs on every invocation. So [`ToolRun::warm_wall`]
 //!   is `None` rather than a copy of the cold number — quoting the cold number
 //!   twice would flatter cambium by making Tango look like it has no cache to
 //!   lose, and quoting it as warm would flatter Tango.
-//! - **Distances are kept.** They land in [`ProducerRun::depths`] and are
+//! - **Distances are kept.** They land in [`ToolRun::depths`] and are
 //!   reported against cambium's own per-target depth. Do not read a
 //!   disagreement there as a bug in either tool: Tango's seed set is wider
 //!   than cambium's direct set (every string attribute counts, including
@@ -25,7 +25,7 @@
 //!   distance that cambium's rule-to-rule edge does not. On the smoke
 //!   workspace, editing `lib/lib.txt` puts `//app:app` at Tango distance 2
 //!   (`lib -> lib.out -> app`) against cambium depth 1 — a full agreement of
-//!   0.5 on that pair, with neither tool wrong. The number is there to make
+//!   0.5 on that change set, with neither tool wrong. The number is there to make
 //!   that drift visible and measurable, not to gate anything.
 //!
 //! # Flags
@@ -34,7 +34,7 @@
 //! revision, and on a real repository at a real pin that query does not load
 //! cleanly — `bazel/bazel` on macOS pulls in a GraalVM distribution with no
 //! `macos-x64` build and an RBE config that needs Docker — so without
-//! `--keep_going` Bazel exits 3 and tango-cli fails the pair. So
+//! `--keep_going` Bazel exits 3 and tango-cli fails the change set. So
 //! [`Tango::DEFAULT_EXTRA_ARGS`] passes `--keep_going` through tango-cli's
 //! `-extra-args`, which places it after the `query` word. The result is the
 //! same universe bazel-diff (run with `-k`) and the `rdeps` oracle see:
@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
-use crate::producer::{normalise_label, run_capture, Producer, ProducerRun, RunContext};
+use crate::tools::{normalise_label, run_capture, RunContext, Tool, ToolRun};
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_TANGO";
@@ -107,7 +107,7 @@ pub struct Tango {
     max_distance: Option<u32>,
     /// `-exclude-external`. Off by default: an external label cambium never
     /// indexed is a *classified* disagreement (`bazeldiff_extra_external`),
-    /// and hiding it inside the producer would hide how much of the answer it
+    /// and hiding it inside the tool would hide how much of the answer it
     /// is.
     exclude_external: bool,
     /// `-extra-args`: extra `bazel query` arguments. See the module docs.
@@ -173,7 +173,7 @@ impl Tango {
     }
 }
 
-impl Producer for Tango {
+impl Tool for Tango {
     fn name(&self) -> &str {
         NAME
     }
@@ -182,7 +182,7 @@ impl Producer for Tango {
         self.version.clone()
     }
 
-    /// One invocation per pair.
+    /// One invocation per change set.
     ///
     /// `ws` is the head worktree, and it is handed over as the *repository*:
     /// tango-cli resolves both revisions in it and adds its own two detached
@@ -190,7 +190,7 @@ impl Producer for Tango {
     /// touched. The scratch directory is pinned under the run's scratch so a
     /// killed run leaves its worktrees somewhere findable rather than in
     /// `$TMPDIR`.
-    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ProducerRun> {
+    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun> {
         std::fs::create_dir_all(&ctx.scratch)?;
         let short = |s: &str| s.chars().take(12).collect::<String>();
         let out = ctx.scratch_file(&format!("tango-{}-{}.json", short(base), short(head)));
@@ -215,8 +215,8 @@ impl Producer for Tango {
         // Not `startup_flags`: tango runs Bazel in its own two worktrees, and
         // sharing an output base across workspace directories corrupts
         // workspace-absolute repository symlinks. See
-        // `RunContext::producer_startup_flags`.
-        let startup = ctx.producer_startup_flags();
+        // `RunContext::tool_startup_flags`.
+        let startup = ctx.tool_startup_flags();
         if !startup.is_empty() {
             cmd.arg("-startup-options").arg(startup.join(" "));
         }
@@ -238,7 +238,7 @@ impl Producer for Tango {
         let text = std::fs::read_to_string(&out)
             .with_context(|| format!("reading tango output {}", out.display()))?;
         let (labels, depths) = parse_output(&text)?;
-        Ok(ProducerRun {
+        Ok(ToolRun {
             labels,
             // Tango computes both graphs every time: there is no warm side to
             // report.
@@ -297,11 +297,11 @@ pub fn parse_output(text: &str) -> Result<(BTreeSet<String>, BTreeMap<String, u3
 /// a restatement of precision.
 pub fn depth_agreement(
     cambium: &BTreeMap<String, u32>,
-    producer: &BTreeMap<String, u32>,
+    tool: &BTreeMap<String, u32>,
 ) -> Option<f64> {
     let mut shared = 0usize;
     let mut same = 0usize;
-    for (label, d) in producer {
+    for (label, d) in tool {
         if let Some(c) = cambium.get(label) {
             shared += 1;
             if c == d {
@@ -315,16 +315,16 @@ pub fn depth_agreement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::producer::git;
+    use crate::tools::git;
 
-    /// A pair must still run when its scratch directory holds a worktree
+    /// A change set must still run when its scratch directory holds a worktree
     /// registration that is both missing from disk *and* locked.
     ///
     /// That is exactly what a killed run leaves behind: `tango-cli`'s own
     /// `addWorktree` (`tools/tango/cmd/tango-cli/main.go`) removes the
     /// directory before re-adding it, but a run that dies before its
     /// deferred cleanup runs can leave the registration behind, and — as
-    /// happened against sourcegraph/sourcegraph, where 9 of 10 pairs failed
+    /// happened against sourcegraph/sourcegraph, where 9 of 10 change sets failed
     /// with `fatal: '.../tango-worktrees/head' is a missing but locked
     /// worktree` — git then refuses `worktree add` outright rather than
     /// treating the stale entry as prunable. `tango-cli`'s `addWorktree` now
@@ -335,7 +335,7 @@ mod tests {
     /// recovery step (from either side of the boundary) shows up here
     /// without a real tango-cli build.
     #[test]
-    fn a_pair_still_runs_over_a_locked_missing_worktree() {
+    fn a_change_set_still_runs_over_a_locked_missing_worktree() {
         let dir = tempfile::tempdir().unwrap();
         // Canonicalised: on macOS `$TMPDIR` is itself a symlink
         // (`/var/folders/... -> /private/var/folders/...`), and `git
@@ -404,7 +404,7 @@ mod tests {
         let tango = Tango::at(stub, "test".into());
         let run = tango
             .affected(&repo, &base, &head, &ctx)
-            .expect("the pair runs despite the stale locked worktree");
+            .expect("the change_set runs despite the stale locked worktree");
         assert_eq!(
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string()]
@@ -522,8 +522,8 @@ JSON
             v.iter().map(|(l, d)| (l.to_string(), *d)).collect()
         };
         let cambium = map(&[("//a:a", 0), ("//b:b", 2), ("//c:c", 1)]);
-        let producer = map(&[("//a:a", 0), ("//b:b", 1), ("//z:z", 5)]);
-        assert_eq!(depth_agreement(&cambium, &producer), Some(0.5));
+        let tool = map(&[("//a:a", 0), ("//b:b", 1), ("//z:z", 5)]);
+        assert_eq!(depth_agreement(&cambium, &tool), Some(0.5));
         assert_eq!(
             depth_agreement(&cambium, &map(&[("//z:z", 5)])),
             None,

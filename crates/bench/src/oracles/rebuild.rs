@@ -1,9 +1,9 @@
 //! The incremental-equals-full oracle on real input.
 //!
-//! After a replay has brought an index forward commit by commit, a cold build
+//! After a history has brought an index forward commit by commit, a cold build
 //! at the same commit must describe the same graph. Ids are not comparable
 //! across lineages, so the comparison is by label: the live nodes, their
-//! kinds, their rule hashes, and the forward edges as label pairs.
+//! kinds, their rule hashes, and the forward edges as label change sets.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 /// What differs between two indexes, by label. Empty means they agree.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GraphDiff {
-    /// Live, known-kind nodes present only in the replayed index.
+    /// Live, known-kind nodes present only in the applied index.
     pub nodes_only_in_replayed: Vec<String>,
     pub nodes_only_in_rebuilt: Vec<String>,
-    /// `label -> (replayed kind, rebuilt kind)` where the kinds disagree.
+    /// `label -> (applied kind, rebuilt kind)` where the kinds disagree.
     pub kind_mismatch: Vec<(String, String, String)>,
     /// Rules whose hashes differ.
     pub rule_hash_mismatch: Vec<String>,
@@ -45,8 +45,8 @@ impl GraphDiff {
     pub fn summary(&self) -> String {
         let c = &self.counts;
         format!(
-            "nodes only in replayed: {}, only in rebuilt: {}; kind mismatches: {}; \
-             rule hash mismatches: {}; edges only in replayed: {}, only in rebuilt: {}",
+            "nodes only in applied: {}, only in rebuilt: {}; kind mismatches: {}; \
+             rule hash mismatches: {}; edges only in applied: {}, only in rebuilt: {}",
             c.nodes_only_in_replayed,
             c.nodes_only_in_rebuilt,
             c.kind_mismatch,
@@ -63,7 +63,7 @@ fn kind_name(k: NodeKind) -> &'static str {
 
 /// Compares two indexes by label, ignoring ids, tombstones and unknown nodes.
 /// Lists are capped at `cap` entries each; the counts are exact.
-pub fn compare_by_label(replayed: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize) -> GraphDiff {
+pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize) -> GraphDiff {
     fn live(v: IndexRef<'_>) -> BTreeMap<&str, u32> {
         (0..v.num_nodes())
             .filter(|&id| !v.is_tombstone(id) && v.kind_of(id) != NodeKind::Unknown)
@@ -83,7 +83,7 @@ pub fn compare_by_label(replayed: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usiz
         out
     }
 
-    let (a, b) = (live(replayed), live(rebuilt));
+    let (a, b) = (live(applied), live(rebuilt));
     let mut d = GraphDiff::default();
     let push = |v: &mut Vec<String>, n: &mut usize, s: String| {
         *n += 1;
@@ -99,7 +99,7 @@ pub fn compare_by_label(replayed: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usiz
                 label.to_string(),
             ),
             Some(&ib) => {
-                let (ka, kb) = (replayed.kind_of(ia), rebuilt.kind_of(ib));
+                let (ka, kb) = (applied.kind_of(ia), rebuilt.kind_of(ib));
                 if ka != kb {
                     d.counts.kind_mismatch += 1;
                     if d.kind_mismatch.len() < cap {
@@ -110,7 +110,7 @@ pub fn compare_by_label(replayed: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usiz
                         ));
                     }
                 } else if ka == NodeKind::Rule
-                    && replayed.hash[ia as usize] != rebuilt.hash[ib as usize]
+                    && applied.hash[ia as usize] != rebuilt.hash[ib as usize]
                 {
                     push(
                         &mut d.rule_hash_mismatch,
@@ -130,7 +130,7 @@ pub fn compare_by_label(replayed: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usiz
             );
         }
     }
-    let (ea, eb) = (edges(replayed), edges(rebuilt));
+    let (ea, eb) = (edges(applied), edges(rebuilt));
     for e in ea.difference(&eb) {
         d.counts.edges_only_in_replayed += 1;
         if d.edges_only_in_replayed.len() < cap {
