@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetches and builds bazel-diff at a pinned commit, so every comparison in the
-# corpus suite and the `bench legacy` benchmark runs against the same code.
+# benchmark's real subjects and its synthetic ones run against the same code.
 #
 #   tools/bazel-diff/fetch.sh [--kotlin] [--dir DIR]
 #

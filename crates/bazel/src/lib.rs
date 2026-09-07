@@ -92,7 +92,7 @@ const HYGIENE: &[&str] = &[
 /// over-approximation, and no invalidator can name it.
 ///
 /// The cost of keeping them turned out to be nearly nothing, measured on both
-/// corpus repositories at their pins: the `//...` proto stream grows 3% on
+/// benchmark subject at its pin: the `//...` proto stream grows 3% on
 /// sourcegraph (36.4 -> 37.5 MB) and 4% on envoy (53.5 -> 55.6 MB), the wall
 /// time does not move, and neither repository reports a single extra load
 /// error. The toolchain labels the flag was there to exclude arrive as
@@ -466,7 +466,7 @@ impl Bazel {
     /// Only the comparison suite's `.bzl` oracle calls this. The engine reads
     /// the answer out of the index's static load closure instead — a partial
     /// `rbuildfiles` can be missing exactly the package that loads the changed
-    /// file, which is an under-approximation, and on the corpus that made
+    /// file, which is an under-approximation, and on the real subjects that made
     /// every `.bzl` commit on a machine that could not fetch some external
     /// repository fall back to invalidating everything. The oracle can live
     /// with a partial answer because it only asks whether cambium's answer

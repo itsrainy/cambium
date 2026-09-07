@@ -2,8 +2,8 @@
 //! this test writes.
 //!
 //! Ignored by default, and deliberately so: it wants bazelisk on disk, it
-//! downloads a Bazel release the first time, and each pair costs two
-//! whole-repository `bazel query` runs per producer — tens of seconds even for
+//! downloads a Bazel release the first time, and each change set costs two
+//! whole-repository `bazel query` runs per tool — tens of seconds even for
 //! a five-target workspace. Run it explicitly:
 //!
 //! ```text
@@ -22,9 +22,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cambium_compare::{compare_pairs, CompareOptions, Producer};
-use cambium_corpus::manifest::RepoEntry;
-use cambium_corpus::{pairs, CorpusDir};
+use cambium_bench::manifest::RepoEntry;
+use cambium_bench::{changes, SubjectsDir};
+use cambium_bench::{compare_change_sets, ChangesOptions, Tool};
 
 fn bazelisk() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("HOME")?).join(".cache/cambium/bin/bazelisk");
@@ -188,7 +188,7 @@ fn head(root: &Path) -> String {
 /// `USE_BAZEL_VERSION`, if set: bazelisk reads it itself once it is in the
 /// process environment (which every `Command` here inherits), but we also
 /// thread it explicitly into `Checkout::engine`, which both sets it on the
-/// `Bazel` (so it rides along to the compare producers via `run_context`'s
+/// `Bazel` (so it rides along to the compare tools via `run_context`'s
 /// `env`, not just bazelisk's own child) and keys `--output_base` off it, so
 /// three versions run side by side without sharing a server or an install.
 fn bazel_version() -> Option<String> {
@@ -232,7 +232,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         // this test off the network for everything but Bazel itself.
         url: format!("file://{}", src.display()),
         pin: pin.clone(),
-        replay_range: shas.len(),
+        history_window: shas.len(),
         bazel: bazel.display().to_string(),
         bazel_version: None,
         extra_query_flags: Vec::new(),
@@ -241,73 +241,80 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         skip: false,
         notes: "synthetic smoke workspace".into(),
     };
-    let corpus = CorpusDir::new(tmp.path().join("corpus"));
-    let checkout = corpus.fetch(&entry).unwrap();
+    let subjects = SubjectsDir::new(tmp.path().join("subjects"));
+    let checkout = subjects.fetch(&entry).unwrap();
     checkout.write_config(&entry, version.as_deref()).unwrap();
     let engine = checkout.engine(&entry, version.as_deref()).unwrap();
     eprintln!(
         "bazel: {} (USE_BAZEL_VERSION={:?}), output_base under {}",
         bazel.display(),
         version,
-        corpus.output_base(&entry.id, version.as_deref()).display()
+        subjects
+            .output_base(&entry.id, version.as_deref())
+            .display()
     );
 
-    let producers: Vec<Box<dyn Producer>> = [
-        cambium_compare::BazelDiff::discover(cambium_compare::Implementation::Rust)
+    let tools: Vec<Box<dyn Tool>> = [
+        cambium_bench::BazelDiff::discover(cambium_bench::Implementation::Rust)
             .ok()
-            .map(|b| Box::new(b) as Box<dyn Producer>),
-        cambium_compare::Tango::discover()
+            .map(|b| Box::new(b) as Box<dyn Tool>),
+        cambium_bench::Tango::discover()
             .ok()
-            .map(|t| Box::new(t) as Box<dyn Producer>),
+            .map(|t| Box::new(t) as Box<dyn Tool>),
     ]
     .into_iter()
     .flatten()
     .collect();
-    if producers.is_empty() {
+    if tools.is_empty() {
         eprintln!("neither bazel-diff nor tango is installed; skipping");
         return;
     }
-    let refs: Vec<&dyn Producer> = producers.iter().map(|p| p.as_ref()).collect();
+    let refs: Vec<&dyn Tool> = tools.iter().map(|p| p.as_ref()).collect();
 
     let results = tmp.path().join("results/smoke");
-    let selected = pairs::select(
+    let selected = changes::select(
         &checkout.repo,
-        &[pairs::PairKind::Adjacent],
-        &pairs::PairOptions {
+        &[changes::ChangeSetKind::Adjacent],
+        &changes::ChangeSetOptions {
             repo_id: entry.id.clone(),
             pin: pin.clone(),
-            replay_range: shas.len(),
+            history_window: shas.len(),
             seed: 0,
             cap: 20,
-            profile: cambium_corpus::Profile::Full,
+            total_cap: None,
             hub_packages: Vec::new(),
             invalidator_paths: Vec::new(),
             invalidator_globs: Vec::new(),
         },
     )
     .unwrap();
-    assert!(selected.pairs.len() >= 3, "{:?}", selected.pairs);
+    assert!(
+        selected.change_sets.len() >= 3,
+        "{:?}",
+        selected.change_sets
+    );
 
-    let opts = CompareOptions {
+    let opts = ChangesOptions {
         oracle_k: 10,
         resume: false,
         scratch: tmp.path().join("scratch"),
-        ..CompareOptions::new("smoke", pin, results)
+        ..ChangesOptions::new("smoke", pin, results)
     };
-    let result = compare_pairs(&engine, &checkout, &selected.pairs, &refs, &opts).unwrap();
+    let result =
+        compare_change_sets(&engine, &checkout, &selected.change_sets, &refs, &opts).unwrap();
 
     // The rendered section, so a run of this test by hand shows the same table
-    // the corpus suite would write into docs/CORPUS.md.
+    // the benchmark would write into docs/RESULTS.md.
     println!(
         "{}",
-        cambium_compare::report::render_repo_section(
-            &cambium_compare::RepoResults::new("bazel").with_compares(vec![result.clone()]),
+        cambium_bench::report::render_subject_section(
+            &cambium_bench::SubjectResults::new("bazel").with_compares(vec![result.clone()]),
             None,
         )
     );
 
-    for pair in &result.pairs {
-        for p in &pair.producers {
+    for change_set in &result.change_sets {
+        for p in &change_set.tools {
             assert!(p.error.is_none(), "{} failed: {:?}", p.name, p.error);
         }
     }
@@ -315,13 +322,13 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         result.summary.min_recall >= 1.0,
         "cambium missed something Bazel's rdeps reached: {:#?}",
         result
-            .pairs
+            .change_sets
             .iter()
             .filter_map(|p| p.oracle.as_ref())
             .filter(|o| !o.ok())
             .collect::<Vec<_>>()
     );
-    let failures: usize = cambium_compare::Class::ALL
+    let failures: usize = cambium_bench::Class::ALL
         .iter()
         .filter(|c| c.is_failure())
         .filter_map(|c| result.summary.by_class.get(c.name()))

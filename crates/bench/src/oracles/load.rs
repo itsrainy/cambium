@@ -2,7 +2,7 @@
 //!
 //! cambium works out which packages a changed `.bzl` reaches by scanning
 //! `load()` statements at index time (`cambium_index::loads`). That is a
-//! reimplementation of something Bazel already knows, so on every pair whose
+//! reimplementation of something Bazel already knows, so on every change set whose
 //! change set contains a `.bzl` the suite asks Bazel the same question —
 //! `rbuildfiles(<paths>)`, the call the engine used to make — and requires
 //! cambium's dirty set to be a **superset** of the packages Bazel names.
@@ -16,7 +16,7 @@
 //! a partial answer and recorded, exactly as the `rdeps` oracle accepts a
 //! partial batch: a shorter Bazel answer can only weaken the containment
 //! check, never invert it. That is also the failure mode this whole change
-//! exists to remove — on the corpus, `rbuildfiles` exited 3 on 5 of 150
+//! exists to remove — on the real subjects, `rbuildfiles` exited 3 on 5 of 150
 //! `bazel/bazel` commits, and the engine had to answer `//...` each time.
 
 use std::collections::BTreeSet;
@@ -25,9 +25,9 @@ use anyhow::{Context as _, Result};
 use cambium_bazel::Bazel;
 use serde::{Deserialize, Serialize};
 
-/// What Bazel said about the `.bzl` files in one pair's change set.
+/// What Bazel said about the `.bzl` files in one change set's change set.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BzlOracleResult {
+pub struct LoadOracleResult {
     /// The changed `.bzl` paths the query asked about.
     pub checked: Vec<String>,
     /// Sky Query finished with errors, so Bazel's answer is a lower bound.
@@ -37,7 +37,7 @@ pub struct BzlOracleResult {
     pub bazel_packages: BTreeSet<String>,
     /// Labels naming a loader outside any main-repo package — a module
     /// extension's `.bzl`, a `WORKSPACE` load. cambium answers those with a
-    /// global invalidation, and a global pair never reaches this oracle, so
+    /// global invalidation, and a global change set never reaches this oracle, so
     /// they are recorded rather than compared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_level: Vec<String>,
@@ -46,11 +46,11 @@ pub struct BzlOracleResult {
     pub missing_packages: BTreeSet<String>,
 }
 
-/// The class a non-empty [`BzlOracleResult::missing_packages`] is counted
+/// The class a non-empty [`LoadOracleResult::missing_packages`] is counted
 /// under, and reported in the class table.
 pub const MISSING_CLASS: &str = "cambium_missing_bzl_closure";
 
-impl BzlOracleResult {
+impl LoadOracleResult {
     pub fn ok(&self) -> bool {
         self.missing_packages.is_empty()
     }
@@ -69,8 +69,8 @@ pub fn changed_bzl<'a>(changed: impl IntoIterator<Item = &'a String>) -> Vec<Str
     v
 }
 
-/// Runs the oracle for one pair. `None` when the change set has no `.bzl` in
-/// it, which is most pairs.
+/// Runs the oracle for one change set. `None` when the change set has no `.bzl` in
+/// it, which is most change sets.
 ///
 /// `bazel` must be the handle for the **head** workspace: `rbuildfiles` is a
 /// question about the tree the changed file now lives in.
@@ -78,7 +78,7 @@ pub fn run<'a>(
     bazel: &Bazel,
     changed: impl IntoIterator<Item = &'a String>,
     cambium_dirty: &BTreeSet<String>,
-) -> Result<Option<BzlOracleResult>> {
+) -> Result<Option<LoadOracleResult>> {
     let paths = changed_bzl(changed);
     if paths.is_empty() {
         return Ok(None);
@@ -88,7 +88,7 @@ pub fn run<'a>(
         .with_context(|| format!("rbuildfiles oracle over {} .bzl file(s)", paths.len()))?;
     let bazel_packages: BTreeSet<String> = r.packages.into_iter().collect();
     let missing_packages = bazel_packages.difference(cambium_dirty).cloned().collect();
-    Ok(Some(BzlOracleResult {
+    Ok(Some(LoadOracleResult {
         checked: paths,
         partial,
         bazel_packages,
@@ -97,29 +97,29 @@ pub fn run<'a>(
     }))
 }
 
-/// Roll-up over a run's pairs, for the summary document and the report table.
+/// Roll-up over a run's change sets, for the summary document and the report table.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BzlOracleSummary {
-    /// Pairs whose change set contained a `.bzl`.
-    pub pairs: usize,
-    /// `.bzl` files asked about, over those pairs.
+pub struct LoadOracleSummary {
+    /// ChangeSets whose change set contained a `.bzl`.
+    pub change_sets: usize,
+    /// `.bzl` files asked about, over those change sets.
     pub checked: usize,
-    /// Pairs where Bazel's answer was partial (exit 3).
+    /// ChangeSets where Bazel's answer was partial (exit 3).
     pub partial: usize,
     /// Packages Bazel named that cambium did not dirty. Must be zero.
     pub missing_packages: usize,
 }
 
-impl BzlOracleSummary {
-    pub fn add(&mut self, r: &BzlOracleResult) {
-        self.pairs += 1;
+impl LoadOracleSummary {
+    pub fn add(&mut self, r: &LoadOracleResult) {
+        self.change_sets += 1;
         self.checked += r.checked.len();
         self.partial += usize::from(r.partial);
         self.missing_packages += r.missing_packages.len();
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pairs == 0
+        self.change_sets == 0
     }
 }
 
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_superset_passes_and_a_gap_fails() {
-        let mut r = BzlOracleResult {
+        let mut r = LoadOracleResult {
             checked: vec!["bazel/defs.bzl".into()],
             bazel_packages: set(&["app", "lib"]),
             ..Default::default()
@@ -167,20 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_counts_pairs_files_and_gaps() {
-        let mut s = BzlOracleSummary::default();
+    fn the_summary_counts_change_sets_files_and_gaps() {
+        let mut s = LoadOracleSummary::default();
         assert!(s.is_empty());
-        s.add(&BzlOracleResult {
+        s.add(&LoadOracleResult {
             checked: vec!["a.bzl".into(), "b.bzl".into()],
             partial: true,
             ..Default::default()
         });
-        s.add(&BzlOracleResult {
+        s.add(&LoadOracleResult {
             checked: vec!["c.bzl".into()],
             missing_packages: set(&["lib"]),
             ..Default::default()
         });
-        assert_eq!(s.pairs, 2);
+        assert_eq!(s.change_sets, 2);
         assert_eq!(s.checked, 3);
         assert_eq!(s.partial, 1);
         assert_eq!(s.missing_packages, 1);

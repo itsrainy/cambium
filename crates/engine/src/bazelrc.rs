@@ -6,7 +6,7 @@
 //! those moves the graph, and nothing in the index records which flags produced
 //! it, so the only sound answer is "everything changed".
 //!
-//! But most `.bazelrc` edits are not that. In the corpus, the commits whose
+//! But most `.bazelrc` edits are not that. Across the real subjects, the commits whose
 //! *only* global reason is `.bazelrc` are overwhelmingly remote-cache endpoints,
 //! `--jobs`, test-output verbosity and BES bookkeeping: flags that select how
 //! the build is executed and reported, never what is loaded or analysed. This

@@ -83,24 +83,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p cambium-cli
       - run: |
-          ./target/release/cambi bench run \
-            --preset small,medium --runs 5 \
-            --out bench-results/ci.json --markdown bench-results/ci.md
+          ./target/release/cambi bench stages synth:small --runs 5 \
+            --out bench-results/synth-small/stages/ci.json \
+            --markdown bench-results/synth-small/stages/ci.md
+          ./target/release/cambi bench stages synth:medium --runs 5 \
+            --out bench-results/synth-medium/stages/ci.json \
+            --markdown bench-results/synth-medium/stages/ci.md
       # Machine fingerprints differ between runners, so gating only makes sense
-      # against a baseline captured on the same runner class; `bench compare`
+      # against a baseline captured on the same runner class; `bench regress`
       # refuses to compare across machines rather than reporting noise.
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results
           path: bench-results/
 
-  synthetic-threeway:
-    name: synthetic three-way vs bazel-diff (small, typical-pr)
+  synthetic-changes:
+    name: change sets on synth:small, vs bazel-diff
+    # The per-pull-request run of the real benchmark, on a synthetic subject:
+    # the same `bench changes` a person points at envoy, over a generated
+    # workspace small enough to emit, load and diff on a hosted runner. Tango
+    # is left out because it costs 30-500 s a change set; the weekly job on the
+    # real subjects runs all three.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - uses: bazel-contrib/setup-bazel@0.9.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
       - name: Cache bazel-diff build
         uses: actions/cache@v4
         with:
@@ -111,39 +123,19 @@ jobs:
           key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
       - run: tools/bazel-diff/fetch.sh
       - run: cargo build --release -p cambium-cli
-      - name: bench legacy (small, typical-pr)
+      - name: bench changes synth:small
+        # Non-zero exit is the gate: the run fails on any `cambium_missing`,
+        # any `cambium_missing_bzl_closure`, any `unclassified` disagreement,
+        # or recall under 1.0 against the rdeps oracle. Everything else in the
+        # taxonomy is an over-approximation and is reported, not gated.
         run: |
-          ./target/release/cambi bench legacy --preset small --changes typical-pr \
-            --output json | tee bench-legacy.json
-      - name: fail on any disagreement
-        # `bench legacy` itself already fails when bazel-diff reports a label
-        # cambium does not (unsoundness). This step is the CI-side belt: it
-        # reads the same JSON `extra` fields (crates/bench/src/legacy.rs) and
-        # fails if `cambium_only`/`bazel_diff_only` show anything other than
-        # the documented select()-only asymmetry, or if `agreed` is zero.
-        run: |
-          python3 - <<'EOF'
-          import json, sys
-
-          with open("bench-legacy.json") as f:
-              doc = json.load(f)
-
-          stages = doc.get("stages", doc if isinstance(doc, list) else [doc])
-          for stage in stages:
-              extra = stage.get("extra", stage)
-              agreed = extra.get("agreed")
-              bd_only = extra.get("bazel_diff_only")
-              cam_only = extra.get("cambium_only")
-              if agreed is None or bd_only is None:
-                  continue
-              print(f"agreed={agreed} cambium_only={cam_only} bazel_diff_only={bd_only}")
-              if bd_only:
-                  print("::error::bazel-diff reported labels cambium missed (unsoundness)")
-                  sys.exit(1)
-              if not agreed and not cam_only:
-                  print("::error::no agreement at all between cambium and bazel-diff")
-                  sys.exit(1)
-          EOF
+          ./target/release/cambi bench changes synth:small \
+            --tools cambium,bazel-diff --change-sets 5 --kind adjacent
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results-synth-small
+          path: bench-results/
 
   bazel-version-matrix:
     name: bazel version matrix (${{ matrix.bazel }})
@@ -186,7 +178,7 @@ jobs:
           path: ~/.cache/cambium/tango
           key: tango-${{ hashFiles('tools/tango/fetch.sh') }}
       - run: tools/tango/fetch.sh
-      - run: cargo test -p cambium-compare --test smoke_real_bazel -- --ignored --nocapture
+      - run: cargo test -p cambium-bench --test smoke_real_bazel -- --ignored --nocapture
       - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
         env:
           CAMBIUM_E2E: "1"
@@ -206,9 +198,10 @@ jobs:
           CAMBIUM_SOUNDNESS_REVISIONS: "10"
       - run: cargo build --release -p cambium-cli
       - run: |
-          ./target/release/cambi bench run --preset large --runs 3 \
+          ./target/release/cambi bench stages synth:large --runs 3 \
             --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
-            --out bench-results/nightly.json --markdown bench-results/nightly.md
+            --out bench-results/synth-large/stages/nightly.json \
+            --markdown bench-results/synth-large/stages/nightly.md
       - uses: actions/upload-artifact@v4
         with:
           name: nightly-bench-results

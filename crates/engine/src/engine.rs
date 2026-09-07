@@ -904,7 +904,7 @@ impl Engine {
         // `docs/BUILD.bazel`, and the commit that removed the old one reads,
         // in the diff alone, exactly like a package deletion — after which
         // the package is dropped from the index and every target in it
-        // becomes invisible to every later revision. (The corpus comparison
+        // becomes invisible to every later revision. (The change-set comparison
         // found this: `//docs:docs` and `//docs:srcs` were reported by both
         // bazel-diff and Tango, on pairs where cambium's index no longer had
         // a `docs` package at all.) The diff cannot tell the two cases apart,
@@ -1487,7 +1487,7 @@ fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
 /// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
 ///
 /// The wording is deliberately the one the `rbuildfiles` path used, so that the
-/// corpus's reason histogram is comparable across the change.
+/// benchmark's reason histogram is comparable across the change.
 fn workspace_level_reason(paths: &[String]) -> String {
     let what = match paths {
         [one] => format!("`{one}`"),

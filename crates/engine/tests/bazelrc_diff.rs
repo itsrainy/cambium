@@ -117,20 +117,20 @@ fn an_added_import_is_global() {
     assert!(reason.contains("import"), "{reason}");
 }
 
-/// Real evidence, opt-in: classify every `.bazelrc` edit in the envoy corpus
+/// Real evidence, opt-in: classify every `.bazelrc` edit in the envoy subject
 /// checkout and print the verdict. Ignored because it needs
-/// `~/.cache/cambium/corpus/envoy`; run with
+/// `~/.cache/cambium/subjects/envoy`; run with
 /// `cargo test -p cambium-engine --test bazelrc_diff -- --ignored --nocapture`.
 #[test]
-#[ignore = "needs the envoy corpus checkout"]
+#[ignore = "needs the envoy subject checkout"]
 fn envoy_bazelrc_commits() {
     let entry = std::env::var("CAMBIUM_BAZELRC_ENTRY").unwrap_or_else(|_| "envoy".into());
-    let root = dirs_home().join(".cache/cambium/corpus").join(entry);
+    let root = dirs_home().join(".cache/cambium/subjects").join(entry);
     if !root.exists() {
         eprintln!("no envoy checkout at {}", root.display());
         return;
     }
-    // envoy's corpus pin; another entry is surveyed from its own HEAD.
+    // envoy's pin; another entry is surveyed from its own HEAD.
     let pin = &std::env::var("CAMBIUM_BAZELRC_PIN")
         .unwrap_or_else(|_| "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf".into());
     let known = Command::new("git")
@@ -144,7 +144,7 @@ fn envoy_bazelrc_commits() {
         .output()
         .is_ok_and(|o| o.status.success());
     let pin = if known { pin.as_str() } else { "HEAD" };
-    // The corpus's own window is the last 50 first-parent commits; widen it
+    // The subject's own window is the last 50 first-parent commits; widen it
     // with CAMBIUM_BAZELRC_WINDOW to survey more history.
     let n = std::env::var("CAMBIUM_BAZELRC_WINDOW").unwrap_or_else(|_| "50".into());
     let n = format!("-{}", n.trim_start_matches('-'));

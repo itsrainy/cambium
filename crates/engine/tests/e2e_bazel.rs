@@ -865,7 +865,7 @@ fn rdeps_oracle(engine: &Engine, pattern: &str) -> BTreeSet<String> {
 #[test]
 fn an_external_repository_edit_reaches_only_its_consumers() {
     skip_unless_e2e!();
-    // The two majors the corpus and CI care about. Selected through
+    // The two majors the benchmark and CI care about. Selected through
     // `.bazelversion` rather than `USE_BAZEL_VERSION` so that parallel tests
     // do not fight over one process-wide environment variable.
     for version in ["7.4.1", "9.2.0"] {

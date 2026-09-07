@@ -1,7 +1,7 @@
-//! The resumable per-repo state file, `corpus-results/<id>/state.json`.
+//! The resumable per-repo state file, `bench-results/<id>/state.json`.
 //!
 //! Every subcommand records what it finished, so a killed TensorFlow run does
-//! not restart the external fetch, and `corpus all` can pick up where the last
+//! not restart the external fetch, and a rerun can pick up where the last
 //! invocation stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,8 +24,8 @@ pub struct State {
     #[serde(default)]
     pub built: BTreeMap<String, PathBuf>,
     #[serde(default)]
-    pub replay: Option<ReplayState>,
-    /// Pair keys (`<base>..<head>`) the comparison has finished.
+    pub history: Option<HistoryState>,
+    /// ChangeSet keys (`<base>..<head>`) the comparison has finished.
     #[serde(default)]
     pub compared: BTreeSet<String>,
     #[serde(default)]
@@ -40,10 +40,10 @@ pub struct State {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct ReplayState {
+pub struct HistoryState {
     pub from: String,
     pub to: String,
-    /// Bazel version string the replay ran under.
+    /// Bazel version string the history ran under.
     #[serde(default)]
     pub bazel_version: String,
     /// The newest commit whose index was materialised and published.
@@ -82,7 +82,7 @@ impl State {
 
     pub fn fresh(id: &str, pin: &str) -> Self {
         Self {
-            schema: cambium_engine::report::SCHEMA_VERSION,
+            schema: crate::RESULT_SCHEMA,
             id: id.to_string(),
             pin: pin.to_string(),
             ..Default::default()
@@ -91,19 +91,19 @@ impl State {
 
     /// The identity of the cambium that will use this state: index format plus
     /// configuration hash, the two things that decide whether an index, a
-    /// replay or a comparison written earlier is the same experiment.
+    /// history or a comparison written earlier is the same experiment.
     pub fn engine_id(config_hash: &[u8; 32]) -> String {
         let hex: String = config_hash.iter().map(|b| format!("{b:02x}")).collect();
         format!("f{}/{}", cambium_index::format::FORMAT_VERSION, &hex[..16])
     }
 
     /// Loads the state and, when a different cambium wrote it, starts over:
-    /// built indexes, the replay and the compared set all belong to that
+    /// built indexes, the history and the compared set all belong to that
     /// other build. Resuming any of them would mix two experiments.
     pub fn load_for(dir: &Path, id: &str, pin: &str, engine_id: &str) -> anyhow::Result<Self> {
         let mut st = Self::load(dir, id, pin)?;
         if st.engine != engine_id {
-            if !st.engine.is_empty() || !st.built.is_empty() || st.replay.is_some() {
+            if !st.engine.is_empty() || !st.built.is_empty() || st.history.is_some() {
                 tracing::warn!(
                     was = %st.engine,
                     now = %engine_id,
@@ -130,7 +130,7 @@ impl State {
         Ok(())
     }
 
-    pub fn pair_key(base: &str, head: &str) -> String {
+    pub fn change_set_key(base: &str, head: &str) -> String {
         format!("{base}..{head}")
     }
 }
@@ -144,7 +144,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut st = State::fresh("bazel", "a");
         st.fetched = true;
-        st.compared.insert(State::pair_key("x", "y"));
+        st.compared.insert(State::change_set_key("x", "y"));
         st.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path(), "bazel", "a").unwrap(), st);
         let other = State::load(dir.path(), "bazel", "b").unwrap();
@@ -179,7 +179,7 @@ mod engine_identity {
         assert!(other.fetched, "the mirror and worktree are still there");
         assert!(other.built.is_empty());
         assert!(other.compared.is_empty());
-        assert!(other.replay.is_none());
+        assert!(other.history.is_none());
         assert_eq!(other.engine, "f5/aaaa");
     }
 

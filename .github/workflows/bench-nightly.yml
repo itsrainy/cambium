@@ -1,15 +1,15 @@
-name: corpus-nightly
+name: bench-nightly
 
-# Nightly real-repository validation for the two cheapest corpus entries
-# (docs/CORPUS.md, spec §3-§6). `bazel` and `envoy` are the only repos small
+# Nightly real-repository validation for the two cheapest subjects
+# (docs/METHODOLOGY.md). `bazel` and `envoy` are the only repos small
 # enough, and cheap enough to fetch, to run every night; the rest are weekly or
-# monthly (corpus-weekly.yml). Each runs under its own `.bazelversion` — that
+# monthly (bench-weekly.yml). Each runs under its own `.bazelversion` — that
 # cambium reads 7.x, 8.x and 9.x graphs alike is the `bazel-version-matrix` job
 # in ci.yml, over the synthetic workspace, on every pull request.
 #
 # Machine requirement: this needs a real Bazel build of each repo at several
 # commits, so a standard GitHub-hosted runner will not do. Point
-# CORPUS_RUNNER (an Actions variable) at a self-hosted or larger runner label
+# BENCH_RUNNER (an Actions variable) at a self-hosted or larger runner label
 # with at least 16 cores, 64 GB RAM and 500 GB disk; until that is set this
 # falls back to ubuntu-latest, where the bazel/envoy jobs are expected to be
 # slow or to fail on disk space.
@@ -19,8 +19,8 @@ on:
     - cron: "5 4 * * *"
   workflow_dispatch:
     inputs:
-      repo:
-        description: "Corpus repo id to run (default: both bazel and envoy)"
+      subject:
+        description: "Subject to run (default: both bazel and envoy)"
         required: false
         type: choice
         options: [both, bazel, envoy]
@@ -31,16 +31,16 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  corpus:
-    name: corpus ${{ matrix.repo }}
-    if: github.event_name == 'schedule' || inputs.repo == 'both' || inputs.repo == matrix.repo
-    runs-on: ${{ vars.CORPUS_RUNNER || 'ubuntu-latest' }}
+  bench:
+    name: bench ${{ matrix.subject }}
+    if: github.event_name == 'schedule' || inputs.subject == 'both' || inputs.subject == matrix.subject
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        repo: [bazel, envoy]
+        subject: [bazel, envoy]
     env:
-      CAMBIUM_CORPUS_DIR: ${{ github.workspace }}/.cache/cambium/corpus
+      CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
       CAMBIUM_TANGO_DIR: ${{ github.workspace }}/.cache/cambium/tango
     steps:
@@ -66,30 +66,30 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.CAMBIUM_CORPUS_DIR }}/repository_cache
-            ${{ env.CAMBIUM_CORPUS_DIR }}/disk_cache
-          key: corpus-cache-${{ matrix.repo }}-${{ github.run_id }}
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/repository_cache
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/disk_cache
+          key: bench-cache-${{ matrix.subject }}-${{ github.run_id }}
           restore-keys: |
-            corpus-cache-${{ matrix.repo }}-
+            bench-cache-${{ matrix.subject }}-
 
       - run: cargo build --release -p cambium-cli
 
-      - name: corpus fetch
-        run: ./target/release/cambi corpus fetch ${{ matrix.repo }}
-      - name: corpus build
-        run: ./target/release/cambi corpus build ${{ matrix.repo }}
-      - name: corpus replay --range 50
-        run: ./target/release/cambi corpus replay ${{ matrix.repo }} --range 50
-      - name: corpus pairs
-        run: ./target/release/cambi corpus pairs ${{ matrix.repo }} --kind adjacent --kind stress
-      - name: corpus compare
-        run: ./target/release/cambi corpus compare ${{ matrix.repo }} --kind adjacent --kind stress --oracle-sample 100
-      - name: corpus report
+      - name: bench subjects fetch
+        run: ./target/release/cambi bench subjects fetch ${{ matrix.subject }}
+      - name: bench subjects build
+        run: ./target/release/cambi bench subjects build ${{ matrix.subject }}
+      - name: bench history --commits 50
+        run: ./target/release/cambi bench history ${{ matrix.subject }} --commits 50
+      - name: bench changes
+        run: |
+          ./target/release/cambi bench changes ${{ matrix.subject }} \
+            --kind pr,adjacent,stress --oracle rdeps,load --oracle-sample 100
+      - name: bench report
         if: always()
-        run: ./target/release/cambi corpus report ${{ matrix.repo }}
+        run: ./target/release/cambi bench report ${{ matrix.subject }}
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: corpus-results-${{ matrix.repo }}
-          path: corpus-results/
+          name: bench-results-${{ matrix.subject }}
+          path: bench-results/

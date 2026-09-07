@@ -1,6 +1,6 @@
 #!/bin/bash
-# Launches (or reports) the corpus box. One instance, tagged
-# cambium=corpus, in us-east-2; re-running when it exists prints its address.
+# Launches (or reports) the benchmark box. One instance, tagged
+# cambium=bench, in us-east-2; re-running when it exists prints its address.
 #
 #   tools/ec2/launch.sh              c7i.4xlarge, 500 GB gp3
 #   SIZE=c7i.8xlarge DISK=1000 tools/ec2/launch.sh
@@ -10,14 +10,14 @@ set -euo pipefail
 R=${AWS_REGION:-us-east-2}
 SIZE=${SIZE:-c7i.4xlarge}
 DISK=${DISK:-500}
-KEY=${KEY:-cambium-corpus}
-PEM=${PEM:-$HOME/.ssh/cambium-corpus.pem}
-SG_NAME=cambium-corpus
+KEY=${KEY:-cambium-bench}
+PEM=${PEM:-$HOME/.ssh/cambium-bench.pem}
+SG_NAME=cambium-bench
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 find_instance() {
   aws ec2 describe-instances --region "$R" \
-    --filters Name=tag:cambium,Values=corpus "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --filters Name=tag:cambium,Values=bench "Name=instance-state-name,Values=pending,running,stopping,stopped" \
     --query 'Reservations[0].Instances[0].[InstanceId,State.Name,PublicDnsName]' --output text 2>/dev/null | grep -v None || true
 }
 
@@ -39,7 +39,7 @@ case "${1:-launch}" in
       --key-name "$KEY" --security-group-ids "$SG" \
       --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":$DISK,\"VolumeType\":\"gp3\",\"Throughput\":500,\"Iops\":6000,\"DeleteOnTermination\":true}}]" \
       --user-data "file://$HERE/bootstrap.sh" \
-      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cambium-corpus},{Key=cambium,Value=corpus}]" \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=cambium-bench},{Key=cambium,Value=bench}]" \
       --query 'Instances[0].InstanceId' --output text)
     echo "launched $ID ($SIZE, ${DISK} GB, $AMI)"
     aws ec2 wait instance-running --region "$R" --instance-ids "$ID"
@@ -51,7 +51,8 @@ case "${1:-launch}" in
     # The repository is private; the box gets the working tree, not a clone.
     read -r ID STATE HOST <<<"$(find_instance)"
     ROOT=$(cd "$HERE/../.." && pwd)
-    tar -C "$ROOT" -czf - --exclude=./target --exclude=./corpus-results --exclude='./corpus-results-*' \
+    tar -C "$ROOT" -czf - --exclude=./target --exclude=./bench-results --exclude='./bench-results-*' \
+      --exclude=./corpus-results --exclude='./corpus-results-*' \
       --exclude=./.claude --exclude=./.git/worktrees . 2>/dev/null \
       | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium 2>/dev/null'
     ssh -i "$PEM" "ubuntu@$HOST" 'cat > ~/finish-bootstrap.sh <<"EOS"
