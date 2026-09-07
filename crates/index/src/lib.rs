@@ -39,7 +39,7 @@ pub use data::{
 };
 pub use externals::{
     build_repo_inputs, diff_module, is_toolchain_module, read_module_facts, scan_module,
-    ModuleChange, ModuleFacts, Pattern, RepoInputs,
+    ModuleChange, ModuleFacts, PathMap, Pattern, RepoInputs,
 };
 pub use format::{
     commit_pointer_key, index_file_name, index_key, parse_commit_pointer_key, parse_index_key,

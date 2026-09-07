@@ -70,6 +70,21 @@ Three separate things, and they are not interchangeable:
   it moved instead of invalidating the world. The same argument applies as at
   4: an index written before the bump has no map, and a run over one cannot
   tell "this file feeds no repository" from "we never looked".
+  It went to **6** when each repository gained its *path mapping*
+  (`repo_map_*`): the entries of `cambium_index::externals::PathMap`, grouped
+  by repository, saying where a main-repo directory or file lands inside it —
+  `api/` is the root of `@envoy_api`, so `api/envoy/x.proto` is
+  `envoy/x.proto` in the repository. That is what tells an edit to a file the
+  repository is *built from* apart from an edit to a `.bzl` the repository
+  *exports*, and so stops one `.proto` under `api/` re-querying every package
+  whose load closure reaches `@envoy_api//bazel:api_build_system.bzl`. The
+  mapping is derived only from shapes that admit no guessing —
+  `local_path_override`, `local_repository` / `new_local_repository`, and a
+  `repository_ctx.symlink` whose source is a literal main-repo path or label —
+  and a repository with no entries keeps the old, wider answer. As at 4 and 5,
+  an empty table in an older index would read as "no mapping is needed" rather
+  than "we never looked", which is the unsound direction, so the layout bump is
+  what stops that answer being given silently.
 - **`config_hash`**, stamped into the index header from
   `cambium_engine::Config::hash`, versions the *meaning of the rows*. An index
   whose `config_hash` differs from the running config is refused for splicing

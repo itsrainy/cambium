@@ -811,6 +811,9 @@ impl<'a> IndexBuilder<'a> {
             repo_input_repo_edges: bzl.repo_input_repo_edges,
             bzl_repo_offsets: bzl.repo_bzl_offsets,
             bzl_repo_edges: bzl.repo_bzl_edges,
+            repo_map_bytes: bzl.repo_map_bytes,
+            repo_map_offsets: bzl.repo_map_offsets,
+            repo_map_ranges: bzl.repo_map_ranges,
         }
     }
 }
@@ -841,6 +844,9 @@ struct BzlTables {
     repo_input_repo_edges: Vec<u32>,
     repo_bzl_offsets: Vec<u32>,
     repo_bzl_edges: Vec<u32>,
+    repo_map_bytes: Vec<u8>,
+    repo_map_offsets: Vec<u32>,
+    repo_map_ranges: Vec<u32>,
 }
 
 impl BzlTables {
@@ -856,6 +862,8 @@ impl BzlTables {
             repo_input_offsets: vec![0],
             repo_input_repo_offsets: vec![0],
             repo_bzl_offsets: vec![0],
+            repo_map_offsets: vec![0],
+            repo_map_ranges: vec![0],
             ..Default::default()
         }
     }
@@ -953,6 +961,15 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         t.repo_canonical_bytes.extend_from_slice(canon.as_bytes());
         t.repo_canonical_offsets
             .push(t.repo_canonical_bytes.len() as u32);
+        // The path mapping, in the same repo-id order. An empty run is the
+        // "no derivable mapping" case.
+        if let Some(maps) = c.inputs.path_maps.get(*n) {
+            for pm in maps {
+                t.repo_map_bytes.extend_from_slice(pm.encode().as_bytes());
+                t.repo_map_offsets.push(t.repo_map_bytes.len() as u32);
+            }
+        }
+        t.repo_map_ranges.push(t.repo_map_offsets.len() as u32 - 1);
     }
     for (pat, repos) in &c.inputs.patterns {
         let mut row: Vec<u32> = repos.iter().filter_map(|r| repo_id(r)).collect();

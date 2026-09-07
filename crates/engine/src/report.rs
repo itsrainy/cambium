@@ -45,7 +45,11 @@ use serde::{Deserialize, Serialize};
 ///   `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl` and
 ///   `external_direct_targets`, and `--explain` can report a new direct reason
 ///   `{"kind": "external_repo", "label": "@@repo+//pkg:target"}`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// - **6** adds `stats.repos_label_only`: repositories an input-path edit
+///   dirtied where the derived path mapping showed the edit could not be one
+///   of the `.bzl` files loaded from the repository, so only its label
+///   consumers were reported. Purely additive.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -157,6 +161,12 @@ pub struct Stats {
     /// changed.
     #[serde(default)]
     pub repos_dirty_by_bzl: usize,
+    /// Of `repos_dirty_by_input`, how many were dirtied by an edit that the
+    /// repository's derived path mapping proves cannot be one of the `.bzl`
+    /// files loaded from it: their label consumers are affected, their package
+    /// closures are not re-queried.
+    #[serde(default)]
+    pub repos_label_only: usize,
     /// Targets in those repositories that the main repository names, and whose
     /// consumers were therefore made direct.
     #[serde(default)]

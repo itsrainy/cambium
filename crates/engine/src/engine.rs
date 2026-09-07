@@ -778,6 +778,7 @@ impl Engine {
         };
         stats.repos_dirty_by_input = ext.by_input;
         stats.repos_dirty_by_module = ext.by_module;
+        stats.repos_label_only = ext.label_only;
 
         let mut matchers = Matchers::compile(&self.cfg.rules())?;
         matchers.exempt(ext.handled.clone());
@@ -865,6 +866,9 @@ impl Engine {
                             Some(repos) => {
                                 tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
                                 ext.by_bzl += repos.len();
+                                // The rule's implementation moved, so what it
+                                // writes into the repository can be anything.
+                                ext.load_repos.extend(repos.iter().cloned());
                                 ext.repos.extend(repos);
                             }
                             None => workspace_level.push(path.clone()),
@@ -945,9 +949,10 @@ impl Engine {
         stats.repos_dirty_by_bzl = ext.by_bzl;
         let mut external_nodes: Vec<(u32, String)> = Vec::new();
         if !dirty.global && !ext.repos.is_empty() {
-            let r = crate::externals::reach(base_view, &ext.repos);
+            let r = crate::externals::reach(base_view, &ext.repos, &ext.load_repos);
             tracing::debug!(
                 repos = ?ext.repos,
+                load_repos = ?ext.load_repos,
                 nodes = r.nodes.len(),
                 packages = r.packages.len(),
                 "external repositories moved"

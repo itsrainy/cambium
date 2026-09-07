@@ -40,6 +40,30 @@
 //!    any other dirty package, and the splice then compares rule hashes as
 //!    usual.
 //!
+//! # Why (2) does not always fire
+//!
+//! A repository built from a main-repo directory is the common case, and it is
+//! the expensive one: on envoy every package's load closure reaches
+//! `@envoy_api//bazel:api_build_system.bzl`, and `@envoy_api` is `api/`. Taken
+//! at face value, rule (2) says an edit to one `.proto` under `api/envoy/`
+//! dirties all twelve hundred packages — past `max_dirty_packages`, so a cold
+//! rebuild, on nearly half of envoy's history.
+//!
+//! But rule (2) exists because a `.bzl` *in the repository* may have changed,
+//! and `api/envoy/config/v3/x.proto` is `envoy/config/v3/x.proto` inside
+//! `@envoy_api`, which is not a file anything loads. So when a repository is
+//! dirty because a main-repo **input path** moved, and the index carries that
+//! repository's path mapping ([`cambium_index::externals::PathMap`]), each
+//! changed path is translated into the repository and rule (2) applies only if
+//! one of the results is a `.bzl` the closure actually loads from there.
+//!
+//! Three things keep that sound. A path the mapping does not cover translates
+//! to nothing, and an untranslatable path keeps rule (2). A repository with no
+//! derivable mapping keeps rule (2). And a repository dirtied by the
+//! `MODULE.bazel` diff — a version bump, a changed tag — keeps rule (2)
+//! unconditionally, because *any* file in it may have moved. Rule (1) is
+//! untouched in every case.
+//!
 //! There is no third way. A repository cannot affect a package's rules without
 //! appearing in that package's `load()` closure or in some rule's attributes —
 //! except through toolchain resolution, which has no edge to follow and which
@@ -113,6 +137,10 @@ pub struct Externals {
     pub global: Option<String>,
     /// Apparent names of the repositories that moved.
     pub repos: BTreeSet<String>,
+    /// The subset of [`Externals::repos`] whose *contents* may have moved in a
+    /// way a `load()` would see, and for which the package closures are
+    /// therefore re-queried. See "Why (2) does not always fire".
+    pub load_repos: BTreeSet<String>,
     /// Workspace files the stage accounted for, and which must therefore not
     /// also fire an invalidator rule.
     pub handled: Vec<String>,
@@ -122,6 +150,9 @@ pub struct Externals {
     pub by_module: usize,
     /// How many were named by a changed workspace-closure `.bzl`.
     pub by_bzl: usize,
+    /// How many input-dirtied repositories the path mapping spared from
+    /// rule (2): their label consumers are dirty, their loaders are not.
+    pub label_only: usize,
 }
 
 /// Runs the stage over a diff.
@@ -166,6 +197,9 @@ pub fn analyse(
             }
             ModuleChange::Repos(repos) => {
                 out.by_module = repos.len();
+                // A version bump replaces the repository wholesale, so every
+                // file in it, `.bzl` included, may have moved.
+                out.load_repos.extend(repos.iter().cloned());
                 out.repos.extend(repos);
                 out.handled.push(MODULE_FILE.to_string());
                 // The lockfile is a function of the module file plus the
@@ -187,17 +221,85 @@ pub fn analyse(
     let _ = lock_changed;
 
     // Repository-rule inputs: main-repo files an external repository is built
-    // from.
-    let mut by_input: BTreeSet<String> = BTreeSet::new();
+    // from. Keyed by repo id, because deciding whether rule (2) applies needs
+    // that repository's path mapping and the paths that dirtied it.
+    let mut by_input: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     for c in changes {
         for r in base.repos_for_path(&c.path) {
-            by_input.insert(base.repo_name(r).to_string());
+            by_input.entry(r).or_default().push(c.path.as_str());
         }
     }
     out.by_input = by_input.len();
-    out.repos.extend(by_input);
+    for (repo, paths) in by_input {
+        let name = base.repo_name(repo).to_string();
+        if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, &paths) {
+            out.load_repos.insert(name.clone());
+        } else {
+            out.label_only += 1;
+            tracing::debug!(
+                repo = %name,
+                ?paths,
+                "an input-path edit cannot be one of the .bzl files loaded from this repository"
+            );
+        }
+        out.repos.insert(name);
+    }
 
     out
+}
+
+/// Whether any of `paths`, translated into repository `repo`, could be one of
+/// the `.bzl` files a main-repo load closure reaches into it for.
+///
+/// `true` — rule (2) applies — whenever the question cannot be answered: no
+/// derivable mapping, no static load closure to compare against, or a changed
+/// path the mapping does not cover.
+fn input_can_be_a_loaded_bzl(base: IndexRef<'_>, repo: u32, paths: &[&str]) -> bool {
+    if !base.bzl_closure {
+        return true;
+    }
+    let maps = base.repo_path_maps(repo);
+    if maps.is_empty() {
+        return true;
+    }
+    let apparent = base.repo_name(repo);
+    let canonical = base.repo_canonical.get(repo);
+    let loaded: BTreeSet<String> = (0..base.bzl_ext_labels.len() as u32)
+        .filter_map(|e| repo_relative_path(base.bzl_ext_labels.get(e), apparent, canonical))
+        .collect();
+    paths.iter().any(|p| {
+        let mut covered = false;
+        for m in &maps {
+            let Some(inside) = m.translate(p) else {
+                continue;
+            };
+            covered = true;
+            if loaded.contains(inside.as_str()) {
+                return true;
+            }
+        }
+        !covered
+    })
+}
+
+/// `@@envoy_api+//bazel:api_build_system.bzl` -> `bazel/api_build_system.bzl`,
+/// but only for labels in the repository named.
+fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<String> {
+    let rest = label
+        .strip_prefix("@@")
+        .or_else(|| label.strip_prefix('@'))?;
+    let (token, rest) = rest.split_once("//")?;
+    if !repo_token_matches(token, apparent, canonical) {
+        return None;
+    }
+    // `pkg:sub/file.bzl` is `pkg/sub/file.bzl`, and the root package's
+    // `:file.bzl` is just `file.bzl`.
+    let (pkg, name) = rest.split_once(':')?;
+    Some(if pkg.is_empty() {
+        name.to_string()
+    } else {
+        format!("{pkg}/{name}")
+    })
 }
 
 fn facts_at(texts: &dyn WorkspaceText, rev: &str) -> ModuleFacts {
@@ -272,7 +374,15 @@ pub struct RepoReach {
 }
 
 /// Resolves dirty repositories to graph work.
-pub fn reach(base: IndexRef<'_>, repos: &BTreeSet<String>) -> RepoReach {
+///
+/// `repos` are all the dirty repositories, which is what rule (1) needs.
+/// `load_repos` is the subset whose `.bzl` files may have moved, which is what
+/// rule (2) needs; see "Why (2) does not always fire".
+pub fn reach(
+    base: IndexRef<'_>,
+    repos: &BTreeSet<String>,
+    load_repos: &BTreeSet<String>,
+) -> RepoReach {
     let mut out = RepoReach::default();
     if repos.is_empty() {
         return out;
@@ -283,11 +393,11 @@ pub fn reach(base: IndexRef<'_>, repos: &BTreeSet<String>) -> RepoReach {
     for r in 0..base.num_repos() {
         canon.insert(base.repo_name(r), base.repo_canonical.get(r));
     }
-    let matches = |token: &str| {
-        repos
-            .iter()
+    let matching = |set: &BTreeSet<String>, token: &str| {
+        set.iter()
             .any(|a| repo_token_matches(token, a, canon.get(a.as_str()).copied().unwrap_or("")))
     };
+    let matches = |token: &str| matching(repos, token);
 
     // (1) labels. Every external label starts with `@`, and `label_sorted` is
     // in label order, so they are one contiguous run at the end of it: found
@@ -312,9 +422,11 @@ pub fn reach(base: IndexRef<'_>, repos: &BTreeSet<String>) -> RepoReach {
     // (2) loads. The static closure recorded the external labels every `.bzl`
     // load walk stopped at; a package whose closure contains one of them can
     // have its rules change when that repository does.
-    if base.bzl_closure {
+    if base.bzl_closure && !load_repos.is_empty() {
         let hot: Vec<u32> = (0..base.bzl_ext_labels.len() as u32)
-            .filter(|&e| label_repo(base.bzl_ext_labels.get(e)).is_some_and(matches))
+            .filter(|&e| {
+                label_repo(base.bzl_ext_labels.get(e)).is_some_and(|t| matching(load_repos, t))
+            })
             .collect();
         if !hot.is_empty() {
             for id in 0..base.num_bzl() {
@@ -348,6 +460,25 @@ mod tests {
         ));
         assert!(!repo_token_matches("rules_ccc", "rules_cc", ""));
         assert!(!repo_token_matches("rules_cc", "", ""));
+    }
+
+    #[test]
+    fn a_load_label_becomes_a_repository_relative_path() {
+        assert_eq!(
+            repo_relative_path("@@envoy_api+//bazel:api_build_system.bzl", "envoy_api", ""),
+            Some("bazel/api_build_system.bzl".to_string())
+        );
+        assert_eq!(
+            repo_relative_path("@mod//:defs.bzl", "mod", "mod+"),
+            Some("defs.bzl".to_string())
+        );
+        assert_eq!(
+            repo_relative_path("@mod//a:b/c.bzl", "mod", ""),
+            Some("a/b/c.bzl".to_string())
+        );
+        // Another repository, and a main-repo label.
+        assert_eq!(repo_relative_path("@@other+//a:b.bzl", "mod", ""), None);
+        assert_eq!(repo_relative_path("//a:b.bzl", "mod", ""), None);
     }
 
     #[test]
