@@ -248,11 +248,20 @@ impl RepoResults {
         (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / vals.len() as f64)
     }
 
+    /// Over **all** compared pairs, globals included — the headline number, so
+    /// the one the top table carries. Results written before that series
+    /// existed fall back to the incremental one.
     fn producer_cold_p50(&self, name: &str) -> Option<u64> {
         let vals: Vec<u64> = self
             .compares
             .iter()
-            .filter_map(|c| c.summary.producer_cold.get(name))
+            .filter_map(|c| {
+                c.summary
+                    .all_producer_cold
+                    .get(name)
+                    .filter(|w| w.samples > 0)
+                    .or_else(|| c.summary.producer_cold.get(name))
+            })
             .filter(|w| w.samples > 0)
             .map(|w| w.p50_ms)
             .collect();
@@ -263,7 +272,14 @@ impl RepoResults {
         let vals: Vec<u64> = self
             .compares
             .iter()
-            .map(|c| &c.summary.cambium_warm)
+            .map(|c| {
+                let all = &c.summary.all_cambium_warm;
+                if all.samples > 0 {
+                    all
+                } else {
+                    &c.summary.cambium_warm
+                }
+            })
             .filter(|w| w.samples > 0)
             .map(|w| w.p50_ms)
             .collect();
@@ -566,7 +582,10 @@ pub fn render_top_table(repos: &[RepoResults]) -> String {
         ));
     }
     s.push_str(
-        "\nReplay p50/p90 are over **non-global** commits (the ones an updater \
+        "\nThe producer-vs-cambium column is over **all** compared pairs, the \
+         ones cambium answered with `//...` included, so the ratio is not an \
+         average over the pairs cambium is fast on; each repository's section \
+         breaks it out. Replay p50/p90 are over **non-global** commits (the ones an updater \
          actually walks); the per-repo sections give both distributions. \
          `pass/fail` counts compared pairs. Precision against a producer is \
          informational; recall against the `rdeps` oracle is the gate.\n",
@@ -749,6 +768,101 @@ fn render_replay(rep: &ReplayResult) -> String {
     s
 }
 
+/// The two pair populations the timings table reports over.
+///
+/// `all pairs` is the published one: nothing is excluded from it. `incremental`
+/// drops the pairs where cambium answered `//...`, and exists because the
+/// precision and class numbers are computed over that set and their walls have
+/// to be readable next to them.
+const ALL_PAIRS: &str = "all pairs";
+const INCREMENTAL_PAIRS: &str = "incremental";
+
+/// The Bazel a comparison ran under: what it reported, else what was asked
+/// for, else `n/a`.
+fn compare_bazel(c: &CompareResult) -> String {
+    c.bazel_version_used
+        .as_deref()
+        .map(tidy_version)
+        .or_else(|| c.bazel_version.clone())
+        .unwrap_or_else(|| "n/a".into())
+}
+
+/// How many pairs a producer's distribution covers. The explicit count when
+/// the run recorded one; otherwise the sample count of its cold distribution,
+/// for results written before the field existed.
+fn producer_ran(
+    counts: &BTreeMap<String, usize>,
+    cold: &BTreeMap<String, WallStats>,
+    name: &str,
+) -> usize {
+    counts
+        .get(name)
+        .copied()
+        .or_else(|| cold.get(name).map(|w| w.samples))
+        .unwrap_or(0)
+}
+
+/// What the globally invalidated pairs cost.
+///
+/// cambium answers `//...` on them, which is sound — it is a superset of any
+/// answer — and useless: the user is told to rebuild the repository. This
+/// table is the price of that, side by side with the precise set the producers
+/// found on the same pairs, so "cambium goes global on N% of commits" is a
+/// sentence with a number after it rather than an asterisk.
+fn render_globals(compares: &[CompareResult]) -> String {
+    let mut s = String::from("#### Globals\n\n");
+    if compares.iter().all(|c| c.summary.global_stats.is_empty()) {
+        s.push_str("No compared pair was globally invalidated.\n\n");
+        return s;
+    }
+    s.push_str(
+        "| Bazel | pairs | cambium `//...` | producer | its precise set | \
+         producer cold p50 | cambium cold/warm p50 |\n\
+         |---|---:|---:|---|---:|---:|---:|\n",
+    );
+    for c in compares {
+        let g = &c.summary.global_stats;
+        if g.is_empty() {
+            continue;
+        }
+        let ver = compare_bazel(c);
+        let cambium = format!(
+            "{} / {}",
+            ms(g.cambium_cold.p50_ms),
+            ms(g.cambium_warm.p50_ms)
+        );
+        let mut names: Vec<&String> = g.mean_producer_labels.keys().collect();
+        names.sort();
+        if names.is_empty() {
+            s.push_str(&format!(
+                "| `{ver}` | {} | {} | _none ran_ | n/a | n/a | {cambium} |\n",
+                g.pairs,
+                num(g.mean_cambium_labels.round() as u64),
+            ));
+        }
+        for name in names {
+            s.push_str(&format!(
+                "| `{ver}` | {} | {} | {name} | {} | {} | {cambium} |\n",
+                g.pairs,
+                num(g.mean_cambium_labels.round() as u64),
+                num(g.mean_producer_labels[name].round() as u64),
+                opt_ms(g.producer_cold.get(name).map(|w| w.p50_ms)),
+            ));
+        }
+    }
+    s.push_str(
+        "\nMeans over the global pairs. *cambium `//...`* is the number of \
+         rule targets `//...` names at head — the answer cambium gave — and \
+         *its precise set* is what the producer found on the same pair. The \
+         ratio between them is the over-approximation a global hands the user; \
+         the wall columns say what each tool charged to produce its answer. \
+         These pairs are excluded from precision, the class counts and recall \
+         (there is nothing to be wrong about inside `//...`) and included in \
+         the `all pairs` timings above.\n\n",
+    );
+    s
+}
+
 fn render_compare(r: &RepoResults) -> String {
     let mut s = String::new();
     let compares = &r.compares;
@@ -758,8 +872,10 @@ fn render_compare(r: &RepoResults) -> String {
     let pairs = r.pairs_total();
     let globals: usize = compares.iter().map(|c| c.summary.globals).sum();
     s.push_str(&format!(
-        "{pairs} pairs compared, {} passed, {} failed ({globals} of them global, \
-         which pass by construction). Worst oracle recall: **{}**.\n\n",
+        "{pairs} pairs compared, {} passed, {} failed ({globals} of them \
+         global, which pass by construction: `//...` contains every answer. \
+         The producers still ran on them — see **Globals** below). Worst \
+         oracle recall: **{}**.\n\n",
         pairs - r.failures(),
         r.failures(),
         opt_pct(r.min_recall()),
@@ -768,12 +884,7 @@ fn render_compare(r: &RepoResults) -> String {
     s.push_str("| Bazel | producer | pairs | passed | precision | min recall |\n");
     s.push_str("|---|---|---:|---:|---:|---:|\n");
     for c in compares {
-        let ver = c
-            .bazel_version_used
-            .as_deref()
-            .map(tidy_version)
-            .or_else(|| c.bazel_version.clone())
-            .unwrap_or_else(|| "n/a".into());
+        let ver = compare_bazel(c);
         let names = producer_names(c);
         if names.is_empty() {
             s.push_str(&format!(
@@ -800,41 +911,77 @@ fn render_compare(r: &RepoResults) -> String {
     s.push('\n');
 
     // ---- timings ----
-    s.push_str("#### Timings (p50 / p90 over the compared pairs)\n\n");
-    s.push_str("| Bazel | tool | pairs | cold | warm |\n|---|---|---:|---:|---:|\n");
+    s.push_str("#### Timings (p50 / p90)\n\n");
+    s.push_str(
+        "| Bazel | tool | over | pairs | cold | warm |\n\
+         |---|---|---|---:|---:|---:|\n",
+    );
     for c in compares {
-        let ver = c
-            .bazel_version_used
-            .as_deref()
-            .map(tidy_version)
-            .or_else(|| c.bazel_version.clone())
-            .unwrap_or_else(|| "n/a".into());
+        let ver = compare_bazel(c);
         for name in producer_names(c) {
             // Per producer, because Tango is capped under the quick profile:
             // a p50 over 10 pairs and one over 50 are different claims and the
             // table has to say which is which.
-            let ran = c
-                .summary
-                .producer_pairs
-                .get(&name)
-                .copied()
-                .or_else(|| c.summary.producer_cold.get(&name).map(|w| w.samples))
-                .unwrap_or(0);
+            for (scope, ran, cold, warm) in [
+                (
+                    ALL_PAIRS,
+                    producer_ran(
+                        &c.summary.all_producer_pairs,
+                        &c.summary.all_producer_cold,
+                        &name,
+                    ),
+                    c.summary.all_producer_cold.get(&name),
+                    c.summary.all_producer_warm.get(&name),
+                ),
+                (
+                    INCREMENTAL_PAIRS,
+                    producer_ran(&c.summary.producer_pairs, &c.summary.producer_cold, &name),
+                    c.summary.producer_cold.get(&name),
+                    c.summary.producer_warm.get(&name),
+                ),
+            ] {
+                s.push_str(&format!(
+                    "| `{ver}` | {name} | {scope} | {ran} | {} | {} |\n",
+                    opt_wall(cold),
+                    opt_wall(warm),
+                ));
+            }
+        }
+        for (scope, cold, warm) in [
+            (
+                ALL_PAIRS,
+                &c.summary.all_cambium_cold,
+                &c.summary.all_cambium_warm,
+            ),
+            (
+                INCREMENTAL_PAIRS,
+                &c.summary.cambium_cold,
+                &c.summary.cambium_warm,
+            ),
+        ] {
             s.push_str(&format!(
-                "| `{ver}` | {name} | {ran} | {} | {} |\n",
-                opt_wall(c.summary.producer_cold.get(&name)),
-                opt_wall(c.summary.producer_warm.get(&name)),
+                "| `{ver}` | **cambium** | {scope} | {} | {} | {} |\n",
+                cold.samples,
+                wall(cold),
+                wall(warm),
             ));
         }
-        s.push_str(&format!(
-            "| `{ver}` | **cambium** | {} | {} | {} |\n",
-            c.summary.cambium_cold.samples,
-            wall(&c.summary.cambium_cold),
-            wall(&c.summary.cambium_warm),
-        ));
     }
+    let cold_rebuilds: usize = compares.iter().map(|c| c.summary.cold_rebuild_pairs).sum();
+    s.push_str(&format!(
+        "\n**Quote the `{ALL_PAIRS}` rows.** They cover every pair compared, \
+         including the {globals} where cambium fell back to `//...` and did no \
+         incremental work at all — which is what a user running cambium over \
+         this history actually waits for. The `{INCREMENTAL_PAIRS}` rows drop \
+         those; they are the rows that belong with the precision and class \
+         numbers above, because those are computed over exactly the same \
+         pairs, but read on their own they flatter cambium — an average over \
+         the pairs it is fast on. {cold_rebuilds} of the incremental pairs \
+         re-indexed the whole repository (the dirty set was too large to \
+         splice), so their *warm* is a cold number under a warm label.\n\n"
+    ));
     s.push_str(
-        "\ncambium's *cold* is a full index build from `bazel query //...`; its \
+        "cambium's *cold* is a full index build from `bazel query //...`; its \
          *warm* is an update against the published baseline, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
          hashes; Tango has no warm mode, so its cell is `n/a`. *pairs* is how \
@@ -842,6 +989,9 @@ fn render_compare(r: &RepoResults) -> String {
          profile Tango runs on the first 10 pairs only, while cambium and \
          bazel-diff run on all of them.\n\n",
     );
+
+    // ---- globals ----
+    s.push_str(&render_globals(compares));
 
     // ---- classes ----
     s.push_str("#### Disagreements by class\n\n");
@@ -1299,11 +1449,54 @@ mod tests {
             seed: 0,
             oracle_k: 100,
             profile: "full".into(),
-            pairs: vec![pair],
+            pairs: vec![pair, global_pair()],
             summary: CompareSummary::default(),
         };
         c.summarise();
         c
+    }
+
+    /// A globally invalidated pair as the driver records one: cambium answered
+    /// `//...` — 24 000 rule targets — in 30 ms, and bazel-diff still ran, took
+    /// 100 s and found 40 targets precisely.
+    fn global_pair() -> PairComparison {
+        PairComparison {
+            schema: 3,
+            base: "gb".into(),
+            head: "gh".into(),
+            kind: "adjacent".into(),
+            category: None,
+            cambium: CambiumRun {
+                global: true,
+                global_reason: Some("`MODULE.bazel` matches an invalidator".into()),
+                universe: 24_000,
+                cold_wall_ms: 30,
+                warm_wall_ms: 30,
+                ..Default::default()
+            },
+            producers: vec![ProducerComparison {
+                name: "bazel-diff-rust".into(),
+                version: "v46.1.0".into(),
+                labels: 40,
+                cold_wall_ms: 100_000,
+                warm_wall_ms: Some(50_000),
+                precision: 1.0,
+                depth_agreement: None,
+                dropped_file_targets: 0,
+                cambium_only: 0,
+                producer_only: 0,
+                counts: BTreeMap::new(),
+                examples: Vec::new(),
+                cambium_only_reasons: BTreeMap::new(),
+                pass: true,
+                error: None,
+            }],
+            bzl_oracle: None,
+            oracle: None,
+            recall: 1.0,
+            global: true,
+            pass: true,
+        }
     }
 
     fn bazel_results() -> RepoResults {
@@ -1371,6 +1564,62 @@ mod tests {
     }
 
     #[test]
+    fn the_timings_table_gives_both_populations_and_says_which_to_quote() {
+        let s = render_repo_section(&bazel_results(), None);
+        assert!(
+            s.contains("| `7.4.1` | **cambium** | all pairs | 2 |"),
+            "the all-pairs row covers the global too: {s}"
+        );
+        assert!(
+            s.contains("| `7.4.1` | **cambium** | incremental | 1 |"),
+            "the incremental row drops it: {s}"
+        );
+        assert!(
+            s.contains("| `7.4.1` | bazel-diff-rust | all pairs | 2 |"),
+            "and so does the producer, which ran on the global: {s}"
+        );
+        assert!(
+            s.contains("| `7.4.1` | bazel-diff-rust | incremental | 1 |"),
+            "{s}"
+        );
+        assert!(
+            s.contains("**Quote the `all pairs` rows.**"),
+            "the prose names the published number: {s}"
+        );
+        assert!(
+            s.contains("1 where cambium fell back to `//...`"),
+            "and says how many pairs that is: {s}"
+        );
+    }
+
+    #[test]
+    fn the_globals_table_prices_the_over_approximation() {
+        let s = render_repo_section(&bazel_results(), None);
+        assert!(s.contains("#### Globals"), "{s}");
+        assert!(
+            s.contains("| `7.4.1` | 1 | 24,000 | bazel-diff-rust | 40 | 100.0 s | 30 ms / 30 ms |"),
+            "cambium's //... against the precise set, with both walls: {s}"
+        );
+
+        // A run with no global pair says so rather than printing an empty
+        // table.
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.pairs.retain(|p| !p.global);
+            c.summarise();
+        }
+        let s = render_repo_section(&r, None);
+        assert!(
+            s.contains("No compared pair was globally invalidated."),
+            "{s}"
+        );
+        assert!(
+            s.contains("| `7.4.1` | **cambium** | all pairs | 1 |"),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn a_repo_with_only_a_replay_still_renders() {
         let r = RepoResults::new("envoy").with_replay(Some(replay("")));
         let s = render_repo_section(&r, None);
@@ -1431,7 +1680,7 @@ mod tests {
     #[test]
     fn the_top_table_links_each_repo_to_its_section() {
         let row = top_row(&bazel_results());
-        assert_eq!(row.pairs, 1);
+        assert_eq!(row.pairs, 2, "the global pair is a compared pair");
         assert_eq!(row.failures, 0);
         assert_eq!(row.bazel_used, "7.4.1, 9.0.0");
         assert_eq!(row.replay_p50_ms, 80, "non-global commits only");
@@ -1442,8 +1691,8 @@ mod tests {
         assert!(t.contains("24,519"), "{t}");
         assert!(t.contains("bazel-diff-rust 90.0%"), "{t}");
         assert!(
-            t.contains("bazel-diff-rust 90.0 s vs 180 ms (500×)"),
-            "producer cold against cambium warm: {t}"
+            t.contains("bazel-diff-rust 100.0 s vs 180 ms (556×)"),
+            "producer cold against cambium warm, over all pairs: {t}"
         );
         assert!(
             t.contains("1× `tools/build_defs"),

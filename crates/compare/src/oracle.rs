@@ -371,6 +371,51 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     Ok(Batch { labels, partial })
 }
 
+/// Every rule target `//...` names, at whatever revision the workspace is on.
+///
+/// This is the *size of cambium's answer* on a globally invalidated pair: it
+/// says `//...`, and `//...` is this set. Without the number the report can
+/// only say "cambium went global", which hides the thing a reader actually
+/// wants — bazel-diff found M targets, cambium is asking the user to build N,
+/// and N/M is what a global costs.
+///
+/// It doubles as the rule filter for that pair's producers
+/// ([`crate::producer::ProducerRun::restrict_to_rule_set`]), so the one query
+/// serves both and the two sides stay in one vocabulary.
+///
+/// Exit 3 is accepted for the reason [`query_rdeps`] gives: a partial universe
+/// under `--keep_going` under-counts N, which understates cambium's
+/// over-approximation rather than flattering it.
+pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
+    let out = bazel
+        .command("query")
+        .args([
+            "kind(rule, //...)",
+            "--output=label",
+            "--order_output=no",
+            "--keep_going",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ])
+        .output()
+        .context("spawning bazel query kind(rule, //...)")?;
+    let partial = out.status.code() == Some(3);
+    anyhow::ensure!(
+        out.status.success() || partial,
+        "bazel query kind(rule, //...) failed with {}\n{}",
+        out.status,
+        crate::producer::tail(&String::from_utf8_lossy(&out.stderr), 20)
+    );
+    let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
+    if partial {
+        tracing::warn!(
+            labels = labels.len(),
+            "the universe query exited 3 under --keep_going; the global answer size is a lower bound"
+        );
+    }
+    Ok(labels)
+}
+
 /// One label per line, blank lines dropped.
 pub fn parse_labels(out: &str) -> BTreeSet<String> {
     out.lines()

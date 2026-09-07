@@ -86,6 +86,11 @@ $ cambi corpus compare bazel --kind adjacent --kind pr --kind stress \
     --oracle-sample 100 --bazel-version 8.x --cap 40
 ```
 
+`--cap` bounds the tail of a run; it defaults to 40 under the full profile
+(`cambium_corpus::profile::FULL_PAIR_CAP`, which `corpus all` uses too). The
+pair selection is deterministic, so raising the cap only ever appends pairs to
+the same list, and the quick profile's own cap of 50 is never shaved down by it.
+
 `--bazel-version` (`7.x`, `8.x`, `9.x`, ...) drives bazelisk via
 `USE_BAZEL_VERSION` and suffixes every result file and the `--output_base`, so
 a run under a pinned Bazel neither overwrites nor is served from another one's.
@@ -270,6 +275,48 @@ Precision against bazel-diff and Tango (`|producer ∩ cambium| / |cambium|`) is
 reported per producer but is informational, not gating — see the disagreement
 table above for why cambium is expected to report more than either tool
 sometimes.
+
+## What the timings measure
+
+Every compared pair is timed, including the ones where cambium answers `//...`.
+That is deliberate, and it was not always so: the driver used to skip the
+producers entirely on a globally invalidated pair, which left the timings drawn
+over precisely the pairs cambium is fast on. A speedup averaged over a
+hand-picked half of the history is advocacy, not measurement, so each repo
+section now reports two populations and says which to quote:
+
+- **all pairs** — every pair compared. This is the published number. It
+  includes the pairs where cambium fell back to `//...` and did no incremental
+  work, because that fallback is part of what a user gets.
+- **incremental** — the pairs cambium answered with a walk. These are the rows
+  that belong next to precision, the class counts and recall, since those are
+  computed over exactly this set; read alone they flatter cambium.
+
+Two counts sit alongside them. `globals` is how many pairs went to `//...`.
+`cold_rebuild_pairs` is how many *incremental* pairs re-indexed the whole
+repository because the dirty set was too large to splice: those stay in every
+statistic — they have a head index and a classified answer — but their *warm*
+is a cold number under a warm label, and the report says how many there are.
+
+### Globals
+
+On a global pair cambium is sound and useless: `//...` contains every answer,
+so nothing can be classified and nothing can be disproved, and the pair enters
+no precision mean, no class total and no recall. The producers run anyway, and
+the **Globals** table prices what the fallback costs:
+
+- *cambium `//...`* — how many rule targets `//...` names at head, from one
+  `kind(rule, //...)` query. That is the answer cambium gave.
+- *its precise set* — how many targets the producer found on the same pair.
+  The ratio between the two is the over-approximation handed to the user.
+- the wall columns — what each tool charged to produce its answer. cambium's
+  is small, which is the point: it is fast because it did not do the work.
+
+Neither oracle runs there, and neither can. The `rdeps` oracle samples its
+roots from cambium's direct set, which a global report leaves empty; the `.bzl`
+load-closure oracle checks `rbuildfiles` against the dirty packages cambium
+named, and a global names none, so running it would report every package as
+missed.
 
 ## Results
 

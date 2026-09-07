@@ -30,6 +30,17 @@ pub const QUICK_REPLAY_RANGE: usize = 50;
 /// Pairs a quick comparison runs, across all kinds.
 pub const QUICK_PAIR_CAP: usize = 50;
 
+/// Pairs a *full* comparison runs by default — the `--cap` a published run
+/// gets when nobody passes one.
+///
+/// It is a cap on the tail of an EC2 job, not a statement about the pair set:
+/// the selection is deterministic, so raising it only ever adds pairs to the
+/// end of the same list. Forty rather than twenty because the timing rows now
+/// cover globally invalidated pairs too (see
+/// `cambium_compare::threeway::summarise`), and a sample that has to carry
+/// both an incremental and an all-pairs distribution needs the room.
+pub const FULL_PAIR_CAP: usize = 40;
+
 /// Pairs a quick comparison runs Tango on: the first this many, in the pair
 /// file's own order. bazel-diff and cambium still run on all of them.
 pub const QUICK_TANGO_PAIRS: usize = 10;
@@ -149,5 +160,14 @@ mod tests {
         assert_eq!(Profile::Quick.tango_pairs(), Some(QUICK_TANGO_PAIRS));
         assert_eq!(Profile::Full.pair_cap(), None);
         assert_eq!(Profile::Full.tango_pairs(), None);
+    }
+
+    #[test]
+    fn a_full_run_compares_forty_pairs_by_default() {
+        assert_eq!(FULL_PAIR_CAP, 40);
+        // The quick profile's own cap is larger, and `do_compare` takes the
+        // max of the two, so a quick run is never shaved down by the full
+        // default.
+        assert_eq!(FULL_PAIR_CAP.max(QUICK_PAIR_CAP), QUICK_PAIR_CAP);
     }
 }

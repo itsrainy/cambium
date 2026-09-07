@@ -163,6 +163,33 @@ pub struct CambiumRun {
     pub dirty_packages: usize,
     pub queried_targets: usize,
     pub changed_files: usize,
+    /// The engine re-indexed the whole repository on this pair
+    /// (`stats.cold_rebuild`): the dirty set was too large to splice, so the
+    /// warm number here is a cold number wearing a warm label. The pair is
+    /// still incremental — it has a head index and a classified answer — so it
+    /// stays in every statistic, but it is counted separately
+    /// ([`CompareSummary::cold_rebuild_pairs`]) because a mean that hides them
+    /// is a mean of two different operations.
+    #[serde(default)]
+    pub cold_rebuild: bool,
+    /// How many rule targets `//...` names at head. Recorded only on a
+    /// `global` pair, where it *is* cambium's answer: the report quotes it
+    /// against the producer's precise set size, so a global's cost to the user
+    /// is a number and not a shrug. 0 when the universe could not be counted.
+    #[serde(default)]
+    pub universe: usize,
+}
+
+impl CambiumRun {
+    /// How many targets cambium told the user to build: the universe on a
+    /// global pair, the affected set otherwise.
+    pub fn answer_size(&self) -> usize {
+        if self.global {
+            self.universe
+        } else {
+            self.affected
+        }
+    }
 }
 
 /// cambium against one producer, on one pair.
@@ -224,8 +251,12 @@ pub struct PairComparison {
     pub bzl_oracle: Option<BzlOracleResult>,
     /// Recall against the oracle; must be 1.0.
     pub recall: f64,
-    /// cambium answered `//...`: no producer ran, nothing was classified, and
-    /// the pair is excluded from the precision means (see [`summarise`]).
+    /// cambium answered `//...`. The producers and the universe query still
+    /// ran — what a global costs the user is the whole reason to record one —
+    /// but nothing was classified, so the pair is excluded from the precision,
+    /// class and recall aggregates and from the *incremental* wall-clock
+    /// series. It is included in the all-pairs series and in
+    /// [`GlobalStats`]. See [`summarise`].
     #[serde(default)]
     pub global: bool,
     pub pass: bool,
@@ -245,15 +276,51 @@ pub struct WallStats {
     pub p90_ms: u64,
 }
 
+/// What the globally invalidated pairs of a run cost.
+///
+/// Kept apart from every other number in the summary because a global is not a
+/// disagreement and not a failure — cambium's `//...` is a superset of any
+/// answer — but it *is* work the user pays for, and a timings table drawn only
+/// over the pairs cambium is fast on would be advocacy rather than
+/// measurement.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GlobalStats {
+    pub pairs: usize,
+    /// Mean size of cambium's answer on those pairs: the `//...` universe.
+    pub mean_cambium_labels: f64,
+    /// Mean size of the *precise* answer each producer found there. The gap
+    /// between this and `mean_cambium_labels` is the over-approximation a
+    /// global hands the user.
+    pub mean_producer_labels: BTreeMap<String, f64>,
+    pub cambium_cold: WallStats,
+    pub cambium_warm: WallStats,
+    pub producer_cold: BTreeMap<String, WallStats>,
+    pub producer_warm: BTreeMap<String, WallStats>,
+}
+
+impl GlobalStats {
+    pub fn is_empty(&self) -> bool {
+        self.pairs == 0
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CompareSummary {
     pub pairs: usize,
     pub passed: usize,
     /// Pairs on which cambium answered `//...`. They pass by construction and
-    /// contribute to no precision, class or wall-clock statistic, so a corpus
-    /// full of `MODULE.bazel` bumps cannot flatter (or ruin) the numbers.
+    /// contribute to no precision, class or recall statistic — a corpus full
+    /// of `MODULE.bazel` bumps cannot flatter (or ruin) the soundness numbers
+    /// — but their wall times *are* counted, in the `all_*` series and in
+    /// [`CompareSummary::global_stats`].
     #[serde(default)]
     pub globals: usize,
+    /// Pairs where the engine gave up on splicing and re-indexed the whole
+    /// repository (`stats.cold_rebuild`). They are ordinary incremental pairs
+    /// in every aggregate; the count is here so a warm p50 that drifted can be
+    /// read against how many of its samples were secretly cold.
+    #[serde(default)]
+    pub cold_rebuild_pairs: usize,
     /// Total labels in each disagreement class, over every pair and producer.
     pub by_class: BTreeMap<String, usize>,
     /// Mean precision per producer.
@@ -263,7 +330,10 @@ pub struct CompareSummary {
     /// The `.bzl` load-closure oracle, rolled up. `missing_packages` must be 0.
     #[serde(default, skip_serializing_if = "BzlOracleSummary::is_empty")]
     pub bzl_oracle: BzlOracleSummary,
-    /// Cold and warm wall distributions per producer.
+    /// Cold and warm wall distributions per producer, over the **incremental**
+    /// pairs: the ones cambium answered with a walk. Every precision, class
+    /// and recall number in this summary is taken over the same set, so these
+    /// are the walls that go with them.
     pub producer_cold: BTreeMap<String, WallStats>,
     pub producer_warm: BTreeMap<String, WallStats>,
     pub cambium_cold: WallStats,
@@ -274,6 +344,26 @@ pub struct CompareSummary {
     /// an average over.
     #[serde(default)]
     pub producer_pairs: BTreeMap<String, usize>,
+    /// The same four distributions over **every** compared pair, globals
+    /// included. This is the honest headline: it is what a user running
+    /// cambium over this repository's history actually waits for, including
+    /// the commits where cambium has nothing clever to say. The report quotes
+    /// it first.
+    #[serde(default)]
+    pub all_producer_cold: BTreeMap<String, WallStats>,
+    #[serde(default)]
+    pub all_producer_warm: BTreeMap<String, WallStats>,
+    #[serde(default)]
+    pub all_cambium_cold: WallStats,
+    #[serde(default)]
+    pub all_cambium_warm: WallStats,
+    /// How many pairs of any kind each producer ran on.
+    #[serde(default)]
+    pub all_producer_pairs: BTreeMap<String, usize>,
+    /// The globals on their own: what cambium's `//...` costs against the
+    /// precise answer the producers found.
+    #[serde(default, skip_serializing_if = "GlobalStats::is_empty")]
+    pub global_stats: GlobalStats,
     pub pass: bool,
 }
 
@@ -356,6 +446,21 @@ pub fn wall_stats(mut ms: Vec<u64>) -> WallStats {
 
 /// Rolls the per-pair results up. Pure, so the arithmetic is testable without
 /// a repository.
+///
+/// Two wall-clock series come out of this, and the difference between them is
+/// the point:
+///
+/// - the **incremental** series (`cambium_cold`, `producer_cold`, ...) covers
+///   the pairs cambium answered with a walk. It is the series that belongs
+///   next to precision and the class counts, because those are computed over
+///   exactly those pairs.
+/// - the **all-pairs** series (`all_*`) covers every pair compared, including
+///   the ones where cambium fell back to `//...`. Nothing is excluded from it,
+///   which is why it is the number the report quotes first.
+///
+/// Soundness is unchanged: a global pair enters no precision mean, no class
+/// total and no recall, because there is nothing there to be right or wrong
+/// about — `//...` contains everything by construction.
 pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
     let mut s = CompareSummary {
         pairs: pairs.len(),
@@ -368,12 +473,43 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
     let mut precisions: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut cold: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut warm: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut all_cold: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut all_warm: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut g_cold: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut g_warm: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut g_labels: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut g_cambium: Vec<usize> = Vec::new();
     for p in pairs {
         if p.pass {
             s.passed += 1;
         }
+        if p.cambium.cold_rebuild {
+            s.cold_rebuild_pairs += 1;
+        }
+        // Every pair's walls, whatever cambium did with it.
+        for pr in p.producers.iter().filter(|pr| pr.error.is_none()) {
+            *s.all_producer_pairs.entry(pr.name.clone()).or_default() += 1;
+            all_cold
+                .entry(pr.name.clone())
+                .or_default()
+                .push(pr.cold_wall_ms);
+            if let Some(w) = pr.warm_wall_ms {
+                all_warm.entry(pr.name.clone()).or_default().push(w);
+            }
+        }
         if p.global {
             s.globals += 1;
+            g_cambium.push(p.cambium.answer_size());
+            for pr in p.producers.iter().filter(|pr| pr.error.is_none()) {
+                g_labels.entry(pr.name.clone()).or_default().push(pr.labels);
+                g_cold
+                    .entry(pr.name.clone())
+                    .or_default()
+                    .push(pr.cold_wall_ms);
+                if let Some(w) = pr.warm_wall_ms {
+                    g_warm.entry(pr.name.clone()).or_default().push(w);
+                }
+            }
             continue;
         }
         s.min_recall = s.min_recall.min(p.recall);
@@ -421,8 +557,58 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
     let timed = || pairs.iter().filter(|p| !p.global);
     s.cambium_cold = wall_stats(timed().map(|p| p.cambium.cold_wall_ms).collect());
     s.cambium_warm = wall_stats(timed().map(|p| p.cambium.warm_wall_ms).collect());
+    s.all_producer_cold = all_cold
+        .into_iter()
+        .map(|(k, v)| (k, wall_stats(v)))
+        .collect();
+    s.all_producer_warm = all_warm
+        .into_iter()
+        .map(|(k, v)| (k, wall_stats(v)))
+        .collect();
+    s.all_cambium_cold = wall_stats(pairs.iter().map(|p| p.cambium.cold_wall_ms).collect());
+    s.all_cambium_warm = wall_stats(pairs.iter().map(|p| p.cambium.warm_wall_ms).collect());
+    s.global_stats = GlobalStats {
+        pairs: s.globals,
+        mean_cambium_labels: mean(g_cambium.iter().map(|n| *n as f64)),
+        mean_producer_labels: g_labels
+            .iter()
+            .map(|(k, v)| (k.clone(), mean(v.iter().map(|n| *n as f64))))
+            .collect(),
+        cambium_cold: wall_stats(
+            pairs
+                .iter()
+                .filter(|p| p.global)
+                .map(|p| p.cambium.cold_wall_ms)
+                .collect(),
+        ),
+        cambium_warm: wall_stats(
+            pairs
+                .iter()
+                .filter(|p| p.global)
+                .map(|p| p.cambium.warm_wall_ms)
+                .collect(),
+        ),
+        producer_cold: g_cold
+            .into_iter()
+            .map(|(k, v)| (k, wall_stats(v)))
+            .collect(),
+        producer_warm: g_warm
+            .into_iter()
+            .map(|(k, v)| (k, wall_stats(v)))
+            .collect(),
+    };
     s.pass = s.passed == s.pairs && s.min_recall >= 1.0;
     s
+}
+
+/// The arithmetic mean, and 0.0 over nothing.
+fn mean(v: impl Iterator<Item = f64>) -> f64 {
+    let (sum, n) = v.fold((0.0, 0usize), |(s, n), x| (s + x, n + 1));
+    if n == 0 {
+        0.0
+    } else {
+        sum / n as f64
+    }
 }
 
 /// Classifies the symmetric difference of the two label sets.
@@ -604,16 +790,33 @@ pub fn compare_pair_with(
         dirty_packages: report.stats.dirty_packages,
         queried_targets: report.stats.queried_targets,
         changed_files: report.stats.changed_files,
+        cold_rebuild: report.stats.cold_rebuild,
+        universe: 0,
     };
     // A globally invalidated pair (MODULE.bazel moved, a `.bazelrc` changed,
     // anything on the invalidator list) has no head index and no affected set:
     // cambium's answer is `//...`. There is nothing to classify — every label
     // any producer could name is trivially inside "everything" — and nothing
-    // the oracle could disprove, so the pair is recorded as global, marked
-    // passing, and the run carries on. The producers are **skipped**: on a
-    // global pair each one costs two whole-repository `bazel query` passes to
-    // produce numbers that no classification consumes, and the timing series
-    // would be dominated by exactly the pairs cambium does not do work for.
+    // an oracle could disprove, so the pair enters no precision, class or
+    // recall aggregate, is marked passing, and the run carries on.
+    //
+    // The producers **do** run. Skipping them was the comfortable choice and
+    // the dishonest one: it left the timing rows drawn over precisely the
+    // pairs cambium is fast on, so the published speedup was an average over a
+    // hand-picked half of the history. Here each producer pays its usual two
+    // whole-repository query passes and the pair records what it cost, what
+    // precise answer it found, and — from one `kind(rule, //...)` query — how
+    // many targets cambium's `//...` is asking the user to build instead.
+    //
+    // The two oracles do not run, and cannot:
+    //
+    // - the rdeps oracle samples its roots from cambium's *direct* set, which
+    //   a global report leaves empty; with no roots there is no query to make,
+    //   and any answer it did produce would be contained in `//...` by
+    //   construction, proving nothing.
+    // - the `.bzl` load-closure oracle checks `rbuildfiles` against the dirty
+    //   packages cambium named, and a global names none — running it would
+    //   report every package as missed, which is the opposite of the truth.
     let Some(index) = out.index.as_ref() else {
         let reason = report
             .global_reason
@@ -621,8 +824,93 @@ pub fn compare_pair_with(
             .unwrap_or_else(|| "globally invalidated".to_string());
         tracing::info!(
             %reason,
-            "the pair is globally invalidated: cambium answers //..., so producers and the oracle are skipped"
+            producers = producers.len(),
+            "the pair is globally invalidated: cambium answers //..., and the producers run anyway so the cost of that is recorded"
         );
+        // A failure here must not take the run down: the universe is a
+        // reporting number, not a gate, and a repository whose `//...` will
+        // not fully load still has a pair worth timing.
+        let universe = match crate::oracle::rule_universe(&engine.bazel) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "could not count the rule universe; the global pair records 0"
+                );
+                BTreeSet::new()
+            }
+        };
+        // Only when there is a producer to hand it to: a comparison run with
+        // none configured must not pay for a worktree nobody reads.
+        let base_wt = match producers.is_empty() {
+            true => None,
+            false => Some(BaseWorktree::create(
+                &checkout.dir,
+                &pair.base,
+                &opts.scratch,
+            )?),
+        };
+        let ctx = run_context(
+            engine,
+            &opts.scratch,
+            base_wt.as_ref().map_or(&checkout.dir, |w| w.path()),
+        );
+        let results = producers
+            .iter()
+            .map(
+                |p| match p.affected(&checkout.dir, &pair.base, &pair.head, &ctx) {
+                    Ok(mut run) => {
+                        run.restrict_to_rule_set(&universe);
+                        ProducerComparison {
+                            name: p.name().to_string(),
+                            version: p.version(),
+                            labels: run.labels.len(),
+                            cold_wall_ms: run.cold_wall.as_millis() as u64,
+                            warm_wall_ms: run.warm_wall.map(|d| d.as_millis() as u64),
+                            // Every label the producer named is inside `//...`, so
+                            // there is nothing for cambium to have missed. It is
+                            // recorded as 1.0 for the reader's sake and consumed
+                            // by nothing: `summarise` takes no precision from a
+                            // global pair.
+                            precision: 1.0,
+                            depth_agreement: None,
+                            dropped_file_targets: run.dropped_file_targets,
+                            cambium_only: 0,
+                            producer_only: 0,
+                            counts: BTreeMap::new(),
+                            examples: Vec::new(),
+                            cambium_only_reasons: BTreeMap::new(),
+                            pass: true,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            producer = p.name(),
+                            error = format!("{e:#}"),
+                            "producer failed on this global pair"
+                        );
+                        ProducerComparison {
+                            name: p.name().to_string(),
+                            version: p.version(),
+                            labels: 0,
+                            cold_wall_ms: 0,
+                            warm_wall_ms: None,
+                            precision: 1.0,
+                            depth_agreement: None,
+                            dropped_file_targets: 0,
+                            cambium_only: 0,
+                            producer_only: 0,
+                            counts: BTreeMap::new(),
+                            examples: Vec::new(),
+                            cambium_only_reasons: BTreeMap::new(),
+                            pass: true,
+                            error: Some(format!("{e:#}")),
+                        }
+                    }
+                },
+            )
+            .collect();
         return Ok(PairComparison {
             schema: cambium_engine::report::SCHEMA_VERSION,
             base: pair.base.clone(),
@@ -632,9 +920,10 @@ pub fn compare_pair_with(
             cambium: CambiumRun {
                 global: true,
                 global_reason: Some(reason),
+                universe: universe.len(),
                 ..cambium
             },
-            producers: Vec::new(),
+            producers: results,
             oracle: None,
             bzl_oracle: None,
             recall: 1.0,
@@ -1144,17 +1433,23 @@ mod tests {
         totals
     }
 
+    /// A globally invalidated pair as the driver now records one: cambium
+    /// answered `//...` (24 000 rule targets) and the producer still ran, took
+    /// 999 ms and found 40 targets precisely.
     fn global_pair(name: &str) -> PairComparison {
         let mut p = pair_comparison(name, 1.0, 999, 999, true);
-        p.producers.clear();
+        p.producers[0].labels = 40;
+        p.producers[0].counts.clear();
+        p.producers[0].cambium_only = 0;
         p.cambium.global = true;
         p.cambium.global_reason = Some("MODULE.bazel".into());
+        p.cambium.universe = 24_000;
         p.global = true;
         p
     }
 
     #[test]
-    fn a_global_pair_is_counted_apart_and_leaves_the_statistics_alone() {
+    fn a_global_pair_is_counted_apart_and_leaves_the_soundness_numbers_alone() {
         let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), global_pair("2")]);
         assert_eq!((s.pairs, s.passed, s.globals), (2, 2, 1));
         assert!(s.pass, "answering //... is not a failure");
@@ -1163,10 +1458,112 @@ mod tests {
             "the global pair contributes no precision"
         );
         assert_eq!(
-            s.cambium_cold.samples, 1,
-            "and no wall time: cambium did not do the work"
+            s.by_class["cambium_extra_select"], 2,
+            "and no classified labels"
         );
-        assert_eq!(s.by_class["cambium_extra_select"], 2);
+        assert_eq!(
+            s.producer_pairs["bazel-diff-rust"], 1,
+            "the incremental producer count skips it"
+        );
+    }
+
+    #[test]
+    fn a_global_pair_still_pays_for_its_producers_and_records_what_they_found() {
+        let g = global_pair("2");
+        assert_eq!(
+            g.producers.len(),
+            1,
+            "the producer ran: a global's cost is the thing being measured"
+        );
+        assert_eq!((g.producers[0].labels, g.cambium.universe), (40, 24_000));
+        assert!(g.producers[0].counts.is_empty(), "nothing was classified");
+
+        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), g]);
+        let gs = &s.global_stats;
+        assert_eq!(gs.pairs, 1);
+        assert_eq!(gs.mean_cambium_labels, 24_000.0);
+        assert_eq!(gs.mean_producer_labels["bazel-diff-rust"], 40.0);
+        assert_eq!(gs.producer_cold["bazel-diff-rust"].p50_ms, 999);
+        assert_eq!(gs.cambium_cold.p50_ms, 9_990, "999 * 10, as the fixture");
+        assert_eq!(gs.cambium_warm.p50_ms, 999);
+    }
+
+    #[test]
+    fn the_all_pairs_walls_include_the_globals_and_the_incremental_walls_do_not() {
+        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), global_pair("2")]);
+        assert_eq!(
+            (s.cambium_cold.samples, s.cambium_warm.samples),
+            (1, 1),
+            "the incremental series is over the walked pair only"
+        );
+        assert_eq!(
+            (s.all_cambium_cold.samples, s.all_cambium_warm.samples),
+            (2, 2),
+            "the all-pairs series hides nothing"
+        );
+        assert_eq!(s.producer_cold["bazel-diff-rust"].samples, 1);
+        assert_eq!(s.all_producer_cold["bazel-diff-rust"].samples, 2);
+        assert_eq!(s.all_producer_pairs["bazel-diff-rust"], 2);
+        // The global is the slow pair, so it can only move the p90 up.
+        assert!(
+            s.all_cambium_warm.p90_ms > s.cambium_warm.p90_ms,
+            "including the globals must not flatter cambium: {s:?}"
+        );
+    }
+
+    #[test]
+    fn a_cold_rebuild_pair_is_incremental_but_counted() {
+        let mut rebuilt = pair_comparison("2", 1.0, 100, 10, true);
+        rebuilt.cambium.cold_rebuild = true;
+        let s = summarise(&[pair_comparison("1", 1.0, 100, 10, true), rebuilt]);
+        assert_eq!(s.cold_rebuild_pairs, 1);
+        assert_eq!(
+            s.cambium_warm.samples, 2,
+            "it is not a global: it stays in every statistic"
+        );
+        assert_eq!(s.globals, 0);
+    }
+
+    #[test]
+    fn a_run_with_no_globals_carries_no_global_statistics() {
+        let s = summarise(&[pair_comparison("1", 1.0, 100, 10, true)]);
+        assert!(s.global_stats.is_empty());
+        assert_eq!(s.global_stats, GlobalStats::default());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("global_stats"),
+            "an empty table is left out of the JSON: {json}"
+        );
+    }
+
+    /// Every field added since the first `compare-*.json` was written has a
+    /// serde default, so the report can still read what is on the box.
+    #[test]
+    fn a_summary_written_before_the_all_pairs_series_still_parses() {
+        let old = r#"{
+            "pairs": 3, "passed": 3, "by_class": {}, "mean_precision": {},
+            "min_recall": 1.0, "producer_cold": {}, "producer_warm": {},
+            "cambium_cold": {"samples": 3, "p50_ms": 10, "p90_ms": 20},
+            "cambium_warm": {"samples": 3, "p50_ms": 5, "p90_ms": 8},
+            "pass": true
+        }"#;
+        let s: CompareSummary = serde_json::from_str(old).unwrap();
+        assert_eq!((s.pairs, s.globals, s.cold_rebuild_pairs), (3, 0, 0));
+        assert_eq!(s.all_cambium_cold, WallStats::default());
+        assert!(s.all_producer_pairs.is_empty());
+        assert!(s.global_stats.is_empty());
+
+        let pair = r#"{
+            "schema": 3, "base": "b", "head": "h", "kind": "adjacent",
+            "cambium": {"direct": 1, "affected": 2, "tests": 0, "global": false,
+                        "cold_wall_ms": 9, "warm_wall_ms": 4, "dirty_packages": 1,
+                        "queried_targets": 2, "changed_files": 1},
+            "producers": [], "recall": 1.0, "pass": true
+        }"#;
+        let p: PairComparison = serde_json::from_str(pair).unwrap();
+        assert!(!p.cambium.cold_rebuild);
+        assert_eq!(p.cambium.universe, 0);
+        assert_eq!(p.cambium.answer_size(), 2);
     }
 
     #[test]

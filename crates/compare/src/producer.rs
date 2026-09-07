@@ -86,6 +86,35 @@ impl ProducerRun {
         }
         self.dropped_file_targets += dropped;
     }
+
+    /// The same restriction, against an explicit set of rule labels rather
+    /// than an index.
+    ///
+    /// A *globally invalidated* pair has no head index — that is the whole
+    /// point of it — so [`ProducerRun::restrict_to_rules`] has nothing to ask.
+    /// The producers still run there (their cost, and the size of the precise
+    /// answer they found, are exactly what a global pair has to report), and
+    /// their answers still have to be counted in cambium's vocabulary, so the
+    /// rule universe comes from one `kind(rule, //...)` query instead
+    /// ([`crate::oracle::rule_universe`]).
+    ///
+    /// A main-repository label the universe does not name is a file target and
+    /// is dropped; an `@repo//...` label is kept, for the same reason
+    /// `restrict_to_rules` keeps a label the index does not know.
+    pub fn restrict_to_rule_set(&mut self, rules: &BTreeSet<String>) {
+        let mut dropped = 0usize;
+        self.labels.retain(|label| {
+            let keep = crate::oracle::is_external(label) || rules.contains(label);
+            if !keep {
+                dropped += 1;
+            }
+            keep
+        });
+        if let Some(d) = self.depths.as_mut() {
+            d.retain(|label, _| self.labels.contains(label));
+        }
+        self.dropped_file_targets += dropped;
+    }
 }
 
 /// One label, in the spelling every producer and cambium can be compared in.
@@ -463,6 +492,34 @@ mod tests {
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
             "unknown labels stay: they are a real disagreement"
+        );
+        assert_eq!(run.dropped_file_targets, 1);
+        assert_eq!(run.depths.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_rule_filter_also_works_from_a_bare_universe() {
+        // What a global pair has instead of an index: the answer to
+        // `kind(rule, //...)`.
+        let universe: BTreeSet<String> = ["//pkg:t".to_string()].into_iter().collect();
+        let mut run = ProducerRun {
+            labels: ["//pkg:t", "//pkg:a.txt", "@ext//:x"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            depths: Some(
+                [("//pkg:t", 0u32), ("//pkg:a.txt", 0)]
+                    .iter()
+                    .map(|(l, d)| (l.to_string(), *d))
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        run.restrict_to_rule_set(&universe);
+        assert_eq!(
+            run.labels.iter().cloned().collect::<Vec<_>>(),
+            vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
+            "external labels stay; a main-repo label //... does not name is a file"
         );
         assert_eq!(run.dropped_file_targets, 1);
         assert_eq!(run.depths.unwrap().len(), 1);
