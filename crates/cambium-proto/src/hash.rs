@@ -22,7 +22,7 @@ const ORDER_INSENSITIVE: &[&str] = &["tags", "visibility", "features"];
 /// `generator_location` is the `pkg/BUILD:line:col` of the macro call that
 /// instantiated the rule, so every rule below an inserted line in a BUILD file
 /// gets a new value on a commit that changed nothing about it. On the
-/// `bazel/bazel` corpus that alone produced thousands of `rule definition
+/// `bazel/bazel` subject that alone produced thousands of `rule definition
 /// changed` direct targets per line-shifting commit. bazel-diff drops it
 /// (`DEFAULT_IGNORED_ATTRS`) and so does Uber's Tango (`sourcehasher.go`);
 /// cambium now does too.

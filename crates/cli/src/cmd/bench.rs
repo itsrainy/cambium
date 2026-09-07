@@ -441,7 +441,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             common,
         } => {
             let preset = preset_of(&subject, "stages")?;
-            let dir = stage_dir(ctx, &subject, &common, "stages")?;
+            let dir = stage_dir(&subject, &common, "stages")?;
             let opts = cambium_bench::runner::RunOptions {
                 presets: vec![preset],
                 stages,
@@ -467,7 +467,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             common,
         } => {
             let preset = preset_of(&subject, "sweep")?;
-            let dir = stage_dir(ctx, &subject, &common, "sweep")?;
+            let dir = stage_dir(&subject, &common, "sweep")?;
             let values = values
                 .iter()
                 .map(|v| parse_size(v))
@@ -512,8 +512,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
 /// `bench-results/<subject>/<workload>/` for a stage benchmark, which needs no
 /// checkout and so does not go through [`Run::open`].
-fn stage_dir(ctx: &Context, subject: &str, c: &Common, workload: &str) -> Result<PathBuf> {
-    let _ = ctx;
+fn stage_dir(subject: &str, c: &Common, workload: &str) -> Result<PathBuf> {
     let id = subject.replace(':', "-");
     let dir = cambium_bench::compare::absolute(&c.results_dir)
         .join(id)

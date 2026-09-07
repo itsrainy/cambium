@@ -36,7 +36,7 @@ pub struct BazelConfig {
     pub extra_query_flags: Vec<String>,
     /// Startup options placed before the command word (`--output_base=...`,
     /// `--bazelrc=...`). They choose *which server* answers, not what the
-    /// graph is, so they are excluded from the config hash: a corpus run on a
+    /// graph is, so they are excluded from the config hash: a benchmark run on a
     /// different machine, with a different output base, still shares the
     /// lineage.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -223,11 +223,11 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             // Where an incremental re-query of N packages costs about what a
-            // cold `//...` re-index costs, measured on the corpus replays:
+            // cold `//...` re-index costs, measured on the history workloads:
             // the crossover is ~450 packages on `bazel`, ~620 on `apollo`,
             // ~210 on `sourcegraph` and beyond the whole repository on
             // `envoy` (whose cold build is 90 s). 500 sits in the middle of
-            // that spread and below the package count of every corpus
+            // that spread and below the package count of every
             // repository, so it fires only on a genuinely repository-wide
             // diff.
             max_dirty_packages: 500,

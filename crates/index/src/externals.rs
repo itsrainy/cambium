@@ -57,7 +57,7 @@
 //! never fewer) and under-attribution is not, so anything unattributable —
 //! a main-repo label in a workspace-closure `.bzl` that no extension or repo
 //! rule reaches — is attributed to *every* repository the main repository
-//! defines. That is bounded (a handful of repositories on every corpus entry)
+//! defines. That is bounded (a handful of repositories on every subject)
 //! and still far short of global.
 //!
 //! # The soundness gap, stated plainly
@@ -1130,7 +1130,7 @@ mod tests {
     /// The precision question `bazel/bazel`'s `5c47f233..bfd201d1` raised: a
     /// version bump next to two extensions that between them name half a dozen
     /// repositories must name the one repository, not all of them. (What
-    /// widened that pair's answer was not this function but the input map —
+    /// widened that change set's answer was not this function but the input map —
     /// `//:extensions.bzl` calls `ctx.path(Label("//:MODULE.bazel"))`, so
     /// every repository it defines really is declared to depend on the file.)
     #[test]

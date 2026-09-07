@@ -509,7 +509,7 @@ impl<'a> IndexRef<'a> {
 
     /// The repositories a changed main-repo path feeds.
     ///
-    /// Linear in the number of stored patterns, which is tens on every corpus
+    /// Linear in the number of stored patterns, which is tens on every subject
     /// entry — a prefix match cannot be answered by binary search, and the
     /// alternative (a trie) would not pay for itself at this size.
     pub fn repos_for_path(&self, path: &str) -> Vec<u32> {
