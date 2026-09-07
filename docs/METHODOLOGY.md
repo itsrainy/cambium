@@ -39,7 +39,7 @@ precision; see [What is not measured](#what-is-not-measured).
 
 | oracle | question it answers | how |
 |---|---|---|
-| reverse-dependency | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision. cambium's answer must be a superset. Runs on every incremental change set. |
+| reverse-dependency | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path that belongs to a package at head, batched by command-line length and unioned. cambium's answer must be a superset. A file *deleted* at head has no label to name, so its consumers are read from the base index's file rows instead and must appear in cambium's answer by label or by package. Runs on every incremental change set; `--oracle-sample N` caps the labels queried and is an escape hatch for enormous subjects, not a mode a published number may use. |
 | rebuild | is the incremental updater exact? | after a history run, a cold index built at the pin is diffed node by node, edge by edge and rule hash by rule hash against the index the history produced. Any difference fails. |
 | load | is the static `.bzl` load closure complete? | on every change set touching a `.bzl`, Bazel's `rbuildfiles` must be a subset of the packages cambium dirtied. |
 
