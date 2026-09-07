@@ -183,10 +183,45 @@ impl RunContext {
     }
 
     /// A child process carrying this context's environment.
+    ///
+    /// Stdin is always `/dev/null` and `CI=1` rides along unless the caller's
+    /// own environment already sets `CI` — see
+    /// [`Self::apply_noninteractive`] for why.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut cmd = Command::new(program);
         cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        Self::apply_noninteractive(&mut cmd, &self.env);
         cmd
+    }
+
+    /// Makes `cmd` unable to block on a prompt: stdin is nulled, and `CI=1`
+    /// is set unless `env` already names `CI`.
+    ///
+    /// A producer never has a terminal to prompt against — it runs
+    /// unattended, in a batch of hundreds of pairs — but some of them assume
+    /// one anyway. The Aspect CLI (`bazelisk` resolves to it wherever a
+    /// repository's `.bazeliskrc` pins `USE_BAZEL_VERSION=aspect/...`, as
+    /// sourcegraph/sourcegraph does) asks a one-time "Would you like to
+    /// continue?" confirmation the first time a workspace directory runs a
+    /// `//...:all-targets`-shaped query — exactly what bazel-diff's
+    /// `generate-hashes` issues — and records the answer in
+    /// `~/.aspect/cli/config.yaml` so later runs skip it. A producer's base
+    /// worktree is a fresh scratch directory on every corpus run, so it hits
+    /// this prompt new every time; reading it from a child process with no
+    /// controlling terminal gets an immediate EOF, which the Aspect CLI's
+    /// `readline`-based prompt renders as a literal `^D` and then fails the
+    /// whole query — the same shape of failure regardless of what actually
+    /// supplied the child's stdin, since it is never a terminal a human could
+    /// answer through. Nulling it removes any ambiguity about where that EOF
+    /// came from. `CI=1` is the general signal most such CLIs (Aspect's
+    /// plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the corpus
+    /// repositories) already check to skip interactive behaviour rather than
+    /// wait on a prompt no one will answer.
+    fn apply_noninteractive(cmd: &mut Command, env: &[(String, String)]) {
+        cmd.stdin(std::process::Stdio::null());
+        if !env.iter().any(|(k, _)| k == "CI") {
+            cmd.env("CI", "1");
+        }
     }
 
     pub fn scratch_file(&self, name: &str) -> PathBuf {
@@ -450,6 +485,37 @@ mod tests {
             .producer_startup_flags()
             .iter()
             .any(|f| f.contains("output_base")));
+    }
+
+    /// A producer's stdin must never be a terminal a prompt could wait on —
+    /// see [`RunContext::apply_noninteractive`]. `cat` on a null stdin sees
+    /// EOF immediately and produces no output.
+    #[test]
+    fn a_producer_command_gets_no_stdin() {
+        let out = ctx().command("cat").output().unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn a_producer_command_gets_ci_1_by_default() {
+        let out = ctx()
+            .command("sh")
+            .arg("-c")
+            .arg("echo $CI")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
+    }
+
+    /// An explicit `CI` in the context's own environment is not
+    /// second-guessed.
+    #[test]
+    fn an_explicit_ci_in_the_context_env_is_left_alone() {
+        let mut c = ctx();
+        c.env.push(("CI".into(), "false".into()));
+        let out = c.command("sh").arg("-c").arg("echo $CI").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "false");
     }
 
     #[test]
