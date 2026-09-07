@@ -77,17 +77,22 @@ plan uses quick; the published numbers come from a full run on EC2
 
 ## Running right now (logs in $CLAUDE_JOB_DIR/tmp = /Users/rainy/.claude/jobs/6b58f265/tmp)
 
-- **item4.sh** (started 10:34 EDT, log `item4.log`, `watch -n 10 tools/corpus-progress.sh`):
-  1. MISLABELLED: `tmp/cambi-old` already had item-4 code (agent rebuilt release at 09:39); this envoy range-50 run is an early "after". The true before is `envoy-before.sh` (binary from 15a46b1 in `tmp/old-target`, writes `corpus-results-before-true/envoy`, runs after ITEM4 DONE, log `envoy-before.log`). `corpus replay envoy
-     --range 50 --restart --results-dir corpus-results-before` → the envoy
-     "before" global count for the last 50 commits;
-  2. `cargo build --release` (item-4 binary);
-  3. `corpus all <id> --profile quick` for bazel, sourcegraph, envoy, apollo.
-  Prints `=== ITEM4 DONE`. Then: compare quick globals to the before column
-  above, regenerate reports, write the before/after into docs/CORPUS.md
-  Findings, commit.
-- Nothing else is running. Earlier lanes (A4, envoy driver, apollo agent,
-  item-4 agent) are finished or were stopped; their logs remain.
+- **No corpus runs.** The item-4 quick chain (item4.sh → envoy-before.sh →
+  bazel-rerun.sh) was stopped at 11:56 EDT: three agent worktrees compiling
+  on top of the compare pushed the load average past 300 and the timings were
+  meaningless. Partial results: envoy last-50 window with item 4 in
+  `corpus-results-before/envoy` (24 globals, none `.bzl`); sourcegraph quick
+  replay done (1 global) in `corpus-results/sourcegraph/quick`, its compare
+  incomplete. Bazel quick failed on the stale-blob bug fixed in d58aef1.
+  Leftover: sourcegraph tango worktrees under
+  `corpus-results/sourcegraph/quick/scratch/`; prune before rerunning.
+- **Three item agents** in `.claude/worktrees/` branches: item 2 (.bazelrc
+  allowlist), item 6 (max_dirty_packages), items 1+3 (repo-granular
+  externals). Each commits to its branch; merge order 2, 6, 1+3.
+- After they land and the machine is quiet: rebuild release, run
+  `corpus all <id> --profile quick` for bazel, sourcegraph, envoy, apollo
+  once for the after numbers, and the true-before envoy window with
+  `tmp/old-target/release/cambi` (15a46b1).
 
 ## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
 
