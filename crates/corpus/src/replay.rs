@@ -71,6 +71,12 @@ pub struct ColdBuild {
     pub rules: u32,
     pub tests: u32,
     pub lineage: String,
+    /// Whether Bazel loaded the whole repository for this build. A partial
+    /// cold build is not a failure — the incremental path drops exactly the
+    /// same packages — but every number above describes a repository minus
+    /// those packages, so it travels with them.
+    #[serde(default)]
+    pub partial: cambium_engine::inspect::PartialLoad,
     /// `cambi index stats` for the index, verbatim.
     pub stats: serde_json::Value,
 }
@@ -276,6 +282,7 @@ fn describe(index: &IndexData, wall_ms: u64) -> Result<ColdBuild> {
         rules: c.rules,
         tests: c.tests,
         lineage: cambium_engine::inspect::hex(&index.header.lineage),
+        partial: cambium_engine::inspect::PartialLoad::from(v),
         stats: serde_json::to_value(stats)?,
     })
 }

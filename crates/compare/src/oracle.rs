@@ -43,8 +43,47 @@ pub struct OracleResult {
     pub oracle_set: BTreeSet<String>,
     /// cambium's reverse closure over the head index from the same roots.
     pub cambium_set_from_roots: BTreeSet<String>,
-    /// `oracle_set - cambium_set_from_roots`: unsoundness. Empty means pass.
+    /// `oracle_set - cambium_set_from_roots`, restricted to the main
+    /// repository: unsoundness. Empty means pass.
     pub missing: Vec<String>,
+    /// The `@repo//...` half of that difference.
+    ///
+    /// `rdeps(//..., root)` takes `//...` as the *universe expression*, and
+    /// Bazel expands a universe to its transitive closure — so the answer
+    /// contains external targets that depend on the root, and on envoy that is
+    /// most of it (157 of the 173 labels on one pair, all `@quiche//...`).
+    /// cambium indexes `//...` by construction and can never contain them, so
+    /// counting them as unsoundness measures the vocabulary difference the
+    /// `bazeldiff_extra_external` class already names on the producer side.
+    /// They are kept here so the number is visible rather than silently
+    /// dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_external: Vec<String>,
+    /// The subset of [`OracleResult::missing`] that Bazel reaches only by
+    /// leaving `//...` and coming back.
+    ///
+    /// This is a real cambium miss and it fails the pair; the field says
+    /// *why*, so a failure that is the known external-route limitation is
+    /// distinguishable from one that is a walk bug. envoy has two instances at
+    /// the pin:
+    ///
+    /// ```text
+    /// somepath(//distribution/dockerhub:readme_json, //changelogs:changelogs)
+    ///   //distribution/dockerhub:readme_json
+    ///   @envoy_repo//:project
+    ///   //changelogs:changelogs
+    /// ```
+    ///
+    /// and `//source/common/quic:*` -> `@quiche//:*` ->
+    /// `@envoy//source/common/quic/platform:*` (envoy ships quiche's `BUILD`
+    /// file and points its `label_flag`s back at main-repo platform impls).
+    /// cambium stops at the first external node, so the reverse walk never
+    /// climbs back. Indexing external repositories is the precise answer; an
+    /// invalidator is the sound one where the changed path is nameable
+    /// (`changelogs/**` covers the first case), and there is no cheap
+    /// invalidator for the second.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_route: Vec<String>,
     /// Roots whose query failed (a broken package, say) and were skipped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_roots: Vec<String>,
@@ -66,8 +105,17 @@ impl OracleResult {
     }
 
     /// Fraction of the oracle's answer cambium reproduces. 1.0 is required.
+    ///
+    /// Over the main repository only, for the reason
+    /// [`OracleResult::missing_external`] gives.
     pub fn recall(&self) -> f64 {
-        recall(&self.cambium_set_from_roots, &self.oracle_set)
+        let theirs: BTreeSet<String> = self
+            .oracle_set
+            .iter()
+            .filter(|l| !is_external(l))
+            .cloned()
+            .collect();
+        recall(&self.cambium_set_from_roots, &theirs)
     }
 }
 
@@ -145,13 +193,66 @@ impl RdepsOracle {
             }
         }
         result.cambium_set_from_roots = walk_from_roots(head, &roots);
-        result.missing = result
+        let (missing, external): (Vec<String>, Vec<String>) = result
             .oracle_set
             .difference(&result.cambium_set_from_roots)
             .cloned()
-            .collect();
+            .partition(|l| !is_external(l));
+        result.missing = missing;
+        result.missing_external = external;
+        result.external_route = external_routes(bazel, &roots, &result.missing);
         Ok(result)
     }
+}
+
+/// A label outside the main repository, in either spelling Bazel uses.
+pub fn is_external(label: &str) -> bool {
+    label.starts_with('@') || label.starts_with("//external:")
+}
+
+/// How many missing labels the external-route probe is willing to ask Bazel
+/// about. A failing pair's missing set is tens of labels and one `somepath` on
+/// envoy is seconds; the probe is diagnosis, not a gate, so it is capped.
+pub const MAX_ROUTE_PROBES: usize = 25;
+
+/// Which of `missing` Bazel reaches only by leaving `//...`.
+///
+/// One `somepath(label, r1 + r2 + …)` per label: Bazel returns *a* shortest
+/// path, and if that path contains an `@repo//...` node then the only way from
+/// this target down to a root is through an external repository, which is
+/// exactly the edge cambium's `//...`-only index does not carry. A path with
+/// no external node means something else is wrong and the label is left
+/// unexplained — the safe direction, since either way it fails the pair.
+fn external_routes(bazel: &Bazel, roots: &[String], missing: &[String]) -> Vec<String> {
+    let union = roots.join(" + ");
+    let mut out = Vec::new();
+    for label in missing.iter().take(MAX_ROUTE_PROBES) {
+        let expr = format!("somepath({label}, {union})");
+        let Ok(o) = bazel
+            .command("query")
+            .args([
+                expr.as_str(),
+                "--output=label",
+                "--order_output=no",
+                "--keep_going",
+                "--noshow_progress",
+                "--ui_event_filters=-info",
+            ])
+            .output()
+        else {
+            continue;
+        };
+        if !o.status.success() && o.status.code() != Some(3) {
+            continue;
+        }
+        if parse_labels(&String::from_utf8_lossy(&o.stdout))
+            .iter()
+            .any(|l| is_external(l))
+        {
+            out.push(label.clone());
+        }
+    }
+    out
 }
 
 /// A deterministic sample of at most `k` labels, sorted so the JSON is stable.
@@ -239,9 +340,11 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
         .args([
             expr.as_str(),
             "--output=label",
-            // The index is built with --noimplicit_deps; the oracle has to ask
-            // the same question or every toolchain edge reads as unsoundness.
-            "--noimplicit_deps",
+            // No `--noimplicit_deps`: the index carries implicit edges (see
+            // `cambium_bazel::QUERY_FLAGS`), and the oracle has to ask the same
+            // question or the two sides are not comparable. Asking it with the
+            // implicit edges in is also the stronger check — it is the version
+            // that catches a main-repo tool reaching its consumers.
             "--order_output=no",
             "--keep_going",
             "--noshow_progress",
@@ -316,6 +419,30 @@ mod tests {
     fn labels_parse_from_query_output() {
         let got = parse_labels("//a:a\n\n  //b:b \n");
         assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["//a:a", "//b:b"]);
+    }
+
+    #[test]
+    fn external_labels_are_split_off_and_left_out_of_recall() {
+        let mut r = OracleResult {
+            oracle_set: parse_labels("//lib:a\n//lib:b\n@quiche//:x\n//external:y\n"),
+            cambium_set_from_roots: parse_labels("//lib:a\n"),
+            ..Default::default()
+        };
+        let (missing, external): (Vec<String>, Vec<String>) = r
+            .oracle_set
+            .difference(&r.cambium_set_from_roots)
+            .cloned()
+            .partition(|l| !is_external(l));
+        r.missing = missing;
+        r.missing_external = external;
+        assert_eq!(r.missing, vec!["//lib:b"]);
+        assert_eq!(r.missing_external, vec!["//external:y", "@quiche//:x"]);
+        // Recall is over `//...` only: one of two main-repo labels.
+        assert_eq!(r.recall(), 0.5);
+        assert!(!r.ok(), "a main-repo miss still fails");
+        // With the main-repo miss gone the external half does not fail it.
+        r.missing.clear();
+        assert!(r.ok());
     }
 
     #[test]

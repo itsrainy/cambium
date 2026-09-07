@@ -36,8 +36,26 @@ pub struct RepoEntry {
     /// Bazel binary; `bazelisk` honours `.bazelversion`.
     #[serde(default = "default_bazel")]
     pub bazel: String,
+    /// `USE_BAZEL_VERSION` for repositories that need one and do not say so
+    /// themselves: no `.bazelversion`, so bazelisk would pick the latest
+    /// release, which for an unmigrated WORKSPACE repo means nothing loads.
+    /// `--bazel-version` on the command line overrides it. Like that flag, it
+    /// suffixes the result file names, so the numbers say which Bazel produced
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bazel_version: Option<String>,
     #[serde(default)]
     pub extra_query_flags: Vec<String>,
+    /// Extra Bazel *startup* options, before the command word, on top of the
+    /// `--output_base` and `--bazelrc` the suite always passes. The reason
+    /// this exists is `--noworkspace_rc`: a repository's own `.bazelrc` is
+    /// written for the Bazel of its day, and replaying 300 commits walks back
+    /// into flags a pinned Bazel no longer recognises, which fails the query
+    /// outright rather than degrading. Use it only where the repo's rc is the
+    /// obstacle, and note what it costs — `--deleted_packages` and friends
+    /// live in those files and do change the graph.
+    #[serde(default)]
+    pub extra_startup_flags: Vec<String>,
     /// Repo-specific additions to the generated `cambium.toml`'s invalidators.
     /// Entries with glob characters become globs, the rest exact paths.
     #[serde(default)]

@@ -71,8 +71,13 @@ impl PackageQuerier for DirQuerier {
         Ok(packages.iter().map(|p| self.update(p)).collect())
     }
 
-    fn universe(&self) -> cambium_engine::Result<Vec<PackageUpdate>> {
-        Ok(self.packages().iter().map(|p| self.update(p)).collect())
+    fn universe(&self) -> cambium_engine::Result<cambium_engine::query::Universe> {
+        Ok(self
+            .packages()
+            .iter()
+            .map(|p| self.update(p))
+            .collect::<Vec<_>>()
+            .into())
     }
 
     fn rbuildfiles(

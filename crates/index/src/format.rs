@@ -33,8 +33,9 @@ use crate::data::{ArchivedIndexData, IndexData, IndexRef, Provenance};
 
 pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 
-/// Bumped to 2 when provenance moved out of the payload into the trailer.
-pub const FORMAT_VERSION: u32 = 2;
+/// Bumped to 2 when provenance moved out of the payload into the trailer, and
+/// to 3 when provenance gained the partial-load fields.
+pub const FORMAT_VERSION: u32 = 3;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

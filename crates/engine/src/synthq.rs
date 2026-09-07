@@ -40,8 +40,8 @@ impl PackageQuerier for SynthQuerier<'_> {
             .collect())
     }
 
-    fn universe(&self) -> Result<Vec<PackageUpdate>, EngineError> {
-        Ok(self.graph.package_updates())
+    fn universe(&self) -> Result<crate::query::Universe, EngineError> {
+        Ok(self.graph.package_updates().into())
     }
 
     fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {

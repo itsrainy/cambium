@@ -137,6 +137,18 @@ pub struct Provenance {
     /// Git revision this index describes, as lowercase hex.
     pub commit: String,
     pub created_unix: u64,
+    /// The query that produced this index finished under `--keep_going` with
+    /// packages it could not load (Bazel exit 3), so the graph is missing
+    /// them. Recorded rather than fatal: a cold build and an incremental
+    /// update drop exactly the same packages, so the two still agree — but a
+    /// consumer comparing an index against reality deserves to know.
+    pub partial: bool,
+    /// How many `error loading package` / `package contains errors` lines the
+    /// query emitted. Not the same as "packages missing from the index": a
+    /// package can produce several lines.
+    pub packages_in_error: u32,
+    /// The first few package names from those lines, for diagnosis.
+    pub error_packages: Vec<String>,
 }
 
 /// The serialised payload. Every field is a flat array addressable from mmap.
@@ -199,6 +211,10 @@ pub struct IndexRef<'a> {
     pub bazel_version: &'a str,
     pub config_hash: [u8; 32],
     pub created_unix: u64,
+    /// See [`Provenance::partial`].
+    pub partial: bool,
+    pub packages_in_error: u32,
+    pub error_packages: &'a [String],
 
     pub labels: StrTabRef<'a>,
     /// Node ids ordered by label; see [`IndexData::label_sorted`].
@@ -352,6 +368,9 @@ impl IndexData {
             bazel_version: &self.header.bazel_version,
             config_hash: self.header.config_hash,
             created_unix: self.provenance.created_unix,
+            partial: self.provenance.partial,
+            packages_in_error: self.provenance.packages_in_error,
+            error_packages: &self.provenance.error_packages,
             labels: StrTabRef {
                 bytes: &self.label_bytes,
                 offsets: &self.label_offsets,
@@ -409,6 +428,9 @@ impl ArchivedIndexData {
             bazel_version: &self.header.bazel_version,
             config_hash: self.header.config_hash,
             created_unix: provenance.created_unix,
+            partial: provenance.partial,
+            packages_in_error: provenance.packages_in_error,
+            error_packages: &provenance.error_packages,
             labels: StrTabRef {
                 bytes: &self.label_bytes,
                 offsets: le::u32s(&self.label_offsets),

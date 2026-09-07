@@ -164,7 +164,7 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.query(packages)
     }
 
-    fn universe(&self) -> std::result::Result<Vec<PackageUpdate>, EngineError> {
+    fn universe(&self) -> std::result::Result<crate::query::Universe, EngineError> {
         self.querier.universe()
     }
 

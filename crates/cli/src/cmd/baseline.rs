@@ -154,6 +154,12 @@ fn emit(
         c.packages,
         hex(&index.header.lineage)
     );
+    // Loud, on stderr, every time: an index that is missing packages will
+    // happily answer `affected` queries about the ones it has, and nothing
+    // downstream can tell the difference without being told.
+    if let Some(w) = cambium_engine::inspect::PartialLoad::from(index.view()).warning() {
+        eprintln!("cambium: WARNING: {w}");
+    }
     if publish {
         let names = engine.publish_index(&path, &index.header.lineage, &index.provenance.commit)?;
         for n in names {

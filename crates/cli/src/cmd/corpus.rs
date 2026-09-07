@@ -186,12 +186,19 @@ impl Run {
         let results = cambium_corpus::results_dir(&c.results_dir, &c.id);
         std::fs::create_dir_all(&results)?;
         let results = cambium_compare::threeway::absolute(&results);
+        // The flag wins; the manifest's own pin is the fallback for a repo
+        // that needs a specific Bazel and has no `.bazelversion` to say so.
+        let version = c
+            .bazel_version
+            .clone()
+            .or_else(|| entry.bazel_version.clone())
+            .filter(|v| !v.is_empty());
         Ok(Self {
             entry,
             manifest,
             corpus,
             results,
-            version: c.bazel_version.clone().filter(|v| !v.is_empty()),
+            version,
             seed: c.seed,
         })
     }
@@ -378,6 +385,14 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
         path = %out.display(),
         "built"
     );
+    if let Some(w) = cambium_engine::inspect::PartialLoad::from(index.view()).warning() {
+        tracing::warn!(
+            packages_in_error = index.provenance.packages_in_error,
+            first = ?index.provenance.error_packages,
+            "{w}"
+        );
+        eprintln!("cambium: WARNING: {w}");
+    }
     for n in engine.publish_base_index(&index)? {
         tracing::info!(artifact = %n, "published");
     }
@@ -419,6 +434,8 @@ fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
         p90_ms = result.summary.p90_total_ms,
         globals = result.summary.globals,
         oracle_ok = result.oracle.as_ref().map(|o| o.ok).unwrap_or(false),
+        partial = result.cold.partial.partial,
+        packages_in_error = result.cold.partial.packages_in_error,
         path = %path.display(),
         "replay done"
     );

@@ -164,6 +164,56 @@ pub struct IndexStats {
     pub counts: CountStats,
     pub bytes: ByteStats,
     pub in_degree: DegreeStats,
+    /// The query behind this index finished with load errors, so the graph is
+    /// missing whatever Bazel could not load. See [`PartialLoad`].
+    #[serde(default, skip_serializing_if = "PartialLoad::is_complete")]
+    pub partial: PartialLoad,
+}
+
+/// How incomplete an index is, if at all. Serialised into every stats and
+/// replay document so a downstream reader is never told a number that silently
+/// describes less than the whole repository.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PartialLoad {
+    pub partial: bool,
+    /// `error loading package` / `package contains errors` lines the query
+    /// emitted.
+    pub packages_in_error: u32,
+    /// The first few package names from those lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
+}
+
+impl PartialLoad {
+    pub fn is_complete(&self) -> bool {
+        !self.partial
+    }
+
+    /// A one-line warning, or nothing when the index is complete.
+    pub fn warning(&self) -> Option<String> {
+        self.partial.then(|| {
+            let sample = if self.packages.is_empty() {
+                String::new()
+            } else {
+                format!(" (first: {})", self.packages.join(", "))
+            };
+            format!(
+                "PARTIAL INDEX: bazel could not load every package ({} error lines){sample}. \
+                 Targets in those packages are absent from this index.",
+                self.packages_in_error
+            )
+        })
+    }
+}
+
+impl From<cambium_index::IndexRef<'_>> for PartialLoad {
+    fn from(v: cambium_index::IndexRef<'_>) -> Self {
+        Self {
+            partial: v.partial,
+            packages_in_error: v.packages_in_error,
+            packages: v.error_packages.to_vec(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -681,6 +731,7 @@ impl<'a> IndexQuery<'a> {
             counts,
             bytes,
             in_degree,
+            partial: PartialLoad::from(v),
         }
     }
 

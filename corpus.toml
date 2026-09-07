@@ -46,6 +46,23 @@ invalidators = [
     # Indexing external repositories would be the precise answer; until then a
     # global invalidation is the sound one.
     "api/**",
+    # `@envoy_repo//:project` is a filegroup in the generated `@envoy_repo`
+    # whose srcs include `//changelogs:changelogs`, and
+    # `//distribution/dockerhub:readme*` plus
+    # `//tools/distribution:update_dockerhub_repository` reach the changelogs
+    # only through it:
+    #   somepath(//distribution/dockerhub:readme_json, //changelogs:changelogs)
+    #     //distribution/dockerhub:readme_json
+    #     @envoy_repo//:project
+    #     //changelogs:changelogs
+    # The path leaves `//...` and comes back, and cambium's index stops at the
+    # first external node, so an edit under `changelogs/` reaches the filegroup
+    # and no further -- the rdeps oracle caught it as recall 0.87 on
+    # 54796eba3..83297dad1 (a "ratelimit: retry-after header" commit whose only
+    # non-source file is `changelogs/current/...rst`). Same shape as `api/**`
+    # above: indexing external repositories is the precise answer, a global
+    # invalidation is the sound one.
+    "changelogs/**",
     "bazel/repo.bzl",
     ".github/config.yml",
     "VERSION.txt",
@@ -72,6 +89,20 @@ url = "https://github.com/ApolloAuto/apollo.git"
 pin = "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"
 replay_range = 300
 bazel = "bazelisk"
+# The repo has no .bazelversion and its deps are all declared in WORKSPACE,
+# with a MODULE.bazel that is the empty placeholder Bazel's migration message
+# suggests. Bazel 9 (what bazelisk picks by default) no longer reads WORKSPACE,
+# so @rules_python and friends are invisible to the main repo and 770 of its
+# 771 packages fail to load. Under 7.4.1 the same pin loads 746 packages, with
+# only @local_config_cuda failing (no CUDA on the corpus host).
+bazel_version = "7.4.1"
+# ...and 7.4.1 in turn cannot read the repo's own tools/bazel.rc, which from 67
+# commits back passes `query --experimental_multi_threaded_digest=true`, a flag
+# Bazel dropped after 6.x. An unrecognised option is a hard failure, not a
+# degraded query, so the replay range is unreachable without ignoring the
+# workspace rc. Apollo's rc holds no --deleted_packages or other
+# graph-affecting query options, so dropping it costs nothing here.
+extra_startup_flags = ["--noworkspace_rc"]
 extra_query_flags = []
 invalidators = ["tools/**", "third_party/**"]
 notes = "C++ AV stack; graph shape closest to the target production repo"
@@ -148,6 +179,7 @@ invalidators = [
     "bazel/repositories.bzl",
     "bazel/repository_locations.bzl",
     "api/**",  # see the `envoy` entry above.
+    "changelogs/**",  # see the `envoy` entry above.
     "bazel/repo.bzl",
     ".github/config.yml",
     "VERSION.txt",

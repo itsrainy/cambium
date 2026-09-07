@@ -68,8 +68,9 @@ pub trait PackageQuerier {
     /// still come back with an empty update, so its old rows are tombstoned.
     fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, crate::error::EngineError>;
 
-    /// Rows for the whole repository (cold build).
-    fn universe(&self) -> Result<Vec<PackageUpdate>, crate::error::EngineError>;
+    /// Rows for the whole repository (cold build), plus whether Bazel managed
+    /// to load all of it.
+    fn universe(&self) -> Result<Universe, crate::error::EngineError>;
 
     /// What loads any of these `.bzl` paths (spec 7.2). The answer separates
     /// main-repo packages from workspace-level loaders; see
@@ -143,16 +144,36 @@ impl PackageQuerier for BazelQuerier {
         Ok(q.updates)
     }
 
-    fn universe(&self) -> Result<Vec<PackageUpdate>, crate::error::EngineError> {
+    fn universe(&self) -> Result<Universe, crate::error::EngineError> {
         let q = query_universe(&self.bazel, &self.opts, &self.files)?;
-        if !q.outcome.success {
+        // Exit 3 is accepted here for the same reason `query` accepts it, and
+        // for consistency with it: the incremental path tombstones a package
+        // that fails to load *because* a cold build would not have it either.
+        // That argument only holds if the cold build really does go ahead
+        // without those packages, so it does — and records that it did, in the
+        // index's provenance, rather than pretending the answer was complete.
+        // Anything other than 0 or 3 is still a hard failure: it means Bazel
+        // did not finish, and a truncated stream is not a partial answer.
+        if !q.outcome.success && q.outcome.exit_code != Some(3) {
             return Err(crate::error::EngineError::BazelQuery {
                 what: "//...".into(),
                 code: q.outcome.exit_code,
                 stderr: q.outcome.stderr_tail,
             });
         }
-        Ok(q.updates)
+        let partial = (q.outcome.exit_code == Some(3)).then(|| {
+            tracing::warn!(
+                packages_in_error = q.outcome.load_errors.count,
+                loaded = q.updates.len(),
+                first = ?q.outcome.load_errors.packages,
+                "bazel query //... finished with errors under --keep_going; the index will be PARTIAL"
+            );
+            q.outcome.load_errors.clone()
+        });
+        Ok(Universe {
+            updates: q.updates,
+            partial,
+        })
     }
 
     fn rbuildfiles(
@@ -168,6 +189,23 @@ impl PackageQuerier for BazelQuerier {
 
     fn workspace(&self) -> Option<&Path> {
         Some(self.bazel.workspace())
+    }
+}
+
+/// A cold-build answer: every package Bazel could load, and — when it could
+/// not load them all — what it said about the ones it dropped.
+pub struct Universe {
+    pub updates: Vec<PackageUpdate>,
+    /// `Some` when the query exited 3 under `--keep_going`.
+    pub partial: Option<cambium_bazel::LoadErrors>,
+}
+
+impl From<Vec<PackageUpdate>> for Universe {
+    fn from(updates: Vec<PackageUpdate>) -> Self {
+        Self {
+            updates,
+            partial: None,
+        }
     }
 }
 
@@ -297,6 +335,7 @@ pub fn parse_stream(
         success: true,
         stderr_tail: String::new(),
         targets_read: 0,
+        load_errors: cambium_bazel::LoadErrors::default(),
     };
     Ok(finish(grouped, outcome, files, None).updates)
 }

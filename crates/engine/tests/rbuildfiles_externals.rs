@@ -26,7 +26,7 @@ impl PackageQuerier for Canned<'_> {
     fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
         self.0.query(packages)
     }
-    fn universe(&self) -> Result<Vec<PackageUpdate>, EngineError> {
+    fn universe(&self) -> Result<cambium_engine::query::Universe, EngineError> {
         self.0.universe()
     }
     fn rbuildfiles(&self, _: &[String]) -> Result<Rbuildfiles, EngineError> {

@@ -39,12 +39,31 @@ impl ConvertOptions {
 /// written dependency. Without this, everything reachable only through a
 /// `label_flag` is missing from the affected set — envoy's
 /// `//distribution:envoy-binary -> //source/exe:envoy-static` and its whole
-/// packaging tree. Verified against Bazel 7.7.1 and 8.7.0.
+/// packaging tree.
+///
+/// **The attribute's declared type is `STRING`, not `LABEL`.** That is the
+/// whole reason this was still broken after it was first written: the proto
+/// Bazel emits for
+///
+/// ```text
+/// label_flag(name = "flag", build_setting_default = "//src:lib")
+/// ```
+///
+/// carries `type: STRING, string_value: "//src:lib"` — identical under 7.7.1
+/// and 8.7.0, and identical for `label_setting`. A `type == LABEL` test
+/// therefore never fires on a real repository, only on a hand-built proto,
+/// which is exactly what the first test asserted against. So the type filter
+/// is gone and the *value* decides: an absolute label (`//…` or `@…`) is
+/// taken as an edge.
+///
+/// That admits one false positive — a `string_flag` whose default happens to
+/// spell a label — and that is the direction this crate is allowed to be
+/// wrong in: an edge too many is over-approximation, an edge too few is
+/// unsoundness.
 fn rule_inputs(r: &crate::blaze_query::Rule) -> Vec<String> {
-    use crate::blaze_query::attribute::Discriminator as AttrKind;
     let mut inputs = r.rule_input.clone();
     for a in &r.attribute {
-        if a.name != "build_setting_default" || a.r#type != AttrKind::Label as i32 {
+        if a.name != "build_setting_default" {
             continue;
         }
         let Some(v) = a.string_value.as_deref() else {
@@ -169,28 +188,61 @@ mod tests {
         assert!(!p.row.manual);
     }
 
-    /// Bazel reports `label_flag` with an empty `rule_input` under
-    /// `--noimplicit_deps`; the dependency lives in `build_setting_default`.
-    #[test]
-    fn a_build_setting_default_is_a_dependency() {
-        let t = Target {
+    fn build_setting(class: &str, ty: AttrKind, value: &str) -> Target {
+        Target {
             r#type: Discriminator::Rule as i32,
             rule: Some(Rule {
                 name: "//distribution:envoy-binary".into(),
-                rule_class: "label_flag".into(),
+                rule_class: class.into(),
                 rule_input: Vec::new(),
                 attribute: vec![Attribute {
                     name: "build_setting_default".into(),
-                    r#type: AttrKind::Label as i32,
-                    string_value: Some("//source/exe:envoy-static".into()),
+                    r#type: ty as i32,
+                    string_value: Some(value.into()),
                     ..Default::default()
                 }],
                 ..Default::default()
             }),
             ..Default::default()
-        };
-        let p = convert(&t, &ConvertOptions::default()).unwrap();
-        assert_eq!(p.row.inputs, vec!["//source/exe:envoy-static"]);
+        }
+    }
+
+    /// Bazel reports `label_flag` with an empty `rule_input` under
+    /// `--noimplicit_deps`; the dependency lives in `build_setting_default`.
+    ///
+    /// **The type is `STRING`.** Captured from a real
+    /// `bazel query --output=streamed_proto` on a two-package workspace under
+    /// both 7.7.1 and 8.7.0: the attribute comes back
+    /// `name: "build_setting_default", type: STRING (2),
+    /// string_value: "//src:lib"`. The earlier version of this test built the
+    /// attribute as `LABEL` and passed while envoy's whole `//distribution`
+    /// tree stayed unreachable, so the type is asserted here explicitly.
+    #[test]
+    fn a_build_setting_default_is_a_dependency() {
+        for class in ["label_flag", "label_setting"] {
+            let t = build_setting(class, AttrKind::String, "//source/exe:envoy-static");
+            let p = convert(&t, &ConvertOptions::default()).unwrap();
+            assert_eq!(
+                p.row.inputs,
+                vec!["//source/exe:envoy-static"],
+                "{class} reports its default as a STRING"
+            );
+        }
+    }
+
+    /// The value, not the declared type, decides. A `LABEL`-typed one is still
+    /// taken (older Bazels, and hand-written protos), and a default that is
+    /// not a label at all is not an edge.
+    #[test]
+    fn only_label_shaped_defaults_become_edges() {
+        let o = ConvertOptions::default();
+        let labelled = build_setting("label_flag", AttrKind::Label, "@repo//pkg:t");
+        assert_eq!(
+            convert(&labelled, &o).unwrap().row.inputs,
+            vec!["@repo//pkg:t"]
+        );
+        let stringly = build_setting("string_flag", AttrKind::String, "fastbuild");
+        assert!(convert(&stringly, &o).unwrap().row.inputs.is_empty());
     }
 
     #[test]

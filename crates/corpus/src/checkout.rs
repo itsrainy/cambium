@@ -248,6 +248,9 @@ impl Checkout {
             ),
             format!("--bazelrc={}", self.corpus.bazelrc().display()),
         ];
+        cfg.bazel
+            .startup_flags
+            .extend(entry.extra_startup_flags.iter().cloned());
         cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
             path: self.corpus.store(&entry.id),
         };
