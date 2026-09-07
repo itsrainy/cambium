@@ -1,23 +1,29 @@
-# The real-repository corpus (docs/CORPUS.md, spec §3).
+# The real subjects: open-source Bazel repositories cambium is benchmarked
+# against (docs/METHODOLOGY.md).
 #
-# Pins are bumped deliberately, in a PR that regenerates that repo's section
-# of docs/CORPUS.md. Order is the order the repos were brought up.
+# Each entry is a subject with a URL, a pinned commit, a history window (how
+# many first-parent commits before the pin a workload may use), and the Bazel
+# version it runs under: its own `.bazelversion`, or a `bazel_version` pin here
+# only when the subject has none to give, as apollo does. Bazel 7/8/9 coverage
+# of cambium itself is CI's synthetic version matrix; a subject is never pinned
+# twice to exercise another Bazel major.
 #
-# Each entry runs under its own `.bazelversion` (or `bazel_version` where the
-# repo has none to give, as apollo does). Bazel major coverage — that cambium
-# reads 7.x, 8.x and 9.x graphs alike — is CI's `bazel-version-matrix` job over
-# the synthetic corpus, not duplicate entries here.
+# Pins are bumped deliberately, in a change that regenerates that subject's
+# section of docs/RESULTS.md. Order is the order the subjects were brought up.
+#
+# Synthetic subjects are not listed here: they are named `synth:<preset>` on
+# the command line and generated on demand.
 
 [[repo]]
 id = "bazel"
 url = "https://github.com/bazelbuild/bazel.git"
 pin = "948b8c70e281c2fe42aa5468dad543c7af9f0ccc"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 # No repo-specific invalidators: builtins_bzl/** and tools/build_defs/repo/**
 # are ordinary sources compiled into the Bazel binary, not files the workspace
-# being queried loads. Listing them cost a third of this repo's replay globals.
+# being queried loads. Listing them cost a third of this subject's history globals.
 invalidators = []
 notes = "small, clean, macro-heavy Java; fast first target"
 
@@ -25,7 +31,7 @@ notes = "small, clean, macro-heavy Java; fast first target"
 id = "envoy"
 url = "https://github.com/envoyproxy/envoy.git"
 pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 # NOTE (external-repository stage, `crates/index/src/externals.rs`): the engine
@@ -36,7 +42,7 @@ extra_query_flags = []
 # this pin, 23 touch one of those paths — every one of them a global
 # invalidation today — and the stage makes 21 of the 23 repository-scoped, the
 # remaining two staying global for good reasons (`bazel: Remove WORKSPACE`, and
-# a `toolchains_llvm` bump). The entries below are kept until a replay on a
+# a `toolchains_llvm` bump). The entries below are kept until a history run on a
 # format-5 index shows the resulting *affected sets* are right too; that needs a
 # cold envoy build, which this laptop cannot do. Delete them with that evidence.
 #
@@ -47,7 +53,7 @@ extra_query_flags = []
 # touches nothing but `.github/config.yml` really does move four rule hashes.
 # No query can see that edge — the file belongs to no package and is not a
 # `.bzl`, so neither the file->target map nor `rbuildfiles` names it — which is
-# what invalidators are for. Without these three entries the replay oracle
+# what invalidators are for. Without these three entries the rebuild oracle
 # fails at the pin with `rule hash mismatches: 4`
 # (//bazel/platforms/rbe:linux_{x64,arm64},
 # //bazel/rbe/toolchains:rbe_linux_gcc_platform and
@@ -56,7 +62,7 @@ extra_query_flags = []
 # at index time from MODULE.bazel and the workspace-level .bzl closure --
 # `api/**` -> @envoy_api, `changelogs/**`, `.github/config.yml`, `VERSION.txt`
 # and `API_VERSION.txt` -> @envoy_repo, and the repository-defining .bzl files
-# to the repositories they define. The replay oracle (rule hashes recomputed at
+# to the repositories they define. The rebuild oracle (rule hashes recomputed at
 # every step) is what proves the derived map is complete; if it ever reports a
 # mismatch on a commit touching one of those paths, put that path back here.
 invalidators = []
@@ -66,14 +72,14 @@ notes = "C++, tens of thousands of targets, deep .bzl layering, heavy select; ex
 id = "sourcegraph"
 # sourcegraph/sourcegraph went private in 2024; this is the archived public
 # snapshot (last push 2024-09-02), which still has the busy Gazelle-generated
-# history the replay wants.
+# history the history workload wants.
 url = "https://github.com/sourcegraph/sourcegraph-public-snapshot.git"
 pin = "c864f15af264f0f456a6d8a83290b5c940715349"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["dev/bazel/**", "go.mod", "go.sum", "pnpm-lock.yaml"]
-notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updater replay"
+notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updater exercise"
 
 [[repo]]
 id = "apollo"
@@ -81,21 +87,21 @@ url = "https://github.com/ApolloAuto/apollo.git"
 pin = "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"
 # 74, not 300: commit cd510fe5, 76 back from the pin, does not load under any
 # Bazel (`third_party/gpus/cuda_configure.bzl` lacks `make_copy_files_rule`,
-# so the main repository mapping itself fails). A replay cannot cross it, and
+# so the main repository mapping itself fails). A history run cannot cross it, and
 # 74 is the longest first-parent range that stays clear of it.
-replay_range = 74
+history_window = 74
 bazel = "bazelisk"
 # The repo has no .bazelversion and its deps are all declared in WORKSPACE,
 # with a MODULE.bazel that is the empty placeholder Bazel's migration message
 # suggests. Bazel 9 (what bazelisk picks by default) no longer reads WORKSPACE,
 # so @rules_python and friends are invisible to the main repo and 770 of its
 # 771 packages fail to load. Under 7.4.1 the same pin loads 746 packages, with
-# only @local_config_cuda failing (no CUDA on the corpus host).
+# only @local_config_cuda failing (no CUDA on the benchmark host).
 bazel_version = "7.4.1"
 # ...and 7.4.1 in turn cannot read the repo's own tools/bazel.rc, which from 67
 # commits back passes `query --experimental_multi_threaded_digest=true`, a flag
 # Bazel dropped after 6.x. An unrecognised option is a hard failure, not a
-# degraded query, so the replay range is unreachable without ignoring the
+# degraded query, so the history window is unreachable without ignoring the
 # workspace rc. Apollo's rc holds no --deleted_packages or other
 # graph-affecting query options, so dropping it costs nothing here.
 extra_startup_flags = ["--noworkspace_rc"]
@@ -107,7 +113,7 @@ notes = "C++ AV stack; graph shape closest to the target production repo"
 id = "xla"
 url = "https://github.com/openxla/xla.git"
 pin = "076fe93fad26cb2555e3bb86defa6a772d11cf35"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["third_party/**", "xla/tsl/**/*.bzl", "workspace*.bzl"]
@@ -117,7 +123,7 @@ notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loadi
 id = "tensorflow"
 url = "https://github.com/tensorflow/tensorflow.git"
 pin = "01990a8ef1f82e62ffffc77ac0d1adc78dc5ee69"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["third_party/**", "tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]

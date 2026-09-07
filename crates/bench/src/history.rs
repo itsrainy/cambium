@@ -1,10 +1,10 @@
-//! The updater replay (spec §6): cold build at the start of a first-parent
+//! The updater history (spec §6): cold build at the start of a first-parent
 //! range, then `baseline update` for every commit forward to the pin, then a
-//! full rebuild at the pin that the replayed index must equal.
+//! full rebuild at the pin that the applied index must equal.
 //!
-//! The row source and the checkout are behind [`Driver`], so the replay can
+//! The row source and the checkout are behind [`Driver`], so the history can
 //! run over a synthetic git history with no Bazel — which is how it is tested
-//! — and over a corpus worktree with a real one.
+//! — and over a subject's worktree with a real one.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,10 +15,10 @@ use cambium_engine::{AffectedRequest, Engine, IndexQuery, PackageQuerier};
 use cambium_index::{format, IndexData, IndexFile};
 use serde::{Deserialize, Serialize};
 
-use crate::oracle::{compare_by_label, GraphDiff};
-use crate::state::{ReplayState, State};
+use crate::oracles::rebuild::{compare_by_label, GraphDiff};
+use crate::state::{HistoryState, State};
 
-/// What the replay needs from the world at a revision.
+/// What the history needs from the world at a revision.
 pub trait Driver {
     /// Puts the worktree at `rev`. A no-op when the row source does not read
     /// the worktree.
@@ -27,7 +27,7 @@ pub trait Driver {
     fn querier(&self, rev: &str) -> Result<Box<dyn PackageQuerier + '_>>;
 }
 
-/// A driver over a corpus checkout and a real Bazel.
+/// A driver over a subject's checkout and a real Bazel.
 pub struct BazelDriver<'a> {
     pub checkout: &'a crate::Checkout,
     pub engine: &'a Engine,
@@ -44,24 +44,29 @@ impl Driver for BazelDriver<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ReplayOptions {
+pub struct HistoryOptions {
     pub repo_id: String,
     pub pin: String,
-    /// Where `replay-<pin>.json` and `state.json` go.
+    /// Where `history-<pin>.json` goes: `bench-results/<subject>/history/`.
     pub results_dir: PathBuf,
+    /// Where `state.json` goes: `bench-results/<subject>/`. One state per
+    /// subject, shared by every workload, because what it records — the
+    /// fetch, the cold builds, the engine identity — is a property of the
+    /// subject and not of the workload asking.
+    pub state_dir: PathBuf,
     /// Publish every index to the engine's store (needed for resume, and for
-    /// the comparison pairs to find their base without a cold build).
+    /// the comparison change sets to find their base without a cold build).
     pub publish: bool,
-    /// Continue a replay whose state file says it stopped part way.
+    /// Continue a history whose state file says it stopped part way.
     pub resume: bool,
     pub bazel_version: String,
     /// How many differences the oracle report lists per class.
     pub diff_cap: usize,
-    /// Which profile this replay belongs to. Recorded in the result so a
-    /// reader of a 50-commit replay is not left comparing it with a 300-commit
-    /// one; it does not itself bound the range, since the caller passes the
-    /// commits.
-    pub profile: crate::Profile,
+    /// Run the rebuild oracle at the end: cold-build the pin and diff it
+    /// against the index the history produced. `--oracle none` turns it off,
+    /// which is only ever right when the cold build is the thing that will not
+    /// finish — without it the history proves nothing.
+    pub rebuild_oracle: bool,
 }
 
 /// One cold build.
@@ -104,7 +109,7 @@ pub struct CommitRecord {
     pub direct: usize,
     pub affected: usize,
     pub tests: usize,
-    /// Kept for continuity with earlier replays; always false since the
+    /// Kept for continuity with earlier history runs; always false since the
     /// static load closure replaced the `rbuildfiles` call.
     pub rbuildfiles_called: bool,
     /// Packages dirtied because a changed `.bzl` is in their load closure.
@@ -160,7 +165,7 @@ pub struct OracleOutcome {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ReplayResult {
+pub struct HistoryResult {
     pub schema: u32,
     pub repo: String,
     pub pin: String,
@@ -175,10 +180,6 @@ pub struct ReplayResult {
     /// report renders as `n/a`.
     #[serde(default)]
     pub bazel_version_used: String,
-    /// `quick` or `full`. Empty in results written before profiles existed,
-    /// which were all full runs.
-    #[serde(default)]
-    pub profile: String,
     pub tool_sha: String,
     /// `State::engine_id` of the build that wrote this; a resume by any other
     /// build starts over.
@@ -195,9 +196,9 @@ pub struct ReplayResult {
     pub done: bool,
 }
 
-impl ReplayResult {
+impl HistoryResult {
     pub fn path(results_dir: &Path, pin: &str) -> PathBuf {
-        results_dir.join(format!("replay-{pin}.json"))
+        results_dir.join(format!("history-{pin}.json"))
     }
 
     /// The result file for one Bazel version of the matrix; `None` (or an
@@ -206,7 +207,7 @@ impl ReplayResult {
     pub fn path_versioned(results_dir: &Path, pin: &str, version: Option<&str>) -> PathBuf {
         match version.filter(|v| !v.is_empty()) {
             Some(v) => results_dir.join(format!(
-                "replay-{pin}-{}.json",
+                "history-{pin}-{}.json",
                 v.replace(['/', ' ', ':'], "_")
             )),
             None => Self::path(results_dir, pin),
@@ -283,9 +284,9 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// `bazel --version` in the corpus worktree, so the report can say which Bazel
+/// `bazel --version` in the subject's worktree, so the report can say which Bazel
 /// actually answered rather than which one was asked for. Best effort: an
-/// unavailable binary yields an empty string rather than failing the replay.
+/// unavailable binary yields an empty string rather than failing the history.
 fn bazel_version_used(engine: &Engine) -> String {
     let v = engine.bazel.version();
     v.lines().next().unwrap_or("").trim().to_string()
@@ -357,31 +358,31 @@ fn load_published(engine: &Engine, rev: &str) -> Result<Option<IndexData>> {
     Ok(Some(IndexFile::open(&path)?.deserialize()?))
 }
 
-/// The replay proper. `commits` is the first-parent range, oldest first, with
+/// The history proper. `commits` is the first-parent range, oldest first, with
 /// the pin last; the cold build happens at `commits[0]`.
-pub fn replay(
+pub fn history(
     engine: &Engine,
     driver: &dyn Driver,
     commits: &[String],
-    opts: &ReplayOptions,
-) -> Result<ReplayResult> {
-    anyhow::ensure!(commits.len() >= 2, "a replay needs at least two commits");
+    opts: &HistoryOptions,
+) -> Result<HistoryResult> {
+    anyhow::ensure!(commits.len() >= 2, "a history needs at least two commits");
     let from = commits[0].clone();
     let to = commits[commits.len() - 1].clone();
-    let path = ReplayResult::path_versioned(
+    let path = HistoryResult::path_versioned(
         &opts.results_dir,
         &opts.pin,
         Some(opts.bazel_version.as_str()),
     );
     let mut state = State::load_for(
-        &opts.results_dir,
+        &opts.state_dir,
         &opts.repo_id,
         &opts.pin,
         &State::engine_id(&engine.cfg.hash()),
     )?;
 
     // ---- resume, or start ----
-    let (mut result, mut index, start_at) = match (opts.resume, ReplayResult::read(&path)) {
+    let (mut result, mut index, start_at) = match (opts.resume, HistoryResult::read(&path)) {
         (true, Ok(prev))
             if prev.from == from
                 && prev.to == to
@@ -396,7 +397,7 @@ pub fn replay(
             match load_published(engine, &last)? {
                 Some(idx) => {
                     let pos = commits.iter().position(|c| *c == last).unwrap_or(0);
-                    tracing::info!(%last, done = prev.commits.len(), "resuming replay");
+                    tracing::info!(%last, done = prev.commits.len(), "resuming history");
                     (prev, idx, pos + 1)
                 }
                 None => {
@@ -411,19 +412,19 @@ pub fn replay(
                 && prev.to == to
                 && prev.engine == State::engine_id(&engine.cfg.hash()) =>
         {
-            tracing::info!("replay already complete");
+            tracing::info!("history already complete");
             return Ok(prev);
         }
         _ => start(engine, driver, &from, &to, opts)?,
     };
-    state.replay = Some(ReplayState {
+    state.history = Some(HistoryState {
         from: from.clone(),
         to: to.clone(),
         bazel_version: opts.bazel_version.clone(),
         last_completed: result.commits.last().map(|c| c.commit.clone()),
         done: false,
     });
-    state.save(&opts.results_dir)?;
+    state.save(&opts.state_dir)?;
 
     // ---- walk forward ----
     for i in start_at..commits.len() {
@@ -493,33 +494,37 @@ pub fn replay(
         result.commits.push(rec);
         result.summarise();
         result.write(&path)?;
-        if let Some(rs) = state.replay.as_mut() {
+        if let Some(rs) = state.history.as_mut() {
             rs.last_completed = Some(commit.clone());
         }
-        state.save(&opts.results_dir)?;
+        state.save(&opts.state_dir)?;
         tracing::info!(
             step = i,
             of = commits.len() - 1,
             %commit,
             dirty = result.commits.last().map(|c| c.dirty_packages).unwrap_or(0),
             ms = total_ms,
-            "replayed"
+            "applied"
         );
     }
 
-    // ---- the oracle: replayed == rebuilt ----
-    let (fresh, rebuild) = cold_build(engine, driver, &to)?;
-    let diff = compare_by_label(index.view(), fresh.view(), opts.diff_cap);
-    let ok = diff.is_empty();
-    result.rebuild = Some(rebuild);
-    result.oracle = Some(OracleOutcome { ok, diff });
+    // ---- the rebuild oracle: applied == rebuilt ----
+    if opts.rebuild_oracle {
+        let (fresh, rebuild) = cold_build(engine, driver, &to)?;
+        let diff = compare_by_label(index.view(), fresh.view(), opts.diff_cap);
+        let ok = diff.is_empty();
+        result.rebuild = Some(rebuild);
+        result.oracle = Some(OracleOutcome { ok, diff });
+    } else {
+        tracing::warn!("the rebuild oracle was skipped: this history proves nothing");
+    }
     result.done = true;
     result.summarise();
     result.write(&path)?;
-    if let Some(rs) = state.replay.as_mut() {
+    if let Some(rs) = state.history.as_mut() {
         rs.done = true;
     }
-    state.save(&opts.results_dir)?;
+    state.save(&opts.state_dir)?;
     Ok(result)
 }
 
@@ -528,21 +533,20 @@ fn start(
     driver: &dyn Driver,
     from: &str,
     to: &str,
-    opts: &ReplayOptions,
-) -> Result<(ReplayResult, IndexData, usize)> {
+    opts: &HistoryOptions,
+) -> Result<(HistoryResult, IndexData, usize)> {
     let (index, cold) = cold_build(engine, driver, from)?;
     if opts.publish {
         publish(engine, &index)?;
     }
-    let result = ReplayResult {
-        schema: cambium_engine::report::SCHEMA_VERSION,
+    let result = HistoryResult {
+        schema: crate::RESULT_SCHEMA,
         repo: opts.repo_id.clone(),
         pin: opts.pin.clone(),
         from: from.to_string(),
         to: to.to_string(),
         bazel_version: opts.bazel_version.clone(),
         bazel_version_used: bazel_version_used(engine),
-        profile: opts.profile.name().to_string(),
         tool_sha: tool_sha(),
         engine: State::engine_id(&engine.cfg.hash()),
         started_unix: now_unix(),
@@ -553,7 +557,7 @@ fn start(
         summary: Summary::default(),
         done: false,
     };
-    result.write(&ReplayResult::path_versioned(
+    result.write(&HistoryResult::path_versioned(
         &opts.results_dir,
         &opts.pin,
         Some(opts.bazel_version.as_str()),
@@ -562,6 +566,6 @@ fn start(
 }
 
 /// Per-commit records keyed by commit, for the report and the comparison.
-pub fn records_by_commit(r: &ReplayResult) -> BTreeMap<&str, &CommitRecord> {
+pub fn records_by_commit(r: &HistoryResult) -> BTreeMap<&str, &CommitRecord> {
     r.commits.iter().map(|c| (c.commit.as_str(), c)).collect()
 }

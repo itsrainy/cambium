@@ -1,4 +1,4 @@
-//! The bazel-diff [`Producer`].
+//! The bazel-diff [`Tool`].
 //!
 //! bazel-diff answers the same question cambium does by a different route: it
 //! runs one whole-repository `bazel query` per revision, hashes every target's
@@ -21,10 +21,10 @@
 //! real repository at a real pin, `bazel query '//...:all-targets'` does not
 //! load cleanly: `bazel/bazel` on macOS references a GraalVM distribution with
 //! no `macos-x64` build and an RBE config that shells out to Docker, so the
-//! query exits 3 and bazel-diff, without `-k`, fails the pair outright. With
+//! query exits 3 and bazel-diff, without `-k`, fails the change set outright. With
 //! `-k` it hashes everything that loaded — the same universe cambium indexes
 //! with its own `--keep_going`, and the same universe the `rdeps` oracle sees
-//! (see [`crate::oracle`]). Turn it off with
+//! (see [`crate::oracles::rdeps`]). Turn it off with
 //! [`BazelDiff::with_keep_going`] if a repository loads cleanly and a partial
 //! answer should be an error instead. No `--useCquery` and no
 //! `--fineGrainedHashExternalRepos`: both change what "affected" means.
@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-use crate::producer::{normalise_label, run_capture, Producer, ProducerRun, RunContext};
+use crate::tools::{normalise_label, run_capture, RunContext, Tool, ToolRun};
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_BAZEL_DIFF";
@@ -189,9 +189,9 @@ impl BazelDiff {
 
     /// `generate-hashes` for one workspace, into `out`.
     ///
-    /// The startup options are the corpus ones minus `--output_base`, so
+    /// The startup options are the run's, minus `--output_base`, so
     /// bazel-diff gets one output base per workspace directory rather than
-    /// sharing cambium's — see [`RunContext::producer_startup_flags`] for what
+    /// sharing cambium's — see [`RunContext::tool_startup_flags`] for what
     /// sharing it costs. `-k` rides along unless it was turned off; see the
     /// module docs for why it is the default.
     pub fn generate_hashes(
@@ -210,7 +210,7 @@ impl BazelDiff {
         if self.keep_going {
             cmd.arg("-k");
         }
-        let startup = ctx.producer_startup_flags();
+        let startup = ctx.tool_startup_flags();
         if !startup.is_empty() {
             cmd.arg("--bazelStartupOptions").arg(startup.join(" "));
         }
@@ -261,7 +261,7 @@ impl BazelDiff {
     }
 }
 
-impl Producer for BazelDiff {
+impl Tool for BazelDiff {
     fn name(&self) -> &str {
         &self.name
     }
@@ -270,7 +270,7 @@ impl Producer for BazelDiff {
         self.version.clone()
     }
 
-    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ProducerRun> {
+    fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun> {
         std::fs::create_dir_all(&ctx.scratch)?;
         let short = |s: &str| s.chars().take(12).collect::<String>();
         let base_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short(base)));
@@ -293,7 +293,7 @@ impl Producer for BazelDiff {
         let ((labels, depths), diff_wall) =
             self.get_impacted_targets(ws, &base_hashes, &head_hashes, &out, ctx)?;
 
-        Ok(ProducerRun {
+        Ok(ToolRun {
             labels,
             cold_wall: base_wall + head_wall + diff_wall,
             warm_wall: Some(head_wall + diff_wall),

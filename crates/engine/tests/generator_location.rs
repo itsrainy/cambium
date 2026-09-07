@@ -2,7 +2,7 @@
 //!
 //! `generator_location` is the `pkg/BUILD:line:col` of the macro call that
 //! instantiated a rule, so inserting one line at the top of a BUILD file moves
-//! it for every target below — on the `bazel/bazel` corpus that produced
+//! it for every target below — on the `bazel/bazel` subject that produced
 //! thousands of `rule definition changed` direct targets on commits that
 //! changed nothing anyone builds. `canonical_rule` drops the attribute; this
 //! test drives the whole engine over it rather than just the hash function.

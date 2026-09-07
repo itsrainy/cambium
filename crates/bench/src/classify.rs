@@ -17,12 +17,12 @@
 //! | `cambium_extra_build_glob` | cambium only | reached from a changed `BUILD` file that a `glob(["**"])` filegroup consumes; the file's *content* is an input, so the filegroup and everything embedding it really do change |
 //! | `cambium_extra_deleted` | cambium only | reached from a target that existed at base and not at head; cambium marks every consumer of a deleted target direct, the hash-diffing tools cannot see a target that is no longer there |
 //! | `cambium_extra_visibility` | cambium only | the target's rule changed only in `visibility`/`tags`, which cannot change its outputs but does move a hash |
-//! | `bazeldiff_extra_content` | producer only | a changed file whose content bazel-diff hashes but which no target in the index consumes |
-//! | `bazeldiff_extra_external` | producer only | an `@repo//...` label; cambium indexes `//...` only |
-//! | `bazeldiff_extra_external_content` | producer only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
-//! | `bazeldiff_extra_line_shift` | producer only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
-//! | `bazeldiff_extra_workspace_path` | producer only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the producer's base checkout is a different directory from head |
-//! | `cambium_missing` | producer only | **fails**: the other tool reached something cambium did not, with no benign explanation |
+//! | `bazeldiff_extra_content` | tool only | a changed file whose content bazel-diff hashes but which no target in the index consumes |
+//! | `bazeldiff_extra_external` | tool only | an `@repo//...` label; cambium indexes `//...` only |
+//! | `bazeldiff_extra_external_content` | tool only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
+//! | `bazeldiff_extra_line_shift` | tool only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
+//! | `bazeldiff_extra_workspace_path` | tool only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the tool's base checkout is a different directory from head |
+//! | `cambium_missing` | tool only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
 //!
 //! The classifier is a pure function of a [`Facts`] oracle so every class can
@@ -37,44 +37,109 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
-    /// cambium reported it and the producer did not.
+    /// cambium reported it and the tool did not.
     Cambium,
-    /// The producer reported it and cambium did not.
-    Producer,
+    /// The tool reported it and cambium did not.
+    Tool,
 }
 
 /// The fourteen disagreement classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
+    /// cambium reports a label because it keeps `select()` branches a
+    /// *configured* Bazel query resolves away.
+    ///
+    /// An over-approximation, and the expected one: all three tools work on
+    /// the unconfigured target graph, but the configured query the other two
+    /// can fall back to resolves a `select()` to one branch. Nothing to do.
     CambiumExtraSelect,
-    /// An external repository this target names moved.
+    /// cambium reached the label from an external repository whose
+    /// *declaration* moved.
+    ///
+    /// A `MODULE.bazel` edit, or a main-repo file a repository rule is built
+    /// from; every main-repo target naming a label in that repository is then
+    /// direct. An over-approximation: cambium's graph stops at the main
+    /// repository's edge, so it cannot ask whether the repository's *contents*
+    /// actually changed, while the hash-diffing tools fetch and hash it and
+    /// see the targets unchanged. On `bazel/bazel`'s `5c47f233..bfd201d1` one
+    /// `maven.install` version bump plus the `//:MODULE.bazel` that
+    /// `//:extensions.bzl` reads through `ctx.path(Label(...))` put 69 such
+    /// targets in cambium's answer. Ranked ahead of [`Class::CambiumExtraSelect`]:
+    /// when it holds, the repository is *why* the target is in the answer.
     CambiumExtraExternalRepo,
+    /// cambium reports a label reachable only through an implicit
+    /// (`$`-prefixed, rule-supplied) attribute edge the other tool does not
+    /// walk. An over-approximation.
     CambiumExtraImplicit,
+    /// The two tools' canonical rules differ only in `visibility` or `tags`,
+    /// which cambium's hash ignores on purpose. An over-approximation.
     CambiumExtraVisibility,
-    /// A `.bzl` edit marked the whole loading package direct, but this
-    /// target's own rule did not move.
+    /// The target's own rule proto is byte-identical at both revisions, but a
+    /// `.bzl` its package loads changed, so cambium marked the whole loading
+    /// package direct.
+    ///
+    /// An over-approximation, and on a real subject the largest cambium-side
+    /// class.
     CambiumExtraBzl,
     /// A dependency of this target was deleted between base and head.
+    ///
+    /// Not an approximation: a target whose dep vanished really may build
+    /// differently.
     CambiumExtraDeleted,
-    /// Reached from a changed `BUILD` file consumed as a source by a
+    /// Reached from a changed `BUILD` file consumed as a *source* by a
     /// `glob`bing filegroup.
+    ///
+    /// Not an approximation either: the file's content genuinely is an input
+    /// to that filegroup.
     CambiumExtraBuildGlob,
+    /// bazel-diff reports a changed path with no consumer in cambium's head
+    /// index — a file outside any package, or a hash-only artifact. It hashes
+    /// source content cambium's graph does not name.
     BazeldiffExtraContent,
+    /// The disagreement is confined to `@external//...` labels, which the
+    /// tools canonicalise differently (`@ext//:x` against `@@ext~//:x`).
+    /// Canonicalisation only, not a graph difference.
     BazeldiffExtraExternal,
-    /// A `//...` label the producer reported only because an external
+    /// A `//...` label the tool reported only because an external
     /// dependency of it hashed differently between the two runs.
+    ///
+    /// Its own rule (modulo `visibility`/`tags`), its source inputs and its
+    /// transitive `//...` dependencies are all unchanged, and it depends on
+    /// something external. bazel-diff's digests include the external graph,
+    /// and on `bazel/bazel` under `--keep_going` how much of that graph loads
+    /// varies between invocations. All four conditions must hold; drop any one
+    /// and the label stays [`Class::CambiumMissing`].
     BazeldiffExtraExternalContent,
-    /// A `//...` label whose rule differs between the producer's two checkouts
+    /// A `//...` label whose rule differs between the tool's two checkouts
     /// only in the absolute workspace path it embeds.
+    ///
+    /// A harness artifact: the other tools hash base in a second git worktree
+    /// while cambium carries its base index forward inside one checkout, so a
+    /// rule that bakes the workspace root into `args`/`cmd`/`env` reads as
+    /// changed to them and unchanged to cambium. All three conditions — rule
+    /// identical once normalised, no changed source input, no affected
+    /// dependency — must hold.
     BazeldiffExtraWorkspacePath,
     /// The rule did not move, its inputs did not move, and nothing it depends
     /// on is affected — but the `BUILD` file it lives in changed, so its line
     /// number did.
+    ///
+    /// bazel-diff hashes `generator_location`; cambium drops it from the
+    /// canonical rule on purpose (`cambium_proto::RULE_HASH_VERSION`, see
+    /// `docs/STORE.md`), and Tango ignores it too. Seen on `apollo`, where a
+    /// `BUILD` reshuffle pushed two unrelated `filegroup`s down the file. The
+    /// source-input condition is checked first, so the `glob(["**"])`
+    /// filegroup that really does eat its own `BUILD` file never lands here.
     BazeldiffExtraLineShift,
-    /// A failure: the other tool found something cambium missed.
+    /// A failure: a tool or an oracle found something cambium missed.
+    ///
+    /// This is unsoundness, and it is the one thing the benchmark exists to
+    /// catch. There is no version of it that is acceptable.
     CambiumMissing,
     /// A failure: no predicate explained the disagreement.
+    ///
+    /// It needs a new class or a real bug fix before it can be waved through.
     Unclassified,
 }
 
@@ -107,10 +172,10 @@ impl Class {
             }
             Class::CambiumExtraExternalRepo => {
                 "cambium reached it from an external repository whose contents moved; the \
-                 producer resolves the repository and sees its targets unchanged"
+                 tool resolves the repository and sees its targets unchanged"
             }
             Class::CambiumExtraImplicit => {
-                "reached only through an implicit (`$`-prefixed) attribute edge the producer \
+                "reached only through an implicit (`$`-prefixed) attribute edge the tool \
                  does not walk"
             }
             Class::CambiumExtraVisibility => {
@@ -137,7 +202,7 @@ impl Class {
             }
             Class::BazeldiffExtraExternalContent => {
                 "an unchanged `//...` rule that depends on something external; how much of the \
-                 external graph loads varies between the producer's runs"
+                 external graph loads varies between the tool's runs"
             }
             Class::BazeldiffExtraWorkspacePath => {
                 "the rule is identical at both revisions once each checkout's own absolute \
@@ -148,7 +213,7 @@ impl Class {
                  moved, and cambium's rule hash excludes `generator_location`"
             }
             Class::CambiumMissing => {
-                "**fails**: the oracle or a producer reached something cambium did not — \
+                "**fails**: the oracle or a tool reached something cambium did not — \
                  unsoundness"
             }
             Class::Unclassified => {
@@ -157,7 +222,7 @@ impl Class {
         }
     }
 
-    /// Whether a label in this class fails the pair.
+    /// Whether a label in this class fails the change set.
     pub fn is_failure(self) -> bool {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
@@ -187,7 +252,7 @@ impl std::fmt::Display for Class {
 }
 
 /// The questions the classifier asks about a label. Every one of them is
-/// answerable from Bazel plus the head index; none of them needs the producer.
+/// answerable from Bazel plus the head index; none of them needs the tool.
 pub trait Facts {
     /// The label names a target outside the main repository (`@repo//...`, or
     /// the older `//external:...`).
@@ -222,7 +287,7 @@ pub trait Facts {
     /// every external repository on every run.
     fn reached_via_external_repo(&self, label: &str) -> bool;
 
-    /// A `.bzl` file changed in this pair and this target's own rule proto is
+    /// A `.bzl` file changed in this change set and this target's own rule proto is
     /// byte-identical at base and head.
     ///
     /// cambium marks *every* rule in a package whose `.bzl` load closure moved
@@ -272,7 +337,7 @@ pub trait Facts {
     fn rule_unchanged_modulo_visibility(&self, label: &str) -> bool;
 
     /// None of the target's `rule_input` labels that name a file inside the
-    /// workspace is in this pair's changed path set.
+    /// workspace is in this change set's changed path set.
     fn no_changed_source_inputs(&self, label: &str) -> bool;
 
     /// None of the target's transitive `//...` dependencies, walked over the
@@ -283,15 +348,15 @@ pub trait Facts {
     /// through the head index, or through an implicit edge the index does not
     /// carry. The implicit half is not a detail: a target's whole toolchain
     /// graph is external and implicit, and it is the commonest thing for a
-    /// producer's two runs to disagree about.
+    /// tool's two runs to disagree about.
     fn has_external_input(&self, label: &str) -> bool;
 
-    /// The label corresponds to a path that changed in this pair but that no
+    /// The label corresponds to a path that changed in this change set but that no
     /// target in the head index consumes — a file bazel-diff hashes and
     /// cambium correctly has no consumer for.
     fn changed_path_without_consumer(&self, label: &str) -> bool;
 
-    /// The `BUILD` file of the target's own package is in this pair's changed
+    /// The `BUILD` file of the target's own package is in this change set's changed
     /// path set. Says nothing on its own — a changed `BUILD` file usually means
     /// a changed rule — and is only ever asked after the rule has been shown to
     /// be byte-identical.
@@ -300,8 +365,8 @@ pub trait Facts {
     /// The target's rule differs between base and head *only* in the absolute
     /// workspace path it embeds.
     ///
-    /// The producers hash base in a second git worktree
-    /// ([`crate::producer::BaseWorktree`]) while cambium carries its base
+    /// The tools hash base in a second git worktree
+    /// ([`crate::tools::BaseWorktree`]) while cambium carries its base
     /// index forward inside the one checkout, so any rule that bakes the
     /// workspace root into an attribute reads as changed to them and unchanged
     /// to cambium. envoy does this to eleven targets through
@@ -309,7 +374,7 @@ pub trait Facts {
     ///
     /// ```text
     /// sh_binary(name = "replace", srcs = ["replace.sh"], args = [PATH])
-    /// #   args = ["/…/corpus/envoy"] at head, ["/…/scratch/base-worktree"] at base
+    /// #   args = ["/…/subjects/envoy"] at head, ["/…/scratch/base-worktree"] at base
     /// ```
     ///
     /// and the same constant reaches `//tools/code:check`'s `args`,
@@ -353,7 +418,7 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
                 Class::Unclassified
             }
         }
-        Side::Producer => {
+        Side::Tool => {
             if facts.is_external(label) {
                 Class::BazeldiffExtraExternal
             } else if facts.changed_path_without_consumer(label) {
@@ -374,10 +439,10 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
 /// The conjunction behind `bazeldiff_extra_workspace_path`.
 ///
 /// Three facts, and all three are needed. The first is the explanation; the
-/// other two are the same "nothing else could have impacted it" pair the
+/// other two are the same "nothing else could have impacted it" change set the
 /// external-content class insists on, because a rule that embeds the workspace
 /// path can *also* have a changed source or a changed dependency, and then the
-/// producer is right and cambium is wrong for an unrelated reason.
+/// tool is right and cambium is wrong for an unrelated reason.
 ///
 /// 1. base and head agree once each side's own workspace root is normalised
 ///    away, and disagree before that — so the path is the whole difference;
@@ -400,7 +465,7 @@ fn workspace_path_artefact(label: &str, facts: &dyn Facts) -> bool {
 
 /// The conjunction behind `bazeldiff_extra_line_shift`.
 ///
-/// Same three "nothing could have impacted it" facts the other producer-side
+/// Same three "nothing could have impacted it" facts the other tool-side
 /// classes insist on, plus the explanation: the target's own `BUILD` file
 /// changed. The rule proto is byte-identical, so whatever the edit did, it did
 /// not do it to this rule — it moved it down the file. bazel-diff hashes
@@ -413,7 +478,7 @@ fn workspace_path_artefact(label: &str, facts: &dyn Facts) -> bool {
 /// `filegroup(srcs = glob(["**"]))` shape — where the `BUILD` file really *is*
 /// an input and the target really did change — never reaches here.
 ///
-/// Found on the `apollo` corpus: one commit reordered
+/// Found on the `apollo` subject: one commit reordered
 /// `modules/common/vehicle_model/BUILD`, and bazel-diff reported the two
 /// `filegroup`s below the edit whose globbed data files had not moved at all.
 fn line_shift_only(label: &str, facts: &dyn Facts) -> bool {
@@ -439,7 +504,7 @@ fn line_shift_only(label: &str, facts: &dyn Facts) -> bool {
 /// `--keep_going`, how much of that external graph loads is not stable between
 /// invocations — a repository rule that fetched on one run and did not on the
 /// next changes the digest of everything above it — so bazel-diff reports
-/// labels like `//:bootstrap-jars` as impacted on pairs where nothing inside
+/// labels like `//:bootstrap-jars` as impacted on change sets where nothing inside
 /// `//...` that they depend on moved at all.
 ///
 /// The predicate is deliberately a conjunction of four *independent* facts, and
@@ -497,7 +562,7 @@ use cambium_proto::blaze_query::{attribute::Discriminator, Rule, Target};
 
 /// A [`Facts`] implementation backed by Bazel and the head index.
 ///
-/// It caches every rule proto it fetches: a pair's symmetric difference asks
+/// It caches every rule proto it fetches: a change set's symmetric difference asks
 /// about the same handful of packages repeatedly, and each miss is a Bazel
 /// query.
 ///
@@ -519,9 +584,9 @@ pub struct BazelFacts<'a> {
     /// the safe direction).
     base: Option<Bazel>,
     index: IndexRef<'a>,
-    /// cambium's depth-0 set for this pair.
+    /// cambium's depth-0 set for this change set.
     direct: BTreeSet<String>,
-    /// cambium's whole affected set for this pair (depth 0 included).
+    /// cambium's whole affected set for this change set (depth 0 included).
     affected: BTreeSet<String>,
     /// Workspace-relative paths `git diff --name-only base..head` reported.
     changed_paths: BTreeSet<String>,
@@ -631,7 +696,7 @@ impl<'a> BazelFacts<'a> {
 
     /// `git diff --name-only base..head` in `repo`.
     pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::producer::git(repo, &["diff", "--name-only", &format!("{base}..{head}")])?;
+        let out = crate::tools::git(repo, &["diff", "--name-only", &format!("{base}..{head}")])?;
         Ok(out
             .lines()
             .map(str::trim)
@@ -702,7 +767,7 @@ impl<'a> BazelFacts<'a> {
         // counts: the index is `//...`, so an external label the walk cannot
         // reach is exactly the case this looks for. The toolchain graph —
         // `@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
-        // toolchain — is exactly what a producer's two runs disagree about
+        // toolchain — is exactly what a tool's two runs disagree about
         // most often, and it is reached through implicit attributes; the index
         // now carries those (`cambium_bazel::QUERY_FLAGS`), so the walk above
         // usually settles it and this is the fallback for a label the index
@@ -716,7 +781,7 @@ impl<'a> BazelFacts<'a> {
         // question of every rule in the closure the walk just enumerated.
         // `//:srcs` reaches `@async_profiler//file:file` only several
         // filegroups down, through an edge on a target inside its closure;
-        // bazel-diff reported it on a pair whose only changed files were
+        // bazel-diff reported it on a change set whose only changed files were
         // `.github/workflows/*.yml`, which no rule consumes at all.
         if !out.has_external {
             let mut closure: Vec<String> = walk
@@ -739,7 +804,7 @@ impl<'a> BazelFacts<'a> {
     /// Does any rule in `labels` name an external label among its inputs?
     ///
     /// Batched and memoised: the closures overlap heavily between the handful
-    /// of labels one pair asks about, and one `query 'set(...)'` answers five
+    /// of labels one change set asks about, and one `query 'set(...)'` answers five
     /// hundred of them.
     fn any_implicit_external(&self, labels: &[String]) -> bool {
         for chunk in labels.chunks(PREFETCH_CHUNK) {
@@ -786,7 +851,7 @@ impl<'a> BazelFacts<'a> {
     /// Without this the classifier is one `bazel query <label>` per label, and
     /// the first real run on `bazel/bazel` produced symmetric differences of
     /// tens of thousands of labels: at roughly a second per invocation that is
-    /// hours per pair, and it is *all* process startup — one batched
+    /// hours per change set, and it is *all* process startup — one batched
     /// `query 'set(a b c ...)'` answers five hundred labels in the same time.
     /// Labels the batch does not return are cached as `None`, so a target
     /// Bazel will not talk about is not retried one at a time either.
@@ -1373,7 +1438,7 @@ mod tests {
     #[test]
     fn a_rule_that_only_moved_down_its_build_file_is_not_a_cambium_miss() {
         assert_eq!(
-            classify("//a:b", Side::Producer, &line_shift_facts()),
+            classify("//a:b", Side::Tool, &line_shift_facts()),
             Class::BazeldiffExtraLineShift
         );
         assert!(!Class::BazeldiffExtraLineShift.is_failure());
@@ -1385,14 +1450,14 @@ mod tests {
         // false and the label is a genuine miss, not a line shift.
         let mut h = line_shift_facts();
         h.no_changed_srcs.clear();
-        assert_eq!(classify("//a:b", Side::Producer, &h), Class::CambiumMissing);
+        assert_eq!(classify("//a:b", Side::Tool, &h), Class::CambiumMissing);
     }
 
     #[test]
     fn a_moved_rule_with_an_affected_dependency_still_fails() {
         let mut h = line_shift_facts();
         h.no_affected_deps.clear();
-        assert_eq!(classify("//a:b", Side::Producer, &h), Class::CambiumMissing);
+        assert_eq!(classify("//a:b", Side::Tool, &h), Class::CambiumMissing);
     }
 
     fn one(field: fn(&mut Hand) -> &mut BTreeSet<String>, side: Side) -> Class {
@@ -1472,17 +1537,17 @@ mod tests {
     }
 
     #[test]
-    fn an_external_label_explains_a_producer_extra() {
+    fn an_external_label_explains_a_tool_extra() {
         assert_eq!(
-            one(|h| &mut h.external, Side::Producer),
+            one(|h| &mut h.external, Side::Tool),
             Class::BazeldiffExtraExternal
         );
     }
 
     #[test]
-    fn an_unconsumed_changed_file_explains_a_producer_extra() {
+    fn an_unconsumed_changed_file_explains_a_tool_extra() {
         assert_eq!(
-            one(|h| &mut h.content, Side::Producer),
+            one(|h| &mut h.content, Side::Tool),
             Class::BazeldiffExtraContent
         );
     }
@@ -1497,8 +1562,8 @@ mod tests {
     }
 
     #[test]
-    fn an_embedded_workspace_path_explains_a_producer_extra() {
-        let c = classify("//a:b", Side::Producer, &workspace_path_facts());
+    fn an_embedded_workspace_path_explains_a_tool_extra() {
+        let c = classify("//a:b", Side::Tool, &workspace_path_facts());
         assert_eq!(c, Class::BazeldiffExtraWorkspacePath);
         assert!(!c.is_failure());
     }
@@ -1513,7 +1578,7 @@ mod tests {
             let mut h = workspace_path_facts();
             drop(&mut h);
             assert_eq!(
-                classify("//a:b", Side::Producer, &h),
+                classify("//a:b", Side::Tool, &h),
                 Class::CambiumMissing,
                 "one condition short must not be waved through"
             );
@@ -1583,8 +1648,8 @@ mod tests {
     }
 
     #[test]
-    fn external_load_nondeterminism_explains_a_producer_extra() {
-        let c = classify("//a:b", Side::Producer, &external_content_facts());
+    fn external_load_nondeterminism_explains_a_tool_extra() {
+        let c = classify("//a:b", Side::Tool, &external_content_facts());
         assert_eq!(c, Class::BazeldiffExtraExternalContent);
         assert!(!c.is_failure());
     }
@@ -1606,9 +1671,9 @@ mod tests {
             let mut h = external_content_facts();
             field(&mut h).clear();
             assert_eq!(
-                classify("//a:b", Side::Producer, &h),
+                classify("//a:b", Side::Tool, &h),
                 Class::CambiumMissing,
-                "{why}: without this fact the label must still fail the pair"
+                "{why}: without this fact the label must still fail the change_set"
             );
         }
     }
@@ -1620,14 +1685,14 @@ mod tests {
         let mut h = external_content_facts();
         h.external.insert("//a:b".into());
         assert_eq!(
-            classify("//a:b", Side::Producer, &h),
+            classify("//a:b", Side::Tool, &h),
             Class::BazeldiffExtraExternal
         );
     }
 
     #[test]
-    fn an_unexplained_producer_extra_is_unsoundness() {
-        let c = classify("//a:b", Side::Producer, &Hand::default());
+    fn an_unexplained_tool_extra_is_unsoundness() {
+        let c = classify("//a:b", Side::Tool, &Hand::default());
         assert_eq!(c, Class::CambiumMissing);
         assert!(c.is_failure());
     }
@@ -1640,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn the_benign_classes_do_not_fail_a_pair() {
+    fn the_benign_classes_do_not_fail_a_change_set() {
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(c.name().contains("extra"), "{c}");
         }
@@ -1651,13 +1716,13 @@ mod tests {
     #[test]
     fn side_decides_which_predicates_apply() {
         // A label that is external *and* selected: the side settles it, so a
-        // producer-only external label is never filed as a cambium extra.
+        // tool-only external label is never filed as a cambium extra.
         let h = Hand::with(|h| {
             h.external.insert("//a:b".into());
             h.select.insert("//a:b".into());
         });
         assert_eq!(
-            classify("//a:b", Side::Producer, &h),
+            classify("//a:b", Side::Tool, &h),
             Class::BazeldiffExtraExternal
         );
         assert_eq!(

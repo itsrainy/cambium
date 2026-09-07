@@ -9,7 +9,7 @@
 //! 3) on any machine that cannot fetch all of them. A partial `rbuildfiles`
 //! answer is unusable: the package it dropped may be exactly the one that
 //! loads the changed file, so the only sound response was to invalidate
-//! everything. On the corpus that fired on 5 of 150 commits for `bazel/bazel`.
+//! everything. On the real subjects that fired on 5 of 150 commits for `bazel/bazel`.
 //!
 //! `load()` is a static, purely syntactic construct: it is only legal at the
 //! top level of a file, its first argument must be a string literal, and it

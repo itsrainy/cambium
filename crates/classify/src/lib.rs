@@ -347,7 +347,7 @@ pub fn dirty_set(
             // move when the BUILD file's text does. Re-querying the package
             // therefore finds nothing changed, and without this the filegroup
             // and everything above it (`//src:srcs`, `//:bazel-srcs`, the
-            // distribution tarball) are missed. The first corpus run against
+            // distribution tarball) are missed. The first run against a real subject
             // bazel/bazel caught it: both bazel-diff and Tango reported
             // `//src/main/java/com/google/devtools/build/lib:srcs` and
             // `//src:srcs` on a BUILD-only commit and cambium did not.
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(d.ignored, 1);
     }
 
-    /// The regression the corpus found on `bazel/bazel`: the default ignore
+    /// The regression the benchmark found on `bazel/bazel`: the default ignore
     /// globs cover `**/*.md`, and `CHANGELOG.md` is a real input of
     /// `//:changelog-file`. Taking the glob at its word missed the genrule and
     /// everything above it; the graph has the final word.

@@ -7,7 +7,7 @@
 //! flagged partial and carries the count and a sample of the packages that
 //! failed, and a splice on top of it stays flagged.
 //!
-//! Found on the `apollo` corpus repo, whose deps live in `WORKSPACE`: under
+//! Found on the `apollo` subject, whose deps live in `WORKSPACE`: under
 //! Bazel 9, which no longer reads it, 770 of 771 packages fail to load.
 
 use cambium_bazel::LoadErrors;

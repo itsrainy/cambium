@@ -130,7 +130,7 @@ pub struct Stats {
     /// A `.bzl` file changed, so Bazel was asked which packages load it.
     ///
     /// Always false since the static load closure replaced the `rbuildfiles`
-    /// call; kept in the contract because consumers (and the corpus's own
+    /// call; kept in the contract because consumers (and the benchmark's own
     /// history) read it, and because the method behind it still exists for the
     /// comparison suite's oracle.
     #[serde(default)]
