@@ -39,15 +39,18 @@ ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 # Rust for cambium and bazel-diff-rust; rust-toolchain.toml picks the channel.
 sudo -u ubuntu -H bash -c 'curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal'
 
-# The repository: the corpus manifest, the producers' fetch scripts, and the
-# binary all come from it.
+# The repository is private, so the box cannot clone it: launch.sh copies the
+# working tree over ssh after boot and runs the rest of this as `ubuntu`. This
+# half only prepares the machine; the repository half is `finish-bootstrap.sh`
+# in the home directory, written by launch.sh.
+echo "MACHINE READY"
+exit 0
+
 sudo -u ubuntu -H bash -c '
   set -euxo pipefail
   source ~/.cargo/env
-  cd ~
-  [ -d cambium ] || git clone https://github.com/itsrainy/cambium.git
-  cd cambium
-  git pull --ff-only
+  export PATH=/usr/local/go/bin:$PATH
+  cd ~/cambium
   cargo build --release
   mkdir -p ~/.cache/cambium/bin
   ln -sf /usr/local/bin/bazelisk ~/.cache/cambium/bin/bazelisk

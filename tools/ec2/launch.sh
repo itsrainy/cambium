@@ -4,6 +4,7 @@
 #
 #   tools/ec2/launch.sh              c7i.4xlarge, 500 GB gp3
 #   SIZE=c7i.8xlarge DISK=1000 tools/ec2/launch.sh
+#   tools/ec2/launch.sh sync           copy this working tree over and build on the box
 #   tools/ec2/launch.sh stop|start|terminate|ssh
 set -euo pipefail
 R=${AWS_REGION:-us-east-2}
@@ -44,6 +45,28 @@ case "${1:-launch}" in
     aws ec2 wait instance-running --region "$R" --instance-ids "$ID"
     HOST=$(aws ec2 describe-instances --region "$R" --instance-ids "$ID" --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
     echo "running: ssh -i $PEM ubuntu@$HOST"
-    echo "bootstrap progress: tools/ec2/launch.sh ssh tail -f /var/log/cambium-bootstrap.log" ;;
-  *) echo "usage: $0 [launch|ssh|stop|start|terminate]"; exit 1 ;;
+    echo "machine bootstrap: tools/ec2/launch.sh ssh tail -f /var/log/cambium-bootstrap.log (ends with MACHINE READY)"
+    echo "then: tools/ec2/launch.sh sync   # copies this tree and builds cambi, bazel-diff-rust, tango" ;;
+  sync)
+    # The repository is private; the box gets the working tree, not a clone.
+    read -r ID STATE HOST <<<"$(find_instance)"
+    ROOT=$(cd "$HERE/../.." && pwd)
+    tar -C "$ROOT" -czf - --exclude=./target --exclude=./corpus-results --exclude='./corpus-results-*' \
+      --exclude=./.claude --exclude=./.git/worktrees . 2>/dev/null \
+      | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium 2>/dev/null'
+    ssh -i "$PEM" "ubuntu@$HOST" 'cat > ~/finish-bootstrap.sh <<"EOS"
+set -euxo pipefail
+source ~/.cargo/env
+export PATH=/usr/local/go/bin:$PATH
+cd ~/cambium
+cargo build --release
+mkdir -p ~/.cache/cambium/bin
+ln -sf /usr/local/bin/bazelisk ~/.cache/cambium/bin/bazelisk
+tools/bazel-diff/fetch.sh
+tools/tango/fetch.sh
+echo "BOOTSTRAP DONE"
+EOS
+nohup bash ~/finish-bootstrap.sh > ~/finish-bootstrap.log 2>&1 &'
+    echo "synced; progress: tools/ec2/launch.sh ssh tail -f finish-bootstrap.log (ends with BOOTSTRAP DONE)" ;;
+  *) echo "usage: $0 [launch|sync|ssh|stop|start|terminate]"; exit 1 ;;
 esac
