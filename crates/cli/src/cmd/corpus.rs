@@ -118,7 +118,7 @@ pub enum Args {
         producers: Vec<String>,
         /// Stress pairs per category when selecting, and the cap on how many
         /// pairs are compared in one run.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = cambium_corpus::profile::FULL_PAIR_CAP)]
         cap: usize,
         /// Compare every pair again rather than resuming.
         #[arg(long)]
@@ -361,7 +361,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             fetch(&run)?;
             build(&run, None, false)?;
             do_replay(&run, None, true)?;
-            do_pairs(&run, &[], 20, DataFormat::Text)?;
+            do_pairs(
+                &run,
+                &[],
+                cambium_corpus::profile::FULL_PAIR_CAP,
+                DataFormat::Text,
+            )?;
             let code = do_compare(&run, &CompareArgs::default())?;
             if code != crate::EXIT_OK {
                 return Ok(code);
@@ -575,7 +580,7 @@ impl Default for CompareArgs {
             tango: false,
             no_tango: false,
             producers: Vec::new(),
-            cap: 20,
+            cap: cambium_corpus::profile::FULL_PAIR_CAP,
             restart: false,
         }
     }
@@ -667,8 +672,8 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let checkout = run.corpus.open(&run.entry)?;
     let set = load_pairs(run, &checkout, args)?;
     // The quick profile's pair set is already capped at its own total, so the
-    // per-run `--cap` (20 by default, meant to bound an EC2 job's tail) must
-    // not shave it down further.
+    // per-run `--cap` (`FULL_PAIR_CAP` by default, meant to bound an EC2 job's
+    // tail) must not shave it down further.
     let cap = match run.profile.pair_cap() {
         Some(c) => args.cap.max(c),
         None => args.cap,
