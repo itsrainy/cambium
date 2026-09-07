@@ -1,0 +1,1232 @@
+//! External repositories: what the main repository feeds them, and what a
+//! `MODULE.bazel` edit changes about them.
+//!
+//! # The problem
+//!
+//! cambium indexes the main repository. Every label into an external
+//! repository is a leaf: `@envoy_api//envoy/config/core/v3:pkg` is a node with
+//! no outgoing edges, because nothing ever queried that repository. So a
+//! change that reaches a main-repo target *through* an external repository is
+//! invisible to the graph, and until this module the only sound answer was to
+//! invalidate everything:
+//!
+//! - envoy lists `api/` in `.bazelignore` and re-exposes it as the module
+//!   `envoy_api` via `local_path_override`. An edit to one `.proto` there owns
+//!   no main-repo package at all, and yet `//tools/proto_format:proto_sync`
+//!   really does depend on it.
+//! - envoy's `@envoy_repo` repository rule reads `.github/config.yml` at load
+//!   time and writes the build-image digests into the `exec_properties` of the
+//!   RBE platform rules. Four main-repo rule hashes move when that YAML moves,
+//!   and no query names the edge.
+//! - a `bazel_dep` version bump changes the contents of exactly one external
+//!   repository, but `MODULE.bazel` was an invalidator, so it changed
+//!   everything.
+//!
+//! Both shapes are the same question with a repository in the middle: *which
+//! external repositories did this edit change, and who depends on them?* This
+//! module answers the first half statically; [`crate::data::IndexRef`] stores
+//! the answer, and the engine answers the second half from the graph it
+//! already has.
+//!
+//! # What is computed, and when
+//!
+//! At index time, from the text of `MODULE.bazel` / `WORKSPACE` and of the
+//! `.bzl` files in their load closure (which [`crate::loads`] already walks):
+//!
+//! - **[`RepoInputs::patterns`]** — main-repo path patterns to the set of
+//!   external repositories built from them. Sources: the `path` of a
+//!   `local_path_override`, every main-repo label in a module extension's tag
+//!   calls or a `use_repo_rule` instantiation, and every main-repo label
+//!   appearing anywhere in a workspace-closure `.bzl`.
+//! - **[`RepoInputs::bzl_repos`]** — which repositories each workspace-closure
+//!   `.bzl` can define. A change to `bazel/repo.bzl` then dirties `envoy_repo`
+//!   rather than the world.
+//! - **[`ModuleFacts`]** — the structured content of `MODULE.bazel`, so that a
+//!   run can diff base against head and name the repositories that moved.
+//!
+//! # Attribution, and why it is conservative in the right direction
+//!
+//! A repository rule's implementation lives in a `.bzl`; the *instance* is
+//! named in `MODULE.bazel` (`use_repo(ext, "envoy_repo")`, or the `name =` of
+//! a `use_repo_rule` call). So the `.bzl` label in `use_extension` /
+//! `use_repo_rule` is the seed: that file, and everything it transitively
+//! `load()`s, is attributed to the repositories that use it. A label found in
+//! such a file is an input of those repositories.
+//!
+//! Over-attribution is safe (more repositories dirty, more targets reported,
+//! never fewer) and under-attribution is not, so anything unattributable —
+//! a main-repo label in a workspace-closure `.bzl` that no extension or repo
+//! rule reaches — is attributed to *every* repository the main repository
+//! defines. That is bounded (a handful of repositories on every corpus entry)
+//! and still far short of global.
+//!
+//! # The soundness gap, stated plainly
+//!
+//! A repository rule can read a main-repo file whose path never appears as a
+//! label: `repository_ctx.read(repository_ctx.workspace_root.get_child("x"))`,
+//! or a path assembled by string arithmetic. No static scan sees that, and
+//! neither does Bazel's own query. Such a path must still be listed as an
+//! invalidator in `cambium.toml`. Everything reachable through a label —
+//! which is the documented, and overwhelmingly the common, way for a
+//! repository rule to name a file — is covered.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::loads::{lex, unescape, FileText, Lexed, LoadGraph, RepoMapping, Tok};
+
+/// A main-repo path pattern that feeds an external repository.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pattern {
+    /// Exactly this repo-relative path.
+    Exact(String),
+    /// This directory and everything under it. Stored with its trailing `/`.
+    Prefix(String),
+}
+
+impl Pattern {
+    pub fn matches(&self, path: &str) -> bool {
+        match self {
+            Pattern::Exact(p) => path == p,
+            Pattern::Prefix(d) => path.starts_with(d.as_str()),
+        }
+    }
+
+    /// The stored form: a prefix keeps its trailing `/`, which is also what
+    /// distinguishes the two kinds on disk.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Pattern::Exact(p) => p,
+            Pattern::Prefix(d) => d,
+        }
+    }
+
+    pub fn is_prefix(&self) -> bool {
+        matches!(self, Pattern::Prefix(_))
+    }
+
+    /// Reads back a stored pattern; a trailing `/` means a prefix.
+    pub fn from_stored(s: &str, prefix: bool) -> Self {
+        if prefix {
+            Pattern::Prefix(s.to_string())
+        } else {
+            Pattern::Exact(s.to_string())
+        }
+    }
+}
+
+/// The main repository's contribution to external repositories, in the
+/// mutable form a build works with. [`crate::IndexBuilder`] flattens it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoInputs {
+    /// Main-repo path pattern -> the repositories built from it.
+    pub patterns: BTreeMap<Pattern, BTreeSet<String>>,
+    /// Workspace-closure `.bzl` path -> the repositories it can define.
+    pub bzl_repos: BTreeMap<String, BTreeSet<String>>,
+    /// Every repository the main repository itself defines (extensions and
+    /// repo rules whose `.bzl` is a main-repo label), plus every module the
+    /// main repository overrides. The fallback attribution set.
+    pub repos: BTreeSet<String>,
+    /// Apparent name -> canonical name, captured so that a run can match a
+    /// dirty repository against the canonical `@@name+//...` labels Bazel
+    /// emits without re-running `bazel mod dump_repo_mapping`.
+    pub canonical: BTreeMap<String, String>,
+}
+
+impl RepoInputs {
+    /// The repositories a changed main-repo path feeds.
+    pub fn repos_for(&self, path: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (pat, repos) in &self.patterns {
+            if pat.matches(path) {
+                out.extend(repos.iter().cloned());
+            }
+        }
+        out
+    }
+}
+
+// ------------------------------------------------------------ MODULE.bazel
+
+/// One `bazel_dep`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dep {
+    pub module: String,
+    pub version: String,
+    /// The apparent name the main repository sees it under.
+    pub repo_name: String,
+}
+
+/// One `use_extension` plus the tags and `use_repo` calls against it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extension {
+    /// The `.bzl` label the extension is defined in, as written.
+    pub bzl: String,
+    pub name: String,
+    /// Apparent repository names this extension is asked for, from `use_repo`.
+    pub repos: BTreeSet<String>,
+    /// Canonical rendering of each tag call, for diffing.
+    pub tags: Vec<String>,
+    /// Main-repo labels named in the tag calls.
+    pub labels: Vec<String>,
+}
+
+/// One `use_repo_rule` plus its instantiations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoRule {
+    pub bzl: String,
+    pub rule: String,
+    /// The `name =` of each instantiation.
+    pub repos: BTreeSet<String>,
+    pub calls: Vec<String>,
+    pub labels: Vec<String>,
+}
+
+/// The structured content of a `MODULE.bazel`.
+///
+/// Only what a diff needs: everything else is deliberately dropped, and
+/// anything the parser did not recognise lands in [`ModuleFacts::unparsed`],
+/// which forces a global invalidation rather than a guess.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModuleFacts {
+    /// `module(name = ..., version = ...)`, rendered.
+    pub module: String,
+    /// The root module's own name, which is also an apparent name for the
+    /// main repository.
+    pub module_name: String,
+    /// By apparent repository name.
+    pub deps: BTreeMap<String, Dep>,
+    /// Module name -> rendered override call.
+    pub overrides: BTreeMap<String, String>,
+    /// Module name -> the main-repo directory a `local_path_override` points
+    /// at, with its trailing `/`.
+    pub local_paths: BTreeMap<String, String>,
+    /// Keyed by `bzl\0name`.
+    pub extensions: BTreeMap<String, Extension>,
+    /// Keyed by `bzl\0rule`.
+    pub repo_rules: BTreeMap<String, RepoRule>,
+    /// `register_toolchains` / `register_execution_platforms` arguments, in
+    /// order. Toolchain resolution has no edge in the graph, so any movement
+    /// here is global.
+    pub registrations: Vec<String>,
+    /// Top-level statements the parser did not recognise, rendered. A run that
+    /// sees one of these on either side of a diff goes global.
+    pub unparsed: Vec<String>,
+}
+
+/// Modules whose version decides how *every* configured target is built, not
+/// what any particular target depends on.
+///
+/// A toolchain is resolved, not depended on: `bazel query` shows no edge from
+/// a `cc_library` to the C++ toolchain that will compile it, so no reverse
+/// walk can find the targets a toolchain change moves. A version bump of one
+/// of these therefore has to invalidate everything, and the list is explicit
+/// rather than heuristic so that each entry can carry its reason.
+///
+/// - `rules_cc`, `rules_java`, `rules_python`, `rules_go`, `rules_rust`,
+///   `rules_shell`, `rules_nodejs` — each registers the toolchains for its
+///   language from its own `MODULE.bazel`.
+/// - `platforms`, `bazel_tools` — the constraint values and the host
+///   toolchains every resolution is expressed in.
+/// - `toolchains_llvm`, `apple_support`, `rules_apple`, `rules_foreign_cc` —
+///   C++ toolchains and execution platforms.
+/// - `bazel_skylib` is deliberately *not* here: it registers no toolchains,
+///   it is a macro library, and its consumers are visible through `load()`.
+pub const TOOLCHAIN_MODULES: &[&str] = &[
+    "apple_support",
+    "bazel_tools",
+    "platforms",
+    "rules_apple",
+    "rules_cc",
+    "rules_foreign_cc",
+    "rules_go",
+    "rules_java",
+    "rules_nodejs",
+    "rules_python",
+    "rules_rust",
+    "rules_shell",
+    "toolchains_llvm",
+];
+
+pub fn is_toolchain_module(name: &str) -> bool {
+    TOOLCHAIN_MODULES.contains(&name)
+}
+
+/// What a `MODULE.bazel` edit means.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModuleChange {
+    /// Nothing a run can localise: invalidate everything, for this reason.
+    Global(String),
+    /// Exactly these apparent repository names moved.
+    Repos(BTreeSet<String>),
+}
+
+// ------------------------------------------------------------- the parser
+
+/// A call's arguments, flattened enough for the questions asked of them.
+#[derive(Debug, Default)]
+struct Args {
+    positional: Vec<String>,
+    /// Keyword arguments in source order; the value is every string literal
+    /// inside it, so a list or a dict argument yields all of its entries.
+    kw: Vec<(String, Vec<String>)>,
+}
+
+impl Args {
+    fn first(&self, key: &str) -> Option<&str> {
+        self.kw
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.first())
+            .map(String::as_str)
+    }
+
+    /// Every string literal in the call, keyword and positional alike.
+    fn strings(&self) -> impl Iterator<Item = &String> {
+        self.positional
+            .iter()
+            .chain(self.kw.iter().flat_map(|(_, v)| v.iter()))
+    }
+
+    /// A stable rendering, for comparing two revisions of the same call.
+    fn render(&self, head: &str) -> String {
+        let mut s = String::from(head);
+        s.push('(');
+        for p in &self.positional {
+            s.push_str(p);
+            s.push(',');
+        }
+        for (k, v) in &self.kw {
+            s.push_str(k);
+            s.push('=');
+            s.push_str(&v.join("|"));
+            s.push(',');
+        }
+        s.push(')');
+        s
+    }
+}
+
+/// A top-level statement, as a token slice plus the shape the parser found.
+struct Stmt<'a, 't> {
+    toks: &'t [Lexed<'a>],
+}
+
+/// Splits a token stream into top-level statements: every token that starts a
+/// line at bracket depth zero begins one.
+fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
+    let mut starts = Vec::new();
+    let mut depth = 0i32;
+    for (i, t) in toks.iter().enumerate() {
+        if t.col0 && depth == 0 {
+            starts.push(i);
+        }
+        match t.tok {
+            Tok::Open => depth += 1,
+            Tok::Close => depth -= 1,
+            _ => {}
+        }
+    }
+    starts.push(toks.len());
+    starts
+        .windows(2)
+        .filter(|w| w[1] > w[0])
+        .map(|w| Stmt {
+            toks: &toks[w[0]..w[1]],
+        })
+        .collect()
+}
+
+/// Arguments of the call whose `(` is at `open`, which must be `Tok::Open`.
+fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
+    let mut out = Args::default();
+    let mut depth = 0i32;
+    let mut i = open;
+    // Current keyword argument being filled, if any.
+    let mut key: Option<String> = None;
+    let mut vals: Vec<String> = Vec::new();
+    let flush = |out: &mut Args, key: &mut Option<String>, vals: &mut Vec<String>| {
+        if let Some(k) = key.take() {
+            out.kw.push((k, std::mem::take(vals)));
+        } else {
+            out.positional.append(vals);
+        }
+    };
+    while i < toks.len() {
+        match toks[i].tok {
+            Tok::Open => {
+                depth += 1;
+                i += 1;
+            }
+            Tok::Close => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Tok::Punct(b',') if depth == 1 => {
+                flush(&mut out, &mut key, &mut vals);
+                i += 1;
+            }
+            // `name = ...` starts a keyword argument; `==`, `>=` and friends
+            // do not, and neither does an `=` nested in a list or a dict.
+            Tok::Name(n)
+                if depth == 1
+                    && matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
+                    && !matches!(toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'='))) =>
+            {
+                flush(&mut out, &mut key, &mut vals);
+                key = Some(n.to_string());
+                i += 2;
+            }
+            Tok::Str(s, e) => {
+                vals.push(unescape(&text[s..e]));
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    flush(&mut out, &mut key, &mut vals);
+    out
+}
+
+/// Statements a `MODULE.bazel` may contain that this parser deliberately
+/// ignores rather than treating as unrecognised.
+const HARMLESS: &[&str] = &["load", "print", "fail", "module", "include"];
+
+/// Reads a `MODULE.bazel`'s structure.
+///
+/// The parser recognises the fixed grammar `MODULE.bazel` actually has —
+/// bzlmod forbids control flow and function definitions there — and records
+/// anything else in [`ModuleFacts::unparsed`] so the engine can escalate
+/// rather than silently under-approximate.
+pub fn scan_module(text: &str) -> ModuleFacts {
+    let toks = lex(text);
+    let mut f = ModuleFacts::default();
+    // Variable name -> the extension / repo-rule key it was bound to.
+    let mut ext_vars: BTreeMap<String, String> = BTreeMap::new();
+    let mut rule_vars: BTreeMap<String, String> = BTreeMap::new();
+
+    for st in statements(&toks) {
+        let t = st.toks;
+        // `x = f(...)`
+        let (target, head) = match (t.first().map(|x| x.tok), t.get(1).map(|x| x.tok)) {
+            (Some(Tok::Name(v)), Some(Tok::Punct(b'='))) => (Some(v), 2usize),
+            _ => (None, 0usize),
+        };
+        let Some(Tok::Name(name)) = t.get(head).map(|x| x.tok) else {
+            // A list comprehension of tag calls — `[maven.artifact(...) for a
+            // in ARTIFACTS]`, which `bazel/bazel` writes twice. The loop body
+            // cannot be evaluated statically, but it does not have to be: what
+            // the diff needs is a rendering that moves when the statement's
+            // text moves, and the extension it belongs to.
+            if let Some(key) = comprehension_target(t, &ext_vars) {
+                let e = f.extensions.entry(key).or_default();
+                e.tags.push(render_limited(text, t, usize::MAX));
+                e.labels.extend(statement_strings(text, t));
+                continue;
+            }
+            // A bare string (a docstring) or a comment-only line.
+            if t.iter()
+                .any(|x| matches!(x.tok, Tok::Name(_) | Tok::Open | Tok::Close))
+            {
+                f.unparsed.push(render_stmt(text, t));
+            }
+            continue;
+        };
+        // `x.tag(...)`
+        let (dotted, call_at) = match (
+            t.get(head + 1).map(|x| x.tok),
+            t.get(head + 2).map(|x| x.tok),
+        ) {
+            (Some(Tok::Punct(b'.')), Some(Tok::Name(m))) => (Some(m), head + 3),
+            _ => (None, head + 1),
+        };
+        if !matches!(t.get(call_at).map(|x| x.tok), Some(Tok::Open)) {
+            if !HARMLESS.contains(&name) {
+                f.unparsed.push(render_stmt(text, t));
+            }
+            continue;
+        }
+        let args = parse_args(text, t, call_at);
+
+        if let Some(method) = dotted {
+            // A tag call on an extension proxy.
+            let Some(key) = ext_vars.get(name) else {
+                f.unparsed.push(render_stmt(text, t));
+                continue;
+            };
+            let e = f.extensions.entry(key.clone()).or_default();
+            e.tags.push(args.render(method));
+            e.labels.extend(args.strings().cloned());
+            continue;
+        }
+
+        match (target, name) {
+            (Some(v), "use_extension") => {
+                let bzl = args.positional.first().cloned().unwrap_or_default();
+                let ext = args.positional.get(1).cloned().unwrap_or_default();
+                let key = format!("{bzl}\u{0}{ext}");
+                let e = f.extensions.entry(key.clone()).or_default();
+                e.bzl = bzl;
+                e.name = ext;
+                ext_vars.insert(v.to_string(), key);
+            }
+            (Some(v), "use_repo_rule") => {
+                let bzl = args.positional.first().cloned().unwrap_or_default();
+                let rule = args.positional.get(1).cloned().unwrap_or_default();
+                let key = format!("{bzl}\u{0}{rule}");
+                let r = f.repo_rules.entry(key.clone()).or_default();
+                r.bzl = bzl;
+                r.rule = rule;
+                rule_vars.insert(v.to_string(), key);
+            }
+            (None, "use_repo") => {
+                // `use_repo(proxy, "a", apparent = "b")`: both the positional
+                // names and the *values* of the keyword aliases are repository
+                // names; the keyword is the apparent name the main repository
+                // sees, and both are worth recording.
+                let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let Some(key) = ext_vars.get(var) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let e = f.extensions.entry(key.clone()).or_default();
+                for (k, v) in &args.kw {
+                    e.repos.insert(k.clone());
+                    e.repos.extend(v.iter().cloned());
+                }
+                e.repos.extend(args.positional.iter().cloned());
+            }
+            (None, "bazel_dep") => {
+                let module = args.first("name").unwrap_or_default().to_string();
+                let version = args.first("version").unwrap_or_default().to_string();
+                let repo_name = args
+                    .first("repo_name")
+                    .map(String::from)
+                    .unwrap_or_else(|| module.clone());
+                f.deps.insert(
+                    repo_name.clone(),
+                    Dep {
+                        module,
+                        version,
+                        repo_name,
+                    },
+                );
+            }
+            (None, "module") => {
+                f.module = args.render("module");
+                f.module_name = args.first("name").unwrap_or_default().to_string();
+            }
+            (None, "register_toolchains") | (None, "register_execution_platforms") => {
+                f.registrations.push(args.render(name));
+            }
+            (None, n) if n.ends_with("_override") => {
+                let m = args.first("module_name").unwrap_or_default().to_string();
+                f.overrides.insert(m.clone(), args.render(n));
+                if n == "local_path_override" {
+                    if let Some(p) = args.first("path") {
+                        let p = p.trim_end_matches('/');
+                        // A path outside the repository is not a main-repo
+                        // input; `..` cannot be matched against a git diff.
+                        let p = p.strip_prefix("./").unwrap_or(p);
+                        if !p.is_empty() && !p.starts_with("..") && !p.starts_with('/') {
+                            f.local_paths.insert(m, format!("{p}/"));
+                        }
+                    }
+                }
+            }
+            (None, n) if HARMLESS.contains(&n) => {}
+            (Some(_), n) if rule_vars.contains_key(n) => {
+                // Assigning a repo-rule proxy to another name; follow it.
+                let key = rule_vars[n].clone();
+                if let Some(v) = target {
+                    rule_vars.insert(v.to_string(), key);
+                }
+            }
+            (None, n) if rule_vars.contains_key(n) => {
+                let key = rule_vars[n].clone();
+                let r = f.repo_rules.entry(key).or_default();
+                r.calls.push(args.render(n));
+                if let Some(name) = args.first("name") {
+                    r.repos.insert(name.to_string());
+                }
+                r.labels.extend(args.strings().cloned());
+            }
+            _ => f.unparsed.push(render_stmt(text, t)),
+        }
+    }
+    f
+}
+
+/// The extension a bracketed statement's tag calls belong to, when every
+/// `x.tag(` in it names the same known extension proxy.
+fn comprehension_target(t: &[Lexed<'_>], ext_vars: &BTreeMap<String, String>) -> Option<String> {
+    let mut found: Option<String> = None;
+    for w in t.windows(4) {
+        let (Tok::Name(v), Tok::Punct(b'.'), Tok::Name(_), Tok::Open) =
+            (w[0].tok, w[1].tok, w[2].tok, w[3].tok)
+        else {
+            continue;
+        };
+        // Other calls in the same statement — `coord.split(":")` in
+        // `bazel/bazel`'s nested comprehension — are not tag calls.
+        let Some(key) = ext_vars.get(v) else {
+            continue;
+        };
+        if found.get_or_insert_with(|| key.clone()) != key {
+            return None;
+        }
+    }
+    found
+}
+
+/// Every string literal in a statement.
+fn statement_strings(text: &str, t: &[Lexed<'_>]) -> Vec<String> {
+    t.iter()
+        .filter_map(|x| match x.tok {
+            Tok::Str(a, b) => Some(unescape(&text[a..b])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A textual rendering of a statement. `limit` truncates it for a
+/// human-facing message; a rendering that is *compared* must not be
+/// truncated, or a change past the cut would be invisible.
+fn render_limited(text: &str, t: &[Lexed<'_>], limit: usize) -> String {
+    let mut s = String::new();
+    for x in t.iter().take(limit) {
+        match x.tok {
+            Tok::Name(n) => s.push_str(n),
+            Tok::Str(a, b) => {
+                s.push('"');
+                s.push_str(&text[a..b]);
+                s.push('"');
+            }
+            Tok::Open => s.push('('),
+            Tok::Close => s.push(')'),
+            Tok::Punct(p) => s.push(p as char),
+            Tok::Other => s.push('?'),
+        }
+    }
+    s
+}
+
+fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
+    render_limited(text, t, 24)
+}
+
+// ---------------------------------------------------------------- the diff
+
+/// What changed between two revisions of a `MODULE.bazel`.
+///
+/// Every rule here answers the same question: can a reverse walk over the
+/// main-repo graph find the targets this change moves? If it can, the change
+/// names repositories; if it cannot, it is global and says why.
+pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
+    if !base.unparsed.is_empty() || !head.unparsed.is_empty() {
+        let what = head.unparsed.first().or(base.unparsed.first()).unwrap();
+        return ModuleChange::Global(format!(
+            "MODULE.bazel contains a statement cambium cannot parse: `{what}`"
+        ));
+    }
+    if base.module != head.module {
+        return ModuleChange::Global(
+            "the root `module()` declaration changed (its version reaches every repository that \
+             reads it)"
+                .into(),
+        );
+    }
+    if base.registrations != head.registrations {
+        return ModuleChange::Global(
+            "`register_toolchains` / `register_execution_platforms` changed; toolchain resolution \
+             has no edge in the query graph, so no reverse walk can find what it moves"
+                .into(),
+        );
+    }
+
+    let mut repos: BTreeSet<String> = BTreeSet::new();
+
+    // Dependencies: a version bump changes exactly one repository's contents.
+    let names: BTreeSet<&String> = base.deps.keys().chain(head.deps.keys()).collect();
+    for n in names {
+        let (b, h) = (base.deps.get(n), head.deps.get(n));
+        if b == h {
+            continue;
+        }
+        let module = h.or(b).map(|d| d.module.clone()).unwrap_or_default();
+        if is_toolchain_module(&module) {
+            return ModuleChange::Global(format!(
+                "`bazel_dep({module})` changed, and {module} registers toolchains: toolchain \
+                 resolution has no edge in the query graph"
+            ));
+        }
+        repos.insert(n.to_string());
+    }
+
+    // Overrides: same, keyed by module name rather than apparent name.
+    let mods: BTreeSet<&String> = base.overrides.keys().chain(head.overrides.keys()).collect();
+    for m in mods {
+        if base.overrides.get(m) == head.overrides.get(m) {
+            continue;
+        }
+        if is_toolchain_module(m) {
+            return ModuleChange::Global(format!(
+                "the override for `{m}` changed, and {m} registers toolchains"
+            ));
+        }
+        // The apparent name is the `repo_name` of the matching bazel_dep, and
+        // the module name itself when there is none.
+        repos.insert(apparent_of(head, m).unwrap_or_else(|| m.to_string()));
+    }
+
+    // Extensions: a changed tag or a changed `use_repo` moves the repositories
+    // on both sides of the change.
+    let keys: BTreeSet<&String> = base
+        .extensions
+        .keys()
+        .chain(head.extensions.keys())
+        .collect();
+    for k in keys {
+        let (b, h) = (base.extensions.get(k), head.extensions.get(k));
+        if b == h {
+            continue;
+        }
+        for e in [b, h].into_iter().flatten() {
+            repos.extend(e.repos.iter().cloned());
+        }
+    }
+
+    let keys: BTreeSet<&String> = base
+        .repo_rules
+        .keys()
+        .chain(head.repo_rules.keys())
+        .collect();
+    for k in keys {
+        let (b, h) = (base.repo_rules.get(k), head.repo_rules.get(k));
+        if b == h {
+            continue;
+        }
+        for r in [b, h].into_iter().flatten() {
+            repos.extend(r.repos.iter().cloned());
+        }
+    }
+
+    ModuleChange::Repos(repos)
+}
+
+fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
+    f.deps
+        .values()
+        .find(|d| d.module == module)
+        .map(|d| d.repo_name.clone())
+}
+
+// ------------------------------------------------------ building the inputs
+
+/// True if a label string names something in the main repository, and what
+/// path patterns it points at.
+///
+/// `//pkg:file.txt` is one file. `//pkg` (no target) is a whole package, so it
+/// is a prefix. `//pkg:name` where the name carries no extension is most
+/// likely a *rule*, whose own sources are not visible from here, so it is a
+/// prefix too — the alternative is to miss every file that rule globs.
+pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
+    let rest = match label.strip_prefix("@@") {
+        Some(r) => match r.split_once("//") {
+            Some(("", rest)) => rest,
+            _ => return Vec::new(),
+        },
+        None => match label.strip_prefix('@') {
+            Some(r) => match r.split_once("//") {
+                Some((repo, rest)) if m.is_main(repo) => rest,
+                _ => return Vec::new(),
+            },
+            None => match label.strip_prefix("//") {
+                Some(rest) => rest,
+                None => return Vec::new(),
+            },
+        },
+    };
+    // `rest` is now `pkg:name` or `pkg`, without the leading `//`.
+    if rest.contains(|c: char| c.is_whitespace()) {
+        return Vec::new();
+    }
+    let (pkg, name) = match rest.split_once(':') {
+        Some((p, n)) => (p, Some(n)),
+        None => (rest, None),
+    };
+    let dir = if pkg.is_empty() {
+        String::new()
+    } else {
+        format!("{pkg}/")
+    };
+    match name {
+        None => {
+            if pkg.is_empty() {
+                // `//` alone would claim the whole repository; that is what a
+                // global invalidation is for, not a pattern.
+                Vec::new()
+            } else {
+                vec![Pattern::Prefix(dir)]
+            }
+        }
+        Some("") => Vec::new(),
+        Some(n) => {
+            let path = format!("{dir}{n}");
+            let mut v = vec![Pattern::Exact(path)];
+            // A name with no extension is a rule, not a file.
+            if !n.contains('.') && !pkg.is_empty() {
+                v.push(Pattern::Prefix(dir));
+            }
+            v
+        }
+    }
+}
+
+/// Computes the repository-input map for a checkout.
+///
+/// `graph` is the load graph the closure walk already built, so the `.bzl`
+/// files here are read from the same memoised parse; `workspace` is that
+/// walk's workspace closure.
+pub fn build_repo_inputs(
+    src: &dyn FileText,
+    m: &RepoMapping,
+    graph: &LoadGraph,
+    workspace: &[u32],
+    facts: &ModuleFacts,
+) -> RepoInputs {
+    let mut out = RepoInputs::default();
+    // `@envoy//...` inside envoy is a main-repo label; see
+    // [`RepoMapping::with_main_alias`].
+    let m = &m.clone().with_main_alias(&facts.module_name);
+
+    // Seed: which `.bzl` each extension / repo rule is defined in, and the
+    // repositories that come out of it.
+    let mut seeds: Vec<(String, BTreeSet<String>)> = Vec::new();
+    for e in facts.extensions.values() {
+        if let Some(p) = main_bzl_path(&e.bzl, m) {
+            seeds.push((p, e.repos.clone()));
+        }
+        for l in &e.labels {
+            for pat in main_repo_patterns(l, m) {
+                out.patterns
+                    .entry(pat)
+                    .or_default()
+                    .extend(e.repos.iter().cloned());
+            }
+        }
+        out.repos.extend(e.repos.iter().cloned());
+    }
+    for r in facts.repo_rules.values() {
+        if let Some(p) = main_bzl_path(&r.bzl, m) {
+            seeds.push((p, r.repos.clone()));
+        }
+        for l in &r.labels {
+            for pat in main_repo_patterns(l, m) {
+                out.patterns
+                    .entry(pat)
+                    .or_default()
+                    .extend(r.repos.iter().cloned());
+            }
+        }
+        out.repos.extend(r.repos.iter().cloned());
+    }
+    // `local_path_override(module_name = "envoy_api", path = "api")`: the whole
+    // directory is that module's source.
+    for (module, path) in &facts.local_paths {
+        let repo = apparent_of(facts, module).unwrap_or_else(|| module.clone());
+        out.repos.insert(repo.clone());
+        out.patterns
+            .entry(Pattern::Prefix(path.clone()))
+            .or_default()
+            .insert(repo);
+    }
+    for d in facts.deps.values() {
+        out.canonical
+            .insert(d.repo_name.clone(), m.canonical(&d.repo_name).to_string());
+    }
+
+    // Propagate down the load graph: a helper a repository rule's `.bzl`
+    // loads is part of that rule's implementation.
+    let mut owner: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+    for (path, repos) in &seeds {
+        let Some(id) = graph.id_of(path) else {
+            continue;
+        };
+        let mut stack = vec![id];
+        let mut seen: BTreeSet<u32> = BTreeSet::new();
+        while let Some(i) = stack.pop() {
+            if !seen.insert(i) {
+                continue;
+            }
+            owner.entry(i).or_default().extend(repos.iter().cloned());
+            stack.extend_from_slice(graph.loads(i));
+        }
+    }
+
+    // Every main-repo label in a workspace-closure `.bzl` is an input of the
+    // repositories that file defines — or, when it defines none we could
+    // attribute, of every repository the main repository defines.
+    for &id in workspace {
+        let path = graph.path(id).to_string();
+        let repos = match owner.get(&id) {
+            Some(r) if !r.is_empty() => r.clone(),
+            _ => out.repos.clone(),
+        };
+        out.bzl_repos.insert(path.clone(), repos.clone());
+        if repos.is_empty() {
+            continue;
+        }
+        let Some(text) = src.text(&path) else {
+            continue;
+        };
+        for l in string_literals(&text) {
+            for pat in main_repo_patterns(&l, m) {
+                out.patterns
+                    .entry(pat)
+                    .or_default()
+                    .extend(repos.iter().cloned());
+            }
+        }
+    }
+
+    out
+}
+
+/// The repo-relative path of a `.bzl` label in the main repository.
+fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
+    match crate::loads::resolve_label(label, "", m) {
+        Some(crate::loads::Load::Main(p)) => Some(p),
+        _ => None,
+    }
+}
+
+/// Every label-shaped token inside a Starlark file's string literals.
+///
+/// Two levels, because repository rules use both. A label is usually a literal
+/// of its own (`attr.label(default = "@envoy//:.github/config.yml")`), but the
+/// other half of the idiom is a repository rule that *writes a BUILD file*:
+///
+/// ```text
+/// rctx.file("BUILD", '''
+/// genrule(
+///     tools = ["@envoy//:VERSION.txt", "@envoy//changelogs"],
+/// )
+/// ''')
+/// ```
+///
+/// That whole block is one string literal, and the labels the generated
+/// repository will depend on are inside it. So each literal is scanned for
+/// label-shaped substrings as well as being offered whole.
+///
+/// Comments and nesting are handled by the shared lexer, so a `//` in a
+/// comment is not a label. A `//` preceded by `:` or `/` is not either, which
+/// is what keeps `https://github.com/envoyproxy/envoy` out.
+fn string_literals(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in lex(text) {
+        let Tok::Str(s, e) = t.tok else {
+            continue;
+        };
+        let lit = unescape(&text[s..e]);
+        out.extend(labels_in(&lit));
+        out.push(lit);
+    }
+    out
+}
+
+fn is_label_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'+' | b'~' | b'/' | b':' | b'@')
+}
+
+/// Label-shaped substrings of a blob of text.
+fn labels_in(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 1 < b.len() {
+        if b[i] != b'/' || b[i + 1] != b'/' {
+            i += 1;
+            continue;
+        }
+        // `https://`, and a path that merely contains `//`.
+        if i > 0 && matches!(b[i - 1], b':' | b'/') {
+            i += 2;
+            continue;
+        }
+        // Expand left over an `@repo` prefix, if there is one.
+        let mut start = i;
+        while start > 0 && is_label_byte(b[start - 1]) && b[start - 1] != b'/' {
+            start -= 1;
+        }
+        if start != i && b[start] != b'@' {
+            i += 2;
+            continue;
+        }
+        let mut end = i + 2;
+        while end < b.len() && is_label_byte(b[end]) {
+            end += 1;
+        }
+        if let Ok(l) = std::str::from_utf8(&b[start..end]) {
+            out.push(l.trim_end_matches(['.', ':', '-']).to_string());
+        }
+        i = end.max(i + 2);
+    }
+    out
+}
+
+/// Reads `MODULE.bazel` out of a checkout. Absent (a WORKSPACE-only
+/// repository) yields empty facts, which diff to no change.
+pub fn read_module_facts(src: &dyn FileText) -> ModuleFacts {
+    match src.text("MODULE.bazel") {
+        Some(t) => scan_module(&t),
+        None => ModuleFacts::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m() -> RepoMapping {
+        RepoMapping::from_dump("{\"\":\"\",\"envoy\":\"\",\"envoy_api\":\"envoy_api+\"}")
+    }
+
+    #[test]
+    fn parses_bazel_deps_and_overrides() {
+        let f = scan_module(
+            "module(name = \"envoy\", version = \"1.0\")\n\
+             bazel_dep(name = \"envoy_api\", version = \"1.40.0-dev\")\n\
+             bazel_dep(name = \"apple_support\", version = \"2.3.0\", repo_name = \"build_bazel_apple_support\")\n\
+             local_path_override(\n    module_name = \"envoy_api\",\n    path = \"api\",\n)\n",
+        );
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        assert_eq!(f.deps["envoy_api"].version, "1.40.0-dev");
+        assert_eq!(f.deps["build_bazel_apple_support"].module, "apple_support");
+        assert_eq!(f.local_paths["envoy_api"], "api/");
+    }
+
+    #[test]
+    fn parses_extensions_tags_and_use_repo() {
+        let f = scan_module(
+            "pip = use_extension(\"@rules_python//python/extensions:pip.bzl\", \"pip\")\n\
+             pip.parse(\n    hub_name = \"base_pip3\",\n    requirements_lock = \"//tools/base:requirements.txt\",\n)\n\
+             use_repo(pip, \"base_pip3\", alias = \"fuzzing_pip3\")\n",
+        );
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        let e = f
+            .extensions
+            .values()
+            .find(|e| e.name == "pip")
+            .expect("extension");
+        assert_eq!(e.tags.len(), 1);
+        assert!(e.repos.contains("base_pip3"));
+        assert!(e.repos.contains("fuzzing_pip3"));
+        assert!(e.repos.contains("alias"));
+        assert!(e
+            .labels
+            .iter()
+            .any(|l| l == "//tools/base:requirements.txt"));
+    }
+
+    #[test]
+    fn parses_use_repo_rule_instantiations() {
+        let f = scan_module(
+            "http_archive = use_repo_rule(\"//bazel:repo.bzl\", \"http_archive\")\n\
+             http_archive(name = \"thing\", build_file = \"//bazel:thing.BUILD\")\n",
+        );
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        let r = f.repo_rules.values().next().unwrap();
+        assert_eq!(r.bzl, "//bazel:repo.bzl");
+        assert!(r.repos.contains("thing"));
+        assert!(r.labels.iter().any(|l| l == "//bazel:thing.BUILD"));
+    }
+
+    /// `bazel/bazel` writes two of these; before they were understood, every
+    /// `MODULE.bazel` edit in that repository went global.
+    #[test]
+    fn a_comprehension_of_tag_calls_belongs_to_its_extension() {
+        let t = "maven = use_extension(\"@rules_jvm_external//:extensions.bzl\", \"maven\")\n\
+                 use_repo(maven, \"maven\")\n\
+                 [\n    maven.artifact(\n        group = group,\n        artifact = artifact,\n    )\n\
+                 \x20   for group, artifact in [c.split(\":\") for c in [\"a:b\", \"c:d\"]]\n]\n";
+        let f = scan_module(t);
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        let e = f.extensions.values().next().unwrap();
+        assert_eq!(e.tags.len(), 1);
+        // And a change inside the comprehension is seen as a change to it.
+        let g = scan_module(&t.replace("\"a:b\"", "\"a:z\""));
+        assert_eq!(
+            diff_module(&f, &g),
+            ModuleChange::Repos(["maven".to_string()].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_statement_is_recorded() {
+        let f = scan_module("if x:\n    bazel_dep(name = \"a\")\n");
+        assert!(!f.unparsed.is_empty());
+    }
+
+    #[test]
+    fn a_version_bump_names_one_repository() {
+        let base = scan_module("bazel_dep(name = \"fmt\", version = \"1.0\")\n");
+        let head = scan_module("bazel_dep(name = \"fmt\", version = \"2.0\")\n");
+        assert_eq!(
+            diff_module(&base, &head),
+            ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn a_toolchain_module_bump_is_global() {
+        let base = scan_module("bazel_dep(name = \"rules_python\", version = \"1.0\")\n");
+        let head = scan_module("bazel_dep(name = \"rules_python\", version = \"2.0\")\n");
+        match diff_module(&base, &head) {
+            ModuleChange::Global(r) => assert!(r.contains("rules_python"), "{r}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_toolchains_is_global() {
+        let base = scan_module("register_toolchains(\"//a:b\")\n");
+        let head = scan_module("register_toolchains(\"//a:c\")\n");
+        assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
+    }
+
+    #[test]
+    fn an_unchanged_module_names_nothing() {
+        let t = "bazel_dep(name = \"fmt\", version = \"1.0\")\nregister_toolchains(\"//a:b\")\n";
+        assert_eq!(
+            diff_module(&scan_module(t), &scan_module(t)),
+            ModuleChange::Repos(BTreeSet::new())
+        );
+    }
+
+    #[test]
+    fn a_changed_tag_names_the_extensions_repositories() {
+        let base = scan_module(
+            "pip = use_extension(\"@rules_python//python/extensions:pip.bzl\", \"pip\")\n\
+             pip.parse(hub_name = \"base_pip3\", requirements_lock = \"//tools:a.txt\")\n\
+             use_repo(pip, \"base_pip3\")\n",
+        );
+        let head = scan_module(
+            "pip = use_extension(\"@rules_python//python/extensions:pip.bzl\", \"pip\")\n\
+             pip.parse(hub_name = \"base_pip3\", requirements_lock = \"//tools:b.txt\")\n\
+             use_repo(pip, \"base_pip3\")\n",
+        );
+        assert_eq!(
+            diff_module(&base, &head),
+            ModuleChange::Repos(["base_pip3".to_string()].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn labels_become_patterns() {
+        let m = m();
+        assert_eq!(
+            main_repo_patterns("@envoy//:.github/config.yml", &m),
+            vec![Pattern::Exact(".github/config.yml".into())]
+        );
+        assert_eq!(
+            main_repo_patterns("@envoy//changelogs", &m),
+            vec![Pattern::Prefix("changelogs/".into())]
+        );
+        assert_eq!(
+            main_repo_patterns("//changelogs:summary", &m),
+            vec![
+                Pattern::Exact("changelogs/summary".into()),
+                Pattern::Prefix("changelogs/".into())
+            ]
+        );
+        // Not the main repository.
+        assert!(main_repo_patterns("@envoy_api//envoy:pkg", &m).is_empty());
+        assert!(main_repo_patterns("not a label", &m).is_empty());
+        assert!(main_repo_patterns("//", &m).is_empty());
+    }
+
+    struct Files(Vec<(&'static str, &'static str)>);
+
+    impl FileText for Files {
+        fn text(&self, path: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, t)| t.to_string())
+        }
+    }
+
+    #[test]
+    fn a_repository_rules_labels_become_its_inputs() {
+        let module = "envoy_repo_ext = use_extension(\"//bazel:extensions.bzl\", \"envoy_repo_extension\")\n\
+                      use_repo(envoy_repo_ext, \"envoy_repo\")\n\
+                      local_path_override(module_name = \"envoy_api\", path = \"api\")\n\
+                      bazel_dep(name = \"envoy_api\", version = \"1.0\")\n";
+        let files = Files(vec![
+            ("MODULE.bazel", module),
+            (
+                "bazel/extensions.bzl",
+                "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+            ),
+            (
+                "bazel/repo.bzl",
+                "X = attr.label(default = \"@envoy//:.github/config.yml\")\n\
+                 Y = \"@envoy//changelogs\"\n",
+            ),
+        ]);
+        let m = m();
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(&files, &m);
+        let facts = read_module_facts(&files);
+        let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+
+        assert_eq!(
+            ri.repos_for(".github/config.yml"),
+            ["envoy_repo".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            ri.repos_for("changelogs/current/x.rst"),
+            ["envoy_repo".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            ri.repos_for("api/envoy/config/v3/x.proto"),
+            ["envoy_api".to_string()].into_iter().collect()
+        );
+        assert!(ri
+            .repos_for("source/common/http/conn_manager.cc")
+            .is_empty());
+        // The `.bzl` files that make up the repository rule name the repo.
+        assert_eq!(
+            ri.bzl_repos["bazel/repo.bzl"],
+            ["envoy_repo".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn an_unattributable_workspace_bzl_falls_back_to_every_repository() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "e = use_extension(\"//bazel:ext.bzl\", \"e\")\nuse_repo(e, \"r\")\n\
+                 load(\"//bazel:loose.bzl\", \"x\")\n",
+            ),
+            ("bazel/ext.bzl", ""),
+            ("bazel/loose.bzl", "P = \"//data:thing.txt\"\n"),
+        ]);
+        let m = RepoMapping::identity();
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(&files, &m);
+        let facts = read_module_facts(&files);
+        let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+        assert_eq!(
+            ri.repos_for("data/thing.txt"),
+            ["r".to_string()].into_iter().collect()
+        );
+    }
+}

@@ -119,6 +119,11 @@ pub struct BzlClosure {
     pub packages: std::collections::BTreeMap<String, Vec<u32>>,
     /// `.bzl` ids reachable from `MODULE.bazel` / `WORKSPACE`.
     pub workspace: Vec<u32>,
+    /// Which main-repo files feed which external repositories, and which
+    /// repositories each workspace-closure `.bzl` defines. Carried alongside
+    /// the closure because it is computed from the same walk over the same
+    /// files; see [`crate::externals`].
+    pub inputs: crate::externals::RepoInputs,
 }
 
 impl BzlClosure {
@@ -140,10 +145,39 @@ impl BzlClosure {
         for ids in packages.values_mut() {
             ids.sort_unstable();
         }
+        let mut inputs = crate::externals::RepoInputs::default();
+        for r in 0..v.num_repos() {
+            let name = v.repo_name(r).to_string();
+            inputs
+                .canonical
+                .insert(name.clone(), v.repo_canonical.get(r).to_string());
+            inputs.repos.insert(name);
+        }
+        for p in 0..v.repo_input_patterns.len() as u32 {
+            let pat = crate::externals::Pattern::from_stored(
+                v.repo_input_patterns.get(p),
+                v.repo_input_prefix[p as usize],
+            );
+            let set = inputs.patterns.entry(pat).or_default();
+            for &r in v.repo_inputs.row(p) {
+                set.insert(v.repo_name(r).to_string());
+            }
+        }
+        for id in 0..v.num_bzl() {
+            let row = v.bzl_repos_of(id);
+            if row.is_empty() {
+                continue;
+            }
+            inputs.bzl_repos.insert(
+                v.bzl_path(id).to_string(),
+                row.iter().map(|&r| v.repo_name(r).to_string()).collect(),
+            );
+        }
         Some(Self {
             graph: crate::loads::LoadGraph::from_index(v),
             packages,
             workspace: v.bzl_workspace.to_vec(),
+            inputs,
         })
     }
 }
@@ -766,6 +800,17 @@ impl<'a> IndexBuilder<'a> {
             bzl_ext_label_offsets: bzl.ext_label_offsets,
             bzl_ext_offsets: bzl.ext_offsets,
             bzl_ext_edges: bzl.ext_edges,
+            repo_name_bytes: bzl.repo_name_bytes,
+            repo_name_offsets: bzl.repo_name_offsets,
+            repo_canonical_bytes: bzl.repo_canonical_bytes,
+            repo_canonical_offsets: bzl.repo_canonical_offsets,
+            repo_input_bytes: bzl.repo_input_bytes,
+            repo_input_offsets: bzl.repo_input_offsets,
+            repo_input_prefix: bzl.repo_input_prefix,
+            repo_input_repo_offsets: bzl.repo_input_repo_offsets,
+            repo_input_repo_edges: bzl.repo_input_repo_edges,
+            bzl_repo_offsets: bzl.repo_bzl_offsets,
+            bzl_repo_edges: bzl.repo_bzl_edges,
         }
     }
 }
@@ -785,6 +830,17 @@ struct BzlTables {
     ext_label_offsets: Vec<u32>,
     ext_offsets: Vec<u32>,
     ext_edges: Vec<u32>,
+    repo_name_bytes: Vec<u8>,
+    repo_name_offsets: Vec<u32>,
+    repo_canonical_bytes: Vec<u8>,
+    repo_canonical_offsets: Vec<u32>,
+    repo_input_bytes: Vec<u8>,
+    repo_input_offsets: Vec<u32>,
+    repo_input_prefix: Vec<bool>,
+    repo_input_repo_offsets: Vec<u32>,
+    repo_input_repo_edges: Vec<u32>,
+    repo_bzl_offsets: Vec<u32>,
+    repo_bzl_edges: Vec<u32>,
 }
 
 impl BzlTables {
@@ -795,6 +851,11 @@ impl BzlTables {
             consumer_offsets: vec![0],
             ext_label_offsets: vec![0],
             ext_offsets: vec![0],
+            repo_name_offsets: vec![0],
+            repo_canonical_offsets: vec![0],
+            repo_input_offsets: vec![0],
+            repo_input_repo_offsets: vec![0],
+            repo_bzl_offsets: vec![0],
             ..Default::default()
         }
     }
@@ -872,6 +933,56 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
     t.workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
     t.workspace.sort_unstable();
     t.workspace.dedup();
+
+    // ---- external repositories ----
+    //
+    // Repo ids are assigned in name order and pattern ids in pattern order,
+    // for the same reason the `.bzl` ids are: the payload has to be a function
+    // of the repository's content, not of the order anything was scanned in.
+    let names: Vec<&String> = c.inputs.repos.iter().collect();
+    let ids: std::collections::BTreeMap<&str, u32> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i as u32))
+        .collect();
+    let repo_id = |n: &str| ids.get(n).copied();
+    for n in &names {
+        t.repo_name_bytes.extend_from_slice(n.as_bytes());
+        t.repo_name_offsets.push(t.repo_name_bytes.len() as u32);
+        let canon = c.inputs.canonical.get(*n).map(String::as_str).unwrap_or("");
+        t.repo_canonical_bytes.extend_from_slice(canon.as_bytes());
+        t.repo_canonical_offsets
+            .push(t.repo_canonical_bytes.len() as u32);
+    }
+    for (pat, repos) in &c.inputs.patterns {
+        let mut row: Vec<u32> = repos.iter().filter_map(|r| repo_id(r)).collect();
+        row.sort_unstable();
+        row.dedup();
+        if row.is_empty() {
+            continue;
+        }
+        t.repo_input_bytes
+            .extend_from_slice(pat.as_str().as_bytes());
+        t.repo_input_offsets.push(t.repo_input_bytes.len() as u32);
+        t.repo_input_prefix.push(pat.is_prefix());
+        t.repo_input_repo_edges.extend_from_slice(&row);
+        t.repo_input_repo_offsets
+            .push(t.repo_input_repo_edges.len() as u32);
+    }
+    let mut per_bzl: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (path, repos) in &c.inputs.bzl_repos {
+        let Some(old) = c.graph.id_of(path) else {
+            continue;
+        };
+        let row = &mut per_bzl[remap[old as usize] as usize];
+        row.extend(repos.iter().filter_map(|r| repo_id(r)));
+        row.sort_unstable();
+        row.dedup();
+    }
+    for row in &per_bzl {
+        t.repo_bzl_edges.extend_from_slice(row);
+        t.repo_bzl_offsets.push(t.repo_bzl_edges.len() as u32);
+    }
     t
 }
 

@@ -28,6 +28,18 @@ pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
 replay_range = 300
 bazel = "bazelisk"
 extra_query_flags = []
+# NOTE (external-repository stage, `crates/index/src/externals.rs`): the engine
+# now derives `.github/config.yml`, `changelogs/**`, `api/**`, `VERSION.txt`,
+# `API_VERSION.txt` and `bazel/repo.bzl` itself from `MODULE.bazel` and the
+# workspace `.bzl` closure, and maps each onto `@envoy_repo` / `@envoy_api`
+# rather than onto the world. Over envoy's last 50 first-parent commits before
+# this pin, 23 touch one of those paths — every one of them a global
+# invalidation today — and the stage makes 21 of the 23 repository-scoped, the
+# remaining two staying global for good reasons (`bazel: Remove WORKSPACE`, and
+# a `toolchains_llvm` bump). The entries below are kept until a replay on a
+# format-5 index shows the resulting *affected sets* are right too; that needs a
+# cold envoy build, which this laptop cannot do. Delete them with that evidence.
+#
 # `bazel/repo.bzl` defines the `@envoy_repo` repository rule, which runs `yq`
 # over `.github/config.yml` at load time and writes the build-image digests
 # into a generated `containers.bzl`. Those digests land in the `exec_properties`

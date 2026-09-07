@@ -61,6 +61,15 @@ Three separate things, and they are not interchangeable:
   replaced the `rbuildfiles` call. An index written before that carries no
   closure and a run over one would have to treat every `.bzl` change as global,
   so the layout bump is also what stops that answer being given silently.
+  It went to **5** when the payload gained the *external-repository input map*
+  (`crates/index/src/externals.rs`): a table of apparent repository names with
+  their canonical spellings, a table of main-repo path patterns with the
+  repositories built from each, and a row per workspace-closure `.bzl` naming
+  the repositories that `.bzl` defines. Together they are what lets an edit to
+  `.github/config.yml`, to `api/**` or to `MODULE.bazel` name the repositories
+  it moved instead of invalidating the world. The same argument applies as at
+  4: an index written before the bump has no map, and a run over one cannot
+  tell "this file feeds no repository" from "we never looked".
 - **`config_hash`**, stamped into the index header from
   `cambium_engine::Config::hash`, versions the *meaning of the rows*. An index
   whose `config_hash` differs from the running config is refused for splicing
