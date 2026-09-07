@@ -32,7 +32,10 @@ use serde::{Deserialize, Serialize};
 ///   because a changed `.bzl` is in their static load closure.
 ///   `stats.rbuildfiles_called` stays in the document and is now always
 ///   `false`: the closure is read from the index instead of from Bazel.
-pub const SCHEMA_VERSION: u32 = 4;
+/// - **5** — `stats` gained `bazelrc_safe_diffs`, the number of changed
+///   bazelrc files whose every changed flag was on the loading-irrelevant
+///   allowlist and which therefore did not invalidate the run.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -114,6 +117,11 @@ pub struct Stats {
     /// Packages dirtied because a changed `.bzl` is in their load closure.
     #[serde(default)]
     pub bzl_closure_hits: usize,
+    /// Changed bazelrc files read and found irrelevant to loading: every
+    /// changed flag was on the allowlist, so the edit invalidated nothing
+    /// instead of invalidating everything.
+    #[serde(default)]
+    pub bazelrc_safe_diffs: usize,
 }
 
 /// One affected target, with how far from the change it sits.

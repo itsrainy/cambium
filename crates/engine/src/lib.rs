@@ -7,6 +7,7 @@
 //! the splice memcpy, which is proportional to the graph but measured in tens
 //! of milliseconds.
 
+pub mod bazelrc;
 pub mod config;
 pub mod engine;
 pub mod error;

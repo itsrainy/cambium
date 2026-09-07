@@ -1,5 +1,6 @@
 //! The run: load a baseline, work out what is dirty, re-query it, splice, walk.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,7 @@ use cambium_index::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::bazelrc;
 use crate::config::Config;
 use crate::error::{EngineError, Result};
 use crate::query::{BazelQuerier, FileSource, PackageQuerier};
@@ -106,6 +108,15 @@ pub enum BaselineOrigin {
     Replayed { from: String },
     /// No usable ancestor either, so it was built from scratch.
     ColdBuild,
+}
+
+/// A diff with the bazelrc changes it can prove irrelevant removed.
+struct ScreenedDiff<'a> {
+    changes: Cow<'a, [cambium_diff::Change]>,
+    /// Bazelrc files whose edit was classified safe.
+    safe: usize,
+    /// Set when a bazelrc edit invalidates the whole run.
+    global_reason: Option<String>,
 }
 
 /// A completed run: the answer, plus the head index it produced.
@@ -625,6 +636,92 @@ impl Engine {
         self.compute(base_view, &changes, &self.bazel_querier(&req.head)?, req)
     }
 
+    /// Reads every changed bazelrc and decides what its edit means.
+    ///
+    /// A bazelrc is an invalidator by default, and the generic rule can only
+    /// say "this file changed, so everything changed". Here the two texts are
+    /// available, so the run can ask the narrower question: did any flag change
+    /// that loading or analysis could see? When the answer is no, the change is
+    /// removed from the diff entirely — it dirties no package, because nothing
+    /// in the graph depends on the number of jobs — and when it is yes, or when
+    /// the file was added, removed, or is not text, the run is global exactly as
+    /// before. The screen can only ever shrink an answer that would otherwise
+    /// have been `//...`.
+    fn screen_bazelrc<'a>(
+        &self,
+        changes: &'a [cambium_diff::Change],
+        req: &AffectedRequest,
+    ) -> ScreenedDiff<'a> {
+        if !changes.iter().any(|c| bazelrc::is_bazelrc_path(&c.path)) {
+            return ScreenedDiff {
+                changes: Cow::Borrowed(changes),
+                safe: 0,
+                global_reason: None,
+            };
+        }
+        let mut kept: Vec<cambium_diff::Change> = Vec::with_capacity(changes.len());
+        let mut safe = 0usize;
+        for c in changes {
+            if !bazelrc::is_bazelrc_path(&c.path) {
+                kept.push(c.clone());
+                continue;
+            }
+            match self.bazelrc_verdict(c, req) {
+                Ok(n) => {
+                    tracing::debug!(
+                        path = %c.path, changed_flags = n,
+                        "the bazelrc edit only touched flags that cannot affect loading"
+                    );
+                    safe += 1;
+                }
+                Err(reason) => {
+                    tracing::info!(path = %c.path, %reason, "bazelrc edit forces a global run");
+                    return ScreenedDiff {
+                        changes: Cow::Borrowed(changes),
+                        safe,
+                        global_reason: Some(reason),
+                    };
+                }
+            }
+        }
+        ScreenedDiff {
+            changes: Cow::Owned(kept),
+            safe,
+            global_reason: None,
+        }
+    }
+
+    /// `Ok(changed flags)` if this one bazelrc change is irrelevant to loading,
+    /// `Err(reason)` if it is not or cannot be read.
+    fn bazelrc_verdict(
+        &self,
+        c: &cambium_diff::Change,
+        req: &AffectedRequest,
+    ) -> std::result::Result<usize, String> {
+        use cambium_diff::Status;
+        let path = &c.path;
+        match c.status {
+            Status::Modified => {}
+            // A bazelrc that appears or vanishes changes which files Bazel
+            // reads at all, and the diff of a file against nothing is not a
+            // flag diff.
+            _ => return Err(format!("{path}: the file was added or removed")),
+        }
+        let text = |rev: &str| -> std::result::Result<String, String> {
+            let bytes = self
+                .repo
+                .read_at(rev, path)
+                .ok_or_else(|| format!("{path}: cannot be read at {rev}"))?;
+            String::from_utf8(bytes).map_err(|_| format!("{path}: is not UTF-8 at {rev}"))
+        };
+        let base = text(&req.base)?;
+        let head = text(&req.head)?;
+        match bazelrc::classify(&base, &head, &self.cfg.bazelrc.allowlist_extra) {
+            bazelrc::Verdict::Safe { changed_flags } => Ok(changed_flags),
+            bazelrc::Verdict::Unknown(why) => Err(format!("{path}: {why}")),
+        }
+    }
+
     /// The pipeline proper: dirty set, query, splice, direct set, walk.
     ///
     /// Takes the diff and the row source as parameters so the whole engine can
@@ -647,6 +744,29 @@ impl Engine {
         stats.changed_files = changes.len();
         let matchers = Matchers::compile(&self.cfg.rules())?;
         let mut packages = PackageSet::from_index(base_view);
+
+        // A changed bazelrc is read before the generic invalidator check, and
+        // dropped from the diff when every flag it changed is known not to
+        // reach loading or analysis. Anything else about it — an unknown flag,
+        // an import, the file appearing or vanishing — invalidates the run, so
+        // this only ever turns a global into a smaller answer.
+        let screened = self.screen_bazelrc(changes, req);
+        stats.bazelrc_safe_diffs = screened.safe;
+        if let Some(reason) = screened.global_reason {
+            timings.dirty = sw.lap();
+            timings.total = timings.dirty;
+            let dirty = DirtySet {
+                global: true,
+                global_reason: Some(reason),
+                ..Default::default()
+            };
+            return Ok(RunOutcome {
+                report: global_report(req, dirty, timings, stats),
+                index: None,
+            });
+        }
+        let changes: &[cambium_diff::Change] = &screened.changes;
+
         let mut dirty = cambium_classify::dirty_set(
             changes,
             &mut packages,

@@ -18,6 +18,7 @@ pub const CONFIG_FILE: &str = "cambium.toml";
 pub struct Config {
     pub bazel: BazelConfig,
     pub invalidators: Invalidators,
+    pub bazelrc: BazelrcConfig,
     pub ignore: Ignore,
     pub output: Output,
     pub baseline: Baseline,
@@ -39,6 +40,19 @@ pub struct BazelConfig {
     /// lineage.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub startup_flags: Vec<String>,
+}
+
+/// Extends the built-in allowlist of `.bazelrc` flags known not to affect
+/// loading or analysis (see [`crate::bazelrc`]).
+///
+/// A repository knows things about its own flags that cambium cannot: a
+/// `--experimental_` flag it has audited, a wrapper flag only its own tooling
+/// reads. Entries are flag names, dashes optional, and may end in `*`. This is
+/// part of the config hash, because it decides what a run is allowed to skip.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct BazelrcConfig {
+    pub allowlist_extra: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
