@@ -263,6 +263,16 @@ pub struct IndexData {
     pub repo_input_repo_edges: Vec<u32>,
     pub bzl_repo_offsets: Vec<u32>,
     pub bzl_repo_edges: Vec<u32>,
+
+    // ---- how main-repo paths land inside a repository (format 6) ----
+    //
+    // `repo_map_entries` is a string table of `from\0to` pairs (see
+    // [`crate::externals::PathMap`]); `repo_map_offsets` cuts it into one run
+    // per repo id. An empty run means "no mapping could be derived", which is
+    // what keeps the old whole-closure answer for that repository.
+    pub repo_map_bytes: Vec<u8>,
+    pub repo_map_offsets: Vec<u32>,
+    pub repo_map_ranges: Vec<u32>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -327,6 +337,10 @@ pub struct IndexRef<'a> {
     pub repo_inputs: CsrRef<'a>,
     /// `.bzl` id -> the repo ids that `.bzl` can define.
     pub bzl_repos: CsrRef<'a>,
+    /// Encoded [`crate::externals::PathMap`] entries, grouped by repo id.
+    pub repo_maps: StrTabRef<'a>,
+    /// Repo id -> its run in [`IndexRef::repo_maps`]; length `num_repos + 1`.
+    pub repo_map_ranges: &'a [u32],
 }
 
 impl<'a> IndexRef<'a> {
@@ -530,6 +544,19 @@ impl<'a> IndexRef<'a> {
         out
     }
 
+    /// How main-repo paths land inside a repository, when that could be
+    /// derived statically. An empty answer means "unknown", and the engine
+    /// keeps its wide behaviour for that repository.
+    pub fn repo_path_maps(&self, repo: u32) -> Vec<crate::externals::PathMap> {
+        let i = repo as usize;
+        if i + 1 >= self.repo_map_ranges.len() {
+            return Vec::new();
+        }
+        (self.repo_map_ranges[i]..self.repo_map_ranges[i + 1])
+            .filter_map(|e| crate::externals::PathMap::decode(self.repo_maps.get(e)))
+            .collect()
+    }
+
     /// The repositories a workspace-closure `.bzl` can define.
     #[inline]
     pub fn bzl_repos_of(&self, id: u32) -> &'a [u32] {
@@ -652,6 +679,11 @@ impl IndexData {
                 offsets: &self.bzl_repo_offsets,
                 edges: &self.bzl_repo_edges,
             },
+            repo_maps: StrTabRef {
+                bytes: &self.repo_map_bytes,
+                offsets: &self.repo_map_offsets,
+            },
+            repo_map_ranges: &self.repo_map_ranges,
         }
     }
 
@@ -755,6 +787,11 @@ impl ArchivedIndexData {
                 offsets: le::u32s(&self.bzl_repo_offsets),
                 edges: le::u32s(&self.bzl_repo_edges),
             },
+            repo_maps: StrTabRef {
+                bytes: &self.repo_map_bytes,
+                offsets: le::u32s(&self.repo_map_offsets),
+            },
+            repo_map_ranges: le::u32s(&self.repo_map_ranges),
         }
     }
 }

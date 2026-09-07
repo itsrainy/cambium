@@ -114,6 +114,65 @@ impl Pattern {
     }
 }
 
+/// The separator between the two halves of a stored [`PathMap`]; no path
+/// contains it.
+const SEP: char = '\u{0}';
+
+/// A statically derived rewrite from a main-repo path to a path inside an
+/// external repository.
+///
+/// This is what lets an input-path edit stop short of re-querying every
+/// package that loads a `.bzl` from the repository. `@envoy_api` is built from
+/// `api/`, so `api/envoy/config/v3/x.proto` is `envoy/config/v3/x.proto` inside
+/// the repository — which is not `bazel/api_build_system.bzl`, the one file
+/// every envoy package's load closure reaches into that repository for. Rule
+/// (a) of the engine's external stage can then be skipped for that edit.
+///
+/// A trailing `/` on [`PathMap::from`] means a directory rewrite; without one
+/// the entry maps exactly one file. A directory rewrite's [`PathMap::to`] is
+/// either empty (the repository root) or itself ends in `/`.
+///
+/// Being *wrong* here is a soundness bug — it would hide a `.bzl` edit — so
+/// every shape the parser is not certain of is simply not recorded, and a
+/// repository with no recorded mapping keeps the old whole-closure behaviour.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PathMap {
+    /// Main-repo path, or directory prefix with its trailing `/`.
+    pub from: String,
+    /// The corresponding repository-relative path or directory prefix.
+    pub to: String,
+}
+
+impl PathMap {
+    /// The repository-relative path a main-repo path lands at, if this entry
+    /// covers it at all.
+    pub fn translate(&self, path: &str) -> Option<String> {
+        match self.from.strip_suffix('/') {
+            Some(_) => path
+                .strip_prefix(self.from.as_str())
+                .map(|rest| format!("{}{rest}", self.to)),
+            None => (path == self.from).then(|| self.to.clone()),
+        }
+    }
+
+    /// The stored form, `from` and `to` joined by a NUL.
+    pub fn encode(&self) -> String {
+        let mut s = self.from.clone();
+        s.push(SEP);
+        s.push_str(&self.to);
+        s
+    }
+
+    /// Reads back [`PathMap::encode`].
+    pub fn decode(s: &str) -> Option<PathMap> {
+        let (from, to) = s.split_once(SEP)?;
+        Some(PathMap {
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+    }
+}
+
 /// The main repository's contribution to external repositories, in the
 /// mutable form a build works with. [`crate::IndexBuilder`] flattens it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -122,6 +181,9 @@ pub struct RepoInputs {
     pub patterns: BTreeMap<Pattern, BTreeSet<String>>,
     /// Workspace-closure `.bzl` path -> the repositories it can define.
     pub bzl_repos: BTreeMap<String, BTreeSet<String>>,
+    /// Repository -> how main-repo paths map into it, where that could be
+    /// derived statically. A repository with no entry has no known mapping.
+    pub path_maps: BTreeMap<String, BTreeSet<PathMap>>,
     /// Every repository the main repository itself defines (extensions and
     /// repo rules whose `.bzl` is a main-repo label), plus every module the
     /// main repository overrides. The fallback attribution set.
@@ -200,6 +262,10 @@ pub struct ModuleFacts {
     /// Module name -> the main-repo directory a `local_path_override` points
     /// at, with its trailing `/`.
     pub local_paths: BTreeMap<String, String>,
+    /// Repository name -> the main-repo directory a `local_repository` or
+    /// `new_local_repository` instantiation points at, with its trailing `/`.
+    /// A `use_repo_rule` shape; the `.bzl` scanner finds the WORKSPACE one.
+    pub local_repo_paths: BTreeMap<String, String>,
     /// Keyed by `bzl\0name`.
     pub extensions: BTreeMap<String, Extension>,
     /// Keyed by `bzl\0rule`.
@@ -528,14 +594,8 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 let m = args.first("module_name").unwrap_or_default().to_string();
                 f.overrides.insert(m.clone(), args.render(n));
                 if n == "local_path_override" {
-                    if let Some(p) = args.first("path") {
-                        let p = p.trim_end_matches('/');
-                        // A path outside the repository is not a main-repo
-                        // input; `..` cannot be matched against a git diff.
-                        let p = p.strip_prefix("./").unwrap_or(p);
-                        if !p.is_empty() && !p.starts_with("..") && !p.starts_with('/') {
-                            f.local_paths.insert(m, format!("{p}/"));
-                        }
+                    if let Some(d) = args.first("path").and_then(local_dir) {
+                        f.local_paths.insert(m, d);
                     }
                 }
             }
@@ -549,10 +609,21 @@ pub fn scan_module(text: &str) -> ModuleFacts {
             }
             (None, n) if rule_vars.contains_key(n) => {
                 let key = rule_vars[n].clone();
+                let rule = key.split(SEP).nth(1).unwrap_or("").to_string();
                 let r = f.repo_rules.entry(key).or_default();
                 r.calls.push(args.render(n));
                 if let Some(name) = args.first("name") {
                     r.repos.insert(name.to_string());
+                    // `local_repository(name = "x", path = "dir")` is a
+                    // directory of the main repository under another name:
+                    // exactly the mapping the engine needs to decide whether
+                    // an edit under `dir` could be a `.bzl` the repository
+                    // exports.
+                    if is_local_repo_rule(&rule) {
+                        if let Some(d) = args.first("path").and_then(local_dir) {
+                            f.local_repo_paths.insert(name.to_string(), d);
+                        }
+                    }
                 }
                 r.labels.extend(args.strings().cloned());
             }
@@ -618,6 +689,247 @@ fn render_limited(text: &str, t: &[Lexed<'_>], limit: usize) -> String {
 
 fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
     render_limited(text, t, 24)
+}
+
+// ------------------------------------------------------- the path mapping
+
+/// Repository rules whose `path` attribute is a main-repo directory that
+/// becomes the repository's root.
+fn is_local_repo_rule(rule: &str) -> bool {
+    matches!(rule, "local_repository" | "new_local_repository")
+}
+
+/// A `path =` attribute as a main-repo directory prefix, when it is one.
+///
+/// A path outside the repository is not a main-repo input: `..` cannot be
+/// matched against a diff, and neither can an absolute path.
+fn local_dir(p: &str) -> Option<String> {
+    let p = p.trim_end_matches('/');
+    let p = p.strip_prefix("./").unwrap_or(p);
+    (!p.is_empty() && !p.starts_with("..") && !p.starts_with('/')).then(|| format!("{p}/"))
+}
+
+/// The path mappings a workspace-closure `.bzl` declares.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BzlPathMaps {
+    /// `local_repository(name = ..., path = ...)`: the call names its own
+    /// repository, so no attribution is needed.
+    pub named: Vec<(String, PathMap)>,
+    /// `repository_ctx.symlink(<main-repo path or label>, "<dest>")`: the call
+    /// says nothing about which repository it builds, so these are attributed
+    /// to the repositories the file is known to define.
+    pub symlinks: Vec<PathMap>,
+}
+
+/// Names a `symlink` source argument may contain and still be a literal.
+///
+/// `ctx.symlink(ctx.path(Label("//api:BUILD")), "BUILD")` is a path this
+/// parser can follow. `ctx.symlink(ctx.path(ctx.attr.root).dirname.get_child(d), d)`
+/// — the shape envoy's `bazel/api_binding.bzl` used before it moved to
+/// `local_path_override` — is not, and is deliberately left unmapped: a
+/// mapping this module guesses wrong would *hide* a `.bzl` edit, where no
+/// mapping at all merely keeps the old, wider answer.
+const PATHY_NAMES: &[&str] = &[
+    "Label",
+    "ctx",
+    "path",
+    "rctx",
+    "repo_ctx",
+    "repository_ctx",
+    "repository_context",
+];
+
+/// Reads the path mappings out of one workspace-closure `.bzl`.
+pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
+    let toks = lex(text);
+    let mut out = BzlPathMaps::default();
+    for i in 0..toks.len() {
+        let Tok::Name(name) = toks[i].tok else {
+            continue;
+        };
+        if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open)) {
+            continue;
+        }
+        if is_local_repo_rule(name) {
+            let args = parse_args(text, &toks, i + 1);
+            if let (Some(n), Some(d)) = (args.first("name"), args.first("path").and_then(local_dir))
+            {
+                out.named.push((
+                    n.to_string(),
+                    PathMap {
+                        from: d,
+                        to: String::new(),
+                    },
+                ));
+            }
+            continue;
+        }
+        // `x.symlink(...)`, on any receiver: only a `repository_ctx` has one.
+        if name != "symlink"
+            || !matches!(
+                toks.get(i.wrapping_sub(1)).map(|t| t.tok),
+                Some(Tok::Punct(b'.'))
+            )
+        {
+            continue;
+        }
+        let spans = arg_spans(&toks, i + 1);
+        let pick = |kw: &str, pos: usize| -> Option<std::ops::Range<usize>> {
+            spans
+                .iter()
+                .find(|(k, _)| k.as_deref() == Some(kw))
+                .or_else(|| spans.iter().filter(|(k, _)| k.is_none()).nth(pos))
+                .map(|(_, r)| r.clone())
+        };
+        let (Some(src), Some(dst)) = (pick("target", 0), pick("link_name", 1)) else {
+            continue;
+        };
+        let (Some(src), Some(dst)) = (
+            only_literal(text, &toks, src, PATHY_NAMES),
+            only_literal(text, &toks, dst, &[]),
+        ) else {
+            continue;
+        };
+        if let Some(pm) = symlink_map(&src, &dst, m) {
+            out.symlinks.push(pm);
+        }
+    }
+    out
+}
+
+/// The `(keyword, token range)` of every argument of the call whose `(` is at
+/// `open`.
+fn arg_spans(toks: &[Lexed<'_>], open: usize) -> Vec<(Option<String>, std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = open + 1;
+    let mut key: Option<String> = None;
+    let mut i = open;
+    while i < toks.len() {
+        match toks[i].tok {
+            Tok::Open => depth += 1,
+            Tok::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    if i > start {
+                        out.push((key.take(), start..i));
+                    }
+                    break;
+                }
+            }
+            Tok::Punct(b',') if depth == 1 => {
+                if i > start {
+                    out.push((key.take(), start..i));
+                }
+                start = i + 1;
+            }
+            Tok::Name(n)
+                if depth == 1
+                    && i == start
+                    && matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
+                    && !matches!(toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'='))) =>
+            {
+                key = Some(n.to_string());
+                start = i + 2;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The single string literal of an argument that is *nothing but* that
+/// literal, optionally wrapped in calls whose names are all in `allowed`.
+fn only_literal(
+    text: &str,
+    toks: &[Lexed<'_>],
+    span: std::ops::Range<usize>,
+    allowed: &[&str],
+) -> Option<String> {
+    let mut lit = None;
+    for t in &toks[span] {
+        match t.tok {
+            Tok::Str(a, b) => {
+                if lit.is_some() {
+                    return None;
+                }
+                lit = Some(unescape(&text[a..b]));
+            }
+            Tok::Name(n) if allowed.contains(&n) => {}
+            Tok::Open | Tok::Close => {}
+            Tok::Punct(b'.') => {}
+            _ => return None,
+        }
+    }
+    lit
+}
+
+/// One `symlink(source, destination)` as a path mapping, when both ends are
+/// unambiguous.
+///
+/// A source that ends in `/` is a directory and rewrites everything under it;
+/// anything else is taken to be exactly one file, which is the conservative
+/// reading — a directory misread as a file simply fails to translate the paths
+/// beneath it, and a path that does not translate keeps the wide answer.
+/// A label with no target (`//api`) is rejected for the same reason: it names
+/// the target `//api:api`, not the directory, and guessing otherwise would
+/// rewrite paths that do not belong to it.
+fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
+    if dst.starts_with('/') || dst.split('/').any(|s| s == "..") {
+        return None;
+    }
+    let dst = dst.trim_start_matches("./").trim_end_matches('/');
+    let from = if src.contains("//") {
+        let (pkg, name) = main_repo_target(src, m)?;
+        if pkg.is_empty() {
+            name
+        } else {
+            format!("{pkg}/{name}")
+        }
+    } else if src.starts_with('/') || src.split('/').any(|s| s == ".." || s == ".") {
+        return None;
+    } else {
+        src.to_string()
+    };
+    if from.is_empty() {
+        return None;
+    }
+    match from.strip_suffix('/') {
+        // A directory: the destination is a directory too, and an empty one
+        // means the repository root.
+        Some(_) => Some(PathMap {
+            from,
+            to: if dst.is_empty() {
+                String::new()
+            } else {
+                format!("{dst}/")
+            },
+        }),
+        None => (!dst.is_empty()).then(|| PathMap {
+            from,
+            to: dst.to_string(),
+        }),
+    }
+}
+
+/// `//pkg:name` in the main repository, split. `None` for any other label.
+fn main_repo_target(label: &str, m: &RepoMapping) -> Option<(String, String)> {
+    let rest = match label.strip_prefix("@@") {
+        Some(r) => r.strip_prefix("//")?,
+        None => match label.strip_prefix('@') {
+            Some(r) => {
+                let (repo, rest) = r.split_once("//")?;
+                if !m.is_main(repo) {
+                    return None;
+                }
+                rest
+            }
+            None => label.strip_prefix("//")?,
+        },
+    };
+    let (pkg, name) = rest.split_once(':')?;
+    (!name.is_empty() && !pkg.starts_with('/')).then(|| (pkg.to_string(), name.to_string()))
 }
 
 // ---------------------------------------------------------------- the diff
@@ -837,14 +1149,35 @@ pub fn build_repo_inputs(
         out.repos.extend(r.repos.iter().cloned());
     }
     // `local_path_override(module_name = "envoy_api", path = "api")`: the whole
-    // directory is that module's source.
+    // directory is that module's source, and its root is that directory.
     for (module, path) in &facts.local_paths {
         let repo = apparent_of(facts, module).unwrap_or_else(|| module.clone());
         out.repos.insert(repo.clone());
         out.patterns
             .entry(Pattern::Prefix(path.clone()))
             .or_default()
-            .insert(repo);
+            .insert(repo.clone());
+        out.path_maps.entry(repo).or_default().insert(PathMap {
+            from: path.clone(),
+            to: String::new(),
+        });
+    }
+    // The same shape written as a repository rule in `MODULE.bazel`.
+    for (repo, path) in &facts.local_repo_paths {
+        if !out.repos.contains(repo) {
+            continue;
+        }
+        out.patterns
+            .entry(Pattern::Prefix(path.clone()))
+            .or_default()
+            .insert(repo.clone());
+        out.path_maps
+            .entry(repo.clone())
+            .or_default()
+            .insert(PathMap {
+                from: path.clone(),
+                to: String::new(),
+            });
     }
     for d in facts.deps.values() {
         out.canonical
@@ -891,6 +1224,31 @@ pub fn build_repo_inputs(
                     .entry(pat)
                     .or_default()
                     .extend(repos.iter().cloned());
+            }
+        }
+        // Path mappings the file declares. A `local_repository` call names its
+        // own repository; a `symlink` does not, so it is attributed only to
+        // the repositories this `.bzl` is *known* to define — never to the
+        // fallback "every repository" set, which would hand one rule's mapping
+        // to repositories built by something else entirely.
+        let maps = scan_bzl_path_maps(&text, m);
+        for (repo, pm) in maps.named {
+            if out.repos.contains(&repo) {
+                out.patterns
+                    .entry(Pattern::Prefix(pm.from.clone()))
+                    .or_default()
+                    .insert(repo.clone());
+                out.path_maps.entry(repo).or_default().insert(pm);
+            }
+        }
+        if let Some(owned) = owner.get(&id).filter(|r| !r.is_empty()) {
+            for pm in &maps.symlinks {
+                for repo in owned {
+                    out.path_maps
+                        .entry(repo.clone())
+                        .or_default()
+                        .insert(pm.clone());
+                }
             }
         }
     }
@@ -1252,6 +1610,179 @@ mod tests {
             ri.bzl_repos["bazel/repo.bzl"],
             ["envoy_repo".to_string()].into_iter().collect()
         );
+    }
+
+    // ---- the path mapping ----
+
+    #[test]
+    fn a_prefix_map_rewrites_and_an_exact_one_does_not() {
+        let dir = PathMap {
+            from: "api/".into(),
+            to: String::new(),
+        };
+        assert_eq!(
+            dir.translate("api/envoy/x.proto").as_deref(),
+            Some("envoy/x.proto")
+        );
+        assert_eq!(
+            dir.translate("api/bazel/defs.bzl").as_deref(),
+            Some("bazel/defs.bzl")
+        );
+        assert_eq!(dir.translate("source/x.cc"), None);
+
+        let nested = PathMap {
+            from: "api/".into(),
+            to: "sub/".into(),
+        };
+        assert_eq!(nested.translate("api/a/b").as_deref(), Some("sub/a/b"));
+
+        let one = PathMap {
+            from: "api/BUILD".into(),
+            to: "BUILD".into(),
+        };
+        assert_eq!(one.translate("api/BUILD").as_deref(), Some("BUILD"));
+        assert_eq!(one.translate("api/BUILD.bazel"), None);
+    }
+
+    #[test]
+    fn a_path_map_round_trips_through_the_index() {
+        for pm in [
+            PathMap {
+                from: "api/".into(),
+                to: String::new(),
+            },
+            PathMap {
+                from: "a/b.txt".into(),
+                to: "c/d.txt".into(),
+            },
+        ] {
+            assert_eq!(PathMap::decode(&pm.encode()), Some(pm));
+        }
+        assert_eq!(PathMap::decode("no separator"), None);
+    }
+
+    #[test]
+    fn local_repository_calls_declare_their_own_mapping() {
+        let maps = scan_bzl_path_maps(
+            "def deps():\n    local_repository(name = \"api\", path = \"api\")\n\
+             \x20   new_local_repository(name = \"x\", path = \"third_party/x/\", build_file = \"//bazel:x.BUILD\")\n\
+             \x20   local_repository(name = \"outside\", path = \"../sibling\")\n",
+            &m(),
+        );
+        assert_eq!(
+            maps.named,
+            vec![
+                (
+                    "api".to_string(),
+                    PathMap {
+                        from: "api/".into(),
+                        to: String::new()
+                    }
+                ),
+                (
+                    "x".to_string(),
+                    PathMap {
+                        from: "third_party/x/".into(),
+                        to: String::new()
+                    }
+                ),
+            ],
+            "a path outside the repository cannot be matched against a diff"
+        );
+    }
+
+    #[test]
+    fn a_literal_symlink_is_a_mapping_and_a_computed_one_is_not() {
+        let maps = scan_bzl_path_maps(
+            "def _impl(ctx):\n\
+             \x20   ctx.symlink(ctx.path(Label(\"//api:BUILD\")), \"BUILD\")\n\
+             \x20   ctx.symlink(\"api/bazel/\", \"bazel\")\n\
+             \x20   rctx.symlink(target = Label(\"//api:versioning.txt\"), link_name = \"versioning.txt\")\n",
+            &m(),
+        );
+        assert_eq!(
+            maps.symlinks,
+            vec![
+                PathMap {
+                    from: "api/BUILD".into(),
+                    to: "BUILD".into()
+                },
+                PathMap {
+                    from: "api/bazel/".into(),
+                    to: "bazel/".into()
+                },
+                PathMap {
+                    from: "api/versioning.txt".into(),
+                    to: "versioning.txt".into()
+                },
+            ]
+        );
+    }
+
+    /// The shape envoy's `bazel/api_binding.bzl` used before it moved to
+    /// `local_path_override`. Deriving a mapping from it would be a guess, and
+    /// a wrong mapping *hides* a `.bzl` edit; no mapping merely keeps the old,
+    /// wider answer.
+    #[test]
+    fn a_computed_symlink_source_yields_no_mapping() {
+        let maps = scan_bzl_path_maps(
+            "def _impl(ctx):\n\
+             \x20   for d in DIRS:\n\
+             \x20       ctx.symlink(ctx.path(ctx.attr.envoy_root).dirname.get_child(ctx.attr.reldir).get_child(d), d)\n\
+             \x20   ctx.symlink(Label(\"//api\"), \"\")\n\
+             \x20   ctx.symlink(Label(\"@other//api:BUILD\"), \"BUILD\")\n\
+             \x20   ctx.symlink(\"../outside\", \"x\")\n",
+            &m(),
+        );
+        assert!(maps.symlinks.is_empty(), "{:?}", maps.symlinks);
+    }
+
+    #[test]
+    fn a_local_path_override_is_the_repositorys_root() {
+        let files = Files(vec![(
+            "MODULE.bazel",
+            "module(name = \"envoy\", version = \"1\")\n\
+                 bazel_dep(name = \"envoy_api\", version = \"1.0\")\n\
+                 local_path_override(module_name = \"envoy_api\", path = \"api\")\n",
+        )]);
+        let m = m();
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(&files, &m);
+        let facts = read_module_facts(&files);
+        let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+        assert_eq!(
+            ri.path_maps["envoy_api"],
+            [PathMap {
+                from: "api/".into(),
+                to: String::new()
+            }]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    /// A `.bzl` that could not be attributed to a repository must not hand its
+    /// symlink mapping to every repository the main repository defines.
+    #[test]
+    fn an_unattributable_bzls_symlinks_map_nothing() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "e = use_extension(\"//bazel:ext.bzl\", \"e\")\nuse_repo(e, \"r\")\n\
+                 load(\"//bazel:loose.bzl\", \"x\")\n",
+            ),
+            ("bazel/ext.bzl", ""),
+            (
+                "bazel/loose.bzl",
+                "def _impl(ctx):\n    ctx.symlink(\"data/\", \"d\")\n",
+            ),
+        ]);
+        let m = RepoMapping::identity();
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(&files, &m);
+        let facts = read_module_facts(&files);
+        let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+        assert!(ri.path_maps.is_empty(), "{:?}", ri.path_maps);
     }
 
     #[test]
