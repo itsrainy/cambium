@@ -482,12 +482,14 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
             head: shas[1].clone(),
             kind: changes::ChangeSetKind::Adjacent,
             category: None,
+            pr_number: None,
         },
         changes::ChangeSet {
             base: shas[1].clone(),
             head: shas[2].clone(),
             kind: changes::ChangeSetKind::Adjacent,
             category: None,
+            pr_number: None,
         },
     ];
     let opts = ChangesOptions {
