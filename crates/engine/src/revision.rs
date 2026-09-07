@@ -21,7 +21,7 @@
 //!   *every* later query with a repository-mapping error. See
 //!   [`derive_startup_flags`].
 //! - **Nothing is done when nothing needs doing.** `baseline update` and
-//!   `corpus replay` check each commit out before calling the engine, so their
+//!   the history workload checks each commit out before calling the engine, so their
 //!   revision is the one on disk and they must keep paying nothing: no
 //!   worktree, no second Bazel server. [`Engine::needs_revision_workspace`]
 //!   compares trees and says no.
@@ -106,7 +106,7 @@ pub fn derive_startup_flags(flags: &[String], sha: &str) -> Vec<String> {
 /// Copies an untracked `cambium.toml` into the worktree.
 ///
 /// A fresh `git worktree add` only has what git tracks, and cambium's own
-/// config is routinely untracked (the corpus generates it into the repository
+/// config is routinely untracked (the benchmark generates it into the subject
 /// root and excludes it). Two things go wrong without it: the engine reads no
 /// config in that tree, and — where the root package globs its directory, as
 /// `bazel/bazel`'s `filegroup(name = "srcs", srcs = glob(["*"]))` does — the

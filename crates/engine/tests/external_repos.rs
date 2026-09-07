@@ -393,7 +393,7 @@ fn a_repository_rules_bzl_names_its_repository_instead_of_going_global() {
     );
 }
 
-/// The soundness hole the bazel corpus found on `9a7ba209..cc5c15fa`.
+/// The soundness hole the bazel subject found on `9a7ba209..cc5c15fa`.
 ///
 /// `tools/build_defs/repo/utils.bzl` is loaded from `MODULE.bazel` (through
 /// `http.bzl`) *and* listed in the `srcs` of fifteen filegroups in its own

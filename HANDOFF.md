@@ -1,5 +1,11 @@
 # Handoff: cambium real-repository validation suite
 
+> **Historical.** This file is the record of how the suite was built, and it
+> uses the words it used at the time: corpus, producers, pairs, replay,
+> profiles. Those are gone. The vocabulary in force is `docs/METHODOLOGY.md` —
+> subjects, tools, oracles, workloads, change sets — and the commands are
+> `cambi bench ...`. Read the mapping there before acting on anything below.
+
 Rewritten 2026-09-07 ~10:45 EDT by the orchestrating session. Read top to
 bottom. `tools/corpus-progress.sh` reconstructs the live picture at any time.
 
