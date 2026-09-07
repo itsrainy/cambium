@@ -171,6 +171,41 @@ impl CorpusDir {
         Ok(co)
     }
 
+    /// The generated `cambium.toml` for `entry`: defaults plus the manifest's
+    /// invalidators, the corpus store, and the startup flags that pin a run to
+    /// its own output base. Needs no checkout, so the state file can learn
+    /// which cambium it belongs to before the first fetch.
+    pub fn config_for(&self, entry: &RepoEntry, bazel_version: Option<&str>) -> Config {
+        let mut cfg = Config::default();
+        let (paths, globs) = entry.invalidator_rules();
+        cfg.invalidators.paths.extend(paths);
+        cfg.invalidators.globs.extend(globs);
+        cfg.bazel.binary = entry.bazel.clone();
+        cfg.bazel.extra_query_flags = entry.extra_query_flags.clone();
+        cfg.bazel.startup_flags = vec![
+            format!(
+                "--output_base={}",
+                self.output_base(&entry.id, bazel_version).display()
+            ),
+            format!("--bazelrc={}", self.bazelrc().display()),
+        ];
+        cfg.bazel
+            .startup_flags
+            .extend(entry.extra_startup_flags.iter().cloned());
+        cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
+            path: self.store(&entry.id),
+        };
+        // A replay range is 300 commits; a comparison pair's base must be able
+        // to find the nearest replayed index without a cold build. This is the
+        // *manifest's* range, never the profile's: the walk length is part of
+        // the config hash, so shortening it for a quick run would mint a fresh
+        // lineage and cold-build the very pairs the quick profile exists to
+        // make cheap. A quick range is a slice of the full one, so a bound
+        // that covers the full range covers it too.
+        cfg.baseline.max_ancestor_walk = entry.replay_range.max(20);
+        cfg
+    }
+
     /// An existing checkout, without touching the network.
     pub fn open(&self, entry: &RepoEntry) -> Result<Checkout> {
         Checkout::open(self, entry)
@@ -231,34 +266,7 @@ impl Checkout {
     /// pin this run to its own output base. Written into the worktree (and
     /// excluded from `git status`), never committed upstream.
     pub fn config_for(&self, entry: &RepoEntry, bazel_version: Option<&str>) -> Config {
-        let mut cfg = Config::default();
-        let (paths, globs) = entry.invalidator_rules();
-        cfg.invalidators.paths.extend(paths);
-        cfg.invalidators.globs.extend(globs);
-        cfg.bazel.binary = entry.bazel.clone();
-        cfg.bazel.extra_query_flags = entry.extra_query_flags.clone();
-        cfg.bazel.startup_flags = vec![
-            format!(
-                "--output_base={}",
-                self.corpus.output_base(&entry.id, bazel_version).display()
-            ),
-            format!("--bazelrc={}", self.corpus.bazelrc().display()),
-        ];
-        cfg.bazel
-            .startup_flags
-            .extend(entry.extra_startup_flags.iter().cloned());
-        cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
-            path: self.corpus.store(&entry.id),
-        };
-        // A replay range is 300 commits; a comparison pair's base must be able
-        // to find the nearest replayed index without a cold build. This is the
-        // *manifest's* range, never the profile's: the walk length is part of
-        // the config hash, so shortening it for a quick run would mint a fresh
-        // lineage and cold-build the very pairs the quick profile exists to
-        // make cheap. A quick range is a slice of the full one, so a bound
-        // that covers the full range covers it too.
-        cfg.baseline.max_ancestor_walk = entry.replay_range.max(20);
-        cfg
+        self.corpus.config_for(entry, bazel_version)
     }
 
     pub fn write_config(&self, entry: &RepoEntry, bazel_version: Option<&str>) -> Result<PathBuf> {
