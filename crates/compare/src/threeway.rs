@@ -663,6 +663,7 @@ pub fn compare_pair_with(
         .map(|e| (e.target.clone(), e.path.clone()))
         .collect();
     let deleted_dep = reasoned(|r| matches!(r, DirectReason::DeletedDep { .. }));
+    let external_repo = reasoned(|r| matches!(r, DirectReason::ExternalRepo { .. }));
     let from_build_file = reasoned(|r| match r {
         DirectReason::File { path } => cambium_classify::is_build_file(path),
         _ => false,
@@ -676,6 +677,7 @@ pub fn compare_pair_with(
     .with_paths(paths)
     .with_affected(cambium_set.iter().cloned())
     .with_deleted_dep(deleted_dep)
+    .with_external_repo(external_repo)
     .with_build_file(from_build_file)
     .with_base(bazel_at(engine, base_wt.path()));
 
@@ -929,6 +931,9 @@ mod tests {
         }
         fn bzl_closure_only(&self, _: &str) -> bool {
             false
+        }
+        fn reached_via_external_repo(&self, l: &str) -> bool {
+            l.ends_with(":from_external_repo")
         }
         fn changed_path_without_consumer(&self, _: &str) -> bool {
             false

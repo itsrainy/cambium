@@ -757,7 +757,16 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
     write(root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n");
     write(root, "config.txt", "v1\n");
     write(root, "BUILD.bazel", "exports_files([\"config.txt\"])\n");
-    write(root, "tools/BUILD.bazel", "");
+    // The repository rule's own `.bzl` is *also* listed as a source of a
+    // filegroup, the shape `bazel/bazel` uses throughout `tools/`
+    // (`//tools/build_defs/repo:bzl_srcs` and friends list
+    // `tools/build_defs/repo/utils.bzl`, which `MODULE.bazel` also loads).
+    write(
+        root,
+        "tools/BUILD.bazel",
+        "filegroup(\n    name = \"bzl_srcs\",\n    srcs = [\"gen.bzl\"],\n\
+        \x20   visibility = [\"//visibility:public\"],\n)\n",
+    );
     write(
         root,
         "tools/gen.bzl",
@@ -793,6 +802,8 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
         \x20   outs = [\"m.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
          genrule(\n    name = \"downstream\",\n    srcs = [\":g.txt\"],\n\
         \x20   outs = [\"d.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"uses_bzl_srcs\",\n    srcs = [\"//tools:bzl_srcs\"],\n\
+        \x20   outs = [\"b.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
          genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
     );
     write(
@@ -926,5 +937,28 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
         let a = check("edit mod_a", "mod_a/lib.txt", "a2\n", "@mod_a//:lib");
         assert!(a.contains("//app:uses_mod_a"), "{version}: {a:?}");
         assert!(!a.contains("//app:uses_gen"), "{version}: {a:?}");
+
+        // A `.bzl` that is *both* in the `MODULE.bazel` workspace closure and
+        // a source of a filegroup. Both consequences are owed: the
+        // repositories the file defines move, and the targets that list it in
+        // `srcs` change content without any rule proto moving. cambium missed
+        // the second on `bazel/bazel`'s `9a7ba209..cc5c15fa`, where fifteen
+        // filegroups around `tools/build_defs/repo/utils.bzl` went unreported.
+        let gen_bzl = std::fs::read_to_string(root.join("tools/gen.bzl")).unwrap();
+        let b = check(
+            "edit gen.bzl",
+            "tools/gen.bzl",
+            &format!("{gen_bzl}\n# the file's text moved; no rule's did\n"),
+            "@gen//:value + //tools:bzl_srcs",
+        );
+        assert!(
+            b.contains("//tools:bzl_srcs") && b.contains("//app:uses_bzl_srcs"),
+            "{version}: a .bzl listed in srcs must reach its consumers: {b:?}"
+        );
+        assert!(
+            b.contains("//app:uses_gen") && b.contains("//app:downstream"),
+            "{version}: without losing the repository consequence: {b:?}"
+        );
+        assert!(!b.contains("//app:unrelated"), "{version}: {b:?}");
     }
 }
