@@ -10,7 +10,10 @@ pin = "948b8c70e281c2fe42aa5468dad543c7af9f0ccc"
 replay_range = 300
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+# No repo-specific invalidators: builtins_bzl/** and tools/build_defs/repo/**
+# are ordinary sources compiled into the Bazel binary, not files the workspace
+# being queried loads. Listing them cost a third of this repo's replay globals.
+invalidators = []
 bazel_versions = ["7.x", "8.x"]
 notes = "small, clean, macro-heavy Java; fast first target"
 
@@ -149,7 +152,10 @@ pin = "7d50755cf12e40838096ad5142bf1f41e96789e9"
 replay_range = 150
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+# No repo-specific invalidators: builtins_bzl/** and tools/build_defs/repo/**
+# are ordinary sources compiled into the Bazel binary, not files the workspace
+# being queried loads. Listing them cost a third of this repo's replay globals.
+invalidators = []
 notes = "bazel under 7.x for the version matrix; shares the bazel mirror"
 
 [[repo]]
@@ -161,7 +167,10 @@ pin = "8584d864876062a15dd11423717b0412f3d1fd8d"
 replay_range = 150
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["src/main/starlark/builtins_bzl/**", "tools/build_defs/repo/**"]
+# No repo-specific invalidators: builtins_bzl/** and tools/build_defs/repo/**
+# are ordinary sources compiled into the Bazel binary, not files the workspace
+# being queried loads. Listing them cost a third of this repo's replay globals.
+invalidators = []
 notes = "bazel under 8.x for the version matrix; shares the bazel mirror"
 
 [[repo]]
