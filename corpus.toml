@@ -79,7 +79,11 @@ notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updat
 id = "apollo"
 url = "https://github.com/ApolloAuto/apollo.git"
 pin = "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"
-replay_range = 300
+# 74, not 300: commit cd510fe5, 76 back from the pin, does not load under any
+# Bazel (`third_party/gpus/cuda_configure.bzl` lacks `make_copy_files_rule`,
+# so the main repository mapping itself fails). A replay cannot cross it, and
+# 74 is the longest first-parent range that stays clear of it.
+replay_range = 74
 bazel = "bazelisk"
 # The repo has no .bazelversion and its deps are all declared in WORKSPACE,
 # with a MODULE.bazel that is the empty placeholder Bazel's migration message
