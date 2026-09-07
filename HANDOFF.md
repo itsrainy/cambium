@@ -1,149 +1,128 @@
-# Handoff: cambium real-repository validation suite
+# Handoff: cambium benchmark suite
 
-Rewritten 2026-09-07 ~10:45 EDT by the orchestrating session. Read top to
-bottom. `tools/corpus-progress.sh` reconstructs the live picture at any time.
+Written 2026-09-07 (late) for the next orchestrator. Read this, then
+`docs/METHODOLOGY.md`, then the task list. The owner is Rainy (they/them).
 
 ## Where things stand
 
-All code is committed and pushed on `main` (HEAD `1684956`). The tree has
-uncommitted edits from two subagents still working (see "Running"). Commit
-only what is green; each agent reports what it changed.
+The engine work is done and on `main`:
 
-Delivered and pushed: `crates/compare`, `crates/corpus`, `cambi corpus
-fetch|build|replay|pairs|compare|report|all`, `bench legacy` (bazel-diff-rust
-on synth; `docs/bench-legacy.svg`), `tools/bazel-diff/fetch.sh` (v46.1.0),
-`tools/tango/` (standalone `tango-cli` built inside uber/tango v0.0.46 plus
-one small patch for `--keep_going` partial graphs), CI (`synthetic-threeway`,
-`bazel-version-matrix` over 7.4.1/8.5.1/9.2.0, `corpus-nightly`,
-`corpus-weekly`), `docs/CORPUS.md` with generated sections between markers,
-`tools/corpus-progress.sh`.
+| commit | what |
+|---|---|
+| `b5a7211` | item 4: static `.bzl` load closure replaces rbuildfiles |
+| `5bcb978` | item 2: `.bazelrc` edits parsed and diffed against an allowlist |
+| `f4cf76d` | item 6: `limits.max_dirty_packages` (500) replaces `max_changed_files`; over it is an exact cold rebuild, not a global |
+| `7036fa0` | items 1+3: MODULE.bazel diff and repository-rule inputs map to repositories; their consumers become direct |
+| `11ae8e0` | soundness fix: a `.bzl` a package owns is also an ordinary changed source (filegroups listing it were missed; globals had hidden it) |
+| `726d913` | harness: tool subprocesses get stdin closed and `CI=1` (Aspect CLI prompt); Tango driver recovers a locked stale worktree |
+| `5596e64` | compare runs the other tools on global pairs too; all-pairs timing rows; Globals table; full pair cap 40 |
+| `1cf10cf` | `docs/METHODOLOGY.md`: the signed-off vocabulary (below) |
 
-### Engine bugs the suite found (all fixed, all in git log)
+Evidence so far (old vocabulary; files under `corpus-results/` locally and
+`corpus-results-box/` copied from the box):
 
-1. `generator_location` in the rule hash (bazel-diff and Tango drop it).
-2. A modified BUILD file is a direct input of any rule that globs it.
-3. Deleting `BUILD` while `BUILD.bazel` remains is not a package deletion.
-4. Ignore globs silently dropped consumed files (CHANGELOG.md in a genrule).
-5. `rbuildfiles`/dirty-package queries under `--keep_going` exit 3: tombstone
-   or escalate, never fail. Cold build accepts exit 3 too (records partial).
-6. Stale store lineage won over a compatible one (config-hash-aware fetch).
-7. A missing base index was built with Bazel on the *head* checkout
-   (now a detached worktree at base, opened lazily only when the store misses).
-8. `label_flag`/`label_setting` edges: `build_setting_default` is typed
-   STRING by Bazel; the first fix (v3) matched LABEL and never fired. v4.
-9. `--noimplicit_deps` dropped real main-repo edges (a rule's private
-   `attr.label(default=...)`); removed from the index query, oracle, verify,
-   classifier. Cost 3-4% index size.
-10. A `.bzl` loaded only from MODULE.bazel/WORKSPACE (repository rules) was
-    treated as dead: rbuildfiles names `@repo//:BUILD` / `//external:WORKSPACE`,
-    now a global invalidation.
-11. Producers shared cambium's `--output_base` across workspaces, poisoning
-    external repos (harness bug).
+- envoy full history on the box: **93 -> 22 globals per 300**, rebuild oracle
+  ok with an EMPTY invalidator list, but **140 engine cold rebuilds** (p50
+  4.4 s): GitHub issue #3, being fixed (task 17).
+- bazel full history: 16 -> 4 globals per 300; three-way on 18 incremental
+  pairs: 0 disagreements, cambium 24 ms warm vs bazel-diff 1.7 s warm vs Tango
+  17.9 s.
+- sourcegraph full history: 25 -> 24 globals (its globals are `go.mod`,
+  `pnpm-lock.yaml` invalidators and a legacy WORKSPACE; see issue #3's
+  "same family" section).
+- apollo (74-commit history, the loadable range): 11 globals, all from its
+  own invalidator list; it is WORKSPACE-only so items 1+3 leave it global.
 
-`RULE_HASH_VERSION` is 4; it is mixed into the config hash, so every index
-older than commit `250bfb7` is a different lineage.
+## The direction (signed off by Rainy)
 
-### Results as of this handoff (item 4 landed at b5a7211; quick profile at ace2c76)
+`docs/METHODOLOGY.md` is the spec. Summary: "corpus" is retired. The
+benchmark is `cambi bench` over **subjects** (real from `subject_repos.toml`,
+synthetic `synth:<preset>`), **tools** (cambium, bazel-diff, Tango),
+**oracles** (reverse-dependency = full `rdeps(//..., changed files)`,
+rebuild, load), **workloads** (history; change sets of kinds PR-shaped
+[primary], adjacent, stress), **runs** keyed by subject/workload/engine
+identity under `bench-results/`. `docs/RESULTS.md` is generated for a reader
+deciding whether to adopt cambium; `docs/METHODOLOGY.md` is hand-written.
 
-One Bazel per repository (Rainy, 2026-09-07): each entry runs at its own
-`.bazelversion`, or a `bazel_version` pin only when it has none (apollo).
-Bazel 7/8/9 coverage is CI's synthetic `bazel-version-matrix` job, not the
-corpus; the historical-pin entries `bazel-7`, `bazel-8`, `envoy-7` were removed
-in ace2c76 (their last results stay on disk under `corpus-results/`).
+Rules Rainy set, in their words where it matters:
 
-| entry | Bazel | replay oracle (old binary, pre item 4) | three-way |
-|---|---|---|---|
-| bazel | 9.2.0 | green; 16/300 global, 2 in the last 50 | 40/40 at v3 and v4 |
-| sourcegraph | aspect 5.8.19 | green; 25/300 global, 1 in the last 50 | 36/36 at v4, cambium_missing 0 |
-| envoy | 8.7.0 | 74/159 global (93/300 at v3); last-50 window replaying now | 11/40 at v4 (cambium_missing 914, mostly api/** and externals) |
-| apollo | 7.4.1 (pinned; WORKSPACE-only) | green over 74 commits; 11 global, 8 in the last 50 | 39/40, the 1 is the new bazeldiff_extra_line_shift class |
+- The benchmark is for timing and accuracy numbers against bazel-diff and
+  Tango, "not for us to test our changes; we should have quicker methods".
+  Validate with unit tests, the synthetic soundness sweep, the real-Bazel e2e
+  (`CAMBIUM_E2E=1 CAMBIUM_BAZEL=$HOME/.cache/cambium/bin/bazelisk cargo test
+  -p cambium-engine --test e2e_bazel`), and targeted runs. The
+  "Choosing what to run" table in METHODOLOGY.md says which workload a change
+  needs.
+- Timing rows must include the change sets where cambium goes global or cold
+  rebuilds, "so we don't artificially inflate our advantage".
+- One Bazel per subject (its `.bazelversion`); 7/8/9 coverage is CI's
+  synthetic matrix, never extra subject checkouts.
+- Commit and push as you go. Agents work in isolated worktrees and commit to
+  branches; the orchestrator merges, gates, pushes.
+- Issue #3 lands before the published run. PR-shaped change sets are primary.
 
-Removed entries, last numbers: bazel-8 40/40, 17/150 global; bazel-7 40/40,
-20/150 global; envoy-7 9/40 pass.
+## Running right now (agents in `.claude/worktrees/`, all branched from main at 1cf10cf+)
 
-Timings (v3 runs, warm store): cambium 0.2-0.5 s per pair; bazel-diff warm
-4-15 s, cold 7-64 s; Tango 33-530 s. Synthetic 100k targets: cambium 67 ms vs
-bazel-diff 37 s warm, exact agreement. See `docs/CORPUS.md` (regenerate with
-`cambi corpus report <id>`; `--profile quick` writes
-`corpus-results/<id>/quick/CORPUS-quick.md` instead).
+| task | agent scope | merge notes |
+|---|---|---|
+| 14 rename to `cambi bench` | crates/corpus + crates/compare + crates/bench -> one crate; CLI tree; `subject_repos.toml`; `bench-results/`; RESULTS.md; CI; word sweep. Commits per step. | Merge FIRST. |
+| 17 issue #3 | crates/index + crates/engine only (path mapping for repository-rule inputs; FORMAT_VERSION bump) | Independent of 14; merge second. |
+| 15 full rdeps oracle | crates/compare/src/oracle.rs, its call site in threeway.rs, smoke_real_bazel.rs, docs | Written against the OLD layout. After 14 lands, re-apply onto crates/bench (the agent's report lists every hunk outside oracle.rs). |
+| 16 PR-shaped change sets | crates/corpus/src/pairs.rs (+ a crates/diff accessor) | Same: re-apply onto the renamed tree after 14. |
+| 18 published run | not started; box is STOPPED; needs Rainy's go | see below |
 
-### Profiles
+When an agent reports: `git merge --no-edit <branch>`, resolve, run
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace`, the e2e if engine/index changed, then
+push and `git worktree remove --force` + `git branch -d`. Watch for
+`.claude/` or `ubuntu@...` directories sneaking into a commit (`.gitignore`
+now covers them).
 
-`--profile quick` (env `CAMBIUM_CORPUS_PROFILE=quick`): 50 commits, 50
-deterministic pairs, Tango on the first 10; results under
-`corpus-results/<id>/quick/`. Local before/after evidence for the invalidation
-plan uses quick; the published numbers come from a full run on EC2
-(c7i.4xlarge for bazel/envoy/sourcegraph/apollo; 8xlarge + 500 GB for xla/tf).
+## The box
 
-## Running right now
+- `i-03c826487f1ab30ac`, c7i.4xlarge, us-east-2, 500 GB gp3, **stopped**.
+  Volume bills ~$45/month while stopped. Key `~/.ssh/cambium-corpus.pem`,
+  security group `cambium-corpus` allows SSH from Rainy's current IP only
+  (revoke the old CIDR and authorize the new one with `aws ec2
+  revoke-security-group-ingress` / `authorize-security-group-ingress` when
+  their IP changes).
+- `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
+  private: `sync` tars the working tree over ssh and rebuilds cambi,
+  bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
+  `BOOTSTRAP DONE`). Mirrors, caches and indexes live under
+  `~/.cache/cambium/` on the box and survive stop/start.
+- Published run recipe (after 14-17 land and Rainy says go): `launch.sh
+  start`, `launch.sh sync`, wait for BOOTSTRAP DONE, then per subject
+  `bench subjects fetch`, `bench subjects build`, `bench history --oracle
+  rebuild`, `bench changes --tools cambium,bazel-diff,tango --oracle
+  rdeps,load`, then `bench report`; tar `bench-results/` back; commit
+  RESULTS.md; `launch.sh stop`. Run under `nohup` with a log and watch it with
+  a Monitor; the box takes ~1 min per subject for a 300-commit history and
+  the change sets are the long part (Tango up to minutes per change set on
+  envoy).
 
-Nothing. The box (i-03c826487f1ab30ac, us-east-2) is **stopped** with all
-mirrors, caches and indexes on its volume; its results are copied to
-`corpus-results-box/`. Local runs are stopped. See the task list in the
-session and `docs/METHODOLOGY.md` (1cf10cf) for the direction.
+## Gotchas
 
-## Direction (Rainy, 2026-09-07 evening)
+- The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
+  driver scripts and logs under the repo (ignored) or on the box.
+- Tango, bazel-diff and cambium must never share an `--output_base`.
+- macOS x86_64 cannot fetch some subjects' externals (toolchains_llvm,
+  GraalVM, Docker-generated RBE configs): local tool timings are inflated and
+  not publishable; bazelisk for the suite is `~/.cache/cambium/bin/bazelisk`.
+- A killed change-set run leaves tango worktrees registered on the subject
+  mirror; the driver now recovers, but `git -C <mirror>.git worktree prune`
+  is the manual fix.
+- Results written by another cambium build (format version or config hash)
+  are started over, not resumed; that identity is in every state file.
+- apollo: WORKSPACE-only, pinned to Bazel 7.4.1, history capped at 74
+  commits because a deeper revision does not load.
+- zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
 
-The engine work is done; the benchmark vocabulary is being redone around
-`cambi bench` per `docs/METHODOLOGY.md`: subjects (real from
-`subject_repos.toml`, synthetic `synth:<preset>`), tools (cambium,
-bazel-diff, Tango), oracles (reverse-dependency, rebuild, load), workloads
-(history, change sets: PR-shaped primary, adjacent, stress), runs keyed by
-subject/workload/engine identity under `bench-results/`. Then: the full
-`rdeps` oracle, PR-shaped selection that understands squash merges, issue #3,
-and only then the published run on the box into `docs/RESULTS.md`.
+## Open issues
 
-## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
-
-5. (done, `1684956`) bazel entries had no real invalidators.
-4. (done, `b5a7211`) Static `.bzl` load closure replaces `rbuildfiles` on the `.bzl` path
-   (repo mapping via `bazel mod dump_repo_mapping ""`; external loads stop at
-   the external label; MODULE/WORKSPACE closure → global; keep `rbuildfiles`
-   as a corpus oracle asserting the static closure is a superset).
-1+3. (done, merged 7036fa0) Repo-granular external invalidation: MODULE.bazel.lock diff and
-   repository-rule inputs map to repos; dirty (a) main-repo consumers of
-   `@repo//...` edges and (b) every package whose `.bzl` closure contains a
-   file from that repo. A module that registers toolchains stays global
-   (toolchain resolution has no edge to follow). Needs item 4.
-2. (done, merged 5bcb978) `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
-   affect loading (`--remote_*`, `--jobs`, `--test_*`, `--disk_cache`,
-   configs no query uses); unknown flags and `import`/`try-import` go global.
-6. (done) Replace `max_changed_files` with "cold build when dirty packages
-   exceed N", N from replay per-package query timings. N = 500: the replay
-   crossover (cold build / marginal ms per dirty package) is ~450 on bazel,
-   ~620 on apollo, ~210 on sourcegraph quick and past the whole repository on
-   envoy. A cold rebuild re-queries `//...` at head and splices it onto the
-   base, so it stays exact — it is reported as `stats.cold_rebuild`, not as a
-   global — and the corpus replay counts the two apart
-   (`summary.engine_cold_rebuilds`).
-Target: envoy replay globals 93 → under 20 per 300.
-
-Validation policy (Rainy, 2026-09-07): the corpus suite is for timing and
-accuracy numbers against bazel-diff and Tango, not for testing our changes.
-Each item validates with unit tests, the synth soundness sweep, the real-Bazel
-e2e, and at most a handful of targeted `cambi affected` runs on specific
-corpus commits of the class being changed. Quick-profile replays are run
-once per milestone, full replays only on EC2.
-
-Then: regenerate all report sections, write the hand-written `## Findings`
-section of `docs/CORPUS.md` (the eleven bugs above, the externals
-limitation, the laptop caveat on producer timings), delete this file's
-"Running" section or the file, commit, push.
-
-## Gotchas learned
-
-- zsh does not word-split `$VAR`; use `${=VAR}` or explicit variables in
-  ad-hoc shell.
-- `$TMPDIR/cambium-cache` holds fetched indexes; after a FORMAT_VERSION bump
-  old files must be deleted (check the `CAMBIDX1` header version).
-- Killing a compare mid-pair leaves registered tango worktrees under
-  `corpus-results/<id>/scratch/tango-worktrees/` and `base-worktree` in the
-  corpus checkout: `git worktree remove --force` them and re-checkout the pin.
-- Never share one `--output_base` across workspace directories.
-- HEAD pins only load under their own Bazel major, which is why the corpus
-  runs one Bazel per repository and never a version matrix.
-- This Mac cannot fetch some externals (GraalVM macos-x64, Docker-based RBE
-  configs, some mirror 404s): producers pay for those on every run, cambium
-  mostly does not; absolute producer timings are inflated here.
-- Replay-then-compare, never compare alone after a hash bump: compare
-  cold-builds every pair's base otherwise.
+- #1 live TUI for the benchmark matrix (now `bench watch`).
+- #2 CLI surface: intent-first verbs, diagnostics with codes, one output
+  contract.
+- #3 externals input-path precision (task 17).
+- Not filed yet: sourcegraph's `go.mod` / `pnpm-lock.yaml` extension inputs
+  should be derived like envoy's (see #3 "same family").
