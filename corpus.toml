@@ -36,7 +36,16 @@ extra_query_flags = []
 invalidators = [
     "bazel/repositories.bzl",
     "bazel/repository_locations.bzl",
-    "api/bazel/**",
+    # envoy lists `api` in `.bazelignore` and re-exposes it as the external
+    # repo `@envoy_api` (`bazel/api_binding.bzl` symlinks every entry of
+    # `api/` into a generated repository). So `api/**` holds no main-repo
+    # package, cambium's file->target map cannot name a consumer for anything
+    # under it, and an edit to a single `.proto` there looks like a no-op --
+    # while `//tools/proto_format:proto_sync`, `//tools/code:check` and the
+    # `//distribution:*` tree really do depend on it through `@envoy_api`.
+    # Indexing external repositories would be the precise answer; until then a
+    # global invalidation is the sound one.
+    "api/**",
     "bazel/repo.bzl",
     ".github/config.yml",
     "VERSION.txt",
@@ -138,7 +147,7 @@ extra_query_flags = []
 invalidators = [
     "bazel/repositories.bzl",
     "bazel/repository_locations.bzl",
-    "api/bazel/**",
+    "api/**",  # see the `envoy` entry above.
     "bazel/repo.bzl",
     ".github/config.yml",
     "VERSION.txt",
