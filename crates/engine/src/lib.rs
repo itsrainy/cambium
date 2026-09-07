@@ -13,6 +13,7 @@ pub mod error;
 pub mod inspect;
 pub mod query;
 pub mod report;
+pub mod revision;
 pub mod store;
 pub mod synthq;
 
@@ -22,4 +23,5 @@ pub use error::{EngineError, Result};
 pub use inspect::{IndexQuery, QueryOptions};
 pub use query::{BazelQuerier, PackageQuerier};
 pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
+pub use revision::{RevisionQuerier, RevisionWorkspace};
 pub use synthq::SynthQuerier;

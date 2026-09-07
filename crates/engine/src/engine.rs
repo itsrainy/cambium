@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::error::{EngineError, Result};
 use crate::query::{BazelQuerier, FileSource, PackageQuerier};
 use crate::report::{AffectedReport, DirectReason, Explanation, Stats, Stopwatch, Timings};
+use crate::revision::{worktrees_dir, RevisionQuerier, RevisionWorkspace};
 use crate::store::{self, ArtifactStore};
 
 /// What the caller asked for.
@@ -175,25 +176,69 @@ impl Engine {
         self.bazel.workspace()
     }
 
-    fn file_source(&self, rev: &str) -> FileSource {
-        FileSource::worktree(self.workspace()).with_fallback_rev(Some(rev.to_string()))
+    /// Reads BUILD files from `root`, falling back to `git show` at `rev` for
+    /// anything the tree does not have (a `.gitignore`d generated BUILD file,
+    /// or a shallow checkout).
+    fn file_source(&self, root: &Path, rev: &str) -> FileSource {
+        FileSource::worktree(root).with_fallback_rev(Some(rev.to_string()))
+    }
+
+    /// Whether Bazel has to be run somewhere other than the working tree to
+    /// see `rev`.
+    ///
+    /// Trees, not commit shas: a rebase or a squash-merge that produced the
+    /// same content is the same checkout as far as `bazel query` is concerned,
+    /// and the store already keys indexes by tree for the same reason. A
+    /// revision git cannot resolve (a synthetic id in the tests, a sha this
+    /// clone does not have) is left to the working tree, which is the only
+    /// thing there is.
+    ///
+    /// A *dirty* working tree at HEAD stays on the fast path deliberately:
+    /// `cambi affected` on a developer's checkout is meant to index the edits
+    /// in front of it, not the last commit.
+    pub fn needs_revision_workspace(&self, rev: &str) -> bool {
+        let (Ok(want), Ok(have)) = (self.repo.tree_of(rev), self.repo.tree_of("HEAD")) else {
+            return false;
+        };
+        want != have
     }
 
     // ------------------------------------------------------------- cold build
 
     /// The querier a normal run uses.
-    pub fn bazel_querier(&self, rev: &str) -> BazelQuerier<'_> {
-        BazelQuerier {
-            bazel: &self.bazel,
-            opts: self.cfg.convert_options(),
-            files: self.file_source(rev),
+    ///
+    /// When the working tree is not at `rev`, this is where the second
+    /// checkout appears: a detached worktree at `rev` with its own Bazel (see
+    /// [`crate::revision`]). It is removed when the returned querier drops.
+    pub fn bazel_querier(&self, rev: &str) -> Result<RevisionQuerier> {
+        if !self.needs_revision_workspace(rev) {
+            return Ok(RevisionQuerier::new(
+                BazelQuerier {
+                    bazel: self.bazel.clone(),
+                    opts: self.cfg.convert_options(),
+                    files: self.file_source(self.workspace(), rev),
+                },
+                None,
+            ));
         }
+        let sha = self.repo.rev_parse(rev)?;
+        let ws = RevisionWorkspace::create(&self.repo, &sha, &worktrees_dir(&self.cache_dir))?;
+        let bazel = ws.bazel(&self.bazel, &sha);
+        let files = self.file_source(ws.path(), &sha);
+        Ok(RevisionQuerier::new(
+            BazelQuerier {
+                bazel,
+                opts: self.cfg.convert_options(),
+                files,
+            },
+            Some(ws),
+        ))
     }
 
     /// Full build from `bazel query //...` (spec 6.9). Mints a new lineage.
     pub fn full_build(&self, commit: &str) -> Result<IndexData> {
         tracing::info!("running full bazel query //... (cold build)");
-        self.full_build_with(commit, &self.bazel_querier(commit))
+        self.full_build_with(commit, &self.bazel_querier(commit)?)
     }
 
     /// Full build from an arbitrary row source.
@@ -366,8 +411,12 @@ impl Engine {
         req: &AffectedRequest,
     ) -> Result<(Baseline, BaselineOrigin)> {
         // The replay's head is `base`, so its querier is the one built for
-        // `base` — not the one the outer run uses for its own head.
-        self.resolve_baseline_with(base, req, &self.bazel_querier(base))
+        // `base` — not the one the outer run uses for its own head. On a
+        // checkout that is at head (the usual `affected` shape) that querier
+        // runs in a worktree at `base`; without it the "base" index would be
+        // built from head's BUILD files, and a target added at head would sit
+        // in both indexes with the same hash and never be reported.
+        self.resolve_baseline_with(base, req, &self.bazel_querier(base)?)
     }
 
     /// As [`Engine::resolve_baseline`], with the row source for the replay step
@@ -541,7 +590,7 @@ impl Engine {
         req: &AffectedRequest,
     ) -> Result<RunOutcome> {
         let changes = self.repo.diff(&req.base, &req.head)?;
-        self.compute(base_view, &changes, &self.bazel_querier(&req.head), req)
+        self.compute(base_view, &changes, &self.bazel_querier(&req.head)?, req)
     }
 
     /// The pipeline proper: dirty set, query, splice, direct set, walk.
@@ -623,7 +672,14 @@ impl Engine {
         // but the head worktree can: if either BUILD file is still on disk,
         // the package lives and is merely dirty.
         if !dirty.global && !dirty.deleted_packages.is_empty() {
-            let ws = self.bazel.workspace().to_path_buf();
+            // The querier's own checkout, which for a revision the working
+            // tree is not on is a worktree at that revision — asking the
+            // working tree whether a BUILD file survived would answer for the
+            // wrong revision.
+            let ws = querier
+                .workspace()
+                .unwrap_or_else(|| self.bazel.workspace())
+                .to_path_buf();
             let survivors: Vec<String> = dirty
                 .deleted_packages
                 .iter()

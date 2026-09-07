@@ -39,7 +39,7 @@ impl Driver for BazelDriver<'_> {
     }
 
     fn querier(&self, rev: &str) -> Result<Box<dyn PackageQuerier + '_>> {
-        Ok(Box::new(self.engine.bazel_querier(rev)))
+        Ok(Box::new(self.engine.bazel_querier(rev)?))
     }
 }
 

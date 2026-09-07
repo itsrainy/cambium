@@ -156,6 +156,10 @@ impl Bazel {
         &self.startup_flags
     }
 
+    pub fn extra_query_flags(&self) -> &[String] {
+        &self.extra_query_flags
+    }
+
     pub fn env(&self) -> &[(String, String)] {
         &self.env
     }
