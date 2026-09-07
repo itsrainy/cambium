@@ -1228,6 +1228,7 @@ mod tests {
             profile: "full".into(),
             bazel_version_used: version_used.to_string(),
             tool_sha: "deadbee".into(),
+            engine: String::new(),
             started_unix: 0,
             cold: cold(),
             commits,

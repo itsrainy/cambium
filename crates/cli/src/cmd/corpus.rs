@@ -231,8 +231,21 @@ impl Run {
         })
     }
 
+    /// The state file, as seen by this build: a state another cambium wrote
+    /// (older index format, different configuration) is started over. The
+    /// configuration is generated, not read from the worktree, so this costs
+    /// no Bazel.
     fn state(&self) -> Result<State> {
-        State::load(&self.results, &self.entry.id, &self.entry.pin)
+        let cfg = self
+            .corpus
+            .open(&self.entry)?
+            .config_for(&self.entry, self.version());
+        State::load_for(
+            &self.results,
+            &self.entry.id,
+            &self.entry.pin,
+            &State::engine_id(&cfg.hash()),
+        )
     }
 
     fn version(&self) -> Option<&str> {
@@ -386,11 +399,16 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
     let out = run.index_path(&sha);
     let mut state = run.state()?;
     if !force {
+        // "Built" means this build can read it: an index left by an older
+        // format is a rebuild, not an answer.
         if let Some(prev) = state.built.get(&sha) {
-            if prev.exists() {
-                tracing::info!(%sha, path = %prev.display(), "already built");
-                println!("{}", prev.display());
-                return Ok(prev.clone());
+            match cambium_index::IndexFile::open(prev) {
+                Ok(_) => {
+                    tracing::info!(%sha, path = %prev.display(), "already built");
+                    println!("{}", prev.display());
+                    return Ok(prev.clone());
+                }
+                Err(e) => tracing::warn!(path = %prev.display(), error = %e, "rebuilding"),
             }
         }
     }

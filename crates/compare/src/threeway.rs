@@ -834,7 +834,12 @@ pub fn compare_pairs(
     owned.make_absolute();
     let opts = &owned;
     let path = opts.output_path();
-    let mut state = State::load(&opts.results_dir, &opts.repo_id, &opts.pin)?;
+    let mut state = State::load_for(
+        &opts.results_dir,
+        &opts.repo_id,
+        &opts.pin,
+        &State::engine_id(&engine.cfg.hash()),
+    )?;
     let mut result = match (opts.resume, CompareResult::read(&path)) {
         (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => prev,
         _ => CompareResult {

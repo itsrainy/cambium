@@ -180,6 +180,10 @@ pub struct ReplayResult {
     #[serde(default)]
     pub profile: String,
     pub tool_sha: String,
+    /// `State::engine_id` of the build that wrote this; a resume by any other
+    /// build starts over.
+    #[serde(default)]
+    pub engine: String,
     pub started_unix: u64,
     pub cold: ColdBuild,
     pub commits: Vec<CommitRecord>,
@@ -369,11 +373,21 @@ pub fn replay(
         &opts.pin,
         Some(opts.bazel_version.as_str()),
     );
-    let mut state = State::load(&opts.results_dir, &opts.repo_id, &opts.pin)?;
+    let mut state = State::load_for(
+        &opts.results_dir,
+        &opts.repo_id,
+        &opts.pin,
+        &State::engine_id(&engine.cfg.hash()),
+    )?;
 
     // ---- resume, or start ----
     let (mut result, mut index, start_at) = match (opts.resume, ReplayResult::read(&path)) {
-        (true, Ok(prev)) if prev.from == from && prev.to == to && !prev.done => {
+        (true, Ok(prev))
+            if prev.from == from
+                && prev.to == to
+                && !prev.done
+                && prev.engine == State::engine_id(&engine.cfg.hash()) =>
+        {
             let last = prev
                 .commits
                 .last()
@@ -391,7 +405,12 @@ pub fn replay(
                 }
             }
         }
-        (true, Ok(prev)) if prev.done && prev.from == from && prev.to == to => {
+        (true, Ok(prev))
+            if prev.done
+                && prev.from == from
+                && prev.to == to
+                && prev.engine == State::engine_id(&engine.cfg.hash()) =>
+        {
             tracing::info!("replay already complete");
             return Ok(prev);
         }
@@ -525,6 +544,7 @@ fn start(
         bazel_version_used: bazel_version_used(engine),
         profile: opts.profile.name().to_string(),
         tool_sha: tool_sha(),
+        engine: State::engine_id(&engine.cfg.hash()),
         started_unix: now_unix(),
         cold,
         commits: Vec::new(),
