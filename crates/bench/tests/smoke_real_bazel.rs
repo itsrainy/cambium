@@ -295,7 +295,8 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     );
 
     let opts = ChangesOptions {
-        oracle_k: 10,
+        // 0 is the full oracle: every changed path in the change set.
+        oracle_k: 0,
         resume: false,
         scratch: tmp.path().join("scratch"),
         ..ChangesOptions::new("smoke", pin, results)
@@ -338,5 +339,197 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         "unexplained disagreements: {:#?}",
         result.summary.by_class
     );
+    assert!(result.summary.pass, "{:#?}", result.summary);
+}
+
+/// A second workspace, written for the oracle alone: `defs/defs.bzl` is both a
+/// macro other packages load *and* a source of a filegroup in its own package.
+///
+/// That is the shape of the miss 11ae8e0 fixed — `utils.bzl` in the `srcs` of
+/// fifteen filegroups in `bazel/bazel` — and it is the shape the sampled
+/// oracle could not see, because its roots came from cambium's own direct set.
+fn write_bzl_filegroup_repo(root: &Path) -> Vec<String> {
+    std::fs::create_dir_all(root).unwrap();
+    git(root, &["init", "--quiet", "-b", "main"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+
+    write(
+        root,
+        "MODULE.bazel",
+        "module(name = \"oracle\", version = \"0.0.1\")\n",
+    );
+    write(
+        root,
+        "defs/BUILD.bazel",
+        r#"exports_files(["defs.bzl"])
+
+filegroup(
+    name = "bzl_srcs",
+    srcs = ["defs.bzl"],
+    visibility = ["//visibility:public"],
+)
+"#,
+    );
+    write(
+        root,
+        "defs/defs.bzl",
+        r#"def cat_rule(name, srcs):
+    native.genrule(
+        name = name,
+        srcs = srcs,
+        outs = [name + ".out"],
+        cmd = "cat $(SRCS) > $@",
+    )
+"#,
+    );
+    write(root, "lib/lib.txt", "one\n");
+    write(
+        root,
+        "lib/BUILD.bazel",
+        r#"genrule(
+    name = "lib",
+    srcs = ["lib.txt"],
+    outs = ["lib.out"],
+    cmd = "cat $(SRCS) > $@",
+    visibility = ["//visibility:public"],
+)
+"#,
+    );
+    write(
+        root,
+        "app/BUILD.bazel",
+        r#"load("//defs:defs.bzl", "cat_rule")
+
+cat_rule(
+    name = "app",
+    srcs = ["//lib:lib.out"],
+)
+"#,
+    );
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "--quiet", "-m", "initial"]);
+    let mut shas = vec![head(root)];
+
+    // The `.bzl`: `rdeps` names the filegroup that lists it, and nothing else.
+    write(
+        root,
+        "defs/defs.bzl",
+        r#"def cat_rule(name, srcs):
+    native.genrule(
+        name = name,
+        srcs = srcs,
+        outs = [name + ".out"],
+        cmd = "cat $(SRCS) | sort > $@",
+    )
+"#,
+    );
+    git(root, &["commit", "--quiet", "-am", "edit the macro"]);
+    shas.push(head(root));
+
+    // A plain source: `rdeps` names the genrule that reads it and the app that
+    // consumes its output.
+    write(root, "lib/lib.txt", "two\n");
+    git(root, &["commit", "--quiet", "-am", "edit a source file"]);
+    shas.push(head(root));
+    shas
+}
+
+/// The full oracle, against `rdeps` computed by hand on a workspace small
+/// enough to compute it by hand.
+///
+/// The unit tests pin how the answer is scored; this pins that the question is
+/// the right one — that a changed path really does become a label Bazel
+/// accepts, and that the set that comes back is the set a person reading the
+/// BUILD files would write down. No other tool runs: the oracle is what is
+/// under test, so bazel-diff and Tango being absent must not skip it.
+#[test]
+#[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
+fn the_full_oracle_matches_hand_computed_rdeps() {
+    let Some(bazel) = bazelisk() else {
+        eprintln!("no ~/.cache/cambium/bin/bazelisk; skipping");
+        return;
+    };
+    let version = bazel_version();
+    let root = scratch_root(version.as_deref());
+    std::fs::create_dir_all(&root).unwrap();
+    let tmp = tempfile::tempdir_in(&root).unwrap();
+    let src = tmp.path().join("src");
+    let shas = write_bzl_filegroup_repo(&src);
+    let pin = shas.last().unwrap().clone();
+
+    let entry = RepoEntry {
+        id: "oracle".into(),
+        url: format!("file://{}", src.display()),
+        pin: pin.clone(),
+        history_window: shas.len(),
+        bazel: bazel.display().to_string(),
+        bazel_version: None,
+        extra_query_flags: Vec::new(),
+        extra_startup_flags: Vec::new(),
+        invalidators: Vec::new(),
+        skip: false,
+        notes: "oracle smoke workspace".into(),
+    };
+    let subjects = SubjectsDir::new(tmp.path().join("subjects"));
+    let checkout = subjects.fetch(&entry).unwrap();
+    checkout.write_config(&entry, version.as_deref()).unwrap();
+    let engine = checkout.engine(&entry, version.as_deref()).unwrap();
+
+    let change_sets = vec![
+        changes::ChangeSet {
+            base: shas[0].clone(),
+            head: shas[1].clone(),
+            kind: changes::ChangeSetKind::Adjacent,
+            category: None,
+        },
+        changes::ChangeSet {
+            base: shas[1].clone(),
+            head: shas[2].clone(),
+            kind: changes::ChangeSetKind::Adjacent,
+            category: None,
+        },
+    ];
+    let opts = ChangesOptions {
+        // 0 is the full oracle: every changed path in the change set.
+        oracle_k: 0,
+        resume: false,
+        scratch: tmp.path().join("scratch"),
+        ..ChangesOptions::new("oracle", pin, tmp.path().join("results/oracle"))
+    };
+    let result = compare_change_sets(&engine, &checkout, &change_sets, &[], &opts).unwrap();
+    assert_eq!(result.change_sets.len(), 2);
+
+    // `defs/defs.bzl` -> the filegroup that lists it in `srcs`. `//app:app`
+    // reaches the file through a `load()`, which is not a `deps` edge, so
+    // `rdeps` does not name it and cambium over-approximates by including it.
+    let bzl = result.change_sets[0]
+        .oracle
+        .as_ref()
+        .expect("an oracle ran");
+    assert_eq!(bzl.roots, vec!["//defs:defs.bzl"], "{bzl:#?}");
+    assert!(!bzl.sampled);
+    assert_eq!(
+        bzl.oracle_set.iter().cloned().collect::<Vec<_>>(),
+        vec!["//defs:bzl_srcs"],
+        "hand-computed rdeps of the changed .bzl: {bzl:#?}"
+    );
+    assert!(bzl.missing.is_empty(), "{bzl:#?}");
+    assert_eq!(bzl.recall(), 1.0);
+
+    // `lib/lib.txt` -> the genrule that reads it, and the app that consumes
+    // its output.
+    let src_set = result.change_sets[1]
+        .oracle
+        .as_ref()
+        .expect("an oracle ran");
+    assert_eq!(src_set.roots, vec!["//lib:lib.txt"], "{src_set:#?}");
+    assert_eq!(
+        src_set.oracle_set.iter().cloned().collect::<Vec<_>>(),
+        vec!["//app:app", "//lib:lib"],
+        "hand-computed rdeps of the changed source: {src_set:#?}"
+    );
+    assert!(src_set.missing.is_empty(), "{src_set:#?}");
+    assert_eq!(src_set.recall(), 1.0);
     assert!(result.summary.pass, "{:#?}", result.summary);
 }
