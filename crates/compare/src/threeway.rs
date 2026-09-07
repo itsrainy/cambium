@@ -59,6 +59,17 @@ pub struct CompareOptions {
     /// Skip pairs already recorded in the state file.
     pub resume: bool,
     pub examples: usize,
+    /// Which corpus profile this run belongs to; recorded in the result.
+    pub profile: cambium_corpus::Profile,
+    /// How many pairs Tango runs on — the first this many, in the pair set's
+    /// own order — or `None` for all of them.
+    ///
+    /// Tango costs 30-500 s a pair against cambium's fractions of a second, so
+    /// on a laptop it *is* the run. Capping it keeps a timing sample worth
+    /// quoting while bazel-diff, cambium and the oracle still see every pair.
+    /// A pair Tango did not run on carries no `tango` row at all: it is a pair
+    /// with fewer producers, not a pair where a producer disagreed.
+    pub tango_pairs: Option<usize>,
 }
 
 /// Makes a path absolute without requiring it to exist.
@@ -96,6 +107,8 @@ impl CompareOptions {
             seed: 0,
             resume: true,
             examples: DEFAULT_EXAMPLES,
+            profile: cambium_corpus::Profile::Full,
+            tango_pairs: None,
         }
     }
 
@@ -108,9 +121,9 @@ impl CompareOptions {
         self.scratch = absolute(&self.scratch);
     }
 
-    /// `compare-<pin>.json`, or `compare-<pin>-<bazel_version>.json` when the
-    /// version matrix is in play — the two runs answer different questions and
-    /// must not overwrite each other.
+    /// `compare-<pin>.json`, or `compare-<pin>-<bazel_version>.json` when a
+    /// Bazel was pinned — the two runs answer different questions and must not
+    /// overwrite each other.
     pub fn output_path(&self) -> PathBuf {
         Self::path(&self.results_dir, &self.pin, self.bazel_version.as_deref())
     }
@@ -255,6 +268,12 @@ pub struct CompareSummary {
     pub producer_warm: BTreeMap<String, WallStats>,
     pub cambium_cold: WallStats,
     pub cambium_warm: WallStats,
+    /// How many non-global pairs each producer actually ran on. Below
+    /// `pairs` when a producer was capped (Tango under the quick profile) or
+    /// failed on some pairs, and it is what every per-producer number above is
+    /// an average over.
+    #[serde(default)]
+    pub producer_pairs: BTreeMap<String, usize>,
     pub pass: bool,
 }
 
@@ -274,6 +293,10 @@ pub struct CompareResult {
     pub bazel_version_used: Option<String>,
     pub seed: u64,
     pub oracle_k: usize,
+    /// `quick` or `full`. Empty in results written before profiles existed,
+    /// which were all full runs.
+    #[serde(default)]
+    pub profile: String,
     pub pairs: Vec<PairComparison>,
     pub summary: CompareSummary,
 }
@@ -369,6 +392,7 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
             for (class, n) in &pr.counts {
                 *s.by_class.entry(class.clone()).or_default() += n;
             }
+            *s.producer_pairs.entry(pr.name.clone()).or_default() += 1;
             precisions
                 .entry(pr.name.clone())
                 .or_default()
@@ -821,13 +845,14 @@ pub fn compare_pairs(
             bazel_version_used: None,
             seed: opts.seed,
             oracle_k: opts.oracle_k,
+            profile: opts.profile.name().to_string(),
             pairs: Vec::new(),
             summary: CompareSummary::default(),
         },
     };
     // Recorded once per run, and re-recorded on a resume whose earlier half
-    // predates the field: the report's version matrix is only worth reading if
-    // it names the Bazel that actually answered.
+    // predates the field: the report's numbers are only worth reading if they
+    // name the Bazel that actually answered.
     if result.bazel_version_used.is_none() {
         let v = engine.bazel.version();
         let v = v.lines().next().unwrap_or("").trim().to_string();
@@ -843,8 +868,23 @@ pub fn compare_pairs(
             tracing::debug!(%key, "already compared");
             continue;
         }
-        tracing::info!(pair = i + 1, of = pairs.len(), %key, kind = pair.kind.name(), "comparing");
-        let cmp = compare_pair_with(engine, checkout, pair, producers, opts)?;
+        // The cap is on the *pair index*, not on how many Tango has managed so
+        // far, so which pairs it runs on is the same set whether the run
+        // finished in one go or resumed at pair 30.
+        let running: Vec<&dyn Producer> = producers
+            .iter()
+            .copied()
+            .filter(|p| p.name() != crate::tango::NAME || opts.tango_pairs.map_or(true, |n| i < n))
+            .collect();
+        tracing::info!(
+            pair = i + 1,
+            of = pairs.len(),
+            %key,
+            kind = pair.kind.name(),
+            producers = running.len(),
+            "comparing"
+        );
+        let cmp = compare_pair_with(engine, checkout, pair, &running, opts)?;
         if !cmp.pass {
             tracing::warn!(%key, "pair failed the three-way comparison");
         }
@@ -1047,6 +1087,53 @@ mod tests {
         assert_eq!(s.producer_cold["bazel-diff-rust"].samples, 1);
     }
 
+    /// The same pair with a `tango` row bolted on, as a full-profile run
+    /// would produce.
+    fn with_tango(mut p: PairComparison) -> PairComparison {
+        let mut t = p.producers[0].clone();
+        t.name = crate::tango::NAME.to_string();
+        t.cold_wall_ms = 300_000;
+        t.warm_wall_ms = None;
+        p.producers.push(t);
+        p
+    }
+
+    #[test]
+    fn a_pair_tango_was_capped_out_of_is_not_a_disagreement() {
+        // Two pairs, Tango on the first only: the quick profile's shape.
+        let capped = summarise(&[
+            with_tango(pair_comparison("1", 1.0, 100, 10, true)),
+            pair_comparison("2", 1.0, 100, 10, true),
+        ]);
+        assert!(capped.pass, "a pair Tango skipped still passes");
+        assert_eq!((capped.pairs, capped.passed), (2, 2));
+        assert_eq!(
+            capped.producer_pairs[crate::tango::NAME],
+            1,
+            "the summary says how many pairs Tango's numbers come from"
+        );
+        assert_eq!(capped.producer_pairs["bazel-diff-rust"], 2);
+        assert_eq!(capped.producer_cold[crate::tango::NAME].samples, 1);
+        // The pairs Tango did run on are scored exactly as they would be with
+        // no cap at all.
+        let uncapped = summarise(&[
+            with_tango(pair_comparison("1", 1.0, 100, 10, true)),
+            with_tango(pair_comparison("2", 1.0, 100, 10, true)),
+        ]);
+        assert_eq!(
+            capped.mean_precision[crate::tango::NAME],
+            uncapped.mean_precision[crate::tango::NAME]
+        );
+        assert_eq!(capped.by_class, uncapped_minus_tango(&uncapped));
+    }
+
+    /// The class totals `uncapped` would have had with one fewer Tango row.
+    fn uncapped_minus_tango(uncapped: &CompareSummary) -> BTreeMap<String, usize> {
+        let mut totals = uncapped.by_class.clone();
+        *totals.get_mut("cambium_extra_select").unwrap() -= 2;
+        totals
+    }
+
     fn global_pair(name: &str) -> PairComparison {
         let mut p = pair_comparison(name, 1.0, 999, 999, true);
         p.producers.clear();
@@ -1121,6 +1208,7 @@ mod tests {
             pin: "abc".into(),
             bazel_version: Some("7.4.1".into()),
             bazel_version_used: Some("bazel 7.4.1".into()),
+            profile: "full".into(),
             seed: 7,
             oracle_k: 100,
             pairs: vec![pair_comparison("1", 1.0, 100, 10, true)],

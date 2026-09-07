@@ -80,6 +80,7 @@ fn opts(f: &Fixture, resume: bool) -> ReplayOptions {
         resume,
         bazel_version: "synth".into(),
         diff_cap: 20,
+        profile: cambium_corpus::Profile::Full,
     }
 }
 
@@ -176,6 +177,7 @@ fn pairs_are_deterministic_and_cover_the_range() {
         replay_range: commits.len() - 1,
         seed: 3,
         cap: 2,
+        profile: cambium_corpus::Profile::Full,
         hub_packages: vec![f.driver.graphs[0].package_path(0).to_string()],
         invalidator_paths: vec!["MODULE.bazel".into()],
         invalidator_globs: vec!["rules/**".into()],

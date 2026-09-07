@@ -10,7 +10,7 @@ D="${1:-/Users/rainy/.claude/jobs/6b58f265/tmp}"
 R="$(cd "$(dirname "$0")/.." && pwd)/corpus-results"
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
-echo "== $(date '+%H:%M:%S')   lanes: A = bazel bazel-8 bazel-7   B = envoy envoy-7   C = sourcegraph apollo"
+echo "== $(date '+%H:%M:%S')   lanes: A = bazel   B = envoy   C = sourcegraph apollo"
 for lane in A B C; do
   L="$D/lane${lane}2.log"; C="$D/cmp${lane}.log"; [ "$lane" = C ] && { L="$D/laneC.log"; C="$D/laneC.log"; }
   [ -f "$L" ] || continue
@@ -24,12 +24,18 @@ for lane in A B C; do
   grep -hE '^cambium: |panicked' "$L" "$C" 2>/dev/null | tail -2 | sed 's/^   !! /   /; s/^/   !! /' | cut -c1-160
 done
 
+# Full-profile results sit in corpus-results/<id>/, quick ones a level down in
+# corpus-results/<id>/quick/. Both are listed, each labelled with the profile
+# its files belong to, because the two are the same repository measured over
+# very different slices and a row without that label means nothing.
 echo "-- results on disk"
-for d in "$R"/*/; do
-  id=$(basename "$d")
+for d in "$R"/*/ "$R"/*/quick/; do
+  [ -d "$d" ] || continue
+  id=$(basename "$(dirname "$d")"); prof=$(basename "$d")
+  case "$prof" in quick) ;; *) id="$prof"; prof=full ;; esac
   rep=$(ls "$d" 2>/dev/null | grep -c '^replay-'); cmp=$(ls "$d" 2>/dev/null | grep -c '^compare-')
   st=$(python3 -c "import json,sys;d=json.load(open('$d/state.json'));r=d.get('replay') or {};print('replay ' + ('done' if r.get('done') else 'partial'), 'compared', len(d.get('compared',[])))" 2>/dev/null)
-  printf '   %-9s replay files %s  compare files %s  %s\n' "$id" "$rep" "$cmp" "$st"
+  printf '   %-12s %-5s replay files %s  compare files %s  %s\n' "$id" "$prof" "$rep" "$cmp" "$st"
 done
 
 echo "-- processes"

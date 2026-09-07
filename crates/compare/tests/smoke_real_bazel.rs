@@ -231,7 +231,6 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         // A local path is a perfectly good git remote, which is what keeps
         // this test off the network for everything but Bazel itself.
         url: format!("file://{}", src.display()),
-        mirror: None,
         pin: pin.clone(),
         replay_range: shas.len(),
         bazel: bazel.display().to_string(),
@@ -239,7 +238,6 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         extra_query_flags: Vec::new(),
         extra_startup_flags: Vec::new(),
         invalidators: Vec::new(),
-        bazel_versions: Vec::new(),
         skip: false,
         notes: "synthetic smoke workspace".into(),
     };
@@ -281,6 +279,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
             replay_range: shas.len(),
             seed: 0,
             cap: 20,
+            profile: cambium_corpus::Profile::Full,
             hub_packages: Vec::new(),
             invalidator_paths: Vec::new(),
             invalidator_globs: Vec::new(),
@@ -302,8 +301,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     println!(
         "{}",
         cambium_compare::report::render_repo_section(
-            &cambium_compare::RepoResults::new("bazel", "bazel")
-                .with_compares(vec![result.clone()]),
+            &cambium_compare::RepoResults::new("bazel").with_compares(vec![result.clone()]),
             None,
         )
     );

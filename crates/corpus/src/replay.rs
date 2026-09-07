@@ -57,6 +57,11 @@ pub struct ReplayOptions {
     pub bazel_version: String,
     /// How many differences the oracle report lists per class.
     pub diff_cap: usize,
+    /// Which profile this replay belongs to. Recorded in the result so a
+    /// reader of a 50-commit replay is not left comparing it with a 300-commit
+    /// one; it does not itself bound the range, since the caller passes the
+    /// commits.
+    pub profile: crate::Profile,
 }
 
 /// One cold build.
@@ -159,6 +164,10 @@ pub struct ReplayResult {
     /// report renders as `n/a`.
     #[serde(default)]
     pub bazel_version_used: String,
+    /// `quick` or `full`. Empty in results written before profiles existed,
+    /// which were all full runs.
+    #[serde(default)]
+    pub profile: String,
     pub tool_sha: String,
     pub started_unix: u64,
     pub cold: ColdBuild,
@@ -501,6 +510,7 @@ fn start(
         to: to.to_string(),
         bazel_version: opts.bazel_version.clone(),
         bazel_version_used: bazel_version_used(engine),
+        profile: opts.profile.name().to_string(),
         tool_sha: tool_sha(),
         started_unix: now_unix(),
         cold,

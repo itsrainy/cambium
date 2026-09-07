@@ -8,6 +8,8 @@
 //! - [`manifest`]: `corpus.toml`, the pinned list of repositories.
 //! - [`checkout`]: bare mirrors and worktrees under `$CAMBIUM_CORPUS_DIR`, the
 //!   generated per-repo `cambium.toml`, and the shared Bazel caches.
+//! - [`profile`]: `quick` versus `full` — how much of a repository one run
+//!   covers, and where its results land.
 //! - [`pairs`]: deterministic `(base, head)` commit pairs — adjacent, PR-shaped
 //!   and stress — that the three-way comparison consumes.
 //! - [`replay`]: the updater replay over a first-parent range, ending with the
@@ -23,16 +25,20 @@ pub mod checkout;
 pub mod manifest;
 pub mod oracle;
 pub mod pairs;
+pub mod profile;
 pub mod replay;
 pub mod state;
 
 pub use checkout::{Checkout, CorpusDir};
 pub use manifest::{Manifest, RepoEntry};
 pub use pairs::{Pair, PairKind, PairSet};
+pub use profile::Profile;
 pub use replay::{replay, CommitRecord, Driver, ReplayOptions, ReplayResult};
 pub use state::State;
 
-/// Where a corpus run writes its results: `corpus-results/<id>/`.
+/// Where a full-profile run writes its results: `corpus-results/<id>/`.
+/// A quick run writes under `corpus-results/<id>/quick/`; see
+/// [`Profile::results_dir`].
 pub fn results_dir(root: &std::path::Path, id: &str) -> std::path::PathBuf {
-    root.join(id)
+    Profile::Full.results_dir(root, id)
 }

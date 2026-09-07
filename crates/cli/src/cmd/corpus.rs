@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use cambium_corpus::manifest::{Manifest, RepoEntry};
+use cambium_corpus::profile::Profile;
 use cambium_corpus::{pairs, replay, CorpusDir, State};
 use cambium_engine::inspect::{IndexQuery, IndexStats};
 use clap::{Args as ClapArgs, Subcommand};
@@ -38,6 +39,11 @@ pub struct Common {
     /// Seed for the deterministic pair sampling.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
+    /// How much of the repository to cover: `full` (the published numbers,
+    /// hours on a big machine) or `quick` (a bounded, deterministic slice that
+    /// finishes on a laptop, written under `<results-dir>/<id>/quick/`).
+    #[arg(long, default_value = "full", env = cambium_corpus::profile::PROFILE_ENV)]
+    pub profile: String,
 }
 
 #[derive(Subcommand)]
@@ -151,13 +157,18 @@ impl Args {
 /// Bazel binary made absolute), the corpus directory, and the results dir.
 struct Run {
     entry: RepoEntry,
-    /// The whole manifest, not just this entry: the report's cross-repo tables
-    /// need every entry's `mirror` to group the version matrix.
+    /// The whole manifest, not just this entry: the report's top table is
+    /// rebuilt from every entry that has results, not only this one.
     manifest: Manifest,
     corpus: CorpusDir,
+    /// `--results-dir` itself, absolute: the parent every repository's results
+    /// hang off, which the report walks to rebuild the cross-repo tables.
+    results_root: PathBuf,
+    /// This run's own directory: `<root>/<id>`, or `<root>/<id>/quick`.
     results: PathBuf,
     version: Option<String>,
     seed: u64,
+    profile: Profile,
 }
 
 impl Run {
@@ -183,9 +194,24 @@ impl Run {
         // worktree), so a relative `--results-dir corpus-results` would name a
         // different directory in each of them — which is exactly how
         // bazel-diff came to be handed a base worktree that did not exist.
-        let results = cambium_corpus::results_dir(&c.results_dir, &c.id);
+        let profile = Profile::parse(&c.profile)
+            .ok_or_else(|| anyhow::anyhow!("--profile {:?}: expected quick or full", c.profile))?;
+        std::fs::create_dir_all(&c.results_dir)?;
+        let results_root = cambium_compare::threeway::absolute(&c.results_dir);
+        // A quick run's files sit in their own directory so they can never be
+        // read as, or write over, the published full-profile numbers.
+        let results = profile.results_dir(&results_root, &c.id);
         std::fs::create_dir_all(&results)?;
         let results = cambium_compare::threeway::absolute(&results);
+        if profile.is_quick() {
+            tracing::info!(
+                results = %results.display(),
+                replay_range = cambium_corpus::profile::QUICK_REPLAY_RANGE,
+                pairs = cambium_corpus::profile::QUICK_PAIR_CAP,
+                tango_pairs = cambium_corpus::profile::QUICK_TANGO_PAIRS,
+                "quick profile: local evidence, not the published numbers"
+            );
+        }
         // The flag wins; the manifest's own pin is the fallback for a repo
         // that needs a specific Bazel and has no `.bazelversion` to say so.
         let version = c
@@ -197,9 +223,11 @@ impl Run {
             entry,
             manifest,
             corpus,
+            results_root,
             results,
             version,
             seed: c.seed,
+            profile,
         })
     }
 
@@ -405,7 +433,9 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
 fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
     let checkout = run.corpus.open(&run.entry)?;
     let engine = checkout.engine(&run.entry, run.version())?;
-    let range = range.unwrap_or(run.entry.replay_range);
+    let range = run
+        .profile
+        .replay_range(range.unwrap_or(run.entry.replay_range));
     let commits = pairs::range_commits(&checkout.repo, &run.entry.pin, range)?;
     tracing::info!(
         commits = commits.len(),
@@ -421,6 +451,7 @@ fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
         resume,
         bazel_version: run.version().unwrap_or_default().to_string(),
         diff_cap: 50,
+        profile: run.profile,
     };
     let driver = replay::BazelDriver {
         checkout: &checkout,
@@ -478,6 +509,7 @@ fn do_pairs(run: &Run, kinds: &[String], cap: usize, output: DataFormat) -> Resu
         replay_range: run.entry.replay_range,
         seed: run.seed,
         cap,
+        profile: run.profile,
         hub_packages,
         invalidator_paths: paths,
         invalidator_globs: globs,
@@ -618,7 +650,14 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
 
     let checkout = run.corpus.open(&run.entry)?;
     let set = load_pairs(run, &checkout, args)?;
-    let pairs: Vec<_> = set.pairs.iter().take(args.cap.max(1)).cloned().collect();
+    // The quick profile's pair set is already capped at its own total, so the
+    // per-run `--cap` (20 by default, meant to bound an EC2 job's tail) must
+    // not shave it down further.
+    let cap = match run.profile.pair_cap() {
+        Some(c) => args.cap.max(c),
+        None => args.cap,
+    };
+    let pairs: Vec<_> = set.pairs.iter().take(cap.max(1)).cloned().collect();
     anyhow::ensure!(!pairs.is_empty(), "no pairs to compare");
 
     let engine = checkout.engine(&run.entry, run.version())?;
@@ -628,6 +667,8 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         seed: run.seed,
         resume: !args.restart,
         scratch: run.results.join("scratch"),
+        profile: run.profile,
+        tango_pairs: run.profile.tango_pairs(),
         ..cambium_compare::CompareOptions::new(
             run.entry.id.clone(),
             run.entry.pin.clone(),
@@ -638,6 +679,8 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         pairs = pairs.len(),
         producers = producers.len(),
         oracle_k = opts.oracle_k,
+        profile = run.profile.name(),
+        tango_pairs = opts.tango_pairs.unwrap_or(pairs.len()),
         "comparing"
     );
     let result = cambium_compare::compare_pairs(&engine, &checkout, &pairs, &producers, &opts)?;
@@ -673,6 +716,7 @@ fn load_pairs(
         replay_range: run.entry.replay_range,
         seed: run.seed,
         cap: args.cap,
+        profile: run.profile,
         hub_packages: Vec::new(),
         invalidator_paths: paths,
         invalidator_globs: globs,
@@ -743,20 +787,28 @@ fn print_compare_summary(result: &cambium_compare::CompareResult) {
 /// `docs/CORPUS.md`: this repo's section, plus the top-level table rebuilt
 /// from every repository that has results.
 fn do_report(ctx: &Context, run: &Run, doc: Option<&std::path::Path>) -> Result<u8> {
-    let doc = doc
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ctx.root.join("docs/CORPUS.md"));
+    // `docs/CORPUS.md` is the published document, and a quick run's numbers are
+    // a laptop's slice: they go to a file of their own next to the results they
+    // came from, unless the caller names a document explicitly.
+    let doc = doc.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        if run.profile.is_quick() {
+            run.results.join("CORPUS-quick.md")
+        } else {
+            ctx.root.join("docs/CORPUS.md")
+        }
+    });
 
     // Every repository at once, not just this one: a per-repo nightly job
-    // rewrites the top table, the version matrix and the synthetic headline
-    // wholesale, and must not drop the other repos' rows on the way.
-    let parent = run.results.parent().unwrap_or(&run.results).to_path_buf();
-    let repos = collect_repos(&run.manifest, &parent, &run.corpus)?;
+    // rewrites the top table and the synthetic headline wholesale, and must
+    // not drop the other repos' rows on the way. Within
+    // one profile, though: quick and full numbers never share a table.
+    let parent = run.results_root.clone();
+    let repos = collect_repos(&run.manifest, &parent, &run.corpus, run.profile)?;
     let mine = repos
         .iter()
         .find(|r| r.id == run.entry.id)
         .cloned()
-        .unwrap_or_else(|| cambium_compare::RepoResults::new(&run.entry.id, family(&run.entry)));
+        .unwrap_or_else(|| cambium_compare::RepoResults::new(&run.entry.id));
     if mine.is_empty() {
         eprintln!(
             "cambium: corpus report: no replay-*.json or compare-*.json in {}",
@@ -774,23 +826,12 @@ fn do_report(ctx: &Context, run: &Run, doc: Option<&std::path::Path>) -> Result<
     cambium_compare::update_doc(&doc, "top", &cambium_compare::render_top_table(&repos))?;
     cambium_compare::update_doc(
         &doc,
-        "matrix",
-        &cambium_compare::render_version_matrix(&repos),
-    )?;
-    cambium_compare::update_doc(
-        &doc,
         "bench",
         &cambium_compare::render_bench_section(&bench, Some("bench-legacy.svg")),
     )?;
     tracing::info!(doc = %doc.display(), repos = repos.len(), "report written");
     println!("{}", doc.display());
     Ok(crate::EXIT_OK)
-}
-
-/// `corpus.toml`'s `mirror`, else the entry's own id: what groups the
-/// version-matrix entries into one row.
-fn family(entry: &RepoEntry) -> String {
-    entry.mirror.clone().unwrap_or_else(|| entry.id.clone())
 }
 
 /// Results for every manifest entry that has a results directory, in manifest
@@ -800,11 +841,12 @@ fn collect_repos(
     manifest: &Manifest,
     parent: &std::path::Path,
     corpus: &CorpusDir,
+    profile: Profile,
 ) -> Result<Vec<cambium_compare::RepoResults>> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for entry in &manifest.repos {
-        let dir = cambium_corpus::results_dir(parent, &entry.id);
+        let dir = profile.results_dir(parent, &entry.id);
         seen.insert(entry.id.clone());
         if !dir.is_dir() {
             continue;
@@ -821,7 +863,7 @@ fn collect_repos(
                 }
             }
         }
-        let r = cambium_compare::RepoResults::new(&entry.id, family(entry))
+        let r = cambium_compare::RepoResults::new(&entry.id)
             .with_replay(replay)
             .with_compares(compares);
         if !r.is_empty() {
@@ -843,8 +885,9 @@ fn collect_repos(
         if seen.contains(id) {
             continue;
         }
+        let dir = profile.within(&dir);
         let (replay, compares) = read_results(&dir)?;
-        let r = cambium_compare::RepoResults::new(id, id)
+        let r = cambium_compare::RepoResults::new(id)
             .with_replay(replay)
             .with_compares(compares);
         if !r.is_empty() {
@@ -924,9 +967,9 @@ fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_compare::Benc
 
 /// Every `replay-*.json` and `compare-*.json` in one results directory.
 ///
-/// More than one replay can be present (one per Bazel version); the newest by
-/// name wins for the section's replay tables, while every compare is rendered,
-/// because the comparison rows are exactly where the version matrix shows up.
+/// More than one replay can be present (a repository whose `bazel_version` was
+/// changed leaves the older file behind); the newest by name wins for the
+/// section's replay tables, while every compare is rendered.
 fn read_results(
     dir: &std::path::Path,
 ) -> Result<(
