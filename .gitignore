@@ -4,3 +4,4 @@
 *.bin.tmp
 corpus-results*/
 .claude/
+.cambium-logs/
