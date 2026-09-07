@@ -1119,7 +1119,7 @@ fn do_report(
     cambium_bench::update_doc(&doc, "top", &cambium_bench::render_top_table(&results))?;
     cambium_bench::update_doc(
         &doc,
-        "bench",
+        "synthetic",
         &cambium_bench::render_bench_section(&bench, Some("bench-legacy.svg")),
     )?;
     tracing::info!(doc = %doc.display(), subjects = results.len(), "report written");
