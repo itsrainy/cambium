@@ -416,6 +416,17 @@ impl Engine {
         // runs in a worktree at `base`; without it the "base" index would be
         // built from head's BUILD files, and a target added at head would sit
         // in both indexes with the same hash and never be reported.
+        //
+        // The querier is built only once the store has come up empty for
+        // `base` itself: on a checkout at head, building it means a detached
+        // worktree and a second Bazel server, which is seconds of work that a
+        // fetched baseline never needs.
+        if let Some(path) = self.fetch_baseline(base)? {
+            let f = IndexFile::open(&path)?;
+            self.check_compatible(f.view(), &path)?;
+            tracing::info!(%base, path = %path.display(), "loaded baseline index");
+            return Ok((Baseline::Mapped(f), BaselineOrigin::Fetched));
+        }
         self.resolve_baseline_with(base, req, &self.bazel_querier(base)?)
     }
 
