@@ -253,18 +253,13 @@ pub fn tail(s: &str, n: usize) -> String {
 /// A second worktree of the repository, checked out at one revision and
 /// removed when it goes out of scope.
 ///
-/// `git worktree add --detach` rather than a clone: it shares the object
-/// store, so adding one costs a checkout rather than a copy of the history,
-/// which matters when the repository is TensorFlow.
+/// The git plumbing lives in [`cambium_diff::Worktree`], which the engine also
+/// uses to run Bazel at a revision the working tree is not on; this adds the
+/// one thing the comparison needs on top — a copy of the untracked
+/// `cambium.toml`.
 #[derive(Debug)]
 pub struct BaseWorktree {
-    path: PathBuf,
-    /// The worktree (or mirror) the new one was registered against; `git
-    /// worktree remove` has to run from there.
-    owner: PathBuf,
-    /// Set when the directory already existed and we only moved it, so `Drop`
-    /// does not delete something the caller owns.
-    borrowed: bool,
+    inner: cambium_diff::Worktree,
 }
 
 /// Copies the workspace's generated `cambium.toml` into the base worktree.
@@ -311,92 +306,27 @@ impl BaseWorktree {
     pub fn create(repo_worktree: &Path, base_sha: &str, scratch: &Path) -> Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let path = scratch.join("base-worktree");
-        if path.join(".git").exists() {
-            git(repo_worktree, &["worktree", "prune"]).ok();
-            // `--force`, like `BaseWorktree::checkout`. A plain checkout keeps
-            // local modifications, and on a case-insensitive filesystem this
-            // worktree acquires them without anyone editing anything: two
-            // `bazel/bazel` paths that differ only in case collide, and git
-            // leaves one of them reported as deleted. bazel-diff then hashes a
-            // `glob(["**"])` filegroup over a directory that is missing a
-            // file, and reports `//docs:srcs` (and everything embedding it) as
-            // impacted on a commit that never touched `docs/` — a
-            // `cambium_missing` failure manufactured entirely by the harness.
-            git(
-                &path,
-                &["checkout", "--quiet", "--force", "--detach", base_sha],
-            )
-            .with_context(|| format!("moving the base worktree to {base_sha}"))?;
-            mirror_untracked_config(repo_worktree, &path)?;
-            return Ok(Self {
-                path,
-                owner: repo_worktree.to_path_buf(),
-                borrowed: true,
-            });
-        }
-        // A stale directory with no `.git` would make `worktree add` fail.
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-        }
-        git(repo_worktree, &["worktree", "prune"]).ok();
-        git(
-            repo_worktree,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "--detach",
-                &path.display().to_string(),
-                base_sha,
-            ],
-        )
-        .with_context(|| format!("adding a base worktree at {base_sha}"))?;
-        mirror_untracked_config(repo_worktree, &path)?;
-        Ok(Self {
-            path,
-            owner: repo_worktree.to_path_buf(),
-            borrowed: false,
-        })
+        let inner = cambium_diff::Worktree::create(repo_worktree, base_sha, &path)
+            .with_context(|| format!("adding a base worktree at {base_sha}"))?;
+        mirror_untracked_config(repo_worktree, inner.path())?;
+        Ok(Self { inner })
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.inner.path()
     }
 
     /// Moves this worktree to another revision, for the next pair.
     pub fn checkout(&self, sha: &str) -> Result<()> {
-        git(
-            &self.path,
-            &["checkout", "--quiet", "--force", "--detach", sha],
-        )?;
-        mirror_untracked_config(&self.owner, &self.path)?;
+        self.inner.checkout(sha)?;
+        mirror_untracked_config(self.inner.owner(), self.inner.path())?;
         Ok(())
     }
 
-    /// Unregisters and deletes the worktree. `Drop` calls this and ignores
+    /// Unregisters and deletes the worktree. `Drop` does this too, and ignores
     /// failures; call it directly to see them.
     pub fn remove(&self) -> Result<()> {
-        git(
-            &self.owner,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                &self.path.display().to_string(),
-            ],
-        )?;
-        Ok(())
-    }
-}
-
-impl Drop for BaseWorktree {
-    fn drop(&mut self) {
-        if self.borrowed {
-            return;
-        }
-        if let Err(e) = self.remove() {
-            tracing::warn!(path = %self.path.display(), error = %e, "could not remove the base worktree");
-        }
+        Ok(self.inner.remove()?)
     }
 }
 

@@ -227,7 +227,7 @@ impl Golden {
             .compute(
                 self.base_index.view(),
                 &engine.repo.diff(&self.base, &head).expect("git diff"),
-                &engine.bazel_querier(&head),
+                &engine.bazel_querier(&head).expect("querier for head"),
                 &req,
             )
             .unwrap_or_else(|e| panic!("{name}: {e}"));

@@ -8,6 +8,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod worktree;
+
+pub use worktree::Worktree;
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("failed to run git: {0}")]
@@ -127,6 +131,27 @@ impl Repo {
             .skip(1)
             .map(|s| s.to_string())
             .collect())
+    }
+
+    /// True when the working tree has uncommitted changes to tracked files.
+    ///
+    /// A dirty tree is not an error: `cambi affected` on a developer's
+    /// checkout is meant to see the edits. It only means the tree is not
+    /// exactly `HEAD`, which the engine takes into account when it decides
+    /// whether a revision can be read from the tree it already has.
+    pub fn is_dirty(&self) -> bool {
+        match run(
+            &self.root,
+            &["status", "--porcelain", "--untracked-files=no"],
+        ) {
+            Ok(out) => !out.trim().is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    /// Adds a detached worktree of this repository at `rev`, in `path`.
+    pub fn worktree_at(&self, rev: &str, path: &Path) -> Result<Worktree> {
+        Worktree::create(&self.root, rev, path)
     }
 
     /// Runs an arbitrary git command in the repository and returns stdout.

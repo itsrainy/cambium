@@ -78,18 +78,35 @@ pub trait PackageQuerier {
     fn version(&self) -> String {
         String::new()
     }
+
+    /// The directory whose files these rows describe, when there is one.
+    ///
+    /// The engine reads the tree directly in one place — deciding whether a
+    /// deleted `BUILD` really deleted the package — and that read has to happen
+    /// in the same checkout the rows came from, not in whatever the working
+    /// tree happens to be on. A querier with no filesystem behind it (the
+    /// synthetic one) returns `None` and the engine falls back to its own
+    /// workspace.
+    fn workspace(&self) -> Option<&Path> {
+        None
+    }
 }
 
 /// The real thing: `bazel query` for a package set.
-pub struct BazelQuerier<'a> {
-    pub bazel: &'a Bazel,
+///
+/// Owns its `Bazel` rather than borrowing one: the handle for a revision the
+/// working tree is not on points at a temporary worktree that lives and dies
+/// with the querier (see [`crate::revision`]), and a borrow could not express
+/// that.
+pub struct BazelQuerier {
+    pub bazel: Bazel,
     pub opts: ConvertOptions,
     pub files: FileSource,
 }
 
-impl PackageQuerier for BazelQuerier<'_> {
+impl PackageQuerier for BazelQuerier {
     fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, crate::error::EngineError> {
-        let q = query_packages(self.bazel, packages, &self.opts, &self.files)?;
+        let q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
         // Exit 3 is `--keep_going` finishing with errors: every package that
         // could load is in the output, and the ones that could not are the
         // ones a cold build would also drop (the universe query runs with
@@ -122,7 +139,7 @@ impl PackageQuerier for BazelQuerier<'_> {
     }
 
     fn universe(&self) -> Result<Vec<PackageUpdate>, crate::error::EngineError> {
-        let q = query_universe(self.bazel, &self.opts, &self.files)?;
+        let q = query_universe(&self.bazel, &self.opts, &self.files)?;
         if !q.outcome.success {
             return Err(crate::error::EngineError::BazelQuery {
                 what: "//...".into(),
@@ -139,6 +156,10 @@ impl PackageQuerier for BazelQuerier<'_> {
 
     fn version(&self) -> String {
         self.bazel.version()
+    }
+
+    fn workspace(&self) -> Option<&Path> {
+        Some(self.bazel.workspace())
     }
 }
 

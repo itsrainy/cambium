@@ -185,6 +185,32 @@ fn head(root: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// `USE_BAZEL_VERSION`, if set: bazelisk reads it itself once it is in the
+/// process environment (which every `Command` here inherits), but we also
+/// thread it explicitly into `Checkout::engine`, which both sets it on the
+/// `Bazel` (so it rides along to the compare producers via `run_context`'s
+/// `env`, not just bazelisk's own child) and keys `--output_base` off it, so
+/// three versions run side by side without sharing a server or an install.
+fn bazel_version() -> Option<String> {
+    std::env::var("USE_BAZEL_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// A scratch root that is stable across a version's runs (handy for
+/// inspecting bazelisk's downloads and the output base by hand) rather than a
+/// fresh `TempDir` every time. Override with `CAMBIUM_SMOKE_SCRATCH`;
+/// defaults to a directory under the job's own tmp.
+fn scratch_root(version: Option<&str>) -> PathBuf {
+    let base = std::env::var_os("CAMBIUM_SMOKE_SCRATCH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/rainy/.claude/jobs/6b58f265/tmp/smoke_bazel"));
+    match version {
+        Some(v) => base.join(v),
+        None => base.join("default"),
+    }
+}
+
 #[test]
 #[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
 fn the_three_tools_agree_on_a_real_bazel_workspace() {
@@ -192,7 +218,10 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         eprintln!("no ~/.cache/cambium/bin/bazelisk; skipping");
         return;
     };
-    let tmp = tempfile::tempdir().unwrap();
+    let version = bazel_version();
+    let root = scratch_root(version.as_deref());
+    std::fs::create_dir_all(&root).unwrap();
+    let tmp = tempfile::tempdir_in(&root).unwrap();
     let src = tmp.path().join("src");
     let shas = write_repo(&src);
     let pin = shas.last().unwrap().clone();
@@ -214,8 +243,14 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     };
     let corpus = CorpusDir::new(tmp.path().join("corpus"));
     let checkout = corpus.fetch(&entry).unwrap();
-    checkout.write_config(&entry, None).unwrap();
-    let engine = checkout.engine(&entry, None).unwrap();
+    checkout.write_config(&entry, version.as_deref()).unwrap();
+    let engine = checkout.engine(&entry, version.as_deref()).unwrap();
+    eprintln!(
+        "bazel: {} (USE_BAZEL_VERSION={:?}), output_base under {}",
+        bazel.display(),
+        version,
+        corpus.output_base(&entry.id, version.as_deref()).display()
+    );
 
     let producers: Vec<Box<dyn Producer>> = [
         cambium_compare::BazelDiff::discover(cambium_compare::Implementation::Rust)
