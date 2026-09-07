@@ -294,4 +294,3 @@ fn emit(report: &BenchReport, out: Option<&Path>, markdown: Option<&Path>) -> Re
     }
     Ok(())
 }
-

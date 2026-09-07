@@ -1,6 +1,6 @@
 #!/bin/bash
-# Bootstraps an Ubuntu 24.04 x86_64 corpus box: everything a full-profile
-# `cambi corpus all` needs, for every repository in subject_repos.toml.
+# Bootstraps an Ubuntu 24.04 x86_64 benchmark box: everything a full
+# `cambi bench` run needs, for every subject in subject_repos.toml.
 #
 # Runs as EC2 user-data (root) on first boot, then everything cambium-related
 # is owned by `ubuntu`. Idempotent enough to re-run by hand:
@@ -13,7 +13,7 @@ exec > >(tee -a /var/log/cambium-bootstrap.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 # build-essential, python3, git: Bazel and repository rules; openjdk: bazel-diff
-# (the Java reference implementation is not used, but Tango and some corpus
+# (the Java reference implementation is not used, but Tango and some subject
 # repos want a JDK on PATH); docker: bazel_ci_rules generates RBE configs by
 # running containers; the rest are what envoy's and apollo's repository rules
 # shell out to.
@@ -24,7 +24,7 @@ apt-get install -y --no-install-recommends \
 systemctl enable --now docker
 usermod -aG docker ubuntu
 
-# Bazelisk, the one Bazel front door every corpus entry uses.
+# Bazelisk, the one Bazel front door every subject uses.
 curl -fsSL -o /usr/local/bin/bazelisk \
   https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
 chmod +x /usr/local/bin/bazelisk

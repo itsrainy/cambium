@@ -1,13 +1,13 @@
-name: corpus-weekly
+name: bench-weekly
 
-# The three expensive corpus repos (docs/CORPUS.md, spec §3-§6):
+# The three expensive subjects (docs/METHODOLOGY.md):
 # sourcegraph, apollo and xla run weekly; tensorflow — the biggest, and the
 # one entry that carries `skip = true` in subject_repos.toml — runs monthly (or on
 # demand) and is asked to ignore that flag.
 #
-# Machine requirement: same as corpus-nightly.yml — at least 16 cores, 64 GB
+# Machine requirement: same as bench-nightly.yml — at least 16 cores, 64 GB
 # RAM and 500 GB disk, several times over for xla/tensorflow's external
-# fetches. Point the CORPUS_RUNNER Actions variable at hardware that meets
+# fetches. Point the BENCH_RUNNER Actions variable at hardware that meets
 # this; ubuntu-latest is a placeholder that will not have the disk for it.
 
 on:
@@ -16,8 +16,8 @@ on:
     - cron: "0 8 1 * *" # monthly: tensorflow
   workflow_dispatch:
     inputs:
-      repo:
-        description: "Corpus repo id to run (default: the whole tier for the day)"
+      subject:
+        description: "Subject to run (default: the whole tier for the day)"
         required: false
         type: choice
         options: [all-weekly, sourcegraph, apollo, xla, tensorflow]
@@ -29,17 +29,17 @@ env:
 
 jobs:
   weekly:
-    name: corpus all ${{ matrix.repo }}
+    name: bench ${{ matrix.subject }}
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.repo == 'all-weekly' || inputs.repo == matrix.repo))
-    runs-on: ${{ vars.CORPUS_RUNNER || 'ubuntu-latest' }}
+      (github.event_name == 'workflow_dispatch' && (inputs.subject == 'all-weekly' || inputs.subject == matrix.subject))
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        repo: [sourcegraph, apollo, xla]
+        subject: [sourcegraph, apollo, xla]
     env:
-      CAMBIUM_CORPUS_DIR: ${{ github.workspace }}/.cache/cambium/corpus
+      CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
       CAMBIUM_TANGO_DIR: ${{ github.workspace }}/.cache/cambium/tango
     steps:
@@ -62,29 +62,34 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            ${{ env.CAMBIUM_CORPUS_DIR }}/repository_cache
-            ${{ env.CAMBIUM_CORPUS_DIR }}/disk_cache
-          key: corpus-cache-${{ matrix.repo }}-${{ github.run_id }}
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/repository_cache
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/disk_cache
+          key: bench-cache-${{ matrix.subject }}-${{ github.run_id }}
           restore-keys: |
-            corpus-cache-${{ matrix.repo }}-
+            bench-cache-${{ matrix.subject }}-
 
       - run: cargo build --release -p cambium-cli
-      - run: ./target/release/cambi corpus all ${{ matrix.repo }}
+      - run: ./target/release/cambi bench subjects fetch ${{ matrix.subject }}
+      - run: ./target/release/cambi bench subjects build ${{ matrix.subject }}
+      - run: ./target/release/cambi bench history ${{ matrix.subject }}
+      - run: ./target/release/cambi bench changes ${{ matrix.subject }}
+      - if: always()
+        run: ./target/release/cambi bench report ${{ matrix.subject }}
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: corpus-results-${{ matrix.repo }}
-          path: corpus-results/
+          name: bench-results-${{ matrix.subject }}
+          path: bench-results/
 
   monthly:
-    name: corpus all tensorflow
+    name: bench tensorflow
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 8 1 * *') ||
-      (github.event_name == 'workflow_dispatch' && inputs.repo == 'tensorflow')
-    runs-on: ${{ vars.CORPUS_RUNNER || 'ubuntu-latest' }}
+      (github.event_name == 'workflow_dispatch' && inputs.subject == 'tensorflow')
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     env:
-      CAMBIUM_CORPUS_DIR: ${{ github.workspace }}/.cache/cambium/corpus
+      CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
       CAMBIUM_TANGO_DIR: ${{ github.workspace }}/.cache/cambium/tango
     steps:
@@ -107,23 +112,25 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            ${{ env.CAMBIUM_CORPUS_DIR }}/repository_cache
-            ${{ env.CAMBIUM_CORPUS_DIR }}/disk_cache
-          key: corpus-cache-tensorflow-${{ github.run_id }}
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/repository_cache
+            ${{ env.CAMBIUM_SUBJECTS_DIR }}/disk_cache
+          key: bench-cache-tensorflow-${{ github.run_id }}
           restore-keys: |
-            corpus-cache-tensorflow-
+            bench-cache-tensorflow-
 
       - run: cargo build --release -p cambium-cli
-      # tensorflow carries `skip = true` in subject_repos.toml. As of this writing
-      # `cambi corpus` has no `--force`-the-manifest flag to ignore that, so
-      # this step will fail fast until either such a flag is added or the
-      # manifest's `skip` is flipped for a manual, deliberate run. Whoever
-      # wires that up should replace this comment with the real invocation
-      # (e.g. `corpus all tensorflow --force`).
-      - run: ./target/release/cambi corpus all tensorflow
+      # tensorflow carries `skip = true` in subject_repos.toml, which only ever
+      # bounds the "every subject" form of `bench subjects`; naming it runs it,
+      # which is what a deliberate monthly job is.
+      - run: ./target/release/cambi bench subjects fetch tensorflow
+      - run: ./target/release/cambi bench subjects build tensorflow
+      - run: ./target/release/cambi bench history tensorflow
+      - run: ./target/release/cambi bench changes tensorflow
+      - if: always()
+        run: ./target/release/cambi bench report tensorflow
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: corpus-results-tensorflow
-          path: corpus-results/
+          name: bench-results-tensorflow
+          path: bench-results/

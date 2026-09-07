@@ -344,7 +344,7 @@ pub struct ChangesSummary {
     pub cambium_cold: WallStats,
     pub cambium_warm: WallStats,
     /// How many non-global change sets each tool actually ran on. Below
-    /// `change_sets` when a tool was capped (Tango under the quick profile) or
+    /// `change_sets` when a tool was capped (Tango usually is) or
     /// failed on some change sets, and it is what every per-tool number above is
     /// an average over.
     #[serde(default)]
@@ -1384,7 +1384,7 @@ mod tests {
         assert_eq!(s.tool_cold["bazel-diff-rust"].samples, 1);
     }
 
-    /// The same change set with a `tango` row bolted on, as a full-profile run
+    /// The same change set with a `tango` row bolted on, as an uncapped run
     /// would produce.
     fn with_tango(mut p: ChangeSetResult) -> ChangeSetResult {
         let mut t = p.tools[0].clone();
@@ -1397,7 +1397,7 @@ mod tests {
 
     #[test]
     fn a_change_set_tango_was_capped_out_of_is_not_a_disagreement() {
-        // Two change sets, Tango on the first only: the quick profile's shape.
+        // Two change sets, Tango on the first only: what `--quick` produces.
         let capped = summarise(&[
             with_tango(change_set_comparison("1", 1.0, 100, 10, true)),
             change_set_comparison("2", 1.0, 100, 10, true),

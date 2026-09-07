@@ -197,9 +197,9 @@ impl SubjectsDir {
         };
         // A history range is 300 commits; a comparison change set's base must be able
         // to find the nearest applied index without a cold build. This is the
-        // *manifest's* range, never the profile's: the walk length is part of
+        // *manifest's* window, never a run's `--commits`: the walk length is part of
         // the config hash, so shortening it for a quick run would mint a fresh
-        // lineage and cold-build the very change sets the quick profile exists to
+        // lineage and cold-build the very change sets a short run exists to
         // make cheap. A quick range is a slice of the full one, so a bound
         // that covers the full range covers it too.
         cfg.baseline.max_ancestor_walk = entry.history_window.max(20);

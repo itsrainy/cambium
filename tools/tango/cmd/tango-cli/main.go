@@ -356,7 +356,7 @@ func environMap() map[string]string {
 // addWorktree creates a detached worktree of rev under dir and returns a
 // cleanup that removes it again.
 //
-// A pair killed mid-run (a timeout, a corpus pass interrupted, `git worktree
+// A change set killed mid-run (a timeout, a benchmark pass interrupted, `git worktree
 // add`'s own checkout phase cut off) skips the deferred cleanup in run(), and
 // can leave the registration locked besides: git itself locks a worktree
 // while `add` is populating it, precisely so a crash in the middle does not

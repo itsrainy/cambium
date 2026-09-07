@@ -27,7 +27,7 @@
 //! cover: [`stages`] times each in-memory stage over a generated graph at
 //! sizes no real subject reaches, [`runner`] drives them and the sweeps, and
 //! [`legacy`] is the like-for-like bazel-diff stage that puts both tools on
-//! one synthetic graph with Bazel replaced by a replay shim.
+//! one synthetic graph with Bazel replaced by a shim that replays a recorded query.
 
 pub mod changes;
 pub mod checkout;
