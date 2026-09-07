@@ -189,10 +189,11 @@ impl BazelDiff {
 
     /// `generate-hashes` for one workspace, into `out`.
     ///
-    /// The startup options are the corpus ones, so bazel-diff talks to the
-    /// same server (and therefore the same analysis cache and external
-    /// repository fetches) cambium used. `-k` rides along unless it was turned
-    /// off; see the module docs for why it is the default.
+    /// The startup options are the corpus ones minus `--output_base`, so
+    /// bazel-diff gets one output base per workspace directory rather than
+    /// sharing cambium's — see [`RunContext::producer_startup_flags`] for what
+    /// sharing it costs. `-k` rides along unless it was turned off; see the
+    /// module docs for why it is the default.
     pub fn generate_hashes(
         &self,
         ws: &Path,
@@ -209,9 +210,9 @@ impl BazelDiff {
         if self.keep_going {
             cmd.arg("-k");
         }
-        if !ctx.startup_flags.is_empty() {
-            cmd.arg("--bazelStartupOptions")
-                .arg(ctx.startup_flags_arg());
+        let startup = ctx.producer_startup_flags();
+        if !startup.is_empty() {
+            cmd.arg("--bazelStartupOptions").arg(startup.join(" "));
         }
         if !command_options.is_empty() {
             cmd.arg("--bazelCommandOptions")

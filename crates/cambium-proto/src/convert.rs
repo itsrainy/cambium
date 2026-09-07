@@ -29,6 +29,36 @@ impl ConvertOptions {
     }
 }
 
+/// The labels a rule depends on.
+///
+/// Normally that is exactly `rule_input`, but a build setting is a special
+/// case: Bazel routes `label_flag` / `label_setting`'s `build_setting_default`
+/// through the rule's *implicit* `:alias` attribute, so `--noimplicit_deps`
+/// (which we pass, to keep toolchains out of the graph) strips the edge and
+/// `rule_input` comes back empty even though the label is a real, explicitly
+/// written dependency. Without this, everything reachable only through a
+/// `label_flag` is missing from the affected set — envoy's
+/// `//distribution:envoy-binary -> //source/exe:envoy-static` and its whole
+/// packaging tree. Verified against Bazel 7.7.1 and 8.7.0.
+fn rule_inputs(r: &crate::blaze_query::Rule) -> Vec<String> {
+    use crate::blaze_query::attribute::Discriminator as AttrKind;
+    let mut inputs = r.rule_input.clone();
+    for a in &r.attribute {
+        if a.name != "build_setting_default" || a.r#type != AttrKind::Label as i32 {
+            continue;
+        }
+        let Some(v) = a.string_value.as_deref() else {
+            continue;
+        };
+        // Bazel writes build-setting defaults as absolute labels; anything
+        // else is not something we can resolve here.
+        if (v.starts_with("//") || v.starts_with('@')) && !inputs.iter().any(|i| i == v) {
+            inputs.push(v.to_string());
+        }
+    }
+    inputs
+}
+
 /// A parsed target, with the package that owns it.
 #[derive(Clone, Debug)]
 pub struct ParsedTarget {
@@ -62,7 +92,7 @@ pub fn convert(t: &Target, opts: &ConvertOptions) -> Option<ParsedTarget> {
                 rule_hash: rule_hash(r),
                 is_test,
                 manual,
-                inputs: r.rule_input.clone(),
+                inputs: rule_inputs(r),
                 generating_rule: None,
             }
         }
@@ -137,6 +167,30 @@ mod tests {
         assert_eq!(p.row.inputs, vec!["//lib/core:a.cc"]);
         assert!(!p.row.is_test);
         assert!(!p.row.manual);
+    }
+
+    /// Bazel reports `label_flag` with an empty `rule_input` under
+    /// `--noimplicit_deps`; the dependency lives in `build_setting_default`.
+    #[test]
+    fn a_build_setting_default_is_a_dependency() {
+        let t = Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: "//distribution:envoy-binary".into(),
+                rule_class: "label_flag".into(),
+                rule_input: Vec::new(),
+                attribute: vec![Attribute {
+                    name: "build_setting_default".into(),
+                    r#type: AttrKind::Label as i32,
+                    string_value: Some("//source/exe:envoy-static".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let p = convert(&t, &ConvertOptions::default()).unwrap();
+        assert_eq!(p.row.inputs, vec!["//source/exe:envoy-static"]);
     }
 
     #[test]

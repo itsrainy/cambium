@@ -44,11 +44,15 @@ const LOCATION_ATTRS: &[&str] = &["generator_location"];
 /// therefore makes every index built by an older cambium incompatible with this
 /// one, so hashes computed under two different canonicalisations can never be
 /// compared against each other. Bump it whenever [`canonical_rule`] starts or
-/// stops keeping a field.
+/// stops keeping a field, or whenever the *edges* an index records change:
+/// both decide whether an old index can be spliced into a new one.
 ///
 /// - 1: the original canonicalisation.
 /// - 2: `generator_location` dropped.
-pub const RULE_HASH_VERSION: u32 = 2;
+/// - 3: `build_setting_default` became a dependency edge
+///   (see [`crate::convert`]), so older indexes are missing every edge out of
+///   a `label_flag` or `label_setting`.
+pub const RULE_HASH_VERSION: u32 = 3;
 
 /// Returns the canonical form of `rule` used for hashing.
 pub fn canonical_rule(rule: &Rule) -> Rule {

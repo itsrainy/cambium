@@ -21,7 +21,26 @@ pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
 replay_range = 300
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["bazel/repositories.bzl", "bazel/repository_locations.bzl", "api/bazel/**"]
+# `bazel/repo.bzl` defines the `@envoy_repo` repository rule, which runs `yq`
+# over `.github/config.yml` at load time and writes the build-image digests
+# into a generated `containers.bzl`. Those digests land in the `exec_properties`
+# of the RBE `platform` rules, so a "deps: Bump build images" commit that
+# touches nothing but `.github/config.yml` really does move four rule hashes.
+# No query can see that edge — the file belongs to no package and is not a
+# `.bzl`, so neither the file->target map nor `rbuildfiles` names it — which is
+# what invalidators are for. Without these three entries the replay oracle
+# fails at the pin with `rule hash mismatches: 4`
+# (//bazel/platforms/rbe:linux_{x64,arm64},
+# //bazel/rbe/toolchains:rbe_linux_gcc_platform and
+# //bazel/rbe/toolchains/configs/linux/gcc/config:platform).
+invalidators = [
+    "bazel/repositories.bzl",
+    "bazel/repository_locations.bzl",
+    "api/bazel/**",
+    "bazel/repo.bzl",
+    ".github/config.yml",
+    "VERSION.txt",
+]
 bazel_versions = ["7.x", "8.x"]
 notes = "C++, tens of thousands of targets, deep .bzl layering, heavy select; external fetch ~6 GB"
 
@@ -115,5 +134,13 @@ pin = "10840c2643bbbcaef5aa781c696c4f2aa6b27909"
 replay_range = 150
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["bazel/repositories.bzl", "bazel/repository_locations.bzl", "api/bazel/**"]
+# The extra three: see the `envoy` entry above.
+invalidators = [
+    "bazel/repositories.bzl",
+    "bazel/repository_locations.bzl",
+    "api/bazel/**",
+    "bazel/repo.bzl",
+    ".github/config.yml",
+    "VERSION.txt",
+]
 notes = "envoy under 7.x for the version matrix; shares the envoy mirror"

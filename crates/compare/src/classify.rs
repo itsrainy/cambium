@@ -83,6 +83,53 @@ impl Class {
         }
     }
 
+    /// One line for the report's class table: what a label in this class
+    /// means, in the same words as this module's own table.
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Class::CambiumExtraSelect => {
+                "cambium keeps `select()` branches a configured Bazel query resolves away"
+            }
+            Class::CambiumExtraImplicit => {
+                "reached only through an implicit (`$`-prefixed) attribute edge the producer \
+                 does not walk"
+            }
+            Class::CambiumExtraVisibility => {
+                "the two rules differ only in `visibility`/`tags`, which cambium's hash ignores"
+            }
+            Class::CambiumExtraBzl => {
+                "the target's own rule is byte-identical, but a `.bzl` its package loads changed"
+            }
+            Class::CambiumExtraDeleted => {
+                "a dependency of this target was deleted between base \
+                                           and head"
+            }
+            Class::CambiumExtraBuildGlob => {
+                "reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a \
+                 source"
+            }
+            Class::BazeldiffExtraContent => {
+                "a changed path with no consumer in cambium's head index (content the graph does \
+                 not name)"
+            }
+            Class::BazeldiffExtraExternal => {
+                "confined to `@external//...` labels, which cambium does not index and the tools \
+                 canonicalise differently"
+            }
+            Class::BazeldiffExtraExternalContent => {
+                "an unchanged `//...` rule that depends on something external; how much of the \
+                 external graph loads varies between the producer's runs"
+            }
+            Class::CambiumMissing => {
+                "**fails**: the oracle or a producer reached something cambium did not — \
+                 unsoundness"
+            }
+            Class::Unclassified => {
+                "**fails**: no predicate explains the disagreement; needs a new class or a fix"
+            }
+        }
+    }
+
     /// Whether a label in this class fails the pair.
     pub fn is_failure(self) -> bool {
         matches!(self, Class::CambiumMissing | Class::Unclassified)

@@ -51,6 +51,10 @@ pub struct Invalidators {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ignore {
+    /// Globs whose changes are assumed irrelevant to the build graph. The
+    /// assumption is checked: a changed path some rule consumes as a source
+    /// marks its consumers direct however these globs read, because the graph
+    /// knows better than the configuration does.
     pub globs: Vec<String>,
 }
 
@@ -296,7 +300,7 @@ mod tests {
         let expected = {
             let mut h = blake3::Hasher::new();
             h.update(b"cambium-rule-hash-v");
-            h.update(&2u32.to_le_bytes());
+            h.update(&3u32.to_le_bytes());
             h.update(b"\n");
             h.update(Config::default().to_toml().as_bytes());
             *h.finalize().as_bytes()

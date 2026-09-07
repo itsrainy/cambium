@@ -11,11 +11,11 @@
 //! Two things every such tool needs, and which is why they live in
 //! [`RunContext`] rather than in each implementation:
 //!
-//! - **The same Bazel.** A producer that starts its own Bazel server against a
-//!   different output base pays fetch and analysis costs cambium already paid,
-//!   and the wall-clock comparison stops meaning anything. So the corpus
-//!   startup flags (`--output_base`, `--bazelrc`) and the environment
-//!   (`USE_BAZEL_VERSION` for the version matrix) travel with the request.
+//! - **The same Bazel.** The corpus startup flags and the environment
+//!   (`USE_BAZEL_VERSION` for the version matrix) travel with the request, so
+//!   a producer runs the same binary and the same `.bazelrc` cambium does.
+//!   `--output_base` is the one flag that must *not* be shared: see
+//!   [`RunContext::producer_startup_flags`].
 //! - **A checkout at base.** bazel-diff-shaped tools hash the workspace at
 //!   each end of the pair, which means the base revision has to be on disk.
 //!   Moving cambium's own checkout there and back would invalidate the Bazel
@@ -145,6 +145,41 @@ impl RunContext {
     /// and friends take them (`--bazelStartupOptions "<flags>"`).
     pub fn startup_flags_arg(&self) -> String {
         self.startup_flags.join(" ")
+    }
+
+    /// The startup flags a producer may use: the corpus ones *minus*
+    /// `--output_base`.
+    ///
+    /// An output base is only safe to share between invocations that run in
+    /// the same workspace directory. Repository rules may write absolute paths
+    /// into the external tree — envoy's `envoy_api` repo symlinks every entry
+    /// of `api/` into the workspace it was fetched from — and the fetch marker
+    /// does not mention the workspace, so Bazel never refetches. Point a
+    /// second workspace (a producer's base worktree, tango's own scratch
+    /// checkouts) at the same output base and it inherits the *first*
+    /// workspace's symlinks; delete that first workspace and every one of them
+    /// dangles. That is how a corpus run ended with
+    /// `Error computing the main repository mapping: ... '@@envoy_api//bazel'
+    /// does not have [a package]` on every subsequent query — a hard exit 1,
+    /// raised before the query is evaluated, so `--keep_going` cannot soften
+    /// it, and cambium's own index queries were the casualty.
+    ///
+    /// Dropping the flag lets Bazel derive the output base from the workspace
+    /// path, which is exactly the one-per-workspace invariant we need. The
+    /// cost is one cold fetch per distinct workspace directory, amortised over
+    /// every pair in the run, in exchange for producers that cannot corrupt
+    /// each other or us.
+    pub fn producer_startup_flags(&self) -> Vec<String> {
+        self.startup_flags
+            .iter()
+            .filter(|f| !f.starts_with("--output_base"))
+            .cloned()
+            .collect()
+    }
+
+    /// [`Self::producer_startup_flags`], space-joined.
+    pub fn producer_startup_flags_arg(&self) -> String {
+        self.producer_startup_flags().join(" ")
     }
 
     /// A child process carrying this context's environment.
@@ -434,6 +469,17 @@ mod tests {
             ctx().startup_flags_arg(),
             "--output_base=/tmp/ob --bazelrc=/tmp/rc"
         );
+    }
+
+    /// An output base is per workspace directory; producers run in other
+    /// workspaces, so they must not inherit ours.
+    #[test]
+    fn producers_do_not_inherit_the_output_base() {
+        assert_eq!(ctx().producer_startup_flags_arg(), "--bazelrc=/tmp/rc");
+        assert!(!ctx()
+            .producer_startup_flags()
+            .iter()
+            .any(|f| f.contains("output_base")));
     }
 
     #[test]

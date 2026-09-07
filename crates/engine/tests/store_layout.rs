@@ -214,7 +214,9 @@ fn the_engine_finds_a_baseline_by_commit_alone() {
     .with_cache_dir(dir.path().join("cache"));
 
     let src = dir.path().join("idx.bin");
-    let d = index_at("feedface", false);
+    let mut d = index_at("feedface", false);
+    // Only an index built with this configuration counts as a baseline.
+    d.header.config_hash = engine.cfg.hash();
     format::write_index(&src, &d).unwrap();
     engine
         .publish_index(&src, &d.header.lineage, "feedface")
