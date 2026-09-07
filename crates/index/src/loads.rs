@@ -142,6 +142,24 @@ impl RepoMapping {
         self.map.is_empty()
     }
 
+    /// Adds an apparent name that means the main repository.
+    ///
+    /// The root module's own name always does — `@envoy//:VERSION.txt` inside
+    /// envoy is a main-repo label — and `bazel mod dump_repo_mapping` says so.
+    /// But that command is unavailable in WORKSPACE mode and before Bazel 7.1,
+    /// where the mapping falls back to the identity, and there `@envoy` would
+    /// read as a *foreign* repository. For the load closure that only costs
+    /// precision, but [`crate::externals`] uses the same test to decide which
+    /// files feed a repository, and getting it wrong there loses an edge. So
+    /// the root module's name, which `MODULE.bazel` states outright, is added
+    /// to whatever mapping is in hand.
+    pub fn with_main_alias(mut self, name: &str) -> Self {
+        if !name.is_empty() {
+            self.map.insert(name.to_string(), String::new());
+        }
+        self
+    }
+
     /// The canonical name for an apparent name. An unmapped name is its own
     /// canonical name, which is what WORKSPACE mode does anyway.
     pub fn canonical<'a>(&'a self, apparent: &'a str) -> &'a str {
@@ -236,25 +254,29 @@ fn split_target_body(rest: &str) -> Option<(&str, &str)> {
 // ------------------------------------------------------------------ the lexer
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tok<'a> {
+pub(crate) enum Tok<'a> {
     Name(&'a str),
     Str(usize, usize),
     Open,
     Close,
+    /// One punctuation byte: `=`, `.`, `,` and friends. Kept rather than
+    /// collapsed into `Other` because [`crate::externals`] reads statement
+    /// shapes (`x = f(...)`, `x.tag(...)`) out of the same token stream.
+    Punct(u8),
     Other,
 }
 
 /// One token plus whether it starts a line.
-struct Lexed<'a> {
-    tok: Tok<'a>,
-    col0: bool,
+pub(crate) struct Lexed<'a> {
+    pub(crate) tok: Tok<'a>,
+    pub(crate) col0: bool,
 }
 
 /// Tokenises far enough to find `load()` calls and nothing further: names,
 /// string literals, and bracket nesting. Comments and string contents are
 /// consumed as units, which is the whole point — a `load(` inside a comment or
 /// inside a docstring is not a load.
-fn lex(text: &str) -> Vec<Lexed<'_>> {
+pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
     let b = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -327,7 +349,11 @@ fn lex(text: &str) -> Vec<Lexed<'_>> {
             }
             _ => {
                 out.push(Lexed {
-                    tok: Tok::Other,
+                    tok: if c.is_ascii_punctuation() {
+                        Tok::Punct(c)
+                    } else {
+                        Tok::Other
+                    },
                     col0,
                 });
                 i += 1;
@@ -374,7 +400,7 @@ fn lex_string(b: &[u8], i: usize, raw: bool) -> (Option<(usize, usize)>, usize) 
 
 /// Decodes the handful of escapes a label could plausibly contain. Anything
 /// else is left alone: this is a label, not arbitrary text.
-fn unescape(s: &str) -> String {
+pub(crate) fn unescape(s: &str) -> String {
     if !s.contains('\\') {
         return s.to_string();
     }
@@ -650,7 +676,7 @@ impl LoadGraph {
 /// deliberate: a relative `:other.bzl` load resolves against the *file's own*
 /// directory-as-package, and a `.bzl` in a subdirectory of a package can only
 /// be loaded by its full `//pkg:sub/file.bzl` label anyway.
-fn owning_dir(path: &str) -> String {
+pub(crate) fn owning_dir(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[..i].to_string(),
         None => String::new(),

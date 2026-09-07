@@ -188,7 +188,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `external_direct_targets` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -209,7 +209,7 @@ on the same terms.
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
 | 5 | `stats.cold_rebuild` and `cold_rebuild_reason`: past `limits.max_dirty_packages` a run re-queries `//...` at head instead of splicing the dirty set. It is not a global invalidation — `affected` is still exact — and `limits.max_changed_files`, which used to make that case global, is gone |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
-| 5 | `stats.bazelrc_safe_diffs` — changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing |
+| 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head — still exact, not global); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}` — the target names something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did
@@ -242,6 +242,12 @@ globs = ["tools/toolchains/**", "platforms/**", "third_party/**/*.bzl"]
                              # vanishing is still global. This extends that
                              # allowlist; entries may end in `*`.
 allowlist_extra = []
+[externals]                  # map MODULE.bazel edits and repository-rule
+enabled = true               # inputs onto the repositories they move, rather
+                             # than invalidating everything. Turn it off for a
+                             # repository whose repository rules read main-repo
+                             # files by computed path rather than by label,
+                             # which no static scan can see.
 
 [ignore]                     # changes that cannot affect the build graph;
                              # a path some rule consumes as a source is an

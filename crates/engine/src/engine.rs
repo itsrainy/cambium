@@ -733,6 +733,28 @@ impl Engine {
         querier: &dyn PackageQuerier,
         req: &AffectedRequest,
     ) -> Result<RunOutcome> {
+        self.compute_with_texts(
+            base_view,
+            changes,
+            querier,
+            req,
+            &crate::externals::GitText(&self.repo),
+        )
+    }
+
+    /// As [`Engine::compute`], with the workspace-file reader supplied.
+    ///
+    /// The external-repository stage needs `MODULE.bazel` at *both* ends of
+    /// the diff, and the base end is not on disk. The real run reads it with
+    /// `git show`; the tests hand over two strings.
+    pub fn compute_with_texts(
+        &self,
+        base_view: IndexRef<'_>,
+        changes: &[cambium_diff::Change],
+        querier: &dyn PackageQuerier,
+        req: &AffectedRequest,
+        texts: &dyn crate::externals::WorkspaceText,
+    ) -> Result<RunOutcome> {
         let mut sw = Stopwatch::start();
         let mut timings = Timings::default();
         let mut stats = Stats {
@@ -742,7 +764,23 @@ impl Engine {
 
         // ---- dirty set ----
         stats.changed_files = changes.len();
-        let matchers = Matchers::compile(&self.cfg.rules())?;
+
+        // ---- external repositories ----
+        //
+        // Runs first because its answer decides whether `MODULE.bazel` still
+        // counts as an invalidator: a diff this stage mapped onto a set of
+        // repositories has been accounted for precisely, and letting the same
+        // file also fire the invalidator rule would throw that away.
+        let mut ext = if self.cfg.externals.enabled {
+            crate::externals::analyse(base_view, changes, &req.base, &req.head, texts)
+        } else {
+            crate::externals::Externals::default()
+        };
+        stats.repos_dirty_by_input = ext.by_input;
+        stats.repos_dirty_by_module = ext.by_module;
+
+        let mut matchers = Matchers::compile(&self.cfg.rules())?;
+        matchers.exempt(ext.handled.clone());
         let mut packages = PackageSet::from_index(base_view);
 
         // A changed bazelrc is read before the generic invalidator check, and
@@ -811,10 +849,26 @@ impl Engine {
                     };
                     // Reachable from MODULE.bazel/WORKSPACE: it can define
                     // repository rules, whose output is not in the index at
-                    // all. Same escalation the `rbuildfiles` path made when it
-                    // saw an external repository among the loaders.
+                    // all. The index records which repositories each such
+                    // `.bzl` defines (format 5), so the usual answer is "these
+                    // repositories moved"; only a file no extension and no
+                    // repo rule reaches still escalates, as the `rbuildfiles`
+                    // path always did.
                     if base_view.bzl_in_workspace(id) {
-                        workspace_level.push(path.clone());
+                        match self
+                            .cfg
+                            .externals
+                            .enabled
+                            .then(|| crate::externals::repos_of_workspace_bzl(base_view, id))
+                            .flatten()
+                        {
+                            Some(repos) => {
+                                tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
+                                ext.by_bzl += repos.len();
+                                ext.repos.extend(repos);
+                            }
+                            None => workspace_level.push(path.clone()),
+                        }
                     }
                     for &p in base_view.bzl_consumers(id) {
                         if base_view.package_tombstoned(p) {
@@ -878,6 +932,34 @@ impl Engine {
         }
 
         stats.ignored_files = dirty.ignored;
+
+        // ---- from dirty repositories to graph work ----
+        //
+        // The stage's own escalation replaces an invalidator's wording: both
+        // say "everything", but only one of them says why in terms of the
+        // module system.
+        if let Some(reason) = ext.global.take() {
+            dirty.global = true;
+            dirty.global_reason = Some(reason);
+        }
+        stats.repos_dirty_by_bzl = ext.by_bzl;
+        let mut external_nodes: Vec<(u32, String)> = Vec::new();
+        if !dirty.global && !ext.repos.is_empty() {
+            let r = crate::externals::reach(base_view, &ext.repos);
+            tracing::debug!(
+                repos = ?ext.repos,
+                nodes = r.nodes.len(),
+                packages = r.packages.len(),
+                "external repositories moved"
+            );
+            dirty.dirty.extend(r.packages);
+            external_nodes = r
+                .nodes
+                .into_iter()
+                .map(|id| (id, base_view.label(id).to_string()))
+                .collect();
+        }
+        stats.external_direct_targets = external_nodes.len();
         timings.dirty = sw.lap();
 
         if dirty.global {
@@ -1007,6 +1089,7 @@ impl Engine {
                 &deleted_by_package,
                 &changed_file_ids,
                 &bzl_dirty,
+                &external_nodes,
             );
             stats.direct_targets = direct.len();
             timings.direct = sw.lap();
@@ -1044,6 +1127,7 @@ impl Engine {
                 &deleted_by_package,
                 &changed_file_ids,
                 &bzl_dirty,
+                &external_nodes,
             );
             stats.direct_targets = direct.len();
             timings.direct = sw.lap();
@@ -1082,6 +1166,7 @@ fn derive_direct<V: GraphView + ?Sized>(
     deleted_by_package: &[(String, Vec<u32>)],
     changed_file_ids: &[(u32, String)],
     bzl_dirty: &BTreeSet<String>,
+    external_nodes: &[(u32, String)],
 ) -> (Vec<u32>, FxHashMap<u32, DirectReason>) {
     let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
     let mut direct: FxHashSet<u32> = FxHashSet::default();
@@ -1172,6 +1257,24 @@ fn derive_direct<V: GraphView + ?Sized>(
             add(
                 consumer,
                 DirectReason::File { path: path.clone() },
+                &mut direct,
+                &mut reasons,
+            );
+        }
+    }
+
+    // An external repository's contents moved. The repository's targets are
+    // leaves here — nothing ever queried them — so the change cannot be seen
+    // as a rule-hash movement; what can be seen is every main-repo rule that
+    // names one of its labels, which is exactly the leaf node's reverse row.
+    for (id, label) in external_nodes {
+        let consumers = view.reverse_row(*id, &mut scratch).to_vec();
+        for consumer in consumers {
+            add(
+                consumer,
+                DirectReason::ExternalRepo {
+                    label: label.clone(),
+                },
                 &mut direct,
                 &mut reasons,
             );
@@ -1364,6 +1467,10 @@ fn rescan_closure(
         c.packages.insert(p.clone(), ids);
     }
     c.workspace = c.graph.workspace_closure(src, &mapping);
+    // The workspace closure just moved, so what the main repository feeds its
+    // external repositories may have moved with it.
+    let facts = cambium_index::read_module_facts(src);
+    c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
     Some(c)
 }
 

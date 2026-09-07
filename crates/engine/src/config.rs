@@ -17,6 +17,7 @@ pub const CONFIG_FILE: &str = "cambium.toml";
 #[derive(Default)]
 pub struct Config {
     pub bazel: BazelConfig,
+    pub externals: Externals,
     pub invalidators: Invalidators,
     pub bazelrc: BazelrcConfig,
     pub ignore: Ignore,
@@ -53,6 +54,26 @@ pub struct BazelConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct BazelrcConfig {
     pub allowlist_extra: Vec<String>,
+}
+
+/// External-repository invalidation (`cambium_index::externals`).
+///
+/// On by default. Turning it off restores the older, blunter behaviour:
+/// `MODULE.bazel` and every workspace-level `.bzl` are invalidators, and a
+/// file that only matters through a repository rule is invisible unless it is
+/// listed as one. That is the right setting for a repository whose repository
+/// rules read main-repo files by computed path rather than by label, since no
+/// static scan can see those.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Externals {
+    pub enabled: bool,
+}
+
+impl Default for Externals {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
