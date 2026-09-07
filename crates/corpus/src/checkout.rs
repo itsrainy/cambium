@@ -4,8 +4,6 @@
 //!
 //! ```text
 //! <id>.git/              bare mirror, fetched once and updated on demand
-//!                        (an entry with `mirror = "<other>"` shares
-//!                        <other>.git and clones nothing of its own)
 //! <id>/                  worktree, checked out at whatever commit a step needs
 //! store/<id>/            the corpus lineage's baseline store (dir backend)
 //! output/<id>[-<ver>]/   per-repo (and per Bazel version) --output_base
@@ -27,7 +25,7 @@ use anyhow::{Context as _, Result};
 use cambium_diff::Repo;
 use cambium_engine::{Config, Engine};
 
-use crate::manifest::{Manifest, RepoEntry};
+use crate::manifest::RepoEntry;
 
 pub const CORPUS_DIR_ENV: &str = "CAMBIUM_CORPUS_DIR";
 
@@ -57,11 +55,9 @@ impl CorpusDir {
         &self.root
     }
 
-    /// The bare mirror `entry` uses. Entries that set `mirror = "<id>"` share
-    /// that entry's clone (same url, older pin) instead of paying for a second
-    /// one; they still get their own worktree, store and output base below.
+    /// The bare mirror `entry` clones into.
     pub fn mirror(&self, entry: &RepoEntry) -> PathBuf {
-        self.mirror_by_id(Manifest::mirror_id(entry))
+        self.mirror_by_id(&entry.id)
     }
 
     pub fn mirror_by_id(&self, id: &str) -> PathBuf {
@@ -255,7 +251,12 @@ impl Checkout {
             path: self.corpus.store(&entry.id),
         };
         // A replay range is 300 commits; a comparison pair's base must be able
-        // to find the nearest replayed index without a cold build.
+        // to find the nearest replayed index without a cold build. This is the
+        // *manifest's* range, never the profile's: the walk length is part of
+        // the config hash, so shortening it for a quick run would mint a fresh
+        // lineage and cold-build the very pairs the quick profile exists to
+        // make cheap. A quick range is a slice of the full one, so a bound
+        // that covers the full range covers it too.
         cfg.baseline.max_ancestor_walk = entry.replay_range.max(20);
         cfg
     }
@@ -332,4 +333,61 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&out.stderr).trim()
     );
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Profile;
+
+    fn entry(range: usize) -> RepoEntry {
+        RepoEntry {
+            id: "r".into(),
+            url: "u".into(),
+            pin: "0".repeat(40),
+            replay_range: range,
+            bazel: "bazelisk".into(),
+            bazel_version: None,
+            extra_query_flags: Vec::new(),
+            extra_startup_flags: Vec::new(),
+            invalidators: Vec::new(),
+            skip: false,
+            notes: String::new(),
+        }
+    }
+
+    fn checkout() -> Checkout {
+        Checkout {
+            id: "r".into(),
+            dir: PathBuf::from("/tmp/wt"),
+            mirror: PathBuf::from("/tmp/mirror"),
+            repo: Repo::new("/tmp/wt"),
+            corpus: CorpusDir::new(PathBuf::from("/tmp/corpus")),
+        }
+    }
+
+    #[test]
+    fn a_pair_base_is_always_inside_the_ancestor_walk() {
+        for range in [0, 5, 50, 300] {
+            let cfg = checkout().config_for(&entry(range), None);
+            for profile in [Profile::Full, Profile::Quick] {
+                assert!(
+                    cfg.baseline.max_ancestor_walk >= profile.replay_range(range),
+                    "{profile} at range {range}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_profile_does_not_reach_the_config_hash() {
+        // The walk length is hashed into the store lineage, so it must come
+        // from the manifest and not from the profile: a quick run has to land
+        // on the same lineage the full run publishes, or every pair base cold
+        // builds.
+        let e = entry(300);
+        let cfg = checkout().config_for(&e, None);
+        assert_eq!(cfg.baseline.max_ancestor_walk, 300);
+        assert_eq!(cfg.hash(), checkout().config_for(&e, None).hash());
+    }
 }

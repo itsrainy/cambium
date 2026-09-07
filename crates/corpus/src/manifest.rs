@@ -20,13 +20,6 @@ pub struct Manifest {
 pub struct RepoEntry {
     pub id: String,
     pub url: String,
-    /// Share another entry's bare mirror instead of cloning `url` again.
-    /// The named entry must have the same `url` and no `mirror` of its own;
-    /// this entry still gets its own worktree, store and output base. Used by
-    /// the version-matrix entries, which are the same repository at an older
-    /// pin and would otherwise cost a second full clone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror: Option<String>,
     /// Baseline commit. Bumped deliberately, in a PR that regenerates the
     /// repo's `docs/CORPUS.md` section.
     pub pin: String,
@@ -40,8 +33,12 @@ pub struct RepoEntry {
     /// themselves: no `.bazelversion`, so bazelisk would pick the latest
     /// release, which for an unmigrated WORKSPACE repo means nothing loads.
     /// `--bazel-version` on the command line overrides it. Like that flag, it
-    /// suffixes the result file names, so the numbers say which Bazel produced
-    /// them.
+    /// suffixes the result file names and the output base, so a run under a
+    /// pinned Bazel cannot be confused with, or served from, another one's.
+    ///
+    /// It is not a version *matrix*: every entry runs under one Bazel, its
+    /// own. That cambium reads 7.x, 8.x and 9.x graphs alike is CI's
+    /// `bazel-version-matrix` job over the synthetic corpus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bazel_version: Option<String>,
     #[serde(default)]
@@ -60,13 +57,6 @@ pub struct RepoEntry {
     /// Entries with glob characters become globs, the rest exact paths.
     #[serde(default)]
     pub invalidators: Vec<String>,
-    /// Informational only: which Bazel majors this repository is exercised
-    /// under. No code reads it. The version matrix is expressed as separate
-    /// manifest entries (`bazel-7`, `bazel-8`, ...) pinned to commits whose
-    /// own `.bazelversion` is the major under test, because a HEAD pin does
-    /// not load under an older major at all.
-    #[serde(default)]
-    pub bazel_versions: Vec<String>,
     #[serde(default)]
     pub skip: bool,
     #[serde(default)]
@@ -127,41 +117,7 @@ impl Manifest {
                 r.pin
             );
         }
-        for r in &self.repos {
-            let Some(parent_id) = r.mirror.as_deref() else {
-                continue;
-            };
-            let parent = self
-                .repos
-                .iter()
-                .find(|p| p.id == parent_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("corpus {}: mirror = {parent_id:?} names no entry", r.id)
-                })?;
-            anyhow::ensure!(
-                parent.id != r.id,
-                "corpus {}: mirror names the entry itself",
-                r.id
-            );
-            anyhow::ensure!(
-                parent.mirror.is_none(),
-                "corpus {}: mirror = {parent_id:?}, which itself borrows a mirror",
-                r.id
-            );
-            anyhow::ensure!(
-                parent.url == r.url,
-                "corpus {}: mirror = {parent_id:?} but their urls differ ({} vs {})",
-                r.id,
-                r.url,
-                parent.url
-            );
-        }
         Ok(())
-    }
-
-    /// The id of the bare mirror `entry` uses: its own, or the one it borrows.
-    pub fn mirror_id(entry: &RepoEntry) -> &str {
-        entry.mirror.as_deref().unwrap_or(&entry.id)
     }
 
     pub fn get(&self, id: &str) -> anyhow::Result<&RepoEntry> {
@@ -243,46 +199,6 @@ notes = "external fetch ~6 GB; needs --repository_cache"
     }
 
     #[test]
-    fn a_shared_mirror_must_name_a_same_url_root_entry() {
-        let base = |extra: &str| {
-            format!(
-                "[[repo]]\nid = \"a\"\nurl = \"u\"\npin = \"{p}\"\n{extra}",
-                p = "0".repeat(40)
-            )
-        };
-        let ok: Manifest = toml::from_str(&base(&format!(
-            "[[repo]]\nid = \"a-7\"\nurl = \"u\"\nmirror = \"a\"\npin = \"{}\"\n",
-            "1".repeat(40)
-        )))
-        .unwrap();
-        ok.validate().unwrap();
-        assert_eq!(Manifest::mirror_id(ok.get("a-7").unwrap()), "a");
-        assert_eq!(Manifest::mirror_id(ok.get("a").unwrap()), "a");
-
-        for bad in [
-            // names no entry
-            format!(
-                "[[repo]]\nid = \"a-7\"\nurl = \"u\"\nmirror = \"nope\"\npin = \"{}\"\n",
-                "1".repeat(40)
-            ),
-            // different url
-            format!(
-                "[[repo]]\nid = \"a-7\"\nurl = \"v\"\nmirror = \"a\"\npin = \"{}\"\n",
-                "1".repeat(40)
-            ),
-            // chained through another borrower
-            format!(
-                "[[repo]]\nid = \"a-7\"\nurl = \"u\"\nmirror = \"a\"\npin = \"{p}\"\n\
-                 [[repo]]\nid = \"a-8\"\nurl = \"u\"\nmirror = \"a-7\"\npin = \"{p}\"\n",
-                p = "1".repeat(40)
-            ),
-        ] {
-            let m: Manifest = toml::from_str(&base(&bad)).unwrap();
-            assert!(m.validate().is_err(), "should have been rejected: {bad}");
-        }
-    }
-
-    #[test]
     fn the_checked_in_manifest_is_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus.toml");
         let m = Manifest::load(&path).unwrap();
@@ -290,22 +206,10 @@ notes = "external fetch ~6 GB; needs --repository_cache"
         for r in &m.repos {
             assert!(!r.url.is_empty(), "{}", r.id);
         }
-        // The version-matrix entries share their parent's mirror rather than
-        // cloning the same repository a second time.
-        for (id, parent) in [
-            ("bazel-7", "bazel"),
-            ("bazel-8", "bazel"),
-            ("envoy-7", "envoy"),
-        ] {
-            let e = m.get(id).unwrap();
-            assert_eq!(e.mirror.as_deref(), Some(parent), "{id}");
-            assert_eq!(e.url, m.get(parent).unwrap().url, "{id}");
-            assert_eq!(
-                e.invalidators,
-                m.get(parent).unwrap().invalidators,
-                "{id} should carry its parent's invalidators"
-            );
-            assert_ne!(e.pin, m.get(parent).unwrap().pin, "{id}");
-        }
+        // One entry per repository, each under its own Bazel. Major coverage
+        // is CI's synthetic version matrix, not a second pin of the same repo.
+        let urls: std::collections::BTreeSet<&str> =
+            m.repos.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls.len(), m.repos.len(), "a repository is listed twice");
     }
 }

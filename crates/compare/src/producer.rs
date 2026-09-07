@@ -12,7 +12,7 @@
 //! [`RunContext`] rather than in each implementation:
 //!
 //! - **The same Bazel.** The corpus startup flags and the environment
-//!   (`USE_BAZEL_VERSION` for the version matrix) travel with the request, so
+//!   (`USE_BAZEL_VERSION` where a repository pins one) travel with the request, so
 //!   a producer runs the same binary and the same `.bazelrc` cambium does.
 //!   `--output_base` is the one flag that must *not* be shared: see
 //!   [`RunContext::producer_startup_flags`].

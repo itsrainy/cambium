@@ -8,10 +8,10 @@
 //! regeneration, and two repositories' nightly jobs can update the same file
 //! without fighting.
 //!
-//! Three regions are not a repository: `top` (the cross-repo table), `matrix`
-//! (the Bazel version matrix) and `bench` (the synthetic headline). They are
-//! rendered from every repository's results at once, so a per-repo job still
-//! rewrites them wholesale rather than dropping its neighbours' rows.
+//! Two regions are not a repository: `top` (the cross-repo table) and `bench`
+//! (the synthetic headline). They are rendered from every repository's results
+//! at once, so a per-repo job still rewrites them wholesale rather than
+//! dropping its neighbours' rows.
 //!
 //! Everything here is a pure function of the result structs, so the rendering
 //! is unit-testable and a formatting change never requires a corpus run. It is
@@ -78,31 +78,19 @@ impl BenchLegacy {
     }
 }
 
-/// One repository's results: what `corpus-results/<id>/` held, plus the two
-/// manifest facts the JSON does not carry (its id, and the entry it mirrors).
-///
-/// `family` is `corpus.toml`'s `mirror` where there is one, else the id. It is
-/// what groups `bazel`, `bazel-8` and `bazel-7` into a single row of the
-/// version matrix.
+/// One repository's results: what `corpus-results/<id>/` held, plus the one
+/// manifest fact the JSON does not carry, its id.
 #[derive(Clone, Debug, Default)]
 pub struct RepoResults {
     pub id: String,
-    pub family: String,
     pub replay: Option<ReplayResult>,
     pub compares: Vec<CompareResult>,
 }
 
 impl RepoResults {
-    pub fn new(id: impl Into<String>, family: impl Into<String>) -> Self {
-        let id = id.into();
-        let family = family.into();
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
-            family: if family.is_empty() {
-                id.clone()
-            } else {
-                family
-            },
-            id,
+            id: id.into(),
             replay: None,
             compares: Vec::new(),
         }
@@ -116,6 +104,21 @@ impl RepoResults {
     pub fn with_compares(mut self, c: Vec<CompareResult>) -> Self {
         self.compares = c;
         self
+    }
+
+    /// The profile these results came from, when any of them says. Results
+    /// written before profiles existed say nothing, and were full runs.
+    pub fn profile(&self) -> &str {
+        if let Some(p) = self
+            .compares
+            .iter()
+            .map(|c| c.profile.as_str())
+            .chain(self.replay.iter().map(|r| r.profile.as_str()))
+            .find(|p| !p.is_empty())
+        {
+            return p;
+        }
+        "full"
     }
 
     pub fn is_empty(&self) -> bool {
@@ -166,39 +169,6 @@ impl RepoResults {
                 asked.into_iter().collect::<Vec<_>>().join(", ")
             ),
         }
-    }
-
-    /// The Bazel major this entry exercises: from the version that answered,
-    /// else from the override that was asked for, else from the entry id the
-    /// manifest gives the matrix (`bazel-7`). `None` when nothing says.
-    fn major(&self) -> Option<u32> {
-        let from = |s: &str| -> Option<u32> {
-            s.split(|c: char| !c.is_ascii_digit())
-                .find(|t| !t.is_empty())
-                .and_then(|t| t.parse().ok())
-        };
-        if let Some(r) = &self.replay {
-            if let Some(m) = from(&r.bazel_version_used) {
-                return Some(m);
-            }
-        }
-        for c in &self.compares {
-            if let Some(m) = c.bazel_version_used.as_deref().and_then(from) {
-                return Some(m);
-            }
-        }
-        if let Some(r) = &self.replay {
-            if let Some(m) = from(&r.bazel_version) {
-                return Some(m);
-            }
-        }
-        for c in &self.compares {
-            if let Some(m) = c.bazel_version.as_deref().and_then(from) {
-                return Some(m);
-            }
-        }
-        // `bazel-7` / `envoy-7`: the manifest names the major in the id.
-        self.id.rsplit_once('-').and_then(|(_, v)| v.parse().ok())
     }
 
     fn commits(&self) -> &[CommitRecord] {
@@ -604,93 +574,6 @@ pub fn render_top_table(repos: &[RepoResults]) -> String {
     s
 }
 
-// ------------------------------------------------------------ version matrix
-
-/// Does cambium load, and agree, under each Bazel major?
-///
-/// Rows are manifest *families* (`corpus.toml`'s `mirror` groups `bazel`,
-/// `bazel-8` and `bazel-7` into one), columns are Bazel majors. The point of
-/// the table is that an empty or failing cell is as informative as a passing
-/// one, so a family is listed even when only one of its majors has run.
-pub fn render_version_matrix(repos: &[RepoResults]) -> String {
-    let with = |r: &&RepoResults| !r.is_empty();
-    let mut majors: BTreeSet<Option<u32>> = BTreeSet::new();
-    let mut families: Vec<String> = Vec::new();
-    for r in repos.iter().filter(with) {
-        majors.insert(r.major());
-        if !families.contains(&r.family) {
-            families.push(r.family.clone());
-        }
-    }
-    if families.is_empty() {
-        return "No version-matrix results yet.".to_string();
-    }
-    let cols: Vec<Option<u32>> = majors.into_iter().collect();
-    let mut s = String::new();
-    s.push_str("| repository |");
-    for c in &cols {
-        match c {
-            Some(m) => s.push_str(&format!(" Bazel {m}.x |")),
-            None => s.push_str(" unrecorded |"),
-        }
-    }
-    s.push_str("\n|---|");
-    for _ in &cols {
-        s.push_str("---|");
-    }
-    s.push('\n');
-    for fam in &families {
-        s.push_str(&format!("| **{fam}** |"));
-        for col in &cols {
-            let cell = repos
-                .iter()
-                .filter(with)
-                .find(|r| &r.family == fam && &r.major() == col)
-                .map(matrix_cell)
-                .unwrap_or_else(|| "not run".to_string());
-            s.push_str(&format!(" {cell} |"));
-        }
-        s.push('\n');
-    }
-    s.push_str(
-        "\nEach cell is the manifest entry that covers that major, whether its \
-         index loaded, and whether the producers agreed. \"loads\" is a cold \
-         `bazel query //...` that built an index; \"agrees\" is pairs passed \
-         out of pairs compared, with the worst oracle recall seen.\n",
-    );
-    s
-}
-
-fn matrix_cell(r: &RepoResults) -> String {
-    let mut cells = vec![format!("`{}`", r.id)];
-    cells.push(match &r.replay {
-        Some(rep) if rep.cold.nodes > 0 => {
-            format!("loads: {} targets", num(rep.cold.nodes as u64))
-        }
-        Some(_) => "loads: no index".to_string(),
-        None => "loads: not run".to_string(),
-    });
-    let pairs = r.pairs_total();
-    cells.push(if pairs == 0 {
-        "agrees: not compared".to_string()
-    } else {
-        format!(
-            "agrees: {}/{pairs} pairs, recall {}",
-            pairs - r.failures(),
-            opt_pct(r.min_recall())
-        )
-    });
-    if let Some(v) = r
-        .replay
-        .as_ref()
-        .map(|x| x.bazel_version_used.clone())
-        .filter(|v| !v.is_empty())
-    {
-        cells.push(format!("`{}`", tidy_version(&v)));
-    }
-    lines(&cells)
-}
-
 // ---------------------------------------------------------- per-repo section
 
 /// The markdown for one repository: everything a reader needs to judge the
@@ -705,6 +588,15 @@ pub fn render_repo_section(r: &RepoResults, bench: Option<&BenchLegacy>) -> Stri
     s.push_str(&format!("- pin: `{}`\n", short(&r.pin())));
     s.push_str(&format!("- Bazel: {}\n", r.bazel_used()));
     s.push_str(&format!("- generated: {}\n", today()));
+    if r.profile() != "full" {
+        // Loudly, and before the tables: quick numbers are a laptop's slice of
+        // the corpus, not the published run.
+        s.push_str(&format!(
+            "- profile: **{}** — a bounded local slice, not the published \
+             numbers\n",
+            r.profile()
+        ));
+    }
     if let Some(rep) = &r.replay {
         s.push_str(&format!("- tool: `{}`\n", rep.tool_sha));
     }
@@ -909,7 +801,7 @@ fn render_compare(r: &RepoResults) -> String {
 
     // ---- timings ----
     s.push_str("#### Timings (p50 / p90 over the compared pairs)\n\n");
-    s.push_str("| Bazel | tool | cold | warm |\n|---|---|---:|---:|\n");
+    s.push_str("| Bazel | tool | pairs | cold | warm |\n|---|---|---:|---:|---:|\n");
     for c in compares {
         let ver = c
             .bazel_version_used
@@ -918,14 +810,25 @@ fn render_compare(r: &RepoResults) -> String {
             .or_else(|| c.bazel_version.clone())
             .unwrap_or_else(|| "n/a".into());
         for name in producer_names(c) {
+            // Per producer, because Tango is capped under the quick profile:
+            // a p50 over 10 pairs and one over 50 are different claims and the
+            // table has to say which is which.
+            let ran = c
+                .summary
+                .producer_pairs
+                .get(&name)
+                .copied()
+                .or_else(|| c.summary.producer_cold.get(&name).map(|w| w.samples))
+                .unwrap_or(0);
             s.push_str(&format!(
-                "| `{ver}` | {name} | {} | {} |\n",
+                "| `{ver}` | {name} | {ran} | {} | {} |\n",
                 opt_wall(c.summary.producer_cold.get(&name)),
                 opt_wall(c.summary.producer_warm.get(&name)),
             ));
         }
         s.push_str(&format!(
-            "| `{ver}` | **cambium** | {} | {} |\n",
+            "| `{ver}` | **cambium** | {} | {} | {} |\n",
+            c.summary.cambium_cold.samples,
             wall(&c.summary.cambium_cold),
             wall(&c.summary.cambium_warm),
         ));
@@ -934,7 +837,10 @@ fn render_compare(r: &RepoResults) -> String {
         "\ncambium's *cold* is a full index build from `bazel query //...`; its \
          *warm* is an update against the published baseline, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
-         hashes; Tango has no warm mode, so its cell is `n/a`.\n\n",
+         hashes; Tango has no warm mode, so its cell is `n/a`. *pairs* is how \
+         many pairs each tool's distribution is taken over: under the `quick` \
+         profile Tango runs on the first 10 pairs only, while cambium and \
+         bazel-diff run on all of them.\n\n",
     );
 
     // ---- classes ----
@@ -1318,6 +1224,7 @@ mod tests {
             from: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             to: "0123456789abcdef0123456789abcdef01234567".into(),
             bazel_version: String::new(),
+            profile: "full".into(),
             bazel_version_used: version_used.to_string(),
             tool_sha: "deadbee".into(),
             started_unix: 0,
@@ -1389,6 +1296,7 @@ mod tests {
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 0,
             oracle_k: 100,
+            profile: "full".into(),
             pairs: vec![pair],
             summary: CompareSummary::default(),
         };
@@ -1397,7 +1305,7 @@ mod tests {
     }
 
     fn bazel_results() -> RepoResults {
-        RepoResults::new("bazel", "bazel")
+        RepoResults::new("bazel")
             .with_replay(Some(replay("bazel 9.0.0")))
             .with_compares(vec![compare()])
     }
@@ -1462,7 +1370,7 @@ mod tests {
 
     #[test]
     fn a_repo_with_only_a_replay_still_renders() {
-        let r = RepoResults::new("envoy", "envoy").with_replay(Some(replay("")));
+        let r = RepoResults::new("envoy").with_replay(Some(replay("")));
         let s = render_repo_section(&r, None);
         assert!(s.contains("#### Cold build"), "{s}");
         assert!(s.contains("No three-way comparison"), "{s}");
@@ -1474,7 +1382,7 @@ mod tests {
 
     #[test]
     fn a_repo_with_only_a_comparison_still_renders() {
-        let r = RepoResults::new("bazel", "bazel").with_compares(vec![compare()]);
+        let r = RepoResults::new("bazel").with_compares(vec![compare()]);
         let s = render_repo_section(&r, None);
         assert!(s.contains("No replay for this repository yet"), "{s}");
         assert!(s.contains("#### Three-way comparison"), "{s}");
@@ -1482,16 +1390,12 @@ mod tests {
 
     #[test]
     fn a_repo_with_no_results_says_so_rather_than_panicking() {
-        let r = RepoResults::new("xla", "xla");
+        let r = RepoResults::new("xla");
         let s = render_repo_section(&r, None);
         assert!(s.contains("No results yet"), "{s}");
         assert_eq!(
             render_top_table(std::slice::from_ref(&r)),
             "No repository in `corpus-results/` has results yet."
-        );
-        assert_eq!(
-            render_version_matrix(&[r]),
-            "No version-matrix results yet."
         );
     }
 
@@ -1543,36 +1447,6 @@ mod tests {
             t.contains("1× `tools/build_defs"),
             "the top reasons ride along: {t}"
         );
-    }
-
-    #[test]
-    fn the_version_matrix_groups_mirrors_by_major() {
-        let repos = vec![
-            bazel_results(),
-            RepoResults::new("bazel-7", "bazel").with_replay(Some(replay("bazel 7.4.1"))),
-            RepoResults::new("envoy", "envoy").with_replay(Some(replay("bazel 8.7.0"))),
-        ];
-        let m = render_version_matrix(&repos);
-        assert!(
-            m.contains("| repository | Bazel 7.x | Bazel 8.x | Bazel 9.x |"),
-            "{m}"
-        );
-        // bazel and bazel-7 share a row; envoy gets its own.
-        assert!(m.contains("| **bazel** | `bazel-7`"), "{m}");
-        assert!(m.contains("| **envoy** | not run |"), "{m}");
-        assert!(m.contains("loads: 24,519 targets"), "{m}");
-        assert!(m.contains("agrees: 1/1 pairs, recall 100.0%"), "{m}");
-        assert!(m.contains("agrees: not compared"), "{m}");
-    }
-
-    #[test]
-    fn the_major_falls_back_to_the_manifest_id() {
-        let r = RepoResults::new("envoy-7", "envoy").with_replay(Some(replay("")));
-        assert_eq!(r.major(), Some(7));
-        // A recorded version wins over the id.
-        let r = RepoResults::new("envoy-7", "envoy").with_replay(Some(replay("bazel 8.7.0")));
-        assert_eq!(r.major(), Some(8));
-        assert_eq!(RepoResults::new("xla", "xla").major(), None);
     }
 
     #[test]

@@ -2,8 +2,10 @@ name: corpus-nightly
 
 # Nightly real-repository validation for the two cheapest corpus entries
 # (docs/CORPUS.md, spec §3-§6). `bazel` and `envoy` are the only repos small
-# enough, and cheap enough to fetch, to run every night across the whole
-# Bazel version matrix; the rest are weekly or monthly (corpus-weekly.yml).
+# enough, and cheap enough to fetch, to run every night; the rest are weekly or
+# monthly (corpus-weekly.yml). Each runs under its own `.bazelversion` — that
+# cambium reads 7.x, 8.x and 9.x graphs alike is the `bazel-version-matrix` job
+# in ci.yml, over the synthetic workspace, on every pull request.
 #
 # Machine requirement: this needs a real Bazel build of each repo at several
 # commits, so a standard GitHub-hosted runner will not do. Point
@@ -23,10 +25,6 @@ on:
         type: choice
         options: [both, bazel, envoy]
         default: both
-      bazel_version:
-        description: "Single --bazel-version to run (default: the full matrix)"
-        required: false
-        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,14 +32,13 @@ env:
 
 jobs:
   corpus:
-    name: corpus ${{ matrix.repo }} (bazel ${{ matrix.bazel_version }})
+    name: corpus ${{ matrix.repo }}
     if: github.event_name == 'schedule' || inputs.repo == 'both' || inputs.repo == matrix.repo
     runs-on: ${{ vars.CORPUS_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         repo: [bazel, envoy]
-        bazel_version: ["7.x", "8.x", "9.x"]
     env:
       CAMBIUM_CORPUS_DIR: ${{ github.workspace }}/.cache/cambium/corpus
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
@@ -71,28 +68,28 @@ jobs:
           path: |
             ${{ env.CAMBIUM_CORPUS_DIR }}/repository_cache
             ${{ env.CAMBIUM_CORPUS_DIR }}/disk_cache
-          key: corpus-cache-${{ matrix.repo }}-${{ matrix.bazel_version }}-${{ github.run_id }}
+          key: corpus-cache-${{ matrix.repo }}-${{ github.run_id }}
           restore-keys: |
-            corpus-cache-${{ matrix.repo }}-${{ matrix.bazel_version }}-
+            corpus-cache-${{ matrix.repo }}-
 
       - run: cargo build --release -p cambium-cli
 
       - name: corpus fetch
-        run: ./target/release/cambi corpus fetch ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus fetch ${{ matrix.repo }}
       - name: corpus build
-        run: ./target/release/cambi corpus build ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus build ${{ matrix.repo }}
       - name: corpus replay --range 50
-        run: ./target/release/cambi corpus replay ${{ matrix.repo }} --range 50 --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus replay ${{ matrix.repo }} --range 50
       - name: corpus pairs
-        run: ./target/release/cambi corpus pairs ${{ matrix.repo }} --kind adjacent --kind stress --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus pairs ${{ matrix.repo }} --kind adjacent --kind stress
       - name: corpus compare
-        run: ./target/release/cambi corpus compare ${{ matrix.repo }} --kind adjacent --kind stress --oracle-sample 100 --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus compare ${{ matrix.repo }} --kind adjacent --kind stress --oracle-sample 100
       - name: corpus report
         if: always()
-        run: ./target/release/cambi corpus report ${{ matrix.repo }} --bazel-version "${{ inputs.bazel_version || matrix.bazel_version }}"
+        run: ./target/release/cambi corpus report ${{ matrix.repo }}
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: corpus-results-${{ matrix.repo }}-${{ matrix.bazel_version }}
+          name: corpus-results-${{ matrix.repo }}
           path: corpus-results/

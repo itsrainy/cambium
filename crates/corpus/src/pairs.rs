@@ -9,6 +9,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::profile::Profile;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum PairKind {
@@ -62,6 +64,14 @@ pub struct PairSet {
     pub repo: String,
     pub pin: String,
     pub seed: u64,
+    /// Which profile selected these pairs. Absent from sets written before
+    /// profiles existed, which were all full runs.
+    #[serde(default)]
+    pub profile: String,
+    /// The replay range the selection drew from: a quick set is chosen from
+    /// the last 50 commits, a full one from the manifest's 300.
+    #[serde(default)]
+    pub replay_range: usize,
     pub pairs: Vec<Pair>,
 }
 
@@ -87,6 +97,8 @@ pub struct PairOptions {
     pub seed: u64,
     /// Stress pairs per category.
     pub cap: usize,
+    /// Bounds the whole selection; see [`cap_total`].
+    pub profile: Profile,
     /// Packages of the hub targets, from `index stats`' top-in-degree list.
     pub hub_packages: Vec<String>,
     /// Invalidator paths and globs from the repo's effective `cambium.toml`.
@@ -177,7 +189,7 @@ fn sample(candidates: Vec<String>, cap: usize, seed: u64, salt: u64) -> Vec<Stri
 }
 
 pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
-    let commits = range_commits(repo, &o.pin, o.replay_range)?;
+    let commits = range_commits(repo, &o.pin, o.profile.replay_range(o.replay_range))?;
     let Some(oldest) = commits.first() else {
         return Ok(Vec::new());
     };
@@ -244,21 +256,70 @@ pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
     Ok(out)
 }
 
+/// Keeps at most `cap` of `pairs`, round-robin over the kinds, in the input
+/// order.
+///
+/// Taking a plain prefix would be simpler and wrong: [`select`] emits every
+/// adjacent pair before the first `pr` or `stress` one, so a 50-pair prefix of
+/// a 300-commit selection is 50 adjacent pairs and no stress at all — exactly
+/// the pairs least likely to catch anything. Round-robin keeps each kind's
+/// share while leaving what it keeps a *prefix of that kind*, so a quick set
+/// is a subset of the full set at the same pin and seed, and the choice is a
+/// pure function of the input order.
+pub fn cap_total(pairs: &[Pair], cap: usize) -> Vec<Pair> {
+    if pairs.len() <= cap {
+        return pairs.to_vec();
+    }
+    let kinds: BTreeSet<PairKind> = pairs.iter().map(|p| p.kind).collect();
+    let mut taken: BTreeSet<usize> = BTreeSet::new();
+    let mut round = 0;
+    while taken.len() < cap {
+        let before = taken.len();
+        for kind in &kinds {
+            let Some((i, _)) = pairs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.kind == *kind)
+                .nth(round)
+            else {
+                continue;
+            };
+            taken.insert(i);
+            if taken.len() == cap {
+                break;
+            }
+        }
+        // Every kind is exhausted: there is nothing left to take, whatever the
+        // cap says.
+        if taken.len() == before {
+            break;
+        }
+        round += 1;
+    }
+    taken.into_iter().map(|i| pairs[i].clone()).collect()
+}
+
 /// Every requested kind, in kind order, as one set.
 pub fn select(repo: &Repo, kinds: &[PairKind], o: &PairOptions) -> Result<PairSet> {
+    let range = o.profile.replay_range(o.replay_range);
     let mut pairs = Vec::new();
     for k in kinds {
         pairs.extend(match k {
-            PairKind::Adjacent => adjacent(repo, &o.pin, o.replay_range)?,
-            PairKind::Pr => pr_shaped(repo, &o.pin, o.replay_range)?,
+            PairKind::Adjacent => adjacent(repo, &o.pin, range)?,
+            PairKind::Pr => pr_shaped(repo, &o.pin, range)?,
             PairKind::Stress => stress(repo, o)?,
         });
+    }
+    if let Some(cap) = o.profile.pair_cap() {
+        pairs = cap_total(&pairs, cap);
     }
     Ok(PairSet {
         schema: cambium_engine::report::SCHEMA_VERSION,
         repo: o.repo_id.clone(),
         pin: o.pin.clone(),
         seed: o.seed,
+        profile: o.profile.name().to_string(),
+        replay_range: range,
         pairs,
     })
 }
@@ -282,6 +343,56 @@ mod tests {
             "a different seed picks differently"
         );
         assert_eq!(sample(c[..3].to_vec(), 5, 7, 1), c[..3].to_vec());
+    }
+
+    fn pair(kind: PairKind, n: usize) -> Pair {
+        Pair {
+            base: format!("b{n}"),
+            head: format!("h{n}"),
+            kind,
+            category: None,
+        }
+    }
+
+    /// 100 adjacent, then 20 pr, then 10 stress: [`select`]'s own order.
+    fn corpus_shaped() -> Vec<Pair> {
+        let mut v: Vec<Pair> = (0..100).map(|n| pair(PairKind::Adjacent, n)).collect();
+        v.extend((100..120).map(|n| pair(PairKind::Pr, n)));
+        v.extend((120..130).map(|n| pair(PairKind::Stress, n)));
+        v
+    }
+
+    #[test]
+    fn the_total_cap_is_deterministic_and_keeps_every_kind() {
+        let all = corpus_shaped();
+        let a = cap_total(&all, 50);
+        assert_eq!(a, cap_total(&all, 50), "selection must be a pure function");
+        assert_eq!(a.len(), 50);
+        for kind in [PairKind::Adjacent, PairKind::Pr, PairKind::Stress] {
+            let kept: Vec<&Pair> = a.iter().filter(|p| p.kind == kind).collect();
+            assert!(!kept.is_empty(), "{kind:?} was dropped entirely");
+            // What it keeps of a kind is that kind's prefix, so the quick set
+            // is a subset of the full one at the same pin and seed.
+            let full: Vec<&Pair> = all.iter().filter(|p| p.kind == kind).collect();
+            assert_eq!(kept, full[..kept.len()].to_vec(), "{kind:?}");
+        }
+        // And the whole thing is a subset, in the full set's own order.
+        assert!(a.iter().all(|p| all.contains(p)));
+        let pos: Vec<usize> = a
+            .iter()
+            .map(|p| all.iter().position(|q| q == p).unwrap())
+            .collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{pos:?}");
+    }
+
+    #[test]
+    fn a_cap_at_or_above_the_count_keeps_everything() {
+        let all = corpus_shaped();
+        assert_eq!(cap_total(&all, all.len()), all);
+        assert_eq!(cap_total(&all, all.len() + 5), all);
+        // More cap than one kind can supply: the others take up the slack.
+        let only = vec![pair(PairKind::Pr, 0), pair(PairKind::Pr, 1)];
+        assert_eq!(cap_total(&only, 10), only);
     }
 
     #[test]
