@@ -315,6 +315,142 @@ pub fn depth_agreement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::producer::git;
+
+    /// A pair must still run when its scratch directory holds a worktree
+    /// registration that is both missing from disk *and* locked.
+    ///
+    /// That is exactly what a killed run leaves behind: `tango-cli`'s own
+    /// `addWorktree` (`tools/tango/cmd/tango-cli/main.go`) removes the
+    /// directory before re-adding it, but a run that dies before its
+    /// deferred cleanup runs can leave the registration behind, and — as
+    /// happened against sourcegraph/sourcegraph, where 9 of 10 pairs failed
+    /// with `fatal: '.../tango-worktrees/head' is a missing but locked
+    /// worktree` — git then refuses `worktree add` outright rather than
+    /// treating the stale entry as prunable. `tango-cli`'s `addWorktree` now
+    /// unlocks, prunes, and force-removes a stale registration before
+    /// adding (in that order: `prune` skips a locked entry by design, so the
+    /// lock has to go first); this test stands a stub in for the real binary
+    /// that performs the same recipe, so a regression that drops the
+    /// recovery step (from either side of the boundary) shows up here
+    /// without a real tango-cli build.
+    #[test]
+    fn a_pair_still_runs_over_a_locked_missing_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalised: on macOS `$TMPDIR` is itself a symlink
+        // (`/var/folders/... -> /private/var/folders/...`), and `git
+        // worktree unlock`/`remove` match a worktree by its *registered*
+        // absolute path, which git records already resolved. Passing the
+        // symlinked form here would make every recovery command below fail
+        // with "is not a working tree" against the very entry `git worktree
+        // list` just showed us, which is a self-inflicted test bug, not the
+        // one this test exists to catch.
+        let dir_path = dir.path().canonicalize().unwrap();
+        let repo = dir_path.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
+        git(&repo, &["config", "user.email", "t@example.com"]).unwrap();
+        git(&repo, &["config", "user.name", "t"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "one").unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["commit", "--quiet", "-m", "one"]).unwrap();
+        let base = git(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.join("a.txt"), "two").unwrap();
+        git(&repo, &["commit", "--quiet", "-am", "two"]).unwrap();
+        let head = git(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Same layout `Tango::affected` uses: `<scratch>/tango-worktrees/{base,head}`.
+        let scratch = dir_path.join("scratch");
+        let worktrees = scratch.join("tango-worktrees");
+        std::fs::create_dir_all(&worktrees).unwrap();
+        let head_wt = worktrees.join("head");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "--quiet",
+                head_wt.to_str().unwrap(),
+                &base,
+            ],
+        )
+        .unwrap();
+        git(&repo, &["worktree", "lock", head_wt.to_str().unwrap()]).unwrap();
+        // Gone from disk, but still registered and locked — exactly the
+        // state a killed run leaves behind and `git worktree prune` alone
+        // will not clear, since prune skips locked entries by design.
+        std::fs::remove_dir_all(&worktrees).unwrap();
+        let listing = git(&repo, &["worktree", "list"]).unwrap();
+        assert!(
+            listing.contains("locked"),
+            "the stale registration must still be there for this test to mean anything: {listing}"
+        );
+
+        let stub = write_recovering_stub(&dir_path);
+        let ctx = RunContext {
+            bazel_binary: "bazel".into(),
+            startup_flags: vec![],
+            env: vec![],
+            scratch: scratch.clone(),
+            base_worktree: dir_path.join("unused"),
+        };
+        let tango = Tango::at(stub, "test".into());
+        let run = tango
+            .affected(&repo, &base, &head, &ctx)
+            .expect("the pair runs despite the stale locked worktree");
+        assert_eq!(
+            run.labels.iter().cloned().collect::<Vec<_>>(),
+            vec!["//pkg:t".to_string()]
+        );
+    }
+
+    /// A stand-in `tango-cli` that performs the same recovery
+    /// `addWorktree` does before `git worktree add` — unlock, then prune
+    /// (which only drops a missing entry once it is unlocked), then a
+    /// force-remove for a locked entry prune does not cover — then adds both
+    /// worktrees and writes one row of JSON to `-o`.
+    fn write_recovering_stub(dir: &Path) -> PathBuf {
+        let path = dir.join("tango-cli-stub.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+set -e
+ws=""; base=""; head=""; scratch=""; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -workspace) ws="$2"; shift 2 ;;
+    -base) base="$2"; shift 2 ;;
+    -head) head="$2"; shift 2 ;;
+    -scratch) scratch="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+for dir in "$scratch/base" "$scratch/head"; do
+  git -C "$ws" worktree unlock "$dir" >/dev/null 2>&1 || true
+  git -C "$ws" worktree prune >/dev/null 2>&1 || true
+  git -C "$ws" worktree remove --force --force "$dir" >/dev/null 2>&1 || true
+done
+git -C "$ws" worktree add --detach --quiet "$scratch/base" "$base"
+git -C "$ws" worktree add --detach --quiet "$scratch/head" "$head"
+cat > "$out" <<JSON
+[{"label": "//pkg:t", "distance": 0, "change_type": "changed"}]
+JSON
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
 
     #[test]
     fn the_output_parses_into_labels_and_distances() {
