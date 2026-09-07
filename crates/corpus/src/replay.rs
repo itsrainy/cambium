@@ -116,6 +116,13 @@ pub struct CommitRecord {
     /// The commit invalidated everything and a cold build minted a new
     /// lineage; `total_ms` is then the cold build.
     pub cold_rebuild: bool,
+    /// The engine itself re-indexed `//...` at head, because the dirty set
+    /// exceeded `limits.max_dirty_packages`. Unlike `cold_rebuild` above, the
+    /// commit's answer is exact and the lineage survives — which is why the
+    /// two are counted apart. Absent from results written before the limit
+    /// existed, where it reads as `false`.
+    #[serde(default)]
+    pub engine_cold_rebuild: bool,
     pub index_nodes: u32,
     pub index_edges: u64,
 }
@@ -134,6 +141,10 @@ pub struct Summary {
     pub largest_dirty_packages: usize,
     pub largest_dirty_commit: String,
     pub globals: usize,
+    /// Commits the engine answered with a whole-repository re-query. Not
+    /// globals: the answer was exact.
+    #[serde(default)]
+    pub engine_cold_rebuilds: usize,
     pub rbuildfiles_calls: usize,
     /// Commits where a changed `.bzl` dirtied at least one package through the
     /// static load closure.
@@ -250,6 +261,7 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
         largest_dirty_packages: largest.map(|c| c.dirty_packages).unwrap_or(0),
         largest_dirty_commit: largest.map(|c| c.commit.clone()).unwrap_or_default(),
         globals: commits.iter().filter(|c| c.global).count(),
+        engine_cold_rebuilds: commits.iter().filter(|c| c.engine_cold_rebuild).count(),
         rbuildfiles_calls: commits.iter().filter(|c| c.rbuildfiles_called).count(),
         bzl_closure_commits: commits.iter().filter(|c| c.bzl_closure_hits > 0).count(),
         mean_affected: if commits.is_empty() {
@@ -437,6 +449,7 @@ pub fn replay(
             global: r.global,
             global_reason: r.global_reason.clone(),
             cold_rebuild: false,
+            engine_cold_rebuild: r.stats.cold_rebuild,
             index_nodes: 0,
             index_edges: 0,
         };
