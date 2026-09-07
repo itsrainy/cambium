@@ -1,253 +1,124 @@
-# Handoff: cambium real-repository validation and comparison suite
+# Handoff: cambium real-repository validation suite
 
-Written 2026-09-06 by the agent implementing the "corpus" spec (v1). Read this
-top to bottom before touching anything; the spec the user gave is reproduced in
-short at the end.
+Rewritten 2026-09-07 ~10:45 EDT by the orchestrating session. Read top to
+bottom. `tools/corpus-progress.sh` reconstructs the live picture at any time.
 
 ## Where things stand
 
-Work is on `main` in `/Users/rainy/Documents/src/cambium`, **uncommitted**.
-`git status` shows every changed/new file. Nothing has been committed or pushed;
-the user has not asked for commits (commit only if they ask). The user said
-"stop once you've updated the handoff", so the previous agent stopped here with
-the tree formatted, clippy-clean, and every test green
-(`cargo test --workspace` last ran green before `crates/corpus` was added, and
-`-p cambium-synth -p cambium-engine -p cambium-corpus` green after; rerun the
-full workspace first thing).
+All code is committed and pushed on `main` (HEAD `1684956`). The tree has
+uncommitted edits from two subagents still working (see "Running"). Commit
+only what is green; each agent reports what it changed.
 
-Files touched (from `git status`): `Cargo.toml`, `Cargo.lock`, `README.md`,
-`docs/STORE.md`, `crates/{bazel,diff,index,engine,cli,bench,synth}` edits,
-new `crates/corpus/`, placeholder `crates/compare/`, `corpus.toml`,
-`tools/bazel-diff/fetch.sh`, `crates/engine/tests/tree_keys.rs`, this file.
+Delivered and pushed: `crates/compare`, `crates/corpus`, `cambi corpus
+fetch|build|replay|pairs|compare|report|all`, `bench legacy` (bazel-diff-rust
+on synth; `docs/bench-legacy.svg`), `tools/bazel-diff/fetch.sh` (v46.1.0),
+`tools/tango/` (standalone `tango-cli` built inside uber/tango v0.0.46 plus
+one small patch for `--keep_going` partial graphs), CI (`synthetic-threeway`,
+`bazel-version-matrix` over 7.4.1/8.5.1/9.2.0, `corpus-nightly`,
+`corpus-weekly`), `docs/CORPUS.md` with generated sections between markers,
+`tools/corpus-progress.sh`.
 
-Milestone status (numbers are the spec's §12):
+### Engine bugs the suite found (all fixed, all in git log)
 
-| milestone | status |
-|---|---|
-| 3. Engine changes §9.1 (tree-hash store) and §9.2 (per-target depth, schema 3) | **done, tested** |
-| 1. `crates/corpus` (manifest, fetch, build, pairs, replay, state) | **written, all tests green** (fetch/checkout against a real remote is untested; run `cambi corpus fetch bazel` once the CLI exists) |
-| 2. `crates/compare` (bazel-diff runner, three-way, classifier) | **not started** (placeholder `crates/compare/src/lib.rs`, Cargo.toml written, already a workspace member) |
-| 4. bazel-diff Rust as `bench legacy` on synth | **fetch script done and the binary is built**; bench stage not written |
-| CLI `cambi corpus ...` | not started |
-| 5. docs/CORPUS.md, CI nightly/weekly | not started |
-| 6. tensorflow | manifest entry only (`skip = true`) |
+1. `generator_location` in the rule hash (bazel-diff and Tango drop it).
+2. A modified BUILD file is a direct input of any rule that globs it.
+3. Deleting `BUILD` while `BUILD.bazel` remains is not a package deletion.
+4. Ignore globs silently dropped consumed files (CHANGELOG.md in a genrule).
+5. `rbuildfiles`/dirty-package queries under `--keep_going` exit 3: tombstone
+   or escalate, never fail. Cold build accepts exit 3 too (records partial).
+6. Stale store lineage won over a compatible one (config-hash-aware fetch).
+7. A missing base index was built with Bazel on the *head* checkout
+   (now a detached worktree at base, opened lazily only when the store misses).
+8. `label_flag`/`label_setting` edges: `build_setting_default` is typed
+   STRING by Bazel; the first fix (v3) matched LABEL and never fired. v4.
+9. `--noimplicit_deps` dropped real main-repo edges (a rule's private
+   `attr.label(default=...)`); removed from the index query, oracle, verify,
+   classifier. Cost 3-4% index size.
+10. A `.bzl` loaded only from MODULE.bazel/WORKSPACE (repository rules) was
+    treated as dead: rbuildfiles names `@repo//:BUILD` / `//external:WORKSPACE`,
+    now a global invalidation.
+11. Producers shared cambium's `--output_base` across workspaces, poisoning
+    external repos (harness bug).
 
-Tasks are also tracked in the session's task list (TaskList tool), ids 1-9.
+`RULE_HASH_VERSION` is 4; it is mixed into the config hash, so every index
+older than commit `250bfb7` is a different lineage.
 
-## Environment facts (verified)
+### Results as of this handoff (pre item-4 rerun)
 
-- macOS x86_64, 8 cores, 16 GB RAM, ~430 GB free. Toolchain pinned by
-  `rust-toolchain.toml` to 1.98.1 (installed).
-- **No system Bazel, no Java, no Docker.** The user said Bazel may be installed.
-  I installed bazelisk to `~/.cache/cambium/bin/bazelisk` (v1.29.0); it has
-  already downloaded Bazel 9.2.0. Use it via `--bazel-binary` or by putting
-  `~/.cache/cambium/bin` on PATH. Kotlin bazel-diff cannot run here (no JRE).
-- **bazel-diff Rust binary is built**: `~/.cache/cambium/bazel-diff/bin/bazel-diff-rust`
-  (`--version` prints `bazel-diff 39.0.0`; the crate version lags the tag).
-  Built by `tools/bazel-diff/fetch.sh` from Tinder/bazel-diff at tag v46.1.0,
-  commit `27ce213b8b090792e06057bff96e37bd284ece8e`. `VERSION` file records it.
-  Upstream has no prebuilt macOS x86_64 Rust binary, which is why it builds
-  from source (needs only cargo; protoc is vendored by its build script).
-- Network works (GitHub API, raw.githubusercontent, git ls-remote).
-- `sourcegraph/sourcegraph` is private now; the manifest uses
-  `sourcegraph/sourcegraph-public-snapshot` (archived 2024-09-02).
-- Corpus pins in `corpus.toml` are the upstream HEADs as of 2026-09-06.
+| entry | Bazel | replay oracle | three-way |
+|---|---|---|---|
+| bazel | 9.2.0 | green, 300 commits | 40/40 pass at v3; v4 rerun in progress |
+| bazel-8 | 8.5.1 | green | 40/40 at v3; v4 rerun queued |
+| bazel-7 | 7.4.1 | green | 40/40 at v3; v4 rerun queued |
+| sourcegraph | aspect 5.8.19 | green | 36/36 pass at v4, cambium_missing 0, recall 1.0 |
+| envoy | 8.7.0 | green (93/300 global before invalidator work) | v4 rerun in progress |
+| envoy-7 | 7.7.1 | green | v4 rerun queued |
+| apollo | see agent | cold build needed partial-universe support | agent running |
 
-## What was learned about bazel-diff (needed for milestones 2 and 4)
+Timings (v3 runs, warm store): cambium 0.2-0.5 s per pair; bazel-diff warm
+4-15 s, cold 7-64 s; Tango 33-530 s. Synthetic 100k targets: cambium 67 ms vs
+bazel-diff 37 s warm, exact agreement. See `docs/CORPUS.md` (regenerate with
+`cambi corpus report <id>` for each id; it rewrites the top table, version
+matrix and bench section every time).
 
-Source fetched to `/Users/rainy/.claude/jobs/6b58f265/tmp/bd_bazel.rs`,
-`bd_hash.rs`, `bd_model.rs`, `perf_workload.py` (job tmp; may be gone — refetch
-from `https://raw.githubusercontent.com/Tinder/bazel-diff/master/src/...`).
+## Running right now (pids as of 10:45 EDT; logs in $CLAUDE_JOB_DIR/tmp = /Users/rainy/.claude/jobs/6b58f265/tmp)
 
-- CLI (Rust and Kotlin share flags):
-  `bazel-diff generate-hashes -w <ws> -b <bazel> [--bazelStartupOptions ...]
-  [--bazelCommandOptions ...] [--fineGrainedHashExternalRepos a,b] [-k]
-  [--excludeExternalTargets] [--depEdgesFile deps.json] <out.json>` and
-  `bazel-diff get-impacted-targets --startingHashes a.json --finalHashes b.json
-  [-d deps.json] -o out.txt -w <ws> -b <bazel>`. Output is one label per line
-  (JSON list of `{label,targetDistance,packageDistance}` with `-d`).
-- How it drives Bazel: `bazel version` (parses `Build label:` or `bazel X`),
-  `bazel mod graph` (to detect bzlmod; on >= 8.6 it also runs
-  `mod dump_repo_mapping` / `mod show_repo`), then one
-  `bazel query --output streamed_proto --proto:instantiation_stack
-  --order_output=no [--keep_going] --query_file <f> [--output_file <f>]`
-  with expression `'//external:all-targets' + '//...:all-targets'` (retries
-  without `//external` if that package errors). `--output_file` is used when
-  version >= 8.2.0.
-- Its perf gate replays a **fake `bazel` shim** answering `version`, `mod`
-  (exit 1 = not bzlmod), `info`, `query` (copies a fixture streamed_proto to
-  `--output_file` or stdout). That is the recipe for `bench legacy` on synth:
-  emit the synth workspace (`cambium_synth::emit_workspace` /
-  `emit_git_history`), dump `cambium_synth::proto::to_streamed_proto(&graph)`
-  at base and head, point bazel-diff at a shim that serves the right dump, so
-  Bazel time is removed. bazel-diff hashes source-file *content* from the
-  workspace, so the emitted files must be on disk at each revision.
-- Hash files are JSON `{label: hash}`; `get-impacted-targets` diffs them.
+- **Lane A4** `rerun-lane.sh bazel bazel-8 bazel-7` (pid 58226): build --force,
+  replay --restart, pairs, compare --restart, per id. Log `laneA4.log`.
+  Binary `tmp/cambi-run` built from `1684956`.
+- **Envoy/sourcegraph agent driver** `run.sh` (pid 43240) then `finish_sg.sh`
+  (pid 28876): sourcegraph compare (done, 36/36) → envoy replay --restart
+  (running, pid 20850, `envoy_replay.log`) → envoy compare → envoy-7 replay →
+  envoy-7 compare. Logs `driver.log`, `driver2.log`, `envoy_replay.log`,
+  `envoy_compare.log`, `envoy7_replay.log`, `envoy7_compare.log`. Prints
+  `ALL DONE` / `SUITE COMPLETE`. Uses `./target/release/cambi` built at 08:08
+  (v4, before the lazy-worktree fix: its cambium walls are ~7-10 s too high;
+  labels are right).
+- **Apollo agent** (subagent a6f0c50f6432ac8b2): partial-universe cold build,
+  replay, compare on ~/.cache/cambium/corpus/apollo. Logs `apollo_*.log`.
+- **Item-4 agent** (subagent abaab62f5fd9b4357): static `.bzl` load closure,
+  no corpus runs. Will report design + tests; do NOT run corpus until it lands.
 
-## What changed in the engine (done)
+Monitors in this session: `byf6n0lsx` (laneA4). Others were stopped.
 
-- `crates/index/src/walk.rs`: `WalkOptions.max_depth: Option<u32>`,
-  `WalkResult.depth: Vec<u32>` (NO_ID = unvisited), `depth_of(id)`. Tombstones
-  count as hops. Tests in `crates/index/tests/index_core.rs`.
-- `crates/engine/src/report.rs`: `SCHEMA_VERSION = 3`, `AffectedTarget
-  {label, depth, test}`, `AffectedReport.affected: Vec<AffectedTarget>`,
-  helpers `affected_labels()`, `affected_within(n)`, `Stats.rbuildfiles_called`.
-- `AffectedRequest.max_depth`; `QueryOptions.max_depth`; CLI `--max-depth` on
-  `affected` and `index rdeps`. `index stats` gained `in_degree.top`
-  (`HubTarget {label, in_degree}`, 20 entries, `TOP_IN_DEGREE`) — this is the
-  hub list `corpus pairs --kind stress` should feed from.
-- `crates/engine/tests/json_contract.rs` updated; README contract table
-  updated (version 3 row).
-- Tree-hash store (§9.1): `cambium_index::format::index_key(lineage, tree)`,
-  `commit_pointer_key(lineage, sha)` (`commits/<lineage>/<sha>`, content =
-  tree hash), unlistable-store fallbacks `indexes/by-tree/<tree>.bin` and
-  `commits/by-commit/<sha>`; legacy `indexes/by-commit/<sha>.bin` still read.
-  `Engine::tree_of(rev)` (falls back to the rev string when git can't
-  resolve — synthetic ids), `fetch_baseline` resolves the tree first, then the
-  pointer. `Repo::tree_of`, `first_parent_log`, `parents`, `git(args)` added
-  to `crates/diff`. Tests: `crates/engine/tests/tree_keys.rs` (identical
-  trees, squash-merge, pointer for unresolvable sha). `docs/STORE.md` updated.
-- Bazel plumbing: `Bazel::with_startup_flags`, `with_env`, `command(sub)`
-  (used by `index verify` now); `[bazel] startup_flags` in `cambium.toml`,
-  **excluded from the config hash** (`Config::hash` clears it) and skipped in
-  serialisation when empty so existing hashes don't move.
-- `cargo test --workspace` was fully green after the engine changes (before
-  the corpus crate was added).
+## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
 
-## `crates/corpus` (written; read the module docs)
+5. (done, `1684956`) bazel entries had no real invalidators.
+4. Static `.bzl` load closure replaces `rbuildfiles` on the `.bzl` path
+   (repo mapping via `bazel mod dump_repo_mapping ""`; external loads stop at
+   the external label; MODULE/WORKSPACE closure → global; keep `rbuildfiles`
+   as a corpus oracle asserting the static closure is a superset).
+1+3. Repo-granular external invalidation: MODULE.bazel.lock diff and
+   repository-rule inputs map to repos; dirty (a) main-repo consumers of
+   `@repo//...` edges and (b) every package whose `.bzl` closure contains a
+   file from that repo. A module that registers toolchains stays global
+   (toolchain resolution has no edge to follow). Needs item 4.
+2. `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
+   affect loading (`--remote_*`, `--jobs`, `--test_*`, `--disk_cache`,
+   configs no query uses); unknown flags and `import`/`try-import` go global.
+6. Replace `max_changed_files` with "cold build when dirty packages exceed
+   N", N from replay per-package query timings.
+Target: envoy replay globals 93 → under 20.
 
-- `manifest.rs`: `Manifest`/`RepoEntry` for `corpus.toml` (root of repo).
-  Extra field `bazel_versions` for the §3.2 matrix (`USE_BAZEL_VERSION` via
-  bazelisk env). Test loads the checked-in manifest.
-- `checkout.rs`: `CorpusDir` (`$CAMBIUM_CORPUS_DIR`, default
-  `~/.cache/cambium/corpus`): `<id>.git` mirror, `<id>` worktree,
-  `store/<id>` dir store, `output/<id>[-ver]` output bases, shared
-  `repository_cache`, `disk_cache`, `bazelrc`. `Checkout::config_for` builds
-  the generated `cambium.toml` (defaults + manifest invalidators + startup
-  flags `--output_base` and `--bazelrc` + dir store + max_ancestor_walk =
-  replay_range); `write_config` writes it into the worktree and adds it to
-  `.git/info/exclude`; `engine(entry, bazel_version)` opens an Engine.
-- `pairs.rs`: adjacent / pr (merge commits → (merge-base(p1,p2), merge)) /
-  stress (bzl, build_add_delete, hub, invalidator; `git log --first-parent
-  -- <pathspecs>`, capped with a seeded sample). `PairSet` JSON.
-- `replay.rs`: `Driver` trait (checkout + querier), `BazelDriver`, `replay()`
-  producing `replay-<pin>.json` (`ReplayResult`: cold build with `index
-  stats`, per-commit `CommitRecord`, `Summary` p50/p90/p99, zero-dirty
-  fraction, largest dirty set, globals; rebuild + oracle). Publishes every
-  index to the engine's store; resumes from the last published index.
-- `oracle.rs`: `compare_by_label(replayed, rebuilt, cap) -> GraphDiff`.
-- `state.rs`: `corpus-results/<id>/state.json`.
-- Tests: `crates/corpus/tests/replay_synthetic.rs` (real git + SynthQuerier).
+Then: regenerate all report sections, write the hand-written `## Findings`
+section of `docs/CORPUS.md` (the eleven bugs above, the externals
+limitation, the laptop caveat on producer timings), delete this file's
+"Running" section or the file, commit, push.
 
-### A bug the replay oracle found (fixed)
+## Gotchas learned
 
-The first run of `replays_a_history_and_the_oracle_holds` failed with one
-rule-hash mismatch. Root cause was in the **synthetic emitter/mutator, not the
-engine**: `Mutation::EditRuleAttr` could pick an `alias` (or `test_suite`),
-bumping its in-memory `attr_salt` — which feeds `SynthGraph::target_hash` —
-while the emitted BUILD file carries no salt for aliases, so `git diff` saw no
-change and the engine (correctly) re-queried nothing. Fixed in
-`crates/synth/src/mutate.rs` by making `EditRuleAttr` only pick rules that
-have attributes. All of `cambium-synth`, `cambium-engine`, `cambium-corpus`
-tests pass after the fix; `cargo fmt` and `cargo clippy -D warnings` are
-clean on the whole workspace.
-
-Worth remembering for the real corpus: a rule hash in a spliced index can
-legitimately go stale relative to a rebuild when a *dependency in another
-package* is deleted (the consumer's row is not re-queried; the engine marks the
-consumer direct via `DeletedDep`, so this is over-approximation, not
-unsoundness). With real Bazel the consumer's proto still names the dangling
-label, so the hash does not move at all — but if `compare_by_label` reports
-`rule_hash_mismatch` on a real repo, check for this before calling it a bug.
-
-## Remaining plan (what to build next, in order)
-
-1. (done) The oracle failure above is fixed.
-2. `crates/compare`:
-   - `bazeldiff.rs`: runner for the Rust binary (`CAMBIUM_BAZEL_DIFF` env or
-     `tools/bazel-diff/fetch.sh` output), Kotlin via `java -jar` when present;
-     `generate-hashes` at base and head (needs the worktree checked out at
-     each; use a second `git worktree` for base so cambium's head checkout is
-     undisturbed), then `get-impacted-targets`. Record impl + version. Pass
-     `--fineGrainedHashExternalRepos` empty, no `--useCquery`, and
-     `--bazelStartupOptions` = the corpus startup flags so the same output
-     base is used. Time cold (two hashes) and warm (one hash + diff).
-   - `oracle.rs`: sample k labels of cambium's direct set (seeded),
-     `bazel query "rdeps(//..., <label>)" --output=label --noimplicit_deps`
-     at head via `engine.bazel.command("query")`; union; cambium's walk from
-     the same roots on the head index must be a superset.
-   - `classify.rs`: `Facts` trait + classifier returning the §4.2 classes;
-     unit tests with hand-built facts per class. Bazel-backed `Facts`
-     implementation (query the rule proto at head with
-     `--proto:flatten_selects=false` to see `selector_list` for
-     `cambium_extra_select`; compare base/head canonical rule minus
-     visibility/tags for `cambium_extra_visibility`; changed paths with no
-     consumer in the head index for `bazeldiff_extra_content`; external
-     labels for `bazeldiff_extra_external`).
-   - `threeway.rs`: per pair: run `engine.affected` (materialize to get the
-     head index), bazel-diff, oracle; symmetric difference → classify;
-     precision `|bd ∩ cambium| / |cambium|`, recall vs oracle must be 1.0;
-     pass = zero `cambium_missing` and zero `unclassified`. Write
-     `corpus-results/<id>/compare-<pin>.json`; mark pair keys done in
-     `State.compared`.
-   - `report.rs`: regenerate the repo's section of `docs/CORPUS.md` from the
-     replay/compare/bench JSON (§11), plus the top-level table.
-3. `bench legacy` (spec §7) in `crates/bench`: new stage `legacy_bazel_diff`
-   for `cambi bench legacy --preset ... --changes typical-pr`: emit synth
-   workspace + 2 revisions, proto dumps per revision, shim script (see above),
-   run bazel-diff twice + diff, run cambium `compute` in memory on the same
-   `Commit`; compare label sets (agree up to `select`); report cold/warm
-   bazel-diff vs cambium. Headline sweep over targets 1e4..1e7 with
-   `bench sweep --stage legacy_bazel_diff`-style plotting (`harness::plot_svg`
-   draws one line; extend to two).
-4. CLI `cambi corpus fetch|build|replay|pairs|compare|report|all` in
-   `crates/cli/src/cmd/corpus.rs` (add `Corpus(cmd::corpus::Args)` to
-   `main.rs`, `pub mod corpus` in `cmd/mod.rs`, deps `cambium-corpus` and
-   `cambium-compare` in `crates/cli/Cargo.toml`). Common flags: `--manifest`
-   (default: discover `corpus.toml` upward from cwd), `--results-dir`
-   (default `corpus-results`), `--corpus-dir`, `--bazel-version`, `--seed`.
-   `build --at <sha>` defaults to the pin and writes
-   `corpus-results/<id>/index-<sha>.bin` (+ publishes). `pairs --kind` reads
-   hubs from that index's `stats().in_degree.top` → packages.
-5. `docs/CORPUS.md` (tables per repo + machine requirements 16+ cores, 64 GB,
-   500 GB disk), README additions (CLI list, corpus section), CI: nightly job
-   for `bazel` + `envoy` (last 50 commits, adjacent + stress, oracle k=100),
-   weekly `sourcegraph`, `apollo`, `xla`; per-PR synthetic three-way at
-   `small` (`bench legacy`).
-6. Actually run it here: `cambi corpus all bazel --bazel-binary
-   ~/.cache/cambium/bin/bazelisk` (the `bazel` repo is small; expect the
-   first `bazel query //...:*` to take many minutes with external fetches;
-   the `bazel` repo's `.bazelversion` decides the version). Record numbers in
-   `docs/CORPUS.md`. Then `bench legacy` on synth for the headline chart.
-   The user explicitly said installing Bazel on this machine is fine.
-
-## Conventions observed in this repo
-
-- Doc comments explain *why*; tests are named as sentences. Keep that style.
-- Every JSON document carries `schema` (`cambium_engine::report::SCHEMA_VERSION`).
-- `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`
-  gate CI on the pinned toolchain; run both before finishing.
-- Temp files go in `$CLAUDE_JOB_DIR/tmp` (`/Users/rainy/.claude/jobs/6b58f265/tmp`).
-
-## The spec, in brief
-
-Goals: soundness on real repos; like-for-like vs bazel-diff; updater
-throughput on real histories; reproducible and CI-schedulable. Deliverables:
-`crates/corpus`, `crates/compare`, `tools/bazel-diff/`, `cambi corpus ...`,
-`bench legacy` on bazel-diff-rust, `docs/CORPUS.md`. Corpus: bazel, envoy,
-sourcegraph, apollo, xla, tensorflow with pins; generated `cambium.toml`;
-shared repository/disk cache and per-repo output base; version matrix (7.x,
-8.x) for bazel and envoy. Three-way: cambium vs bazel-diff vs sampled
-`rdeps` oracle; disagreement classes `cambium_extra_select`,
-`cambium_extra_implicit`, `cambium_extra_visibility`,
-`bazeldiff_extra_content`, `bazeldiff_extra_external`, `cambium_missing`
-(fail), `unclassified` (fail); precision informational, recall vs oracle must
-be 1.0. Pairs: adjacent, PR-shaped, stress (bzl, BUILD add/delete, hub,
-invalidator; 20 per category). Replay: cold build at pin-range, forward
-updates, per-commit metrics, rebuild at pin must equal replayed index. Bench
-legacy: bazel-diff-rust on synth proto dumps; cold (two hashes) and warm (one
-hash) vs cambium; headline chart targets 1e4..1e7 at typical-pr. CLI
-subcommands resumable via `corpus-results/<id>/state.json`. CI: per-PR
-synthetic three-way; nightly bazel+envoy; weekly sourcegraph/apollo/xla;
-tensorflow monthly. Reporting: `docs/CORPUS.md` per-repo sections plus a
-top-level table and the scaling chart.
+- zsh does not word-split `$VAR`; use `${=VAR}` or explicit variables in
+  ad-hoc shell.
+- `$TMPDIR/cambium-cache` holds fetched indexes; after a FORMAT_VERSION bump
+  old files must be deleted (check the `CAMBIDX1` header version).
+- Killing a compare mid-pair leaves registered tango worktrees under
+  `corpus-results/<id>/scratch/tango-worktrees/` and `base-worktree` in the
+  corpus checkout: `git worktree remove --force` them and re-checkout the pin.
+- Never share one `--output_base` across workspace directories.
+- HEAD pins only load under their own Bazel major; the matrix uses
+  historical pins (`bazel-7`, `bazel-8`, `envoy-7`; envoy never pinned 9.x).
+- This Mac cannot fetch some externals (GraalVM macos-x64, Docker-based RBE
+  configs, some mirror 404s): producers pay for those on every run, cambium
+  mostly does not; absolute producer timings are inflated here.
+- Replay-then-compare, never compare alone after a hash bump: compare
+  cold-builds every pair's base otherwise.
