@@ -81,6 +81,7 @@ fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
         resume,
         bazel_version: "synth".into(),
         diff_cap: 20,
+        rebuild_oracle: true,
     }
 }
 

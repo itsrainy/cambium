@@ -62,6 +62,11 @@ pub struct HistoryOptions {
     pub bazel_version: String,
     /// How many differences the oracle report lists per class.
     pub diff_cap: usize,
+    /// Run the rebuild oracle at the end: cold-build the pin and diff it
+    /// against the index the history produced. `--oracle none` turns it off,
+    /// which is only ever right when the cold build is the thing that will not
+    /// finish — without it the history proves nothing.
+    pub rebuild_oracle: bool,
 }
 
 /// One cold build.
@@ -503,12 +508,16 @@ pub fn history(
         );
     }
 
-    // ---- the oracle: applied == rebuilt ----
-    let (fresh, rebuild) = cold_build(engine, driver, &to)?;
-    let diff = compare_by_label(index.view(), fresh.view(), opts.diff_cap);
-    let ok = diff.is_empty();
-    result.rebuild = Some(rebuild);
-    result.oracle = Some(OracleOutcome { ok, diff });
+    // ---- the rebuild oracle: applied == rebuilt ----
+    if opts.rebuild_oracle {
+        let (fresh, rebuild) = cold_build(engine, driver, &to)?;
+        let diff = compare_by_label(index.view(), fresh.view(), opts.diff_cap);
+        let ok = diff.is_empty();
+        result.rebuild = Some(rebuild);
+        result.oracle = Some(OracleOutcome { ok, diff });
+    } else {
+        tracing::warn!("the rebuild oracle was skipped: this history proves nothing");
+    }
     result.done = true;
     result.summarise();
     result.write(&path)?;

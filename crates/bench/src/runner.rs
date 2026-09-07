@@ -295,11 +295,3 @@ fn emit(report: &BenchReport, out: Option<&Path>, markdown: Option<&Path>) -> Re
     Ok(())
 }
 
-/// Default results path: `bench-results/<unix seconds>.json`.
-pub fn default_results_path() -> PathBuf {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    PathBuf::from("bench-results").join(format!("{ts}.json"))
-}
