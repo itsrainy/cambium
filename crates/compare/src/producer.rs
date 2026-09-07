@@ -267,6 +267,43 @@ pub struct BaseWorktree {
     borrowed: bool,
 }
 
+/// Copies the workspace's generated `cambium.toml` into the base worktree.
+///
+/// The corpus writes that file into the repository root and excludes it from
+/// git, so a fresh `git worktree add` does not have it — and on `bazel/bazel`
+/// the root package is `filegroup(name = "srcs", srcs = glob(["*"]))`, which
+/// swallows it. The head tree's `//:srcs` then lists `//:cambium.toml` and the
+/// base tree's does not, so the producers see the filegroup change on every
+/// pair while cambium (whose base index was built in a tree that had the file)
+/// sees nothing. That surfaced as `//:srcs` in `cambium_missing` on a pair
+/// whose only changed files were `.github/workflows/*.yml`, which no rule
+/// consumes at all: a disagreement manufactured entirely by the harness, in
+/// the same family as the case-collision one above.
+///
+/// A tracked `cambium.toml` is left alone — the checkout already has the right
+/// version of it.
+fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
+    let src = repo_worktree.join(cambium_engine::config::CONFIG_FILE);
+    if !src.exists() {
+        return Ok(());
+    }
+    let tracked = git(
+        repo_worktree,
+        &[
+            "ls-files",
+            "--error-unmatch",
+            cambium_engine::config::CONFIG_FILE,
+        ],
+    )
+    .is_ok();
+    if tracked {
+        return Ok(());
+    }
+    std::fs::copy(&src, base.join(cambium_engine::config::CONFIG_FILE))
+        .with_context(|| format!("copying {} into the base worktree", src.display()))?;
+    Ok(())
+}
+
 impl BaseWorktree {
     /// Adds (or reuses) a worktree of `repo_worktree` at `base_sha`, under
     /// `scratch`. Reuse matters: consecutive pairs in an adjacent-pair sweep
@@ -290,6 +327,7 @@ impl BaseWorktree {
                 &["checkout", "--quiet", "--force", "--detach", base_sha],
             )
             .with_context(|| format!("moving the base worktree to {base_sha}"))?;
+            mirror_untracked_config(repo_worktree, &path)?;
             return Ok(Self {
                 path,
                 owner: repo_worktree.to_path_buf(),
@@ -313,6 +351,7 @@ impl BaseWorktree {
             ],
         )
         .with_context(|| format!("adding a base worktree at {base_sha}"))?;
+        mirror_untracked_config(repo_worktree, &path)?;
         Ok(Self {
             path,
             owner: repo_worktree.to_path_buf(),
@@ -330,6 +369,7 @@ impl BaseWorktree {
             &self.path,
             &["checkout", "--quiet", "--force", "--detach", sha],
         )?;
+        mirror_untracked_config(&self.owner, &self.path)?;
         Ok(())
     }
 
