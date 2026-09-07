@@ -11,6 +11,7 @@ pub mod bazelrc;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod externals;
 pub mod inspect;
 pub mod query;
 pub mod report;

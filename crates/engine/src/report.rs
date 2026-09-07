@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 ///   is still exact — so a consumer that treats `global` as "run everything"
 ///   needs no change. `limits.max_changed_files`, which used to make that
 ///   case global, is gone.
+///   External repositories also became first-class: `stats` gained
+///   `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl` and
+///   `external_direct_targets`, and `--explain` can report a new direct reason
+///   `{"kind": "external_repo", "label": "@@repo+//pkg:target"}`.
 pub const SCHEMA_VERSION: u32 = 5;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
@@ -75,6 +79,10 @@ pub enum DirectReason {
     File { path: String },
     /// A target it depended on was deleted.
     DeletedDep { label: String },
+    /// It names a target in an external repository whose contents moved —
+    /// because `MODULE.bazel` moved, or because a main-repo file the
+    /// repository is built from moved.
+    ExternalRepo { label: String },
 }
 
 impl DirectReason {
@@ -87,6 +95,9 @@ impl DirectReason {
             }
             DirectReason::File { path } => format!("source file {path} changed"),
             DirectReason::DeletedDep { label } => format!("dependency {label} was deleted"),
+            DirectReason::ExternalRepo { label } => {
+                format!("external dependency {label} changed")
+            }
         }
     }
 }
@@ -134,6 +145,22 @@ pub struct Stats {
     /// `dirty_packages` still reports the count that triggered it.
     #[serde(default)]
     pub cold_rebuild: bool,
+    /// External repositories dirtied because a main-repo file they are built
+    /// from changed (a `local_path_override` directory, or a file a repository
+    /// rule reads by label).
+    #[serde(default)]
+    pub repos_dirty_by_input: usize,
+    /// External repositories dirtied by the `MODULE.bazel` diff.
+    #[serde(default)]
+    pub repos_dirty_by_module: usize,
+    /// External repositories dirtied because a `.bzl` that defines them
+    /// changed.
+    #[serde(default)]
+    pub repos_dirty_by_bzl: usize,
+    /// Targets in those repositories that the main repository names, and whose
+    /// consumers were therefore made direct.
+    #[serde(default)]
+    pub external_direct_targets: usize,
 }
 
 /// One affected target, with how far from the change it sits.

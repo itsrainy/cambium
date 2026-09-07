@@ -36,8 +36,11 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// Bumped to 2 when provenance moved out of the payload into the trailer, to
 /// 3 when provenance gained the partial-load fields, and to 4 when the payload
 /// gained the static `.bzl` load closure (`bzl_*` in
-/// [`crate::data::IndexData`]) that replaced the `rbuildfiles` call.
-pub const FORMAT_VERSION: u32 = 4;
+/// [`crate::data::IndexData`]) that replaced the `rbuildfiles` call, and to 5
+/// when it gained the external-repository input map (`repo_*`, `bzl_repo_*`;
+/// see [`crate::externals`]) that replaced whole-world invalidation on a
+/// `MODULE.bazel` or repository-rule-input edit.
+pub const FORMAT_VERSION: u32 = 5;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

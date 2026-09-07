@@ -23,8 +23,10 @@ use serde_json::Value;
 /// `stats.rbuildfiles_called`; version 4 added `stats.bzl_closure_hits`, and
 /// `stats.rbuildfiles_called` is now always false; version 5 added
 /// `stats.bazelrc_safe_diffs`, `stats.cold_rebuild` and the optional
-/// `cold_rebuild_reason`. The version is shared with the other documents, and
-/// `index stats` changed shape at version 2 and again at 3.
+/// `cold_rebuild_reason`, the four `stats.repos_*` / `stats.external_direct_targets`
+/// counters and the `external_repo` direct reason. The version is shared with
+/// the other documents, and `index stats` changed shape at version 2 and again
+/// at 3.
 ///
 /// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
 /// recurse through `[]`. Optional fields are listed — the fixture below
@@ -53,11 +55,15 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.changed_files",
     "stats.cold_rebuild",
     "stats.direct_targets",
+    "stats.external_direct_targets",
     "stats.dirty_packages",
     "stats.head_edges",
     "stats.head_nodes",
     "stats.ignored_files",
     "stats.queried_targets",
+    "stats.repos_dirty_by_bzl",
+    "stats.repos_dirty_by_input",
+    "stats.repos_dirty_by_module",
     "stats.rbuildfiles_called",
     "tests[]",
     "timings_ms.dirty",
@@ -116,6 +122,10 @@ fn fixture() -> AffectedReport {
             bzl_closure_hits: 10,
             bazelrc_safe_diffs: 11,
             cold_rebuild: true,
+            repos_dirty_by_input: 11,
+            repos_dirty_by_module: 12,
+            repos_dirty_by_bzl: 13,
+            external_direct_targets: 14,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
