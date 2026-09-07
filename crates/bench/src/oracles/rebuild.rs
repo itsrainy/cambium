@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GraphDiff {
     /// Live, known-kind nodes present only in the applied index.
-    pub nodes_only_in_replayed: Vec<String>,
+    pub nodes_only_in_applied: Vec<String>,
     pub nodes_only_in_rebuilt: Vec<String>,
     /// `label -> (applied kind, rebuilt kind)` where the kinds disagree.
     pub kind_mismatch: Vec<(String, String, String)>,
     /// Rules whose hashes differ.
     pub rule_hash_mismatch: Vec<String>,
     /// `(from, to)` edges present only in one side.
-    pub edges_only_in_replayed: Vec<(String, String)>,
+    pub edges_only_in_applied: Vec<(String, String)>,
     pub edges_only_in_rebuilt: Vec<(String, String)>,
     /// Totals, so a capped report still says how big the disagreement is.
     pub counts: DiffCounts,
@@ -29,11 +29,11 @@ pub struct GraphDiff {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffCounts {
-    pub nodes_only_in_replayed: usize,
+    pub nodes_only_in_applied: usize,
     pub nodes_only_in_rebuilt: usize,
     pub kind_mismatch: usize,
     pub rule_hash_mismatch: usize,
-    pub edges_only_in_replayed: usize,
+    pub edges_only_in_applied: usize,
     pub edges_only_in_rebuilt: usize,
 }
 
@@ -47,11 +47,11 @@ impl GraphDiff {
         format!(
             "nodes only in applied: {}, only in rebuilt: {}; kind mismatches: {}; \
              rule hash mismatches: {}; edges only in applied: {}, only in rebuilt: {}",
-            c.nodes_only_in_replayed,
+            c.nodes_only_in_applied,
             c.nodes_only_in_rebuilt,
             c.kind_mismatch,
             c.rule_hash_mismatch,
-            c.edges_only_in_replayed,
+            c.edges_only_in_applied,
             c.edges_only_in_rebuilt
         )
     }
@@ -94,8 +94,8 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
     for (label, &ia) in &a {
         match b.get(label) {
             None => push(
-                &mut d.nodes_only_in_replayed,
-                &mut d.counts.nodes_only_in_replayed,
+                &mut d.nodes_only_in_applied,
+                &mut d.counts.nodes_only_in_applied,
                 label.to_string(),
             ),
             Some(&ib) => {
@@ -132,9 +132,9 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
     }
     let (ea, eb) = (edges(applied), edges(rebuilt));
     for e in ea.difference(&eb) {
-        d.counts.edges_only_in_replayed += 1;
-        if d.edges_only_in_replayed.len() < cap {
-            d.edges_only_in_replayed
+        d.counts.edges_only_in_applied += 1;
+        if d.edges_only_in_applied.len() < cap {
+            d.edges_only_in_applied
                 .push((e.0.to_string(), e.1.to_string()));
         }
     }
@@ -185,10 +185,10 @@ mod tests {
         let a = index(true, 1);
         let b = index(false, 2);
         let d = compare_by_label(a.view(), b.view(), 10);
-        assert_eq!(d.nodes_only_in_replayed, vec!["//lib:extra"]);
+        assert_eq!(d.nodes_only_in_applied, vec!["//lib:extra"]);
         assert_eq!(d.rule_hash_mismatch, vec!["//lib:core"]);
         assert_eq!(
-            d.edges_only_in_replayed,
+            d.edges_only_in_applied,
             vec![("//lib:extra".to_string(), "//lib:core".to_string())]
         );
         assert!(!d.is_empty());

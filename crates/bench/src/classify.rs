@@ -47,34 +47,99 @@ pub enum Side {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
+    /// cambium reports a label because it keeps `select()` branches a
+    /// *configured* Bazel query resolves away.
+    ///
+    /// An over-approximation, and the expected one: all three tools work on
+    /// the unconfigured target graph, but the configured query the other two
+    /// can fall back to resolves a `select()` to one branch. Nothing to do.
     CambiumExtraSelect,
-    /// An external repository this target names moved.
+    /// cambium reached the label from an external repository whose
+    /// *declaration* moved.
+    ///
+    /// A `MODULE.bazel` edit, or a main-repo file a repository rule is built
+    /// from; every main-repo target naming a label in that repository is then
+    /// direct. An over-approximation: cambium's graph stops at the main
+    /// repository's edge, so it cannot ask whether the repository's *contents*
+    /// actually changed, while the hash-diffing tools fetch and hash it and
+    /// see the targets unchanged. On `bazel/bazel`'s `5c47f233..bfd201d1` one
+    /// `maven.install` version bump plus the `//:MODULE.bazel` that
+    /// `//:extensions.bzl` reads through `ctx.path(Label(...))` put 69 such
+    /// targets in cambium's answer. Ranked ahead of [`Class::CambiumExtraSelect`]:
+    /// when it holds, the repository is *why* the target is in the answer.
     CambiumExtraExternalRepo,
+    /// cambium reports a label reachable only through an implicit
+    /// (`$`-prefixed, rule-supplied) attribute edge the other tool does not
+    /// walk. An over-approximation.
     CambiumExtraImplicit,
+    /// The two tools' canonical rules differ only in `visibility` or `tags`,
+    /// which cambium's hash ignores on purpose. An over-approximation.
     CambiumExtraVisibility,
-    /// A `.bzl` edit marked the whole loading package direct, but this
-    /// target's own rule did not move.
+    /// The target's own rule proto is byte-identical at both revisions, but a
+    /// `.bzl` its package loads changed, so cambium marked the whole loading
+    /// package direct.
+    ///
+    /// An over-approximation, and on a real subject the largest cambium-side
+    /// class.
     CambiumExtraBzl,
     /// A dependency of this target was deleted between base and head.
+    ///
+    /// Not an approximation: a target whose dep vanished really may build
+    /// differently.
     CambiumExtraDeleted,
-    /// Reached from a changed `BUILD` file consumed as a source by a
+    /// Reached from a changed `BUILD` file consumed as a *source* by a
     /// `glob`bing filegroup.
+    ///
+    /// Not an approximation either: the file's content genuinely is an input
+    /// to that filegroup.
     CambiumExtraBuildGlob,
+    /// bazel-diff reports a changed path with no consumer in cambium's head
+    /// index — a file outside any package, or a hash-only artifact. It hashes
+    /// source content cambium's graph does not name.
     BazeldiffExtraContent,
+    /// The disagreement is confined to `@external//...` labels, which the
+    /// tools canonicalise differently (`@ext//:x` against `@@ext~//:x`).
+    /// Canonicalisation only, not a graph difference.
     BazeldiffExtraExternal,
     /// A `//...` label the tool reported only because an external
     /// dependency of it hashed differently between the two runs.
+    ///
+    /// Its own rule (modulo `visibility`/`tags`), its source inputs and its
+    /// transitive `//...` dependencies are all unchanged, and it depends on
+    /// something external. bazel-diff's digests include the external graph,
+    /// and on `bazel/bazel` under `--keep_going` how much of that graph loads
+    /// varies between invocations. All four conditions must hold; drop any one
+    /// and the label stays [`Class::CambiumMissing`].
     BazeldiffExtraExternalContent,
     /// A `//...` label whose rule differs between the tool's two checkouts
     /// only in the absolute workspace path it embeds.
+    ///
+    /// A harness artifact: the other tools hash base in a second git worktree
+    /// while cambium carries its base index forward inside one checkout, so a
+    /// rule that bakes the workspace root into `args`/`cmd`/`env` reads as
+    /// changed to them and unchanged to cambium. All three conditions — rule
+    /// identical once normalised, no changed source input, no affected
+    /// dependency — must hold.
     BazeldiffExtraWorkspacePath,
     /// The rule did not move, its inputs did not move, and nothing it depends
     /// on is affected — but the `BUILD` file it lives in changed, so its line
     /// number did.
+    ///
+    /// bazel-diff hashes `generator_location`; cambium drops it from the
+    /// canonical rule on purpose (`cambium_proto::RULE_HASH_VERSION`, see
+    /// `docs/STORE.md`), and Tango ignores it too. Seen on `apollo`, where a
+    /// `BUILD` reshuffle pushed two unrelated `filegroup`s down the file. The
+    /// source-input condition is checked first, so the `glob(["**"])`
+    /// filegroup that really does eat its own `BUILD` file never lands here.
     BazeldiffExtraLineShift,
-    /// A failure: the other tool found something cambium missed.
+    /// A failure: a tool or an oracle found something cambium missed.
+    ///
+    /// This is unsoundness, and it is the one thing the benchmark exists to
+    /// catch. There is no version of it that is acceptable.
     CambiumMissing,
     /// A failure: no predicate explained the disagreement.
+    ///
+    /// It needs a new class or a real bug fix before it can be waved through.
     Unclassified,
 }
 

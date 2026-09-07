@@ -96,7 +96,7 @@ impl SubjectResults {
         }
     }
 
-    pub fn with_replay(mut self, r: Option<HistoryResult>) -> Self {
+    pub fn with_history(mut self, r: Option<HistoryResult>) -> Self {
         self.history = r;
         self
     }
@@ -302,9 +302,9 @@ pub struct TopRow {
     pub cold_build_s: f64,
     /// Over non-global commits only — the commits an updater actually works
     /// on; a global answers `//...` without walking anything.
-    pub replay_p50_ms: u64,
-    pub replay_p90_ms: u64,
-    pub replay_commits: usize,
+    pub history_p50_ms: u64,
+    pub history_p90_ms: u64,
+    pub history_commits: usize,
     pub globals: usize,
     pub global_reasons: Vec<(String, usize)>,
     pub change_sets: usize,
@@ -465,9 +465,9 @@ pub fn top_row(r: &SubjectResults) -> TopRow {
         repo: r.id.clone(),
         pin: r.pin(),
         bazel_used: r.bazel_used(),
-        replay_p50_ms: non_global.p50,
-        replay_p90_ms: non_global.p90,
-        replay_commits: non_global.n,
+        history_p50_ms: non_global.p50,
+        history_p90_ms: non_global.p90,
+        history_commits: non_global.n,
         globals,
         global_reasons: reasons.into_iter().take(3).collect(),
         change_sets: r.change_sets_total(),
@@ -500,11 +500,11 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
         .map(top_row)
         .collect();
     if rows.is_empty() {
-        return "No repository in `bench-results/` has results yet.".to_string();
+        return "No subject in `bench-results/` has results yet.".to_string();
     }
     let mut s = String::new();
     s.push_str(
-        "| repo | pin | Bazel | targets | cold build | history p50/p90 | globals | change_sets | \
+        "| subject | pin | Bazel | targets | cold build | history p50/p90 | globals | change sets | \
          pass/fail | min recall | precision | tool cold p50 vs cambium warm p50 |\n",
     );
     s.push_str("|---|---|---|---:|---:|---:|---|---:|---:|---:|---|---|\n");
@@ -556,8 +556,8 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
             } else {
                 format!("{:.0} s", r.cold_build_s)
             },
-            ms(r.replay_p50_ms),
-            ms(r.replay_p90_ms),
+            ms(r.history_p50_ms),
+            ms(r.history_p90_ms),
             globals,
             r.change_sets,
             format_args!("{} / {}", r.change_sets - r.failures, r.failures),
@@ -567,12 +567,12 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
         ));
     }
     s.push_str(
-        "\nThe tool-vs-cambium column is over **all** compared change_sets, the \
+        "\nThe tool-vs-cambium column is over **all** compared change sets, the \
          ones cambium answered with `//...` included, so the ratio is not an \
-         average over the change_sets cambium is fast on; each repository's section \
+         average over the change sets cambium is fast on; each subject's section \
          breaks it out. History p50/p90 are over **non-global** commits (the ones an updater \
-         actually walks); the per-repo sections give both distributions. \
-         `pass/fail` counts compared change_sets. Precision against a tool is \
+         actually walks); the per-subject sections give both distributions. \
+         `pass/fail` counts compared change sets. Precision against a tool is \
          informational; recall against the `rdeps` oracle is the gate.\n",
     );
     s
@@ -598,17 +598,17 @@ pub fn render_subject_section(r: &SubjectResults, bench: Option<&BenchLegacy>) -
     if r.is_empty() {
         s.push_str(
             "\nNo results yet: neither `history-*.json` nor `changes-*.json` \
-                    was found for this repository.\n",
+                    was found for this subject.\n",
         );
         return s;
     }
     s.push('\n');
 
     if let Some(rep) = &r.history {
-        s.push_str(&render_replay(rep));
+        s.push_str(&render_history(rep));
     } else {
         s.push_str(
-            "_No history for this repository yet; the cold build and \
+            "_No history for this subject yet; the cold build and \
                     updater-latency tables below are omitted._\n\n",
         );
     }
@@ -617,7 +617,7 @@ pub fn render_subject_section(r: &SubjectResults, bench: Option<&BenchLegacy>) -
         s.push_str(&render_compare(r));
     } else {
         s.push_str(
-            "_No three-way comparison for this repository yet: no \
+            "_No comparison for this subject yet: no \
                     `changes-*.json`, so there are no precision, recall or \
                     disagreement numbers._\n\n",
         );
@@ -630,7 +630,7 @@ pub fn render_subject_section(r: &SubjectResults, bench: Option<&BenchLegacy>) -
     s
 }
 
-fn render_replay(rep: &HistoryResult) -> String {
+fn render_history(rep: &HistoryResult) -> String {
     let mut s = String::new();
     let c = &rep.cold;
     s.push_str("#### Cold build\n\n");
@@ -792,7 +792,7 @@ fn render_globals(compares: &[ChangesResult]) -> String {
         return s;
     }
     s.push_str(
-        "| Bazel | change_sets | cambium `//...` | tool | its precise set | \
+        "| Bazel | change sets | cambium `//...` | tool | its precise set | \
          tool cold p50 | cambium cold/warm p50 |\n\
          |---|---:|---:|---|---:|---:|---:|\n",
     );
@@ -827,7 +827,7 @@ fn render_globals(compares: &[ChangesResult]) -> String {
         }
     }
     s.push_str(
-        "\nMeans over the global change_sets. *cambium `//...`* is the number of \
+        "\nMeans over the global change sets. *cambium `//...`* is the number of \
          rule targets `//...` names at head — the answer cambium gave — and \
          *its precise set* is what the tool found on the same change_set. The \
          ratio between them is the over-approximation a global hands the user; \
@@ -848,7 +848,7 @@ fn render_compare(r: &SubjectResults) -> String {
     let change_sets = r.change_sets_total();
     let globals: usize = compares.iter().map(|c| c.summary.globals).sum();
     s.push_str(&format!(
-        "{change_sets} change_sets compared, {} passed, {} failed ({globals} of them \
+        "{change_sets} change sets compared, {} passed, {} failed ({globals} of them \
          global, which pass by construction: `//...` contains every answer. \
          The tools still ran on them — see **Globals** below). Worst \
          oracle recall: **{}**.\n\n",
@@ -857,7 +857,7 @@ fn render_compare(r: &SubjectResults) -> String {
         opt_pct(r.min_recall()),
     ));
 
-    s.push_str("| Bazel | tool | change_sets | passed | precision | min recall |\n");
+    s.push_str("| Bazel | tool | change sets | passed | precision | min recall |\n");
     s.push_str("|---|---|---:|---:|---:|---:|\n");
     for c in compares {
         let ver = compare_bazel(c);
@@ -889,13 +889,13 @@ fn render_compare(r: &SubjectResults) -> String {
     // ---- timings ----
     s.push_str("#### Timings (p50 / p90)\n\n");
     s.push_str(
-        "| Bazel | tool | over | change_sets | cold | warm |\n\
+        "| Bazel | tool | over | change sets | cold | warm |\n\
          |---|---|---|---:|---:|---:|\n",
     );
     for c in compares {
         let ver = compare_bazel(c);
         for name in tool_names(c) {
-            // Per tool, because Tango is capped under the quick profile:
+            // Per tool, because Tango is often capped:
             // a p50 over 10 change sets and one over 50 are different claims and the
             // table has to say which is which.
             for (scope, ran, cold, warm) in [
@@ -954,8 +954,9 @@ fn render_compare(r: &SubjectResults) -> String {
          this history actually waits for. The `{INCREMENTAL_CHANGE_SETS}` rows drop \
          those; they are the rows that belong with the precision and class \
          numbers above, because those are computed over exactly the same \
-         change_sets, but read on their own they flatter cambium — an average over \
-         the change_sets it is fast on. {cold_rebuilds} of the incremental change_sets \
+         change sets, but read on their own they flatter cambium — an average \
+         over the change sets it is fast on. {cold_rebuilds} of the incremental \
+         change sets \
          re-indexed the whole repository (the dirty set was too large to \
          splice), so their *warm* is a cold number under a warm label.\n\n"
     ));
@@ -963,9 +964,9 @@ fn render_compare(r: &SubjectResults) -> String {
         "cambium's *cold* is a full index build from `bazel query //...`; its \
          *warm* is an update against the published baseline, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
-         hashes; Tango has no warm mode, so its cell is `n/a`. *change_sets* is how \
-         many change_sets each tool's distribution is taken over: under the `quick` \
-         profile Tango runs on the first 10 change_sets only, while cambium and \
+         hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is \
+         how many change sets each tool's distribution is taken over: Tango is \
+         often capped (it costs 30-500 s a change set) while cambium and \
          bazel-diff run on all of them.\n\n",
     );
 
@@ -1052,7 +1053,7 @@ fn render_compare(r: &SubjectResults) -> String {
                     if *count == 1 {
                         "change_set"
                     } else {
-                        "change_sets"
+                        "change sets"
                     }
                 ),
                 _ => "no distances reported".to_string(),
@@ -1095,7 +1096,7 @@ fn render_compare(r: &SubjectResults) -> String {
     if with_oracle == 0 {
         s.push_str("No change_set ran the oracle (`--oracle-sample 0`, or every change_set was global).\n\n");
     } else {
-        s.push_str("| change_sets with an oracle | roots sampled | roots skipped | partial change_sets | partial batches | missing labels | of those, external route | external labels not counted |\n");
+        s.push_str("| change sets with an oracle | roots sampled | roots skipped | partial change sets | partial batches | missing labels | of those, external route | external labels not counted |\n");
         s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
             "| {with_oracle} | {roots} | {skipped_roots} | {partial_change_sets} | {partial_batches} | {missing} | {external_route} | {missing_external} |\n\n"
@@ -1128,7 +1129,7 @@ fn render_compare(r: &SubjectResults) -> String {
         s.push_str("No change_set changed a `.bzl` file.\n\n");
     } else {
         s.push_str(
-            "| change_sets with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
+            "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
         );
         s.push_str("|---:|---:|---:|---:|\n");
         s.push_str(&format!(
@@ -1144,7 +1145,7 @@ fn render_compare(r: &SubjectResults) -> String {
              packages under `cambium_missing_bzl_closure`. A *partial* answer \
              is a Sky Query that exited 3 — the very failure mode the static \
              closure removes, since `rbuildfiles` loads every external \
-             repository and the closure loads none.\n\n",
+             subject and the closure loads none.\n\n",
         );
     }
 
@@ -1170,8 +1171,8 @@ pub fn render_bench_section(rows: &[BenchLegacy], chart: Option<&str>) -> String
         "These are *synthetic* graphs (`cambi bench sweep --stage \
          legacy_bazel_diff`), not the real subjects above: cambium and bazel-diff on \
          the same generated workspace, the same change, and a `bazel` shim that \
-         history runs a recorded query, so what is measured is each tool's own work \
-         rather than a Bazel server. See [BENCH.md](BENCH.md#legacy_bazel_diff-like-for-like-against-bazel-diff).\n\n",
+         replays a recorded query, so what is measured is each tool's own work \
+         rather than a Bazel server. See [METHODOLOGY.md](METHODOLOGY.md#engine-stages).\n\n",
     );
     if rows.is_empty() {
         s.push_str("_No `bench legacy` sweep recorded yet._\n");
@@ -1483,7 +1484,7 @@ mod tests {
 
     fn bazel_results() -> SubjectResults {
         SubjectResults::new("bazel")
-            .with_replay(Some(history("bazel 9.0.0")))
+            .with_history(Some(history("bazel 9.0.0")))
             .with_compares(vec![compare()])
     }
 
@@ -1550,7 +1551,7 @@ mod tests {
         let s = render_subject_section(&bazel_results(), None);
         assert!(
             s.contains("| `7.4.1` | **cambium** | all change sets | 2 |"),
-            "the all-change_sets row covers the global too: {s}"
+            "the all-change-sets row covers the global too: {s}"
         );
         assert!(
             s.contains("| `7.4.1` | **cambium** | incremental | 1 |"),
@@ -1570,7 +1571,7 @@ mod tests {
         );
         assert!(
             s.contains("1 where cambium fell back to `//...`"),
-            "and says how many change_sets that is: {s}"
+            "and says how many change sets that is: {s}"
         );
     }
 
@@ -1602,11 +1603,11 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_with_only_a_replay_still_renders() {
-        let r = SubjectResults::new("envoy").with_replay(Some(history("")));
+    fn a_subject_with_only_a_history_still_renders() {
+        let r = SubjectResults::new("envoy").with_history(Some(history("")));
         let s = render_subject_section(&r, None);
         assert!(s.contains("#### Cold build"), "{s}");
-        assert!(s.contains("No three-way comparison"), "{s}");
+        assert!(s.contains("No comparison for this subject"), "{s}");
         assert!(
             s.contains("- Bazel: n/a"),
             "an unrecorded version is n/a: {s}"
@@ -1614,21 +1615,21 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_with_only_a_comparison_still_renders() {
+    fn a_subject_with_only_a_comparison_still_renders() {
         let r = SubjectResults::new("bazel").with_compares(vec![compare()]);
         let s = render_subject_section(&r, None);
-        assert!(s.contains("No history for this repository yet"), "{s}");
+        assert!(s.contains("No history for this subject yet"), "{s}");
         assert!(s.contains("#### Three-way comparison"), "{s}");
     }
 
     #[test]
-    fn a_repo_with_no_results_says_so_rather_than_panicking() {
+    fn a_subject_with_no_results_says_so_rather_than_panicking() {
         let r = SubjectResults::new("xla");
         let s = render_subject_section(&r, None);
         assert!(s.contains("No results yet"), "{s}");
         assert_eq!(
             render_top_table(std::slice::from_ref(&r)),
-            "No repository in `bench-results/` has results yet."
+            "No subject in `bench-results/` has results yet."
         );
     }
 
@@ -1668,7 +1669,7 @@ mod tests {
         );
         assert_eq!(row.failures, 0);
         assert_eq!(row.bazel_used, "7.4.1, 9.0.0");
-        assert_eq!(row.replay_p50_ms, 80, "non-global commits only");
+        assert_eq!(row.history_p50_ms, 80, "non-global commits only");
         assert_eq!(row.globals, 1);
         let t = render_top_table(&[bazel_results()]);
         assert!(t.contains("[bazel](#bazel)"), "{t}");

@@ -21,7 +21,8 @@ and every workload accepts either.
   another Bazel major. Today: `bazel`, `envoy`, `sourcegraph`, `apollo`, with
   `xla` and `tensorflow` run only on the benchmark machine.
 - *Synthetic*: a generated graph from a preset, named `synth:<preset>`
-  (`synth:medium` is 4 500 packages and 250 000 targets). It is emitted as a
+  (`synth:medium` is 4 551 packages and 50 167 rule targets, 250 507 index
+  nodes once source files are counted). It is emitted as a
   real Bazel workspace with a git history when a workload needs one, so the
   same commands run on it as on a real subject. Synthetic subjects are cheap,
   deterministic and scale to sizes no real subject reaches; they say nothing
@@ -156,7 +157,7 @@ from every tool's answer so that only rule targets are compared.
 ## Disagreement taxonomy
 
 Every disagreement between cambium and a tool, or between cambium and an
-oracle, is filed under exactly one class (`crates/compare/src/classify.rs`).
+oracle, is filed under exactly one class (`crates/bench/src/classify.rs`).
 The three that fail a run are marked.
 
 | class | meaning |
@@ -201,8 +202,68 @@ cambi bench report              regenerate RESULTS.md from bench-results/
 `<subject>` is a name from `subject_repos.toml` or `synth:<preset>`. Every
 workload takes `--tools`, `--oracle`, `--kind` and a size (`--commits`,
 `--change-sets`) so a run can be exactly as large as the question needs.
-CI's per-pull-request job is `cambi bench changes synth:small`, the same
-command a person runs.
+CI's per-pull-request job is `cambi bench changes synth:small --tools
+cambium,bazel-diff`, the same command a person runs. Tango is left out of it
+only because it costs 30-500 s a change set; the weekly job on the real
+subjects runs all three.
+
+## Running it
+
+```console
+$ tools/bazel-diff/fetch.sh          # builds bazel-diff-rust at its pin, once
+$ tools/tango/fetch.sh               # builds tango-cli at its pin, once
+$ cambi bench subjects fetch bazel   # mirror and check out the pin
+$ cambi bench subjects build bazel   # one cold `bazel query //...`
+$ cambi bench changes bazel --quick
+```
+
+Both tool scripts cache their binaries under
+`~/.cache/cambium/{bazel-diff,tango}` (override with `$CAMBIUM_BAZEL_DIFF_DIR`
+/ `$CAMBIUM_TANGO_DIR`). A run uses whichever of the two are installed and says
+so when one is missing, rather than refusing to compare the other.
+
+Mirrors, worktrees, per-subject stores, emitted synthetic workspaces and a
+*shared* Bazel `repository_cache` and `disk_cache` live under
+`$CAMBIUM_SUBJECTS_DIR`, default `~/.cache/cambium/subjects`. Sharing the
+caches is what stops the subjects redownloading each other's externals.
+
+`--quick` is 50 commits, 50 change sets and Tango on the first 10 — a bounded,
+deterministic slice that finishes on a laptop, and a subset of what a full run
+selects at the same pin and seed. It sets three flags and nothing else: the
+results land in the same tree, and the file records the sizes that produced
+them.
+
+The real subjects are large. Budget, per concurrent subject: 16+ cores (Bazel's
+own parallelism dominates), 64+ GB of RAM (`envoy` and `xla` load a large query
+result into one server process), and 500+ GB of disk. `bazel` is the smallest
+and cleanest entry specifically so that a from-scratch contributor can exercise
+the whole pipeline on a laptop.
+
+## Engine stages
+
+Underneath the workloads sit the in-memory stage benchmarks, which need no
+Bazel and so can be measured at sizes no real subject reaches:
+`build_index`, `load_index`, `classify`, `parse_proto`, `rule_hash`, `splice`,
+`reverse_rebuild`, `walk` / `walk_hub`, `e2e_memory`, `e2e_materialize`, and
+`legacy_bazel_diff`.
+
+```console
+$ cambi bench stages synth:medium
+$ cambi bench sweep  synth:medium --stage walk --param targets --values 1e4,1e6
+$ cambi bench regress a.json b.json --threshold 15
+```
+
+Results carry a machine fingerprint, and `bench regress` refuses to compare
+across machines rather than reporting noise.
+
+`legacy_bazel_diff` is the like-for-like stage: it emits the graph as two real
+workspaces, writes the `streamed_proto` dump `bazel query` would produce for
+each, and puts a `bazel` shim in front of both tools that replays those bytes.
+That takes the Bazel server out of the measurement, so what is left is each
+tool's own work — the same replay technique bazel-diff's own perf gate uses.
+The stage fails outright if bazel-diff reports a label cambium does not; the
+other direction is the `select()` over-approximation above, and is reported.
+Its sweep draws the headline chart (`bench-legacy.svg`).
 
 ## Choosing what to run
 

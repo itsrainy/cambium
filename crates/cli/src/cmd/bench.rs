@@ -63,7 +63,7 @@ pub enum Args {
     /// time to an index built at the start of the window.
     ///
     /// cambium-only: the other tools keep no state between runs, so there is
-    /// nothing to replay. It yields the per-commit cost, the global rate, the
+    /// no state to carry. It yields the per-commit cost, the global rate, the
     /// cold-rebuild rate, and the rebuild oracle.
     History {
         /// A name from subject_repos.toml, or synth:<preset>.
@@ -1156,7 +1156,7 @@ fn collect_subjects(
             }
         }
         let r = cambium_bench::SubjectResults::new(&entry.id)
-            .with_replay(history)
+            .with_history(history)
             .with_compares(compares);
         if !r.is_empty() {
             out.push(r);
@@ -1179,7 +1179,7 @@ fn collect_subjects(
         }
         let (history, compares) = read_results(&dir)?;
         let r = cambium_bench::SubjectResults::new(id)
-            .with_replay(history)
+            .with_history(history)
             .with_compares(compares);
         if !r.is_empty() {
             out.push(r);
@@ -1256,36 +1256,25 @@ fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_bench::BenchL
     Ok(rows)
 }
 
-/// Every `history-*.json` and `compare-*.json` in one results directory.
+/// The `history-*.json` and `changes-*.json` under one subject's results.
 ///
-/// More than one history can be present (a repository whose `bazel_version` was
-/// changed leaves the older file behind); the newest by name wins for the
-/// section's history tables, while every compare is rendered.
+/// They live in the workload directory that produced them —
+/// `<subject>/history/` and `<subject>/changes/` — so this looks in both and
+/// nowhere else. More than one history can be present (a subject whose
+/// `bazel_version` changed leaves the older file behind); the newest by name
+/// wins for the section's history tables, while every change-set result is
+/// rendered.
 fn read_results(
     dir: &std::path::Path,
 ) -> Result<(
     Option<cambium_bench::HistoryResult>,
     Vec<cambium_bench::ChangesResult>,
 )> {
-    let mut replays: Vec<PathBuf> = Vec::new();
-    let mut compares: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".json") {
-            continue;
-        }
-        if name.starts_with("history-") {
-            replays.push(path);
-        } else if name.starts_with("compare-") {
-            compares.push(path);
-        }
-    }
-    replays.sort();
+    let mut histories = json_files(&dir.join("history"), "history-");
+    let mut compares = json_files(&dir.join("changes"), "changes-");
+    histories.sort();
     compares.sort();
-    let history = replays
+    let history = histories
         .last()
         .map(|p| {
             cambium_bench::HistoryResult::read(p)
@@ -1300,6 +1289,21 @@ fn read_results(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((history, compares))
+}
+
+/// The `<prefix>*.json` files in `dir`, if it is one.
+fn json_files(dir: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
+        })
+        .collect()
 }
 
 /// The packages of the built index's busiest targets: an edit anywhere in one

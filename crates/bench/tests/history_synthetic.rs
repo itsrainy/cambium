@@ -86,7 +86,7 @@ fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
 }
 
 #[test]
-fn replays_a_history_and_the_oracle_holds() {
+fn a_history_runs_and_the_rebuild_oracle_holds() {
     let f = fixture(8, "typical-pr");
     let commits = f.driver.commits.clone();
     let r = history(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
@@ -129,7 +129,7 @@ fn replays_a_history_and_the_oracle_holds() {
 }
 
 #[test]
-fn a_replay_resumes_from_its_last_published_index() {
+fn a_history_resumes_from_its_last_published_index() {
     let f = fixture(6, "typical-pr");
     let commits = f.driver.commits.clone();
     // Run the first half only, as a killed run would have.

@@ -89,12 +89,13 @@ $ cambi index owner     <file> <path>...
 $ cambi index targets   <file> <package> [--kind rule]
 $ cambi index stats     <file>
 $ cambi index verify    <file> --against-bazel
-$ cambi bench run|sweep|legacy|compare|bazel
-$ cambi corpus fetch|build|replay|pairs|compare|report|all <id>
-                   [--bazel-version v] [--manifest subject_repos.toml] [--corpus-dir d]
-$ cambi corpus compare <id> [--pairs f.json] [--kind adjacent|pr|stress] [--cap n]
-                   [--oracle-sample k] [--bazel-diff rust|kotlin|none] [--no-tango]
-                   [--producers bazel-diff-rust,tango]
+$ cambi bench subjects list|fetch|build [<subject>]
+$ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
+$ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
+                   [--tools cambium,bazel-diff,tango] [--oracle rdeps,load]
+$ cambi bench stages|sweep <subject>
+$ cambi bench regress <a.json> <b.json>
+$ cambi bench report  [<subject>]
 $ cambi synth emit-bazel|describe|presets
 $ cambi config
 ```
@@ -321,23 +322,22 @@ $ cambi baseline build --publish && cambi baseline gc
 
 ## Benchmarks
 
-`cambi bench run` and `cambi bench sweep` measure each stage of the pipeline
-against synthetic graphs at sizes no real repository reaches, and
-`cambi bench legacy` puts cambium and bazel-diff on the identical graph and
-change — a `bazel` shim replays the graph dump the generator already produces,
-so the measured time is each tool's own work rather than a Bazel server's, and
-the two label sets have to agree. See [docs/BENCH.md](docs/BENCH.md).
+`cambi bench` runs cambium, bazel-diff and Tango on the same *subject* — an
+open-source Bazel monorepo from `subject_repos.toml` (bazel, envoy,
+sourcegraph, apollo, xla, tensorflow), or a generated graph named
+`synth:<preset>` and emitted as a real workspace with a real history. The same
+commands run on either.
 
-## Validation against real repositories
+Two workloads: `bench history` applies a subject's last N first-parent commits
+one at a time and ends by diffing the result against a cold rebuild, and
+`bench changes` runs every tool over `(base, head)` change sets shaped like the
+question a CI job asks, scoring recall against a `bazel query rdeps` oracle and
+filing every disagreement under a named class. `bench stages` and `bench sweep`
+time each in-memory stage at sizes no real repository reaches.
 
-`cambi bench legacy` is a like-for-like comparison against bazel-diff, but it
-runs on a synthetic graph. The corpus suite (`cambi corpus ...`,
-`crates/corpus`, `crates/compare`) runs the same kind of three-way comparison
-— cambium vs bazel-diff vs Tango vs a from-scratch `rdeps` oracle — against
-real Bazel monorepos (bazel, envoy, sourcegraph, apollo, xla, tensorflow), plus
-an updater replay over each repository's real commit history. See
-[docs/CORPUS.md](docs/CORPUS.md) for what it proves, how to run it locally,
-the disagreement classes, and the current results.
+[docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
+measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
+numbers.
 
 ## Layout
 
@@ -350,7 +350,7 @@ crates/
   classify/        path -> package, invalidator rules, dirty-set computation
   engine/          a run: load, dirty, query, splice, direct set, walk
   synth/           synthetic graph generator, mutations, Bazel repo emitter
-  bench/           stage benchmarks, sweeps, regression gating, bazel-diff comparison
+  bench/           the benchmark: subjects, tools, oracles, workloads, report
   cli/             the `cambi` binary
 ```
 
@@ -438,9 +438,9 @@ also what removed the last Bazel call from the dirty-set step. It used to be
 loads every external repository: on a machine that cannot fetch one, it exits 3
 with a partial answer, and a partial answer there can be missing exactly the
 package that loads the changed file — so the run had to invalidate everything.
-That fired on 5 of 150 `bazel/bazel` commits in the corpus. The comparison
-suite still makes the call, as an oracle over the static closure
-(`crates/compare/src/bzloracle.rs`).
+That fired on 5 of 150 `bazel/bazel` commits. The benchmark still makes the
+call, as the `load` oracle over the static closure
+(`crates/bench/src/oracles/load.rs`).
 
 The `edit bzl` end-to-end scenario pins this: it edits a constant nothing uses,
 asserts the whole downstream closure is reported, and asserts that every one of
