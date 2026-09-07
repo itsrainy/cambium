@@ -22,6 +22,7 @@ pub mod csr;
 pub mod data;
 pub mod format;
 pub mod label;
+pub mod loads;
 pub mod overlay;
 pub mod space;
 pub mod strtab;
@@ -29,7 +30,7 @@ pub mod view;
 pub mod walk;
 
 pub use builder::{
-    new_lineage, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
+    new_lineage, BzlClosure, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
 };
 pub use csr::{Csr, CsrRef};
 pub use data::{
@@ -39,6 +40,7 @@ pub use format::{
     commit_pointer_key, index_file_name, index_key, parse_commit_pointer_key, parse_index_key,
     temp_suffix, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION,
 };
+pub use loads::{FileText, Load, LoadGraph, RepoMapping};
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
 pub use view::GraphView;

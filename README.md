@@ -48,7 +48,7 @@ whose inputs did not change. A run is:
 | step | cost |
 |---|---|
 | load index | O(1) mmap, plus an O(labels) map only where a label lookup is needed |
-| dirty set | O(changed files × path depth), plus one `rbuildfiles` call if a `.bzl` changed |
+| dirty set | O(changed files × path depth), plus O(consumers) per changed `.bzl` from the stored load closure — no Bazel call |
 | query | O(targets in dirty packages) of Bazel loading time |
 | splice | O(edges) memcpy |
 | direct set | O(dirty targets + changed files) |
@@ -155,7 +155,7 @@ versioned contract. Every JSON document carries the version it was written
 against:
 
 ```json
-{ "schema": 3, "base": "...", "head": "...", ... }
+{ "schema": 4, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -187,7 +187,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -206,6 +206,7 @@ on the same terms.
 | 1 | the first published contract |
 | 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
+| 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did
@@ -316,7 +317,7 @@ the disagreement classes, and the current results.
 crates/
   index/           CSR graph, interning, on-disk format, mmap loader, splice
   cambium-proto/   vendored build.proto, streamed_proto reader, rule hashing
-  bazel/           spawning bazel: query, rbuildfiles, workspace detection
+  bazel/           spawning bazel: query, repo mapping, workspace detection
   diff/            git diff --name-status parsing and revision plumbing
   classify/        path -> package, invalidator rules, dirty-set computation
   engine/          a run: load, dirty, query, splice, direct set, walk
@@ -395,13 +396,23 @@ package's `.bzl` load closure changed, every rule in it is direct regardless of
 its own hash. That branch is load-bearing, not a nicety: a `.bzl` edit that
 changes a rule implementation without changing any BUILD attribute leaves every
 rule proto in the loading packages byte-identical, so every rule hash matches
-and nothing would be reported. cambium takes that branch on `rbuildfiles`
-membership instead — the packages `rbuildfiles` names are exactly the packages
-whose closure hash would have moved — so the behaviour is the spec's, and the
-stored hash would be a second, redundant answer to a question already answered.
-Computing it statically needs a Starlark load-graph index, which the spec lists
-as a v2 candidate and which would let us skip the `rbuildfiles` call on cold
-Bazel servers.
+and nothing would be reported. cambium takes that branch on **load-closure
+membership** instead: the index stores, per `.bzl` file, the packages whose
+BUILD file transitively loads it (`crates/index/src/loads.rs`), and those are
+exactly the packages whose closure hash would have moved. A hash could only say
+*that* something moved; the stored closure says *which packages*, which is the
+question the direct set actually asks, so the hash stays a second, redundant
+answer and is written as zero.
+
+The closure is computed by scanning `load()` statements at index time, which is
+also what removed the last Bazel call from the dirty-set step. It used to be
+`rbuildfiles`, which needs Sky Query (`--universe_scope=//...`) and therefore
+loads every external repository: on a machine that cannot fetch one, it exits 3
+with a partial answer, and a partial answer there can be missing exactly the
+package that loads the changed file — so the run had to invalidate everything.
+That fired on 5 of 150 `bazel/bazel` commits in the corpus. The comparison
+suite still makes the call, as an oracle over the static closure
+(`crates/compare/src/bzloracle.rs`).
 
 The `edit bzl` end-to-end scenario pins this: it edits a constant nothing uses,
 asserts the whole downstream closure is reported, and asserts that every one of

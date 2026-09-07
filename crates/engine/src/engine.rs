@@ -251,6 +251,10 @@ impl Engine {
             b.set_partial(e.count, e.packages.clone());
         }
         b.apply_packages(&u.updates);
+        let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
+        if let Some(c) = rescan_closure(q, None, &packages, &BTreeSet::new(), &BTreeSet::new()) {
+            b.set_bzl_closure(c);
+        }
         Ok(b.finish(commit))
     }
 
@@ -637,68 +641,71 @@ impl Engine {
             &cambium_classify::IndexConsumers(base_view),
         );
 
-        // `.bzl` files are not package inputs by path; Bazel resolves them.
+        // ---- changed `.bzl` files ----
+        //
+        // Answered from the index's static load closure (see
+        // `cambium_index::loads`), not from Bazel. The `rbuildfiles` call this
+        // replaces needed Sky Query, which loads every external repository and
+        // therefore fails with exit 3 on any machine that cannot fetch one of
+        // them — and a partial answer there is unusable, so the run had to
+        // invalidate everything. The closure is computed at index time from the
+        // text of the BUILD and `.bzl` files, so this path has no Bazel process
+        // in it and no failure mode: one binary search and one CSR row per
+        // changed file.
         let mut bzl_dirty: BTreeSet<String> = BTreeSet::new();
         if !dirty.global && !dirty.changed_bzl.is_empty() {
             let paths: Vec<String> = dirty.changed_bzl.iter().cloned().collect();
-            tracing::debug!(
-                count = paths.len(),
-                "resolving changed .bzl files with rbuildfiles"
-            );
-            stats.rbuildfiles_called = true;
-            match querier.rbuildfiles(&paths) {
-                // A `.bzl` whose only loader is the workspace file — a module
-                // extension or `use_repo_rule` in `MODULE.bazel`, a `load()` in
-                // `WORKSPACE` — defines repository rules. Changing it can
-                // change the contents of an external repository, and so every
-                // target that depends on one; none of that is in the main
-                // tree's diff or in cambium's index, so there is no package
-                // set that covers it. `rbuildfiles` says so by naming the
-                // external repository (`@my_repo//:BUILD`) or the
-                // `//external:WORKSPACE` pseudo-package rather than a main-repo
-                // package. Sound answer: global.
-                //
-                // The converse — an empty answer — stays local, and that is
-                // sound because Bazel never answers empty for a
-                // repository-rule `.bzl`: on 9.2.0, 8.5.1 and 7.4.1, in both
-                // bzlmod and WORKSPACE mode, such a file always comes back
-                // naming at least the external repository it defines. Only a
-                // `.bzl` that nothing loads at all is empty, and a file
-                // nothing loads cannot change any target. See
-                // `cambium_bazel::Rbuildfiles` for the measurements.
-                Ok(r) if !r.workspace_level.is_empty() => {
+            if !base_view.bzl_closure {
+                // An index built by a row source that could not read the tree.
+                // "No consumers" and "we never looked" are the same empty
+                // table, and only one of them is safe to act on.
+                tracing::warn!(
+                    count = paths.len(),
+                    "the base index carries no static .bzl load closure; treating the change as global"
+                );
+                dirty.global = true;
+                dirty.global_reason = Some(no_closure_reason(&paths));
+            } else {
+                let mut workspace_level: Vec<String> = Vec::new();
+                for path in &paths {
+                    // A `.bzl` the closure does not know is loaded by nothing:
+                    // a dead file, or one added by this very commit (in which
+                    // case whatever BUILD file started loading it changed too,
+                    // and that dirties the package on its own).
+                    let Some(id) = base_view.bzl_id(path) else {
+                        tracing::debug!(%path, "no package or workspace file loads this .bzl");
+                        continue;
+                    };
+                    // Reachable from MODULE.bazel/WORKSPACE: it can define
+                    // repository rules, whose output is not in the index at
+                    // all. Same escalation the `rbuildfiles` path made when it
+                    // saw an external repository among the loaders.
+                    if base_view.bzl_in_workspace(id) {
+                        workspace_level.push(path.clone());
+                    }
+                    for &p in base_view.bzl_consumers(id) {
+                        if base_view.package_tombstoned(p) {
+                            continue;
+                        }
+                        let pkg = base_view.package_name(p).to_string();
+                        bzl_dirty.insert(pkg.clone());
+                        dirty.dirty.insert(pkg);
+                    }
+                }
+                stats.bzl_closure_hits = bzl_dirty.len();
+                tracing::debug!(
+                    changed = paths.len(),
+                    packages = bzl_dirty.len(),
+                    "resolved changed .bzl files from the static load closure"
+                );
+                if !workspace_level.is_empty() {
                     tracing::warn!(
-                        loaders = ?r.workspace_level,
+                        files = ?workspace_level,
                         "a changed .bzl is loaded outside any package; treating the change as global"
                     );
                     dirty.global = true;
-                    dirty.global_reason = Some(workspace_level_reason(&paths, &r.workspace_level));
+                    dirty.global_reason = Some(workspace_level_reason(&workspace_level));
                 }
-                Ok(r) => {
-                    for p in r.packages {
-                        bzl_dirty.insert(p.clone());
-                        dirty.dirty.insert(p);
-                    }
-                }
-                // Sky Query loads the whole universe, external repositories
-                // included, so on a machine where some of those cannot be
-                // fetched it finishes with errors (exit 3) even though the
-                // package query itself is fine. The rbuildfiles answer is
-                // then incomplete, and the only sound move is to treat the
-                // commit as global: over-approximate rather than miss a
-                // package that loads the changed .bzl.
-                Err(EngineError::Bazel(cambium_bazel::BazelError::Partial { stderr, .. })) => {
-                    tracing::warn!(
-                        stderr = %stderr,
-                        "rbuildfiles finished with errors; treating the change as global"
-                    );
-                    dirty.global = true;
-                    dirty.global_reason = Some(
-                        "rbuildfiles finished with errors under --keep_going (bazel exit 3)"
-                            .to_string(),
-                    );
-                }
-                Err(e) => return Err(e),
             }
         }
         // A deleted `BUILD` does not always delete the package. `bazel/bazel`
@@ -763,6 +770,19 @@ impl Engine {
         // ---- splice ----
         let mut builder = IndexBuilder::from_view(base_view);
         builder.set_config_hash(self.cfg.hash());
+        // Only the materialised path: an overlay is never published, and the
+        // run that produced it read the closure it needed out of the base.
+        if req.materialize {
+            if let Some(c) = rescan_closure(
+                querier,
+                builder.take_bzl_closure(),
+                &to_query,
+                &dirty.changed_bzl,
+                &dirty.deleted_packages,
+            ) {
+                builder.set_bzl_closure(c);
+            }
+        }
         if !base_view.bazel_version.is_empty() {
             builder.set_bazel_version(base_view.bazel_version.to_string());
         }
@@ -888,8 +908,8 @@ fn derive_direct<V: GraphView + ?Sized>(
     for pd in &splice.packages {
         if bzl_dirty.contains(&pd.package) {
             // Spec 6.7's "bzl closure hash changed" branch, keyed on
-            // `rbuildfiles` membership instead of a stored hash, and
-            // load-bearing rather than an optimisation.
+            // membership of the stored load closure instead of a stored hash,
+            // and load-bearing rather than an optimisation.
             //
             // A `.bzl` edit that changes a rule implementation without changing
             // any BUILD attribute leaves every rule proto in the loading
@@ -899,8 +919,9 @@ fn derive_direct<V: GraphView + ?Sized>(
             // is empty. Marking every rule in the package direct regardless of
             // its hash is the only thing that catches it, and
             // `Packages::bzl_closure_hash` is written as zero for exactly that
-            // reason: `rbuildfiles` names the same set the hash comparison
-            // would have. (Covered by the `edit bzl` end-to-end scenario, which
+            // reason: the closure names the same set the hash comparison would
+            // have, and names *which* packages, which a hash cannot.
+            // (Covered by the `edit bzl` end-to-end scenario, which
             // asserts this is *why* those targets are reported.)
             for &id in &pd.current {
                 if view.is_rule(id) {
@@ -1108,19 +1129,71 @@ pub fn kind_histogram(v: IndexRef<'_>) -> HashMap<&'static str, u32> {
     h
 }
 
+/// Recomputes the static `.bzl` load closure for the packages a run touched.
+///
+/// `prior` is the base index's closure, carried through the splice: every
+/// package that was not re-queried keeps the row it had, because nothing that
+/// could have moved it is in this diff. What does get recomputed:
+///
+/// - every changed `.bzl` is invalidated, so it is re-read rather than
+///   answered from the memoised parse;
+/// - every re-queried package has its BUILD file re-scanned and its closure
+///   rebuilt (a package is re-queried precisely when its BUILD file, or the
+///   files it owns, moved — which is when its loads can have changed);
+/// - a deleted package's closure goes with it;
+/// - the workspace closure is rebuilt, since a `.bzl` can move into or out of
+///   it without `MODULE.bazel` changing (`MODULE.bazel` itself is an
+///   invalidator, so that case never reaches here).
+///
+/// Returns `None` when the row source cannot read the tree, which leaves the
+/// index without a closure and makes the next `.bzl` change global.
+fn rescan_closure(
+    querier: &dyn PackageQuerier,
+    prior: Option<cambium_index::BzlClosure>,
+    packages: &[String],
+    changed_bzl: &BTreeSet<String>,
+    deleted: &BTreeSet<String>,
+) -> Option<cambium_index::BzlClosure> {
+    if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
+        return prior;
+    }
+    let src = querier.load_source()?;
+    let mapping = querier.repo_mapping();
+    let mut c = prior.unwrap_or_default();
+    for p in changed_bzl {
+        c.graph.invalidate(p);
+    }
+    for p in deleted {
+        c.packages.remove(p);
+    }
+    for p in packages {
+        let ids = c.graph.package_closure(p, src, &mapping);
+        c.packages.insert(p.clone(), ids);
+    }
+    c.workspace = c.graph.workspace_closure(src, &mapping);
+    Some(c)
+}
+
 /// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
-fn workspace_level_reason(paths: &[String], loaders: &[String]) -> String {
+///
+/// The wording is deliberately the one the `rbuildfiles` path used, so that the
+/// corpus's reason histogram is comparable across the change.
+fn workspace_level_reason(paths: &[String]) -> String {
     let what = match paths {
         [one] => format!("`{one}`"),
         many => format!("{} changed `.bzl` files", many.len()),
     };
-    let mut shown: Vec<&str> = loaders.iter().take(3).map(String::as_str).collect();
-    if loaders.len() > 3 {
-        shown.push("...");
-    }
     format!(
         "{what} is loaded by MODULE.bazel/WORKSPACE (repository rules), not by any \
-         package BUILD file; rbuildfiles names {}",
-        shown.join(", ")
+         package BUILD file; it is in the workspace load closure"
     )
+}
+
+/// The `global_reason` for a base index with no load closure to consult.
+fn no_closure_reason(paths: &[String]) -> String {
+    let what = match paths {
+        [one] => format!("`{one}`"),
+        many => format!("{} changed `.bzl` files", many.len()),
+    };
+    format!("{what} changed and the base index carries no static .bzl load closure")
 }

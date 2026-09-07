@@ -28,7 +28,11 @@ use serde::{Deserialize, Serialize};
 ///   gained `rbuildfiles_called`; `index stats` gained
 ///   `in_degree.top`. `direct` and `tests` stay lists of labels, and the `text`
 ///   and `query` outputs are unchanged.
-pub const SCHEMA_VERSION: u32 = 3;
+/// - **4** — `stats` gained `bzl_closure_hits`, the number of packages dirtied
+///   because a changed `.bzl` is in their static load closure.
+///   `stats.rbuildfiles_called` stays in the document and is now always
+///   `false`: the closure is read from the index instead of from Bazel.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -100,8 +104,16 @@ pub struct Stats {
     pub changed_files: usize,
     pub ignored_files: usize,
     /// A `.bzl` file changed, so Bazel was asked which packages load it.
+    ///
+    /// Always false since the static load closure replaced the `rbuildfiles`
+    /// call; kept in the contract because consumers (and the corpus's own
+    /// history) read it, and because the method behind it still exists for the
+    /// comparison suite's oracle.
     #[serde(default)]
     pub rbuildfiles_called: bool,
+    /// Packages dirtied because a changed `.bzl` is in their load closure.
+    #[serde(default)]
+    pub bzl_closure_hits: usize,
 }
 
 /// One affected target, with how far from the change it sits.

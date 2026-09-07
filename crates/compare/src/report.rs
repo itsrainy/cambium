@@ -817,6 +817,11 @@ fn render_replay(rep: &ReplayResult) -> String {
         u.rbuildfiles_calls, u.commits
     ));
     s.push_str(&format!(
+        "- commits where a changed `.bzl` dirtied packages through the static \
+         load closure: {} of {}\n",
+        u.bzl_closure_commits, u.commits
+    ));
+    s.push_str(&format!(
         "- mean affected targets: {:.0}\n\n",
         u.mean_affected
     ));
@@ -1069,6 +1074,41 @@ fn render_compare(r: &RepoResults) -> String {
              index by construction and which recall therefore ignores.\n\n",
         );
     }
+
+    // ---- the .bzl load-closure oracle ----
+    let mut bzl = crate::bzloracle::BzlOracleSummary::default();
+    for c in compares {
+        for p in &c.pairs {
+            if let Some(o) = &p.bzl_oracle {
+                bzl.add(o);
+            }
+        }
+    }
+    s.push_str("#### `.bzl` load-closure oracle\n\n");
+    if bzl.is_empty() {
+        s.push_str("No pair changed a `.bzl` file.\n\n");
+    } else {
+        s.push_str(
+            "| pairs with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
+        );
+        s.push_str("|---:|---:|---:|---:|\n");
+        s.push_str(&format!(
+            "| {} | {} | {} | {} |\n\n",
+            bzl.pairs, bzl.checked, bzl.partial, bzl.missing_packages
+        ));
+        s.push_str(
+            "cambium resolves a changed `.bzl` from the static load closure it \
+             stores in the index, with no Bazel call. This checks that answer \
+             against `rbuildfiles`, the call it replaced: cambium's dirty set \
+             must contain every main-repo package Bazel names. The last column \
+             gates the run and must be zero; a non-zero entry files those \
+             packages under `cambium_missing_bzl_closure`. A *partial* answer \
+             is a Sky Query that exited 3 — the very failure mode the static \
+             closure removes, since `rbuildfiles` loads every external \
+             repository and the closure loads none.\n\n",
+        );
+    }
+
     s
 }
 
@@ -1249,6 +1289,7 @@ mod tests {
             affected: 10,
             tests: 2,
             rbuildfiles_called: false,
+            bzl_closure_hits: 0,
             global,
             global_reason: why.map(str::to_string),
             cold_rebuild: false,
@@ -1324,6 +1365,7 @@ mod tests {
                 pass: true,
                 error: None,
             }],
+            bzl_oracle: None,
             oracle: Some(crate::oracle::OracleResult {
                 roots: vec!["//a:a".into(), "//b:b".into()],
                 oracle_set: Default::default(),
@@ -1389,6 +1431,26 @@ mod tests {
             "the global histogram is bucketed by reason: {s}"
         );
         assert!(s.contains("largest dirty set: **2 packages**"), "{s}");
+    }
+
+    #[test]
+    fn the_section_reports_the_bzl_load_closure_oracle() {
+        // No `.bzl` in the fixture's change sets.
+        let s = render_repo_section(&bazel_results(), None);
+        assert!(s.contains("No pair changed a `.bzl` file."), "{s}");
+
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.pairs[0].bzl_oracle = Some(crate::bzloracle::BzlOracleResult {
+                checked: vec!["bazel/defs.bzl".into(), "bazel/other.bzl".into()],
+                partial: true,
+                bazel_packages: ["app".to_string()].into_iter().collect(),
+                ..Default::default()
+            });
+        }
+        let s = render_repo_section(&r, None);
+        assert!(s.contains("`.bzl` load-closure oracle"), "{s}");
+        assert!(s.contains("| 1 | 2 | 1 | 0 |"), "{s}");
     }
 
     #[test]

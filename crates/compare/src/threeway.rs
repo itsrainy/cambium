@@ -33,6 +33,7 @@ use cambium_corpus::{Checkout, Pair, State};
 use cambium_engine::{AffectedRequest, Engine};
 use serde::{Deserialize, Serialize};
 
+use crate::bzloracle::{BzlOracleResult, BzlOracleSummary};
 use crate::classify::{classify, BazelFacts, Class, Facts, Side};
 use crate::oracle::{OracleResult, RdepsOracle};
 use crate::producer::{BaseWorktree, Producer, RunContext};
@@ -203,6 +204,11 @@ pub struct PairComparison {
     pub producers: Vec<ProducerComparison>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleResult>,
+    /// What Bazel's `rbuildfiles` said about the `.bzl` files in this pair's
+    /// change set, against the static load closure cambium answered from.
+    /// `None` when nothing in the diff was a `.bzl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bzl_oracle: Option<BzlOracleResult>,
     /// Recall against the oracle; must be 1.0.
     pub recall: f64,
     /// cambium answered `//...`: no producer ran, nothing was classified, and
@@ -241,6 +247,9 @@ pub struct CompareSummary {
     pub mean_precision: BTreeMap<String, f64>,
     /// The worst recall any pair achieved. Anything below 1.0 fails the run.
     pub min_recall: f64,
+    /// The `.bzl` load-closure oracle, rolled up. `missing_packages` must be 0.
+    #[serde(default, skip_serializing_if = "BzlOracleSummary::is_empty")]
+    pub bzl_oracle: BzlOracleSummary,
     /// Cold and warm wall distributions per producer.
     pub producer_cold: BTreeMap<String, WallStats>,
     pub producer_warm: BTreeMap<String, WallStats>,
@@ -345,6 +354,14 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
             continue;
         }
         s.min_recall = s.min_recall.min(p.recall);
+        if let Some(o) = &p.bzl_oracle {
+            s.bzl_oracle.add(o);
+            if !o.missing_packages.is_empty() {
+                *s.by_class
+                    .entry(crate::bzloracle::MISSING_CLASS.to_string())
+                    .or_default() += o.missing_packages.len();
+            }
+        }
         for pr in &p.producers {
             if pr.error.is_some() {
                 continue;
@@ -595,6 +612,7 @@ pub fn compare_pair_with(
             },
             producers: Vec::new(),
             oracle: None,
+            bzl_oracle: None,
             recall: 1.0,
             global: true,
             pass: true,
@@ -734,7 +752,31 @@ pub fn compare_pair_with(
         None
     };
     let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
-    let pass = results.iter().all(|p| p.pass) && oracle.as_ref().map_or(true, |o| o.ok());
+
+    // ---- the `.bzl` load-closure oracle ----
+    //
+    // Only on pairs that changed a `.bzl`, which is where the static closure
+    // is the thing under test. `engine.bazel` is the head checkout, which is
+    // the tree `rbuildfiles` has to be asked about.
+    let bzl_oracle = crate::bzloracle::run(
+        &engine.bazel,
+        &changed,
+        &report.dirty_packages.iter().cloned().collect(),
+    )
+    .with_context(|| format!("bzl load-closure oracle at {}", pair.head))?;
+    if let Some(o) = &bzl_oracle {
+        if !o.ok() {
+            tracing::error!(
+                missing = ?o.missing_packages,
+                checked = ?o.checked,
+                "rbuildfiles names packages the static load closure did not dirty"
+            );
+        }
+    }
+
+    let pass = results.iter().all(|p| p.pass)
+        && oracle.as_ref().map_or(true, |o| o.ok())
+        && bzl_oracle.as_ref().map_or(true, |o| o.ok());
 
     Ok(PairComparison {
         schema: cambium_engine::report::SCHEMA_VERSION,
@@ -745,6 +787,7 @@ pub fn compare_pair_with(
         cambium,
         producers: results,
         oracle,
+        bzl_oracle,
         recall: oracle_recall,
         global: false,
         pass,
@@ -843,6 +886,9 @@ mod tests {
             false
         }
         fn changed_path_without_consumer(&self, _: &str) -> bool {
+            false
+        }
+        fn build_file_changed(&self, _: &str) -> bool {
             false
         }
         fn reached_via_deleted_dep(&self, l: &str) -> bool {
@@ -952,6 +998,7 @@ mod tests {
                 error: None,
             }],
             oracle: None,
+            bzl_oracle: None,
             recall: if pass { 1.0 } else { 0.75 },
             global: false,
             pass,

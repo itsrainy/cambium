@@ -30,9 +30,6 @@ impl PackageQuerier for PartialUniverse<'_> {
             partial: Some(self.1.clone()),
         })
     }
-    fn rbuildfiles(&self, p: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {
-        self.0.rbuildfiles(p)
-    }
 }
 
 fn engine() -> Engine {

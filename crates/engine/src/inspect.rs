@@ -229,6 +229,15 @@ pub struct CountStats {
     pub unknown: u32,
     pub tombstones: u32,
     pub tombstoned_packages: u32,
+    /// `.bzl` files in the static load closure: those some package's BUILD
+    /// file, or a workspace file, transitively loads. A `.bzl` nothing loads
+    /// is not in the index at all.
+    #[serde(default)]
+    pub bzl_files: u32,
+    /// Of those, the ones reachable from `MODULE.bazel` / `WORKSPACE`, which
+    /// can define repository rules and so invalidate everything.
+    #[serde(default)]
+    pub bzl_workspace_files: u32,
 }
 
 /// Per-component byte sizes. Every field is the size of the arrays as they sit
@@ -258,6 +267,11 @@ pub struct ByteStats {
     pub rule_hashes: u64,
     pub node_columns: u64,
     pub package_table: u64,
+    /// The static `.bzl` load closure: paths, direct loads, the inverted
+    /// `bzl -> packages` rows, the workspace closure, and the external labels
+    /// the walk stopped at.
+    #[serde(default)]
+    pub bzl_closure: u64,
     pub framing: i64,
     /// What labels would cost stored as `(package_id, relative_name)` instead
     /// of whole strings. See [`LabelPacking`].
@@ -581,6 +595,8 @@ impl<'a> IndexQuery<'a> {
             unknown: 0,
             tombstones: 0,
             tombstoned_packages: 0,
+            bzl_files: 0,
+            bzl_workspace_files: 0,
         };
         for id in 0..v.num_nodes() {
             match v.kind_of(id) {
@@ -597,6 +613,8 @@ impl<'a> IndexQuery<'a> {
                 NodeKind::Tombstone => counts.tombstones += 1,
             }
         }
+        counts.bzl_files = v.num_bzl();
+        counts.bzl_workspace_files = v.bzl_workspace.len() as u32;
         for p in 0..v.num_packages() {
             if v.package_tombstoned(p) {
                 counts.tombstoned_packages += 1;
@@ -643,6 +661,18 @@ impl<'a> IndexQuery<'a> {
             },
         };
 
+        let bzl_closure = (v.bzl_paths.bytes.len()
+            + v.bzl_paths.offsets.len() * 4
+            + v.bzl_loads.offsets.len() * 4
+            + v.bzl_loads.edges.len() * 4
+            + v.bzl_consumers.offsets.len() * 4
+            + v.bzl_consumers.edges.len() * 4
+            + v.bzl_workspace.len() * 4
+            + v.bzl_ext_labels.bytes.len()
+            + v.bzl_ext_labels.offsets.len() * 4
+            + v.bzl_ext.offsets.len() * 4
+            + v.bzl_ext.edges.len() * 4) as u64;
+
         let accounted = label_table
             + label_sorted
             + rule_class_table
@@ -652,7 +682,8 @@ impl<'a> IndexQuery<'a> {
             + reverse_edges
             + rule_hashes
             + node_columns
-            + package_table;
+            + package_table
+            + bzl_closure;
 
         let bytes = ByteStats {
             file_total,
@@ -677,6 +708,7 @@ impl<'a> IndexQuery<'a> {
             rule_hashes,
             node_columns,
             package_table,
+            bzl_closure,
             framing: file_total as i64 - accounted as i64,
             label_packing,
         };

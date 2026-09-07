@@ -55,6 +55,12 @@ Three separate things, and they are not interchangeable:
 - **`FORMAT_VERSION`** (`crates/index/src/format.rs`) versions the *file
   layout*. A bump makes older files unreadable — `index inspect` can still name
   their version, nothing else can touch them. Bump it only when the bytes move.
+  It went to **4** when the payload gained the static `.bzl` load closure — a
+  `.bzl` path table plus three flat sections over it (direct loads, the
+  inverted `bzl -> packages` closure, and the workspace closure), which is what
+  replaced the `rbuildfiles` call. An index written before that carries no
+  closure and a run over one would have to treat every `.bzl` change as global,
+  so the layout bump is also what stops that answer being given silently.
 - **`config_hash`**, stamped into the index header from
   `cambium_engine::Config::hash`, versions the *meaning of the rows*. An index
   whose `config_hash` differs from the running config is refused for splicing

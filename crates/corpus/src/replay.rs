@@ -99,7 +99,12 @@ pub struct CommitRecord {
     pub direct: usize,
     pub affected: usize,
     pub tests: usize,
+    /// Kept for continuity with earlier replays; always false since the
+    /// static load closure replaced the `rbuildfiles` call.
     pub rbuildfiles_called: bool,
+    /// Packages dirtied because a changed `.bzl` is in their load closure.
+    #[serde(default)]
+    pub bzl_closure_hits: usize,
     pub global: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_reason: Option<String>,
@@ -125,6 +130,10 @@ pub struct Summary {
     pub largest_dirty_commit: String,
     pub globals: usize,
     pub rbuildfiles_calls: usize,
+    /// Commits where a changed `.bzl` dirtied at least one package through the
+    /// static load closure.
+    #[serde(default)]
+    pub bzl_closure_commits: usize,
     pub mean_affected: f64,
 }
 
@@ -233,6 +242,7 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
         largest_dirty_commit: largest.map(|c| c.commit.clone()).unwrap_or_default(),
         globals: commits.iter().filter(|c| c.global).count(),
         rbuildfiles_calls: commits.iter().filter(|c| c.rbuildfiles_called).count(),
+        bzl_closure_commits: commits.iter().filter(|c| c.bzl_closure_hits > 0).count(),
         mean_affected: if commits.is_empty() {
             0.0
         } else {
@@ -414,6 +424,7 @@ pub fn replay(
             affected: r.stats.affected_targets,
             tests: r.tests.len(),
             rbuildfiles_called: r.stats.rbuildfiles_called,
+            bzl_closure_hits: r.stats.bzl_closure_hits,
             global: r.global,
             global_reason: r.global_reason.clone(),
             cold_rebuild: false,

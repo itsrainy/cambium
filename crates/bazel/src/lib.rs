@@ -460,9 +460,21 @@ impl Bazel {
     /// `rbuildfiles(...)`: what loads any of `bzl_paths` (spec 7.2). Paths are
     /// workspace-relative. See [`Rbuildfiles`] for why the answer is not just
     /// a list of packages.
-    pub fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Rbuildfiles> {
+    /// Hands back what Bazel managed to answer even when Sky Query finished
+    /// with errors, plus a flag saying that it did.
+    ///
+    /// Only the comparison suite's `.bzl` oracle calls this. The engine reads
+    /// the answer out of the index's static load closure instead — a partial
+    /// `rbuildfiles` can be missing exactly the package that loads the changed
+    /// file, which is an under-approximation, and on the corpus that made
+    /// every `.bzl` commit on a machine that could not fetch some external
+    /// repository fall back to invalidating everything. The oracle can live
+    /// with a partial answer because it only asks whether cambium's answer
+    /// *contains* Bazel's: a smaller Bazel answer weakens the check, it cannot
+    /// make it wrong.
+    pub fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<(Rbuildfiles, bool)> {
         if bzl_paths.is_empty() {
-            return Ok(Rbuildfiles::default());
+            return Ok((Rbuildfiles::default(), false));
         }
         let expr = format!("rbuildfiles({})", bzl_paths.join(", "));
         let mut cmd = self.command("query");
@@ -492,16 +504,10 @@ impl Bazel {
             .read_to_string(&mut out)?;
         let status = child.wait()?;
         let (stderr_tail, _) = stderr_rx.recv().unwrap_or_default();
-        // Exit 3 is "finished with errors" under --keep_going. For rbuildfiles
-        // a partial answer is unusable: a package that failed to load may be
-        // exactly the one that loads the changed .bzl, and it is not in the
-        // output. Report it as Partial so the engine can fall back to a full
-        // rebuild instead of silently under-approximating.
+        // Exit 3 is "finished with errors" under --keep_going: the answer is
+        // whatever loaded. Whether that is usable is the caller's call.
         if status.code() == Some(3) {
-            return Err(BazelError::Partial {
-                args: truncate(&expr, 200),
-                stderr: stderr_tail,
-            });
+            return Ok((parse_buildfile_labels(&out), true));
         }
         if !status.success() {
             return Err(BazelError::Failed {
@@ -510,7 +516,44 @@ impl Bazel {
                 stderr: stderr_tail,
             });
         }
-        Ok(parse_buildfile_labels(&out))
+        Ok((parse_buildfile_labels(&out), false))
+    }
+
+    /// The root module's repository mapping as Bazel prints it, for
+    /// `cambium_index::RepoMapping::from_dump` to parse.
+    ///
+    /// `bazel mod dump_repo_mapping ""` (Bazel >= 7.1) prints it as one JSON
+    /// object on stdout: apparent repository name -> canonical name. Measured
+    /// output shapes per Bazel version are recorded in `cambium_index::loads`. Anything that goes wrong — the subcommand does
+    /// not exist, the repository is in WORKSPACE mode, the module graph will
+    /// not resolve — is a warning and the identity mapping, which is what
+    /// WORKSPACE mode means anyway. The mapping only ever *names* external
+    /// loads; nothing walks into them, so a wrong name costs nothing but a
+    /// less precise record.
+    pub fn repo_mapping_dump(&self) -> Option<String> {
+        let out = self
+            .command("mod")
+            .arg("dump_repo_mapping")
+            .arg("")
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(o) => {
+                tracing::warn!(
+                    status = %o.status,
+                    "bazel mod dump_repo_mapping failed (WORKSPACE mode, or bazel < 7.1); \
+                     falling back to the identity repository mapping"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not run bazel mod dump_repo_mapping");
+                None
+            }
+        }
     }
 }
 
@@ -538,13 +581,22 @@ impl Bazel {
 ///
 /// So: a repository-rule `.bzl` is never silent — it always names at least the
 /// external repository it defines — and a genuinely dead `.bzl` is the only
-/// thing that comes back empty. That is what makes "empty means nothing is
+/// thing that comes back empty. That is what made "empty means nothing is
 /// dirty" sound, and why anything non-empty that is not a main-repo package
-/// has to be treated as global.
+/// had to be treated as global.
+///
+/// The engine no longer asks: it reads the same answer out of the index's
+/// static load closure (`cambium_index::loads`), where the repository-rule
+/// case is "the file is in the closure of `MODULE.bazel`/`WORKSPACE`". The
+/// call survives as the comparison suite's oracle over that closure
+/// (`cambium_compare::bzloracle`), which is why the measurements above are
+/// still worth having: they are what the oracle is calibrated against.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rbuildfiles {
-    /// Main-repository packages whose `BUILD` loads one of the paths. These
-    /// are re-queried.
+    /// Main-repository packages whose `BUILD` loads one of the paths. The
+    /// engine used to re-query exactly these; it now reads the same set out of
+    /// the index's static load closure, and the comparison suite checks one
+    /// against the other.
     pub packages: Vec<String>,
     /// Labels that name a loader outside any main-repo package:
     /// `//:MODULE.bazel`, `//:WORKSPACE[.bazel|.bzlmod]`, `//external:*`, and

@@ -173,7 +173,8 @@ pub enum Classification {
     Invalidator,
     /// A BUILD file, defining the named package.
     Build(String),
-    /// A `.bzl` file; which packages it reaches is a question for `rbuildfiles`.
+    /// A `.bzl` file. Which packages it reaches is answered from the index's
+    /// static load closure (`cambium_index::loads`), not from a path.
     Bzl(String),
     /// A file owned by the named package.
     Source(String),
@@ -261,7 +262,8 @@ pub struct DirtySet {
     pub deleted_packages: BTreeSet<String>,
     /// Paths whose content changed but whose package structure did not.
     pub direct_files: BTreeSet<String>,
-    /// `.bzl` paths that changed, to be resolved with `rbuildfiles`.
+    /// `.bzl` paths that changed, to be resolved against the index's static
+    /// load closure.
     pub changed_bzl: BTreeSet<String>,
     /// Paths that were ignored, for `--explain`.
     pub ignored: usize,
@@ -608,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn bzl_changes_are_collected_for_rbuildfiles() {
+    fn bzl_changes_are_collected_for_the_load_closure() {
         let d = run(vec![Change::new(Status::Modified, "lib/util.bzl")]);
         assert!(d.dirty.is_empty());
         assert_eq!(d.changed_bzl.iter().next().unwrap(), "lib/util.bzl");

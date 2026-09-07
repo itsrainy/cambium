@@ -307,6 +307,10 @@ fn print_stats(s: &inspect::IndexStats) {
         "packages:        {} ({} tombstoned)",
         c.packages, c.tombstoned_packages
     );
+    println!(
+        "bzl closure:     {} .bzl files ({} reachable from MODULE.bazel/WORKSPACE)",
+        c.bzl_files, c.bzl_workspace_files
+    );
     println!();
     println!(
         "in-degree:       max {} ({})",
@@ -325,7 +329,7 @@ fn print_stats(s: &inspect::IndexStats) {
     println!();
     let b = &s.bytes;
     println!("bytes:           {} total", human(b.file_total));
-    let rows: [(&str, i64); 11] = [
+    let rows: [(&str, i64); 12] = [
         ("label table", b.label_table as i64),
         ("label sort index", b.label_sorted as i64),
         ("rule class table", b.rule_class_table as i64),
@@ -337,6 +341,7 @@ fn print_stats(s: &inspect::IndexStats) {
         ("rule hashes", b.rule_hashes as i64),
         ("node columns", b.node_columns as i64),
         ("package table", b.package_table as i64),
+        ("bzl load closure", b.bzl_closure as i64),
     ];
     for (name, v) in rows {
         println!(

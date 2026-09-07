@@ -168,11 +168,12 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.universe()
     }
 
-    fn rbuildfiles(
-        &self,
-        bzl_paths: &[String],
-    ) -> std::result::Result<cambium_bazel::Rbuildfiles, EngineError> {
-        self.querier.rbuildfiles(bzl_paths)
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        self.querier.load_source()
+    }
+
+    fn repo_mapping(&self) -> cambium_index::RepoMapping {
+        self.querier.repo_mapping()
     }
 
     fn version(&self) -> String {

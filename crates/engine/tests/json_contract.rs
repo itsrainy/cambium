@@ -20,8 +20,10 @@ use serde_json::Value;
 /// The shape of `cambi affected --output json`.
 ///
 /// Version 3 turned `affected` into `{label, depth, test}` objects and added
-/// `stats.rbuildfiles_called`; the version is shared with the other documents,
-/// and `index stats` changed shape at version 2 and again at 3.
+/// `stats.rbuildfiles_called`; version 4 added `stats.bzl_closure_hits`, and
+/// `stats.rbuildfiles_called` is now always false. The version is shared with
+/// the other documents, and `index stats` changed shape at version 2 and
+/// again at 3.
 ///
 /// Nested objects are dotted; arrays of scalars end in `[]`; arrays of objects
 /// recurse through `[]`. Optional fields are listed — the fixture below
@@ -44,6 +46,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "schema",
     "stats.affected_targets",
     "stats.base_nodes",
+    "stats.bzl_closure_hits",
     "stats.changed_files",
     "stats.direct_targets",
     "stats.dirty_packages",
@@ -104,7 +107,8 @@ fn fixture() -> AffectedReport {
             affected_targets: 7,
             changed_files: 8,
             ignored_files: 9,
-            rbuildfiles_called: true,
+            rbuildfiles_called: false,
+            bzl_closure_hits: 10,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
