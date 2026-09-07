@@ -32,9 +32,15 @@ use serde::{Deserialize, Serialize};
 ///   because a changed `.bzl` is in their static load closure.
 ///   `stats.rbuildfiles_called` stays in the document and is now always
 ///   `false`: the closure is read from the index instead of from Bazel.
-/// - **5** — `stats` gained `bazelrc_safe_diffs`, the number of changed
-///   bazelrc files whose every changed flag was on the loading-irrelevant
-///   allowlist and which therefore did not invalidate the run.
+/// - **5** — `stats` gained `bazelrc_safe_diffs` (changed bazelrc files
+///   whose every changed flag was on the loading-irrelevant allowlist and
+///   which therefore invalidated nothing) and `stats.cold_rebuild` with the
+///   optional `cold_rebuild_reason`: a run whose dirty set exceeded
+///   `limits.max_dirty_packages` re-indexed the whole repository at head
+///   instead of splicing. That is *not* a global invalidation — `affected`
+///   is still exact — so a consumer that treats `global` as "run everything"
+///   needs no change. `limits.max_changed_files`, which used to make that
+///   case global, is gone.
 pub const SCHEMA_VERSION: u32 = 5;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
@@ -122,6 +128,12 @@ pub struct Stats {
     /// instead of invalidating everything.
     #[serde(default)]
     pub bazelrc_safe_diffs: usize,
+    /// The dirty set was larger than `limits.max_dirty_packages`, so the run
+    /// re-queried `//...` at head rather than the dirty packages alone. The
+    /// answer is exact either way; only the cost differs, and
+    /// `dirty_packages` still reports the count that triggered it.
+    #[serde(default)]
+    pub cold_rebuild: bool,
 }
 
 /// One affected target, with how far from the change it sits.
@@ -149,6 +161,9 @@ pub struct AffectedReport {
     pub global: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global_reason: Option<String>,
+    /// Why the run re-indexed the whole repository, when `stats.cold_rebuild`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_rebuild_reason: Option<String>,
     pub dirty_packages: Vec<String>,
     pub direct: Vec<String>,
     /// `direct` plus its reverse closure, sorted by label.
@@ -169,6 +184,7 @@ impl Default for AffectedReport {
             head: String::new(),
             global: false,
             global_reason: None,
+            cold_rebuild_reason: None,
             dirty_packages: Vec::new(),
             direct: Vec::new(),
             affected: Vec::new(),

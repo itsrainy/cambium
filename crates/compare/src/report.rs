@@ -1198,6 +1198,7 @@ mod tests {
             bzl_closure_hits: 0,
             global,
             global_reason: why.map(str::to_string),
+            engine_cold_rebuild: false,
             cold_rebuild: false,
             index_nodes: 24_519,
             index_edges: 53_242,

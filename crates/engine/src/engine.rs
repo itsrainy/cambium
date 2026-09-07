@@ -771,7 +771,6 @@ impl Engine {
             changes,
             &mut packages,
             &matchers,
-            self.cfg.limits.max_changed_files,
             &cambium_classify::IndexConsumers(base_view),
         );
 
@@ -890,20 +889,59 @@ impl Engine {
         }
 
         // ---- query ----
-        let to_query: Vec<String> = dirty
-            .dirty
-            .iter()
-            .filter(|p| !dirty.deleted_packages.contains(*p))
-            .cloned()
-            .collect();
+        //
+        // Normally the dirty packages, and only those. Past
+        // `limits.max_dirty_packages` that stops being the cheap way round: a
+        // per-package `bazel query` costs tens of milliseconds a package, and
+        // once enough of them are dirty, one `//...` query answers for the
+        // whole repository for less. So the run re-queries everything and
+        // splices all of it onto the base.
+        //
+        // That is a cost decision, not an accuracy one, and the distinction is
+        // the whole point of the change: the limit it replaces
+        // (`max_changed_files`) made a large diff *global*, discarding the
+        // answer. A cold rebuild keeps it. Every package the dirty set would
+        // have named is in the universe, so the splice sees at least the rows
+        // the incremental path would have seen; the packages it did not name
+        // come back byte-identical and contribute nothing to the direct set.
+        // The soundness sweep asserts exactly that, by running each synthetic
+        // revision both ways.
         stats.dirty_packages = dirty.dirty.len();
-        let updates = querier.query(&to_query)?;
+        let limit = self.cfg.limits.max_dirty_packages;
+        let cold = limit > 0 && dirty.dirty.len() > limit;
+        let mut cold_reason = None;
+        let mut partial = None;
+        let (to_query, updates) = if cold {
+            let reason = cold_rebuild_reason(dirty.dirty.len(), limit);
+            tracing::info!(%reason, "re-indexing the whole repository at head");
+            cold_reason = Some(reason);
+            let u = querier.universe()?;
+            partial = u.partial;
+            let names: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
+            (names, u.updates)
+        } else {
+            let to_query: Vec<String> = dirty
+                .dirty
+                .iter()
+                .filter(|p| !dirty.deleted_packages.contains(*p))
+                .cloned()
+                .collect();
+            let updates = querier.query(&to_query)?;
+            (to_query, updates)
+        };
+        stats.cold_rebuild = cold;
         stats.queried_targets = updates.iter().map(|u| u.targets.len()).sum();
         timings.query = sw.lap();
 
         // ---- splice ----
         let mut builder = IndexBuilder::from_view(base_view);
         builder.set_config_hash(self.cfg.hash());
+        // A `//...` query that exited 3 under `--keep_going` loaded some of the
+        // repository, and the index has to say which part, exactly as
+        // `full_build_with` records it.
+        if let Some(e) = &partial {
+            builder.set_partial(e.count, e.packages.clone());
+        }
         // Only the materialised path: an overlay is never published, and the
         // run that produced it read the closure it needed out of the base.
         if req.materialize {
@@ -978,7 +1016,17 @@ impl Engine {
             timings.walk = sw.lap();
 
             (
-                finish_report(&hv, req, &dirty, &direct, &result, &reasons, timings, stats),
+                finish_report(
+                    &hv,
+                    req,
+                    &dirty,
+                    &direct,
+                    &result,
+                    &reasons,
+                    timings,
+                    stats,
+                    cold_reason,
+                ),
                 Some(head_index),
             )
         } else {
@@ -1006,7 +1054,15 @@ impl Engine {
 
             (
                 finish_report(
-                    &overlay, req, &dirty, &direct, &result, &reasons, timings, stats,
+                    &overlay,
+                    req,
+                    &dirty,
+                    &direct,
+                    &result,
+                    &reasons,
+                    timings,
+                    stats,
+                    cold_reason,
                 ),
                 None,
             )
@@ -1137,6 +1193,7 @@ fn finish_report<V: GraphView + ?Sized>(
     reasons: &FxHashMap<u32, DirectReason>,
     timings: Timings,
     stats: Stats,
+    cold_rebuild_reason: Option<String>,
 ) -> AffectedReport {
     AffectedReport {
         schema: crate::report::SCHEMA_VERSION,
@@ -1144,6 +1201,7 @@ fn finish_report<V: GraphView + ?Sized>(
         head: req.head.clone(),
         global: false,
         global_reason: None,
+        cold_rebuild_reason,
         dirty_packages: dirty.dirty.iter().cloned().collect(),
         direct: cambium_index::view::labels_sorted(view, direct),
         affected: affected_targets(view, result),
@@ -1213,6 +1271,7 @@ fn global_report(
         head: req.head.clone(),
         global: true,
         global_reason: dirty.global_reason,
+        cold_rebuild_reason: None,
         dirty_packages: Vec::new(),
         direct: Vec::new(),
         affected: Vec::new(),
@@ -1306,6 +1365,11 @@ fn rescan_closure(
     }
     c.workspace = c.graph.workspace_closure(src, &mapping);
     Some(c)
+}
+
+/// Why a run gave up on splicing the dirty set and re-indexed instead.
+fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
+    format!("dirty packages {dirty} exceed limits.max_dirty_packages = {limit}")
 }
 
 /// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
