@@ -232,8 +232,11 @@ pub trait Facts {
     /// head index, is in cambium's affected set.
     fn no_affected_deps(&self, label: &str) -> bool;
 
-    /// The target depends, directly or transitively through the head index, on
-    /// at least one external (`@`-prefixed) label.
+    /// The target depends on at least one external (`@`-prefixed) label —
+    /// through the head index, or through an implicit edge the index does not
+    /// carry. The implicit half is not a detail: a target's whole toolchain
+    /// graph is external and implicit, and it is the commonest thing for a
+    /// producer's two runs to disagree about.
     fn has_external_input(&self, label: &str) -> bool;
 
     /// The label corresponds to a path that changed in this pair but that no
@@ -306,15 +309,33 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
 /// 3. nothing it transitively depends on inside `//...` is in cambium's
 ///    affected set — so it is not a propagation cambium dropped;
 /// 4. it does depend on something external — so there *is* an external
-///    explanation for the difference.
+///    explanation for the difference. "Depends on" here means Bazel's full
+///    dependency set, implicit edges included: a target's toolchains are
+///    external and reached only implicitly, and asking the
+///    `--noimplicit_deps` index alone answered "no external dependency" for
+///    every plain `java_binary` in the repository.
 ///
 /// Without (4) the class would be "cambium missed a label and we cannot see
 /// why", which is exactly the failure `cambium_missing` exists to report.
 fn external_load_nondeterminism(label: &str, facts: &dyn Facts) -> bool {
-    facts.rule_unchanged_modulo_visibility(label)
-        && facts.no_changed_source_inputs(label)
-        && facts.no_affected_deps(label)
-        && facts.has_external_input(label)
+    // Evaluated one at a time and logged, because when a label lands in
+    // `cambium_missing` the only thing worth knowing is *which* of the four
+    // conditions said no: both times this classifier was wrong about a label,
+    // it was a condition answering the wrong question rather than a missing
+    // class.
+    let unchanged = facts.rule_unchanged_modulo_visibility(label);
+    let no_srcs = unchanged && facts.no_changed_source_inputs(label);
+    let no_deps = no_srcs && facts.no_affected_deps(label);
+    let external = no_deps && facts.has_external_input(label);
+    tracing::debug!(
+        label,
+        unchanged,
+        no_srcs,
+        no_deps,
+        external,
+        "external-content conditions"
+    );
+    external
 }
 
 // ----------------------------------------------------------------- BazelFacts
@@ -368,6 +389,10 @@ pub struct BazelFacts<'a> {
     paths: HashMap<String, Vec<String>>,
     cache: RefCell<HashMap<String, Option<Rule>>>,
     base_cache: RefCell<HashMap<String, Option<Rule>>>,
+    /// Rule protos fetched *with* implicit deps, for
+    /// [`Facts::has_external_input`] only. Everything else in this file speaks
+    /// the `--noimplicit_deps` vocabulary the index was built from.
+    implicit_cache: RefCell<HashMap<String, Option<Rule>>>,
     /// One forward walk per label, memoised: `bazeldiff_extra_external_content`
     /// asks two questions of the same traversal.
     dep_cache: RefCell<HashMap<String, DepFacts>>,
@@ -404,6 +429,7 @@ impl<'a> BazelFacts<'a> {
             paths: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             base_cache: RefCell::new(HashMap::new()),
+            implicit_cache: RefCell::new(HashMap::new()),
             dep_cache: RefCell::new(HashMap::new()),
         }
     }
@@ -517,15 +543,93 @@ impl<'a> BazelFacts<'a> {
         // A dependency named in the rule but absent from the index still
         // counts: the index is `//...`, so an external label the walk cannot
         // reach is exactly the case this looks for.
+        //
+        // Both of those views come from `--noimplicit_deps`, and that is
+        // exactly the wrong question to ask about external content. The whole
+        // toolchain graph — `@bazel_tools//tools/jdk:jdk`,
+        // `@local_jdk//:jdk`, the C++ toolchain — reaches a target only
+        // through implicit attributes, so under `--noimplicit_deps` a plain
+        // `java_binary(srcs = ["Greeter.java"])` names nothing external at
+        // all. The producers hash it anyway, and when a JDK resolves
+        // differently between their base and head runs the target's digest
+        // moves with it: on `bazel/bazel` that is Tango reporting
+        // `//examples/java-starlark/...:hello-world` together with
+        // `@bazel_tools//tools/jdk:jdk` on every single pair. So when neither
+        // `//...` view finds anything external, ask Bazel once more with the
+        // implicit edges left in.
         if !out.has_external {
             if let Some(rule) = self.head_rule(label) {
-                out.has_external = rule
-                    .rule_input
-                    .iter()
-                    .any(|l| l.starts_with('@') || l.starts_with("//external:"));
+                out.has_external = names_external_input(&rule);
             }
         }
+        // And when the label's own inputs say nothing either, ask the same
+        // question of every rule in the closure the walk just enumerated.
+        // `//:srcs` reaches `@async_profiler//file:file` only several
+        // filegroups down, through an implicit edge on a target inside its
+        // closure; bazel-diff reported it on a pair whose only changed files
+        // were `.github/workflows/*.yml`, which no rule consumes at all.
+        if !out.has_external {
+            let mut closure: Vec<String> = walk
+                .visited
+                .ones()
+                .map(|v| v as u32)
+                // Only rules have a `rule_input`; the file nodes in a
+                // filegroup's closure would be a Bazel query each for nothing.
+                .filter(|&v| self.index.is_rule(v))
+                .map(|v| self.index.label(v).to_string())
+                .filter(|l| !self.is_external(l))
+                .collect();
+            closure.sort();
+            closure.dedup();
+            out.has_external = self.any_implicit_external(&closure);
+        }
         out
+    }
+
+    /// Does any rule in `labels` name an external label among its inputs once
+    /// the implicit edges are left in?
+    ///
+    /// Batched and memoised: the closures overlap heavily between the handful
+    /// of labels one pair asks about, and one `query 'set(...)'` answers five
+    /// hundred of them.
+    fn any_implicit_external(&self, labels: &[String]) -> bool {
+        for chunk in labels.chunks(PREFETCH_CHUNK) {
+            let todo: Vec<&String> = {
+                let c = self.implicit_cache.borrow();
+                chunk
+                    .iter()
+                    .filter(|l| !c.contains_key(l.as_str()))
+                    .collect()
+            };
+            if !todo.is_empty() {
+                let expr = format!(
+                    "set({})",
+                    todo.iter()
+                        .map(|l| l.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                if let Some(rules) = query_rules_with_implicit(self.head, &expr) {
+                    let mut c = self.implicit_cache.borrow_mut();
+                    for r in rules {
+                        c.insert(r.name.clone(), Some(r));
+                    }
+                    for l in todo {
+                        c.entry(l.clone()).or_insert(None);
+                    }
+                }
+            }
+            let c = self.implicit_cache.borrow();
+            if chunk
+                .iter()
+                .filter_map(|l| c.get(l.as_str()))
+                .flatten()
+                .any(names_external_input)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Fetches the rule protos for `labels` in bulk, at both revisions.
@@ -614,6 +718,48 @@ fn query_rules(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
         .ok()?;
     if !out.status.success() && out.status.code() != Some(3) {
         tracing::debug!(status = %out.status, "the batched rule query failed");
+        return None;
+    }
+    let targets: Vec<Target> = cambium_proto::decode_all(out.stdout.as_slice()).ok()?;
+    Some(targets.into_iter().filter_map(|t| t.rule).collect())
+}
+
+/// Whether a rule names a label outside the main repository among its
+/// inputs. Split out from the walk so the predicate can be tested on a
+/// hand-built proto without a Bazel.
+pub fn names_external_input(rule: &Rule) -> bool {
+    rule.rule_input
+        .iter()
+        .any(|l| l.starts_with('@') || l.starts_with("//external:"))
+}
+
+/// Every rule proto an expression yields, with implicit (`$`-prefixed,
+/// toolchain) deps left in.
+///
+/// Only [`Facts::has_external_input`] wants this. A target's toolchains are
+/// external and reached only implicitly, so the `--noimplicit_deps` protos the
+/// rest of this file uses — and the index built from them — cannot answer
+/// "does this depend on an external repository" at all: under them a plain
+/// `java_binary(srcs = ["Greeter.java"])` names nothing external, while every
+/// producer hashes it together with `@bazel_tools//tools/jdk:jdk` and moves
+/// its digest whenever a JDK resolves differently between their two runs.
+fn query_rules_with_implicit(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
+    let out = bazel
+        .command("query")
+        .args([
+            expr,
+            "--output=streamed_proto",
+            "--proto:flatten_selects=false",
+            "--proto:locations=false",
+            "--order_output=no",
+            "--keep_going",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() && out.status.code() != Some(3) {
+        tracing::debug!(expr, "the implicit-deps rule query failed");
         return None;
     }
     let targets: Vec<Target> = cambium_proto::decode_all(out.stdout.as_slice()).ok()?;
@@ -864,6 +1010,35 @@ impl Facts for BazelFacts<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fourth condition of `bazeldiff_extra_external_content` reads the
+    /// rule's inputs; a toolchain edge only shows up there when Bazel is
+    /// asked *with* implicit deps, which is what
+    /// `query_rule_with_implicit` is for.
+    #[test]
+    fn a_toolchain_input_counts_as_external() {
+        let mut rule = Rule {
+            name: "//examples:hello-world".into(),
+            rule_input: vec!["//examples:Greeter.java".into()],
+            ..Default::default()
+        };
+        assert!(
+            !names_external_input(&rule),
+            "the --noimplicit_deps proto names nothing external"
+        );
+        rule.rule_input.push("@bazel_tools//tools/jdk:jdk".into());
+        assert!(names_external_input(&rule));
+    }
+
+    #[test]
+    fn the_legacy_external_spelling_counts_too() {
+        let rule = Rule {
+            name: "//a:b".into(),
+            rule_input: vec!["//external:jdk".into()],
+            ..Default::default()
+        };
+        assert!(names_external_input(&rule));
+    }
 
     /// A hand-built oracle: every predicate is a membership test, so a test
     /// says exactly which fact it is exercising.
