@@ -200,11 +200,11 @@ fn bazel_version() -> Option<String> {
 /// A scratch root that is stable across a version's runs (handy for
 /// inspecting bazelisk's downloads and the output base by hand) rather than a
 /// fresh `TempDir` every time. Override with `CAMBIUM_SMOKE_SCRATCH`;
-/// defaults to a directory under the job's own tmp.
+/// defaults under the system tmp dir, so this works unmodified in CI.
 fn scratch_root(version: Option<&str>) -> PathBuf {
     let base = std::env::var_os("CAMBIUM_SMOKE_SCRATCH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/user/.claude/jobs/6b58f265/tmp/smoke_bazel"));
+        .unwrap_or_else(|| std::env::temp_dir().join("cambium-smoke-bazel"));
     match version {
         Some(v) => base.join(v),
         None => base.join("default"),

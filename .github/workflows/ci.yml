@@ -145,6 +145,52 @@ jobs:
                   sys.exit(1)
           EOF
 
+  bazel-version-matrix:
+    name: bazel version matrix (${{ matrix.bazel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: ["7.4.1", "8.5.1", "9.2.0"]
+    env:
+      USE_BAZEL_VERSION: ${{ matrix.bazel }}
+      BAZELISK_VERSION: "v1.26.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Cache bazelisk downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ matrix.bazel }}-${{ env.BAZELISK_VERSION }}
+      - name: Install bazelisk
+        run: |
+          mkdir -p "$HOME/.cache/cambium/bin"
+          curl -sSL -o "$HOME/.cache/cambium/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64"
+          chmod +x "$HOME/.cache/cambium/bin/bazelisk"
+          "$HOME/.cache/cambium/bin/bazelisk" --version
+      - name: Cache bazel-diff build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/bazel-diff
+          key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
+      - run: tools/bazel-diff/fetch.sh
+      - name: Cache tango build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/tango
+          key: tango-${{ hashFiles('tools/tango/fetch.sh') }}
+      - run: tools/tango/fetch.sh
+      - run: cargo test -p cambium-compare --test smoke_real_bazel -- --ignored --nocapture
+      - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
+        env:
+          CAMBIUM_E2E: "1"
+
   nightly:
     name: nightly (medium soundness, large benchmarks)
     if: github.event_name == 'schedule'
