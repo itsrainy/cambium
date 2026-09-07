@@ -1,0 +1,16 @@
+{
+  "schema": 4,
+  "id": "envoy",
+  "pin": "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf",
+  "fetched": false,
+  "built": {},
+  "replay": {
+    "from": "3dac25287a74431c02a0cf8db98d2a805bfba8ca",
+    "to": "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf",
+    "bazel_version": "",
+    "last_completed": "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf",
+    "done": true
+  },
+  "compared": [],
+  "reported": false
+}
