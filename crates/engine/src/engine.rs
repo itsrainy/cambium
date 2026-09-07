@@ -353,7 +353,21 @@ impl Engine {
         if !store.fetch(name, &dest)? {
             return Ok(None);
         }
-        let f = IndexFile::open(&dest)?;
+        // A blob written by an older build of cambium is not corrupt, just
+        // stale: a store outlives format bumps the same way it outlives config
+        // edits, and the walk must step past it rather than stop.
+        let f = match IndexFile::open(&dest) {
+            Ok(f) => f,
+            Err(
+                e @ (cambium_index::IndexError::BadVersion { .. }
+                | cambium_index::IndexError::BadMagic { .. }),
+            ) => {
+                tracing::warn!(key = name, error = %e, "skipping an index this build cannot read");
+                let _ = std::fs::remove_file(&dest);
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
         if f.view().config_hash != self.cfg.hash() {
             tracing::warn!(
                 key = name,

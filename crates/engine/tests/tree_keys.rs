@@ -272,3 +272,27 @@ fn a_stale_lineage_never_wins_over_a_compatible_one() {
     assert_eq!(view.view().lineage, [3u8; 16]);
     assert_eq!(view.view().config_hash, good);
 }
+
+/// A blob written by an older build of cambium — a format bump, not a
+/// config edit — is stale in the same way, and the resolver steps past it.
+#[test]
+fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
+    let f = fixture();
+    let a = commit(&f.root, "one");
+    let names = f.publish(&a);
+    let store = f.engine.store.as_ref().unwrap();
+    let dir = match &f.engine.cfg.baseline.store {
+        cambium_engine::config::StoreConfig::Dir { path } => path.clone(),
+        _ => unreachable!(),
+    };
+    let blob = dir.join(&names[0]);
+    let mut bytes = std::fs::read(&blob).unwrap();
+    // Magic is the first 8 bytes; the version follows it.
+    bytes[8] ^= 0xff;
+    std::fs::write(&blob, bytes).unwrap();
+    assert!(store.list().is_ok());
+    assert!(
+        f.engine.fetch_baseline(&a).unwrap().is_none(),
+        "an unreadable blob is not a baseline, and is not an error"
+    );
+}

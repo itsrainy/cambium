@@ -542,11 +542,17 @@ impl Bazel {
         match out {
             Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
             Ok(o) => {
-                tracing::warn!(
-                    status = %o.status,
-                    "bazel mod dump_repo_mapping failed (WORKSPACE mode, or bazel < 7.1); \
-                     falling back to the identity repository mapping"
-                );
+                // Once per process: a replay asks for the mapping on every
+                // step, and a WORKSPACE repository answers the same way each
+                // time.
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        status = %o.status,
+                        "bazel mod dump_repo_mapping failed (WORKSPACE mode, or bazel < 7.1); \
+                         falling back to the identity repository mapping"
+                    )
+                });
                 None
             }
             Err(e) => {
