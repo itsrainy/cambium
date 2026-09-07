@@ -376,6 +376,41 @@ pub fn dirty_set(
             Classification::Build(_) => unreachable!("handled in pass one"),
             Classification::Bzl(p) => {
                 out.changed_bzl.insert(p);
+                // A `.bzl` is a load-closure input *and* an ordinary file in
+                // its package. `filegroup(name = "srcs", srcs = glob(["**"]))`
+                // and the hand-written `bzl_srcs` / `embedded_tools` lists
+                // `bazel/bazel` keeps in `tools/build_defs/repo/BUILD` name the
+                // `.bzl` as a source, so `//tools/build_defs/repo:utils.bzl` is
+                // a genuine input of a dozen targets whose rule protos do not
+                // move when the file's text does — exactly the case the
+                // modified-BUILD arm above exists for.
+                //
+                // The load closure cannot stand in for this. It answers "which
+                // packages *load* this file", and the packages that merely
+                // *consume* it are a different, overlapping set; and even for a
+                // package in both, being dirty only means "re-query me", which
+                // finds the filegroup's rule byte-identical. So the file has to
+                // reach its consumers the way every other changed source does.
+                //
+                // This is on top of, never instead of, the closure walk and
+                // whatever the external-repository stage makes of the same
+                // file: a `.bzl` in the `MODULE.bazel` workspace closure gets
+                // both answers.
+                //
+                // A `.bzl` no package owns — one above every BUILD file — has
+                // no source label, so the load closure is all there is.
+                if let Some(pkg) = packages.owner_of(&c.path) {
+                    match c.status {
+                        Status::Modified | Status::TypeChanged => {
+                            out.direct_files.insert(c.path.clone());
+                        }
+                        // An added or deleted `.bzl` can enter or leave a
+                        // `glob`, so the package's edges may have moved.
+                        Status::Added | Status::Deleted => {
+                            out.dirty.insert(pkg.to_string());
+                        }
+                    }
+                }
             }
             Classification::Source(pkg) => match c.status {
                 // Content-only edits cannot change the graph, only mark the
@@ -555,6 +590,60 @@ mod tests {
             d.direct_files.contains("lib/core/BUILD.bazel"),
             "a BUILD file is also a source file: a glob(['**']) filegroup consumes it"
         );
+    }
+
+    #[test]
+    fn modified_bzl_is_also_a_changed_source_file() {
+        // The load closure gets it (`changed_bzl`) *and* the file->target map
+        // gets it (`direct_files`), because a filegroup can list the `.bzl`
+        // among its `srcs` without its own rule proto moving.
+        let d = run(vec![Change::new(Status::Modified, "lib/core/rules.bzl")]);
+        assert!(d.changed_bzl.contains("lib/core/rules.bzl"));
+        assert!(
+            d.direct_files.contains("lib/core/rules.bzl"),
+            "a .bzl consumed as a source must reach its consumers"
+        );
+    }
+
+    #[test]
+    fn added_bzl_dirties_its_package() {
+        let d = run(vec![Change::new(Status::Added, "lib/core/new.bzl")]);
+        assert!(d.changed_bzl.contains("lib/core/new.bzl"));
+        assert!(d.dirty.contains("lib/core"), "it may have entered a glob");
+        assert!(d.direct_files.is_empty());
+    }
+
+    #[test]
+    fn a_bzl_no_package_owns_is_left_to_the_load_closure() {
+        let mut p = PackageSet::new(["lib".to_string()]);
+        let d = dirty_set(
+            &[Change::new(Status::Modified, "vendor/x.bzl")],
+            &mut p,
+            &matchers(),
+            &NoConsumers,
+        );
+        assert!(d.changed_bzl.contains("vendor/x.bzl"));
+        assert!(d.direct_files.is_empty());
+        assert!(d.dirty.is_empty());
+    }
+
+    #[test]
+    fn an_exempt_module_file_is_still_a_changed_source_file() {
+        // `MODULE.bazel` is an invalidator by default; once the
+        // external-repository stage claims it, it must fall through to the
+        // ordinary source path so `filegroup(srcs = ["MODULE.bazel"])` and
+        // `//:srcs` still see it.
+        let mut m = matchers();
+        m.exempt(["MODULE.bazel".to_string()]);
+        let mut p = packages();
+        let d = dirty_set(
+            &[Change::new(Status::Modified, "MODULE.bazel")],
+            &mut p,
+            &m,
+            &NoConsumers,
+        );
+        assert!(!d.global);
+        assert!(d.direct_files.contains("MODULE.bazel"));
     }
 
     #[test]

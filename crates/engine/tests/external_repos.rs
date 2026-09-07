@@ -56,6 +56,7 @@ fn files() -> Files {
     put("app/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
     put("lib/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
     put("bazel/defs.bzl", "R = 1\n");
+    put("bazel/BUILD", "");
     Files(m)
 }
 
@@ -75,6 +76,23 @@ fn rows(pkg: &str) -> PackageUpdate {
             "demo_lib",
             vec!["@generated//:thing".into()],
         )],
+        // The shape `bazel/bazel` uses all over `tools/`: the very `.bzl` that
+        // the workspace closure reaches is *also* listed as a source of a
+        // filegroup. Editing it must dirty this filegroup, on top of whatever
+        // the repository it defines does elsewhere.
+        "bazel" => vec![
+            TargetRow::source_file("//bazel:repo.bzl"),
+            TargetRow::rule(
+                "//bazel:bzl_srcs",
+                "filegroup",
+                vec!["//bazel:repo.bzl".into()],
+            ),
+            TargetRow::rule(
+                "//bazel:embedded_tools",
+                "filegroup",
+                vec!["//bazel:bzl_srcs".into()],
+            ),
+        ],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -84,7 +102,7 @@ fn rows(pkg: &str) -> PackageUpdate {
     }
 }
 
-const PACKAGES: &[&str] = &["app", "lib"];
+const PACKAGES: &[&str] = &["app", "lib", "bazel"];
 
 struct Scanning(Files);
 
@@ -368,7 +386,42 @@ fn a_repository_rules_bzl_names_its_repository_instead_of_going_global() {
         r.global_reason
     );
     assert_eq!(r.stats.repos_dirty_by_bzl, 1);
-    assert_eq!(r.direct, vec!["//lib:lib".to_string()]);
+    assert_eq!(
+        r.direct,
+        vec!["//bazel:bzl_srcs".to_string(), "//lib:lib".to_string()],
+        "the repository consequence and the source-file consequence are both owed"
+    );
+}
+
+/// The soundness hole the bazel corpus found on `9a7ba209..cc5c15fa`.
+///
+/// `tools/build_defs/repo/utils.bzl` is loaded from `MODULE.bazel` (through
+/// `http.bzl`) *and* listed in the `srcs` of fifteen filegroups in its own
+/// package. Once the externals stage started claiming such a file as a
+/// repository-defining input, and item 4 stopped sending it through
+/// `rbuildfiles`, nothing left marked its ordinary source-file consumers: the
+/// filegroups were `cambium_missing` against bazel-diff. Before those items
+/// the edit went global, which hid the miss rather than fixing it.
+#[test]
+fn a_workspace_closure_bzl_still_reaches_the_filegroups_that_list_it() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["bazel/repo.bzl"]),
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    let a = affected(&r);
+    assert!(
+        a.contains(&"//bazel:bzl_srcs".to_string()),
+        "the filegroup consuming the .bzl as a source must be affected: {a:?}"
+    );
+    assert!(
+        a.contains(&"//bazel:embedded_tools".to_string()),
+        "and everything above it: {a:?}"
+    );
+    // Without losing the repository consequence.
+    assert!(a.contains(&"//lib:lib".to_string()), "{a:?}");
 }
 
 #[test]
