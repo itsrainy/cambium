@@ -235,6 +235,34 @@ pub struct IndexData {
     pub bzl_ext_label_offsets: Vec<u32>,
     pub bzl_ext_offsets: Vec<u32>,
     pub bzl_ext_edges: Vec<u32>,
+
+    // ---- external repositories built from main-repo files (format 5) ----
+    //
+    // One id space of *apparent* repository names, sorted, with the canonical
+    // name (`rules_cc+`) alongside so a run can match either spelling of an
+    // external label without re-running `bazel mod dump_repo_mapping`.
+    //
+    // - `repo_input_*` is the map from a main-repo path pattern to the
+    //   repositories built from it: an edit to `.github/config.yml` dirties
+    //   `@envoy_repo` and nothing else. Patterns are sorted; a trailing `/`
+    //   (recorded in `repo_input_prefix`) means "this directory and below".
+    // - `bzl_repo_*` is, for each `.bzl` in the workspace closure, the
+    //   repositories it can define. That is what stops a change to
+    //   `bazel/repo.bzl` from being global.
+    //
+    // See [`crate::externals`] for how the two are derived and why the
+    // attribution errs wide.
+    pub repo_name_bytes: Vec<u8>,
+    pub repo_name_offsets: Vec<u32>,
+    pub repo_canonical_bytes: Vec<u8>,
+    pub repo_canonical_offsets: Vec<u32>,
+    pub repo_input_bytes: Vec<u8>,
+    pub repo_input_offsets: Vec<u32>,
+    pub repo_input_prefix: Vec<bool>,
+    pub repo_input_repo_offsets: Vec<u32>,
+    pub repo_input_repo_edges: Vec<u32>,
+    pub bzl_repo_offsets: Vec<u32>,
+    pub bzl_repo_edges: Vec<u32>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -286,6 +314,19 @@ pub struct IndexRef<'a> {
     pub bzl_workspace: &'a [u32],
     pub bzl_ext_labels: StrTabRef<'a>,
     pub bzl_ext: CsrRef<'a>,
+
+    /// Apparent external-repository names, sorted, one per repo id.
+    pub repo_names: StrTabRef<'a>,
+    /// Canonical name of each repo id, empty when unknown.
+    pub repo_canonical: StrTabRef<'a>,
+    /// Main-repo path patterns, sorted, one per pattern id.
+    pub repo_input_patterns: StrTabRef<'a>,
+    /// Whether each pattern is a directory prefix rather than an exact path.
+    pub repo_input_prefix: &'a [bool],
+    /// Pattern id -> repo ids.
+    pub repo_inputs: CsrRef<'a>,
+    /// `.bzl` id -> the repo ids that `.bzl` can define.
+    pub bzl_repos: CsrRef<'a>,
 }
 
 impl<'a> IndexRef<'a> {
@@ -442,6 +483,63 @@ impl<'a> IndexRef<'a> {
         self.bzl_workspace.binary_search(&id).is_ok()
     }
 
+    // ---- external repositories ----
+
+    #[inline]
+    pub fn num_repos(&self) -> u32 {
+        self.repo_names.len() as u32
+    }
+
+    #[inline]
+    pub fn repo_name(&self, id: u32) -> &'a str {
+        self.repo_names.get(id)
+    }
+
+    /// The canonical name of a repo id, or its apparent name when the index
+    /// was built without a repository mapping.
+    #[inline]
+    pub fn repo_canonical_name(&self, id: u32) -> &'a str {
+        let c = self.repo_canonical.get(id);
+        if c.is_empty() {
+            self.repo_name(id)
+        } else {
+            c
+        }
+    }
+
+    /// The repositories a changed main-repo path feeds.
+    ///
+    /// Linear in the number of stored patterns, which is tens on every corpus
+    /// entry — a prefix match cannot be answered by binary search, and the
+    /// alternative (a trie) would not pay for itself at this size.
+    pub fn repos_for_path(&self, path: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        for p in 0..self.repo_input_patterns.len() as u32 {
+            let pat = self.repo_input_patterns.get(p);
+            let hit = if self.repo_input_prefix[p as usize] {
+                path.starts_with(pat)
+            } else {
+                path == pat
+            };
+            if hit {
+                out.extend_from_slice(self.repo_inputs.row(p));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The repositories a workspace-closure `.bzl` can define.
+    #[inline]
+    pub fn bzl_repos_of(&self, id: u32) -> &'a [u32] {
+        if (id as usize) < self.bzl_repos.offsets.len().saturating_sub(1) {
+            self.bzl_repos.row(id)
+        } else {
+            &[]
+        }
+    }
+
     pub fn counts(&self) -> Counts {
         let mut c = Counts {
             nodes: self.num_nodes(),
@@ -533,6 +631,27 @@ impl IndexData {
                 offsets: &self.bzl_ext_offsets,
                 edges: &self.bzl_ext_edges,
             },
+            repo_names: StrTabRef {
+                bytes: &self.repo_name_bytes,
+                offsets: &self.repo_name_offsets,
+            },
+            repo_canonical: StrTabRef {
+                bytes: &self.repo_canonical_bytes,
+                offsets: &self.repo_canonical_offsets,
+            },
+            repo_input_patterns: StrTabRef {
+                bytes: &self.repo_input_bytes,
+                offsets: &self.repo_input_offsets,
+            },
+            repo_input_prefix: &self.repo_input_prefix,
+            repo_inputs: CsrRef {
+                offsets: &self.repo_input_repo_offsets,
+                edges: &self.repo_input_repo_edges,
+            },
+            bzl_repos: CsrRef {
+                offsets: &self.bzl_repo_offsets,
+                edges: &self.bzl_repo_edges,
+            },
         }
     }
 
@@ -614,6 +733,27 @@ impl ArchivedIndexData {
             bzl_ext: CsrRef {
                 offsets: le::u32s(&self.bzl_ext_offsets),
                 edges: le::u32s(&self.bzl_ext_edges),
+            },
+            repo_names: StrTabRef {
+                bytes: &self.repo_name_bytes,
+                offsets: le::u32s(&self.repo_name_offsets),
+            },
+            repo_canonical: StrTabRef {
+                bytes: &self.repo_canonical_bytes,
+                offsets: le::u32s(&self.repo_canonical_offsets),
+            },
+            repo_input_patterns: StrTabRef {
+                bytes: &self.repo_input_bytes,
+                offsets: le::u32s(&self.repo_input_offsets),
+            },
+            repo_input_prefix: &self.repo_input_prefix,
+            repo_inputs: CsrRef {
+                offsets: le::u32s(&self.repo_input_repo_offsets),
+                edges: le::u32s(&self.repo_input_repo_edges),
+            },
+            bzl_repos: CsrRef {
+                offsets: le::u32s(&self.bzl_repo_offsets),
+                edges: le::u32s(&self.bzl_repo_edges),
             },
         }
     }

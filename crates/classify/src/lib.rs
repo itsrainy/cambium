@@ -39,6 +39,7 @@ pub struct Matchers {
     exact: FxHashSet<String>,
     invalidators: GlobSet,
     ignores: GlobSet,
+    exempt: FxHashSet<String>,
 }
 
 impl Matchers {
@@ -47,13 +48,28 @@ impl Matchers {
             exact: rules.invalidator_paths.iter().cloned().collect(),
             invalidators: build_globset(&rules.invalidator_globs)?,
             ignores: build_globset(&rules.ignore_globs)?,
+            exempt: FxHashSet::default(),
         })
+    }
+
+    /// Paths the caller has already accounted for precisely, and which must
+    /// therefore not fire an invalidator rule.
+    ///
+    /// The only user is the engine's external-repository stage: `MODULE.bazel`
+    /// is an invalidator by default because a bzlmod edit can change anything,
+    /// but once the stage has diffed it and named the repositories that moved,
+    /// re-invalidating the world for the same file would throw that answer
+    /// away. An exemption is a claim by the caller that it handled the file,
+    /// not a claim that the file does not matter.
+    pub fn exempt(&mut self, paths: impl IntoIterator<Item = String>) {
+        self.exempt.extend(paths);
     }
 
     /// A root-level `BUILD` file is an invalidator by default (it can define
     /// package-wide settings), and so is anything matching a configured glob.
     pub fn is_invalidator(&self, path: &str) -> bool {
-        self.exact.contains(path) || self.invalidators.is_match(path)
+        !self.exempt.contains(path)
+            && (self.exact.contains(path) || self.invalidators.is_match(path))
     }
 
     pub fn is_ignored(&self, path: &str) -> bool {

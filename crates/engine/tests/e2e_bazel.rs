@@ -722,3 +722,209 @@ fn assert_same_edges(spliced: &IndexData, fresh: &IndexData, step: usize) {
         "step {step}: spliced-only {only_spliced:?}, rebuild-only {only_fresh:?}"
     );
 }
+
+// ------------------------------------------------- external repositories
+
+/// A bzlmod workspace whose external repositories are built from main-repo
+/// files, both ways envoy does it:
+///
+/// - `mod_a/` is a `local_path_override` module, `.bazelignore`d out of the
+///   main repository exactly as envoy hides `api/` behind `@envoy_api`;
+/// - `@gen` is a `use_repo_rule` repository whose rule reads `config.txt`
+///   through a label attribute, exactly as `@envoy_repo` reads
+///   `.github/config.yml`.
+///
+/// Neither file belongs to a main-repo package, so before the external stage
+/// existed the only sound answer for either was "everything".
+fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
+    write(root, ".bazelversion", &format!("{bazel_version}\n"));
+    // `mod_a` is a module of its own; the main repository must not also load
+    // it as a package, or its targets would be `//mod_a:...`.
+    write(root, ".bazelignore", "mod_a\n");
+    write(
+        root,
+        "MODULE.bazel",
+        "module(name = \"root\", version = \"0.0.1\")\n\
+         bazel_dep(name = \"mod_a\", version = \"0.0.1\")\n\
+         local_path_override(\n    module_name = \"mod_a\",\n    path = \"mod_a\",\n)\n\
+         gen_repo = use_repo_rule(\"//tools:gen.bzl\", \"gen_repo\")\n\
+         gen_repo(\n    name = \"gen\",\n    config = \"@root//:config.txt\",\n)\n",
+    );
+    // The cold build at base runs Bazel, which writes the lockfile into the
+    // tree; committing it with the *next* edit would make every scenario a
+    // lockfile change. Repositories that track their lockfile commit it once,
+    // at the same time as `MODULE.bazel`.
+    write(root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n");
+    write(root, "config.txt", "v1\n");
+    write(root, "BUILD.bazel", "exports_files([\"config.txt\"])\n");
+    write(root, "tools/BUILD.bazel", "");
+    write(
+        root,
+        "tools/gen.bzl",
+        "def _impl(rctx):\n\
+        \x20   value = rctx.read(rctx.path(rctx.attr.config))\n\
+        \x20   rctx.file(\"value.txt\", value)\n\
+        \x20   rctx.file(\n\
+        \x20       \"BUILD\",\n\
+        \x20       'filegroup(name = \"value\", srcs = [\"value.txt\"], visibility = [\"//visibility:public\"])\\n',\n\
+        \x20   )\n\n\
+         gen_repo = repository_rule(\n\
+        \x20   implementation = _impl,\n\
+        \x20   attrs = {\"config\": attr.label(mandatory = True)},\n\
+         )\n",
+    );
+    write(
+        root,
+        "mod_a/MODULE.bazel",
+        "module(name = \"mod_a\", version = \"0.0.1\")\n",
+    );
+    write(
+        root,
+        "mod_a/BUILD.bazel",
+        "filegroup(name = \"lib\", srcs = [\"lib.txt\"], visibility = [\"//visibility:public\"])\n",
+    );
+    write(root, "mod_a/lib.txt", "a1\n");
+    write(
+        root,
+        "app/BUILD.bazel",
+        "genrule(\n    name = \"uses_gen\",\n    srcs = [\"@gen//:value\"],\n\
+        \x20   outs = [\"g.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"uses_mod_a\",\n    srcs = [\"@mod_a//:lib\"],\n\
+        \x20   outs = [\"m.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"downstream\",\n    srcs = [\":g.txt\"],\n\
+        \x20   outs = [\"d.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
+    );
+    write(
+        root,
+        "cambium.toml",
+        &format!(
+            "[baseline]\nstore = {{ kind = \"dir\", path = \"{}\" }}\n",
+            store.display()
+        ),
+    );
+}
+
+/// Main-repo targets `bazel query rdeps(//..., <pattern>)` reports.
+fn rdeps_oracle(engine: &Engine, pattern: &str) -> BTreeSet<String> {
+    let out = Command::new(engine.bazel.binary())
+        .current_dir(engine.workspace())
+        .args([
+            "query",
+            // Rules only: Bazel counts a generated file among a target's
+            // reverse dependencies, cambium reports the rule that generates it.
+            &format!("kind(rule, rdeps(//..., {pattern}))"),
+            "--output=label",
+            "--order_output=no",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ])
+        .output()
+        .expect("bazel query");
+    assert!(
+        out.status.success(),
+        "bazel rdeps({pattern}) failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| s.starts_with("//"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn an_external_repository_edit_reaches_only_its_consumers() {
+    skip_unless_e2e!();
+    // The two majors the corpus and CI care about. Selected through
+    // `.bazelversion` rather than `USE_BAZEL_VERSION` so that parallel tests
+    // do not fight over one process-wide environment variable.
+    for version in ["7.4.1", "9.2.0"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = root.join("_store");
+        std::fs::create_dir_all(&store).unwrap();
+        write_external_workspace(&root, &store, version);
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "t"]);
+        let base = commit_all(&root, "base");
+
+        let config = root.join("cambium.toml");
+        let engine = engine_for(&root, &config);
+        let base_index = engine
+            .full_build(&base)
+            .unwrap_or_else(|e| panic!("{version}: cold build: {e}"));
+
+        // The index knows which main-repo paths feed which repository.
+        let v = base_index.view();
+        let named = |p: &str| -> BTreeSet<String> {
+            v.repos_for_path(p)
+                .into_iter()
+                .map(|r| v.repo_name(r).to_string())
+                .collect()
+        };
+        assert_eq!(
+            named("config.txt"),
+            ["gen".to_string()].into_iter().collect::<BTreeSet<_>>(),
+            "{version}: the repository rule's label attribute is an input map entry"
+        );
+        assert_eq!(
+            named("mod_a/lib.txt"),
+            ["mod_a".to_string()].into_iter().collect::<BTreeSet<_>>(),
+            "{version}: a local_path_override directory is an input map entry"
+        );
+
+        let check = |name: &str, rel: &str, contents: &str, pattern: &str| {
+            write(&root, rel, contents);
+            let head = commit_all(&root, name);
+            let engine = engine_for(&root, &config);
+            let req = AffectedRequest {
+                base: base.clone(),
+                head: head.clone(),
+                include_manual: true,
+                explain: true,
+                no_full_build: true,
+                materialize: false,
+                publish_base: false,
+                max_depth: None,
+            };
+            let out = engine
+                .compute(
+                    base_index.view(),
+                    &engine.repo.diff(&base, &head).expect("git diff"),
+                    &engine.bazel_querier(&head).expect("querier"),
+                    &req,
+                )
+                .unwrap_or_else(|e| panic!("{version}/{name}: {e}"));
+            assert!(
+                !out.report.global,
+                "{version}/{name}: went global: {:?}",
+                out.report.global_reason
+            );
+            let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
+            let theirs = rdeps_oracle(&engine, pattern);
+            assert_eq!(
+                ours, theirs,
+                "{version}/{name}: cambium and `rdeps(//..., {pattern})` disagree"
+            );
+            git(&root, &["reset", "-q", "--hard", &base]);
+            git(&root, &["clean", "-qfd"]);
+            ours
+        };
+
+        // The `@envoy_repo` shape: a file a repository rule reads by label.
+        let gen = check("edit config", "config.txt", "v2\n", "@gen//:value");
+        assert!(
+            gen.contains("//app:uses_gen") && gen.contains("//app:downstream"),
+            "{version}: {gen:?}"
+        );
+        assert!(!gen.contains("//app:unrelated"), "{version}: {gen:?}");
+
+        // The `@envoy_api` shape: a `local_path_override` module's sources.
+        let a = check("edit mod_a", "mod_a/lib.txt", "a2\n", "@mod_a//:lib");
+        assert!(a.contains("//app:uses_mod_a"), "{version}: {a:?}");
+        assert!(!a.contains("//app:uses_gen"), "{version}: {a:?}");
+    }
+}
