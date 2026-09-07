@@ -78,7 +78,7 @@ plan uses quick; the published numbers come from a full run on EC2
 ## Running right now (logs in $CLAUDE_JOB_DIR/tmp = /Users/rainy/.claude/jobs/6b58f265/tmp)
 
 - **item4.sh** (started 10:34 EDT, log `item4.log`, `watch -n 10 tools/corpus-progress.sh`):
-  1. old binary (`tmp/cambi-old`, built at 1684956+) `corpus replay envoy
+  1. MISLABELLED: `tmp/cambi-old` already had item-4 code (agent rebuilt release at 09:39); this envoy range-50 run is an early "after". The true before is `envoy-before.sh` (binary from 15a46b1 in `tmp/old-target`, writes `corpus-results-before-true/envoy`, runs after ITEM4 DONE, log `envoy-before.log`). `corpus replay envoy
      --range 50 --restart --results-dir corpus-results-before` → the envoy
      "before" global count for the last 50 commits;
   2. `cargo build --release` (item-4 binary);
