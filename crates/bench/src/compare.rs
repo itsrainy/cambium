@@ -53,8 +53,11 @@ pub struct ChangesOptions {
     pub state_dir: PathBuf,
     /// Bazel version this run pinned, for the file name and the JSON.
     pub bazel_version: Option<String>,
-    /// Roots the oracle samples per change set; 0 disables it.
+    /// Roots the rdeps oracle samples per change set; 0 disables it.
     pub oracle_k: usize,
+    /// Run the `.bzl` load-closure oracle on every change set that touches a
+    /// `.bzl`. `--oracle` without `load` turns it off.
+    pub load_oracle: bool,
     pub seed: u64,
     /// Where tools may write hash files and raw output.
     pub scratch: PathBuf,
@@ -105,6 +108,7 @@ impl ChangesOptions {
             results_dir: absolute(&results_dir),
             bazel_version: None,
             oracle_k: 100,
+            load_oracle: true,
             seed: 0,
             resume: true,
             examples: DEFAULT_EXAMPLES,
@@ -1061,12 +1065,15 @@ pub fn compare_change_set_with(
     // Only on change sets that changed a `.bzl`, which is where the static closure
     // is the thing under test. `engine.bazel` is the head checkout, which is
     // the tree `rbuildfiles` has to be asked about.
-    let load_oracle = crate::oracles::load::run(
-        &engine.bazel,
-        &changed,
-        &report.dirty_packages.iter().cloned().collect(),
-    )
-    .with_context(|| format!("bzl load-closure oracle at {}", change_set.head))?;
+    let load_oracle = match opts.load_oracle {
+        true => crate::oracles::load::run(
+            &engine.bazel,
+            &changed,
+            &report.dirty_packages.iter().cloned().collect(),
+        )
+        .with_context(|| format!("bzl load-closure oracle at {}", change_set.head))?,
+        false => None,
+    };
     if let Some(o) = &load_oracle {
         if !o.ok() {
             tracing::error!(
