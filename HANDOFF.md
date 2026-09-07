@@ -75,17 +75,23 @@ deterministic pairs, Tango on the first 10; results under
 plan uses quick; the published numbers come from a full run on EC2
 (c7i.4xlarge for bazel/envoy/sourcegraph/apollo; 8xlarge + 500 GB for xla/tf).
 
-## Running right now (logs in $CLAUDE_JOB_DIR/tmp = /Users/rainy/.claude/jobs/6b58f265/tmp)
+## Running right now
 
-- **after.sh** (log `after.log`): release build at 7036fa0+, then
-  `corpus all <id> --profile quick` for bazel, sourcegraph, apollo, envoy
-  (FORMAT_VERSION 5 => every repo cold-builds once), then the true envoy
-  before-window with `tmp/old-target/release/cambi` (15a46b1) into
-  `corpus-results-before-true/envoy`. Prints `=== AFTER DONE`.
-- Envoy's corpus.toml invalidators are now empty (derived by items 1+3); the
-  replay oracle is the check. A mismatch on a commit touching api/**,
-  changelogs/**, .github/config.yml or VERSION.txt means put that path back.
-- Then: quick before/after table into docs/CORPUS.md Findings, commit.
+Nothing. The box (i-03c826487f1ab30ac, us-east-2) is **stopped** with all
+mirrors, caches and indexes on its volume; its results are copied to
+`corpus-results-box/`. Local runs are stopped. See the task list in the
+session and `docs/METHODOLOGY.md` (1cf10cf) for the direction.
+
+## Direction (Rainy, 2026-09-07 evening)
+
+The engine work is done; the benchmark vocabulary is being redone around
+`cambi bench` per `docs/METHODOLOGY.md`: subjects (real from
+`subject_repos.toml`, synthetic `synth:<preset>`), tools (cambium,
+bazel-diff, Tango), oracles (reverse-dependency, rebuild, load), workloads
+(history, change sets: PR-shaped primary, adjacent, stress), runs keyed by
+subject/workload/engine identity under `bench-results/`. Then: the full
+`rdeps` oracle, PR-shaped selection that understands squash merges, issue #3,
+and only then the published run on the box into `docs/RESULTS.md`.
 
 ## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
 
