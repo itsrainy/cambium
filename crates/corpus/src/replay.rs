@@ -135,7 +135,15 @@ pub struct ReplayResult {
     pub pin: String,
     pub from: String,
     pub to: String,
+    /// The `--bazel-version` override the run was asked for, if any. It is a
+    /// *request* (`7.x`), not what bazelisk resolved it to.
     pub bazel_version: String,
+    /// What `bazel --version` actually reported in the worktree, e.g.
+    /// `bazel 7.4.1`. Empty when the binary could not be asked (and absent
+    /// entirely from results written before this field existed), which the
+    /// report renders as `n/a`.
+    #[serde(default)]
+    pub bazel_version_used: String,
     pub tool_sha: String,
     pub started_unix: u64,
     pub cold: ColdBuild,
@@ -232,6 +240,14 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// `bazel --version` in the corpus worktree, so the report can say which Bazel
+/// actually answered rather than which one was asked for. Best effort: an
+/// unavailable binary yields an empty string rather than failing the replay.
+fn bazel_version_used(engine: &Engine) -> String {
+    let v = engine.bazel.version();
+    v.lines().next().unwrap_or("").trim().to_string()
 }
 
 fn tool_sha() -> String {
@@ -466,6 +482,7 @@ fn start(
         from: from.to_string(),
         to: to.to_string(),
         bazel_version: opts.bazel_version.clone(),
+        bazel_version_used: bazel_version_used(engine),
         tool_sha: tool_sha(),
         started_unix: now_unix(),
         cold,

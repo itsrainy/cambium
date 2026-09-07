@@ -238,38 +238,41 @@ impl Engine {
         }
         suffixes.push(format!("-{commit}.bin"));
         if let Ok(names) = store.list() {
-            if let Some(name) = names
+            // Several lineages can hold this tree: every `baseline build`
+            // mints one, and a config change (or a rule-hash version bump)
+            // leaves the old lineage's blobs behind. Take the first one built
+            // with this configuration; an incompatible blob is not a baseline,
+            // it is a leftover.
+            let candidates = names
                 .iter()
-                .find(|n| suffixes.iter().any(|s| n.ends_with(s)))
-            {
-                let dest = self.cache_dir.join(cache_name(name));
-                if store.fetch(name, &dest)? {
+                .filter(|n| suffixes.iter().any(|s| n.ends_with(s)));
+            for name in candidates {
+                if let Some(dest) = self.fetch_if_compatible(store.as_ref(), name)? {
                     return Ok(Some(dest));
                 }
             }
             // Tooling that only has a sha: follow the pointer to the tree.
             let pointer_suffix = format!("/{commit}");
-            if let Some(name) = names
+            let pointers = names
                 .iter()
-                .find(|n| n.starts_with("commits/") && n.ends_with(&pointer_suffix))
-            {
+                .filter(|n| n.starts_with("commits/") && n.ends_with(&pointer_suffix));
+            for name in pointers {
                 let dest = self.cache_dir.join(cache_name(name));
-                if store.fetch(name, &dest)? {
-                    let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
-                    let suffix = format!("/{pointed}.bin");
-                    if let Some(name) = names.iter().find(|n| n.ends_with(&suffix)) {
-                        let dest = self.cache_dir.join(cache_name(name));
-                        if store.fetch(name, &dest)? {
-                            return Ok(Some(dest));
-                        }
+                if !store.fetch(name, &dest)? {
+                    continue;
+                }
+                let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
+                let suffix = format!("/{pointed}.bin");
+                for name in names.iter().filter(|n| n.ends_with(&suffix)) {
+                    if let Some(dest) = self.fetch_if_compatible(store.as_ref(), name)? {
+                        return Ok(Some(dest));
                     }
                 }
             }
             return Ok(None);
         }
         for name in [tree_addressed_key(&tree), commit_addressed_key(commit)] {
-            let dest = self.cache_dir.join(cache_name(&name));
-            if store.fetch(&name, &dest)? {
+            if let Some(dest) = self.fetch_if_compatible(store.as_ref(), &name)? {
                 return Ok(Some(dest));
             }
         }
@@ -278,12 +281,35 @@ impl Engine {
         if store.fetch(&pointer, &dest)? {
             let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
             let name = tree_addressed_key(&pointed);
-            let dest = self.cache_dir.join(cache_name(&name));
-            if store.fetch(&name, &dest)? {
+            if let Some(dest) = self.fetch_if_compatible(store.as_ref(), &name)? {
                 return Ok(Some(dest));
             }
         }
         Ok(None)
+    }
+
+    /// Fetches one index blob into the cache and keeps it only if it was
+    /// built with this configuration. An incompatible blob is logged and
+    /// skipped, so that a store carrying an older lineage neither wins over a
+    /// compatible one nor stops the ancestor walk.
+    fn fetch_if_compatible(
+        &self,
+        store: &dyn ArtifactStore,
+        name: &str,
+    ) -> Result<Option<PathBuf>> {
+        let dest = self.cache_dir.join(cache_name(name));
+        if !store.fetch(name, &dest)? {
+            return Ok(None);
+        }
+        let f = IndexFile::open(&dest)?;
+        if f.view().config_hash != self.cfg.hash() {
+            tracing::warn!(
+                key = name,
+                "skipping an index built with a different cambium.toml (or an older rule-hash version)"
+            );
+            return Ok(None);
+        }
+        Ok(Some(dest))
     }
 
     /// Publishes an index under `indexes/<lineage>/<tree>.bin`, with a
@@ -545,6 +571,7 @@ impl Engine {
             &mut packages,
             &matchers,
             self.cfg.limits.max_changed_files,
+            &cambium_classify::IndexConsumers(base_view),
         );
 
         // `.bzl` files are not package inputs by path; Bazel resolves them.

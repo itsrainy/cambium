@@ -177,7 +177,11 @@ pub enum Classification {
     Bzl(String),
     /// A file owned by the named package.
     Source(String),
-    /// Not part of the build graph.
+    /// A file owned by the named package that also matches an ignore glob.
+    /// Whether it really is out of the graph is a question for the index:
+    /// see [`Consumed`].
+    IgnoredSource(String),
+    /// Not part of the build graph: no package owns it.
     Ignored,
 }
 
@@ -192,14 +196,55 @@ pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classificati
     if is_bzl_file(path) {
         return Classification::Bzl(path.to_string());
     }
-    // Ignore globs apply only to paths that are not BUILD/.bzl files.
-    if m.is_ignored(path) {
-        return Classification::Ignored;
-    }
+    // Ignore globs apply only to paths that are not BUILD/.bzl files, and
+    // even then they do not settle the question on their own: a path the
+    // build graph names as a source is an input whatever the glob says.
     match packages.owner_of(path) {
+        Some(pkg) if m.is_ignored(path) => Classification::IgnoredSource(pkg.to_string()),
         Some(pkg) => Classification::Source(pkg.to_string()),
         // No BUILD file anywhere above: not part of any package.
         None => Classification::Ignored,
+    }
+}
+
+/// Whether the build graph names a path as a source of some rule.
+///
+/// An ignore glob is a claim about paths the graph does not name — "`**/*.md`
+/// is documentation, not input". On a real repository that claim is often
+/// wrong: `bazel/bazel` feeds its distribution tarball from
+/// `filegroup(name = "srcs", srcs = glob(["**"]))` in every package, so
+/// `CHANGELOG.md` is a genuine input of `//:changelog-file` and
+/// `site/en/**/*.md` of `//site/en:srcs`. Taking the glob at its word there is
+/// an under-approximation — the one class of bug this design does not tolerate
+/// — so [`dirty_set`] asks the index instead and lets the glob decide only the
+/// cases the graph does not contradict.
+pub trait Consumed {
+    /// Some rule consumes `path` (owned by `pkg`) as a source input.
+    fn is_consumed(&self, pkg: &str, path: &str) -> bool;
+}
+
+/// A [`Consumed`] that never contradicts an ignore glob. For callers with no
+/// index in hand; it restores the old path-only behaviour, so it is *not* the
+/// right answer for a real run.
+pub struct NoConsumers;
+
+impl Consumed for NoConsumers {
+    fn is_consumed(&self, _pkg: &str, _path: &str) -> bool {
+        false
+    }
+}
+
+/// The [`Consumed`] a real run uses: the base index's reverse row for the
+/// path's source label.
+pub struct IndexConsumers<'a>(pub IndexRef<'a>);
+
+impl Consumed for IndexConsumers<'_> {
+    fn is_consumed(&self, pkg: &str, path: &str) -> bool {
+        let label = label::source_label(pkg, path);
+        match self.0.id_of(&label) {
+            Some(id) => !self.0.file_consumers(id).is_empty(),
+            None => false,
+        }
     }
 }
 
@@ -242,6 +287,7 @@ pub fn dirty_set(
     packages: &mut PackageSet,
     m: &Matchers,
     max_changed_files: usize,
+    consumed: &dyn Consumed,
 ) -> DirtySet {
     if max_changed_files > 0 && changes.len() > max_changed_files {
         return DirtySet::global(format!(
@@ -334,6 +380,26 @@ pub fn dirty_set(
                     out.dirty.insert(pkg);
                 }
             },
+            // A path an ignore glob claims is not input. The claim holds
+            // only where the graph agrees.
+            Classification::IgnoredSource(pkg) => match c.status {
+                Status::Modified | Status::TypeChanged => {
+                    if consumed.is_consumed(&pkg, &c.path) {
+                        out.direct_files.insert(c.path.clone());
+                    } else {
+                        out.ignored += 1;
+                    }
+                }
+                // The index cannot answer for a file that does not exist at
+                // base, and a file entering or leaving a `glob(["**"])`
+                // changes the package's edges either way, so an add or a
+                // delete re-queries the package however the glob reads. That
+                // costs one package query on a docs-only commit that adds a
+                // file; the alternative is missing the filegroup.
+                Status::Added | Status::Deleted => {
+                    out.dirty.insert(pkg);
+                }
+            },
             Classification::Ignored => out.ignored += 1,
         }
     }
@@ -408,8 +474,14 @@ mod tests {
             classify("lib/core/a.cc", &p, &m),
             Classification::Source("lib/core".into())
         );
-        assert_eq!(classify("docs/x.txt", &p, &m), Classification::Ignored);
-        assert_eq!(classify("lib/core/x.md", &p, &m), Classification::Ignored);
+        assert_eq!(
+            classify("docs/x.txt", &p, &m),
+            Classification::IgnoredSource("".into())
+        );
+        assert_eq!(
+            classify("lib/core/x.md", &p, &m),
+            Classification::IgnoredSource("lib/core".into())
+        );
     }
 
     #[test]
@@ -429,12 +501,24 @@ mod tests {
             classify("lib/core/x.bzl", &p, &m),
             Classification::Bzl("lib/core/x.bzl".into())
         );
-        assert_eq!(classify("lib/core/x.cc", &p, &m), Classification::Ignored);
+        assert_eq!(
+            classify("lib/core/x.cc", &p, &m),
+            Classification::IgnoredSource("lib/core".into())
+        );
+    }
+
+    /// A [`Consumed`] over a hand-written list of consumed paths.
+    struct Consumes(&'static [&'static str]);
+
+    impl Consumed for Consumes {
+        fn is_consumed(&self, _pkg: &str, path: &str) -> bool {
+            self.0.contains(&path)
+        }
     }
 
     fn run(changes: Vec<Change>) -> DirtySet {
         let mut p = packages();
-        dirty_set(&changes, &mut p, &matchers(), 5000)
+        dirty_set(&changes, &mut p, &matchers(), 5000, &NoConsumers)
     }
 
     #[test]
@@ -546,7 +630,7 @@ mod tests {
             .map(|i| Change::new(Status::Modified, format!("lib/core/f{i}.cc")))
             .collect();
         let mut p = packages();
-        let d = dirty_set(&changes, &mut p, &matchers(), 5);
+        let d = dirty_set(&changes, &mut p, &matchers(), 5, &NoConsumers);
         assert!(d.global);
         assert!(d.global_reason.unwrap().contains("max_changed_files"));
     }
@@ -559,9 +643,78 @@ mod tests {
             &mut p,
             &matchers(),
             0,
+            &NoConsumers,
         );
         assert!(!d.global);
         assert!(d.dirty.is_empty());
         assert_eq!(d.ignored, 1);
+    }
+
+    /// The regression the corpus found on `bazel/bazel`: the default ignore
+    /// globs cover `**/*.md`, and `CHANGELOG.md` is a real input of
+    /// `//:changelog-file`. Taking the glob at its word missed the genrule and
+    /// everything above it; the graph has the final word.
+    #[test]
+    fn a_consumed_ignored_file_is_still_direct() {
+        let m = Matchers::compile(&Rules {
+            ignore_globs: vec!["**/*.md".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut p = PackageSet::new(["".to_string()]);
+        let d = dirty_set(
+            &[Change::new(Status::Modified, "CHANGELOG.md")],
+            &mut p,
+            &m,
+            0,
+            &Consumes(&["CHANGELOG.md"]),
+        );
+        assert!(d.direct_files.contains("CHANGELOG.md"));
+        assert_eq!(d.ignored, 0);
+        assert!(d.dirty.is_empty());
+    }
+
+    /// The case the ignore glob exists for: nothing consumes the file, so the
+    /// commit does no Bazel work at all.
+    #[test]
+    fn an_unconsumed_ignored_file_stays_ignored() {
+        let m = Matchers::compile(&Rules {
+            ignore_globs: vec!["**/*.md".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut p = PackageSet::new(["".to_string()]);
+        let d = dirty_set(
+            &[Change::new(Status::Modified, "CHANGELOG.md")],
+            &mut p,
+            &m,
+            0,
+            &NoConsumers,
+        );
+        assert!(d.direct_files.is_empty());
+        assert!(d.dirty.is_empty());
+        assert_eq!(d.ignored, 1);
+    }
+
+    /// A file entering or leaving `glob(["**"])` moves the package's edges
+    /// whatever the ignore glob says, and the base index cannot answer for a
+    /// path that does not exist there yet.
+    #[test]
+    fn an_added_ignored_file_dirties_its_package() {
+        let m = Matchers::compile(&Rules {
+            ignore_globs: vec!["docs/**".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut p = PackageSet::new(["docs".to_string()]);
+        let d = dirty_set(
+            &[Change::new(Status::Added, "docs/new.md")],
+            &mut p,
+            &m,
+            0,
+            &NoConsumers,
+        );
+        assert_eq!(d.dirty.iter().next().unwrap(), "docs");
+        assert!(d.direct_files.is_empty());
     }
 }

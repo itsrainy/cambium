@@ -255,8 +255,14 @@ pub struct CompareResult {
     pub schema: u32,
     pub repo: String,
     pub pin: String,
+    /// The `--bazel-version` override, if any: a request (`7.x`), not what
+    /// bazelisk resolved it to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bazel_version: Option<String>,
+    /// What `bazel --version` actually reported, e.g. `bazel 7.4.1`. Absent
+    /// from results written before this field existed; the report says `n/a`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bazel_version_used: Option<String>,
     pub seed: u64,
     pub oracle_k: usize,
     pub pairs: Vec<PairComparison>,
@@ -415,13 +421,25 @@ pub fn classify_difference(
 // ----------------------------------------------------------------- the driver
 
 /// A Bazel rooted at another worktree, carrying this run's startup flags and
-/// environment so it joins the same server.
+/// environment.
+///
+/// Everything but `--output_base`: that one is per workspace directory, and
+/// lending it to a second workspace corrupts repository rules that symlink
+/// into the workspace they were fetched from. See
+/// [`RunContext::producer_startup_flags`].
 fn bazel_at(engine: &Engine, workspace: &Path) -> Bazel {
+    let startup: Vec<String> = engine
+        .bazel
+        .startup_flags()
+        .iter()
+        .filter(|f| !f.starts_with("--output_base"))
+        .cloned()
+        .collect();
     Bazel::at(
         workspace.to_path_buf(),
         Some(&engine.bazel.binary().display().to_string()),
     )
-    .with_startup_flags(engine.bazel.startup_flags().to_vec())
+    .with_startup_flags(startup)
     .with_env(engine.bazel.env().to_vec())
 }
 
@@ -757,12 +775,23 @@ pub fn compare_pairs(
             repo: opts.repo_id.clone(),
             pin: opts.pin.clone(),
             bazel_version: opts.bazel_version.clone(),
+            bazel_version_used: None,
             seed: opts.seed,
             oracle_k: opts.oracle_k,
             pairs: Vec::new(),
             summary: CompareSummary::default(),
         },
     };
+    // Recorded once per run, and re-recorded on a resume whose earlier half
+    // predates the field: the report's version matrix is only worth reading if
+    // it names the Bazel that actually answered.
+    if result.bazel_version_used.is_none() {
+        let v = engine.bazel.version();
+        let v = v.lines().next().unwrap_or("").trim().to_string();
+        if !v.is_empty() {
+            result.bazel_version_used = Some(v);
+        }
+    }
     let done: BTreeSet<String> = result.pairs.iter().map(|p| p.key()).collect();
 
     for (i, pair) in pairs.iter().enumerate() {
@@ -1041,6 +1070,7 @@ mod tests {
             repo: "bazel".into(),
             pin: "abc".into(),
             bazel_version: Some("7.4.1".into()),
+            bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 7,
             oracle_k: 100,
             pairs: vec![pair_comparison("1", 1.0, 100, 10, true)],

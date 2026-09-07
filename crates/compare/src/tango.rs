@@ -212,8 +212,13 @@ impl Producer for Tango {
             .arg(&worktrees)
             .arg("-o")
             .arg(&out);
-        if !ctx.startup_flags.is_empty() {
-            cmd.arg("-startup-options").arg(ctx.startup_flags_arg());
+        // Not `startup_flags`: tango runs Bazel in its own two worktrees, and
+        // sharing an output base across workspace directories corrupts
+        // workspace-absolute repository symlinks. See
+        // `RunContext::producer_startup_flags`.
+        let startup = ctx.producer_startup_flags();
+        if !startup.is_empty() {
+            cmd.arg("-startup-options").arg(startup.join(" "));
         }
         if !self.extra_args.is_empty() {
             cmd.arg("-extra-args").arg(self.extra_args.join(" "));

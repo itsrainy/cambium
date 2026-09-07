@@ -151,6 +151,9 @@ impl Args {
 /// Bazel binary made absolute), the corpus directory, and the results dir.
 struct Run {
     entry: RepoEntry,
+    /// The whole manifest, not just this entry: the report's cross-repo tables
+    /// need every entry's `mirror` to group the version matrix.
+    manifest: Manifest,
     corpus: CorpusDir,
     results: PathBuf,
     version: Option<String>,
@@ -185,6 +188,7 @@ impl Run {
         let results = cambium_compare::threeway::absolute(&results);
         Ok(Self {
             entry,
+            manifest,
             corpus,
             results,
             version: c.bazel_version.clone().filter(|v| !v.is_empty()),
@@ -725,40 +729,180 @@ fn do_report(ctx: &Context, run: &Run, doc: Option<&std::path::Path>) -> Result<
     let doc = doc
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| ctx.root.join("docs/CORPUS.md"));
-    let (replay, compares) = read_results(&run.results)?;
-    if replay.is_none() && compares.is_empty() {
+
+    // Every repository at once, not just this one: a per-repo nightly job
+    // rewrites the top table, the version matrix and the synthetic headline
+    // wholesale, and must not drop the other repos' rows on the way.
+    let parent = run.results.parent().unwrap_or(&run.results).to_path_buf();
+    let repos = collect_repos(&run.manifest, &parent, &run.corpus)?;
+    let mine = repos
+        .iter()
+        .find(|r| r.id == run.entry.id)
+        .cloned()
+        .unwrap_or_else(|| cambium_compare::RepoResults::new(&run.entry.id, family(&run.entry)));
+    if mine.is_empty() {
         eprintln!(
             "cambium: corpus report: no replay-*.json or compare-*.json in {}",
             run.results.display()
         );
         return Ok(crate::EXIT_ERROR);
     }
-    let section = cambium_compare::render_repo_section(replay.as_ref(), &compares, None);
-    cambium_compare::update_doc(&doc, &run.entry.id, &section)?;
 
-    // The top table is regenerated from *every* repository directory, not just
-    // this one: a per-repo nightly job must not drop the other repos' rows.
-    let mut rows = Vec::new();
-    let parent = run.results.parent().unwrap_or(&run.results).to_path_buf();
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&parent)
+    let bench = read_bench_legacy(&ctx.root.join("docs/benchmarks/sweep-legacy.json"))?;
+    cambium_compare::update_doc(
+        &doc,
+        &run.entry.id,
+        &cambium_compare::render_repo_section(&mine, None),
+    )?;
+    cambium_compare::update_doc(&doc, "top", &cambium_compare::render_top_table(&repos))?;
+    cambium_compare::update_doc(
+        &doc,
+        "matrix",
+        &cambium_compare::render_version_matrix(&repos),
+    )?;
+    cambium_compare::update_doc(
+        &doc,
+        "bench",
+        &cambium_compare::render_bench_section(&bench, Some("bench-legacy.svg")),
+    )?;
+    tracing::info!(doc = %doc.display(), repos = repos.len(), "report written");
+    println!("{}", doc.display());
+    Ok(crate::EXIT_OK)
+}
+
+/// `corpus.toml`'s `mirror`, else the entry's own id: what groups the
+/// version-matrix entries into one row.
+fn family(entry: &RepoEntry) -> String {
+    entry.mirror.clone().unwrap_or_else(|| entry.id.clone())
+}
+
+/// Results for every manifest entry that has a results directory, in manifest
+/// order, plus any stray directory the manifest no longer names (a renamed or
+/// removed entry still has numbers worth showing rather than silently losing).
+fn collect_repos(
+    manifest: &Manifest,
+    parent: &std::path::Path,
+    corpus: &CorpusDir,
+) -> Result<Vec<cambium_compare::RepoResults>> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in &manifest.repos {
+        let dir = cambium_corpus::results_dir(parent, &entry.id);
+        seen.insert(entry.id.clone());
+        if !dir.is_dir() {
+            continue;
+        }
+        let (mut replay, compares) = read_results(&dir)?;
+        // A replay written before `bazel_version_used` existed, with no
+        // version override, ran whatever the worktree's `.bazelversion`
+        // asked bazelisk for; that file is the honest record.
+        if let Some(r) = replay.as_mut() {
+            if r.bazel_version_used.is_empty() && r.bazel_version.is_empty() {
+                let path = corpus.worktree(&entry.id).join(".bazelversion");
+                if let Ok(v) = std::fs::read_to_string(path) {
+                    r.bazel_version_used = v.trim().to_string();
+                }
+            }
+        }
+        let r = cambium_compare::RepoResults::new(&entry.id, family(entry))
+            .with_replay(replay)
+            .with_compares(compares);
+        if !r.is_empty() {
+            out.push(r);
+        }
+    }
+    let mut strays: Vec<PathBuf> = std::fs::read_dir(parent)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();
-    dirs.sort();
-    for dir in dirs {
-        let (r, c) = read_results(&dir)?;
-        if r.is_none() && c.is_empty() {
+    strays.sort();
+    for dir in strays {
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if seen.contains(id) {
             continue;
         }
-        rows.push(cambium_compare::top_row(r.as_ref(), &c));
+        let (replay, compares) = read_results(&dir)?;
+        let r = cambium_compare::RepoResults::new(id, id)
+            .with_replay(replay)
+            .with_compares(compares);
+        if !r.is_empty() {
+            out.push(r);
+        }
     }
-    cambium_compare::update_doc(&doc, "top", &cambium_compare::render_top_table(&rows))?;
-    tracing::info!(doc = %doc.display(), repos = rows.len(), "report written");
-    println!("{}", doc.display());
-    Ok(crate::EXIT_OK)
+    Ok(out)
+}
+
+/// The saved `bench sweep --stage legacy_bazel_diff` run, as report rows.
+///
+/// Missing or unparseable is not an error: the synthetic section then says the
+/// sweep has not been recorded, which is true and better than failing a corpus
+/// report over a benchmark file.
+fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_compare::BenchLegacy>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(Vec::new());
+    };
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "ignoring an unreadable bench file");
+            return Ok(Vec::new());
+        }
+    };
+    let mut rows = Vec::new();
+    for r in v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if r.get("stage").and_then(|s| s.as_str()) != Some("legacy_bazel_diff") {
+            continue;
+        }
+        let n = |k: &str| -> u64 {
+            r.get("extra")
+                .and_then(|e| e.get(k))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                .round() as u64
+        };
+        let top =
+            |k: &str| -> u64 { r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).round() as u64 };
+        let targets = match n("targets") {
+            0 => top("param"),
+            t => t,
+        };
+        let cambium_only = n("cambium_only");
+        let legacy_only = n("bazel_diff_only");
+        rows.push(cambium_compare::BenchLegacy {
+            preset: r
+                .get("preset")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            targets,
+            legacy_cold_ms: n("bazel_diff_cold_ms"),
+            legacy_warm_ms: n("bazel_diff_warm_ms"),
+            cambium_cold_ms: 0,
+            cambium_warm_ms: match n("cambium_ms") {
+                0 => top("median_ms"),
+                v => v,
+            },
+            cambium_p90_ms: match n("cambium_p90_ms") {
+                0 => top("p90_ms"),
+                v => v,
+            },
+            agreed_labels: n("agreed"),
+            cambium_only,
+            legacy_only,
+            agreed: cambium_only == 0 && legacy_only == 0,
+        });
+    }
+    Ok(rows)
 }
 
 /// Every `replay-*.json` and `compare-*.json` in one results directory.

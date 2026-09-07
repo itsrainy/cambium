@@ -229,7 +229,9 @@ paths = ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel",
          ".bazelversion", "BUILD", "BUILD.bazel"]
 globs = ["tools/toolchains/**", "platforms/**", "third_party/**/*.bzl"]
 
-[ignore]                     # changes that cannot affect the build graph
+[ignore]                     # changes that cannot affect the build graph;
+                             # a path some rule consumes as a source is an
+                             # input anyway, whatever the glob says
 globs = ["**/*.md", "docs/**", ".github/**"]
 
 [output]

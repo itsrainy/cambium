@@ -31,7 +31,10 @@ pub use bazeldiff::{BazelDiff, Implementation};
 pub use classify::{classify, BazelFacts, Class, Facts, Side};
 pub use oracle::{OracleResult, RdepsOracle};
 pub use producer::{normalise_label, BaseWorktree, Producer, ProducerRun, RunContext};
-pub use report::{render_repo_section, render_top_table, top_row, update_doc, BenchLegacy, TopRow};
+pub use report::{
+    render_bench_section, render_repo_section, render_top_table, render_version_matrix, top_row,
+    update_doc, BenchLegacy, RepoResults, TopRow,
+};
 pub use tango::Tango;
 pub use threeway::{
     compare_pair, compare_pair_with, compare_pairs, CompareOptions, CompareResult, CompareSummary,

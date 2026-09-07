@@ -264,7 +264,11 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     // the corpus suite would write into docs/CORPUS.md.
     println!(
         "{}",
-        cambium_compare::report::render_repo_section(None, std::slice::from_ref(&result), None)
+        cambium_compare::report::render_repo_section(
+            &cambium_compare::RepoResults::new("bazel", "bazel")
+                .with_compares(vec![result.clone()]),
+            None,
+        )
     );
 
     for pair in &result.pairs {

@@ -30,9 +30,14 @@ fn commit(dir: &Path, msg: &str) -> String {
     git(dir, &["rev-parse", "HEAD"])
 }
 
-fn index_for(commit: &str) -> IndexData {
-    let mut b = IndexBuilder::new([3u8; 16]);
+fn index_for(commit: &str, config_hash: [u8; 32]) -> IndexData {
+    index_in_lineage(commit, [3u8; 16], config_hash)
+}
+
+fn index_in_lineage(commit: &str, lineage: [u8; 16], config_hash: [u8; 32]) -> IndexData {
+    let mut b = IndexBuilder::new(lineage);
     b.set_bazel_version("test");
+    b.set_config_hash(config_hash);
     b.apply_packages(&[PackageUpdate {
         package: "lib".into(),
         build_hash: [1; 32],
@@ -80,8 +85,14 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn publish(&self, sha: &str) -> Vec<String> {
-        let idx = index_for(sha);
-        let path = self.root.join(format!("../{sha}.bin"));
+        let idx = index_for(sha, self.engine.cfg.hash());
+        self.publish_idx(sha, idx)
+    }
+
+    fn publish_idx(&self, sha: &str, idx: IndexData) -> Vec<String> {
+        let path = self
+            .root
+            .join(format!("../{}-{sha}.bin", idx.header.lineage[0]));
         format::write_index(&path, &idx).unwrap();
         self.engine
             .publish_index(&path, &idx.header.lineage, sha)
@@ -230,4 +241,34 @@ fn a_sha_git_cannot_resolve_follows_the_pointer() {
         .fetch_baseline("0000000000000000000000000000000000000000")
         .unwrap()
         .is_none());
+}
+
+/// A store outlives configuration changes: every `baseline build` mints a
+/// lineage, and a config edit (or a rule-hash version bump) strands the old
+/// one. The blob built with the current configuration must win whichever
+/// lineage lists first, and when only stale blobs exist there is no baseline.
+#[test]
+fn a_stale_lineage_never_wins_over_a_compatible_one() {
+    let f = fixture();
+    let a = commit(&f.root, "one");
+    let good = f.engine.cfg.hash();
+    let mut stale = good;
+    stale[0] ^= 0xff;
+
+    // Lineage 0x01 sorts before 0x03 in the listing and is stale.
+    f.publish_idx(&a, index_in_lineage(&a, [1u8; 16], stale));
+    assert!(
+        f.engine.fetch_baseline(&a).unwrap().is_none(),
+        "a stale blob is not a baseline"
+    );
+
+    f.publish(&a);
+    let found = f
+        .engine
+        .fetch_baseline(&a)
+        .unwrap()
+        .expect("compatible blob");
+    let view = IndexFile::open(&found).unwrap();
+    assert_eq!(view.view().lineage, [3u8; 16]);
+    assert_eq!(view.view().config_hash, good);
 }
