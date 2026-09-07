@@ -1,8 +1,8 @@
-//! `docs/CORPUS.md`, generated from the run's JSON (spec §11).
+//! `docs/RESULTS.md`, generated from the run's JSON.
 //!
 //! The document is written by hand *around* generated blocks: each repository
-//! owns a region delimited by `<!-- corpus:<id>:begin -->` and
-//! `<!-- corpus:<id>:end -->`, and a run replaces the text between its own
+//! owns a region delimited by `<!-- bench:<id>:begin -->` and
+//! `<!-- bench:<id>:end -->`, and a run replaces the text between its own
 //! markers and nothing else. That way prose a person wrote — caveats about a
 //! repository, why a pin was chosen, the Findings section — survives every
 //! regeneration, and two repositories' nightly jobs can update the same file
@@ -14,21 +14,21 @@
 //! dropping its neighbours' rows.
 //!
 //! Everything here is a pure function of the result structs, so the rendering
-//! is unit-testable and a formatting change never requires a corpus run. It is
-//! also written to survive *partial* data: a repository with a replay and no
-//! comparison, a comparison whose producers all failed, a result file written
+//! is unit-testable and a formatting change never requires a benchmark run. It is
+//! also written to survive *partial* data: a repository with a history and no
+//! comparison, a comparison whose tools all failed, a result file written
 //! by an older binary that has no `bazel_version_used`. Every such hole
 //! renders as `n/a` or a one-line note, never as a panic or a missing table.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::history::CommitRecord;
+use crate::HistoryResult;
 use anyhow::{Context as _, Result};
-use cambium_corpus::replay::CommitRecord;
-use cambium_corpus::ReplayResult;
 use serde::{Deserialize, Serialize};
 
-use crate::threeway::{CompareResult, WallStats};
+use crate::compare::{ChangesResult, WallStats};
 
 /// `bench legacy`'s headline numbers at one graph size.
 ///
@@ -78,55 +78,40 @@ impl BenchLegacy {
     }
 }
 
-/// One repository's results: what `corpus-results/<id>/` held, plus the one
+/// One repository's results: what `bench-results/<id>/` held, plus the one
 /// manifest fact the JSON does not carry, its id.
 #[derive(Clone, Debug, Default)]
-pub struct RepoResults {
+pub struct SubjectResults {
     pub id: String,
-    pub replay: Option<ReplayResult>,
-    pub compares: Vec<CompareResult>,
+    pub history: Option<HistoryResult>,
+    pub compares: Vec<ChangesResult>,
 }
 
-impl RepoResults {
+impl SubjectResults {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            replay: None,
+            history: None,
             compares: Vec::new(),
         }
     }
 
-    pub fn with_replay(mut self, r: Option<ReplayResult>) -> Self {
-        self.replay = r;
+    pub fn with_replay(mut self, r: Option<HistoryResult>) -> Self {
+        self.history = r;
         self
     }
 
-    pub fn with_compares(mut self, c: Vec<CompareResult>) -> Self {
+    pub fn with_compares(mut self, c: Vec<ChangesResult>) -> Self {
         self.compares = c;
         self
     }
 
-    /// The profile these results came from, when any of them says. Results
-    /// written before profiles existed say nothing, and were full runs.
-    pub fn profile(&self) -> &str {
-        if let Some(p) = self
-            .compares
-            .iter()
-            .map(|c| c.profile.as_str())
-            .chain(self.replay.iter().map(|r| r.profile.as_str()))
-            .find(|p| !p.is_empty())
-        {
-            return p;
-        }
-        "full"
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.replay.is_none() && self.compares.is_empty()
+        self.history.is_none() && self.compares.is_empty()
     }
 
     fn pin(&self) -> String {
-        self.replay
+        self.history
             .as_ref()
             .map(|r| r.pin.clone())
             .or_else(|| self.compares.first().map(|c| c.pin.clone()))
@@ -138,7 +123,7 @@ impl RepoResults {
     /// override at least knows what it asked for, and says so.
     fn bazel_used(&self) -> String {
         let mut used: BTreeSet<String> = BTreeSet::new();
-        if let Some(r) = &self.replay {
+        if let Some(r) = &self.history {
             if !r.bazel_version_used.is_empty() {
                 used.insert(tidy_version(&r.bazel_version_used));
             }
@@ -152,7 +137,7 @@ impl RepoResults {
             return used.into_iter().collect::<Vec<_>>().join(", ");
         }
         let mut asked: BTreeSet<String> = BTreeSet::new();
-        if let Some(r) = &self.replay {
+        if let Some(r) = &self.history {
             if !r.bazel_version.is_empty() {
                 asked.insert(r.bazel_version.clone());
             }
@@ -172,11 +157,11 @@ impl RepoResults {
     }
 
     fn commits(&self) -> &[CommitRecord] {
-        self.replay.as_ref().map(|r| &r.commits[..]).unwrap_or(&[])
+        self.history.as_ref().map(|r| &r.commits[..]).unwrap_or(&[])
     }
 
-    /// Global commits and why, most common first. From the replay when it ran
-    /// any commits, else from the comparison pairs, which see the same
+    /// Global commits and why, most common first. From the history when it ran
+    /// any commits, else from the comparison change sets, which see the same
     /// invalidators over a different (sampled) slice of history.
     fn globals(&self) -> (usize, Vec<(String, usize)>) {
         let mut h: BTreeMap<String, usize> = BTreeMap::new();
@@ -188,7 +173,7 @@ impl RepoResults {
             }
         } else {
             for c in &self.compares {
-                for p in self.pairs(c).filter(|p| p.global) {
+                for p in self.change_sets(c).filter(|p| p.global) {
                     n += 1;
                     *h.entry(reason(p.cambium.global_reason.as_deref()))
                         .or_default() += 1;
@@ -200,38 +185,38 @@ impl RepoResults {
         (n, v)
     }
 
-    fn pairs<'a>(
+    fn change_sets<'a>(
         &self,
-        c: &'a CompareResult,
-    ) -> impl Iterator<Item = &'a crate::threeway::PairComparison> {
-        c.pairs.iter()
+        c: &'a ChangesResult,
+    ) -> impl Iterator<Item = &'a crate::compare::ChangeSetResult> {
+        c.change_sets.iter()
     }
 
-    fn pairs_total(&self) -> usize {
-        self.compares.iter().map(|c| c.summary.pairs).sum()
+    fn change_sets_total(&self) -> usize {
+        self.compares.iter().map(|c| c.summary.change_sets).sum()
     }
 
     fn failures(&self) -> usize {
         self.compares
             .iter()
-            .map(|c| c.summary.pairs - c.summary.passed)
+            .map(|c| c.summary.change_sets - c.summary.passed)
             .sum()
     }
 
     fn min_recall(&self) -> Option<f64> {
         self.compares
             .iter()
-            .filter(|c| c.summary.pairs > 0)
+            .filter(|c| c.summary.change_sets > 0)
             .map(|c| c.summary.min_recall)
             .fold(None, |acc, r| Some(acc.map_or(r, |a: f64| a.min(r))))
     }
 
-    /// Every producer named anywhere in this repository's comparisons.
-    fn producers(&self) -> Vec<String> {
+    /// Every tool named anywhere in this repository's comparisons.
+    fn tools(&self) -> Vec<String> {
         let mut names: BTreeSet<String> = BTreeSet::new();
         for c in &self.compares {
-            for p in &c.pairs {
-                for pr in &p.producers {
+            for p in &c.change_sets {
+                for pr in &p.tools {
                     names.insert(pr.name.clone());
                 }
             }
@@ -248,19 +233,19 @@ impl RepoResults {
         (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / vals.len() as f64)
     }
 
-    /// Over **all** compared pairs, globals included — the headline number, so
+    /// Over **all** compared change sets, globals included — the headline number, so
     /// the one the top table carries. Results written before that series
     /// existed fall back to the incremental one.
-    fn producer_cold_p50(&self, name: &str) -> Option<u64> {
+    fn tool_cold_p50(&self, name: &str) -> Option<u64> {
         let vals: Vec<u64> = self
             .compares
             .iter()
             .filter_map(|c| {
                 c.summary
-                    .all_producer_cold
+                    .all_tool_cold
                     .get(name)
                     .filter(|w| w.samples > 0)
-                    .or_else(|| c.summary.producer_cold.get(name))
+                    .or_else(|| c.summary.tool_cold.get(name))
             })
             .filter(|w| w.samples > 0)
             .map(|w| w.p50_ms)
@@ -322,13 +307,13 @@ pub struct TopRow {
     pub replay_commits: usize,
     pub globals: usize,
     pub global_reasons: Vec<(String, usize)>,
-    pub pairs: usize,
+    pub change_sets: usize,
     pub failures: usize,
     pub min_recall: Option<f64>,
-    /// Mean precision per producer.
+    /// Mean precision per tool.
     pub precision: BTreeMap<String, f64>,
-    /// Producer cold p50 per producer, against cambium's warm p50.
-    pub producer_cold_p50: BTreeMap<String, u64>,
+    /// Tool cold p50 per tool, against cambium's warm p50.
+    pub tool_cold_p50: BTreeMap<String, u64>,
     pub cambium_warm_p50: Option<u64>,
 }
 
@@ -473,7 +458,7 @@ fn lat_row(label: &str, l: Lat) -> String {
 // ---------------------------------------------------------------- top table
 
 /// A row for the top table, derived from a repository's results.
-pub fn top_row(r: &RepoResults) -> TopRow {
+pub fn top_row(r: &SubjectResults) -> TopRow {
     let non_global = latency(r.commits().iter().filter(|c| !c.global).map(|c| c.total_ms));
     let (globals, reasons) = r.globals();
     let mut row = TopRow {
@@ -485,22 +470,22 @@ pub fn top_row(r: &RepoResults) -> TopRow {
         replay_commits: non_global.n,
         globals,
         global_reasons: reasons.into_iter().take(3).collect(),
-        pairs: r.pairs_total(),
+        change_sets: r.change_sets_total(),
         failures: r.failures(),
         min_recall: r.min_recall(),
         cambium_warm_p50: r.cambium_warm_p50(),
         ..Default::default()
     };
-    if let Some(rep) = &r.replay {
+    if let Some(rep) = &r.history {
         row.targets = rep.cold.nodes;
         row.cold_build_s = rep.cold.wall_ms as f64 / 1000.0;
     }
-    for name in r.producers() {
+    for name in r.tools() {
         if let Some(p) = r.mean_precision(&name) {
             row.precision.insert(name.clone(), p);
         }
-        if let Some(c) = r.producer_cold_p50(&name) {
-            row.producer_cold_p50.insert(name, c);
+        if let Some(c) = r.tool_cold_p50(&name) {
+            row.tool_cold_p50.insert(name, c);
         }
     }
     row
@@ -508,19 +493,19 @@ pub fn top_row(r: &RepoResults) -> TopRow {
 
 /// The table at the top of the document: one line per repository that has
 /// results at all.
-pub fn render_top_table(repos: &[RepoResults]) -> String {
+pub fn render_top_table(repos: &[SubjectResults]) -> String {
     let rows: Vec<TopRow> = repos
         .iter()
         .filter(|r| !r.is_empty())
         .map(top_row)
         .collect();
     if rows.is_empty() {
-        return "No repository in `corpus-results/` has results yet.".to_string();
+        return "No repository in `bench-results/` has results yet.".to_string();
     }
     let mut s = String::new();
     s.push_str(
-        "| repo | pin | Bazel | targets | cold build | replay p50/p90 | globals | pairs | \
-         pass/fail | min recall | precision | producer cold p50 vs cambium warm p50 |\n",
+        "| repo | pin | Bazel | targets | cold build | history p50/p90 | globals | change_sets | \
+         pass/fail | min recall | precision | tool cold p50 vs cambium warm p50 |\n",
     );
     s.push_str("|---|---|---|---:|---:|---:|---|---:|---:|---:|---|---|\n");
     for r in &rows {
@@ -542,7 +527,7 @@ pub fn render_top_table(repos: &[RepoResults]) -> String {
                 .collect::<Vec<_>>(),
         );
         let speed = lines(
-            &r.producer_cold_p50
+            &r.tool_cold_p50
                 .iter()
                 .map(|(n, c)| {
                     let warm = r.cambium_warm_p50.unwrap_or(0);
@@ -574,20 +559,20 @@ pub fn render_top_table(repos: &[RepoResults]) -> String {
             ms(r.replay_p50_ms),
             ms(r.replay_p90_ms),
             globals,
-            r.pairs,
-            format_args!("{} / {}", r.pairs - r.failures, r.failures),
+            r.change_sets,
+            format_args!("{} / {}", r.change_sets - r.failures, r.failures),
             opt_pct(r.min_recall),
             precision,
             speed,
         ));
     }
     s.push_str(
-        "\nThe producer-vs-cambium column is over **all** compared pairs, the \
+        "\nThe tool-vs-cambium column is over **all** compared change_sets, the \
          ones cambium answered with `//...` included, so the ratio is not an \
-         average over the pairs cambium is fast on; each repository's section \
-         breaks it out. Replay p50/p90 are over **non-global** commits (the ones an updater \
+         average over the change_sets cambium is fast on; each repository's section \
+         breaks it out. History p50/p90 are over **non-global** commits (the ones an updater \
          actually walks); the per-repo sections give both distributions. \
-         `pass/fail` counts compared pairs. Precision against a producer is \
+         `pass/fail` counts compared change_sets. Precision against a tool is \
          informational; recall against the `rdeps` oracle is the gate.\n",
     );
     s
@@ -598,7 +583,7 @@ pub fn render_top_table(repos: &[RepoResults]) -> String {
 /// The markdown for one repository: everything a reader needs to judge the
 /// claim, in the order they will ask for it — what was measured, whether it
 /// was sound, then how fast.
-pub fn render_repo_section(r: &RepoResults, bench: Option<&BenchLegacy>) -> String {
+pub fn render_subject_section(r: &SubjectResults, bench: Option<&BenchLegacy>) -> String {
     // No heading of its own: the document hand-writes `## <id>` above each
     // marked region, and that heading is what the top table links to. A
     // generated duplicate would give the anchor a `-1` suffix and break the
@@ -607,32 +592,23 @@ pub fn render_repo_section(r: &RepoResults, bench: Option<&BenchLegacy>) -> Stri
     s.push_str(&format!("- pin: `{}`\n", short(&r.pin())));
     s.push_str(&format!("- Bazel: {}\n", r.bazel_used()));
     s.push_str(&format!("- generated: {}\n", today()));
-    if r.profile() != "full" {
-        // Loudly, and before the tables: quick numbers are a laptop's slice of
-        // the corpus, not the published run.
-        s.push_str(&format!(
-            "- profile: **{}** — a bounded local slice, not the published \
-             numbers\n",
-            r.profile()
-        ));
-    }
-    if let Some(rep) = &r.replay {
+    if let Some(rep) = &r.history {
         s.push_str(&format!("- tool: `{}`\n", rep.tool_sha));
     }
     if r.is_empty() {
         s.push_str(
-            "\nNo results yet: neither `replay-*.json` nor `compare-*.json` \
+            "\nNo results yet: neither `history-*.json` nor `changes-*.json` \
                     was found for this repository.\n",
         );
         return s;
     }
     s.push('\n');
 
-    if let Some(rep) = &r.replay {
+    if let Some(rep) = &r.history {
         s.push_str(&render_replay(rep));
     } else {
         s.push_str(
-            "_No replay for this repository yet; the cold build and \
+            "_No history for this repository yet; the cold build and \
                     updater-latency tables below are omitted._\n\n",
         );
     }
@@ -642,7 +618,7 @@ pub fn render_repo_section(r: &RepoResults, bench: Option<&BenchLegacy>) -> Stri
     } else {
         s.push_str(
             "_No three-way comparison for this repository yet: no \
-                    `compare-*.json`, so there are no precision, recall or \
+                    `changes-*.json`, so there are no precision, recall or \
                     disagreement numbers._\n\n",
         );
     }
@@ -654,7 +630,7 @@ pub fn render_repo_section(r: &RepoResults, bench: Option<&BenchLegacy>) -> Stri
     s
 }
 
-fn render_replay(rep: &ReplayResult) -> String {
+fn render_replay(rep: &HistoryResult) -> String {
     let mut s = String::new();
     let c = &rep.cold;
     s.push_str("#### Cold build\n\n");
@@ -687,15 +663,15 @@ fn render_replay(rep: &ReplayResult) -> String {
 
     let u = &rep.summary;
     s.push_str(&format!(
-        "#### Replay ({} commits, `{}..{}`)\n\n",
+        "#### History ({} commits, `{}..{}`)\n\n",
         u.commits,
         short(&rep.from),
         short(&rep.to)
     ));
     if !rep.done {
         s.push_str(
-            "_This replay has not finished; the numbers below cover the \
-                    commits it has replayed so far._\n\n",
+            "_This history has not finished; the numbers below cover the \
+                    commits it has applied so far._\n\n",
         );
     }
     s.push_str("| over | commits | p50 | p90 | p99 | max |\n|---|---:|---:|---:|---:|---:|\n");
@@ -768,18 +744,18 @@ fn render_replay(rep: &ReplayResult) -> String {
     s
 }
 
-/// The two pair populations the timings table reports over.
+/// The two change set populations the timings table reports over.
 ///
-/// `all pairs` is the published one: nothing is excluded from it. `incremental`
-/// drops the pairs where cambium answered `//...`, and exists because the
+/// `all change sets` is the published one: nothing is excluded from it. `incremental`
+/// drops the change sets where cambium answered `//...`, and exists because the
 /// precision and class numbers are computed over that set and their walls have
 /// to be readable next to them.
-const ALL_PAIRS: &str = "all pairs";
-const INCREMENTAL_PAIRS: &str = "incremental";
+const ALL_CHANGE_SETS: &str = "all change sets";
+const INCREMENTAL_CHANGE_SETS: &str = "incremental";
 
 /// The Bazel a comparison ran under: what it reported, else what was asked
 /// for, else `n/a`.
-fn compare_bazel(c: &CompareResult) -> String {
+fn compare_bazel(c: &ChangesResult) -> String {
     c.bazel_version_used
         .as_deref()
         .map(tidy_version)
@@ -787,10 +763,10 @@ fn compare_bazel(c: &CompareResult) -> String {
         .unwrap_or_else(|| "n/a".into())
 }
 
-/// How many pairs a producer's distribution covers. The explicit count when
+/// How many change sets a tool's distribution covers. The explicit count when
 /// the run recorded one; otherwise the sample count of its cold distribution,
 /// for results written before the field existed.
-fn producer_ran(
+fn tool_ran(
     counts: &BTreeMap<String, usize>,
     cold: &BTreeMap<String, WallStats>,
     name: &str,
@@ -802,22 +778,22 @@ fn producer_ran(
         .unwrap_or(0)
 }
 
-/// What the globally invalidated pairs cost.
+/// What the globally invalidated change sets cost.
 ///
 /// cambium answers `//...` on them, which is sound — it is a superset of any
 /// answer — and useless: the user is told to rebuild the repository. This
-/// table is the price of that, side by side with the precise set the producers
-/// found on the same pairs, so "cambium goes global on N% of commits" is a
+/// table is the price of that, side by side with the precise set the tools
+/// found on the same change sets, so "cambium goes global on N% of commits" is a
 /// sentence with a number after it rather than an asterisk.
-fn render_globals(compares: &[CompareResult]) -> String {
+fn render_globals(compares: &[ChangesResult]) -> String {
     let mut s = String::from("#### Globals\n\n");
     if compares.iter().all(|c| c.summary.global_stats.is_empty()) {
-        s.push_str("No compared pair was globally invalidated.\n\n");
+        s.push_str("No compared change_set was globally invalidated.\n\n");
         return s;
     }
     s.push_str(
-        "| Bazel | pairs | cambium `//...` | producer | its precise set | \
-         producer cold p50 | cambium cold/warm p50 |\n\
+        "| Bazel | change_sets | cambium `//...` | tool | its precise set | \
+         tool cold p50 | cambium cold/warm p50 |\n\
          |---|---:|---:|---|---:|---:|---:|\n",
     );
     for c in compares {
@@ -831,65 +807,65 @@ fn render_globals(compares: &[CompareResult]) -> String {
             ms(g.cambium_cold.p50_ms),
             ms(g.cambium_warm.p50_ms)
         );
-        let mut names: Vec<&String> = g.mean_producer_labels.keys().collect();
+        let mut names: Vec<&String> = g.mean_tool_labels.keys().collect();
         names.sort();
         if names.is_empty() {
             s.push_str(&format!(
                 "| `{ver}` | {} | {} | _none ran_ | n/a | n/a | {cambium} |\n",
-                g.pairs,
+                g.change_sets,
                 num(g.mean_cambium_labels.round() as u64),
             ));
         }
         for name in names {
             s.push_str(&format!(
                 "| `{ver}` | {} | {} | {name} | {} | {} | {cambium} |\n",
-                g.pairs,
+                g.change_sets,
                 num(g.mean_cambium_labels.round() as u64),
-                num(g.mean_producer_labels[name].round() as u64),
-                opt_ms(g.producer_cold.get(name).map(|w| w.p50_ms)),
+                num(g.mean_tool_labels[name].round() as u64),
+                opt_ms(g.tool_cold.get(name).map(|w| w.p50_ms)),
             ));
         }
     }
     s.push_str(
-        "\nMeans over the global pairs. *cambium `//...`* is the number of \
+        "\nMeans over the global change_sets. *cambium `//...`* is the number of \
          rule targets `//...` names at head — the answer cambium gave — and \
-         *its precise set* is what the producer found on the same pair. The \
+         *its precise set* is what the tool found on the same change_set. The \
          ratio between them is the over-approximation a global hands the user; \
          the wall columns say what each tool charged to produce its answer. \
-         These pairs are excluded from precision, the class counts and recall \
+         These change_sets are excluded from precision, the class counts and recall \
          (there is nothing to be wrong about inside `//...`) and included in \
-         the `all pairs` timings above.\n\n",
+         the `all change sets` timings above.\n\n",
     );
     s
 }
 
-fn render_compare(r: &RepoResults) -> String {
+fn render_compare(r: &SubjectResults) -> String {
     let mut s = String::new();
     let compares = &r.compares;
 
     // ---- soundness first ----
     s.push_str("#### Three-way comparison\n\n");
-    let pairs = r.pairs_total();
+    let change_sets = r.change_sets_total();
     let globals: usize = compares.iter().map(|c| c.summary.globals).sum();
     s.push_str(&format!(
-        "{pairs} pairs compared, {} passed, {} failed ({globals} of them \
+        "{change_sets} change_sets compared, {} passed, {} failed ({globals} of them \
          global, which pass by construction: `//...` contains every answer. \
-         The producers still ran on them — see **Globals** below). Worst \
+         The tools still ran on them — see **Globals** below). Worst \
          oracle recall: **{}**.\n\n",
-        pairs - r.failures(),
+        change_sets - r.failures(),
         r.failures(),
         opt_pct(r.min_recall()),
     ));
 
-    s.push_str("| Bazel | producer | pairs | passed | precision | min recall |\n");
+    s.push_str("| Bazel | tool | change_sets | passed | precision | min recall |\n");
     s.push_str("|---|---|---:|---:|---:|---:|\n");
     for c in compares {
         let ver = compare_bazel(c);
-        let names = producer_names(c);
+        let names = tool_names(c);
         if names.is_empty() {
             s.push_str(&format!(
                 "| `{ver}` | _none ran_ | {} | {} | n/a | {} |\n",
-                c.summary.pairs,
+                c.summary.change_sets,
                 c.summary.passed,
                 pct(c.summary.min_recall)
             ));
@@ -897,7 +873,7 @@ fn render_compare(r: &RepoResults) -> String {
         for name in names {
             s.push_str(&format!(
                 "| `{ver}` | {name} | {} | {} | {} | {} |\n",
-                c.summary.pairs,
+                c.summary.change_sets,
                 c.summary.passed,
                 c.summary
                     .mean_precision
@@ -913,31 +889,31 @@ fn render_compare(r: &RepoResults) -> String {
     // ---- timings ----
     s.push_str("#### Timings (p50 / p90)\n\n");
     s.push_str(
-        "| Bazel | tool | over | pairs | cold | warm |\n\
+        "| Bazel | tool | over | change_sets | cold | warm |\n\
          |---|---|---|---:|---:|---:|\n",
     );
     for c in compares {
         let ver = compare_bazel(c);
-        for name in producer_names(c) {
-            // Per producer, because Tango is capped under the quick profile:
-            // a p50 over 10 pairs and one over 50 are different claims and the
+        for name in tool_names(c) {
+            // Per tool, because Tango is capped under the quick profile:
+            // a p50 over 10 change sets and one over 50 are different claims and the
             // table has to say which is which.
             for (scope, ran, cold, warm) in [
                 (
-                    ALL_PAIRS,
-                    producer_ran(
-                        &c.summary.all_producer_pairs,
-                        &c.summary.all_producer_cold,
+                    ALL_CHANGE_SETS,
+                    tool_ran(
+                        &c.summary.all_tool_change_sets,
+                        &c.summary.all_tool_cold,
                         &name,
                     ),
-                    c.summary.all_producer_cold.get(&name),
-                    c.summary.all_producer_warm.get(&name),
+                    c.summary.all_tool_cold.get(&name),
+                    c.summary.all_tool_warm.get(&name),
                 ),
                 (
-                    INCREMENTAL_PAIRS,
-                    producer_ran(&c.summary.producer_pairs, &c.summary.producer_cold, &name),
-                    c.summary.producer_cold.get(&name),
-                    c.summary.producer_warm.get(&name),
+                    INCREMENTAL_CHANGE_SETS,
+                    tool_ran(&c.summary.tool_change_sets, &c.summary.tool_cold, &name),
+                    c.summary.tool_cold.get(&name),
+                    c.summary.tool_warm.get(&name),
                 ),
             ] {
                 s.push_str(&format!(
@@ -949,12 +925,12 @@ fn render_compare(r: &RepoResults) -> String {
         }
         for (scope, cold, warm) in [
             (
-                ALL_PAIRS,
+                ALL_CHANGE_SETS,
                 &c.summary.all_cambium_cold,
                 &c.summary.all_cambium_warm,
             ),
             (
-                INCREMENTAL_PAIRS,
+                INCREMENTAL_CHANGE_SETS,
                 &c.summary.cambium_cold,
                 &c.summary.cambium_warm,
             ),
@@ -967,16 +943,19 @@ fn render_compare(r: &RepoResults) -> String {
             ));
         }
     }
-    let cold_rebuilds: usize = compares.iter().map(|c| c.summary.cold_rebuild_pairs).sum();
+    let cold_rebuilds: usize = compares
+        .iter()
+        .map(|c| c.summary.cold_rebuild_change_sets)
+        .sum();
     s.push_str(&format!(
-        "\n**Quote the `{ALL_PAIRS}` rows.** They cover every pair compared, \
+        "\n**Quote the `{ALL_CHANGE_SETS}` rows.** They cover every change set compared, \
          including the {globals} where cambium fell back to `//...` and did no \
          incremental work at all — which is what a user running cambium over \
-         this history actually waits for. The `{INCREMENTAL_PAIRS}` rows drop \
+         this history actually waits for. The `{INCREMENTAL_CHANGE_SETS}` rows drop \
          those; they are the rows that belong with the precision and class \
          numbers above, because those are computed over exactly the same \
-         pairs, but read on their own they flatter cambium — an average over \
-         the pairs it is fast on. {cold_rebuilds} of the incremental pairs \
+         change_sets, but read on their own they flatter cambium — an average over \
+         the change_sets it is fast on. {cold_rebuilds} of the incremental change_sets \
          re-indexed the whole repository (the dirty set was too large to \
          splice), so their *warm* is a cold number under a warm label.\n\n"
     ));
@@ -984,9 +963,9 @@ fn render_compare(r: &RepoResults) -> String {
         "cambium's *cold* is a full index build from `bazel query //...`; its \
          *warm* is an update against the published baseline, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
-         hashes; Tango has no warm mode, so its cell is `n/a`. *pairs* is how \
-         many pairs each tool's distribution is taken over: under the `quick` \
-         profile Tango runs on the first 10 pairs only, while cambium and \
+         hashes; Tango has no warm mode, so its cell is `n/a`. *change_sets* is how \
+         many change_sets each tool's distribution is taken over: under the `quick` \
+         profile Tango runs on the first 10 change_sets only, while cambium and \
          bazel-diff run on all of them.\n\n",
     );
 
@@ -1023,15 +1002,15 @@ fn render_compare(r: &RepoResults) -> String {
             ));
         }
     }
-    s.push_str("\nCounts are labels, summed over every pair and producer.\n\n");
+    s.push_str("\nCounts are labels, summed over every change_set and tool.\n\n");
 
     // ---- why cambium reported the extras ----
     let mut reasons: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut depth: BTreeMap<String, (f64, usize)> = BTreeMap::new();
     let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
     for c in compares {
-        for pair in &c.pairs {
-            for pr in &pair.producers {
+        for change_set in &c.change_sets {
+            for pr in &change_set.tools {
                 let e = reasons.entry(pr.name.clone()).or_default();
                 for (k, v) in &pr.cambium_only_reasons {
                     *e.entry(k.clone()).or_default() += v;
@@ -1046,8 +1025,8 @@ fn render_compare(r: &RepoResults) -> String {
         }
     }
     if reasons.values().any(|m| !m.is_empty()) {
-        s.push_str("#### Why cambium reported the labels the producer did not\n\n");
-        s.push_str("| producer | cambium's reason | labels |\n|---|---|---:|\n");
+        s.push_str("#### Why cambium reported the labels the tool did not\n\n");
+        s.push_str("| tool | cambium's reason | labels |\n|---|---|---:|\n");
         for (name, m) in &reasons {
             let mut v: Vec<(&String, &usize)> = m.iter().collect();
             v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -1063,14 +1042,18 @@ fn render_compare(r: &RepoResults) -> String {
         );
     }
 
-    // Two numbers that belong to the producers rather than to a class.
+    // Two numbers that belong to the tools rather than to a class.
     if !dropped.is_empty() {
         for (name, n) in &dropped {
             let agree = match depth.get(name) {
                 Some((sum, count)) if *count > 0 => format!(
                     "depth agrees on {} of shared labels ({count} {})",
                     pct(sum / *count as f64),
-                    if *count == 1 { "pair" } else { "pairs" }
+                    if *count == 1 {
+                        "change_set"
+                    } else {
+                        "change_sets"
+                    }
                 ),
                 _ => "no distances reported".to_string(),
             };
@@ -1086,14 +1069,14 @@ fn render_compare(r: &RepoResults) -> String {
     // ---- the oracle ----
     let mut with_oracle = 0usize;
     let mut roots = 0usize;
-    let mut partial_pairs = 0usize;
+    let mut partial_change_sets = 0usize;
     let mut partial_batches = 0usize;
     let mut skipped_roots = 0usize;
     let mut missing = 0usize;
     let mut missing_external = 0usize;
     let mut external_route = 0usize;
     for c in compares {
-        for p in &c.pairs {
+        for p in &c.change_sets {
             if let Some(o) = &p.oracle {
                 with_oracle += 1;
                 roots += o.roots.len();
@@ -1102,7 +1085,7 @@ fn render_compare(r: &RepoResults) -> String {
                 missing_external += o.missing_external.len();
                 external_route += o.external_route.len();
                 if o.partial {
-                    partial_pairs += 1;
+                    partial_change_sets += 1;
                     partial_batches += o.partial_batches;
                 }
             }
@@ -1110,12 +1093,12 @@ fn render_compare(r: &RepoResults) -> String {
     }
     s.push_str("#### `rdeps` oracle\n\n");
     if with_oracle == 0 {
-        s.push_str("No pair ran the oracle (`--oracle-sample 0`, or every pair was global).\n\n");
+        s.push_str("No change_set ran the oracle (`--oracle-sample 0`, or every change_set was global).\n\n");
     } else {
-        s.push_str("| pairs with an oracle | roots sampled | roots skipped | partial pairs | partial batches | missing labels | of those, external route | external labels not counted |\n");
+        s.push_str("| change_sets with an oracle | roots sampled | roots skipped | partial change_sets | partial batches | missing labels | of those, external route | external labels not counted |\n");
         s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
-            "| {with_oracle} | {roots} | {skipped_roots} | {partial_pairs} | {partial_batches} | {missing} | {external_route} | {missing_external} |\n\n"
+            "| {with_oracle} | {roots} | {skipped_roots} | {partial_change_sets} | {partial_batches} | {missing} | {external_route} | {missing_external} |\n\n"
         ));
         s.push_str(
             "A *partial* batch is a `--keep_going` query that exited 3: Bazel \
@@ -1132,25 +1115,25 @@ fn render_compare(r: &RepoResults) -> String {
     }
 
     // ---- the .bzl load-closure oracle ----
-    let mut bzl = crate::bzloracle::BzlOracleSummary::default();
+    let mut bzl = crate::oracles::load::LoadOracleSummary::default();
     for c in compares {
-        for p in &c.pairs {
-            if let Some(o) = &p.bzl_oracle {
+        for p in &c.change_sets {
+            if let Some(o) = &p.load_oracle {
                 bzl.add(o);
             }
         }
     }
     s.push_str("#### `.bzl` load-closure oracle\n\n");
     if bzl.is_empty() {
-        s.push_str("No pair changed a `.bzl` file.\n\n");
+        s.push_str("No change_set changed a `.bzl` file.\n\n");
     } else {
         s.push_str(
-            "| pairs with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
+            "| change_sets with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
         );
         s.push_str("|---:|---:|---:|---:|\n");
         s.push_str(&format!(
             "| {} | {} | {} | {} |\n\n",
-            bzl.pairs, bzl.checked, bzl.partial, bzl.missing_packages
+            bzl.change_sets, bzl.checked, bzl.partial, bzl.missing_packages
         ));
         s.push_str(
             "cambium resolves a changed `.bzl` from the static load closure it \
@@ -1168,11 +1151,11 @@ fn render_compare(r: &RepoResults) -> String {
     s
 }
 
-fn producer_names(c: &CompareResult) -> Vec<String> {
+fn tool_names(c: &ChangesResult) -> Vec<String> {
     let names: BTreeSet<String> = c
-        .pairs
+        .change_sets
         .iter()
-        .flat_map(|p| p.producers.iter().map(|pr| pr.name.clone()))
+        .flat_map(|p| p.tools.iter().map(|pr| pr.name.clone()))
         .collect();
     names.into_iter().collect()
 }
@@ -1185,9 +1168,9 @@ pub fn render_bench_section(rows: &[BenchLegacy], chart: Option<&str>) -> String
     let mut s = String::new();
     s.push_str(
         "These are *synthetic* graphs (`cambi bench sweep --stage \
-         legacy_bazel_diff`), not the corpus above: cambium and bazel-diff on \
+         legacy_bazel_diff`), not the real subjects above: cambium and bazel-diff on \
          the same generated workspace, the same change, and a `bazel` shim that \
-         replays a recorded query, so what is measured is each tool's own work \
+         history runs a recorded query, so what is measured is each tool's own work \
          rather than a Bazel server. See [BENCH.md](BENCH.md#legacy_bazel_diff-like-for-like-against-bazel-diff).\n\n",
     );
     if rows.is_empty() {
@@ -1245,21 +1228,21 @@ fn render_bench_table(rows: &[BenchLegacy]) -> String {
     s
 }
 
-pub fn begin_marker(repo_id: &str) -> String {
-    format!("<!-- corpus:{repo_id}:begin -->")
+pub fn begin_marker(subject_id: &str) -> String {
+    format!("<!-- bench:{subject_id}:begin -->")
 }
 
-pub fn end_marker(repo_id: &str) -> String {
-    format!("<!-- corpus:{repo_id}:end -->")
+pub fn end_marker(subject_id: &str) -> String {
+    format!("<!-- bench:{subject_id}:end -->")
 }
 
-/// Replaces `repo_id`'s region of `doc` with `section`, appending the region
+/// Replaces `subject_id`'s region of `doc` with `section`, appending the region
 /// (markers and all) when it is not there yet.
 ///
 /// A begin marker with no end marker is treated as absent rather than as a
 /// licence to eat the rest of the file.
-pub fn replace_section(doc: &str, repo_id: &str, section: &str) -> String {
-    let (begin, end) = (begin_marker(repo_id), end_marker(repo_id));
+pub fn replace_section(doc: &str, subject_id: &str, section: &str) -> String {
+    let (begin, end) = (begin_marker(subject_id), end_marker(subject_id));
     let block = format!("{begin}\n{}\n{end}\n", section.trim_end());
     match (doc.find(&begin), doc.find(&end)) {
         (Some(b), Some(e)) if e > b => {
@@ -1288,13 +1271,13 @@ pub fn replace_section(doc: &str, repo_id: &str, section: &str) -> String {
 }
 
 /// [`replace_section`] against a file, creating it when missing.
-pub fn update_doc(path: &Path, repo_id: &str, section: &str) -> Result<()> {
+pub fn update_doc(path: &Path, subject_id: &str, section: &str) -> Result<()> {
     let existing = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let updated = replace_section(&existing, repo_id, section);
+    let updated = replace_section(&existing, subject_id, section);
     if updated == existing {
         return Ok(());
     }
@@ -1308,8 +1291,8 @@ pub fn update_doc(path: &Path, repo_id: &str, section: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threeway::{CambiumRun, CompareSummary, PairComparison, ProducerComparison};
-    use cambium_corpus::replay::{ColdBuild, Summary};
+    use crate::compare::{CambiumRun, ChangeSetResult, ChangesSummary, ToolComparison};
+    use crate::history::{ColdBuild, Summary};
 
     fn cold() -> ColdBuild {
         ColdBuild {
@@ -1355,9 +1338,9 @@ mod tests {
         }
     }
 
-    /// A replay with two cheap non-global commits and one very cheap global
+    /// A history with two cheap non-global commits and one very cheap global
     /// one, so the two latency rows must differ.
-    fn replay(version_used: &str) -> ReplayResult {
+    fn history(version_used: &str) -> HistoryResult {
         let commits = vec![
             commit("1111111111111111111111111111111111111111", 40, false, None),
             commit("2222222222222222222222222222222222222222", 80, false, None),
@@ -1368,14 +1351,13 @@ mod tests {
                 Some("tools/build_defs/repo/git.bzl matches an invalidator"),
             ),
         ];
-        let mut r = ReplayResult {
+        let mut r = HistoryResult {
             schema: 3,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
             from: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             to: "0123456789abcdef0123456789abcdef01234567".into(),
             bazel_version: String::new(),
-            profile: "full".into(),
             bazel_version_used: version_used.to_string(),
             tool_sha: "deadbee".into(),
             engine: String::new(),
@@ -1391,12 +1373,12 @@ mod tests {
         r
     }
 
-    fn compare() -> CompareResult {
+    fn compare() -> ChangesResult {
         let mut counts = BTreeMap::new();
         counts.insert("cambium_extra_select".to_string(), 3);
         let mut why = BTreeMap::new();
         why.insert("rule definition changed".to_string(), 233);
-        let pair = PairComparison {
+        let change_set = ChangeSetResult {
             schema: 3,
             base: "b".into(),
             head: "h".into(),
@@ -1407,7 +1389,7 @@ mod tests {
                 warm_wall_ms: 180,
                 ..Default::default()
             },
-            producers: vec![ProducerComparison {
+            tools: vec![ToolComparison {
                 name: "bazel-diff-rust".into(),
                 version: "v46.1.0".into(),
                 labels: 12,
@@ -1417,15 +1399,15 @@ mod tests {
                 depth_agreement: Some(0.8),
                 dropped_file_targets: 4,
                 cambium_only: 3,
-                producer_only: 0,
+                tool_only: 0,
                 counts,
                 examples: Vec::new(),
                 cambium_only_reasons: why,
                 pass: true,
                 error: None,
             }],
-            bzl_oracle: None,
-            oracle: Some(crate::oracle::OracleResult {
+            load_oracle: None,
+            oracle: Some(crate::oracles::rdeps::RdepsResult {
                 roots: vec!["//a:a".into(), "//b:b".into()],
                 oracle_set: Default::default(),
                 cambium_set_from_roots: Default::default(),
@@ -1440,7 +1422,7 @@ mod tests {
             global: false,
             pass: true,
         };
-        let mut c = CompareResult {
+        let mut c = ChangesResult {
             schema: 3,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -1448,19 +1430,19 @@ mod tests {
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 0,
             oracle_k: 100,
-            profile: "full".into(),
-            pairs: vec![pair, global_pair()],
-            summary: CompareSummary::default(),
+            tango_change_sets: None,
+            change_sets: vec![change_set, global_change_set()],
+            summary: ChangesSummary::default(),
         };
         c.summarise();
         c
     }
 
-    /// A globally invalidated pair as the driver records one: cambium answered
+    /// A globally invalidated change set as the driver records one: cambium answered
     /// `//...` — 24 000 rule targets — in 30 ms, and bazel-diff still ran, took
     /// 100 s and found 40 targets precisely.
-    fn global_pair() -> PairComparison {
-        PairComparison {
+    fn global_change_set() -> ChangeSetResult {
+        ChangeSetResult {
             schema: 3,
             base: "gb".into(),
             head: "gh".into(),
@@ -1474,7 +1456,7 @@ mod tests {
                 warm_wall_ms: 30,
                 ..Default::default()
             },
-            producers: vec![ProducerComparison {
+            tools: vec![ToolComparison {
                 name: "bazel-diff-rust".into(),
                 version: "v46.1.0".into(),
                 labels: 40,
@@ -1484,14 +1466,14 @@ mod tests {
                 depth_agreement: None,
                 dropped_file_targets: 0,
                 cambium_only: 0,
-                producer_only: 0,
+                tool_only: 0,
                 counts: BTreeMap::new(),
                 examples: Vec::new(),
                 cambium_only_reasons: BTreeMap::new(),
                 pass: true,
                 error: None,
             }],
-            bzl_oracle: None,
+            load_oracle: None,
             oracle: None,
             recall: 1.0,
             global: true,
@@ -1499,15 +1481,15 @@ mod tests {
         }
     }
 
-    fn bazel_results() -> RepoResults {
-        RepoResults::new("bazel")
-            .with_replay(Some(replay("bazel 9.0.0")))
+    fn bazel_results() -> SubjectResults {
+        SubjectResults::new("bazel")
+            .with_replay(Some(history("bazel 9.0.0")))
             .with_compares(vec![compare()])
     }
 
     #[test]
     fn a_repo_section_reports_the_pin_the_versions_and_the_classes() {
-        let s = render_repo_section(&bazel_results(), None);
+        let s = render_subject_section(&bazel_results(), None);
         assert!(s.starts_with("- pin: `0123456789ab`"), "{s}");
         assert!(s.contains("`0123456789ab`"), "the pin is abbreviated: {s}");
         assert!(s.contains("bazel-diff-rust"), "{s}");
@@ -1526,7 +1508,7 @@ mod tests {
 
     #[test]
     fn the_section_gives_both_latency_distributions() {
-        let s = render_repo_section(&bazel_results(), None);
+        let s = render_subject_section(&bazel_results(), None);
         assert!(s.contains("| all commits | 3 | 40 ms |"), "{s}");
         assert!(s.contains("| non-global commits | 2 | 80 ms |"), "{s}");
         assert!(
@@ -1539,90 +1521,90 @@ mod tests {
     #[test]
     fn the_section_reports_the_bzl_load_closure_oracle() {
         // No `.bzl` in the fixture's change sets.
-        let s = render_repo_section(&bazel_results(), None);
-        assert!(s.contains("No pair changed a `.bzl` file."), "{s}");
+        let s = render_subject_section(&bazel_results(), None);
+        assert!(s.contains("No change_set changed a `.bzl` file."), "{s}");
 
         let mut r = bazel_results();
         for c in &mut r.compares {
-            c.pairs[0].bzl_oracle = Some(crate::bzloracle::BzlOracleResult {
+            c.change_sets[0].load_oracle = Some(crate::oracles::load::LoadOracleResult {
                 checked: vec!["bazel/defs.bzl".into(), "bazel/other.bzl".into()],
                 partial: true,
                 bazel_packages: ["app".to_string()].into_iter().collect(),
                 ..Default::default()
             });
         }
-        let s = render_repo_section(&r, None);
+        let s = render_subject_section(&r, None);
         assert!(s.contains("`.bzl` load-closure oracle"), "{s}");
         assert!(s.contains("| 1 | 2 | 1 | 0 |"), "{s}");
     }
 
     #[test]
     fn the_section_reports_the_oracles_partial_batches() {
-        let s = render_repo_section(&bazel_results(), None);
+        let s = render_subject_section(&bazel_results(), None);
         assert!(s.contains("| 1 | 2 | 0 | 1 | 2 | 0 |"), "{s}");
         assert!(s.contains("rule definition changed | 233"), "{s}");
     }
 
     #[test]
     fn the_timings_table_gives_both_populations_and_says_which_to_quote() {
-        let s = render_repo_section(&bazel_results(), None);
+        let s = render_subject_section(&bazel_results(), None);
         assert!(
-            s.contains("| `7.4.1` | **cambium** | all pairs | 2 |"),
-            "the all-pairs row covers the global too: {s}"
+            s.contains("| `7.4.1` | **cambium** | all change sets | 2 |"),
+            "the all-change_sets row covers the global too: {s}"
         );
         assert!(
             s.contains("| `7.4.1` | **cambium** | incremental | 1 |"),
             "the incremental row drops it: {s}"
         );
         assert!(
-            s.contains("| `7.4.1` | bazel-diff-rust | all pairs | 2 |"),
-            "and so does the producer, which ran on the global: {s}"
+            s.contains("| `7.4.1` | bazel-diff-rust | all change sets | 2 |"),
+            "and so does the tool, which ran on the global: {s}"
         );
         assert!(
             s.contains("| `7.4.1` | bazel-diff-rust | incremental | 1 |"),
             "{s}"
         );
         assert!(
-            s.contains("**Quote the `all pairs` rows.**"),
+            s.contains("**Quote the `all change sets` rows.**"),
             "the prose names the published number: {s}"
         );
         assert!(
             s.contains("1 where cambium fell back to `//...`"),
-            "and says how many pairs that is: {s}"
+            "and says how many change_sets that is: {s}"
         );
     }
 
     #[test]
     fn the_globals_table_prices_the_over_approximation() {
-        let s = render_repo_section(&bazel_results(), None);
+        let s = render_subject_section(&bazel_results(), None);
         assert!(s.contains("#### Globals"), "{s}");
         assert!(
             s.contains("| `7.4.1` | 1 | 24,000 | bazel-diff-rust | 40 | 100.0 s | 30 ms / 30 ms |"),
             "cambium's //... against the precise set, with both walls: {s}"
         );
 
-        // A run with no global pair says so rather than printing an empty
+        // A run with no global change set says so rather than printing an empty
         // table.
         let mut r = bazel_results();
         for c in &mut r.compares {
-            c.pairs.retain(|p| !p.global);
+            c.change_sets.retain(|p| !p.global);
             c.summarise();
         }
-        let s = render_repo_section(&r, None);
+        let s = render_subject_section(&r, None);
         assert!(
-            s.contains("No compared pair was globally invalidated."),
+            s.contains("No compared change_set was globally invalidated."),
             "{s}"
         );
         assert!(
-            s.contains("| `7.4.1` | **cambium** | all pairs | 1 |"),
+            s.contains("| `7.4.1` | **cambium** | all change sets | 1 |"),
             "{s}"
         );
     }
 
     #[test]
     fn a_repo_with_only_a_replay_still_renders() {
-        let r = RepoResults::new("envoy").with_replay(Some(replay("")));
-        let s = render_repo_section(&r, None);
+        let r = SubjectResults::new("envoy").with_replay(Some(history("")));
+        let s = render_subject_section(&r, None);
         assert!(s.contains("#### Cold build"), "{s}");
         assert!(s.contains("No three-way comparison"), "{s}");
         assert!(
@@ -1633,20 +1615,20 @@ mod tests {
 
     #[test]
     fn a_repo_with_only_a_comparison_still_renders() {
-        let r = RepoResults::new("bazel").with_compares(vec![compare()]);
-        let s = render_repo_section(&r, None);
-        assert!(s.contains("No replay for this repository yet"), "{s}");
+        let r = SubjectResults::new("bazel").with_compares(vec![compare()]);
+        let s = render_subject_section(&r, None);
+        assert!(s.contains("No history for this repository yet"), "{s}");
         assert!(s.contains("#### Three-way comparison"), "{s}");
     }
 
     #[test]
     fn a_repo_with_no_results_says_so_rather_than_panicking() {
-        let r = RepoResults::new("xla");
-        let s = render_repo_section(&r, None);
+        let r = SubjectResults::new("xla");
+        let s = render_subject_section(&r, None);
         assert!(s.contains("No results yet"), "{s}");
         assert_eq!(
             render_top_table(std::slice::from_ref(&r)),
-            "No repository in `corpus-results/` has results yet."
+            "No repository in `bench-results/` has results yet."
         );
     }
 
@@ -1680,7 +1662,10 @@ mod tests {
     #[test]
     fn the_top_table_links_each_repo_to_its_section() {
         let row = top_row(&bazel_results());
-        assert_eq!(row.pairs, 2, "the global pair is a compared pair");
+        assert_eq!(
+            row.change_sets, 2,
+            "the global change_set is a compared change_set"
+        );
         assert_eq!(row.failures, 0);
         assert_eq!(row.bazel_used, "7.4.1, 9.0.0");
         assert_eq!(row.replay_p50_ms, 80, "non-global commits only");
@@ -1692,7 +1677,7 @@ mod tests {
         assert!(t.contains("bazel-diff-rust 90.0%"), "{t}");
         assert!(
             t.contains("bazel-diff-rust 100.0 s vs 180 ms (556×)"),
-            "producer cold against cambium warm, over all pairs: {t}"
+            "tool cold against cambium warm, over all change sets: {t}"
         );
         assert!(
             t.contains("1× `tools/build_defs"),
@@ -1702,23 +1687,23 @@ mod tests {
 
     #[test]
     fn a_section_replaces_only_its_own_markers() {
-        let doc = "# Corpus\n\nprose\n\n\
-                   <!-- corpus:bazel:begin -->\nold bazel\n<!-- corpus:bazel:end -->\n\n\
-                   <!-- corpus:envoy:begin -->\nenvoy\n<!-- corpus:envoy:end -->\n";
+        let doc = "# Results\n\nprose\n\n\
+                   <!-- bench:bazel:begin -->\nold bazel\n<!-- bench:bazel:end -->\n\n\
+                   <!-- bench:envoy:begin -->\nenvoy\n<!-- bench:envoy:end -->\n";
         let out = replace_section(doc, "bazel", "new bazel");
         assert!(out.contains("new bazel"));
         assert!(!out.contains("old bazel"));
         assert!(out.contains("envoy"), "the neighbour survives: {out}");
-        assert!(out.starts_with("# Corpus\n\nprose\n"), "{out}");
-        assert_eq!(out.matches("<!-- corpus:bazel:begin -->").count(), 1);
+        assert!(out.starts_with("# Results\n\nprose\n"), "{out}");
+        assert_eq!(out.matches("<!-- bench:bazel:begin -->").count(), 1);
     }
 
     #[test]
     fn the_blank_line_after_a_region_survives() {
-        let doc = "<!-- corpus:bazel:begin -->\nold\n<!-- corpus:bazel:end -->\n\n## Findings\n";
+        let doc = "<!-- bench:bazel:begin -->\nold\n<!-- bench:bazel:end -->\n\n## Findings\n";
         let out = replace_section(doc, "bazel", "new");
         assert!(
-            out.ends_with("<!-- corpus:bazel:end -->\n\n## Findings\n"),
+            out.ends_with("<!-- bench:bazel:end -->\n\n## Findings\n"),
             "the heading below keeps its blank line: {out:?}"
         );
     }
@@ -1726,17 +1711,17 @@ mod tests {
     #[test]
     fn a_hand_written_findings_section_survives_a_rerun() {
         let doc = "## Findings\n\nThe bzl class dominates.\n\n\
-                   <!-- corpus:bazel:begin -->\nold\n<!-- corpus:bazel:end -->\n";
+                   <!-- bench:bazel:begin -->\nold\n<!-- bench:bazel:end -->\n";
         let out = replace_section(doc, "bazel", "new");
         assert!(out.contains("The bzl class dominates."), "{out}");
     }
 
     #[test]
     fn an_absent_section_is_appended_with_its_markers() {
-        let out = replace_section("# Corpus\n", "bazel", "hello");
+        let out = replace_section("# Results\n", "bazel", "hello");
         assert_eq!(
             out,
-            "# Corpus\n\n<!-- corpus:bazel:begin -->\nhello\n<!-- corpus:bazel:end -->\n"
+            "# Results\n\n<!-- bench:bazel:begin -->\nhello\n<!-- bench:bazel:end -->\n"
         );
         // Idempotent: rendering the same section again changes nothing.
         assert_eq!(replace_section(&out, "bazel", "hello"), out);
@@ -1744,21 +1729,21 @@ mod tests {
 
     #[test]
     fn a_begin_marker_without_an_end_does_not_eat_the_file() {
-        let doc = "# Corpus\n<!-- corpus:bazel:begin -->\nhalf written\n";
+        let doc = "# Results\n<!-- bench:bazel:begin -->\nhalf written\n";
         let out = replace_section(doc, "bazel", "new");
         assert!(out.contains("half written"), "{out}");
-        assert!(out.ends_with("<!-- corpus:bazel:end -->\n"), "{out}");
+        assert!(out.ends_with("<!-- bench:bazel:end -->\n"), "{out}");
     }
 
     #[test]
     fn updating_a_missing_doc_creates_it() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("docs/CORPUS.md");
+        let path = dir.path().join("docs/RESULTS.md");
         update_doc(&path, "bazel", "body").unwrap();
         let s = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             s,
-            "<!-- corpus:bazel:begin -->\nbody\n<!-- corpus:bazel:end -->\n"
+            "<!-- bench:bazel:begin -->\nbody\n<!-- bench:bazel:end -->\n"
         );
         update_doc(&path, "envoy", "other").unwrap();
         let s = std::fs::read_to_string(&path).unwrap();

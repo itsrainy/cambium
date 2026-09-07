@@ -114,7 +114,7 @@ impl StageResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BenchReport {
-    /// JSON contract version; see `cambium_engine::report::SCHEMA_VERSION`.
+    /// JSON contract version; see `crate::RESULT_SCHEMA`.
     #[serde(default = "schema_version")]
     pub schema: u32,
     pub tool_version: String,
@@ -125,7 +125,7 @@ pub struct BenchReport {
 }
 
 const fn schema_version() -> u32 {
-    cambium_engine::report::SCHEMA_VERSION
+    crate::RESULT_SCHEMA
 }
 
 impl BenchReport {

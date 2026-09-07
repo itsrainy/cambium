@@ -1,14 +1,14 @@
-//! The replay over a synthetic git history: real git, synthetic Bazel.
+//! The history over a synthetic git history: real git, synthetic Bazel.
 //!
 //! What this proves is the harness — cold build, forward walk, publish,
-//! resume, the incremental-equals-full oracle, pair selection — over the same
-//! `compute` a corpus run drives with a real Bazel.
+//! resume, the incremental-equals-full oracle, change set selection — over the same
+//! `compute` a real subject's run drives with a real Bazel.
 
 use std::path::Path;
 
-use cambium_corpus::pairs::{self, PairKind, PairOptions};
-use cambium_corpus::replay::{replay, Driver, ReplayOptions, ReplayResult};
-use cambium_corpus::State;
+use cambium_bench::changes::{self, ChangeSetKind, ChangeSetOptions};
+use cambium_bench::history::{history, Driver, HistoryOptions, HistoryResult};
+use cambium_bench::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 
@@ -71,16 +71,16 @@ fn fixture(revisions: u64, change_preset: &str) -> Fixture {
     }
 }
 
-fn opts(f: &Fixture, resume: bool) -> ReplayOptions {
-    ReplayOptions {
+fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
+    HistoryOptions {
         repo_id: "synth".into(),
         pin: f.driver.commits.last().unwrap().clone(),
         results_dir: f.results.clone(),
+        state_dir: f.results.clone(),
         publish: true,
         resume,
         bazel_version: "synth".into(),
         diff_cap: 20,
-        profile: cambium_corpus::Profile::Full,
     }
 }
 
@@ -88,7 +88,7 @@ fn opts(f: &Fixture, resume: bool) -> ReplayOptions {
 fn replays_a_history_and_the_oracle_holds() {
     let f = fixture(8, "typical-pr");
     let commits = f.driver.commits.clone();
-    let r = replay(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
+    let r = history(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
 
     assert!(r.done);
     assert_eq!(r.commits.len(), commits.len() - 1);
@@ -98,7 +98,7 @@ fn replays_a_history_and_the_oracle_holds() {
     let oracle = r.oracle.as_ref().expect("oracle ran");
     assert!(
         oracle.ok,
-        "replayed index differs from a rebuild: {} {:?}",
+        "applied index differs from a rebuild: {} {:?}",
         oracle.diff.summary(),
         oracle.diff
     );
@@ -115,7 +115,7 @@ fn replays_a_history_and_the_oracle_holds() {
         );
     }
     // The results file is the same document the function returned.
-    let on_disk = ReplayResult::read(&ReplayResult::path_versioned(
+    let on_disk = HistoryResult::read(&HistoryResult::path_versioned(
         &f.results,
         &opts(&f, false).pin,
         Some("synth"),
@@ -124,7 +124,7 @@ fn replays_a_history_and_the_oracle_holds() {
     assert_eq!(on_disk.commits.len(), r.commits.len());
     assert!(on_disk.done);
     let st = State::load(&f.results, "synth", &opts(&f, false).pin).unwrap();
-    assert!(st.replay.as_ref().unwrap().done);
+    assert!(st.history.as_ref().unwrap().done);
 }
 
 #[test]
@@ -134,31 +134,31 @@ fn a_replay_resumes_from_its_last_published_index() {
     // Run the first half only, as a killed run would have.
     let half = &commits[..4];
     let o = opts(&f, false);
-    let partial = replay(&f.engine, &f.driver, half, &o).unwrap();
+    let partial = history(&f.engine, &f.driver, half, &o).unwrap();
     assert!(partial.done);
 
     // Now a full-range run resumes: its results file says the range ended at
     // `half.last()`, which differs, so it must start over — that is the
     // conservative reading, and it must still be correct.
-    let full = replay(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
+    let full = history(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
     assert_eq!(full.commits.len(), commits.len() - 1);
     assert!(full.oracle.unwrap().ok);
 
     // A genuinely interrupted run: truncate the results file to three commits
-    // and mark it unfinished, then resume. The remaining commits are replayed
+    // and mark it unfinished, then resume. The remaining commits are applied
     // from the published index of the third, not from the cold build.
-    let path = ReplayResult::path_versioned(&f.results, &o.pin, Some("synth"));
-    let mut truncated = ReplayResult::read(&path).unwrap();
+    let path = HistoryResult::path_versioned(&f.results, &o.pin, Some("synth"));
+    let mut truncated = HistoryResult::read(&path).unwrap();
     truncated.commits.truncate(3);
     truncated.done = false;
     truncated.oracle = None;
     truncated.write(&path).unwrap();
-    let resumed = replay(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
+    let resumed = history(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
     assert_eq!(resumed.commits.len(), commits.len() - 1);
     assert_eq!(resumed.commits[2].commit, truncated.commits[2].commit);
     assert!(
         resumed.oracle.unwrap().ok,
-        "resumed replay must still equal a rebuild"
+        "resumed history must still equal a rebuild"
     );
     assert_eq!(
         resumed.cold.commit, commits[0],
@@ -167,33 +167,33 @@ fn a_replay_resumes_from_its_last_published_index() {
 }
 
 #[test]
-fn pairs_are_deterministic_and_cover_the_range() {
+fn change_sets_are_deterministic_and_cover_the_range() {
     let f = fixture(10, "mixed");
     let commits = f.driver.commits.clone();
     let pin = commits.last().unwrap().clone();
-    let o = PairOptions {
+    let o = ChangeSetOptions {
         repo_id: "synth".into(),
         pin: pin.clone(),
         history_window: commits.len() - 1,
         seed: 3,
         cap: 2,
-        profile: cambium_corpus::Profile::Full,
+        total_cap: None,
         hub_packages: vec![f.driver.graphs[0].package_path(0).to_string()],
         invalidator_paths: vec!["MODULE.bazel".into()],
         invalidator_globs: vec!["rules/**".into()],
     };
-    let adjacent = pairs::adjacent(&f.engine.repo, &pin, o.history_window).unwrap();
+    let adjacent = changes::adjacent(&f.engine.repo, &pin, o.history_window).unwrap();
     assert_eq!(adjacent.len(), commits.len() - 1);
     assert_eq!(adjacent[0].base, commits[0]);
     assert_eq!(adjacent.last().unwrap().head, pin);
 
     // A linear history has no merges.
-    assert!(pairs::pr_shaped(&f.engine.repo, &pin, o.history_window)
+    assert!(changes::pr_shaped(&f.engine.repo, &pin, o.history_window)
         .unwrap()
         .is_empty());
 
-    let stress = pairs::stress(&f.engine.repo, &o).unwrap();
-    let again = pairs::stress(&f.engine.repo, &o).unwrap();
+    let stress = changes::stress(&f.engine.repo, &o).unwrap();
+    let again = changes::stress(&f.engine.repo, &o).unwrap();
     assert_eq!(stress, again, "stress selection is deterministic");
     for p in &stress {
         assert!(p.category.is_some());
@@ -209,21 +209,28 @@ fn pairs_are_deterministic_and_cover_the_range() {
     // `mixed` edits .bzl files and adds packages, so both categories fire.
     assert!(per_category("bzl") > 0, "{stress:?}");
 
-    let set = pairs::select(&f.engine.repo, &[PairKind::Adjacent, PairKind::Stress], &o).unwrap();
-    assert_eq!(set.pairs.len(), adjacent.len() + stress.len());
-    let path = f.results.join("pairs.json");
+    let set = changes::select(
+        &f.engine.repo,
+        &[ChangeSetKind::Adjacent, ChangeSetKind::Stress],
+        &o,
+    )
+    .unwrap();
+    assert_eq!(set.change_sets.len(), adjacent.len() + stress.len());
+    let path = f.results.join("change_sets.json");
     set.write(&path).unwrap();
     assert_eq!(
-        cambium_corpus::PairSet::read(&path).unwrap().pairs,
-        set.pairs
+        cambium_bench::ChangeSetSet::read(&path)
+            .unwrap()
+            .change_sets,
+        set.change_sets
     );
     let _ = Path::new(&f.root);
 }
 
-/// A merge commit in the history makes a PR-shaped pair whose base is the
+/// A merge commit in the history makes a PR-shaped change set whose base is the
 /// merge base of its parents.
 #[test]
-fn pr_pairs_come_from_merge_commits() {
+fn pr_change_sets_come_from_merge_commits() {
     let f = fixture(3, "typical-pr");
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
@@ -248,12 +255,12 @@ fn pr_pairs_come_from_merge_commits() {
     git(&["merge", "-q", "--no-ff", "-m", "merge pr", "pr"]);
     let merge = git(&["rev-parse", "HEAD"]);
 
-    let prs = pairs::pr_shaped(&f.engine.repo, &merge, 10).unwrap();
+    let prs = changes::pr_shaped(&f.engine.repo, &merge, 10).unwrap();
     assert_eq!(prs.len(), 1);
     assert_eq!(prs[0].head, merge);
     assert_eq!(
         prs[0].base, base,
         "merge-base of {main_tip} and the pr branch"
     );
-    assert_eq!(prs[0].kind, PairKind::Pr);
+    assert_eq!(prs[0].kind, ChangeSetKind::Pr);
 }

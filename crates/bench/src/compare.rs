@@ -1,82 +1,82 @@
 //! The three-way comparison itself.
 //!
-//! For one `(base, head)` pair the driver produces three answers and compares
+//! For one `(base, head)` change set the driver produces three answers and compares
 //! them:
 //!
 //! 1. **cambium**, twice — once with the base index resolved from scratch
 //!    (`cold`) and once with it in the store (`warm`) — because the whole
 //!    argument for cambium is the warm number, and quoting it without the cold
 //!    one would be dishonest.
-//! 2. **each producer** ([`crate::producer::Producer`]), typically bazel-diff.
-//! 3. **the oracle** ([`crate::oracle`]), a sampled `bazel query rdeps`.
+//! 2. **each tool** ([`crate::tools::Tool`]), typically bazel-diff.
+//! 3. **the oracle** ([`crate::oracles::rdeps`]), a sampled `bazel query rdeps`.
 //!
-//! cambium vs producer is a *symmetric difference*, classified label by label
+//! cambium vs tool is a *symmetric difference*, classified label by label
 //! (see [`crate::classify`]). cambium vs oracle is one-sided and absolute:
-//! cambium must contain everything Bazel reaches. A pair passes when no label
+//! cambium must contain everything Bazel reaches. A change set passes when no label
 //! landed in `cambium_missing` or `unclassified` and the oracle found nothing
-//! missing. Precision (`|producer ∩ cambium| / |cambium|`) is informational —
+//! missing. Precision (`|tool ∩ cambium| / |cambium|`) is informational —
 //! cambium deliberately over-approximates — and is reported so a regression in
 //! over-approximation is visible.
 //!
 //! Results are written per repository to
-//! `corpus-results/<id>/compare-<pin>[-<bazel_version>].json` after **every**
-//! pair, and finished pairs are recorded in the corpus state file, so a run
-//! killed at pair 137 of 200 resumes there.
+//! `bench-results/<id>/compare-<pin>[-<bazel_version>].json` after **every**
+//! change set, and finished change sets are recorded in the subject's state file, so a run
+//! killed at change set 137 of 200 resumes there.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
+use crate::{ChangeSet, Checkout, State};
 use anyhow::{Context as _, Result};
 use cambium_bazel::Bazel;
-use cambium_corpus::{Checkout, Pair, State};
-use cambium_engine::{AffectedRequest, Engine};
+use cambium_engine::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::bzloracle::{BzlOracleResult, BzlOracleSummary};
 use crate::classify::{classify, BazelFacts, Class, Facts, Side};
-use crate::oracle::{OracleResult, RdepsOracle};
-use crate::producer::{BaseWorktree, Producer, RunContext};
+use crate::oracles::load::{LoadOracleResult, LoadOracleSummary};
+use crate::oracles::rdeps::{RdepsOracle, RdepsResult};
+use crate::tools::{BaseWorktree, RunContext, Tool};
 
 /// How many example labels of each class are kept in the JSON. The counts are
-/// exact; only the lists are capped, because a pair can disagree on tens of
+/// exact; only the lists are capped, because a change set can disagree on tens of
 /// thousands of labels and the file has to stay readable.
 pub const DEFAULT_EXAMPLES: usize = 20;
 
 #[derive(Clone, Debug)]
-pub struct CompareOptions {
+pub struct ChangesOptions {
     pub repo_id: String,
     pub pin: String,
-    /// `corpus-results/<id>`.
+    /// Where `changes-<pin>.json` goes: `bench-results/<subject>/changes/`.
     pub results_dir: PathBuf,
+    /// Where `state.json` goes: `bench-results/<subject>/`. See
+    /// [`crate::history::HistoryOptions::state_dir`].
+    pub state_dir: PathBuf,
     /// Bazel version this run pinned, for the file name and the JSON.
     pub bazel_version: Option<String>,
-    /// Roots the oracle samples per pair; 0 disables it.
+    /// Roots the oracle samples per change set; 0 disables it.
     pub oracle_k: usize,
     pub seed: u64,
-    /// Where producers may write hash files and raw output.
+    /// Where tools may write hash files and raw output.
     pub scratch: PathBuf,
-    /// Skip pairs already recorded in the state file.
+    /// Skip change sets already recorded in the state file.
     pub resume: bool,
     pub examples: usize,
-    /// Which corpus profile this run belongs to; recorded in the result.
-    pub profile: cambium_corpus::Profile,
-    /// How many pairs Tango runs on — the first this many, in the pair set's
+    /// How many change sets Tango runs on — the first this many, in the change set set's
     /// own order — or `None` for all of them.
     ///
-    /// Tango costs 30-500 s a pair against cambium's fractions of a second, so
+    /// Tango costs 30-500 s a change set against cambium's fractions of a second, so
     /// on a laptop it *is* the run. Capping it keeps a timing sample worth
-    /// quoting while bazel-diff, cambium and the oracle still see every pair.
-    /// A pair Tango did not run on carries no `tango` row at all: it is a pair
-    /// with fewer producers, not a pair where a producer disagreed.
-    pub tango_pairs: Option<usize>,
+    /// quoting while bazel-diff, cambium and the oracle still see every change set.
+    /// A change set Tango did not run on carries no `tango` row at all: it is a change set
+    /// with fewer tools, not a change set where a tool disagreed.
+    pub tango_change_sets: Option<usize>,
 }
 
 /// Makes a path absolute without requiring it to exist.
 ///
 /// Every path in a run is handed to a *child process* — bazel-diff, tango-cli,
-/// Bazel — that runs with its own working directory (the corpus worktree, a
-/// scratch worktree), so a relative `--results-dir corpus-results` resolves
+/// Bazel — that runs with its own working directory (the subject's worktree, a
+/// scratch worktree), so a relative `--results-dir bench-results` resolves
 /// somewhere else in each of them. `canonicalize` is used where it can be
 /// (it also resolves the macOS `/var` -> `/private/var` symlink, which keeps
 /// paths comparable across processes) and falls back to joining the current
@@ -94,30 +94,31 @@ pub fn absolute(p: &Path) -> PathBuf {
     }
 }
 
-impl CompareOptions {
+impl ChangesOptions {
     pub fn new(repo_id: impl Into<String>, pin: impl Into<String>, results_dir: PathBuf) -> Self {
         let repo_id = repo_id.into();
         Self {
             scratch: absolute(&std::env::temp_dir().join(format!("cambium-compare/{repo_id}"))),
             repo_id,
             pin: pin.into(),
+            state_dir: absolute(results_dir.parent().unwrap_or(&results_dir)),
             results_dir: absolute(&results_dir),
             bazel_version: None,
             oracle_k: 100,
             seed: 0,
             resume: true,
             examples: DEFAULT_EXAMPLES,
-            profile: cambium_corpus::Profile::Full,
-            tango_pairs: None,
+            tango_change_sets: None,
         }
     }
 
     /// Forces `results_dir` and `scratch` absolute. Called at the top of
-    /// [`compare_pairs`] and [`compare_pair_with`], so a caller that built the
-    /// options by hand from a relative CLI flag cannot hand a producer a path
+    /// [`compare_change_sets`] and [`compare_change_set_with`], so a caller that built the
+    /// options by hand from a relative CLI flag cannot hand a tool a path
     /// that means something different in the child's working directory.
     pub fn make_absolute(&mut self) {
         self.results_dir = absolute(&self.results_dir);
+        self.state_dir = absolute(&self.state_dir);
         self.scratch = absolute(&self.scratch);
     }
 
@@ -131,9 +132,9 @@ impl CompareOptions {
     pub fn path(results_dir: &Path, pin: &str, bazel_version: Option<&str>) -> PathBuf {
         match bazel_version.filter(|v| !v.is_empty()) {
             Some(v) => {
-                results_dir.join(format!("compare-{pin}-{}.json", v.replace(['/', ' '], "_")))
+                results_dir.join(format!("changes-{pin}-{}.json", v.replace(['/', ' '], "_")))
             }
-            None => results_dir.join(format!("compare-{pin}.json")),
+            None => results_dir.join(format!("changes-{pin}.json")),
         }
     }
 }
@@ -163,18 +164,18 @@ pub struct CambiumRun {
     pub dirty_packages: usize,
     pub queried_targets: usize,
     pub changed_files: usize,
-    /// The engine re-indexed the whole repository on this pair
+    /// The engine re-indexed the whole repository on this change set
     /// (`stats.cold_rebuild`): the dirty set was too large to splice, so the
-    /// warm number here is a cold number wearing a warm label. The pair is
+    /// warm number here is a cold number wearing a warm label. The change set is
     /// still incremental — it has a head index and a classified answer — so it
     /// stays in every statistic, but it is counted separately
-    /// ([`CompareSummary::cold_rebuild_pairs`]) because a mean that hides them
+    /// ([`ChangesSummary::cold_rebuild_change_sets`]) because a mean that hides them
     /// is a mean of two different operations.
     #[serde(default)]
     pub cold_rebuild: bool,
     /// How many rule targets `//...` names at head. Recorded only on a
-    /// `global` pair, where it *is* cambium's answer: the report quotes it
-    /// against the producer's precise set size, so a global's cost to the user
+    /// `global` change set, where it *is* cambium's answer: the report quotes it
+    /// against the tool's precise set size, so a global's cost to the user
     /// is a number and not a shrug. 0 when the universe could not be counted.
     #[serde(default)]
     pub universe: usize,
@@ -182,7 +183,7 @@ pub struct CambiumRun {
 
 impl CambiumRun {
     /// How many targets cambium told the user to build: the universe on a
-    /// global pair, the affected set otherwise.
+    /// global change set, the affected set otherwise.
     pub fn answer_size(&self) -> usize {
         if self.global {
             self.universe
@@ -192,33 +193,33 @@ impl CambiumRun {
     }
 }
 
-/// cambium against one producer, on one pair.
+/// cambium against one tool, on one change set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ProducerComparison {
+pub struct ToolComparison {
     pub name: String,
     pub version: String,
     pub labels: usize,
     pub cold_wall_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_wall_ms: Option<u64>,
-    /// `|producer ∩ cambium| / |cambium|`.
+    /// `|tool ∩ cambium| / |cambium|`.
     pub precision: f64,
     /// Of the labels both tools reported, the fraction whose depth agrees with
-    /// cambium's. `None` when the producer reports no distances (bazel-diff
+    /// cambium's. `None` when the tool reports no distances (bazel-diff
     /// without `--depEdgesFile`) or when the two share no labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_agreement: Option<f64>,
     /// File-target rows dropped so the two tools are compared over the same
-    /// universe (see [`crate::producer::ProducerRun::restrict_to_rules`]).
+    /// universe (see [`crate::tools::ToolRun::restrict_to_rules`]).
     #[serde(default)]
     pub dropped_file_targets: usize,
     pub cambium_only: usize,
-    pub producer_only: usize,
+    pub tool_only: usize,
     /// Exact counts, keyed by class name.
     pub counts: BTreeMap<String, usize>,
     /// A capped sample of the disagreements, failures first.
     pub examples: Vec<Disagreement>,
-    /// Why cambium reached the labels the producer did not report, counted by
+    /// Why cambium reached the labels the tool did not report, counted by
     /// `--explain` reason kind (`rule_hash`, `file src/.../BUILD`,
     /// `deleted_dep //x:y`, ...). Without this a `unclassified` count is a
     /// number with no way in: the classifier says "nothing explains these",
@@ -226,14 +227,14 @@ pub struct ProducerComparison {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cambium_only_reasons: BTreeMap<String, usize>,
     pub pass: bool,
-    /// Set when the producer itself failed; the pair is then not counted.
+    /// Set when the tool itself failed; the change set is then not counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Everything learned about one pair.
+/// Everything learned about one change set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairComparison {
+pub struct ChangeSetResult {
     pub schema: u32,
     pub base: String,
     pub head: String,
@@ -241,34 +242,34 @@ pub struct PairComparison {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     pub cambium: CambiumRun,
-    pub producers: Vec<ProducerComparison>,
+    pub tools: Vec<ToolComparison>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle: Option<OracleResult>,
-    /// What Bazel's `rbuildfiles` said about the `.bzl` files in this pair's
+    pub oracle: Option<RdepsResult>,
+    /// What Bazel's `rbuildfiles` said about the `.bzl` files in this change set's
     /// change set, against the static load closure cambium answered from.
     /// `None` when nothing in the diff was a `.bzl`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bzl_oracle: Option<BzlOracleResult>,
+    pub load_oracle: Option<LoadOracleResult>,
     /// Recall against the oracle; must be 1.0.
     pub recall: f64,
-    /// cambium answered `//...`. The producers and the universe query still
+    /// cambium answered `//...`. The tools and the universe query still
     /// ran — what a global costs the user is the whole reason to record one —
-    /// but nothing was classified, so the pair is excluded from the precision,
+    /// but nothing was classified, so the change set is excluded from the precision,
     /// class and recall aggregates and from the *incremental* wall-clock
-    /// series. It is included in the all-pairs series and in
+    /// series. It is included in the all-change sets series and in
     /// [`GlobalStats`]. See [`summarise`].
     #[serde(default)]
     pub global: bool,
     pub pass: bool,
 }
 
-impl PairComparison {
+impl ChangeSetResult {
     pub fn key(&self) -> String {
-        State::pair_key(&self.base, &self.head)
+        State::change_set_key(&self.base, &self.head)
     }
 }
 
-/// Wall-clock distribution over the pairs of a run.
+/// Wall-clock distribution over the change sets of a run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct WallStats {
     pub samples: usize,
@@ -276,92 +277,92 @@ pub struct WallStats {
     pub p90_ms: u64,
 }
 
-/// What the globally invalidated pairs of a run cost.
+/// What the globally invalidated change sets of a run cost.
 ///
 /// Kept apart from every other number in the summary because a global is not a
 /// disagreement and not a failure — cambium's `//...` is a superset of any
 /// answer — but it *is* work the user pays for, and a timings table drawn only
-/// over the pairs cambium is fast on would be advocacy rather than
+/// over the change sets cambium is fast on would be advocacy rather than
 /// measurement.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GlobalStats {
-    pub pairs: usize,
-    /// Mean size of cambium's answer on those pairs: the `//...` universe.
+    pub change_sets: usize,
+    /// Mean size of cambium's answer on those change sets: the `//...` universe.
     pub mean_cambium_labels: f64,
-    /// Mean size of the *precise* answer each producer found there. The gap
+    /// Mean size of the *precise* answer each tool found there. The gap
     /// between this and `mean_cambium_labels` is the over-approximation a
     /// global hands the user.
-    pub mean_producer_labels: BTreeMap<String, f64>,
+    pub mean_tool_labels: BTreeMap<String, f64>,
     pub cambium_cold: WallStats,
     pub cambium_warm: WallStats,
-    pub producer_cold: BTreeMap<String, WallStats>,
-    pub producer_warm: BTreeMap<String, WallStats>,
+    pub tool_cold: BTreeMap<String, WallStats>,
+    pub tool_warm: BTreeMap<String, WallStats>,
 }
 
 impl GlobalStats {
     pub fn is_empty(&self) -> bool {
-        self.pairs == 0
+        self.change_sets == 0
     }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct CompareSummary {
-    pub pairs: usize,
+pub struct ChangesSummary {
+    pub change_sets: usize,
     pub passed: usize,
-    /// Pairs on which cambium answered `//...`. They pass by construction and
-    /// contribute to no precision, class or recall statistic — a corpus full
+    /// ChangeSets on which cambium answered `//...`. They pass by construction and
+    /// contribute to no precision, class or recall statistic — a full
     /// of `MODULE.bazel` bumps cannot flatter (or ruin) the soundness numbers
     /// — but their wall times *are* counted, in the `all_*` series and in
-    /// [`CompareSummary::global_stats`].
+    /// [`ChangesSummary::global_stats`].
     #[serde(default)]
     pub globals: usize,
-    /// Pairs where the engine gave up on splicing and re-indexed the whole
-    /// repository (`stats.cold_rebuild`). They are ordinary incremental pairs
+    /// ChangeSets where the engine gave up on splicing and re-indexed the whole
+    /// repository (`stats.cold_rebuild`). They are ordinary incremental change sets
     /// in every aggregate; the count is here so a warm p50 that drifted can be
     /// read against how many of its samples were secretly cold.
     #[serde(default)]
-    pub cold_rebuild_pairs: usize,
-    /// Total labels in each disagreement class, over every pair and producer.
+    pub cold_rebuild_change_sets: usize,
+    /// Total labels in each disagreement class, over every change set and tool.
     pub by_class: BTreeMap<String, usize>,
-    /// Mean precision per producer.
+    /// Mean precision per tool.
     pub mean_precision: BTreeMap<String, f64>,
-    /// The worst recall any pair achieved. Anything below 1.0 fails the run.
+    /// The worst recall any change set achieved. Anything below 1.0 fails the run.
     pub min_recall: f64,
     /// The `.bzl` load-closure oracle, rolled up. `missing_packages` must be 0.
-    #[serde(default, skip_serializing_if = "BzlOracleSummary::is_empty")]
-    pub bzl_oracle: BzlOracleSummary,
-    /// Cold and warm wall distributions per producer, over the **incremental**
-    /// pairs: the ones cambium answered with a walk. Every precision, class
+    #[serde(default, skip_serializing_if = "LoadOracleSummary::is_empty")]
+    pub load_oracle: LoadOracleSummary,
+    /// Cold and warm wall distributions per tool, over the **incremental**
+    /// change sets: the ones cambium answered with a walk. Every precision, class
     /// and recall number in this summary is taken over the same set, so these
     /// are the walls that go with them.
-    pub producer_cold: BTreeMap<String, WallStats>,
-    pub producer_warm: BTreeMap<String, WallStats>,
+    pub tool_cold: BTreeMap<String, WallStats>,
+    pub tool_warm: BTreeMap<String, WallStats>,
     pub cambium_cold: WallStats,
     pub cambium_warm: WallStats,
-    /// How many non-global pairs each producer actually ran on. Below
-    /// `pairs` when a producer was capped (Tango under the quick profile) or
-    /// failed on some pairs, and it is what every per-producer number above is
+    /// How many non-global change sets each tool actually ran on. Below
+    /// `change_sets` when a tool was capped (Tango under the quick profile) or
+    /// failed on some change sets, and it is what every per-tool number above is
     /// an average over.
     #[serde(default)]
-    pub producer_pairs: BTreeMap<String, usize>,
-    /// The same four distributions over **every** compared pair, globals
+    pub tool_change_sets: BTreeMap<String, usize>,
+    /// The same four distributions over **every** compared change set, globals
     /// included. This is the honest headline: it is what a user running
     /// cambium over this repository's history actually waits for, including
     /// the commits where cambium has nothing clever to say. The report quotes
     /// it first.
     #[serde(default)]
-    pub all_producer_cold: BTreeMap<String, WallStats>,
+    pub all_tool_cold: BTreeMap<String, WallStats>,
     #[serde(default)]
-    pub all_producer_warm: BTreeMap<String, WallStats>,
+    pub all_tool_warm: BTreeMap<String, WallStats>,
     #[serde(default)]
     pub all_cambium_cold: WallStats,
     #[serde(default)]
     pub all_cambium_warm: WallStats,
-    /// How many pairs of any kind each producer ran on.
+    /// How many change sets of any kind each tool ran on.
     #[serde(default)]
-    pub all_producer_pairs: BTreeMap<String, usize>,
+    pub all_tool_change_sets: BTreeMap<String, usize>,
     /// The globals on their own: what cambium's `//...` costs against the
-    /// precise answer the producers found.
+    /// precise answer the tools found.
     #[serde(default, skip_serializing_if = "GlobalStats::is_empty")]
     pub global_stats: GlobalStats,
     pub pass: bool,
@@ -369,7 +370,7 @@ pub struct CompareSummary {
 
 /// The comparison run for one repository at one pin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CompareResult {
+pub struct ChangesResult {
     pub schema: u32,
     pub repo: String,
     pub pin: String,
@@ -383,15 +384,16 @@ pub struct CompareResult {
     pub bazel_version_used: Option<String>,
     pub seed: u64,
     pub oracle_k: usize,
-    /// `quick` or `full`. Empty in results written before profiles existed,
-    /// which were all full runs.
-    #[serde(default)]
-    pub profile: String,
-    pub pairs: Vec<PairComparison>,
-    pub summary: CompareSummary,
+    /// How many change sets Tango was asked to run on, when it was capped.
+    /// Tango costs 30-500 s a change set, so a run that quotes its p50 has to
+    /// say how many change sets that p50 is taken over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tango_change_sets: Option<usize>,
+    pub change_sets: Vec<ChangeSetResult>,
+    pub summary: ChangesSummary,
 }
 
-impl CompareResult {
+impl ChangesResult {
     pub fn read(path: &Path) -> Result<Self> {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
@@ -407,24 +409,24 @@ impl CompareResult {
     }
 
     pub fn summarise(&mut self) {
-        self.summary = summarise(&self.pairs);
+        self.summary = summarise(&self.change_sets);
     }
 }
 
 // ------------------------------------------------------------------- the math
 
-/// `|producer ∩ cambium| / |cambium|`: how much of what cambium reported the
-/// producer also reported.
+/// `|tool ∩ cambium| / |cambium|`: how much of what cambium reported the
+/// tool also reported.
 ///
 /// An empty cambium answer is defined as precision 1.0 — the two tools agreed
 /// that nothing is affected, which is the common case on a source-only commit,
 /// and calling it 0.0 would drag every mean down for the least interesting
-/// pairs in the corpus.
-pub fn precision(producer: &BTreeSet<String>, cambium: &BTreeSet<String>) -> f64 {
+/// change sets in the run.
+pub fn precision(tool: &BTreeSet<String>, cambium: &BTreeSet<String>) -> f64 {
     if cambium.is_empty() {
         return 1.0;
     }
-    producer.intersection(cambium).count() as f64 / cambium.len() as f64
+    tool.intersection(cambium).count() as f64 / cambium.len() as f64
 }
 
 fn percentile(sorted: &[u64], q: f64) -> u64 {
@@ -444,26 +446,26 @@ pub fn wall_stats(mut ms: Vec<u64>) -> WallStats {
     }
 }
 
-/// Rolls the per-pair results up. Pure, so the arithmetic is testable without
+/// Rolls the per-change set results up. Pure, so the arithmetic is testable without
 /// a repository.
 ///
 /// Two wall-clock series come out of this, and the difference between them is
 /// the point:
 ///
-/// - the **incremental** series (`cambium_cold`, `producer_cold`, ...) covers
-///   the pairs cambium answered with a walk. It is the series that belongs
+/// - the **incremental** series (`cambium_cold`, `tool_cold`, ...) covers
+///   the change sets cambium answered with a walk. It is the series that belongs
 ///   next to precision and the class counts, because those are computed over
-///   exactly those pairs.
-/// - the **all-pairs** series (`all_*`) covers every pair compared, including
+///   exactly those change sets.
+/// - the **all-change sets** series (`all_*`) covers every change set compared, including
 ///   the ones where cambium fell back to `//...`. Nothing is excluded from it,
 ///   which is why it is the number the report quotes first.
 ///
-/// Soundness is unchanged: a global pair enters no precision mean, no class
+/// Soundness is unchanged: a global change set enters no precision mean, no class
 /// total and no recall, because there is nothing there to be right or wrong
 /// about — `//...` contains everything by construction.
-pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
-    let mut s = CompareSummary {
-        pairs: pairs.len(),
+pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
+    let mut s = ChangesSummary {
+        change_sets: change_sets.len(),
         min_recall: 1.0,
         ..Default::default()
     };
@@ -479,16 +481,16 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
     let mut g_warm: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut g_labels: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut g_cambium: Vec<usize> = Vec::new();
-    for p in pairs {
+    for p in change_sets {
         if p.pass {
             s.passed += 1;
         }
         if p.cambium.cold_rebuild {
-            s.cold_rebuild_pairs += 1;
+            s.cold_rebuild_change_sets += 1;
         }
-        // Every pair's walls, whatever cambium did with it.
-        for pr in p.producers.iter().filter(|pr| pr.error.is_none()) {
-            *s.all_producer_pairs.entry(pr.name.clone()).or_default() += 1;
+        // Every change set's walls, whatever cambium did with it.
+        for pr in p.tools.iter().filter(|pr| pr.error.is_none()) {
+            *s.all_tool_change_sets.entry(pr.name.clone()).or_default() += 1;
             all_cold
                 .entry(pr.name.clone())
                 .or_default()
@@ -500,7 +502,7 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
         if p.global {
             s.globals += 1;
             g_cambium.push(p.cambium.answer_size());
-            for pr in p.producers.iter().filter(|pr| pr.error.is_none()) {
+            for pr in p.tools.iter().filter(|pr| pr.error.is_none()) {
                 g_labels.entry(pr.name.clone()).or_default().push(pr.labels);
                 g_cold
                     .entry(pr.name.clone())
@@ -513,22 +515,22 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
             continue;
         }
         s.min_recall = s.min_recall.min(p.recall);
-        if let Some(o) = &p.bzl_oracle {
-            s.bzl_oracle.add(o);
+        if let Some(o) = &p.load_oracle {
+            s.load_oracle.add(o);
             if !o.missing_packages.is_empty() {
                 *s.by_class
-                    .entry(crate::bzloracle::MISSING_CLASS.to_string())
+                    .entry(crate::oracles::load::MISSING_CLASS.to_string())
                     .or_default() += o.missing_packages.len();
             }
         }
-        for pr in &p.producers {
+        for pr in &p.tools {
             if pr.error.is_some() {
                 continue;
             }
             for (class, n) in &pr.counts {
                 *s.by_class.entry(class.clone()).or_default() += n;
             }
-            *s.producer_pairs.entry(pr.name.clone()).or_default() += 1;
+            *s.tool_change_sets.entry(pr.name.clone()).or_default() += 1;
             precisions
                 .entry(pr.name.clone())
                 .or_default()
@@ -552,52 +554,52 @@ pub fn summarise(pairs: &[PairComparison]) -> CompareSummary {
             (k, mean)
         })
         .collect();
-    s.producer_cold = cold.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
-    s.producer_warm = warm.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
-    let timed = || pairs.iter().filter(|p| !p.global);
+    s.tool_cold = cold.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
+    s.tool_warm = warm.into_iter().map(|(k, v)| (k, wall_stats(v))).collect();
+    let timed = || change_sets.iter().filter(|p| !p.global);
     s.cambium_cold = wall_stats(timed().map(|p| p.cambium.cold_wall_ms).collect());
     s.cambium_warm = wall_stats(timed().map(|p| p.cambium.warm_wall_ms).collect());
-    s.all_producer_cold = all_cold
+    s.all_tool_cold = all_cold
         .into_iter()
         .map(|(k, v)| (k, wall_stats(v)))
         .collect();
-    s.all_producer_warm = all_warm
+    s.all_tool_warm = all_warm
         .into_iter()
         .map(|(k, v)| (k, wall_stats(v)))
         .collect();
-    s.all_cambium_cold = wall_stats(pairs.iter().map(|p| p.cambium.cold_wall_ms).collect());
-    s.all_cambium_warm = wall_stats(pairs.iter().map(|p| p.cambium.warm_wall_ms).collect());
+    s.all_cambium_cold = wall_stats(change_sets.iter().map(|p| p.cambium.cold_wall_ms).collect());
+    s.all_cambium_warm = wall_stats(change_sets.iter().map(|p| p.cambium.warm_wall_ms).collect());
     s.global_stats = GlobalStats {
-        pairs: s.globals,
+        change_sets: s.globals,
         mean_cambium_labels: mean(g_cambium.iter().map(|n| *n as f64)),
-        mean_producer_labels: g_labels
+        mean_tool_labels: g_labels
             .iter()
             .map(|(k, v)| (k.clone(), mean(v.iter().map(|n| *n as f64))))
             .collect(),
         cambium_cold: wall_stats(
-            pairs
+            change_sets
                 .iter()
                 .filter(|p| p.global)
                 .map(|p| p.cambium.cold_wall_ms)
                 .collect(),
         ),
         cambium_warm: wall_stats(
-            pairs
+            change_sets
                 .iter()
                 .filter(|p| p.global)
                 .map(|p| p.cambium.warm_wall_ms)
                 .collect(),
         ),
-        producer_cold: g_cold
+        tool_cold: g_cold
             .into_iter()
             .map(|(k, v)| (k, wall_stats(v)))
             .collect(),
-        producer_warm: g_warm
+        tool_warm: g_warm
             .into_iter()
             .map(|(k, v)| (k, wall_stats(v)))
             .collect(),
     };
-    s.pass = s.passed == s.pairs && s.min_recall >= 1.0;
+    s.pass = s.passed == s.change_sets && s.min_recall >= 1.0;
     s
 }
 
@@ -617,7 +619,7 @@ fn mean(v: impl Iterator<Item = f64>) -> f64 {
 /// side with the other side's rules.
 pub fn classify_difference(
     cambium: &BTreeSet<String>,
-    producer: &BTreeSet<String>,
+    tool: &BTreeSet<String>,
     facts: &dyn Facts,
     examples: usize,
 ) -> (BTreeMap<String, usize>, Vec<Disagreement>) {
@@ -632,11 +634,11 @@ pub fn classify_difference(
             class,
         });
     };
-    for label in cambium.difference(producer) {
+    for label in cambium.difference(tool) {
         push(label, Side::Cambium);
     }
-    for label in producer.difference(cambium) {
-        push(label, Side::Producer);
+    for label in tool.difference(cambium) {
+        push(label, Side::Tool);
     }
     // Failures first: the examples that survive the cap are the ones a human
     // has to look at.
@@ -653,7 +655,7 @@ pub fn classify_difference(
 /// Everything but `--output_base`: that one is per workspace directory, and
 /// lending it to a second workspace corrupts repository rules that symlink
 /// into the workspace they were fetched from. See
-/// [`RunContext::producer_startup_flags`].
+/// [`RunContext::tool_startup_flags`].
 fn bazel_at(engine: &Engine, workspace: &Path) -> Bazel {
     let startup: Vec<String> = engine
         .bazel
@@ -670,7 +672,7 @@ fn bazel_at(engine: &Engine, workspace: &Path) -> Bazel {
     .with_env(engine.bazel.env().to_vec())
 }
 
-/// The run context producers are handed for one pair.
+/// The run context tools are handed for one change set.
 pub fn run_context(engine: &Engine, scratch: &Path, base_worktree: &Path) -> RunContext {
     RunContext {
         bazel_binary: engine.bazel.binary().to_path_buf(),
@@ -712,35 +714,35 @@ fn with_paths<'a>(
     out.into_iter().collect()
 }
 
-/// One pair, with defaults for scratch and the example cap.
-pub fn compare_pair(
+/// One change set, with defaults for scratch and the example cap.
+pub fn compare_change_set(
     engine: &Engine,
     checkout: &Checkout,
-    pair: &Pair,
-    producers: &[&dyn Producer],
+    change_set: &ChangeSet,
+    tools: &[&dyn Tool],
     oracle_k: usize,
     seed: u64,
-) -> Result<PairComparison> {
-    let opts = CompareOptions {
+) -> Result<ChangeSetResult> {
+    let opts = ChangesOptions {
         oracle_k,
         seed,
-        ..CompareOptions::new(
+        ..ChangesOptions::new(
             checkout.id.clone(),
-            pair.head.clone(),
-            checkout.dir.join("corpus-results"),
+            change_set.head.clone(),
+            checkout.dir.join("bench-results"),
         )
     };
-    compare_pair_with(engine, checkout, pair, producers, &opts)
+    compare_change_set_with(engine, checkout, change_set, tools, &opts)
 }
 
-/// One pair, with the run's options.
-pub fn compare_pair_with(
+/// One change set, with the run's options.
+pub fn compare_change_set_with(
     engine: &Engine,
     checkout: &Checkout,
-    pair: &Pair,
-    producers: &[&dyn Producer],
-    opts: &CompareOptions,
-) -> Result<PairComparison> {
+    change_set: &ChangeSet,
+    tools: &[&dyn Tool],
+    opts: &ChangesOptions,
+) -> Result<ChangeSetResult> {
     let mut owned = opts.clone();
     owned.make_absolute();
     let opts = &owned;
@@ -751,25 +753,11 @@ pub fn compare_pair_with(
     // The first run publishes whatever base index it had to compute, so the
     // second one finds it in the store: that is precisely the difference the
     // two numbers are meant to show.
-    checkout.checkout(&pair.head)?;
-    let req = AffectedRequest {
-        include_manual: true,
-        materialize: true,
-        publish_base: true,
-        // The classifier needs the per-target reason to explain the largest
-        // cambium-side class on a deletion commit (`cambium_extra_deleted`).
-        explain: true,
-        ..AffectedRequest::new(pair.base.clone(), pair.head.clone())
-    };
-    let t = Instant::now();
-    let cold = engine
-        .affected(&req)
-        .with_context(|| format!("cambium affected {}..{}", pair.base, pair.head))?;
-    let cold_wall_ms = t.elapsed().as_millis() as u64;
-    let t = Instant::now();
-    let out = engine.affected(&req)?;
-    let warm_wall_ms = t.elapsed().as_millis() as u64;
-    drop(cold);
+    checkout.checkout(&change_set.head)?;
+    let run =
+        crate::tools::cambium::Cambium::new(engine).run(&change_set.base, &change_set.head)?;
+    let (cold_wall_ms, warm_wall_ms) = (run.cold.as_millis() as u64, run.warm.as_millis() as u64);
+    let out = run.out;
 
     let report = &out.report;
     let cambium_set: BTreeSet<String> = report.affected_labels().into_iter().collect();
@@ -793,18 +781,18 @@ pub fn compare_pair_with(
         cold_rebuild: report.stats.cold_rebuild,
         universe: 0,
     };
-    // A globally invalidated pair (MODULE.bazel moved, a `.bazelrc` changed,
+    // A globally invalidated change set (MODULE.bazel moved, a `.bazelrc` changed,
     // anything on the invalidator list) has no head index and no affected set:
     // cambium's answer is `//...`. There is nothing to classify — every label
-    // any producer could name is trivially inside "everything" — and nothing
-    // an oracle could disprove, so the pair enters no precision, class or
+    // any tool could name is trivially inside "everything" — and nothing
+    // an oracle could disprove, so the change set enters no precision, class or
     // recall aggregate, is marked passing, and the run carries on.
     //
-    // The producers **do** run. Skipping them was the comfortable choice and
+    // The tools **do** run. Skipping them was the comfortable choice and
     // the dishonest one: it left the timing rows drawn over precisely the
-    // pairs cambium is fast on, so the published speedup was an average over a
-    // hand-picked half of the history. Here each producer pays its usual two
-    // whole-repository query passes and the pair records what it cost, what
+    // change sets cambium is fast on, so the published speedup was an average over a
+    // hand-picked half of the history. Here each tool pays its usual two
+    // whole-repository query passes and the change set records what it cost, what
     // precise answer it found, and — from one `kind(rule, //...)` query — how
     // many targets cambium's `//...` is asking the user to build instead.
     //
@@ -824,29 +812,29 @@ pub fn compare_pair_with(
             .unwrap_or_else(|| "globally invalidated".to_string());
         tracing::info!(
             %reason,
-            producers = producers.len(),
-            "the pair is globally invalidated: cambium answers //..., and the producers run anyway so the cost of that is recorded"
+            tools = tools.len(),
+            "the change_set is globally invalidated: cambium answers //..., and the tools run anyway so the cost of that is recorded"
         );
         // A failure here must not take the run down: the universe is a
         // reporting number, not a gate, and a repository whose `//...` will
-        // not fully load still has a pair worth timing.
-        let universe = match crate::oracle::rule_universe(&engine.bazel) {
+        // not fully load still has a change set worth timing.
+        let universe = match crate::oracles::rdeps::rule_universe(&engine.bazel) {
             Ok(u) => u,
             Err(e) => {
                 tracing::warn!(
                     error = format!("{e:#}"),
-                    "could not count the rule universe; the global pair records 0"
+                    "could not count the rule universe; the global change_set records 0"
                 );
                 BTreeSet::new()
             }
         };
-        // Only when there is a producer to hand it to: a comparison run with
+        // Only when there is a tool to hand it to: a comparison run with
         // none configured must not pay for a worktree nobody reads.
-        let base_wt = match producers.is_empty() {
+        let base_wt = match tools.is_empty() {
             true => None,
             false => Some(BaseWorktree::create(
                 &checkout.dir,
-                &pair.base,
+                &change_set.base,
                 &opts.scratch,
             )?),
         };
@@ -855,28 +843,28 @@ pub fn compare_pair_with(
             &opts.scratch,
             base_wt.as_ref().map_or(&checkout.dir, |w| w.path()),
         );
-        let results = producers
+        let results = tools
             .iter()
             .map(
-                |p| match p.affected(&checkout.dir, &pair.base, &pair.head, &ctx) {
+                |p| match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
                     Ok(mut run) => {
                         run.restrict_to_rule_set(&universe);
-                        ProducerComparison {
+                        ToolComparison {
                             name: p.name().to_string(),
                             version: p.version(),
                             labels: run.labels.len(),
                             cold_wall_ms: run.cold_wall.as_millis() as u64,
                             warm_wall_ms: run.warm_wall.map(|d| d.as_millis() as u64),
-                            // Every label the producer named is inside `//...`, so
+                            // Every label the tool named is inside `//...`, so
                             // there is nothing for cambium to have missed. It is
                             // recorded as 1.0 for the reader's sake and consumed
                             // by nothing: `summarise` takes no precision from a
-                            // global pair.
+                            // global change set.
                             precision: 1.0,
                             depth_agreement: None,
                             dropped_file_targets: run.dropped_file_targets,
                             cambium_only: 0,
-                            producer_only: 0,
+                            tool_only: 0,
                             counts: BTreeMap::new(),
                             examples: Vec::new(),
                             cambium_only_reasons: BTreeMap::new(),
@@ -886,11 +874,11 @@ pub fn compare_pair_with(
                     }
                     Err(e) => {
                         tracing::warn!(
-                            producer = p.name(),
+                            tool = p.name(),
                             error = format!("{e:#}"),
-                            "producer failed on this global pair"
+                            "tool failed on this global change_set"
                         );
-                        ProducerComparison {
+                        ToolComparison {
                             name: p.name().to_string(),
                             version: p.version(),
                             labels: 0,
@@ -900,7 +888,7 @@ pub fn compare_pair_with(
                             depth_agreement: None,
                             dropped_file_targets: 0,
                             cambium_only: 0,
-                            producer_only: 0,
+                            tool_only: 0,
                             counts: BTreeMap::new(),
                             examples: Vec::new(),
                             cambium_only_reasons: BTreeMap::new(),
@@ -911,21 +899,21 @@ pub fn compare_pair_with(
                 },
             )
             .collect();
-        return Ok(PairComparison {
-            schema: cambium_engine::report::SCHEMA_VERSION,
-            base: pair.base.clone(),
-            head: pair.head.clone(),
-            kind: pair.kind.name().to_string(),
-            category: pair.category.clone(),
+        return Ok(ChangeSetResult {
+            schema: crate::RESULT_SCHEMA,
+            base: change_set.base.clone(),
+            head: change_set.head.clone(),
+            kind: change_set.kind.name().to_string(),
+            category: change_set.category.clone(),
             cambium: CambiumRun {
                 global: true,
                 global_reason: Some(reason),
                 universe: universe.len(),
                 ..cambium
             },
-            producers: results,
+            tools: results,
             oracle: None,
-            bzl_oracle: None,
+            load_oracle: None,
             recall: 1.0,
             global: true,
             pass: true,
@@ -933,8 +921,8 @@ pub fn compare_pair_with(
     };
 
     // ---- the facts a classification needs ----
-    let base_wt = BaseWorktree::create(&checkout.dir, &pair.base, &opts.scratch)?;
-    let changed = BazelFacts::changed_paths(&checkout.dir, &pair.base, &pair.head)?;
+    let base_wt = BaseWorktree::create(&checkout.dir, &change_set.base, &opts.scratch)?;
+    let changed = BazelFacts::changed_paths(&checkout.dir, &change_set.base, &change_set.head)?;
     use cambium_engine::report::DirectReason;
     let reasoned = |f: fn(&DirectReason) -> bool| -> Vec<String> {
         report
@@ -970,13 +958,13 @@ pub fn compare_pair_with(
     .with_build_file(from_build_file)
     .with_base(bazel_at(engine, base_wt.path()));
 
-    // ---- the producers ----
+    // ---- the tools ----
     let ctx = run_context(engine, &opts.scratch, base_wt.path());
     let mut results = Vec::new();
-    for p in producers {
-        let cmp = match p.affected(&checkout.dir, &pair.base, &pair.head, &ctx) {
+    for p in tools {
+        let cmp = match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
             Ok(mut run) => {
-                // Both producers report source-file targets (`//pkg:BUILD.bazel`
+                // Both tools report source-file targets (`//pkg:BUILD.bazel`
                 // at distance 0); cambium's walk emits rules only. Comparing
                 // the two vocabularies would file every such row as
                 // `cambium_missing`, so the answer is restricted to the
@@ -1000,7 +988,7 @@ pub fn compare_pair_with(
                     })
                     .map(|(_, n)| n)
                     .sum();
-                ProducerComparison {
+                ToolComparison {
                     name: p.name().to_string(),
                     version: p.version(),
                     labels: run.labels.len(),
@@ -1010,10 +998,10 @@ pub fn compare_pair_with(
                     depth_agreement: run
                         .depths
                         .as_ref()
-                        .and_then(|d| crate::tango::depth_agreement(&cambium_depths, d)),
+                        .and_then(|d| crate::tools::tango::depth_agreement(&cambium_depths, d)),
                     dropped_file_targets: run.dropped_file_targets,
                     cambium_only: cambium_set.difference(&run.labels).count(),
-                    producer_only: run.labels.difference(&cambium_set).count(),
+                    tool_only: run.labels.difference(&cambium_set).count(),
                     counts,
                     examples,
                     cambium_only_reasons: reason_histogram(
@@ -1026,11 +1014,11 @@ pub fn compare_pair_with(
             }
             Err(e) => {
                 tracing::warn!(
-                    producer = p.name(),
+                    tool = p.name(),
                     error = format!("{e:#}"),
-                    "producer failed on this pair"
+                    "tool failed on this change_set"
                 );
-                ProducerComparison {
+                ToolComparison {
                     name: p.name().to_string(),
                     version: p.version(),
                     labels: 0,
@@ -1040,7 +1028,7 @@ pub fn compare_pair_with(
                     depth_agreement: None,
                     dropped_file_targets: 0,
                     cambium_only: 0,
-                    producer_only: 0,
+                    tool_only: 0,
                     counts: BTreeMap::new(),
                     examples: Vec::new(),
                     cambium_only_reasons: BTreeMap::new(),
@@ -1048,7 +1036,7 @@ pub fn compare_pair_with(
                     // `{:#}` and not `{}`: anyhow's `Display` prints only the
                     // outermost context, so `hashing <sha> in <dir>` would
                     // arrive without the exit status and stderr tail the
-                    // producer attached underneath it.
+                    // tool attached underneath it.
                     error: Some(format!("{e:#}")),
                 }
             }
@@ -1061,7 +1049,7 @@ pub fn compare_pair_with(
         Some(
             RdepsOracle::new(opts.oracle_k, opts.seed)
                 .run(&engine.bazel, index.view(), &direct)
-                .with_context(|| format!("rdeps oracle at {}", pair.head))?,
+                .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
         )
     } else {
         None
@@ -1070,16 +1058,16 @@ pub fn compare_pair_with(
 
     // ---- the `.bzl` load-closure oracle ----
     //
-    // Only on pairs that changed a `.bzl`, which is where the static closure
+    // Only on change sets that changed a `.bzl`, which is where the static closure
     // is the thing under test. `engine.bazel` is the head checkout, which is
     // the tree `rbuildfiles` has to be asked about.
-    let bzl_oracle = crate::bzloracle::run(
+    let load_oracle = crate::oracles::load::run(
         &engine.bazel,
         &changed,
         &report.dirty_packages.iter().cloned().collect(),
     )
-    .with_context(|| format!("bzl load-closure oracle at {}", pair.head))?;
-    if let Some(o) = &bzl_oracle {
+    .with_context(|| format!("bzl load-closure oracle at {}", change_set.head))?;
+    if let Some(o) = &load_oracle {
         if !o.ok() {
             tracing::error!(
                 missing = ?o.missing_packages,
@@ -1091,59 +1079,59 @@ pub fn compare_pair_with(
 
     let pass = results.iter().all(|p| p.pass)
         && oracle.as_ref().map_or(true, |o| o.ok())
-        && bzl_oracle.as_ref().map_or(true, |o| o.ok());
+        && load_oracle.as_ref().map_or(true, |o| o.ok());
 
-    Ok(PairComparison {
-        schema: cambium_engine::report::SCHEMA_VERSION,
-        base: pair.base.clone(),
-        head: pair.head.clone(),
-        kind: pair.kind.name().to_string(),
-        category: pair.category.clone(),
+    Ok(ChangeSetResult {
+        schema: crate::RESULT_SCHEMA,
+        base: change_set.base.clone(),
+        head: change_set.head.clone(),
+        kind: change_set.kind.name().to_string(),
+        category: change_set.category.clone(),
         cambium,
-        producers: results,
+        tools: results,
         oracle,
-        bzl_oracle,
+        load_oracle,
         recall: oracle_recall,
         global: false,
         pass,
     })
 }
 
-/// Every pair, resumable, writing after each one.
+/// Every change set, resumable, writing after each one.
 ///
-/// A pair that errors outright (a producer that cannot run at all, a base
+/// A change set that errors outright (a tool that cannot run at all, a base
 /// revision Bazel refuses to load) stops the run rather than being skipped: a
-/// comparison that silently drops the hard pairs is worse than no comparison.
-pub fn compare_pairs(
+/// comparison that silently drops the hard change sets is worse than no comparison.
+pub fn compare_change_sets(
     engine: &Engine,
     checkout: &Checkout,
-    pairs: &[Pair],
-    producers: &[&dyn Producer],
-    opts: &CompareOptions,
-) -> Result<CompareResult> {
+    change_sets: &[ChangeSet],
+    tools: &[&dyn Tool],
+    opts: &ChangesOptions,
+) -> Result<ChangesResult> {
     let mut owned = opts.clone();
     owned.make_absolute();
     let opts = &owned;
     let path = opts.output_path();
     let mut state = State::load_for(
-        &opts.results_dir,
+        &opts.state_dir,
         &opts.repo_id,
         &opts.pin,
         &State::engine_id(&engine.cfg.hash()),
     )?;
-    let mut result = match (opts.resume, CompareResult::read(&path)) {
+    let mut result = match (opts.resume, ChangesResult::read(&path)) {
         (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => prev,
-        _ => CompareResult {
-            schema: cambium_engine::report::SCHEMA_VERSION,
+        _ => ChangesResult {
+            schema: crate::RESULT_SCHEMA,
             repo: opts.repo_id.clone(),
             pin: opts.pin.clone(),
             bazel_version: opts.bazel_version.clone(),
             bazel_version_used: None,
             seed: opts.seed,
             oracle_k: opts.oracle_k,
-            profile: opts.profile.name().to_string(),
-            pairs: Vec::new(),
-            summary: CompareSummary::default(),
+            tango_change_sets: opts.tango_change_sets,
+            change_sets: Vec::new(),
+            summary: ChangesSummary::default(),
         },
     };
     // Recorded once per run, and re-recorded on a resume whose earlier half
@@ -1156,39 +1144,42 @@ pub fn compare_pairs(
             result.bazel_version_used = Some(v);
         }
     }
-    let done: BTreeSet<String> = result.pairs.iter().map(|p| p.key()).collect();
+    let done: BTreeSet<String> = result.change_sets.iter().map(|p| p.key()).collect();
 
-    for (i, pair) in pairs.iter().enumerate() {
-        let key = pair.key();
+    for (i, change_set) in change_sets.iter().enumerate() {
+        let key = change_set.key();
         if opts.resume && done.contains(&key) {
             tracing::debug!(%key, "already compared");
             continue;
         }
-        // The cap is on the *pair index*, not on how many Tango has managed so
-        // far, so which pairs it runs on is the same set whether the run
-        // finished in one go or resumed at pair 30.
-        let running: Vec<&dyn Producer> = producers
+        // The cap is on the *change set index*, not on how many Tango has managed so
+        // far, so which change sets it runs on is the same set whether the run
+        // finished in one go or resumed at change set 30.
+        let running: Vec<&dyn Tool> = tools
             .iter()
             .copied()
-            .filter(|p| p.name() != crate::tango::NAME || opts.tango_pairs.map_or(true, |n| i < n))
+            .filter(|p| {
+                p.name() != crate::tools::tango::NAME
+                    || opts.tango_change_sets.map_or(true, |n| i < n)
+            })
             .collect();
         tracing::info!(
-            pair = i + 1,
-            of = pairs.len(),
+            change_set = i + 1,
+            of = change_sets.len(),
             %key,
-            kind = pair.kind.name(),
-            producers = running.len(),
+            kind = change_set.kind.name(),
+            tools = running.len(),
             "comparing"
         );
-        let cmp = compare_pair_with(engine, checkout, pair, &running, opts)?;
+        let cmp = compare_change_set_with(engine, checkout, change_set, &running, opts)?;
         if !cmp.pass {
-            tracing::warn!(%key, "pair failed the three-way comparison");
+            tracing::warn!(%key, "change_set failed the three-way comparison");
         }
-        result.pairs.push(cmp);
+        result.change_sets.push(cmp);
         result.summarise();
         result.write(&path)?;
         state.compared.insert(key);
-        state.save(&opts.results_dir)?;
+        state.save(&opts.state_dir)?;
     }
     result.summarise();
     result.write(&path)?;
@@ -1254,14 +1245,14 @@ mod tests {
     }
 
     #[test]
-    fn precision_is_the_producers_share_of_cambiums_answer() {
+    fn precision_is_the_tools_share_of_cambiums_answer() {
         let cambium = set(&["//a:a", "//b:b", "//c:c", "//d:d"]);
         assert_eq!(precision(&set(&["//a:a", "//b:b"]), &cambium), 0.5);
         assert_eq!(precision(&cambium, &cambium), 1.0);
         assert_eq!(
             precision(&set(&["//z:z"]), &cambium),
             0.0,
-            "labels the producer alone reports do not raise precision"
+            "labels the tool alone reports do not raise precision"
         );
     }
 
@@ -1273,8 +1264,8 @@ mod tests {
     #[test]
     fn the_symmetric_difference_is_classified_from_both_sides() {
         let cambium = set(&["//a:a", "//p:selected", "//shared:s"]);
-        let producer = set(&["//shared:s", "@ext//x:y", "//missed:m"]);
-        let (counts, examples) = classify_difference(&cambium, &producer, &NoFacts, 10);
+        let tool = set(&["//shared:s", "@ext//x:y", "//missed:m"]);
+        let (counts, examples) = classify_difference(&cambium, &tool, &NoFacts, 10);
         assert_eq!(counts["cambium_extra_select"], 1);
         assert_eq!(counts["unclassified"], 1, "//a:a has no explanation");
         assert_eq!(counts["bazeldiff_extra_external"], 1);
@@ -1296,19 +1287,19 @@ mod tests {
         assert_eq!(examples.len(), 3);
     }
 
-    fn pair_comparison(
+    fn change_set_comparison(
         name: &str,
         precision: f64,
         cold: u64,
         warm: u64,
         pass: bool,
-    ) -> PairComparison {
+    ) -> ChangeSetResult {
         let mut counts = BTreeMap::new();
         counts.insert("cambium_extra_select".to_string(), 2);
         if !pass {
             counts.insert("cambium_missing".to_string(), 1);
         }
-        PairComparison {
+        ChangeSetResult {
             schema: 3,
             base: format!("b{name}"),
             head: format!("h{name}"),
@@ -1319,7 +1310,7 @@ mod tests {
                 warm_wall_ms: warm,
                 ..Default::default()
             },
-            producers: vec![ProducerComparison {
+            tools: vec![ToolComparison {
                 name: "bazel-diff-rust".into(),
                 version: "v46".into(),
                 labels: 10,
@@ -1329,7 +1320,7 @@ mod tests {
                 depth_agreement: None,
                 dropped_file_targets: 0,
                 cambium_only: 2,
-                producer_only: 0,
+                tool_only: 0,
                 counts,
                 examples: Vec::new(),
                 cambium_only_reasons: BTreeMap::new(),
@@ -1337,7 +1328,7 @@ mod tests {
                 error: None,
             }],
             oracle: None,
-            bzl_oracle: None,
+            load_oracle: None,
             recall: if pass { 1.0 } else { 0.75 },
             global: false,
             pass,
@@ -1346,14 +1337,14 @@ mod tests {
 
     #[test]
     fn the_summary_counts_classes_averages_precision_and_takes_the_worst_recall() {
-        let pairs = vec![
-            pair_comparison("1", 1.0, 100, 10, true),
-            pair_comparison("2", 0.5, 300, 30, false),
+        let change_sets = vec![
+            change_set_comparison("1", 1.0, 100, 10, true),
+            change_set_comparison("2", 0.5, 300, 30, false),
         ];
-        let s = summarise(&pairs);
-        assert_eq!(s.pairs, 2);
+        let s = summarise(&change_sets);
+        assert_eq!(s.change_sets, 2);
         assert_eq!(s.passed, 1);
-        assert!(!s.pass, "one failing pair fails the run");
+        assert!(!s.pass, "one failing change_set fails the run");
         assert_eq!(s.by_class["cambium_extra_select"], 4);
         assert_eq!(s.by_class["cambium_missing"], 1);
         assert_eq!(
@@ -1363,7 +1354,7 @@ mod tests {
         assert_eq!(s.mean_precision["bazel-diff-rust"], 0.75);
         assert_eq!(s.min_recall, 0.75);
         assert_eq!(
-            s.producer_cold["bazel-diff-rust"],
+            s.tool_cold["bazel-diff-rust"],
             WallStats {
                 samples: 2,
                 p50_ms: 300,
@@ -1375,72 +1366,72 @@ mod tests {
     }
 
     #[test]
-    fn a_producer_that_failed_does_not_pollute_the_averages() {
-        let mut pairs = vec![pair_comparison("1", 1.0, 100, 10, true)];
-        let mut broken = pair_comparison("2", 0.0, 0, 0, true);
-        broken.producers[0].error = Some("boom".into());
-        broken.producers[0].counts.clear();
-        pairs.push(broken);
-        let s = summarise(&pairs);
+    fn a_tool_that_failed_does_not_pollute_the_averages() {
+        let mut change_sets = vec![change_set_comparison("1", 1.0, 100, 10, true)];
+        let mut broken = change_set_comparison("2", 0.0, 0, 0, true);
+        broken.tools[0].error = Some("boom".into());
+        broken.tools[0].counts.clear();
+        change_sets.push(broken);
+        let s = summarise(&change_sets);
         assert_eq!(s.mean_precision["bazel-diff-rust"], 1.0);
-        assert_eq!(s.producer_cold["bazel-diff-rust"].samples, 1);
+        assert_eq!(s.tool_cold["bazel-diff-rust"].samples, 1);
     }
 
-    /// The same pair with a `tango` row bolted on, as a full-profile run
+    /// The same change set with a `tango` row bolted on, as a full-profile run
     /// would produce.
-    fn with_tango(mut p: PairComparison) -> PairComparison {
-        let mut t = p.producers[0].clone();
-        t.name = crate::tango::NAME.to_string();
+    fn with_tango(mut p: ChangeSetResult) -> ChangeSetResult {
+        let mut t = p.tools[0].clone();
+        t.name = crate::tools::tango::NAME.to_string();
         t.cold_wall_ms = 300_000;
         t.warm_wall_ms = None;
-        p.producers.push(t);
+        p.tools.push(t);
         p
     }
 
     #[test]
-    fn a_pair_tango_was_capped_out_of_is_not_a_disagreement() {
-        // Two pairs, Tango on the first only: the quick profile's shape.
+    fn a_change_set_tango_was_capped_out_of_is_not_a_disagreement() {
+        // Two change sets, Tango on the first only: the quick profile's shape.
         let capped = summarise(&[
-            with_tango(pair_comparison("1", 1.0, 100, 10, true)),
-            pair_comparison("2", 1.0, 100, 10, true),
+            with_tango(change_set_comparison("1", 1.0, 100, 10, true)),
+            change_set_comparison("2", 1.0, 100, 10, true),
         ]);
-        assert!(capped.pass, "a pair Tango skipped still passes");
-        assert_eq!((capped.pairs, capped.passed), (2, 2));
+        assert!(capped.pass, "a change_set Tango skipped still passes");
+        assert_eq!((capped.change_sets, capped.passed), (2, 2));
         assert_eq!(
-            capped.producer_pairs[crate::tango::NAME],
+            capped.tool_change_sets[crate::tools::tango::NAME],
             1,
-            "the summary says how many pairs Tango's numbers come from"
+            "the summary says how many change_sets Tango's numbers come from"
         );
-        assert_eq!(capped.producer_pairs["bazel-diff-rust"], 2);
-        assert_eq!(capped.producer_cold[crate::tango::NAME].samples, 1);
-        // The pairs Tango did run on are scored exactly as they would be with
+        assert_eq!(capped.tool_change_sets["bazel-diff-rust"], 2);
+        assert_eq!(capped.tool_cold[crate::tools::tango::NAME].samples, 1);
+        // The change sets Tango did run on are scored exactly as they would be with
         // no cap at all.
         let uncapped = summarise(&[
-            with_tango(pair_comparison("1", 1.0, 100, 10, true)),
-            with_tango(pair_comparison("2", 1.0, 100, 10, true)),
+            with_tango(change_set_comparison("1", 1.0, 100, 10, true)),
+            with_tango(change_set_comparison("2", 1.0, 100, 10, true)),
         ]);
         assert_eq!(
-            capped.mean_precision[crate::tango::NAME],
-            uncapped.mean_precision[crate::tango::NAME]
+            capped.mean_precision[crate::tools::tango::NAME],
+            uncapped.mean_precision[crate::tools::tango::NAME]
         );
         assert_eq!(capped.by_class, uncapped_minus_tango(&uncapped));
     }
 
     /// The class totals `uncapped` would have had with one fewer Tango row.
-    fn uncapped_minus_tango(uncapped: &CompareSummary) -> BTreeMap<String, usize> {
+    fn uncapped_minus_tango(uncapped: &ChangesSummary) -> BTreeMap<String, usize> {
         let mut totals = uncapped.by_class.clone();
         *totals.get_mut("cambium_extra_select").unwrap() -= 2;
         totals
     }
 
-    /// A globally invalidated pair as the driver now records one: cambium
-    /// answered `//...` (24 000 rule targets) and the producer still ran, took
+    /// A globally invalidated change set as the driver now records one: cambium
+    /// answered `//...` (24 000 rule targets) and the tool still ran, took
     /// 999 ms and found 40 targets precisely.
-    fn global_pair(name: &str) -> PairComparison {
-        let mut p = pair_comparison(name, 1.0, 999, 999, true);
-        p.producers[0].labels = 40;
-        p.producers[0].counts.clear();
-        p.producers[0].cambium_only = 0;
+    fn global_change_set(name: &str) -> ChangeSetResult {
+        let mut p = change_set_comparison(name, 1.0, 999, 999, true);
+        p.tools[0].labels = 40;
+        p.tools[0].counts.clear();
+        p.tools[0].cambium_only = 0;
         p.cambium.global = true;
         p.cambium.global_reason = Some("MODULE.bazel".into());
         p.cambium.universe = 24_000;
@@ -1449,62 +1440,68 @@ mod tests {
     }
 
     #[test]
-    fn a_global_pair_is_counted_apart_and_leaves_the_soundness_numbers_alone() {
-        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), global_pair("2")]);
-        assert_eq!((s.pairs, s.passed, s.globals), (2, 2, 1));
+    fn a_global_change_set_is_counted_apart_and_leaves_the_soundness_numbers_alone() {
+        let s = summarise(&[
+            change_set_comparison("1", 0.5, 100, 10, true),
+            global_change_set("2"),
+        ]);
+        assert_eq!((s.change_sets, s.passed, s.globals), (2, 2, 1));
         assert!(s.pass, "answering //... is not a failure");
         assert_eq!(
             s.mean_precision["bazel-diff-rust"], 0.5,
-            "the global pair contributes no precision"
+            "the global change_set contributes no precision"
         );
         assert_eq!(
             s.by_class["cambium_extra_select"], 2,
             "and no classified labels"
         );
         assert_eq!(
-            s.producer_pairs["bazel-diff-rust"], 1,
-            "the incremental producer count skips it"
+            s.tool_change_sets["bazel-diff-rust"], 1,
+            "the incremental tool count skips it"
         );
     }
 
     #[test]
-    fn a_global_pair_still_pays_for_its_producers_and_records_what_they_found() {
-        let g = global_pair("2");
+    fn a_global_change_set_still_pays_for_its_tools_and_records_what_they_found() {
+        let g = global_change_set("2");
         assert_eq!(
-            g.producers.len(),
+            g.tools.len(),
             1,
-            "the producer ran: a global's cost is the thing being measured"
+            "the tool ran: a global's cost is the thing being measured"
         );
-        assert_eq!((g.producers[0].labels, g.cambium.universe), (40, 24_000));
-        assert!(g.producers[0].counts.is_empty(), "nothing was classified");
+        assert_eq!((g.tools[0].labels, g.cambium.universe), (40, 24_000));
+        assert!(g.tools[0].counts.is_empty(), "nothing was classified");
 
-        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), g]);
+        let s = summarise(&[change_set_comparison("1", 0.5, 100, 10, true), g]);
         let gs = &s.global_stats;
-        assert_eq!(gs.pairs, 1);
+        assert_eq!(gs.change_sets, 1);
         assert_eq!(gs.mean_cambium_labels, 24_000.0);
-        assert_eq!(gs.mean_producer_labels["bazel-diff-rust"], 40.0);
-        assert_eq!(gs.producer_cold["bazel-diff-rust"].p50_ms, 999);
+        assert_eq!(gs.mean_tool_labels["bazel-diff-rust"], 40.0);
+        assert_eq!(gs.tool_cold["bazel-diff-rust"].p50_ms, 999);
         assert_eq!(gs.cambium_cold.p50_ms, 9_990, "999 * 10, as the fixture");
         assert_eq!(gs.cambium_warm.p50_ms, 999);
     }
 
     #[test]
-    fn the_all_pairs_walls_include_the_globals_and_the_incremental_walls_do_not() {
-        let s = summarise(&[pair_comparison("1", 0.5, 100, 10, true), global_pair("2")]);
+    fn the_all_change_sets_walls_include_the_globals_and_the_incremental_walls_do_not() {
+        let s = summarise(&[
+            change_set_comparison("1", 0.5, 100, 10, true),
+            global_change_set("2"),
+        ]);
         assert_eq!(
             (s.cambium_cold.samples, s.cambium_warm.samples),
             (1, 1),
-            "the incremental series is over the walked pair only"
+            "the incremental series is over the walked change_set only"
         );
         assert_eq!(
             (s.all_cambium_cold.samples, s.all_cambium_warm.samples),
             (2, 2),
-            "the all-pairs series hides nothing"
+            "the all-change_sets series hides nothing"
         );
-        assert_eq!(s.producer_cold["bazel-diff-rust"].samples, 1);
-        assert_eq!(s.all_producer_cold["bazel-diff-rust"].samples, 2);
-        assert_eq!(s.all_producer_pairs["bazel-diff-rust"], 2);
-        // The global is the slow pair, so it can only move the p90 up.
+        assert_eq!(s.tool_cold["bazel-diff-rust"].samples, 1);
+        assert_eq!(s.all_tool_cold["bazel-diff-rust"].samples, 2);
+        assert_eq!(s.all_tool_change_sets["bazel-diff-rust"], 2);
+        // The global is the slow change set, so it can only move the p90 up.
         assert!(
             s.all_cambium_warm.p90_ms > s.cambium_warm.p90_ms,
             "including the globals must not flatter cambium: {s:?}"
@@ -1512,11 +1509,11 @@ mod tests {
     }
 
     #[test]
-    fn a_cold_rebuild_pair_is_incremental_but_counted() {
-        let mut rebuilt = pair_comparison("2", 1.0, 100, 10, true);
+    fn a_cold_rebuild_change_set_is_incremental_but_counted() {
+        let mut rebuilt = change_set_comparison("2", 1.0, 100, 10, true);
         rebuilt.cambium.cold_rebuild = true;
-        let s = summarise(&[pair_comparison("1", 1.0, 100, 10, true), rebuilt]);
-        assert_eq!(s.cold_rebuild_pairs, 1);
+        let s = summarise(&[change_set_comparison("1", 1.0, 100, 10, true), rebuilt]);
+        assert_eq!(s.cold_rebuild_change_sets, 1);
         assert_eq!(
             s.cambium_warm.samples, 2,
             "it is not a global: it stays in every statistic"
@@ -1526,7 +1523,7 @@ mod tests {
 
     #[test]
     fn a_run_with_no_globals_carries_no_global_statistics() {
-        let s = summarise(&[pair_comparison("1", 1.0, 100, 10, true)]);
+        let s = summarise(&[change_set_comparison("1", 1.0, 100, 10, true)]);
         assert!(s.global_stats.is_empty());
         assert_eq!(s.global_stats, GlobalStats::default());
         let json = serde_json::to_string(&s).unwrap();
@@ -1536,31 +1533,34 @@ mod tests {
         );
     }
 
-    /// Every field added since the first `compare-*.json` was written has a
+    /// Every field added since the first `changes-*.json` was written has a
     /// serde default, so the report can still read what is on the box.
     #[test]
-    fn a_summary_written_before_the_all_pairs_series_still_parses() {
+    fn a_summary_written_before_the_all_change_sets_series_still_parses() {
         let old = r#"{
-            "pairs": 3, "passed": 3, "by_class": {}, "mean_precision": {},
-            "min_recall": 1.0, "producer_cold": {}, "producer_warm": {},
+            "change_sets": 3, "passed": 3, "by_class": {}, "mean_precision": {},
+            "min_recall": 1.0, "tool_cold": {}, "tool_warm": {},
             "cambium_cold": {"samples": 3, "p50_ms": 10, "p90_ms": 20},
             "cambium_warm": {"samples": 3, "p50_ms": 5, "p90_ms": 8},
             "pass": true
         }"#;
-        let s: CompareSummary = serde_json::from_str(old).unwrap();
-        assert_eq!((s.pairs, s.globals, s.cold_rebuild_pairs), (3, 0, 0));
+        let s: ChangesSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (s.change_sets, s.globals, s.cold_rebuild_change_sets),
+            (3, 0, 0)
+        );
         assert_eq!(s.all_cambium_cold, WallStats::default());
-        assert!(s.all_producer_pairs.is_empty());
+        assert!(s.all_tool_change_sets.is_empty());
         assert!(s.global_stats.is_empty());
 
-        let pair = r#"{
+        let change_set = r#"{
             "schema": 3, "base": "b", "head": "h", "kind": "adjacent",
             "cambium": {"direct": 1, "affected": 2, "tests": 0, "global": false,
                         "cold_wall_ms": 9, "warm_wall_ms": 4, "dirty_packages": 1,
                         "queried_targets": 2, "changed_files": 1},
-            "producers": [], "recall": 1.0, "pass": true
+            "tools": [], "recall": 1.0, "pass": true
         }"#;
-        let p: PairComparison = serde_json::from_str(pair).unwrap();
+        let p: ChangeSetResult = serde_json::from_str(change_set).unwrap();
         assert!(!p.cambium.cold_rebuild);
         assert_eq!(p.cambium.universe, 0);
         assert_eq!(p.cambium.answer_size(), 2);
@@ -1568,12 +1568,12 @@ mod tests {
 
     #[test]
     fn options_are_forced_absolute() {
-        let opts = CompareOptions::new("bazel", "abc", PathBuf::from("corpus-results/bazel"));
+        let opts = ChangesOptions::new("bazel", "abc", PathBuf::from("bench-results/bazel"));
         assert!(opts.results_dir.is_absolute(), "{opts:?}");
         assert!(opts.scratch.is_absolute(), "{opts:?}");
-        let mut hand_built = CompareOptions {
-            results_dir: "corpus-results/bazel".into(),
-            scratch: "corpus-results/bazel/scratch".into(),
+        let mut hand_built = ChangesOptions {
+            results_dir: "bench-results/bazel".into(),
+            scratch: "bench-results/bazel/scratch".into(),
             ..opts
         };
         hand_built.make_absolute();
@@ -1593,40 +1593,40 @@ mod tests {
     fn the_output_file_names_the_bazel_version_only_in_the_matrix() {
         let dir = Path::new("/r");
         assert_eq!(
-            CompareOptions::path(dir, "abc", None),
-            PathBuf::from("/r/compare-abc.json")
+            ChangesOptions::path(dir, "abc", None),
+            PathBuf::from("/r/changes-abc.json")
         );
         assert_eq!(
-            CompareOptions::path(dir, "abc", Some("7.4.1")),
-            PathBuf::from("/r/compare-abc-7.4.1.json")
+            ChangesOptions::path(dir, "abc", Some("7.4.1")),
+            PathBuf::from("/r/changes-abc-7.4.1.json")
         );
         assert_eq!(
-            CompareOptions::path(dir, "abc", Some("")),
-            PathBuf::from("/r/compare-abc.json")
+            ChangesOptions::path(dir, "abc", Some("")),
+            PathBuf::from("/r/changes-abc.json")
         );
     }
 
     #[test]
     fn a_result_round_trips_through_json() {
         let dir = tempfile::tempdir().unwrap();
-        let mut r = CompareResult {
-            schema: cambium_engine::report::SCHEMA_VERSION,
+        let mut r = ChangesResult {
+            schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "abc".into(),
             bazel_version: Some("7.4.1".into()),
             bazel_version_used: Some("bazel 7.4.1".into()),
-            profile: "full".into(),
             seed: 7,
             oracle_k: 100,
-            pairs: vec![pair_comparison("1", 1.0, 100, 10, true)],
-            summary: CompareSummary::default(),
+            tango_change_sets: None,
+            change_sets: vec![change_set_comparison("1", 1.0, 100, 10, true)],
+            summary: ChangesSummary::default(),
         };
         r.summarise();
-        let path = dir.path().join("compare-abc.json");
+        let path = dir.path().join("changes-abc.json");
         r.write(&path).unwrap();
-        let back = CompareResult::read(&path).unwrap();
-        assert_eq!(back.schema, cambium_engine::report::SCHEMA_VERSION);
-        assert_eq!(back.pairs.len(), 1);
+        let back = ChangesResult::read(&path).unwrap();
+        assert_eq!(back.schema, crate::RESULT_SCHEMA);
+        assert_eq!(back.change_sets.len(), 1);
         assert!(back.summary.pass);
     }
 }

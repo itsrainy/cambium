@@ -1,4 +1,4 @@
-//! Commit-pair selection (spec §5): deterministic from the pin and a seed.
+//! Commit-change set selection (spec §5): deterministic from the pin and a seed.
 
 use std::collections::BTreeSet;
 
@@ -9,12 +9,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::profile::Profile;
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum PairKind {
-    /// `(parent, commit)` for every first-parent commit in the replay range.
+pub enum ChangeSetKind {
+    /// `(parent, commit)` for every first-parent commit in the history range.
     Adjacent,
     /// `(merge-base, merge)` for every merge commit in the range: what CI asks.
     Pr,
@@ -23,7 +21,7 @@ pub enum PairKind {
     Stress,
 }
 
-impl PairKind {
+impl ChangeSetKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "adjacent" => Some(Self::Adjacent),
@@ -43,39 +41,39 @@ impl PairKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Pair {
+pub struct ChangeSet {
     pub base: String,
     pub head: String,
-    pub kind: PairKind,
+    pub kind: ChangeSetKind,
     /// Stress category: `bzl`, `build_add_delete`, `hub`, `invalidator`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
 }
 
-impl Pair {
+impl ChangeSet {
     pub fn key(&self) -> String {
-        crate::state::State::pair_key(&self.base, &self.head)
+        crate::state::State::change_set_key(&self.base, &self.head)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairSet {
+pub struct ChangeSetSet {
     pub schema: u32,
     pub repo: String,
     pub pin: String,
     pub seed: u64,
-    /// Which profile selected these pairs. Absent from sets written before
-    /// profiles existed, which were all full runs.
-    #[serde(default)]
-    pub profile: String,
-    /// The replay range the selection drew from: a quick set is chosen from
-    /// the last 50 commits, a full one from the manifest's 300.
+    /// The history window the selection drew from — the size is part of the
+    /// result, not of a mode, so a set chosen from the last 50 commits and one
+    /// chosen from the manifest's 300 say so themselves.
     #[serde(default)]
     pub history_window: usize,
-    pub pairs: Vec<Pair>,
+    /// The `--change-sets N` this selection was capped at, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<usize>,
+    pub change_sets: Vec<ChangeSet>,
 }
 
-impl PairSet {
+impl ChangeSetSet {
     pub fn write(&self, path: &std::path::Path) -> Result<()> {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
@@ -90,15 +88,16 @@ impl PairSet {
 }
 
 #[derive(Clone, Debug)]
-pub struct PairOptions {
+pub struct ChangeSetOptions {
     pub repo_id: String,
     pub pin: String,
     pub history_window: usize,
     pub seed: u64,
-    /// Stress pairs per category.
+    /// Stress change sets per category.
     pub cap: usize,
-    /// Bounds the whole selection; see [`cap_total`].
-    pub profile: Profile,
+    /// Bounds the whole selection, across every kind; see [`cap_total`].
+    /// `None` selects everything the window offers.
+    pub total_cap: Option<usize>,
     /// Packages of the hub targets, from `index stats`' top-in-degree list.
     pub hub_packages: Vec<String>,
     /// Invalidator paths and globs from the repo's effective `cambium.toml`.
@@ -106,26 +105,26 @@ pub struct PairOptions {
     pub invalidator_globs: Vec<String>,
 }
 
-/// The first-parent commits of the replay range, oldest first, ending at the
+/// The first-parent commits of the history range, oldest first, ending at the
 /// pin. `range` commits before the pin means `range + 1` commits.
 pub fn range_commits(repo: &Repo, pin: &str, range: usize) -> Result<Vec<String>> {
     Ok(repo.first_parent_log(pin, range + 1)?)
 }
 
-pub fn adjacent(repo: &Repo, pin: &str, range: usize) -> Result<Vec<Pair>> {
+pub fn adjacent(repo: &Repo, pin: &str, range: usize) -> Result<Vec<ChangeSet>> {
     let commits = range_commits(repo, pin, range)?;
     Ok(commits
         .windows(2)
-        .map(|w| Pair {
+        .map(|w| ChangeSet {
             base: w[0].clone(),
             head: w[1].clone(),
-            kind: PairKind::Adjacent,
+            kind: ChangeSetKind::Adjacent,
             category: None,
         })
         .collect())
 }
 
-pub fn pr_shaped(repo: &Repo, pin: &str, range: usize) -> Result<Vec<Pair>> {
+pub fn pr_shaped(repo: &Repo, pin: &str, range: usize) -> Result<Vec<ChangeSet>> {
     let commits = range_commits(repo, pin, range)?;
     let mut out = Vec::new();
     for c in &commits {
@@ -137,10 +136,10 @@ pub fn pr_shaped(repo: &Repo, pin: &str, range: usize) -> Result<Vec<Pair>> {
         if base.is_empty() || base == *c {
             continue;
         }
-        out.push(Pair {
+        out.push(ChangeSet {
             base,
             head: c.clone(),
-            kind: PairKind::Pr,
+            kind: ChangeSetKind::Pr,
             category: None,
         });
     }
@@ -188,8 +187,8 @@ fn sample(candidates: Vec<String>, cap: usize, seed: u64, salt: u64) -> Vec<Stri
     chosen.into_iter().map(|i| candidates[i].clone()).collect()
 }
 
-pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
-    let commits = range_commits(repo, &o.pin, o.profile.history_window(o.history_window))?;
+pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
+    let commits = range_commits(repo, &o.pin, o.history_window)?;
     let Some(oldest) = commits.first() else {
         return Ok(Vec::new());
     };
@@ -245,10 +244,10 @@ pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
                 continue;
             };
             seen.insert(c.clone());
-            out.push(Pair {
+            out.push(ChangeSet {
                 base: parent.clone(),
                 head: c,
-                kind: PairKind::Stress,
+                kind: ChangeSetKind::Stress,
                 category: Some(name.to_string()),
             });
         }
@@ -256,27 +255,27 @@ pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
     Ok(out)
 }
 
-/// Keeps at most `cap` of `pairs`, round-robin over the kinds, in the input
+/// Keeps at most `cap` of `change_sets`, round-robin over the kinds, in the input
 /// order.
 ///
 /// Taking a plain prefix would be simpler and wrong: [`select`] emits every
-/// adjacent pair before the first `pr` or `stress` one, so a 50-pair prefix of
-/// a 300-commit selection is 50 adjacent pairs and no stress at all — exactly
-/// the pairs least likely to catch anything. Round-robin keeps each kind's
+/// adjacent change set before the first `pr` or `stress` one, so a 50-change set prefix of
+/// a 300-commit selection is 50 adjacent change sets and no stress at all — exactly
+/// the change sets least likely to catch anything. Round-robin keeps each kind's
 /// share while leaving what it keeps a *prefix of that kind*, so a quick set
 /// is a subset of the full set at the same pin and seed, and the choice is a
 /// pure function of the input order.
-pub fn cap_total(pairs: &[Pair], cap: usize) -> Vec<Pair> {
-    if pairs.len() <= cap {
-        return pairs.to_vec();
+pub fn cap_total(change_sets: &[ChangeSet], cap: usize) -> Vec<ChangeSet> {
+    if change_sets.len() <= cap {
+        return change_sets.to_vec();
     }
-    let kinds: BTreeSet<PairKind> = pairs.iter().map(|p| p.kind).collect();
+    let kinds: BTreeSet<ChangeSetKind> = change_sets.iter().map(|p| p.kind).collect();
     let mut taken: BTreeSet<usize> = BTreeSet::new();
     let mut round = 0;
     while taken.len() < cap {
         let before = taken.len();
         for kind in &kinds {
-            let Some((i, _)) = pairs
+            let Some((i, _)) = change_sets
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| p.kind == *kind)
@@ -296,31 +295,31 @@ pub fn cap_total(pairs: &[Pair], cap: usize) -> Vec<Pair> {
         }
         round += 1;
     }
-    taken.into_iter().map(|i| pairs[i].clone()).collect()
+    taken.into_iter().map(|i| change_sets[i].clone()).collect()
 }
 
 /// Every requested kind, in kind order, as one set.
-pub fn select(repo: &Repo, kinds: &[PairKind], o: &PairOptions) -> Result<PairSet> {
-    let range = o.profile.history_window(o.history_window);
-    let mut pairs = Vec::new();
+pub fn select(repo: &Repo, kinds: &[ChangeSetKind], o: &ChangeSetOptions) -> Result<ChangeSetSet> {
+    let range = o.history_window;
+    let mut change_sets = Vec::new();
     for k in kinds {
-        pairs.extend(match k {
-            PairKind::Adjacent => adjacent(repo, &o.pin, range)?,
-            PairKind::Pr => pr_shaped(repo, &o.pin, range)?,
-            PairKind::Stress => stress(repo, o)?,
+        change_sets.extend(match k {
+            ChangeSetKind::Adjacent => adjacent(repo, &o.pin, range)?,
+            ChangeSetKind::Pr => pr_shaped(repo, &o.pin, range)?,
+            ChangeSetKind::Stress => stress(repo, o)?,
         });
     }
-    if let Some(cap) = o.profile.pair_cap() {
-        pairs = cap_total(&pairs, cap);
+    if let Some(cap) = o.total_cap {
+        change_sets = cap_total(&change_sets, cap);
     }
-    Ok(PairSet {
-        schema: cambium_engine::report::SCHEMA_VERSION,
+    Ok(ChangeSetSet {
+        schema: crate::RESULT_SCHEMA,
         repo: o.repo_id.clone(),
         pin: o.pin.clone(),
         seed: o.seed,
-        profile: o.profile.name().to_string(),
         history_window: range,
-        pairs,
+        cap: o.total_cap,
+        change_sets,
     })
 }
 
@@ -345,8 +344,8 @@ mod tests {
         assert_eq!(sample(c[..3].to_vec(), 5, 7, 1), c[..3].to_vec());
     }
 
-    fn pair(kind: PairKind, n: usize) -> Pair {
-        Pair {
+    fn change_set(kind: ChangeSetKind, n: usize) -> ChangeSet {
+        ChangeSet {
             base: format!("b{n}"),
             head: format!("h{n}"),
             kind,
@@ -355,25 +354,31 @@ mod tests {
     }
 
     /// 100 adjacent, then 20 pr, then 10 stress: [`select`]'s own order.
-    fn corpus_shaped() -> Vec<Pair> {
-        let mut v: Vec<Pair> = (0..100).map(|n| pair(PairKind::Adjacent, n)).collect();
-        v.extend((100..120).map(|n| pair(PairKind::Pr, n)));
-        v.extend((120..130).map(|n| pair(PairKind::Stress, n)));
+    fn subject_shaped() -> Vec<ChangeSet> {
+        let mut v: Vec<ChangeSet> = (0..100)
+            .map(|n| change_set(ChangeSetKind::Adjacent, n))
+            .collect();
+        v.extend((100..120).map(|n| change_set(ChangeSetKind::Pr, n)));
+        v.extend((120..130).map(|n| change_set(ChangeSetKind::Stress, n)));
         v
     }
 
     #[test]
     fn the_total_cap_is_deterministic_and_keeps_every_kind() {
-        let all = corpus_shaped();
+        let all = subject_shaped();
         let a = cap_total(&all, 50);
         assert_eq!(a, cap_total(&all, 50), "selection must be a pure function");
         assert_eq!(a.len(), 50);
-        for kind in [PairKind::Adjacent, PairKind::Pr, PairKind::Stress] {
-            let kept: Vec<&Pair> = a.iter().filter(|p| p.kind == kind).collect();
+        for kind in [
+            ChangeSetKind::Adjacent,
+            ChangeSetKind::Pr,
+            ChangeSetKind::Stress,
+        ] {
+            let kept: Vec<&ChangeSet> = a.iter().filter(|p| p.kind == kind).collect();
             assert!(!kept.is_empty(), "{kind:?} was dropped entirely");
             // What it keeps of a kind is that kind's prefix, so the quick set
             // is a subset of the full one at the same pin and seed.
-            let full: Vec<&Pair> = all.iter().filter(|p| p.kind == kind).collect();
+            let full: Vec<&ChangeSet> = all.iter().filter(|p| p.kind == kind).collect();
             assert_eq!(kept, full[..kept.len()].to_vec(), "{kind:?}");
         }
         // And the whole thing is a subset, in the full set's own order.
@@ -387,18 +392,21 @@ mod tests {
 
     #[test]
     fn a_cap_at_or_above_the_count_keeps_everything() {
-        let all = corpus_shaped();
+        let all = subject_shaped();
         assert_eq!(cap_total(&all, all.len()), all);
         assert_eq!(cap_total(&all, all.len() + 5), all);
         // More cap than one kind can supply: the others take up the slack.
-        let only = vec![pair(PairKind::Pr, 0), pair(PairKind::Pr, 1)];
+        let only = vec![
+            change_set(ChangeSetKind::Pr, 0),
+            change_set(ChangeSetKind::Pr, 1),
+        ];
         assert_eq!(cap_total(&only, 10), only);
     }
 
     #[test]
     fn kinds_parse() {
-        assert_eq!(PairKind::parse("pr"), Some(PairKind::Pr));
-        assert_eq!(PairKind::parse("nope"), None);
-        assert_eq!(PairKind::Stress.name(), "stress");
+        assert_eq!(ChangeSetKind::parse("pr"), Some(ChangeSetKind::Pr));
+        assert_eq!(ChangeSetKind::parse("nope"), None);
+        assert_eq!(ChangeSetKind::Stress.name(), "stress");
     }
 }
