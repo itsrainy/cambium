@@ -39,8 +39,10 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// [`crate::data::IndexData`]) that replaced the `rbuildfiles` call, and to 5
 /// when it gained the external-repository input map (`repo_*`, `bzl_repo_*`;
 /// see [`crate::externals`]) that replaced whole-world invalidation on a
-/// `MODULE.bazel` or repository-rule-input edit.
-pub const FORMAT_VERSION: u32 = 5;
+/// `MODULE.bazel` or repository-rule-input edit, and to 6 when it gained the
+/// per-repository path mapping (`repo_map_*`) that tells an input-path edit
+/// apart from an edit to a `.bzl` the repository exports.
+pub const FORMAT_VERSION: u32 = 6;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

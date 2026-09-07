@@ -64,6 +64,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.repos_dirty_by_bzl",
     "stats.repos_dirty_by_input",
     "stats.repos_dirty_by_module",
+    "stats.repos_label_only",
     "stats.rbuildfiles_called",
     "tests[]",
     "timings_ms.dirty",
@@ -125,6 +126,7 @@ fn fixture() -> AffectedReport {
             repos_dirty_by_input: 11,
             repos_dirty_by_module: 12,
             repos_dirty_by_bzl: 13,
+            repos_label_only: 15,
             external_direct_targets: 14,
         },
         explanations: Some(vec![Explanation {

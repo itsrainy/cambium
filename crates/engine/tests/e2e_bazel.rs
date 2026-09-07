@@ -784,6 +784,12 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
     );
     write(
         root,
+        "tools/macros.bzl",
+        "load(\"@mod_a//:defs.bzl\", _via_macro = \"via_macro\")\n\n\
+         via_macro = _via_macro\n",
+    );
+    write(
+        root,
         "mod_a/MODULE.bazel",
         "module(name = \"mod_a\", version = \"0.0.1\")\n",
     );
@@ -793,10 +799,21 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
         "filegroup(name = \"lib\", srcs = [\"lib.txt\"], visibility = [\"//visibility:public\"])\n",
     );
     write(root, "mod_a/lib.txt", "a1\n");
+    // The `@envoy_api//bazel:api_build_system.bzl` shape: a `.bzl` inside the
+    // overridden module that a main-repo package loads. Editing `lib.txt` must
+    // not re-query the packages that load this file; editing *this* file must.
+    write(
+        root,
+        "mod_a/defs.bzl",
+        "def via_macro(name):\n\
+        \x20   native.genrule(name = name, outs = [name + \".txt\"], cmd = \"echo v1 > $@\")\n",
+    );
     write(
         root,
         "app/BUILD.bazel",
-        "genrule(\n    name = \"uses_gen\",\n    srcs = [\"@gen//:value\"],\n\
+        "load(\"//tools:macros.bzl\", \"via_macro\")\n\n\
+         via_macro(name = \"via_macro\")\n\n\
+         genrule(\n    name = \"uses_gen\",\n    srcs = [\"@gen//:value\"],\n\
         \x20   outs = [\"g.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
          genrule(\n    name = \"uses_mod_a\",\n    srcs = [\"@mod_a//:lib\"],\n\
         \x20   outs = [\"m.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
@@ -887,7 +904,7 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             "{version}: a local_path_override directory is an input map entry"
         );
 
-        let check = |name: &str, rel: &str, contents: &str, pattern: &str| {
+        let check = |name: &str, rel: &str, contents: &str, pattern: Option<&str>| {
             write(&root, rel, contents);
             let head = commit_all(&root, name);
             let engine = engine_for(&root, &config);
@@ -914,19 +931,29 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
                 "{version}/{name}: went global: {:?}",
                 out.report.global_reason
             );
-            let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
-            let theirs = rdeps_oracle(&engine, pattern);
-            assert_eq!(
-                ours, theirs,
-                "{version}/{name}: cambium and `rdeps(//..., {pattern})` disagree"
-            );
+            if let Some(pattern) = pattern {
+                let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
+                let theirs = rdeps_oracle(&engine, pattern);
+                assert_eq!(
+                    ours, theirs,
+                    "{version}/{name}: cambium and `rdeps(//..., {pattern})` disagree"
+                );
+            }
             git(&root, &["reset", "-q", "--hard", &base]);
             git(&root, &["clean", "-qfd"]);
-            ours
+            out.report
+        };
+        let labels = |r: &cambium_engine::AffectedReport| -> BTreeSet<String> {
+            r.affected_labels().into_iter().collect()
         };
 
         // The `@envoy_repo` shape: a file a repository rule reads by label.
-        let gen = check("edit config", "config.txt", "v2\n", "@gen//:value");
+        let gen = labels(&check(
+            "edit config",
+            "config.txt",
+            "v2\n",
+            Some("@gen//:value"),
+        ));
         assert!(
             gen.contains("//app:uses_gen") && gen.contains("//app:downstream"),
             "{version}: {gen:?}"
@@ -934,9 +961,44 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
         assert!(!gen.contains("//app:unrelated"), "{version}: {gen:?}");
 
         // The `@envoy_api` shape: a `local_path_override` module's sources.
-        let a = check("edit mod_a", "mod_a/lib.txt", "a2\n", "@mod_a//:lib");
+        //
+        // `mod_a/lib.txt` is `lib.txt` inside `@mod_a`, and nothing loads that,
+        // so the answer is exactly the label consumers — even though `//app`'s
+        // load closure does reach `@mod_a//:defs.bzl`. That is issue #3: the
+        // package is not re-queried at all.
+        let a_report = check("edit mod_a", "mod_a/lib.txt", "a2\n", Some("@mod_a//:lib"));
+        let a = labels(&a_report);
         assert!(a.contains("//app:uses_mod_a"), "{version}: {a:?}");
         assert!(!a.contains("//app:uses_gen"), "{version}: {a:?}");
+        assert_eq!(
+            a_report.stats.repos_label_only, 1,
+            "{version}: an input edit that cannot be a loaded .bzl spares rule (a)"
+        );
+        assert!(
+            a_report.dirty_packages.is_empty(),
+            "{version}: no package should have been re-queried: {:?}",
+            a_report.dirty_packages
+        );
+
+        // And the same repository's `.bzl`, which *is* loaded: the package
+        // whose closure reaches it is re-queried, and the macro's new `cmd`
+        // moves the rule it generates.
+        let d_report = check(
+            "edit mod_a defs.bzl",
+            "mod_a/defs.bzl",
+            "def via_macro(name):\n\
+            \x20   native.genrule(name = name, outs = [name + \".txt\"], cmd = \"echo v2 > $@\")\n",
+            None,
+        );
+        assert_eq!(d_report.stats.repos_label_only, 0, "{version}");
+        assert!(
+            d_report.dirty_packages.contains(&"app".to_string()),
+            "{version}: {:?}",
+            d_report.dirty_packages
+        );
+        let d = labels(&d_report);
+        assert!(d.contains("//app:via_macro"), "{version}: {d:?}");
+        assert!(!d.contains("//app:unrelated"), "{version}: {d:?}");
 
         // A `.bzl` that is *both* in the `MODULE.bazel` workspace closure and
         // a source of a filegroup. Both consequences are owed: the
@@ -945,12 +1007,12 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
         // the second on `bazel/bazel`'s `9a7ba209..cc5c15fa`, where fifteen
         // filegroups around `tools/build_defs/repo/utils.bzl` went unreported.
         let gen_bzl = std::fs::read_to_string(root.join("tools/gen.bzl")).unwrap();
-        let b = check(
+        let b = labels(&check(
             "edit gen.bzl",
             "tools/gen.bzl",
             &format!("{gen_bzl}\n# the file's text moved; no rule's did\n"),
-            "@gen//:value + //tools:bzl_srcs",
-        );
+            Some("@gen//:value + //tools:bzl_srcs"),
+        ));
         assert!(
             b.contains("//tools:bzl_srcs") && b.contains("//app:uses_bzl_srcs"),
             "{version}: a .bzl listed in srcs must reach its consumers: {b:?}"
