@@ -71,8 +71,13 @@ pub trait PackageQuerier {
     /// Rows for the whole repository (cold build).
     fn universe(&self) -> Result<Vec<PackageUpdate>, crate::error::EngineError>;
 
-    /// Packages whose BUILD files load any of these `.bzl` paths (spec 7.2).
-    fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Vec<String>, crate::error::EngineError>;
+    /// What loads any of these `.bzl` paths (spec 7.2). The answer separates
+    /// main-repo packages from workspace-level loaders; see
+    /// [`cambium_bazel::Rbuildfiles`].
+    fn rbuildfiles(
+        &self,
+        bzl_paths: &[String],
+    ) -> Result<cambium_bazel::Rbuildfiles, crate::error::EngineError>;
 
     /// Version string recorded in the index header.
     fn version(&self) -> String {
@@ -150,7 +155,10 @@ impl PackageQuerier for BazelQuerier {
         Ok(q.updates)
     }
 
-    fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Vec<String>, crate::error::EngineError> {
+    fn rbuildfiles(
+        &self,
+        bzl_paths: &[String],
+    ) -> Result<cambium_bazel::Rbuildfiles, crate::error::EngineError> {
         Ok(self.bazel.rbuildfiles(bzl_paths)?)
     }
 

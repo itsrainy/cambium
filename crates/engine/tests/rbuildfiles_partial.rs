@@ -20,7 +20,7 @@ impl PackageQuerier for PartialRbuildfiles<'_> {
     fn universe(&self) -> Result<Vec<PackageUpdate>, EngineError> {
         self.0.universe()
     }
-    fn rbuildfiles(&self, _: &[String]) -> Result<Vec<String>, EngineError> {
+    fn rbuildfiles(&self, _: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {
         Err(EngineError::Bazel(BazelError::Partial {
             args: "rbuildfiles(...)".into(),
             stderr: "ERROR: some external repository failed to fetch".into(),
@@ -81,7 +81,7 @@ fn a_partial_rbuildfiles_answer_becomes_a_global_invalidation() {
         fn universe(&self) -> Result<Vec<PackageUpdate>, EngineError> {
             self.0.universe()
         }
-        fn rbuildfiles(&self, _: &[String]) -> Result<Vec<String>, EngineError> {
+        fn rbuildfiles(&self, _: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {
             Err(EngineError::Bazel(BazelError::Failed {
                 args: "rbuildfiles(...)".into(),
                 status: "exit status: 1".into(),

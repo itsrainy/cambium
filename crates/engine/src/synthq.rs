@@ -44,7 +44,7 @@ impl PackageQuerier for SynthQuerier<'_> {
         Ok(self.graph.package_updates())
     }
 
-    fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Vec<String>, EngineError> {
+    fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {
         let mut out: Vec<String> = Vec::new();
         for path in bzl_paths {
             let Some(b) = self.graph.bzl.iter().find(|b| &b.path == path) else {
@@ -58,7 +58,10 @@ impl PackageQuerier for SynthQuerier<'_> {
         }
         out.sort();
         out.dedup();
-        Ok(out)
+        Ok(cambium_bazel::Rbuildfiles {
+            packages: out,
+            workspace_level: Vec::new(),
+        })
     }
 
     fn version(&self) -> String {
