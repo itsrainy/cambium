@@ -77,22 +77,15 @@ plan uses quick; the published numbers come from a full run on EC2
 
 ## Running right now (logs in $CLAUDE_JOB_DIR/tmp = /Users/rainy/.claude/jobs/6b58f265/tmp)
 
-- **No corpus runs.** The item-4 quick chain (item4.sh → envoy-before.sh →
-  bazel-rerun.sh) was stopped at 11:56 EDT: three agent worktrees compiling
-  on top of the compare pushed the load average past 300 and the timings were
-  meaningless. Partial results: envoy last-50 window with item 4 in
-  `corpus-results-before/envoy` (24 globals, none `.bzl`); sourcegraph quick
-  replay done (1 global) in `corpus-results/sourcegraph/quick`, its compare
-  incomplete. Bazel quick failed on the stale-blob bug fixed in d58aef1.
-  Leftover: sourcegraph tango worktrees under
-  `corpus-results/sourcegraph/quick/scratch/`; prune before rerunning.
-- **Three item agents** in `.claude/worktrees/` branches: item 2 (.bazelrc
-  allowlist), item 6 (max_dirty_packages), items 1+3 (repo-granular
-  externals). Each commits to its branch; merge order 2, 6, 1+3.
-- After they land and the machine is quiet: rebuild release, run
-  `corpus all <id> --profile quick` for bazel, sourcegraph, envoy, apollo
-  once for the after numbers, and the true-before envoy window with
-  `tmp/old-target/release/cambi` (15a46b1).
+- **after.sh** (log `after.log`): release build at 7036fa0+, then
+  `corpus all <id> --profile quick` for bazel, sourcegraph, apollo, envoy
+  (FORMAT_VERSION 5 => every repo cold-builds once), then the true envoy
+  before-window with `tmp/old-target/release/cambi` (15a46b1) into
+  `corpus-results-before-true/envoy`. Prints `=== AFTER DONE`.
+- Envoy's corpus.toml invalidators are now empty (derived by items 1+3); the
+  replay oracle is the check. A mismatch on a commit touching api/**,
+  changelogs/**, .github/config.yml or VERSION.txt means put that path back.
+- Then: quick before/after table into docs/CORPUS.md Findings, commit.
 
 ## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
 
@@ -101,12 +94,12 @@ plan uses quick; the published numbers come from a full run on EC2
    (repo mapping via `bazel mod dump_repo_mapping ""`; external loads stop at
    the external label; MODULE/WORKSPACE closure → global; keep `rbuildfiles`
    as a corpus oracle asserting the static closure is a superset).
-1+3. Repo-granular external invalidation: MODULE.bazel.lock diff and
+1+3. (done, merged 7036fa0) Repo-granular external invalidation: MODULE.bazel.lock diff and
    repository-rule inputs map to repos; dirty (a) main-repo consumers of
    `@repo//...` edges and (b) every package whose `.bzl` closure contains a
    file from that repo. A module that registers toolchains stays global
    (toolchain resolution has no edge to follow). Needs item 4.
-2. `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
+2. (done, merged 5bcb978) `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
    affect loading (`--remote_*`, `--jobs`, `--test_*`, `--disk_cache`,
    configs no query uses); unknown flags and `import`/`try-import` go global.
 6. (done) Replace `max_changed_files` with "cold build when dirty packages

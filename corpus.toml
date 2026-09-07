@@ -52,40 +52,14 @@ extra_query_flags = []
 # (//bazel/platforms/rbe:linux_{x64,arm64},
 # //bazel/rbe/toolchains:rbe_linux_gcc_platform and
 # //bazel/rbe/toolchains/configs/linux/gcc/config:platform).
-invalidators = [
-    "bazel/repositories.bzl",
-    "bazel/repository_locations.bzl",
-    # envoy lists `api` in `.bazelignore` and re-exposes it as the external
-    # repo `@envoy_api` (`bazel/api_binding.bzl` symlinks every entry of
-    # `api/` into a generated repository). So `api/**` holds no main-repo
-    # package, cambium's file->target map cannot name a consumer for anything
-    # under it, and an edit to a single `.proto` there looks like a no-op --
-    # while `//tools/proto_format:proto_sync`, `//tools/code:check` and the
-    # `//distribution:*` tree really do depend on it through `@envoy_api`.
-    # Indexing external repositories would be the precise answer; until then a
-    # global invalidation is the sound one.
-    "api/**",
-    # `@envoy_repo//:project` is a filegroup in the generated `@envoy_repo`
-    # whose srcs include `//changelogs:changelogs`, and
-    # `//distribution/dockerhub:readme*` plus
-    # `//tools/distribution:update_dockerhub_repository` reach the changelogs
-    # only through it:
-    #   somepath(//distribution/dockerhub:readme_json, //changelogs:changelogs)
-    #     //distribution/dockerhub:readme_json
-    #     @envoy_repo//:project
-    #     //changelogs:changelogs
-    # The path leaves `//...` and comes back, and cambium's index stops at the
-    # first external node, so an edit under `changelogs/` reaches the filegroup
-    # and no further -- the rdeps oracle caught it as recall 0.87 on
-    # 54796eba3..83297dad1 (a "ratelimit: retry-after header" commit whose only
-    # non-source file is `changelogs/current/...rst`). Same shape as `api/**`
-    # above: indexing external repositories is the precise answer, a global
-    # invalidation is the sound one.
-    "changelogs/**",
-    "bazel/repo.bzl",
-    ".github/config.yml",
-    "VERSION.txt",
-]
+# Item 1+3 (commit 7036fa0): every entry that used to live here is now derived
+# at index time from MODULE.bazel and the workspace-level .bzl closure --
+# `api/**` -> @envoy_api, `changelogs/**`, `.github/config.yml`, `VERSION.txt`
+# and `API_VERSION.txt` -> @envoy_repo, and the repository-defining .bzl files
+# to the repositories they define. The replay oracle (rule hashes recomputed at
+# every step) is what proves the derived map is complete; if it ever reports a
+# mismatch on a commit touching one of those paths, put that path back here.
+invalidators = []
 notes = "C++, tens of thousands of targets, deep .bzl layering, heavy select; external fetch ~6 GB"
 
 [[repo]]
