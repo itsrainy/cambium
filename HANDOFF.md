@@ -1,37 +1,36 @@
 # Handoff: cambium benchmark suite
 
-Written 2026-09-07 (late) for the next orchestrator. Read this, then
-`docs/METHODOLOGY.md`, then the task list. The owner is Rainy (they/them).
+Written 2026-09-07 (night) for the next orchestrator. Read this, then
+`docs/METHODOLOGY.md`. The owner is Rainy (they/them).
 
 ## Where things stand
 
-The engine work is done and on `main`:
+Everything the previous handoff had in flight is on `main` and pushed. Tasks
+14-17 are done; only task 18 (the published run) remains, and it needs Rainy's
+go because it starts the box.
 
 | commit | what |
 |---|---|
-| `b5a7211` | item 4: static `.bzl` load closure replaces rbuildfiles |
-| `5bcb978` | item 2: `.bazelrc` edits parsed and diffed against an allowlist |
-| `f4cf76d` | item 6: `limits.max_dirty_packages` (500) replaces `max_changed_files`; over it is an exact cold rebuild, not a global |
-| `7036fa0` | items 1+3: MODULE.bazel diff and repository-rule inputs map to repositories; their consumers become direct |
-| `11ae8e0` | soundness fix: a `.bzl` a package owns is also an ordinary changed source (filegroups listing it were missed; globals had hidden it) |
-| `726d913` | harness: tool subprocesses get stdin closed and `CI=1` (Aspect CLI prompt); Tango driver recovers a locked stale worktree |
-| `5596e64` | compare runs the other tools on global pairs too; all-pairs timing rows; Globals table; full pair cap 40 |
-| `1cf10cf` | `docs/METHODOLOGY.md`: the signed-off vocabulary (below) |
+| `aab1997` | issue #3: per-repository path maps (`local_path_override`, `local_repository`, literal `ctx.symlink`) decide whether an input edit is the loaded `.bzl`; envoy's `api/**` edits no longer dirty ~1200 packages. Index FORMAT_VERSION 6, `stats.repos_label_only`, SCHEMA_VERSION 6. |
+| `54edacf` | task 14: `crates/corpus` + `crates/compare` -> `crates/bench`; CLI is `cambi bench {subjects,history,changes,stages,sweep,regress,report}` and `cambi synth`; manifest `subject_repos.toml`; results under `bench-results/<subject>/<workload>/`; `docs/RESULTS.md` generated, `docs/METHODOLOGY.md` hand-written; old words swept. |
+| `4445ab9` | task 16: PR-shaped change sets. `pr_reference` matches `Merge pull request #N`, `PR #N`, trailing `(#N)` and trailing `(https://github.com/o/r/pull/N)`; a commit is in exactly one kind; cap fills PR-shaped first, then stress <= cap/4, then adjacent. |
+| `faa95c8` | task 15: full rdeps oracle. `kind(rule, rdeps(//..., set(<every changed file's label>)))` at head, batched (500 labels / 96 KiB) with bisection of failing batches; deleted files resolved from the base index's consumers; `--oracle-sample N` is an escape hatch, default 0 = full; `ChangesOptions::rdeps_oracle` toggles it (the CLI's `--oracle rdeps`). |
+| `d57c76e` | smoke-test fixup after merging 15 and 16 together |
 
-Evidence so far (old vocabulary; files under `corpus-results/` locally and
-`corpus-results-box/` copied from the box):
+Gates run on the merged tree: fmt, clippy `-D warnings`, `cargo test
+--workspace`, the engine e2e (4/4) and the bench real-Bazel smoke
+(`CAMBIUM_E2E=1 CAMBIUM_BAZEL=$HOME/.cache/cambium/bin/bazelisk cargo test -p
+cambium-bench --test smoke_real_bazel -- --ignored`, 2/2).
 
-- envoy full history on the box: **93 -> 22 globals per 300**, rebuild oracle
-  ok with an EMPTY invalidator list, but **140 engine cold rebuilds** (p50
-  4.4 s): GitHub issue #3, being fixed (task 17).
-- bazel full history: 16 -> 4 globals per 300; three-way on 18 incremental
-  pairs: 0 disagreements, cambium 24 ms warm vs bazel-diff 1.7 s warm vs Tango
-  17.9 s.
-- sourcegraph full history: 25 -> 24 globals (its globals are `go.mod`,
-  `pnpm-lock.yaml` invalidators and a legacy WORKSPACE; see issue #3's
-  "same family" section).
-- apollo (74-commit history, the loadable range): 11 globals, all from its
-  own invalidator list; it is WORKSPACE-only so items 1+3 leave it global.
+Earlier engine commits (`b5a7211`, `5bcb978`, `f4cf76d`, `7036fa0`,
+`11ae8e0`, `726d913`, `5596e64`) are described in `git log`; the evidence
+they produced is in the old vocabulary under `corpus-results/` and
+`corpus-results-box/`, which this build can no longer read (RESULT_SCHEMA 6,
+renamed fields and paths). Those directories are history only.
+
+PR-shape counts over the last 300 first-parent commits (read-only on the
+mirrors): bazel 101 PR-shaped / 199 adjacent (the 199 are Piper exports with
+no PR), envoy 287 / 13, sourcegraph 300 / 0.
 
 ## The direction (signed off by Rainy)
 
@@ -61,22 +60,29 @@ Rules Rainy set, in their words where it matters:
   branches; the orchestrator merges, gates, pushes.
 - Issue #3 lands before the published run. PR-shaped change sets are primary.
 
-## Running right now (agents in `.claude/worktrees/`, all branched from main at 1cf10cf+)
+## Nothing is running
 
-| task | agent scope | merge notes |
-|---|---|---|
-| 14 rename to `cambi bench` | crates/corpus + crates/compare + crates/bench -> one crate; CLI tree; `subject_repos.toml`; `bench-results/`; RESULTS.md; CI; word sweep. Commits per step. | Merge FIRST. |
-| 17 issue #3 | crates/index + crates/engine only (path mapping for repository-rule inputs; FORMAT_VERSION bump) | Independent of 14; merge second. |
-| 15 full rdeps oracle | crates/compare/src/oracle.rs, its call site in threeway.rs, smoke_real_bazel.rs, docs | Written against the OLD layout. After 14 lands, re-apply onto crates/bench (the agent's report lists every hunk outside oracle.rs). |
-| 16 PR-shaped change sets | crates/corpus/src/pairs.rs (+ a crates/diff accessor) | Same: re-apply onto the renamed tree after 14. |
-| 18 published run | not started; box is STOPPED; needs Rainy's go | see below |
+No agents, no worktrees with unmerged work. Two stale worktrees under
+`.claude/worktrees/` (`agent-a1477d118ede418ed`, `agent-a32a183a90cb3eb84`)
+hold nothing unmerged; `git worktree remove --force` them when convenient
+(the auto-mode classifier blocked that command in this session).
 
 When an agent reports: `git merge --no-edit <branch>`, resolve, run
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo test --workspace`, the e2e if engine/index changed, then
-push and `git worktree remove --force` + `git branch -d`. Watch for
-`.claude/` or `ubuntu@...` directories sneaking into a commit (`.gitignore`
-now covers them).
+warnings`, `cargo test --workspace`, the e2e if engine/index changed, the
+bench smoke if crates/bench changed, then push and `git worktree remove
+--force` + `git branch -d`. Watch for `.claude/` or `ubuntu@...` directories
+sneaking into a commit.
+
+## Next: task 18, the published run (needs Rainy's go)
+
+Blocked on Rainy: starting the box costs money and the security group must
+allow their current IP. Once they say go, follow the recipe under "The box".
+`tools/ec2/launch.sh` already uses the renamed tree. The mirrors on this Mac
+still live under
+`~/.cache/cambium/corpus/`; the renamed code looks in
+`~/.cache/cambium/subjects/` (or `$CAMBIUM_SUBJECTS_DIR`), so on the box
+either move the directory or set the variable rather than re-fetching.
 
 ## The box
 
@@ -91,7 +97,7 @@ now covers them).
   bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
   `BOOTSTRAP DONE`). Mirrors, caches and indexes live under
   `~/.cache/cambium/` on the box and survive stop/start.
-- Published run recipe (after 14-17 land and Rainy says go): `launch.sh
+- Published run recipe (when Rainy says go): `launch.sh
   start`, `launch.sh sync`, wait for BOOTSTRAP DONE, then per subject
   `bench subjects fetch`, `bench subjects build`, `bench history --oracle
   rebuild`, `bench changes --tools cambium,bazel-diff,tango --oracle
@@ -120,9 +126,13 @@ now covers them).
 
 ## Open issues
 
-- #1 live TUI for the benchmark matrix (now `bench watch`).
+- #1 live TUI for the benchmark matrix (`bench watch`).
 - #2 CLI surface: intent-first verbs, diagnostics with codes, one output
   contract.
-- #3 externals input-path precision (task 17).
-- Not filed yet: sourcegraph's `go.mod` / `pnpm-lock.yaml` extension inputs
-  should be derived like envoy's (see #3 "same family").
+- #3 externals input-path precision: landed (`aab1997`); close it after the
+  published run confirms envoy's cold-rebuild count dropped.
+- #4 a BUILD file's direct `load()` of an external `.bzl` is invisible to
+  rule (a) (`LoadGraph::package_closure` drops the external half). Found
+  while landing #3; write the direct-load e2e first.
+- #5 sourcegraph's `go.mod` / `pnpm-lock.yaml` extension inputs should be
+  derived like envoy's `api/` mapping.
