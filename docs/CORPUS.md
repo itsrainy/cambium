@@ -114,11 +114,12 @@ contributor can exercise the whole pipeline without provisioning the above.
 
 ## Disagreement classes
 
-Every disagreement between cambium and a producer, or between cambium and the
-`rdeps` oracle, is put into exactly one of these classes
-(`crates/compare/src/classify.rs`). `cambium_missing` and `unclassified` are
-the only two that fail a comparison; the rest are recorded for the report but
-do not. `cambi corpus report` regenerates this same table, with live counts,
+Every disagreement between cambium and a producer, between cambium and the
+`rdeps` oracle, or between cambium and the `.bzl` load-closure oracle, is put
+into exactly one of these classes
+(`crates/compare/src/classify.rs`). `cambium_missing`,
+`cambium_missing_bzl_closure` and `unclassified` are the only three that fail a
+comparison; the rest are recorded for the report but do not. `cambi corpus report` regenerates this same table, with live counts,
 into each repository's section.
 
 | class | meaning | action |
@@ -133,7 +134,9 @@ into each repository's section.
 | `bazeldiff_extra_external` | the disagreement is confined to `@external//...` labels, which the tools may canonicalise differently (`@ext//:x` vs `@@ext~//:x`) | none — canonicalisation only, not a graph difference |
 | `bazeldiff_extra_external_content` | a `//...` label whose own rule (modulo `visibility`/`tags`), source inputs and transitive `//...` dependencies are all unchanged, and which depends on something external. bazel-diff's digests include the external graph, and on `bazel/bazel` under `--keep_going` how much of that graph loads varies between invocations | none — external load nondeterminism in the producer, not a graph difference. All four conditions must hold; drop any one and the label stays `cambium_missing` |
 | `bazeldiff_extra_workspace_path` | a `//...` label whose rule is byte-identical at the two revisions once each side's own absolute workspace root is normalised away, with no changed source input and no affected dependency | none — a harness artifact: the producers hash base in a second git worktree while cambium carries its base index forward inside one checkout, so a rule that bakes the workspace root into `args`/`cmd`/`env` reads as changed to them and unchanged to cambium. All three conditions must hold |
+| `bazeldiff_extra_line_shift` | a `//...` label whose rule is byte-identical at the two revisions, with no changed source input and no affected dependency, but whose own `BUILD` file changed — so only its line number moved | none — bazel-diff hashes `generator_location`; cambium drops it from the canonical rule on purpose (`cambium_proto::RULE_HASH_VERSION`, see `docs/STORE.md`), and Tango ignores it too. Seen on `apollo`, where a `BUILD` reshuffle pushed two unrelated `filegroup`s down the file. The source-input condition is checked first, so the `glob(["**"])` filegroup that really does eat its own `BUILD` file never lands here |
 | `cambium_missing` | a label the oracle or a producer says is impacted, that cambium's `affected` does not report | **fail** — this is unsoundness |
+| `cambium_missing_bzl_closure` | a *package* Bazel's `rbuildfiles` says loads a changed `.bzl`, that cambium's static load closure did not dirty (`crates/compare/src/bzloracle.rs`) | **fail** — the closure is under-approximating |
 | `unclassified` | a disagreement none of the above rules explain | **fail** — needs a new class or a real bug fix before it can be waved through |
 
 ## Externals and soundness
@@ -151,12 +154,18 @@ rules, an explicit `sha256`/`integrity` — then a change to that repository
 shows up in the diff as a change to one of those files, and cambium reacts.
 The workspace files are invalidators (`crates/engine/src/config.rs`,
 `Invalidators::default`), so a change to any of them is global. A repository
-rule `.bzl` is resolved through `rbuildfiles`, which names the external
-repository it defines (`@my_repo//:BUILD`) or `//external:WORKSPACE` rather
-than a main-repo package — measured on Bazel 9.2.0, 8.5.1 and 7.4.1, in both
-bzlmod and WORKSPACE mode — and the engine treats such a loader as global too
-(`crates/bazel/src/lib.rs`, `Rbuildfiles`; `crates/engine/src/engine.rs`,
-`compute`).
+rule `.bzl` is found in the *workspace load closure* — the `.bzl` files
+reachable from `MODULE.bazel` (through `load`, `use_extension` or
+`use_repo_rule`) and `WORKSPACE` — which the index stores alongside the
+per-package closure, and the engine treats a change to one as global too
+(`crates/index/src/loads.rs`; `crates/engine/src/engine.rs`, `compute`). That
+replaced an `rbuildfiles` call, which answered the same question by naming the
+external repository the file defines (`@my_repo//:BUILD`) or
+`//external:WORKSPACE` — measured on Bazel 9.2.0, 8.5.1 and 7.4.1, in both
+bzlmod and WORKSPACE mode — but needed Sky Query, and so failed with exit 3 on
+any machine that could not fetch every external repository. The comparison
+suite still makes the call, as an oracle over the static closure
+(`crates/compare/src/bzloracle.rs`).
 
 **Files read by repository rules must be listed as invalidators.** A
 repository rule may read an arbitrary file from the tree — a version pin, a

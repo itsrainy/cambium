@@ -57,6 +57,14 @@ impl FileSource {
     }
 }
 
+impl cambium_index::FileText for FileSource {
+    fn text(&self, path: &str) -> Option<String> {
+        // Starlark is UTF-8 by definition; a file that is not is not one we
+        // can scan, and `from_utf8_lossy` would only invent loads.
+        self.read(path).and_then(|b| String::from_utf8(b).ok())
+    }
+}
+
 /// The source of package rows for a run.
 ///
 /// Everything above this trait — dirty sets, splices, direct sets, the walk —
@@ -72,17 +80,25 @@ pub trait PackageQuerier {
     /// to load all of it.
     fn universe(&self) -> Result<Universe, crate::error::EngineError>;
 
-    /// What loads any of these `.bzl` paths (spec 7.2). The answer separates
-    /// main-repo packages from workspace-level loaders; see
-    /// [`cambium_bazel::Rbuildfiles`].
-    fn rbuildfiles(
-        &self,
-        bzl_paths: &[String],
-    ) -> Result<cambium_bazel::Rbuildfiles, crate::error::EngineError>;
-
     /// Version string recorded in the index header.
     fn version(&self) -> String {
         String::new()
+    }
+
+    /// Starlark source for the static `.bzl` load closure, read at the
+    /// revision these rows describe.
+    ///
+    /// A querier that returns `None` produces an index with no closure in it,
+    /// and the engine then treats any `.bzl` change as global rather than
+    /// guessing — see `Header::bzl_closure`.
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        None
+    }
+
+    /// The repository mapping to canonicalise external load labels with.
+    /// Identity is always safe: nothing walks into an external repository.
+    fn repo_mapping(&self) -> cambium_index::RepoMapping {
+        cambium_index::RepoMapping::identity()
     }
 
     /// The directory whose files these rows describe, when there is one.
@@ -176,15 +192,19 @@ impl PackageQuerier for BazelQuerier {
         })
     }
 
-    fn rbuildfiles(
-        &self,
-        bzl_paths: &[String],
-    ) -> Result<cambium_bazel::Rbuildfiles, crate::error::EngineError> {
-        Ok(self.bazel.rbuildfiles(bzl_paths)?)
-    }
-
     fn version(&self) -> String {
         self.bazel.version()
+    }
+
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        Some(&self.files)
+    }
+
+    fn repo_mapping(&self) -> cambium_index::RepoMapping {
+        match self.bazel.repo_mapping_dump() {
+            Some(dump) => cambium_index::RepoMapping::from_dump(&dump),
+            None => cambium_index::RepoMapping::identity(),
+        }
     }
 
     fn workspace(&self) -> Option<&Path> {
@@ -302,8 +322,10 @@ fn finish(
         targets.dedup_by(|a, b| a.row.label == b.row.label);
         updates.push(PackageUpdate {
             build_hash: files.build_hash(&package),
-            // Reserved: v1 resolves .bzl changes with rbuildfiles rather than
-            // by hashing the load closure (see spec 15, static .bzl load graph).
+            // Reserved. The `.bzl` load closure lives in its own section of
+            // the index (see `cambium_index::loads`) rather than as a
+            // per-package hash: the engine needs "which packages load this
+            // file", which a hash cannot answer.
             bzl_hash: [0; 32],
             package,
             targets: targets.into_iter().map(|t| t.row).collect(),

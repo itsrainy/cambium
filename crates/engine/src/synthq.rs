@@ -6,18 +6,22 @@
 //! algorithm.
 
 use cambium_index::PackageUpdate;
-use cambium_synth::SynthGraph;
+use cambium_synth::{SynthFiles, SynthGraph};
 
 use crate::error::EngineError;
 use crate::query::PackageQuerier;
 
 pub struct SynthQuerier<'a> {
     pub graph: &'a SynthGraph,
+    files: SynthFiles<'a>,
 }
 
 impl<'a> SynthQuerier<'a> {
     pub fn new(graph: &'a SynthGraph) -> Self {
-        Self { graph }
+        Self {
+            graph,
+            files: SynthFiles(graph),
+        }
     }
 }
 
@@ -44,24 +48,10 @@ impl PackageQuerier for SynthQuerier<'_> {
         Ok(self.graph.package_updates().into())
     }
 
-    fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<cambium_bazel::Rbuildfiles, EngineError> {
-        let mut out: Vec<String> = Vec::new();
-        for path in bzl_paths {
-            let Some(b) = self.graph.bzl.iter().find(|b| &b.path == path) else {
-                continue;
-            };
-            for &p in &b.loaded_by {
-                if self.graph.packages[p as usize].alive {
-                    out.push(self.graph.packages[p as usize].path.clone());
-                }
-            }
-        }
-        out.sort();
-        out.dedup();
-        Ok(cambium_bazel::Rbuildfiles {
-            packages: out,
-            workspace_level: Vec::new(),
-        })
+    /// The synthetic workspace's own BUILD and `.bzl` text, so the static
+    /// load closure is computed by the same code a real run uses.
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        Some(&self.files)
     }
 
     fn version(&self) -> String {

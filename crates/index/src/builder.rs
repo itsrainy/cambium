@@ -68,8 +68,9 @@ impl TargetRow {
 pub struct PackageUpdate {
     pub package: String,
     pub build_hash: [u8; 32],
-    /// Hash of the package's transitive `.bzl` load closure. Reserved: v1 marks
-    /// bzl-affected packages through `rbuildfiles` instead of hashing loads, so
+    /// Hash of the package's transitive `.bzl` load closure. Reserved: the
+    /// closure itself is stored (see [`BzlClosure`]), which answers the
+    /// question a hash cannot — *which* packages a changed `.bzl` reaches — so
     /// this is written as zero unless a caller supplies it.
     pub bzl_hash: [u8; 32],
     pub targets: Vec<TargetRow>,
@@ -104,6 +105,49 @@ impl SpliceReport {
     }
 }
 
+/// The static `.bzl` load closure, in the mutable form a build or a splice
+/// works with.
+///
+/// Ids are the [`crate::loads::LoadGraph`]'s, and [`IndexBuilder::finish`]
+/// re-sorts them into path order on the way out so the serialised table can be
+/// binary-searched.
+#[derive(Clone, Debug, Default)]
+pub struct BzlClosure {
+    /// The load graph: paths, direct loads, external labels.
+    pub graph: crate::loads::LoadGraph,
+    /// Package name -> the `.bzl` ids its BUILD file transitively loads.
+    pub packages: std::collections::BTreeMap<String, Vec<u32>>,
+    /// `.bzl` ids reachable from `MODULE.bazel` / `WORKSPACE`.
+    pub workspace: Vec<u32>,
+}
+
+impl BzlClosure {
+    /// Reads a closure back out of an index, so a splice can update the
+    /// packages it re-queried and carry the rest unchanged.
+    pub fn from_view(v: IndexRef<'_>) -> Option<Self> {
+        if !v.bzl_closure {
+            return None;
+        }
+        let mut packages: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        for id in 0..v.num_bzl() {
+            for &p in v.bzl_consumers(id) {
+                packages
+                    .entry(v.package_name(p).to_string())
+                    .or_default()
+                    .push(id);
+            }
+        }
+        for ids in packages.values_mut() {
+            ids.sort_unstable();
+        }
+        Some(Self {
+            graph: crate::loads::LoadGraph::from_index(v),
+            packages,
+            workspace: v.bzl_workspace.to_vec(),
+        })
+    }
+}
+
 /// Mutable index. Built empty for a full build, or over a loaded index for a
 /// splice.
 ///
@@ -134,6 +178,8 @@ pub struct IndexBuilder<'a> {
     /// Generated file -> generating rule, for edge redirection.
     gen_rule: FxHashMap<u32, u32>,
 
+    bzl: Option<BzlClosure>,
+
     lineage: [u8; 16],
     bazel_version: String,
     config_hash: [u8; 32],
@@ -158,6 +204,7 @@ impl<'a> IndexBuilder<'a> {
             rebuilt: FixedBitSet::with_capacity(0),
             pairs: Vec::new(),
             gen_rule: FxHashMap::default(),
+            bzl: None,
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
@@ -207,6 +254,7 @@ impl<'a> IndexBuilder<'a> {
             rebuilt: FixedBitSet::with_capacity(n),
             pairs: Vec::new(),
             gen_rule: FxHashMap::default(),
+            bzl: BzlClosure::from_view(v),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -230,6 +278,17 @@ impl<'a> IndexBuilder<'a> {
         if self.error_packages.is_empty() {
             self.error_packages = error_packages;
         }
+    }
+
+    /// Installs (or replaces) the static `.bzl` load closure.
+    pub fn set_bzl_closure(&mut self, c: BzlClosure) {
+        self.bzl = Some(c);
+    }
+
+    /// The closure carried over from the base, for a caller that wants to
+    /// update only the packages it re-queried.
+    pub fn take_bzl_closure(&mut self) -> Option<BzlClosure> {
+        self.bzl.take()
     }
 
     pub fn set_config_hash(&mut self, h: [u8; 32]) {
@@ -631,6 +690,7 @@ impl<'a> IndexBuilder<'a> {
         }
 
         let columns = self.nodes.finish();
+        let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
         let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
         let (class_bytes, class_offsets) = self.classes.into_parts();
         let (pkg_name_bytes, pkg_name_offsets) = self.pkg_names.into_parts();
@@ -660,6 +720,7 @@ impl<'a> IndexBuilder<'a> {
                 lineage: self.lineage,
                 bazel_version: self.bazel_version,
                 config_hash: self.config_hash,
+                bzl_closure: bzl.present,
                 counts,
             },
             provenance: Provenance {
@@ -694,8 +755,124 @@ impl<'a> IndexBuilder<'a> {
             pkg_bzl_hash: self.pkg_bzl_hash,
             pkg_build_hash: self.pkg_build_hash,
             pkg_flags: self.pkg_flags,
+            bzl_path_bytes: bzl.path_bytes,
+            bzl_path_offsets: bzl.path_offsets,
+            bzl_load_offsets: bzl.load_offsets,
+            bzl_load_edges: bzl.load_edges,
+            bzl_consumer_offsets: bzl.consumer_offsets,
+            bzl_consumer_edges: bzl.consumer_edges,
+            bzl_workspace: bzl.workspace,
+            bzl_ext_label_bytes: bzl.ext_label_bytes,
+            bzl_ext_label_offsets: bzl.ext_label_offsets,
+            bzl_ext_offsets: bzl.ext_offsets,
+            bzl_ext_edges: bzl.ext_edges,
         }
     }
+}
+
+/// The serialised form of the `.bzl` load closure.
+#[derive(Default)]
+struct BzlTables {
+    present: bool,
+    path_bytes: Vec<u8>,
+    path_offsets: Vec<u32>,
+    load_offsets: Vec<u32>,
+    load_edges: Vec<u32>,
+    consumer_offsets: Vec<u32>,
+    consumer_edges: Vec<u32>,
+    workspace: Vec<u32>,
+    ext_label_bytes: Vec<u8>,
+    ext_label_offsets: Vec<u32>,
+    ext_offsets: Vec<u32>,
+    ext_edges: Vec<u32>,
+}
+
+impl BzlTables {
+    fn empty() -> Self {
+        Self {
+            path_offsets: vec![0],
+            load_offsets: vec![0],
+            consumer_offsets: vec![0],
+            ext_label_offsets: vec![0],
+            ext_offsets: vec![0],
+            ..Default::default()
+        }
+    }
+}
+
+/// Sorts the load graph into path order, inverts the per-package closures, and
+/// flattens everything into the index's tables.
+///
+/// The ids the builder worked with are insertion-ordered, which depends on the
+/// order packages were scanned in; sorting by path here is what makes the
+/// payload a function of the repository's content rather than of the walk, and
+/// what lets `IndexRef::bzl_id` binary-search.
+fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
+    let Some(c) = c else {
+        return BzlTables::empty();
+    };
+    let n = c.graph.len();
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_by(|&a, &b| c.graph.path(a).cmp(c.graph.path(b)));
+    let mut remap = vec![0u32; n];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old as usize] = new as u32;
+    }
+
+    let mut t = BzlTables::empty();
+    t.present = true;
+    let mut ext_labels = Interner::new();
+    for &old in &order {
+        t.path_bytes.extend_from_slice(c.graph.path(old).as_bytes());
+        t.path_offsets.push(t.path_bytes.len() as u32);
+        let mut row: Vec<u32> = c
+            .graph
+            .loads(old)
+            .iter()
+            .map(|&d| remap[d as usize])
+            .collect();
+        row.sort_unstable();
+        row.dedup();
+        t.load_edges.extend_from_slice(&row);
+        t.load_offsets.push(t.load_edges.len() as u32);
+        let mut ext: Vec<u32> = c
+            .graph
+            .external(old)
+            .iter()
+            .map(|l| ext_labels.intern(l))
+            .collect();
+        ext.sort_unstable();
+        ext.dedup();
+        t.ext_edges.extend_from_slice(&ext);
+        t.ext_offsets.push(t.ext_edges.len() as u32);
+    }
+    let (b, o) = ext_labels.into_parts();
+    t.ext_label_bytes = b;
+    t.ext_label_offsets = o;
+
+    // Invert: package closures -> consumers per `.bzl`.
+    let mut consumers: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (pkg, ids) in &c.packages {
+        // A package the splice deleted has no slot left; its closure goes with
+        // it.
+        let Some(p) = pkg_names.lookup(pkg) else {
+            continue;
+        };
+        for &id in ids {
+            consumers[remap[id as usize] as usize].push(p);
+        }
+    }
+    for row in &mut consumers {
+        row.sort_unstable();
+        row.dedup();
+        t.consumer_edges.extend_from_slice(row);
+        t.consumer_offsets.push(t.consumer_edges.len() as u32);
+    }
+
+    t.workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
+    t.workspace.sort_unstable();
+    t.workspace.dedup();
+    t
 }
 
 /// Mints a fresh lineage id from the system clock and a process-local counter.

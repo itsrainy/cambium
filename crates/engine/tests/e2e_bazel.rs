@@ -459,8 +459,8 @@ fn golden_scenarios() {
     // folds a rule's *definition* environment into the proto, not the loading
     // BUILD file's load closure. (Verified against Bazel 7.4.1.) So this
     // scenario isolates the only mechanism that can catch a changed rule
-    // implementation — every rule in a package `rbuildfiles` names is direct
-    // regardless of its hash — and the reason assertion below is what keeps it
+    // implementation — every rule in a package the static load closure names
+    // is direct regardless of its hash — and the reason assertion below keeps it
     // isolated. Should it ever start passing through the rule-hash path
     // instead, that assertion fails and says so, rather than the coverage
     // quietly evaporating.
@@ -479,7 +479,7 @@ fn golden_scenarios() {
     assert!(
         r.dirty_packages.contains(&"lib".to_string())
             && r.dirty_packages.contains(&"app".to_string()),
-        "rbuildfiles should report both loading packages: {:?}",
+        "the load closure should report both loading packages: {:?}",
         r.dirty_packages
     );
     let explanations = r

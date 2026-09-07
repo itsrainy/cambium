@@ -52,13 +52,6 @@ impl PackageQuerier for Canned {
         Ok(self.0.values().cloned().collect::<Vec<_>>().into())
     }
 
-    fn rbuildfiles(
-        &self,
-        _bzl_paths: &[String],
-    ) -> cambium_engine::Result<cambium_bazel::Rbuildfiles> {
-        Ok(cambium_bazel::Rbuildfiles::default())
-    }
-
     fn version(&self) -> String {
         "canned".to_string()
     }

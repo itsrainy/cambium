@@ -92,13 +92,16 @@ fn clear(out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
+/// The `load()` prologue of a package's BUILD file.
+///
+/// Shared by the emitter and by [`SynthFiles`], which is what makes the
+/// property tests exercise the real `load()` parser: the text the engine scans
+/// in memory is the text `emit-bazel` would have written to disk.
+pub fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
     let p = &g.packages[pkg as usize];
-    let dir = out.join(&p.path);
     let mut build = String::new();
-
-    // Loads. Each generated .bzl exposes macros suffixed with its index, so a
-    // package that loads several has no name clashes.
+    // Each generated .bzl exposes macros suffixed with its index, so a package
+    // that loads several has no name clashes.
     for &b in &p.bzl {
         build.push_str(&format!(
             "load(\"//tools/synth:rules{b}.bzl\", \"synth_lib{b}\", \"synth_test{b}\", \"synth_bin{b}\")\n"
@@ -110,6 +113,44 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         );
     }
     build.push('\n');
+    build
+}
+
+/// Every file of the synthetic workspace, served from memory.
+///
+/// The engine's static `.bzl` closure scan reads Starlark text through this
+/// rather than from a checkout, so the soundness sweep runs the real parser
+/// over the real load lines at graph sizes no emitted workspace could reach.
+pub struct SynthFiles<'a>(pub &'a SynthGraph);
+
+impl cambium_index::FileText for SynthFiles<'_> {
+    fn text(&self, path: &str) -> Option<String> {
+        let g = self.0;
+        if path == "MODULE.bazel" {
+            return Some(module_bazel());
+        }
+        if path == "rules/synth.bzl" {
+            return Some(RULES_BZL.to_string());
+        }
+        if let Some(b) = g.bzl.iter().position(|b| b.path == path) {
+            return Some(generated_bzl(b as u32, g.bzl[b].version));
+        }
+        let dir = path.strip_suffix("/BUILD.bazel").or_else(|| {
+            // The root package, and the `BUILD` spelling, neither of which the
+            // emitter writes.
+            (path == "BUILD.bazel").then_some("")
+        })?;
+        let &pkg = g.pkg_by_path.get(dir)?;
+        g.packages[pkg as usize]
+            .alive
+            .then(|| build_file_loads(g, pkg))
+    }
+}
+
+fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
+    let p = &g.packages[pkg as usize];
+    let dir = out.join(&p.path);
+    let mut build = build_file_loads(g, pkg);
 
     if !p.exported.is_empty() {
         let files: Vec<String> = p

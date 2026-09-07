@@ -80,13 +80,6 @@ impl PackageQuerier for DirQuerier {
             .into())
     }
 
-    fn rbuildfiles(
-        &self,
-        _bzl_paths: &[String],
-    ) -> cambium_engine::Result<cambium_bazel::Rbuildfiles> {
-        Ok(cambium_bazel::Rbuildfiles::default())
-    }
-
     fn workspace(&self) -> Option<&Path> {
         Some(&self.root)
     }

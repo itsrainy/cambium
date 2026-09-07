@@ -393,7 +393,30 @@ impl SynthGraph {
         let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
         b.set_bazel_version("synth");
         b.apply_packages(&self.package_updates());
+        // The same static `.bzl` load closure a real cold build computes,
+        // scanned out of the load lines `emit_workspace` would have written.
+        // Without it every `.bzl` edit would be a global invalidation, which
+        // is sound but would make every bzl-edit benchmark and property test
+        // vacuous.
+        b.set_bzl_closure(self.bzl_closure());
         b.finish(commit)
+    }
+
+    /// The `.bzl` load closure of the whole graph.
+    pub fn bzl_closure(&self) -> cambium_index::BzlClosure {
+        let files = crate::emit::SynthFiles(self);
+        let mapping = cambium_index::RepoMapping::identity();
+        let mut c = cambium_index::BzlClosure::default();
+        for (i, p) in self.packages.iter().enumerate() {
+            if !p.alive {
+                continue;
+            }
+            let ids = c.graph.package_closure(&p.path, &files, &mapping);
+            debug_assert_eq!(self.pkg_by_path.get(&p.path), Some(&(i as u32)));
+            c.packages.insert(p.path.clone(), ids);
+        }
+        c.workspace = c.graph.workspace_closure(&files, &mapping);
+        c
     }
 }
 

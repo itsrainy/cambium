@@ -19,6 +19,7 @@
 //! | `bazeldiff_extra_content` | producer only | a changed file whose content bazel-diff hashes but which no target in the index consumes |
 //! | `bazeldiff_extra_external` | producer only | an `@repo//...` label; cambium indexes `//...` only |
 //! | `bazeldiff_extra_external_content` | producer only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
+//! | `bazeldiff_extra_line_shift` | producer only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
 //! | `bazeldiff_extra_workspace_path` | producer only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the producer's base checkout is a different directory from head |
 //! | `cambium_missing` | producer only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
@@ -64,6 +65,10 @@ pub enum Class {
     /// A `//...` label whose rule differs between the producer's two checkouts
     /// only in the absolute workspace path it embeds.
     BazeldiffExtraWorkspacePath,
+    /// The rule did not move, its inputs did not move, and nothing it depends
+    /// on is affected — but the `BUILD` file it lives in changed, so its line
+    /// number did.
+    BazeldiffExtraLineShift,
     /// A failure: the other tool found something cambium missed.
     CambiumMissing,
     /// A failure: no predicate explained the disagreement.
@@ -83,6 +88,7 @@ impl Class {
             Class::BazeldiffExtraExternal => "bazeldiff_extra_external",
             Class::BazeldiffExtraExternalContent => "bazeldiff_extra_external_content",
             Class::BazeldiffExtraWorkspacePath => "bazeldiff_extra_workspace_path",
+            Class::BazeldiffExtraLineShift => "bazeldiff_extra_line_shift",
             Class::CambiumMissing => "cambium_missing",
             Class::Unclassified => "unclassified",
         }
@@ -129,6 +135,10 @@ impl Class {
                 "the rule is identical at both revisions once each checkout's own absolute \
                  workspace root is normalised away"
             }
+            Class::BazeldiffExtraLineShift => {
+                "an unchanged rule whose `BUILD` file changed around it: only its line number \
+                 moved, and cambium's rule hash excludes `generator_location`"
+            }
             Class::CambiumMissing => {
                 "**fails**: the oracle or a producer reached something cambium did not — \
                  unsoundness"
@@ -144,7 +154,7 @@ impl Class {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
 
-    pub const ALL: [Class; 12] = [
+    pub const ALL: [Class; 13] = [
         Class::CambiumExtraSelect,
         Class::CambiumExtraImplicit,
         Class::CambiumExtraVisibility,
@@ -155,6 +165,7 @@ impl Class {
         Class::BazeldiffExtraExternal,
         Class::BazeldiffExtraExternalContent,
         Class::BazeldiffExtraWorkspacePath,
+        Class::BazeldiffExtraLineShift,
         Class::CambiumMissing,
         Class::Unclassified,
     ];
@@ -254,6 +265,12 @@ pub trait Facts {
     /// cambium correctly has no consumer for.
     fn changed_path_without_consumer(&self, label: &str) -> bool;
 
+    /// The `BUILD` file of the target's own package is in this pair's changed
+    /// path set. Says nothing on its own — a changed `BUILD` file usually means
+    /// a changed rule — and is only ever asked after the rule has been shown to
+    /// be byte-identical.
+    fn build_file_changed(&self, label: &str) -> bool;
+
     /// The target's rule differs between base and head *only* in the absolute
     /// workspace path it embeds.
     ///
@@ -313,6 +330,8 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
                 Class::BazeldiffExtraWorkspacePath
             } else if external_load_nondeterminism(label, facts) {
                 Class::BazeldiffExtraExternalContent
+            } else if line_shift_only(label, facts) {
+                Class::BazeldiffExtraLineShift
             } else {
                 Class::CambiumMissing
             }
@@ -345,6 +364,40 @@ fn workspace_path_artefact(label: &str, facts: &dyn Facts) -> bool {
         "workspace-path conditions"
     );
     no_deps
+}
+
+/// The conjunction behind `bazeldiff_extra_line_shift`.
+///
+/// Same three "nothing could have impacted it" facts the other producer-side
+/// classes insist on, plus the explanation: the target's own `BUILD` file
+/// changed. The rule proto is byte-identical, so whatever the edit did, it did
+/// not do it to this rule — it moved it down the file. bazel-diff hashes
+/// `generator_location`; cambium dropped it from the canonical rule
+/// deliberately (see `docs/STORE.md` and `cambium_proto::RULE_HASH_VERSION`),
+/// because a macro's BUILD line shifts whenever a line is inserted above it,
+/// and Tango ignores it too.
+///
+/// Note the order: [`Facts::no_changed_source_inputs`] runs first, so the
+/// `filegroup(srcs = glob(["**"]))` shape — where the `BUILD` file really *is*
+/// an input and the target really did change — never reaches here.
+///
+/// Found on the `apollo` corpus: one commit reordered
+/// `modules/common/vehicle_model/BUILD`, and bazel-diff reported the two
+/// `filegroup`s below the edit whose globbed data files had not moved at all.
+fn line_shift_only(label: &str, facts: &dyn Facts) -> bool {
+    let unchanged = facts.rule_unchanged_modulo_visibility(label);
+    let no_srcs = unchanged && facts.no_changed_source_inputs(label);
+    let no_deps = no_srcs && facts.no_affected_deps(label);
+    let build_changed = no_deps && facts.build_file_changed(label);
+    tracing::debug!(
+        label,
+        unchanged,
+        no_srcs,
+        no_deps,
+        build_changed,
+        "line-shift conditions"
+    );
+    build_changed
 }
 
 /// The conjunction behind `bazeldiff_extra_external_content`.
@@ -1106,6 +1159,23 @@ impl Facts for BazelFacts<'_> {
         })
     }
 
+    fn build_file_changed(&self, label: &str) -> bool {
+        // `//pkg:name` -> `pkg/BUILD`, either spelling. The root package's
+        // BUILD file has no directory prefix.
+        let Some(rest) = label.strip_prefix("//") else {
+            return false;
+        };
+        let pkg = rest.split_once(':').map(|(p, _)| p).unwrap_or(rest);
+        ["BUILD.bazel", "BUILD"].iter().any(|name| {
+            let path = if pkg.is_empty() {
+                (*name).to_string()
+            } else {
+                format!("{pkg}/{name}")
+            };
+            self.changed_paths.contains(&path)
+        })
+    }
+
     fn changed_path_without_consumer(&self, label: &str) -> bool {
         let Some(path) = label_to_path(label) else {
             return false;
@@ -1171,6 +1241,7 @@ mod tests {
         no_affected_deps: BTreeSet<String>,
         external_input: BTreeSet<String>,
         workspace_path: BTreeSet<String>,
+        build_changed: BTreeSet<String>,
     }
 
     impl Hand {
@@ -1221,6 +1292,9 @@ mod tests {
         fn workspace_path_only_change(&self, l: &str) -> bool {
             self.workspace_path.contains(l)
         }
+        fn build_file_changed(&self, l: &str) -> bool {
+            self.build_changed.contains(l)
+        }
     }
 
     /// All four conditions of `bazeldiff_extra_external_content`, so a test can
@@ -1232,6 +1306,42 @@ mod tests {
             h.no_affected_deps.insert("//a:b".into());
             h.external_input.insert("//a:b".into());
         })
+    }
+
+    /// The three "nothing could have impacted it" facts plus the changed
+    /// `BUILD` file, so a test can take exactly one away.
+    fn line_shift_facts() -> Hand {
+        Hand::with(|h| {
+            h.rule_unchanged.insert("//a:b".into());
+            h.no_changed_srcs.insert("//a:b".into());
+            h.no_affected_deps.insert("//a:b".into());
+            h.build_changed.insert("//a:b".into());
+        })
+    }
+
+    #[test]
+    fn a_rule_that_only_moved_down_its_build_file_is_not_a_cambium_miss() {
+        assert_eq!(
+            classify("//a:b", Side::Producer, &line_shift_facts()),
+            Class::BazeldiffExtraLineShift
+        );
+        assert!(!Class::BazeldiffExtraLineShift.is_failure());
+    }
+
+    #[test]
+    fn a_glob_filegroup_that_eats_its_own_build_file_still_fails() {
+        // The `BUILD` file is a source input, so the second condition is
+        // false and the label is a genuine miss, not a line shift.
+        let mut h = line_shift_facts();
+        h.no_changed_srcs.clear();
+        assert_eq!(classify("//a:b", Side::Producer, &h), Class::CambiumMissing);
+    }
+
+    #[test]
+    fn a_moved_rule_with_an_affected_dependency_still_fails() {
+        let mut h = line_shift_facts();
+        h.no_affected_deps.clear();
+        assert_eq!(classify("//a:b", Side::Producer, &h), Class::CambiumMissing);
     }
 
     fn one(field: fn(&mut Hand) -> &mut BTreeSet<String>, side: Side) -> Class {
@@ -1460,7 +1570,7 @@ mod tests {
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(c.name().contains("extra"), "{c}");
         }
-        assert_eq!(Class::ALL.len(), 12);
+        assert_eq!(Class::ALL.len(), 13);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
     }
 

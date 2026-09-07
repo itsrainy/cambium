@@ -151,7 +151,7 @@ cat_rule(
     git(root, &["commit", "--quiet", "-am", "edit a rule"]);
     shas.push(head(root));
     // A macro edit: every rule proto in the loading package is byte-identical,
-    // so only the `rbuildfiles` path catches it.
+    // so only the static `.bzl` load closure catches it.
     write(
         root,
         "defs/defs.bzl",

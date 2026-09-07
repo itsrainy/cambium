@@ -122,6 +122,14 @@ pub struct Header {
     pub bazel_version: String,
     /// Hash of the `cambium.toml` that produced this index.
     pub config_hash: [u8; 32],
+    /// This index carries a static `.bzl` load closure (see [`IndexData`]).
+    ///
+    /// Recorded rather than inferred from an empty table: a repository with no
+    /// `.bzl` files at all is indistinguishable from one built by a row source
+    /// that could not read the tree, and the two want opposite answers — the
+    /// first says "nothing loads this", the second "we do not know". Without
+    /// the flag a run over the second would silently under-approximate.
+    pub bzl_closure: bool,
     pub counts: Counts,
 }
 
@@ -198,6 +206,35 @@ pub struct IndexData {
     pub pkg_bzl_hash: Vec<[u8; 32]>,
     pub pkg_build_hash: Vec<[u8; 32]>,
     pub pkg_flags: Vec<u8>,
+
+    // ---- the static `.bzl` load closure (format 4) ----
+    //
+    // Three tables over one id space, whose ids are assigned in path order so
+    // a path can be found by binary search:
+    //
+    // - `bzl_loads` is what each `.bzl` loads directly, which is what lets an
+    //   incremental run recompute a dirty package's closure without re-reading
+    //   the `.bzl` files whose text did not move.
+    // - `bzl_consumers` is the inverted closure: the packages whose BUILD file
+    //   transitively loads this `.bzl`. That is the direction `affected` asks
+    //   in ("this file changed, who cares?"), so the answer is one CSR row.
+    // - `bzl_workspace` is the closure of `MODULE.bazel` / `WORKSPACE`;
+    //   a `.bzl` in it defines repository rules and escalates to global.
+    //
+    // `bzl_ext_labels` records the canonical `@@repo//pkg:f.bzl` labels the
+    // walk stopped at, so a later MODULE-diffing pass can map a module version
+    // bump onto the files that load it.
+    pub bzl_path_bytes: Vec<u8>,
+    pub bzl_path_offsets: Vec<u32>,
+    pub bzl_load_offsets: Vec<u32>,
+    pub bzl_load_edges: Vec<u32>,
+    pub bzl_consumer_offsets: Vec<u32>,
+    pub bzl_consumer_edges: Vec<u32>,
+    pub bzl_workspace: Vec<u32>,
+    pub bzl_ext_label_bytes: Vec<u8>,
+    pub bzl_ext_label_offsets: Vec<u32>,
+    pub bzl_ext_offsets: Vec<u32>,
+    pub bzl_ext_edges: Vec<u32>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -236,6 +273,19 @@ pub struct IndexRef<'a> {
     pub pkg_bzl_hash: &'a [[u8; 32]],
     pub pkg_build_hash: &'a [[u8; 32]],
     pub pkg_flags: &'a [u8],
+
+    /// Whether the `.bzl` tables below mean anything; see [`Header::bzl_closure`].
+    pub bzl_closure: bool,
+    /// `.bzl` paths, sorted, one per id.
+    pub bzl_paths: StrTabRef<'a>,
+    /// What each `.bzl` loads directly.
+    pub bzl_loads: CsrRef<'a>,
+    /// Package ids whose closure contains each `.bzl`.
+    pub bzl_consumers: CsrRef<'a>,
+    /// `.bzl` ids reachable from `MODULE.bazel` / `WORKSPACE`.
+    pub bzl_workspace: &'a [u32],
+    pub bzl_ext_labels: StrTabRef<'a>,
+    pub bzl_ext: CsrRef<'a>,
 }
 
 impl<'a> IndexRef<'a> {
@@ -336,6 +386,62 @@ impl<'a> IndexRef<'a> {
         self.reverse.row(id)
     }
 
+    // ---- the static `.bzl` load closure ----
+
+    #[inline]
+    pub fn num_bzl(&self) -> u32 {
+        self.bzl_paths.len() as u32
+    }
+
+    #[inline]
+    pub fn bzl_path(&self, id: u32) -> &'a str {
+        self.bzl_paths.get(id)
+    }
+
+    /// Id of a repo-relative `.bzl` path. O(log n): the table is path-sorted.
+    pub fn bzl_id(&self, path: &str) -> Option<u32> {
+        let n = self.bzl_paths.len();
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.bzl_paths.get(mid as u32).cmp(path) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(mid as u32),
+            }
+        }
+        None
+    }
+
+    #[inline]
+    pub fn bzl_loads(&self, id: u32) -> &'a [u32] {
+        self.bzl_loads.row(id)
+    }
+
+    /// Packages whose BUILD file transitively loads this `.bzl`. The whole
+    /// point of the inverted layout: this is O(consumers), not O(packages).
+    #[inline]
+    pub fn bzl_consumers(&self, id: u32) -> &'a [u32] {
+        self.bzl_consumers.row(id)
+    }
+
+    /// Canonical external labels this `.bzl` loads and the walk stopped at.
+    pub fn bzl_external(&self, id: u32) -> Vec<&'a str> {
+        self.bzl_ext
+            .row(id)
+            .iter()
+            .map(|&e| self.bzl_ext_labels.get(e))
+            .collect()
+    }
+
+    /// This `.bzl` is reachable from `MODULE.bazel` or `WORKSPACE`, so it can
+    /// define repository rules.
+    #[inline]
+    pub fn bzl_in_workspace(&self, id: u32) -> bool {
+        self.bzl_workspace.binary_search(&id).is_ok()
+    }
+
     pub fn counts(&self) -> Counts {
         let mut c = Counts {
             nodes: self.num_nodes(),
@@ -405,6 +511,28 @@ impl IndexData {
             pkg_bzl_hash: &self.pkg_bzl_hash,
             pkg_build_hash: &self.pkg_build_hash,
             pkg_flags: &self.pkg_flags,
+            bzl_closure: self.header.bzl_closure,
+            bzl_paths: StrTabRef {
+                bytes: &self.bzl_path_bytes,
+                offsets: &self.bzl_path_offsets,
+            },
+            bzl_loads: CsrRef {
+                offsets: &self.bzl_load_offsets,
+                edges: &self.bzl_load_edges,
+            },
+            bzl_consumers: CsrRef {
+                offsets: &self.bzl_consumer_offsets,
+                edges: &self.bzl_consumer_edges,
+            },
+            bzl_workspace: &self.bzl_workspace,
+            bzl_ext_labels: StrTabRef {
+                bytes: &self.bzl_ext_label_bytes,
+                offsets: &self.bzl_ext_label_offsets,
+            },
+            bzl_ext: CsrRef {
+                offsets: &self.bzl_ext_offsets,
+                edges: &self.bzl_ext_edges,
+            },
         }
     }
 
@@ -465,6 +593,28 @@ impl ArchivedIndexData {
             pkg_bzl_hash: &self.pkg_bzl_hash,
             pkg_build_hash: &self.pkg_build_hash,
             pkg_flags: &self.pkg_flags,
+            bzl_closure: self.header.bzl_closure,
+            bzl_paths: StrTabRef {
+                bytes: &self.bzl_path_bytes,
+                offsets: le::u32s(&self.bzl_path_offsets),
+            },
+            bzl_loads: CsrRef {
+                offsets: le::u32s(&self.bzl_load_offsets),
+                edges: le::u32s(&self.bzl_load_edges),
+            },
+            bzl_consumers: CsrRef {
+                offsets: le::u32s(&self.bzl_consumer_offsets),
+                edges: le::u32s(&self.bzl_consumer_edges),
+            },
+            bzl_workspace: le::u32s(&self.bzl_workspace),
+            bzl_ext_labels: StrTabRef {
+                bytes: &self.bzl_ext_label_bytes,
+                offsets: le::u32s(&self.bzl_ext_label_offsets),
+            },
+            bzl_ext: CsrRef {
+                offsets: le::u32s(&self.bzl_ext_offsets),
+                edges: le::u32s(&self.bzl_ext_edges),
+            },
         }
     }
 }
