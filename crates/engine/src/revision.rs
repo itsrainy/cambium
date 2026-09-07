@@ -168,7 +168,10 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.universe()
     }
 
-    fn rbuildfiles(&self, bzl_paths: &[String]) -> std::result::Result<Vec<String>, EngineError> {
+    fn rbuildfiles(
+        &self,
+        bzl_paths: &[String],
+    ) -> std::result::Result<cambium_bazel::Rbuildfiles, EngineError> {
         self.querier.rbuildfiles(bzl_paths)
     }
 

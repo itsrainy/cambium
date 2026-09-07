@@ -325,11 +325,12 @@ impl Bazel {
         })
     }
 
-    /// `rbuildfiles(...)`: the packages whose BUILD files load any of `bzl_paths`
-    /// (spec 7.2). Paths are workspace-relative. Returns package paths.
-    pub fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Vec<String>> {
+    /// `rbuildfiles(...)`: what loads any of `bzl_paths` (spec 7.2). Paths are
+    /// workspace-relative. See [`Rbuildfiles`] for why the answer is not just
+    /// a list of packages.
+    pub fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<Rbuildfiles> {
         if bzl_paths.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Rbuildfiles::default());
         }
         let expr = format!("rbuildfiles({})", bzl_paths.join(", "));
         let mut cmd = self.command("query");
@@ -381,20 +382,99 @@ impl Bazel {
     }
 }
 
-/// `//lib/core:BUILD` -> `lib/core`. Unknown shapes are skipped.
-pub fn parse_buildfile_labels(out: &str) -> Vec<String> {
-    let mut pkgs: Vec<String> = out
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            let rest = l.strip_prefix("//")?;
-            let (pkg, name) = rest.rsplit_once(':')?;
-            (name == "BUILD" || name == "BUILD.bazel").then(|| pkg.to_string())
-        })
-        .collect();
-    pkgs.sort();
-    pkgs.dedup();
-    pkgs
+/// What `rbuildfiles` said, split by what cambium can act on.
+///
+/// The distinction matters for soundness. `rbuildfiles` answers with labels,
+/// and only some of them name a package in the main repository that cambium
+/// can re-query. A `.bzl` that defines repository rules — loaded from
+/// `MODULE.bazel` through a module extension or `use_repo_rule`, or from
+/// `WORKSPACE` — comes back naming the *external* repository it builds
+/// (`@my_repo//:BUILD`), or `//external:WORKSPACE`, and never a main-repo
+/// package. Flattening that to "no packages" would mark nothing dirty while
+/// the contents of every external repository just changed underneath us.
+///
+/// Observed on 9.2.0 / 8.5.1 / 7.4.1 against a workspace whose `//app` target
+/// depends on `@my_repo//:x`:
+///
+/// | mode | query | answer |
+/// |---|---|---|
+/// | bzlmod (all three) | `rbuildfiles(bazel/ext.bzl)` | `@my_repo//:BUILD` |
+/// | bzlmod (all three) | `rbuildfiles(MODULE.bazel)` | *(empty)* |
+/// | bzlmod (all three) | `rbuildfiles(WORKSPACE)` | every package, `@my_repo//:BUILD`, `@bazel_tools//tools/genrule:BUILD` |
+/// | WORKSPACE (7.4.1, 8.5.1 with `--noenable_bzlmod --enable_workspace`) | `rbuildfiles(bazel/ext.bzl)` | `//external:WORKSPACE`, `@my_repo//:BUILD`, every package |
+/// | either, any version | `rbuildfiles(<.bzl nothing loads>)` | *(empty)* |
+///
+/// So: a repository-rule `.bzl` is never silent — it always names at least the
+/// external repository it defines — and a genuinely dead `.bzl` is the only
+/// thing that comes back empty. That is what makes "empty means nothing is
+/// dirty" sound, and why anything non-empty that is not a main-repo package
+/// has to be treated as global.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rbuildfiles {
+    /// Main-repository packages whose `BUILD` loads one of the paths. These
+    /// are re-queried.
+    pub packages: Vec<String>,
+    /// Labels that name a loader outside any main-repo package:
+    /// `//:MODULE.bazel`, `//:WORKSPACE[.bazel|.bzlmod]`, `//external:*`, and
+    /// any `@repo//...` label. Non-empty means the change reaches external
+    /// repository contents, which cambium's index does not model — global.
+    pub workspace_level: Vec<String>,
+}
+
+impl Rbuildfiles {
+    /// Nothing at all loads the path: not a package, not the workspace files,
+    /// not an external repository. A dead file.
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty() && self.workspace_level.is_empty()
+    }
+}
+
+/// Parses `--output=label` lines from `rbuildfiles`.
+///
+/// `//lib/core:BUILD` -> a package; `@my_repo//:BUILD`, `//external:WORKSPACE`,
+/// `//:MODULE.bazel` -> workspace-level. Other shapes are skipped.
+pub fn parse_buildfile_labels(out: &str) -> Rbuildfiles {
+    const WORKSPACE_FILES: &[&str] = &[
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "WORKSPACE",
+        "WORKSPACE.bazel",
+        "WORKSPACE.bzlmod",
+        "REPO.bazel",
+    ];
+    let mut r = Rbuildfiles::default();
+    for line in out.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        // Any label in another repository: `@repo//...` or `@@canonical//...`.
+        if l.starts_with('@') {
+            r.workspace_level.push(l.to_string());
+            continue;
+        }
+        let Some(rest) = l.strip_prefix("//") else {
+            continue;
+        };
+        let Some((pkg, name)) = rest.rsplit_once(':') else {
+            continue;
+        };
+        // `//external:...` is the pseudo-package Bazel reports WORKSPACE-driven
+        // loads under in WORKSPACE mode; `//:MODULE.bazel` and friends are the
+        // workspace files themselves.
+        let external_pseudo_package = pkg == "external" || pkg.starts_with("external/");
+        let workspace_file = pkg.is_empty() && WORKSPACE_FILES.contains(&name);
+        if external_pseudo_package || workspace_file {
+            r.workspace_level.push(l.to_string());
+        } else if name == "BUILD" || name == "BUILD.bazel" {
+            r.packages.push(pkg.to_string());
+        }
+    }
+    r.packages.sort();
+    r.packages.dedup();
+    r.workspace_level.sort();
+    r.workspace_level.dedup();
+    r
 }
 
 /// Walks up from `start` looking for a workspace marker.
@@ -499,9 +579,44 @@ mod tests {
     #[test]
     fn parses_rbuildfiles_output() {
         let out = "//lib/core:BUILD\n//app:BUILD.bazel\n//:BUILD\n//weird:thing\ngarbage\n";
-        assert_eq!(
-            parse_buildfile_labels(out),
-            vec!["".to_string(), "app".to_string(), "lib/core".to_string()]
+        let r = parse_buildfile_labels(out);
+        assert_eq!(r.packages, vec!["", "app", "lib/core"]);
+        assert!(r.workspace_level.is_empty());
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn separates_workspace_level_loaders_from_packages() {
+        // bzlmod, 9.2.0 / 8.5.1 / 7.4.1: a module-extension `.bzl` names only
+        // the external repository it defines.
+        let r = parse_buildfile_labels("@my_repo//:BUILD\n");
+        assert!(r.packages.is_empty());
+        assert_eq!(r.workspace_level, vec!["@my_repo//:BUILD"]);
+        assert!(!r.is_empty());
+
+        // WORKSPACE mode, 7.4.1 / 8.5.1: the pseudo-package plus everything.
+        let r = parse_buildfile_labels(
+            "//external:WORKSPACE\n@my_repo//:BUILD\n//app:BUILD\n//bazel:BUILD\n\
+             @bazel_tools//tools/genrule:BUILD\n",
         );
+        assert_eq!(r.packages, vec!["app", "bazel"]);
+        assert_eq!(
+            r.workspace_level,
+            vec![
+                "//external:WORKSPACE",
+                "@bazel_tools//tools/genrule:BUILD",
+                "@my_repo//:BUILD"
+            ]
+        );
+
+        // The workspace files themselves, and canonical `@@` repo names.
+        let r =
+            parse_buildfile_labels("//:MODULE.bazel\n//:WORKSPACE.bazel\n@@rules_cc+//:BUILD\n");
+        assert!(r.packages.is_empty());
+        assert_eq!(r.workspace_level.len(), 3);
+
+        // A dead `.bzl`: nothing at all.
+        assert!(parse_buildfile_labels("").is_empty());
+        assert!(parse_buildfile_labels("INFO: Empty results\n").is_empty());
     }
 }

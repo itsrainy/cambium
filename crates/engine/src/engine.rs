@@ -633,8 +633,35 @@ impl Engine {
             );
             stats.rbuildfiles_called = true;
             match querier.rbuildfiles(&paths) {
-                Ok(pkgs) => {
-                    for p in pkgs {
+                // A `.bzl` whose only loader is the workspace file — a module
+                // extension or `use_repo_rule` in `MODULE.bazel`, a `load()` in
+                // `WORKSPACE` — defines repository rules. Changing it can
+                // change the contents of an external repository, and so every
+                // target that depends on one; none of that is in the main
+                // tree's diff or in cambium's index, so there is no package
+                // set that covers it. `rbuildfiles` says so by naming the
+                // external repository (`@my_repo//:BUILD`) or the
+                // `//external:WORKSPACE` pseudo-package rather than a main-repo
+                // package. Sound answer: global.
+                //
+                // The converse — an empty answer — stays local, and that is
+                // sound because Bazel never answers empty for a
+                // repository-rule `.bzl`: on 9.2.0, 8.5.1 and 7.4.1, in both
+                // bzlmod and WORKSPACE mode, such a file always comes back
+                // naming at least the external repository it defines. Only a
+                // `.bzl` that nothing loads at all is empty, and a file
+                // nothing loads cannot change any target. See
+                // `cambium_bazel::Rbuildfiles` for the measurements.
+                Ok(r) if !r.workspace_level.is_empty() => {
+                    tracing::warn!(
+                        loaders = ?r.workspace_level,
+                        "a changed .bzl is loaded outside any package; treating the change as global"
+                    );
+                    dirty.global = true;
+                    dirty.global_reason = Some(workspace_level_reason(&paths, &r.workspace_level));
+                }
+                Ok(r) => {
+                    for p in r.packages {
                         bzl_dirty.insert(p.clone());
                         dirty.dirty.insert(p);
                     }
@@ -1065,4 +1092,21 @@ pub fn kind_histogram(v: IndexRef<'_>) -> HashMap<&'static str, u32> {
         *h.entry(k).or_insert(0) += 1;
     }
     h
+}
+
+/// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
+fn workspace_level_reason(paths: &[String], loaders: &[String]) -> String {
+    let what = match paths {
+        [one] => format!("`{one}`"),
+        many => format!("{} changed `.bzl` files", many.len()),
+    };
+    let mut shown: Vec<&str> = loaders.iter().take(3).map(String::as_str).collect();
+    if loaders.len() > 3 {
+        shown.push("...");
+    }
+    format!(
+        "{what} is loaded by MODULE.bazel/WORKSPACE (repository rules), not by any \
+         package BUILD file; rbuildfiles names {}",
+        shown.join(", ")
+    )
 }

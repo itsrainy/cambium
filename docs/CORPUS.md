@@ -11,6 +11,22 @@ that gap — it runs cambium, unmodified, against a shortlist of real
 Bazel monorepos and checks its answer against two independent tools and a
 from-scratch `bazel query` oracle.
 
+## Bazel version coverage
+
+Bazel-major coverage comes from two independent places:
+
+- **The per-PR synthetic matrix** (`bazel-version-matrix` in
+  [ci.yml](../.github/workflows/ci.yml)): a small synthetic workspace,
+  `crates/compare/tests/smoke_real_bazel.rs` and
+  `crates/engine/tests/e2e_bazel.rs`, run against real Bazel 7.4.1, 8.5.1 and
+  9.2.0 via bazelisk (`USE_BAZEL_VERSION`) on every pull request. Fast and
+  disposable — it exists to catch a version regression before it lands, not to
+  say anything about real Starlark.
+- **The corpus entries below**, pinned to commits whose own `.bazelversion`
+  is the major under test (see the "Version matrix" section) — real
+  repositories, real history, but refreshed on the corpus's own (slower)
+  schedule rather than every PR.
+
 ## What the suite proves
 
 - **Soundness on real repositories.** `cambi index verify --against-bazel`
@@ -118,6 +134,49 @@ into each repository's section.
 | `bazeldiff_extra_external_content` | a `//...` label whose own rule (modulo `visibility`/`tags`), source inputs and transitive `//...` dependencies are all unchanged, and which depends on something external. bazel-diff's digests include the external graph, and on `bazel/bazel` under `--keep_going` how much of that graph loads varies between invocations | none — external load nondeterminism in the producer, not a graph difference. All four conditions must hold; drop any one and the label stays `cambium_missing` |
 | `cambium_missing` | a label the oracle or a producer says is impacted, that cambium's `affected` does not report | **fail** — this is unsoundness |
 | `unclassified` | a disagreement none of the above rules explain | **fail** — needs a new class or a real bug fix before it can be waved through |
+
+## Externals and soundness
+
+cambium answers a question about the *main tree's diff*. Everything it can
+see is a path in that diff; everything it cannot see is, by construction,
+assumed not to have changed. That assumption is what makes the whole thing
+fast, and it is worth stating precisely, because it is also the boundary of
+what cambium can be sound about.
+
+**Externals must be pinned by content in the tree.** If an external
+repository's identity is fixed by something committed — `MODULE.bazel` and
+`MODULE.bazel.lock`, `WORKSPACE`, the `.bzl` files that define repository
+rules, an explicit `sha256`/`integrity` — then a change to that repository
+shows up in the diff as a change to one of those files, and cambium reacts.
+The workspace files are invalidators (`crates/engine/src/config.rs`,
+`Invalidators::default`), so a change to any of them is global. A repository
+rule `.bzl` is resolved through `rbuildfiles`, which names the external
+repository it defines (`@my_repo//:BUILD`) or `//external:WORKSPACE` rather
+than a main-repo package — measured on Bazel 9.2.0, 8.5.1 and 7.4.1, in both
+bzlmod and WORKSPACE mode — and the engine treats such a loader as global too
+(`crates/bazel/src/lib.rs`, `Rbuildfiles`; `crates/engine/src/engine.rs`,
+`compute`).
+
+**Files read by repository rules must be listed as invalidators.** A
+repository rule may read an arbitrary file from the tree — a version pin, a
+config — through `rctx.read()`. Bazel's query graph does not record that
+edge, so cambium cannot discover it, and neither can bazel-diff or Tango. The
+worked example is envoy's `.github/config.yml`, which the repository setup
+reads to pick dependency versions: a commit that touches only that file
+changes what gets fetched, while the graph says nothing changed. The fix is
+configuration, not inference — add the path to `[invalidators] paths` (or a
+glob) in `cambium.toml`, so the commit is global.
+
+**Unpinned externals are invisible to every tool in this comparison.** A
+`local_path_override` pointing at a sibling checkout, a git dependency on a
+branch rather than a commit, an http archive without an integrity hash, a
+repository rule that reads `$HOME` or the network: in all of these the
+external contents can change with no corresponding change in the tree at all.
+cambium reports nothing, and so do bazel-diff and Tango — none of them can
+see a change that leaves no trace in the revision being diffed. The corpus
+repositories are all content-pinned, which is why the comparison is
+meaningful; a repository that is not gets a correct answer to the question
+"what changed in this tree", which is not the same as "what must be rebuilt".
 
 ## Pass criteria
 
