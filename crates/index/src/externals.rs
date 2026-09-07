@@ -1127,6 +1127,52 @@ mod tests {
         );
     }
 
+    /// The precision question `bazel/bazel`'s `5c47f233..bfd201d1` raised: a
+    /// version bump next to two extensions that between them name half a dozen
+    /// repositories must name the one repository, not all of them. (What
+    /// widened that pair's answer was not this function but the input map —
+    /// `//:extensions.bzl` calls `ctx.path(Label("//:MODULE.bazel"))`, so
+    /// every repository it defines really is declared to depend on the file.)
+    #[test]
+    fn a_version_bump_does_not_name_the_other_extensions_repositories() {
+        let text = |v: &str| {
+            format!(
+                "bazel_dep(name = \"fmt\", version = \"{v}\")\n\
+                 maven = use_extension(\"@rules_jvm_external//:extensions.bzl\", \"maven\")\n\
+                 maven.install(artifacts = [\"g:a:1\"])\n\
+                 use_repo(maven, \"maven\", \"unpinned_maven\")\n\
+                 deps = use_extension(\"//:extensions.bzl\", \"build_deps\")\n\
+                 use_repo(deps, \"debian_java_deps\", \"debian_cc_deps\")\n"
+            )
+        };
+        assert_eq!(
+            diff_module(&scan_module(&text("1.0")), &scan_module(&text("2.0"))),
+            ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
+        );
+    }
+
+    /// And a changed tag names its own extension's repositories only.
+    #[test]
+    fn a_changed_tag_leaves_the_other_extensions_alone() {
+        let text = |a: &str| {
+            format!(
+                "maven = use_extension(\"@rules_jvm_external//:extensions.bzl\", \"maven\")\n\
+                 maven.install(artifacts = [\"{a}\"])\n\
+                 use_repo(maven, \"maven\", \"unpinned_maven\")\n\
+                 deps = use_extension(\"//:extensions.bzl\", \"build_deps\")\n\
+                 use_repo(deps, \"debian_java_deps\", \"debian_cc_deps\")\n"
+            )
+        };
+        assert_eq!(
+            diff_module(&scan_module(&text("g:a:1")), &scan_module(&text("g:a:2"))),
+            ModuleChange::Repos(
+                ["maven".to_string(), "unpinned_maven".to_string()]
+                    .into_iter()
+                    .collect()
+            )
+        );
+    }
+
     #[test]
     fn labels_become_patterns() {
         let m = m();
