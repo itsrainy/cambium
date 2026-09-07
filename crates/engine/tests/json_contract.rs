@@ -21,7 +21,8 @@ use serde_json::Value;
 ///
 /// Version 3 turned `affected` into `{label, depth, test}` objects and added
 /// `stats.rbuildfiles_called`; version 4 added `stats.bzl_closure_hits`, and
-/// `stats.rbuildfiles_called` is now always false. The version is shared with
+/// `stats.rbuildfiles_called` is now always false; version 5 added
+/// `stats.bazelrc_safe_diffs`. The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and
 /// again at 3.
 ///
@@ -46,6 +47,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "schema",
     "stats.affected_targets",
     "stats.base_nodes",
+    "stats.bazelrc_safe_diffs",
     "stats.bzl_closure_hits",
     "stats.changed_files",
     "stats.direct_targets",
@@ -109,6 +111,7 @@ fn fixture() -> AffectedReport {
             ignored_files: 9,
             rbuildfiles_called: false,
             bzl_closure_hits: 10,
+            bazelrc_safe_diffs: 11,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
