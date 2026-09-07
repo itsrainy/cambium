@@ -12,6 +12,7 @@
 //! |---|---|---|
 //! | `cambium_extra_select` | cambium only | reached through a `select` branch that is not taken in the current configuration; cambium indexes the unconfigured graph, so it keeps every branch |
 //! | `cambium_extra_implicit` | cambium only | reached only through an implicit (`$`-prefixed) attribute edge |
+//! | `cambium_extra_external_repo` | cambium only | cambium reached it from an external repository whose contents moved — a `MODULE.bazel` edit, or a main-repo file a repository rule is built from; the hash-diffing tools resolve the repository and see its targets unchanged |
 //! | `cambium_extra_bzl` | cambium only | the target's own rule is byte-identical at both revisions, but a `.bzl` its package loads changed, so cambium marked the whole loading package direct |
 //! | `cambium_extra_build_glob` | cambium only | reached from a changed `BUILD` file that a `glob(["**"])` filegroup consumes; the file's *content* is an input, so the filegroup and everything embedding it really do change |
 //! | `cambium_extra_deleted` | cambium only | reached from a target that existed at base and not at head; cambium marks every consumer of a deleted target direct, the hash-diffing tools cannot see a target that is no longer there |
@@ -42,11 +43,13 @@ pub enum Side {
     Producer,
 }
 
-/// The ten disagreement classes.
+/// The fourteen disagreement classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
     CambiumExtraSelect,
+    /// An external repository this target names moved.
+    CambiumExtraExternalRepo,
     CambiumExtraImplicit,
     CambiumExtraVisibility,
     /// A `.bzl` edit marked the whole loading package direct, but this
@@ -79,6 +82,7 @@ impl Class {
     pub fn name(self) -> &'static str {
         match self {
             Class::CambiumExtraSelect => "cambium_extra_select",
+            Class::CambiumExtraExternalRepo => "cambium_extra_external_repo",
             Class::CambiumExtraImplicit => "cambium_extra_implicit",
             Class::CambiumExtraVisibility => "cambium_extra_visibility",
             Class::CambiumExtraBzl => "cambium_extra_bzl",
@@ -100,6 +104,10 @@ impl Class {
         match self {
             Class::CambiumExtraSelect => {
                 "cambium keeps `select()` branches a configured Bazel query resolves away"
+            }
+            Class::CambiumExtraExternalRepo => {
+                "cambium reached it from an external repository whose contents moved; the \
+                 producer resolves the repository and sees its targets unchanged"
             }
             Class::CambiumExtraImplicit => {
                 "reached only through an implicit (`$`-prefixed) attribute edge the producer \
@@ -154,8 +162,9 @@ impl Class {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
 
-    pub const ALL: [Class; 13] = [
+    pub const ALL: [Class; 14] = [
         Class::CambiumExtraSelect,
+        Class::CambiumExtraExternalRepo,
         Class::CambiumExtraImplicit,
         Class::CambiumExtraVisibility,
         Class::CambiumExtraBzl,
@@ -195,6 +204,23 @@ pub trait Facts {
     /// Between base and head this target's rule changed only in visibility (or
     /// tags): nothing that can change its outputs.
     fn visibility_only_change(&self, label: &str) -> bool;
+
+    /// cambium reached this target because an external repository it names
+    /// moved (`DirectReason::ExternalRepo`), directly or through the reverse
+    /// walk.
+    ///
+    /// cambium's graph stops at the main repository's edge, so it cannot ask
+    /// whether `@debian_java_deps//:asm` actually changed: the external stage
+    /// says "this repository's *declaration* moved" and every main-repo target
+    /// that names a label in it is direct. On `bazel/bazel`'s
+    /// `5c47f233..bfd201d1` one `maven.install` version bump, plus the
+    /// `//:MODULE.bazel` that `//:extensions.bzl` reads by label, put
+    /// sixty-nine targets in cambium's answer that bazel-diff — which resolves
+    /// the repositories and hashes their contents — reported as unchanged.
+    ///
+    /// Over-approximation, not unsoundness, and the price of not fetching
+    /// every external repository on every run.
+    fn reached_via_external_repo(&self, label: &str) -> bool;
 
     /// A `.bzl` file changed in this pair and this target's own rule proto is
     /// byte-identical at base and head.
@@ -305,7 +331,13 @@ pub trait Facts {
 pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
     match side {
         Side::Cambium => {
-            if facts.reachable_via_select(label) {
+            // The external-repository reason comes first: when it holds, the
+            // target is in cambium's answer *only* because a repository moved,
+            // and a `select` or implicit edge further along the path is a
+            // detail of how it got there rather than the reason it is there.
+            if facts.reached_via_external_repo(label) {
+                Class::CambiumExtraExternalRepo
+            } else if facts.reachable_via_select(label) {
                 Class::CambiumExtraSelect
             } else if facts.reachable_only_via_implicit(label) {
                 Class::CambiumExtraImplicit
@@ -495,6 +527,8 @@ pub struct BazelFacts<'a> {
     changed_paths: BTreeSet<String>,
     /// Affected labels whose `--explain` reason is `DeletedDep`.
     deleted_dep: BTreeSet<String>,
+    /// Affected labels whose `--explain` reason is `ExternalRepo`.
+    external_repo: BTreeSet<String>,
     /// Affected labels whose `--explain` reason is a changed `BUILD` file.
     build_file: BTreeSet<String>,
     /// For an affected label, the shortest path back to the direct-set member
@@ -540,6 +574,7 @@ impl<'a> BazelFacts<'a> {
             affected: BTreeSet::new(),
             changed_paths: changed_paths.into_iter().collect(),
             deleted_dep: BTreeSet::new(),
+            external_repo: BTreeSet::new(),
             build_file: BTreeSet::new(),
             paths: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
@@ -563,6 +598,14 @@ impl<'a> BazelFacts<'a> {
     /// `explanations` (the comparison asks for them).
     pub fn with_deleted_dep(mut self, labels: impl IntoIterator<Item = String>) -> Self {
         self.deleted_dep = labels.into_iter().collect();
+        self
+    }
+
+    /// Records the targets cambium reached because an external repository
+    /// moved, enabling `cambium_extra_external_repo`. Feed it from the
+    /// report's `explanations`.
+    pub fn with_external_repo(mut self, labels: impl IntoIterator<Item = String>) -> Self {
+        self.external_repo = labels.into_iter().collect();
         self
     }
 
@@ -1071,6 +1114,10 @@ impl Facts for BazelFacts<'_> {
         self.deleted_dep.contains(label)
     }
 
+    fn reached_via_external_repo(&self, label: &str) -> bool {
+        self.external_repo.contains(label)
+    }
+
     fn reached_via_build_file(&self, label: &str) -> bool {
         self.build_file.contains(label)
     }
@@ -1234,6 +1281,7 @@ mod tests {
         visibility: BTreeSet<String>,
         bzl: BTreeSet<String>,
         deleted: BTreeSet<String>,
+        external_repo: BTreeSet<String>,
         build_glob: BTreeSet<String>,
         content: BTreeSet<String>,
         rule_unchanged: BTreeSet<String>,
@@ -1270,6 +1318,9 @@ mod tests {
         }
         fn reached_via_deleted_dep(&self, l: &str) -> bool {
             self.deleted.contains(l)
+        }
+        fn reached_via_external_repo(&self, l: &str) -> bool {
+            self.external_repo.contains(l)
         }
         fn reached_via_build_file(&self, l: &str) -> bool {
             self.build_glob.contains(l)
@@ -1356,6 +1407,29 @@ mod tests {
         assert_eq!(
             one(|h| &mut h.select, Side::Cambium),
             Class::CambiumExtraSelect
+        );
+    }
+
+    #[test]
+    fn a_moved_external_repository_explains_a_cambium_extra() {
+        assert_eq!(
+            one(|h| &mut h.external_repo, Side::Cambium),
+            Class::CambiumExtraExternalRepo
+        );
+    }
+
+    /// The external-repository reason outranks `select`: a target cambium only
+    /// holds because a repository moved is explained by the repository, not by
+    /// the branch of the path it happened to arrive along.
+    #[test]
+    fn the_external_repository_reason_outranks_select() {
+        let h = Hand::with(|h| {
+            h.external_repo.insert("//a:b".into());
+            h.select.insert("//a:b".into());
+        });
+        assert_eq!(
+            classify("//a:b", Side::Cambium, &h),
+            Class::CambiumExtraExternalRepo
         );
     }
 
@@ -1570,7 +1644,7 @@ mod tests {
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(c.name().contains("extra"), "{c}");
         }
-        assert_eq!(Class::ALL.len(), 13);
+        assert_eq!(Class::ALL.len(), 14);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
     }
 
