@@ -355,7 +355,39 @@ func environMap() map[string]string {
 
 // addWorktree creates a detached worktree of rev under dir and returns a
 // cleanup that removes it again.
+//
+// A pair killed mid-run (a timeout, a corpus pass interrupted, `git worktree
+// add`'s own checkout phase cut off) skips the deferred cleanup in run(), and
+// can leave the registration locked besides: git itself locks a worktree
+// while `add` is populating it, precisely so a crash in the middle does not
+// let something else prune away what might still be a live checkout, and
+// that lock outlives the process that never got to clear it. The next
+// invocation then finds dir gone from disk but still registered *and*
+// locked, and git refuses `worktree add` outright:
+// `fatal: '<dir>' is a missing but locked worktree`.
+//
+// `prune` alone does not clear this — pruning stale entries is exactly what
+// the lock exists to prevent — so the lock has to go first. Order matters:
+// unlock, *then* prune (which now sees an unlocked, missing entry and drops
+// it), then a force-remove as a last resort for the case prune does not
+// cover, a locked entry whose directory is still present but unusable
+// (interrupted mid-checkout, or dirty).
+func recoverStaleWorktree(ctx context.Context, repo, dir string) {
+	unlock := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "unlock", dir)
+	unlock.Stderr = os.Stderr
+	_ = unlock.Run()
+
+	prune := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "prune")
+	prune.Stderr = os.Stderr
+	_ = prune.Run()
+
+	remove := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "remove", "--force", "--force", dir)
+	remove.Stderr = os.Stderr
+	_ = remove.Run()
+}
+
 func addWorktree(ctx context.Context, repo, dir, rev string) (string, func(), error) {
+	recoverStaleWorktree(ctx, repo, dir)
 	if err := os.RemoveAll(dir); err != nil {
 		return "", nil, err
 	}
