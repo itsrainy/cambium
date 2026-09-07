@@ -89,6 +89,39 @@ plan uses quick; the published numbers come from a full run on EC2
 - Nothing else is running. Earlier lanes (A4, envoy driver, apollo agent,
   item-4 agent) are finished or were stopped; their logs remain.
 
+## The agreed plan (from the owner, in order; each ships with before/after replay globals and a clean three-way in the same commit)
+
+5. (done, `1684956`) bazel entries had no real invalidators.
+4. (done, `b5a7211`) Static `.bzl` load closure replaces `rbuildfiles` on the `.bzl` path
+   (repo mapping via `bazel mod dump_repo_mapping ""`; external loads stop at
+   the external label; MODULE/WORKSPACE closure → global; keep `rbuildfiles`
+   as a corpus oracle asserting the static closure is a superset).
+1+3. Repo-granular external invalidation: MODULE.bazel.lock diff and
+   repository-rule inputs map to repos; dirty (a) main-repo consumers of
+   `@repo//...` edges and (b) every package whose `.bzl` closure contains a
+   file from that repo. A module that registers toolchains stays global
+   (toolchain resolution has no edge to follow). Needs item 4.
+2. `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
+   affect loading (`--remote_*`, `--jobs`, `--test_*`, `--disk_cache`,
+   configs no query uses); unknown flags and `import`/`try-import` go global.
+6. Replace `max_changed_files` with "cold build when dirty packages exceed
+   N", N from replay per-package query timings.
+Target: envoy replay globals 93 → under 20 per 300.
+
+Validation policy (Rainy, 2026-09-07): the corpus suite is for timing and
+accuracy numbers against bazel-diff and Tango, not for testing our changes.
+Each item validates with unit tests, the synth soundness sweep, the real-Bazel
+e2e, and at most a handful of targeted `cambi affected` runs on specific
+corpus commits of the class being changed. Quick-profile replays are run
+once per milestone, full replays only on EC2.
+
+Then: regenerate all report sections, write the hand-written `## Findings`
+section of `docs/CORPUS.md` (the eleven bugs above, the externals
+limitation, the laptop caveat on producer timings), delete this file's
+"Running" section or the file, commit, push.
+
+## Gotchas learned
+
 - zsh does not word-split `$VAR`; use `${=VAR}` or explicit variables in
   ad-hoc shell.
 - `$TMPDIR/cambium-cache` holds fetched indexes; after a FORMAT_VERSION bump
