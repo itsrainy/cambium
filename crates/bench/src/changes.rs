@@ -12,9 +12,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSetKind {
-    /// `(parent, commit)` for every first-parent commit in the history range.
+    /// `(parent, commit)` for first-parent commits with no PR reference: the
+    /// same shape as a squash-merged PR, but without the marker.
     Adjacent,
-    /// `(merge-base, merge)` for every merge commit in the range: what CI asks.
+    /// One pull request's worth of change (METHODOLOGY.md, "Change sets"):
+    /// for a merge commit, `merge-base(parents)..commit`; for a first-parent
+    /// commit whose message carries a PR reference, `parent..commit`.
     Pr,
     /// Commits touching `.bzl` files, adding or deleting BUILD files, touching
     /// a hub target's package, or touching an invalidator path.
@@ -48,6 +51,10 @@ pub struct ChangeSet {
     /// Stress category: `bzl`, `build_add_delete`, `hub`, `invalidator`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// The pull request number, when a PR-shaped change set's commit message
+    /// named one, so the report can link it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
 }
 
 impl ChangeSet {
@@ -111,37 +118,121 @@ pub fn range_commits(repo: &Repo, pin: &str, range: usize) -> Result<Vec<String>
     Ok(repo.first_parent_log(pin, range + 1)?)
 }
 
+/// Finds a pull-request reference in a commit subject line (METHODOLOGY.md,
+/// "Change sets"). Four forms: `Merge pull request #1234`, GitHub's default
+/// merge-commit subject; `PR #1234` anywhere; `(#1234)` at the end, as
+/// GitHub's squash merge writes it; and a trailing
+/// `(https://github.com/<owner>/<repo>/pull/1234)`, as bazel's import tooling
+/// writes it. Deliberately narrow: an issue reference like `Closes #1234` or
+/// a trailing `.../issues/1234` URL is not a PR marker and must not match.
+pub fn pr_reference(subject: &str) -> Option<u64> {
+    fn leading_digits(s: &str) -> Option<u64> {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    }
+    fn all_digits(s: &str) -> Option<u64> {
+        if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+            s.parse().ok()
+        } else {
+            None
+        }
+    }
+
+    if let Some(rest) = subject.strip_prefix("Merge pull request #") {
+        if let Some(n) = leading_digits(rest) {
+            return Some(n);
+        }
+    }
+    if let Some(idx) = subject.find("PR #") {
+        if let Some(n) = leading_digits(&subject[idx + "PR #".len()..]) {
+            return Some(n);
+        }
+    }
+    // The last parenthesised group of the subject: `(#N)` or a PR URL.
+    let trimmed = subject.trim_end();
+    let inner = trimmed
+        .strip_suffix(')')
+        .and_then(|s| s.rfind('(').map(|open| &s[open + 1..]));
+    if let Some(inner) = inner {
+        if let Some(n) = inner.strip_prefix('#').and_then(all_digits) {
+            return Some(n);
+        }
+        if let Some(rest) = inner.strip_prefix("https://github.com/") {
+            // `<owner>/<repo>/pull/<N>`: exactly four segments, no more.
+            let parts: Vec<&str> = rest.split('/').collect();
+            if let [owner, repo, "pull", n] = parts.as_slice() {
+                if !owner.is_empty() && !repo.is_empty() {
+                    if let Some(n) = all_digits(n) {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// First-parent commits with a single parent and no PR reference in their
+/// message: the same shape as a squash-merged PR, but without the marker
+/// that would make them [`pr_shaped`] instead.
 pub fn adjacent(repo: &Repo, pin: &str, range: usize) -> Result<Vec<ChangeSet>> {
     let commits = range_commits(repo, pin, range)?;
-    Ok(commits
-        .windows(2)
-        .map(|w| ChangeSet {
+    let mut out = Vec::new();
+    for w in commits.windows(2) {
+        if repo.parents(&w[1])?.len() != 1 {
+            continue;
+        }
+        if pr_reference(&repo.subject(&w[1])?).is_some() {
+            continue;
+        }
+        out.push(ChangeSet {
             base: w[0].clone(),
             head: w[1].clone(),
             kind: ChangeSetKind::Adjacent,
             category: None,
-        })
-        .collect())
+            pr_number: None,
+        });
+    }
+    Ok(out)
 }
 
+/// One pull request's worth of change, per commit in the history range: a
+/// merge commit's `merge-base(parents)..commit`, or a first-parent single-
+/// parent commit whose message carries a PR reference, `parent..commit`. A
+/// commit is [`adjacent`] or PR-shaped, never both.
 pub fn pr_shaped(repo: &Repo, pin: &str, range: usize) -> Result<Vec<ChangeSet>> {
     let commits = range_commits(repo, pin, range)?;
     let mut out = Vec::new();
-    for c in &commits {
+    for (i, c) in commits.iter().enumerate() {
         let parents = repo.parents(c)?;
-        if parents.len() < 2 {
-            continue;
+        if parents.len() >= 2 {
+            let base = repo.merge_base(&parents[0], &parents[1])?;
+            if base.is_empty() || base == *c {
+                continue;
+            }
+            let pr_number = pr_reference(&repo.subject(c)?);
+            out.push(ChangeSet {
+                base,
+                head: c.clone(),
+                kind: ChangeSetKind::Pr,
+                category: None,
+                pr_number,
+            });
+        } else if parents.len() == 1 && i > 0 {
+            if let Some(pr_number) = pr_reference(&repo.subject(c)?) {
+                out.push(ChangeSet {
+                    base: commits[i - 1].clone(),
+                    head: c.clone(),
+                    kind: ChangeSetKind::Pr,
+                    category: None,
+                    pr_number: Some(pr_number),
+                });
+            }
         }
-        let base = repo.merge_base(&parents[0], &parents[1])?;
-        if base.is_empty() || base == *c {
-            continue;
-        }
-        out.push(ChangeSet {
-            base,
-            head: c.clone(),
-            kind: ChangeSetKind::Pr,
-            category: None,
-        });
     }
     Ok(out)
 }
@@ -249,52 +340,49 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
                 head: c,
                 kind: ChangeSetKind::Stress,
                 category: Some(name.to_string()),
+                pr_number: None,
             });
         }
     }
     Ok(out)
 }
 
-/// Keeps at most `cap` of `change_sets`, round-robin over the kinds, in the input
-/// order.
+/// Keeps at most `cap` of `change_sets`, PR-shaped first.
 ///
-/// Taking a plain prefix would be simpler and wrong: [`select`] emits every
-/// adjacent change set before the first `pr` or `stress` one, so a 50-change set prefix of
-/// a 300-commit selection is 50 adjacent change sets and no stress at all — exactly
-/// the change sets least likely to catch anything. Round-robin keeps each kind's
-/// share while leaving what it keeps a *prefix of that kind*, so a quick set
-/// is a subset of the full set at the same pin and seed, and the choice is a
-/// pure function of the input order.
+/// Taking a plain prefix would be simpler and wrong: [`select`] can emit
+/// every adjacent change set before the first `pr` or `stress` one, so a
+/// 50-change-set prefix of a 300-commit selection could be 50 adjacent change
+/// sets and no PR-shaped ones at all — the opposite of the methodology's
+/// priority. PR-shaped is the primary kind, so it fills the cap first, up to
+/// all of it; stress gets at most a quarter of the cap, since it exists to
+/// hit paths a quiet history might not, not to dominate the run; adjacent
+/// takes whatever is left. What each kind keeps is a *prefix of that kind's
+/// own change sets*, so a quick set is a subset of the full set at the same
+/// pin and seed, and the choice is a pure function of `change_sets` and `cap`.
 pub fn cap_total(change_sets: &[ChangeSet], cap: usize) -> Vec<ChangeSet> {
     if change_sets.len() <= cap {
         return change_sets.to_vec();
     }
-    let kinds: BTreeSet<ChangeSetKind> = change_sets.iter().map(|p| p.kind).collect();
+    let indices_of = |kind: ChangeSetKind| -> Vec<usize> {
+        change_sets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == kind)
+            .map(|(i, _)| i)
+            .collect()
+    };
     let mut taken: BTreeSet<usize> = BTreeSet::new();
-    let mut round = 0;
-    while taken.len() < cap {
-        let before = taken.len();
-        for kind in &kinds {
-            let Some((i, _)) = change_sets
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| p.kind == *kind)
-                .nth(round)
-            else {
-                continue;
-            };
-            taken.insert(i);
-            if taken.len() == cap {
-                break;
-            }
-        }
-        // Every kind is exhausted: there is nothing left to take, whatever the
-        // cap says.
-        if taken.len() == before {
-            break;
-        }
-        round += 1;
-    }
+
+    let pr = indices_of(ChangeSetKind::Pr);
+    taken.extend(pr.into_iter().take(cap - taken.len()));
+
+    let stress_cap = (cap - taken.len()).min(cap / 4);
+    let stress = indices_of(ChangeSetKind::Stress);
+    taken.extend(stress.into_iter().take(stress_cap));
+
+    let adjacent = indices_of(ChangeSetKind::Adjacent);
+    taken.extend(adjacent.into_iter().take(cap - taken.len()));
+
     taken.into_iter().map(|i| change_sets[i].clone()).collect()
 }
 
@@ -350,6 +438,7 @@ mod tests {
             head: format!("h{n}"),
             kind,
             category: None,
+            pr_number: None,
         }
     }
 
@@ -401,6 +490,95 @@ mod tests {
             change_set(ChangeSetKind::Pr, 1),
         ];
         assert_eq!(cap_total(&only, 10), only);
+    }
+
+    #[test]
+    fn pr_reference_matches_squash_and_merge_markers() {
+        // GitHub's squash-merge default: the PR number in parens at the end.
+        assert_eq!(
+            pr_reference("index: account for label costs (#1234)"),
+            Some(1234)
+        );
+        // Trailing whitespace after the marker must not break the match.
+        assert_eq!(pr_reference("fix the thing (#42) "), Some(42));
+        // A parenthesised suffix that isn't `(#N)` must not match.
+        assert_eq!(pr_reference("clean up (WIP)"), None);
+        // `PR #N` anywhere in the subject.
+        assert_eq!(pr_reference("Backport fix, PR #987, to 1.2"), Some(987));
+        // GitHub's default merge-commit subject.
+        assert_eq!(
+            pr_reference("Merge pull request #55 from user/branch"),
+            Some(55)
+        );
+        // An issue reference is not a PR marker.
+        assert_eq!(pr_reference("Closes #1234"), None);
+        assert_eq!(pr_reference("fixes issue #1234, no PR here"), None);
+        // A bare subject with no marker at all.
+        assert_eq!(pr_reference("bump the version"), None);
+    }
+
+    #[test]
+    fn pr_reference_matches_a_trailing_pull_request_url() {
+        // bazel's import tooling writes the full URL in parens at the end.
+        assert_eq!(
+            pr_reference(
+                "Remove the deprecated flag (https://github.com/bazelbuild/bazel/pull/27015)"
+            ),
+            Some(27015)
+        );
+        assert_eq!(
+            pr_reference("fix (https://github.com/o/r/pull/7)  "),
+            Some(7)
+        );
+        // A trailing issue URL is not a PR marker.
+        assert_eq!(
+            pr_reference("fix (https://github.com/o/r/issues/1234)"),
+            None
+        );
+        // Nor is a PR URL that isn't the trailing parenthesised group.
+        assert_eq!(
+            pr_reference("see https://github.com/o/r/pull/1234 for context"),
+            None
+        );
+        // Nor a malformed one.
+        assert_eq!(pr_reference("fix (https://github.com/o/r/pull/x)"), None);
+        assert_eq!(
+            pr_reference("fix (https://github.com/o/r/pull/1/files)"),
+            None
+        );
+    }
+
+    #[test]
+    fn cap_fills_pr_shaped_first_then_a_quarter_stress_then_adjacent() {
+        let all = subject_shaped(); // 100 adjacent, 20 pr, 10 stress
+        let a = cap_total(&all, 50);
+        let count = |kind: ChangeSetKind| a.iter().filter(|p| p.kind == kind).count();
+        // All 20 pr change sets fit under the cap, so all are kept.
+        assert_eq!(count(ChangeSetKind::Pr), 20);
+        // Stress is capped at a quarter of 50 = 12, and only 10 exist.
+        assert_eq!(count(ChangeSetKind::Stress), 10);
+        // Adjacent takes whatever cap remains: 50 - 20 - 10 = 20.
+        assert_eq!(count(ChangeSetKind::Adjacent), 20);
+
+        // With more stress than a quarter of the cap, stress is held to it.
+        let mut many = all.clone();
+        many.extend((130..160).map(|n| change_set(ChangeSetKind::Stress, n)));
+        let b = cap_total(&many, 40);
+        let count = |kind: ChangeSetKind| b.iter().filter(|p| p.kind == kind).count();
+        assert_eq!(count(ChangeSetKind::Pr), 20);
+        assert_eq!(count(ChangeSetKind::Stress), 10);
+        assert_eq!(count(ChangeSetKind::Adjacent), 10);
+    }
+
+    #[test]
+    fn cap_smaller_than_pr_count_takes_only_pr_shaped() {
+        let all = subject_shaped();
+        let a = cap_total(&all, 10);
+        assert_eq!(a.len(), 10);
+        assert!(a.iter().all(|p| p.kind == ChangeSetKind::Pr));
+        // And it is that kind's own prefix.
+        let full: Vec<&ChangeSet> = all.iter().filter(|p| p.kind == ChangeSetKind::Pr).collect();
+        assert_eq!(a.iter().collect::<Vec<_>>(), full[..10].to_vec());
     }
 
     #[test]
