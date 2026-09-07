@@ -13,11 +13,13 @@ use std::collections::BTreeSet;
 use cambium_engine::{AffectedRequest, Config, Engine, SynthQuerier};
 use cambium_synth::{commit, generate, reference::reference_affected, ChangeSpec, GraphSpec};
 
-fn engine() -> Engine {
+fn engine(max_dirty_packages: usize) -> Engine {
     let dir = std::env::temp_dir().join("cambium-tests");
     let _ = std::fs::create_dir_all(&dir);
+    let mut cfg = Config::default();
+    cfg.limits.max_dirty_packages = max_dirty_packages;
     Engine::with_parts(
-        Config::default(),
+        cfg,
         cambium_diff::Repo::new(dir.clone()),
         cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
     )
@@ -29,10 +31,24 @@ fn env_or(key: &str, default: &str) -> String {
 
 #[test]
 fn engine_never_under_approximates() {
+    sweep(0);
+}
+
+/// The same sweep with `limits.max_dirty_packages = 1`, so every revision that
+/// dirties a package takes the cold-rebuild path: `//...` at head, spliced onto
+/// the base. It has to answer exactly what the incremental path answers — and
+/// the sweep's own overlay-versus-materialised assertion holds inside it — so
+/// this is the proof that the limit costs time and never precision.
+#[test]
+fn cold_rebuilds_never_under_approximate() {
+    sweep(1);
+}
+
+fn sweep(max_dirty_packages: usize) {
     let preset = env_or("CAMBIUM_SOUNDNESS_SIZE", "small");
     let seeds: u64 = env_or("CAMBIUM_SOUNDNESS_SEEDS", "12").parse().unwrap();
     let revisions: u64 = env_or("CAMBIUM_SOUNDNESS_REVISIONS", "8").parse().unwrap();
-    let e = engine();
+    let e = engine(max_dirty_packages);
     let req = AffectedRequest {
         base: "base".into(),
         head: "head".into(),
@@ -51,6 +67,7 @@ fn engine_never_under_approximates() {
     let mut over = 0usize;
     let mut global = 0usize;
     let mut empty = 0usize;
+    let mut cold = 0usize;
     for seed in 0..seeds {
         let mut g = generate(&GraphSpec::preset(&preset).unwrap().with_seed(seed));
         let mut index = e
@@ -99,6 +116,14 @@ fn engine_never_under_approximates() {
             assert_eq!(overlay.report.direct, out.report.direct);
             assert_eq!(overlay.report.tests, out.report.tests);
             assert!(overlay.index.is_none());
+            if out.report.stats.cold_rebuild {
+                cold += 1;
+            }
+            assert_eq!(
+                out.report.stats.cold_rebuild,
+                max_dirty_packages > 0 && out.report.stats.dirty_packages > max_dirty_packages,
+                "seed {seed} rev {rev} ({preset_name}): the limit fired on the wrong side"
+            );
             if out.report.global {
                 // "Everything is affected" trivially contains the reference, so
                 // this is sound; it is counted rather than compared because the
@@ -128,15 +153,22 @@ fn engine_never_under_approximates() {
 
     let total = (seeds * revisions) as usize;
     eprintln!(
-        "soundness sweep ({preset}, {seeds} seeds x {revisions} revisions = {total}): \
+        "soundness sweep ({preset}, max_dirty_packages {max_dirty_packages}, \
+         {seeds} seeds x {revisions} revisions = {total}): \
          {exact} exact, {over} over-approximating, {global} globally invalidated, \
-         {empty} produced no change"
+         {empty} produced no change, {cold} cold rebuilds"
     );
     assert_eq!(
         exact + over + global + empty,
         total,
         "every iteration must be accounted for"
     );
+    if max_dirty_packages > 0 {
+        assert!(
+            cold > 0,
+            "the sweep never took the cold-rebuild path, so it proved nothing about it"
+        );
+    }
     assert!(
         exact + over > 0,
         "the sweep compared nothing: {empty} empty and {global} global out of {total}"

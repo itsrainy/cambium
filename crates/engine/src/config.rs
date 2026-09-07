@@ -76,8 +76,25 @@ pub struct Baseline {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
-    /// Diffs larger than this fall back to global invalidation (spec 11).
-    pub max_changed_files: usize,
+    /// How many packages a run may re-query incrementally before it gives up
+    /// on splicing and re-indexes the whole repository at head.
+    ///
+    /// This bounds the thing that actually costs time. Its predecessor,
+    /// `max_changed_files`, bounded the diff instead, which is a proxy that
+    /// misfires in both directions: an `apollo` commit touching 10146 files
+    /// went global on file count alone though it dirtied a handful of
+    /// packages, while a fifty-file commit that rewrites fifty BUILD files
+    /// sailed under it. A cold rebuild is also not a global invalidation —
+    /// it re-indexes at head and still answers exactly — so exceeding this
+    /// limit costs time, never precision.
+    ///
+    /// Zero disables the limit: every diff is spliced, however large.
+    pub max_dirty_packages: usize,
+    /// Removed. Present only so that a `cambium.toml` written for an older
+    /// cambium still parses; the value is warned about at load and ignored.
+    /// Never serialised, so it reaches neither `config show` nor the hash.
+    #[serde(default, skip_serializing)]
+    pub max_changed_files: Option<usize>,
 }
 
 /// Where baseline indexes live. `command` templates get `{name}` and `{path}`
@@ -170,7 +187,16 @@ impl Default for Baseline {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_changed_files: 5_000,
+            // Where an incremental re-query of N packages costs about what a
+            // cold `//...` re-index costs, measured on the corpus replays:
+            // the crossover is ~450 packages on `bazel`, ~620 on `apollo`,
+            // ~210 on `sourcegraph` and beyond the whole repository on
+            // `envoy` (whose cold build is 90 s). 500 sits in the middle of
+            // that spread and below the package count of every corpus
+            // repository, so it fires only on a genuinely repository-wide
+            // diff.
+            max_dirty_packages: 500,
+            max_changed_files: None,
         }
     }
 }
@@ -199,15 +225,36 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).map_err(|source| ConfigError::Parse {
-                path: path.to_path_buf(),
-                source,
-            }),
+            Ok(s) => {
+                let cfg: Self = toml::from_str(&s).map_err(|source| ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                cfg.warn_about_removed_keys(path);
+                Ok(cfg)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(source) => Err(ConfigError::Io {
                 path: path.to_path_buf(),
                 source,
             }),
+        }
+    }
+
+    /// Says so, once, for every key that a newer cambium no longer honours.
+    ///
+    /// Refusing the file instead would be the stricter reading of
+    /// `deny_unknown_fields`, but a removed limit is not a typo: the repository
+    /// that set it did so deliberately, and failing every `cambi` invocation
+    /// until someone edits the file punishes the wrong person.
+    fn warn_about_removed_keys(&self, path: &Path) {
+        if let Some(n) = self.limits.max_changed_files {
+            tracing::warn!(
+                config = %path.display(),
+                value = n,
+                "limits.max_changed_files was removed and is ignored; the limit is now \
+                 limits.max_dirty_packages, which bounds the re-query rather than the diff"
+            );
         }
     }
 
@@ -345,7 +392,30 @@ retention_days = 30
             }
         );
         // Unset sections keep their defaults.
-        assert_eq!(c.limits.max_changed_files, 5_000);
+        assert_eq!(c.limits.max_dirty_packages, 500);
+    }
+
+    /// A `cambium.toml` written for an older cambium must still load. The
+    /// value is parsed, warned about and ignored — and it must not reach the
+    /// hash, or upgrading cambium would orphan every published index of a
+    /// repository that had set it.
+    #[test]
+    fn the_removed_max_changed_files_key_is_accepted_and_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, "[limits]\nmax_changed_files = 5000\n").unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(c.limits.max_changed_files, Some(5_000));
+        assert_eq!(
+            c.limits.max_dirty_packages, 500,
+            "the live limit is unchanged"
+        );
+        assert_eq!(
+            c.hash(),
+            Config::default().hash(),
+            "a dead key must not mint a new lineage"
+        );
+        assert!(!c.to_toml().contains("max_changed_files"));
     }
 
     #[test]

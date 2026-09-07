@@ -288,17 +288,8 @@ pub fn dirty_set(
     changes: &[Change],
     packages: &mut PackageSet,
     m: &Matchers,
-    max_changed_files: usize,
     consumed: &dyn Consumed,
 ) -> DirtySet {
-    if max_changed_files > 0 && changes.len() > max_changed_files {
-        return DirtySet::global(format!(
-            "{} changed files exceeds max_changed_files = {}",
-            changes.len(),
-            max_changed_files
-        ));
-    }
-
     // Pass one: apply BUILD file adds and deletes so ownership questions in
     // pass two see the package layout at head.
     let mut out = DirtySet::default();
@@ -520,7 +511,7 @@ mod tests {
 
     fn run(changes: Vec<Change>) -> DirtySet {
         let mut p = packages();
-        dirty_set(&changes, &mut p, &matchers(), 5000, &NoConsumers)
+        dirty_set(&changes, &mut p, &matchers(), &NoConsumers)
     }
 
     #[test]
@@ -626,15 +617,21 @@ mod tests {
         assert!(d.global_reason.unwrap().contains("MODULE.bazel"));
     }
 
+    /// A diff of any size is classified on its merits. The old
+    /// `max_changed_files` cut-off went global here on file count alone,
+    /// which fired on large no-op commits (a 10k-file licence-header sweep in
+    /// `apollo`) whose dirty set was tiny. What a run cannot afford is
+    /// re-querying too many *packages*, and the engine bounds that instead.
     #[test]
-    fn oversized_diffs_fall_back_to_global() {
-        let changes: Vec<Change> = (0..10)
+    fn a_large_diff_within_one_package_is_not_global() {
+        let changes: Vec<Change> = (0..10_000)
             .map(|i| Change::new(Status::Modified, format!("lib/core/f{i}.cc")))
             .collect();
         let mut p = packages();
-        let d = dirty_set(&changes, &mut p, &matchers(), 5, &NoConsumers);
-        assert!(d.global);
-        assert!(d.global_reason.unwrap().contains("max_changed_files"));
+        let d = dirty_set(&changes, &mut p, &matchers(), &NoConsumers);
+        assert!(!d.global);
+        assert_eq!(d.dirty.len(), 0, "sources do not re-query their package");
+        assert_eq!(d.direct_files.len(), 10_000);
     }
 
     #[test]
@@ -644,7 +641,6 @@ mod tests {
             &[Change::new(Status::Modified, "README.md")],
             &mut p,
             &matchers(),
-            0,
             &NoConsumers,
         );
         assert!(!d.global);
@@ -668,7 +664,6 @@ mod tests {
             &[Change::new(Status::Modified, "CHANGELOG.md")],
             &mut p,
             &m,
-            0,
             &Consumes(&["CHANGELOG.md"]),
         );
         assert!(d.direct_files.contains("CHANGELOG.md"));
@@ -690,7 +685,6 @@ mod tests {
             &[Change::new(Status::Modified, "CHANGELOG.md")],
             &mut p,
             &m,
-            0,
             &NoConsumers,
         );
         assert!(d.direct_files.is_empty());
@@ -713,7 +707,6 @@ mod tests {
             &[Change::new(Status::Added, "docs/new.md")],
             &mut p,
             &m,
-            0,
             &NoConsumers,
         );
         assert_eq!(d.dirty.iter().next().unwrap(), "docs");

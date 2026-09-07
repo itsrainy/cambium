@@ -104,8 +104,14 @@ plan uses quick; the published numbers come from a full run on EC2
 2. `.bazelrc` diff as an allowlist of (command, flag) pairs known not to
    affect loading (`--remote_*`, `--jobs`, `--test_*`, `--disk_cache`,
    configs no query uses); unknown flags and `import`/`try-import` go global.
-6. Replace `max_changed_files` with "cold build when dirty packages exceed
-   N", N from replay per-package query timings.
+6. (done) Replace `max_changed_files` with "cold build when dirty packages
+   exceed N", N from replay per-package query timings. N = 500: the replay
+   crossover (cold build / marginal ms per dirty package) is ~450 on bazel,
+   ~620 on apollo, ~210 on sourcegraph quick and past the whole repository on
+   envoy. A cold rebuild re-queries `//...` at head and splices it onto the
+   base, so it stays exact — it is reported as `stats.cold_rebuild`, not as a
+   global — and the corpus replay counts the two apart
+   (`summary.engine_cold_rebuilds`).
 Target: envoy replay globals 93 → under 20 per 300.
 
 Validation policy (Rainy, 2026-09-07): the corpus suite is for timing and

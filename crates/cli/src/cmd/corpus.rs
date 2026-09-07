@@ -464,6 +464,7 @@ fn do_replay(run: &Run, range: Option<usize>, resume: bool) -> Result<()> {
         p50_ms = result.summary.p50_total_ms,
         p90_ms = result.summary.p90_total_ms,
         globals = result.summary.globals,
+        cold_rebuilds = result.summary.engine_cold_rebuilds,
         oracle_ok = result.oracle.as_ref().map(|o| o.ok).unwrap_or(false),
         partial = result.cold.partial.partial,
         packages_in_error = result.cold.partial.packages_in_error,
