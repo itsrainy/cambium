@@ -10,12 +10,12 @@ D="${1:-/home/user/.claude/jobs/6b58f265/tmp}"
 R="$(cd "$(dirname "$0")/.." && pwd)/corpus-results"
 strip() { sed 's/\x1b\[[0-9;]*m//g'; }
 
-echo "== $(date '+%H:%M:%S')   lanes: A = bazel bazel-8 bazel-7   B = envoy envoy-7"
-for lane in A B; do
-  L="$D/lane${lane}2.log"; C="$D/cmp${lane}.log"
+echo "== $(date '+%H:%M:%S')   lanes: A = bazel bazel-8 bazel-7   B = envoy envoy-7   C = sourcegraph apollo"
+for lane in A B C; do
+  L="$D/lane${lane}2.log"; C="$D/cmp${lane}.log"; [ "$lane" = C ] && { L="$D/laneC.log"; C="$D/laneC.log"; }
   [ -f "$L" ] || continue
   echo "-- lane $lane"
-  grep -hE '^===' "$L" "$C" 2>/dev/null | tail -3 | cut -c1-90
+  { [ "$L" = "$C" ] && grep -hE '^===' "$L" || grep -hE '^===' "$L" "$C" 2>/dev/null; } | tail -3 | cut -c1-90
   step=$(grep -E 'replayed step=' "$L" | tail -1 | strip | sed -E 's/.*step=([0-9]+) of=([0-9]+).*dirty=([0-9]+) ms=([0-9]+).*/replay \1\/\2  (last: dirty=\3 \4ms)/')
   [ -n "$step" ] && echo "   $step"
   pair=$(grep -E 'comparing pair=' "$C" 2>/dev/null | tail -1 | strip | sed -E 's/.*pair=([0-9]+) of=([0-9]+).*kind="([a-z]+)".*/compare \1\/\2 (\3)/')
