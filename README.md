@@ -155,7 +155,7 @@ versioned contract. Every JSON document carries the version it was written
 against:
 
 ```json
-{ "schema": 4, "base": "...", "head": "...", ... }
+{ "schema": 5, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -187,7 +187,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -207,6 +207,7 @@ on the same terms.
 | 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
+| 5 | `stats.bazelrc_safe_diffs` — changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did
@@ -229,6 +230,16 @@ paths = ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel",
          "WORKSPACE.bzlmod", "WORKSPACE.bzlmod.lock", ".bazelrc",
          ".bazelversion", "BUILD", "BUILD.bazel"]
 globs = ["tools/toolchains/**", "platforms/**", "third_party/**/*.bzl"]
+
+[bazelrc]                    # a changed bazelrc is read rather than assumed:
+                             # if every flag it changed is known not to affect
+                             # loading or analysis (--remote_*, --jobs,
+                             # --test_output, BES, sandboxing, UI...) the run
+                             # is not invalidated. An unknown flag, a startup
+                             # line, an import, or the file appearing or
+                             # vanishing is still global. This extends that
+                             # allowlist; entries may end in `*`.
+allowlist_extra = []
 
 [ignore]                     # changes that cannot affect the build graph;
                              # a path some rule consumes as a source is an
