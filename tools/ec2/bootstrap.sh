@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bootstraps an Ubuntu 24.04 x86_64 corpus box: everything a full-profile
-# `cambi corpus all` needs, for every repository in corpus.toml.
+# `cambi corpus all` needs, for every repository in subject_repos.toml.
 #
 # Runs as EC2 user-data (root) on first boot, then everything cambium-related
 # is owned by `ubuntu`. Idempotent enough to re-run by hand:

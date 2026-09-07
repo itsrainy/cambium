@@ -174,7 +174,7 @@ fn pairs_are_deterministic_and_cover_the_range() {
     let o = PairOptions {
         repo_id: "synth".into(),
         pin: pin.clone(),
-        replay_range: commits.len() - 1,
+        history_window: commits.len() - 1,
         seed: 3,
         cap: 2,
         profile: cambium_corpus::Profile::Full,
@@ -182,13 +182,13 @@ fn pairs_are_deterministic_and_cover_the_range() {
         invalidator_paths: vec!["MODULE.bazel".into()],
         invalidator_globs: vec!["rules/**".into()],
     };
-    let adjacent = pairs::adjacent(&f.engine.repo, &pin, o.replay_range).unwrap();
+    let adjacent = pairs::adjacent(&f.engine.repo, &pin, o.history_window).unwrap();
     assert_eq!(adjacent.len(), commits.len() - 1);
     assert_eq!(adjacent[0].base, commits[0]);
     assert_eq!(adjacent.last().unwrap().head, pin);
 
     // A linear history has no merges.
-    assert!(pairs::pr_shaped(&f.engine.repo, &pin, o.replay_range)
+    assert!(pairs::pr_shaped(&f.engine.repo, &pin, o.history_window)
         .unwrap()
         .is_empty());
 

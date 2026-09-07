@@ -71,7 +71,7 @@ pub struct PairSet {
     /// The replay range the selection drew from: a quick set is chosen from
     /// the last 50 commits, a full one from the manifest's 300.
     #[serde(default)]
-    pub replay_range: usize,
+    pub history_window: usize,
     pub pairs: Vec<Pair>,
 }
 
@@ -93,7 +93,7 @@ impl PairSet {
 pub struct PairOptions {
     pub repo_id: String,
     pub pin: String,
-    pub replay_range: usize,
+    pub history_window: usize,
     pub seed: u64,
     /// Stress pairs per category.
     pub cap: usize,
@@ -189,7 +189,7 @@ fn sample(candidates: Vec<String>, cap: usize, seed: u64, salt: u64) -> Vec<Stri
 }
 
 pub fn stress(repo: &Repo, o: &PairOptions) -> Result<Vec<Pair>> {
-    let commits = range_commits(repo, &o.pin, o.profile.replay_range(o.replay_range))?;
+    let commits = range_commits(repo, &o.pin, o.profile.history_window(o.history_window))?;
     let Some(oldest) = commits.first() else {
         return Ok(Vec::new());
     };
@@ -301,7 +301,7 @@ pub fn cap_total(pairs: &[Pair], cap: usize) -> Vec<Pair> {
 
 /// Every requested kind, in kind order, as one set.
 pub fn select(repo: &Repo, kinds: &[PairKind], o: &PairOptions) -> Result<PairSet> {
-    let range = o.profile.replay_range(o.replay_range);
+    let range = o.profile.history_window(o.history_window);
     let mut pairs = Vec::new();
     for k in kinds {
         pairs.extend(match k {
@@ -319,7 +319,7 @@ pub fn select(repo: &Repo, kinds: &[PairKind], o: &PairOptions) -> Result<PairSe
         pin: o.pin.clone(),
         seed: o.seed,
         profile: o.profile.name().to_string(),
-        replay_range: range,
+        history_window: range,
         pairs,
     })
 }

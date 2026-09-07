@@ -92,7 +92,7 @@ impl Profile {
     /// Never larger than the manifest's: a quick run is a slice of the full
     /// one, so the same commits are replayed under both and the store lineage
     /// they publish is shared.
-    pub fn replay_range(self, manifest: usize) -> usize {
+    pub fn history_window(self, manifest: usize) -> usize {
         match self {
             Self::Full => manifest,
             Self::Quick => manifest.min(QUICK_REPLAY_RANGE),
@@ -153,9 +153,9 @@ mod tests {
 
     #[test]
     fn quick_bounds_the_range_but_never_grows_it() {
-        assert_eq!(Profile::Full.replay_range(300), 300);
-        assert_eq!(Profile::Quick.replay_range(300), QUICK_REPLAY_RANGE);
-        assert_eq!(Profile::Quick.replay_range(10), 10);
+        assert_eq!(Profile::Full.history_window(300), 300);
+        assert_eq!(Profile::Quick.history_window(300), QUICK_REPLAY_RANGE);
+        assert_eq!(Profile::Quick.history_window(10), 10);
         assert_eq!(Profile::Quick.pair_cap(), Some(QUICK_PAIR_CAP));
         assert_eq!(Profile::Quick.tango_pairs(), Some(QUICK_TANGO_PAIRS));
         assert_eq!(Profile::Full.pair_cap(), None);

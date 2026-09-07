@@ -5,7 +5,7 @@
 //! patterns, real `exports_files`, real broken packages — and at their real
 //! commit histories:
 //!
-//! - [`manifest`]: `corpus.toml`, the pinned list of repositories.
+//! - [`manifest`]: `subject_repos.toml`, the pinned list of repositories.
 //! - [`checkout`]: bare mirrors and worktrees under `$CAMBIUM_CORPUS_DIR`, the
 //!   generated per-repo `cambium.toml`, and the shared Bazel caches.
 //! - [`profile`]: `quick` versus `full` — how much of a repository one run
@@ -28,6 +28,7 @@ pub mod pairs;
 pub mod profile;
 pub mod replay;
 pub mod state;
+pub mod subject;
 
 pub use checkout::{Checkout, CorpusDir};
 pub use manifest::{Manifest, RepoEntry};
@@ -35,6 +36,7 @@ pub use pairs::{Pair, PairKind, PairSet};
 pub use profile::Profile;
 pub use replay::{replay, CommitRecord, Driver, ReplayOptions, ReplayResult};
 pub use state::State;
+pub use subject::{Subject, Synthetic};
 
 /// Where a full-profile run writes its results: `corpus-results/<id>/`.
 /// A quick run writes under `corpus-results/<id>/quick/`; see

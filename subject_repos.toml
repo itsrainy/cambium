@@ -1,18 +1,24 @@
-# The real-repository corpus (docs/CORPUS.md, spec §3).
+# The real subjects: open-source Bazel repositories cambium is benchmarked
+# against (docs/METHODOLOGY.md).
 #
-# Pins are bumped deliberately, in a PR that regenerates that repo's section
-# of docs/CORPUS.md. Order is the order the repos were brought up.
+# Each entry is a subject with a URL, a pinned commit, a history window (how
+# many first-parent commits before the pin a workload may use), and the Bazel
+# version it runs under: its own `.bazelversion`, or a `bazel_version` pin here
+# only when the subject has none to give, as apollo does. Bazel 7/8/9 coverage
+# of cambium itself is CI's synthetic version matrix; a subject is never pinned
+# twice to exercise another Bazel major.
 #
-# Each entry runs under its own `.bazelversion` (or `bazel_version` where the
-# repo has none to give, as apollo does). Bazel major coverage — that cambium
-# reads 7.x, 8.x and 9.x graphs alike — is CI's `bazel-version-matrix` job over
-# the synthetic corpus, not duplicate entries here.
+# Pins are bumped deliberately, in a change that regenerates that subject's
+# section of docs/RESULTS.md. Order is the order the subjects were brought up.
+#
+# Synthetic subjects are not listed here: they are named `synth:<preset>` on
+# the command line and generated on demand.
 
 [[repo]]
 id = "bazel"
 url = "https://github.com/bazelbuild/bazel.git"
 pin = "948b8c70e281c2fe42aa5468dad543c7af9f0ccc"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 # No repo-specific invalidators: builtins_bzl/** and tools/build_defs/repo/**
@@ -25,7 +31,7 @@ notes = "small, clean, macro-heavy Java; fast first target"
 id = "envoy"
 url = "https://github.com/envoyproxy/envoy.git"
 pin = "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 # NOTE (external-repository stage, `crates/index/src/externals.rs`): the engine
@@ -69,7 +75,7 @@ id = "sourcegraph"
 # history the replay wants.
 url = "https://github.com/sourcegraph/sourcegraph-public-snapshot.git"
 pin = "c864f15af264f0f456a6d8a83290b5c940715349"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["dev/bazel/**", "go.mod", "go.sum", "pnpm-lock.yaml"]
@@ -83,7 +89,7 @@ pin = "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"
 # Bazel (`third_party/gpus/cuda_configure.bzl` lacks `make_copy_files_rule`,
 # so the main repository mapping itself fails). A replay cannot cross it, and
 # 74 is the longest first-parent range that stays clear of it.
-replay_range = 74
+history_window = 74
 bazel = "bazelisk"
 # The repo has no .bazelversion and its deps are all declared in WORKSPACE,
 # with a MODULE.bazel that is the empty placeholder Bazel's migration message
@@ -107,7 +113,7 @@ notes = "C++ AV stack; graph shape closest to the target production repo"
 id = "xla"
 url = "https://github.com/openxla/xla.git"
 pin = "076fe93fad26cb2555e3bb86defa6a772d11cf35"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["third_party/**", "xla/tsl/**/*.bzl", "workspace*.bzl"]
@@ -117,7 +123,7 @@ notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loadi
 id = "tensorflow"
 url = "https://github.com/tensorflow/tensorflow.git"
 pin = "01990a8ef1f82e62ffffc77ac0d1adc78dc5ee69"
-replay_range = 300
+history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
 invalidators = ["third_party/**", "tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]
