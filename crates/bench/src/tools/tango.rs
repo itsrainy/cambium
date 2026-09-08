@@ -71,10 +71,7 @@ pub fn default_dir() -> PathBuf {
     if let Some(d) = std::env::var_os(DIR_ENV) {
         return PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".cache/cambium/tango")
+    crate::util::cache_dir("tango")
 }
 
 /// The tag and commit `fetch.sh` recorded, as one line.

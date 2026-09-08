@@ -39,12 +39,7 @@ impl SubjectsDir {
     pub fn from_env() -> Self {
         let root = std::env::var_os(SUBJECTS_DIR_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(std::env::temp_dir);
-                home.join(".cache/cambium/subjects")
-            });
+            .unwrap_or_else(|| crate::util::cache_dir("subjects"));
         Self { root }
     }
 
@@ -74,11 +69,9 @@ impl SubjectsDir {
     }
 
     pub fn output_base(&self, id: &str, bazel_version: Option<&str>) -> PathBuf {
-        let name = match bazel_version {
-            Some(v) if !v.is_empty() => format!("{id}-{}", v.replace(['/', ' '], "_")),
-            _ => id.to_string(),
-        };
-        self.root.join("output").join(name)
+        self.root
+            .join("output")
+            .join(crate::util::versioned_stem(id, bazel_version))
     }
 
     pub fn repository_cache(&self) -> PathBuf {

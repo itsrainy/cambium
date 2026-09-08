@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use cambium_bench::manifest::{Manifest, RepoEntry};
+use cambium_bench::util::{cache_dir, versioned_name};
 use cambium_bench::{changes, history, State, Subject, SubjectsDir};
 use cambium_engine::inspect::{IndexQuery, IndexStats};
 use clap::{Args as ClapArgs, Subcommand};
@@ -319,20 +320,11 @@ impl Run {
     /// `<stem>[-<version>].<ext>` — one result file per Bazel version, since
     /// the whole point of naming one is that two can disagree.
     fn result_path(&self, dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
-        dir.join(suffixed(stem, self.version(), ext))
+        dir.join(versioned_name(stem, self.version(), ext))
     }
 
     fn index_path(&self, sha: &str) -> PathBuf {
         self.result_path(&self.results, &format!("index-{sha}"), "bin")
-    }
-}
-
-/// `<stem>[-<version>].<ext>`, with anything path-hostile in the version
-/// flattened (`7.x` is fine, `latest/rc` would not be).
-pub fn suffixed(stem: &str, version: Option<&str>, ext: &str) -> String {
-    match version.filter(|v| !v.is_empty()) {
-        Some(v) => format!("{stem}-{}.{ext}", v.replace(['/', ' ', ':'], "_")),
-        None => format!("{stem}.{ext}"),
     }
 }
 
@@ -347,13 +339,13 @@ fn resolve_bazel(binary: &str) -> Result<String> {
     if let Some(found) = which(binary) {
         return Ok(found.display().to_string());
     }
-    let fallback = home().join(".cache/cambium/bin").join(binary);
+    let fallback = cache_dir("bin").join(binary);
     if fallback.exists() {
         return Ok(fallback.display().to_string());
     }
     anyhow::bail!(
         "no {binary} on PATH or in {}; pass --bazel-binary",
-        home().join(".cache/cambium/bin").display()
+        cache_dir("bin").display()
     )
 }
 
@@ -364,15 +356,9 @@ fn which(binary: &str) -> Option<PathBuf> {
         .find(|c| c.is_file())
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 fn expand_tilde(s: &str) -> PathBuf {
     match s.strip_prefix("~/") {
-        Some(rest) => home().join(rest),
+        Some(rest) => cambium_bench::util::home().join(rest),
         None => PathBuf::from(s),
     }
 }
@@ -534,13 +520,7 @@ fn stage_dir(subject: &str, c: &Common, workload: &str) -> Result<PathBuf> {
 }
 
 fn timestamped() -> String {
-    format!(
-        "{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    )
+    format!("{}.json", cambium_bench::util::now_unix())
 }
 
 /// Accepts `1000`, `1e6`, `2M`, `500k`.
@@ -1379,20 +1359,6 @@ mod tests {
         assert_eq!(path, dir.path().join("subject_repos.toml"));
         assert_eq!(m.get("bazel").unwrap().history_window, 300);
         assert!(Manifest::discover(Path::new("/")).is_err());
-    }
-
-    #[test]
-    fn result_names_carry_the_bazel_version() {
-        assert_eq!(suffixed("index-abc", None, "bin"), "index-abc.bin");
-        assert_eq!(suffixed("index-abc", Some(""), "bin"), "index-abc.bin");
-        assert_eq!(
-            suffixed("history-abc", Some("7.x"), "json"),
-            "history-abc-7.x.json"
-        );
-        assert_eq!(
-            suffixed("index-abc", Some("last/green"), "bin"),
-            "index-abc-last_green.bin"
-        );
     }
 
     #[test]

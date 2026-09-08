@@ -44,6 +44,7 @@ pub mod stages;
 pub mod state;
 pub mod subject;
 pub mod tools;
+pub mod util;
 
 pub use changes::{ChangeSet, ChangeSetKind, ChangeSetSet};
 pub use checkout::{Checkout, SubjectsDir};

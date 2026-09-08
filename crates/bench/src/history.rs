@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::oracles::rebuild::{compare_by_label, GraphDiff};
 use crate::state::{HistoryState, State};
+use crate::util::{now_unix, percentile};
 
 /// What the history needs from the world at a revision.
 pub trait Driver {
@@ -205,17 +206,15 @@ impl HistoryResult {
     /// empty version) is the repo's own `.bazelversion` and keeps the plain
     /// name.
     pub fn path_versioned(results_dir: &Path, pin: &str, version: Option<&str>) -> PathBuf {
-        match version.filter(|v| !v.is_empty()) {
-            Some(v) => results_dir.join(format!(
-                "history-{pin}-{}.json",
-                v.replace(['/', ' ', ':'], "_")
-            )),
-            None => Self::path(results_dir, pin),
-        }
+        results_dir.join(crate::util::versioned_name(
+            &format!("history-{pin}"),
+            version,
+            "json",
+        ))
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        crate::util::read_result(path)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -231,13 +230,6 @@ impl HistoryResult {
     pub fn summarise(&mut self) {
         self.summary = summarise(&self.commits);
     }
-}
-
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
 }
 
 pub fn summarise(commits: &[CommitRecord]) -> Summary {
@@ -275,13 +267,6 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
             commits.iter().map(|c| c.affected as f64).sum::<f64>() / commits.len() as f64
         },
     }
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// `bazel --version` in the subject's worktree, so the report can say which Bazel
