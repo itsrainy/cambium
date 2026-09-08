@@ -225,6 +225,9 @@ pub enum SubjectArgs {
 /// Everything a subcommand resolves once: the subject (with its Bazel binary
 /// made absolute), the subjects directory, and where its results go.
 struct Run {
+    /// What the person named, kept so a checkout knows whether it may be
+    /// produced on the spot (a synthetic subject) or must already exist.
+    subject: Subject,
     entry: RepoEntry,
     subjects: SubjectsDir,
     /// `<root>/<subject>`: the state file and the cold indexes, shared by
@@ -273,6 +276,7 @@ impl Run {
             .or_else(|| entry.bazel_version.clone())
             .filter(|v| !v.is_empty());
         Ok(Self {
+            subject,
             entry,
             subjects,
             results,
@@ -280,6 +284,11 @@ impl Run {
             seed: c.seed,
             quick: c.quick,
         })
+    }
+
+    /// The subject's worktree, emitted and cloned first if it is synthetic.
+    fn checkout(&self) -> Result<cambium_bench::checkout::Checkout> {
+        self.subjects.open_or_fetch(&self.subject, &self.entry)
     }
 
     /// `bench-results/<subject>/<workload>/`, created.
@@ -628,7 +637,7 @@ fn fetch(run: &Run) -> Result<()> {
 }
 
 fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let want = at.unwrap_or(&run.entry.pin);
     let sha = checkout
         .repo
@@ -688,7 +697,7 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
 
 fn do_history(run: &Run, commits: Option<usize>, oracles: &[String], resume: bool) -> Result<()> {
     let rebuild_oracle = parse_history_oracles(oracles)?;
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let engine = checkout.engine(&run.entry, run.version())?;
     let results = run.workload("history")?;
     let range = commits.unwrap_or(run.entry.history_window);
@@ -787,7 +796,7 @@ fn do_change_sets(
             })
             .collect::<Result<Vec<_>>>()?
     };
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let wants_hubs = kinds.contains(&changes::ChangeSetKind::Stress);
     let hub_packages = if wants_hubs {
         hub_packages(run)?
@@ -929,7 +938,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     }
     let tools: Vec<&dyn cambium_bench::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let set = load_change_sets(run, &checkout, args)?;
     let change_sets: Vec<_> = set
         .change_sets

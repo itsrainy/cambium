@@ -25,7 +25,7 @@ use anyhow::{Context as _, Result};
 use cambium_bazel::Bazel;
 use serde::{Deserialize, Serialize};
 
-/// What Bazel said about the `.bzl` files in one change set's change set.
+/// What Bazel said about the `.bzl` files loaded in one change set.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadOracleResult {
     /// The changed `.bzl` paths the query asked about.

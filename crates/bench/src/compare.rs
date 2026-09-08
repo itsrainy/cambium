@@ -71,8 +71,8 @@ pub struct ChangesOptions {
     /// Skip change sets already recorded in the state file.
     pub resume: bool,
     pub examples: usize,
-    /// How many change sets Tango runs on — the first this many, in the change set set's
-    /// own order — or `None` for all of them.
+    /// How many change sets Tango runs on — the first this many, in the change
+    /// sets' own order — or `None` for all of them.
     ///
     /// Tango costs 30-500 s a change set against cambium's fractions of a second, so
     /// on a laptop it *is* the run. Capping it keeps a timing sample worth
