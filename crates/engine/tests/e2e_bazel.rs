@@ -732,7 +732,9 @@ fn assert_same_edges(spliced: &IndexData, fresh: &IndexData, step: usize) {
 ///   main repository exactly as envoy hides `api/` behind `@envoy_api`;
 /// - `@gen` is a `use_repo_rule` repository whose rule reads `config.txt`
 ///   through a label attribute, exactly as `@envoy_repo` reads
-///   `.github/config.yml`.
+///   `.github/config.yml`, and whose generated BUILD file lists `//data` in
+///   a target's `srcs`, exactly as `@envoy_repo//:project` lists
+///   `@envoy//changelogs` in its `tools`.
 ///
 /// Neither file belongs to a main-repo package, so before the external stage
 /// existed the only sound answer for either was "everything".
@@ -775,7 +777,7 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
         \x20   rctx.file(\"value.txt\", value)\n\
         \x20   rctx.file(\n\
         \x20       \"BUILD\",\n\
-        \x20       'filegroup(name = \"value\", srcs = [\"value.txt\"], visibility = [\"//visibility:public\"])\\n',\n\
+        \x20       'filegroup(name = \"value\", srcs = [\"value.txt\", \"@root//data\"], visibility = [\"//visibility:public\"])\\n',\n\
         \x20   )\n\n\
          gen_repo = repository_rule(\n\
         \x20   implementation = _impl,\n\
@@ -788,6 +790,14 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
         "load(\"@mod_a//:defs.bzl\", _via_macro = \"via_macro\")\n\n\
          via_macro = _via_macro\n",
     );
+    // What `@gen//:value`'s generated `srcs` names: a file the repository
+    // rule never reads.
+    write(
+        root,
+        "data/BUILD.bazel",
+        "filegroup(name = \"data\", srcs = [\"notes.txt\"], visibility = [\"//visibility:public\"])\n",
+    );
+    write(root, "data/notes.txt", "n1\n");
     write(
         root,
         "mod_a/MODULE.bazel",
@@ -903,6 +913,14 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             ["mod_a".to_string()].into_iter().collect::<BTreeSet<_>>(),
             "{version}: a local_path_override directory is an input map entry"
         );
+        assert_eq!(
+            v.repos_for_path_kinds("data/notes.txt")
+                .into_iter()
+                .map(|(r, feeds)| (v.repo_name(r).to_string(), feeds))
+                .collect::<Vec<_>>(),
+            vec![("gen".to_string(), false)],
+            "{version}: a path only the generated BUILD file names is target-only"
+        );
 
         let check = |name: &str, rel: &str, contents: &str, pattern: Option<&str>| {
             write(&root, rel, contents);
@@ -959,6 +977,35 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             "{version}: {gen:?}"
         );
         assert!(!gen.contains("//app:unrelated"), "{version}: {gen:?}");
+
+        // The other half of the `@envoy_repo` shape: a file the rule never
+        // reads, listed in the `srcs` of a target it *writes*. Bazel's own
+        // edge runs `//data:data` -> `@gen//:value` -> `//app:uses_gen`, and
+        // that is the whole answer: nothing the rule writes can have moved,
+        // so the package whose closure loads from `@gen` is not re-queried.
+        let n_report = check(
+            "edit data",
+            "data/notes.txt",
+            "n2\n",
+            Some("//data:notes.txt + @gen//:value"),
+        );
+        let n = labels(&n_report);
+        assert!(
+            n.contains("//data:data")
+                && n.contains("//app:uses_gen")
+                && n.contains("//app:downstream"),
+            "{version}: {n:?}"
+        );
+        assert!(!n.contains("//app:unrelated"), "{version}: {n:?}");
+        assert_eq!(
+            n_report.stats.repos_label_only, 1,
+            "{version}: a path only a generated target names spares rule (a)"
+        );
+        assert!(
+            !n_report.dirty_packages.contains(&"app".to_string()),
+            "{version}: `app` must not be re-queried: {:?}",
+            n_report.dirty_packages
+        );
 
         // The `@envoy_api` shape: a `local_path_override` module's sources.
         //

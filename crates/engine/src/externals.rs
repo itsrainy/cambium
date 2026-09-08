@@ -64,6 +64,20 @@
 //! unconditionally, because *any* file in it may have moved. Rule (1) is
 //! untouched in every case.
 //!
+//! The same question has a second static answer, for repositories with no
+//! mapping at all. The index's input map errs wide: every main-repo label in a
+//! repository rule's `.bzl` is an input of the repositories it defines, and
+//! that includes labels the rule merely *writes* — envoy's `bazel/repo.bzl`
+//! generates a BUILD file whose `genrule` lists `@envoy//changelogs` in
+//! `tools`, so every commit that adds a changelog entry dirtied `@envoy_repo`,
+//! whose `compiler.bzl` is in eleven hundred package closures. But a file only
+//! a generated target names is a build-time dependency of that target; the
+//! rule never reads it, so nothing it writes — no `.bzl` — can have moved. The
+//! index records those patterns as target-only
+//! ([`cambium_index::externals::RepoInputs::target_only`]) and the stage
+//! applies rule (1) alone for them, which is exactly the edge Bazel would
+//! follow. A path a rule both resolves and writes counts as resolved.
+//!
 //! There is no third way. A repository cannot affect a package's rules without
 //! appearing in that package's `load()` closure or in some rule's attributes —
 //! except through toolchain resolution, which has no edge to follow and which
@@ -150,8 +164,10 @@ pub struct Externals {
     pub by_module: usize,
     /// How many were named by a changed workspace-closure `.bzl`.
     pub by_bzl: usize,
-    /// How many input-dirtied repositories the path mapping spared from
-    /// rule (2): their label consumers are dirty, their loaders are not.
+    /// How many input-dirtied repositories were spared rule (2) — by the
+    /// path mapping, or because the only thing naming the path is a target
+    /// the repository rule writes: their label consumers are dirty, their
+    /// loaders are not.
     pub label_only: usize,
 }
 
@@ -222,14 +238,27 @@ pub fn analyse(
 
     // Repository-rule inputs: main-repo files an external repository is built
     // from. Keyed by repo id, because deciding whether rule (2) applies needs
-    // that repository's path mapping and the paths that dirtied it.
+    // that repository's path mapping and the paths that dirtied it. A path
+    // that only a *target* the rule writes names (its generated BUILD file
+    // lists `@envoy//changelogs` in `tools`) is kept apart: it moves the
+    // repository's targets and nothing the rule itself reads.
     let mut by_input: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    let mut by_target: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     for c in changes {
-        for r in base.repos_for_path(&c.path) {
-            by_input.entry(r).or_default().push(c.path.as_str());
+        for (r, feeds_rule) in base.repos_for_path_kinds(&c.path) {
+            let map = if feeds_rule {
+                &mut by_input
+            } else {
+                &mut by_target
+            };
+            map.entry(r).or_default().push(c.path.as_str());
         }
     }
-    out.by_input = by_input.len();
+    out.by_input = by_input
+        .keys()
+        .chain(by_target.keys())
+        .collect::<BTreeSet<_>>()
+        .len();
     for (repo, paths) in by_input {
         let name = base.repo_name(repo).to_string();
         if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, &paths) {
@@ -243,6 +272,17 @@ pub fn analyse(
             );
         }
         out.repos.insert(name);
+    }
+    for (repo, paths) in by_target {
+        let name = base.repo_name(repo).to_string();
+        if out.repos.insert(name.clone()) {
+            out.label_only += 1;
+            tracing::debug!(
+                repo = %name,
+                ?paths,
+                "a target the repository rule writes names this path; no .bzl in the repository can have moved"
+            );
+        }
     }
 
     out
