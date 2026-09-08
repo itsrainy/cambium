@@ -7,11 +7,13 @@
 //! a five-target workspace. Run it explicitly:
 //!
 //! ```text
-//! USE_BAZEL_VERSION=9.2.0 cargo test -p cambium-compare -- --ignored --nocapture
+//! USE_BAZEL_VERSION=9.2.0 cargo test -p cambium-bench --test smoke_real_bazel -- --ignored --nocapture
 //! ```
 //!
-//! Skipped (not failed) when `~/.cache/cambium/bin/bazelisk` is absent, so a
-//! machine without it can still run `--ignored` for the rest of the suite.
+//! Skipped (not failed) when `~/.cache/cambium/bin/bazelisk` or both tools are
+//! absent, so a machine without them can still run `--ignored` for the rest of
+//! the suite. `CAMBIUM_REQUIRE_TOOLS=1` turns each skip into a failure; CI's
+//! matrix job sets it, having just built the tools.
 //!
 //! What it is actually for: the unit tests pin the arithmetic and the parsing,
 //! but only a real Bazel can tell you whether the three tools are being asked
@@ -29,6 +31,15 @@ use cambium_bench::{compare_change_sets, ChangesOptions, Tool};
 fn bazelisk() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("HOME")?).join(".cache/cambium/bin/bazelisk");
     p.exists().then_some(p)
+}
+
+/// Says why the test is not running, or refuses to skip when the environment
+/// says the tools must be there.
+fn skip(why: &str) {
+    if std::env::var_os("CAMBIUM_REQUIRE_TOOLS").is_some_and(|v| v == "1") {
+        panic!("CAMBIUM_REQUIRE_TOOLS is set: {why}");
+    }
+    eprintln!("{why}; skipping");
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -215,7 +226,7 @@ fn scratch_root(version: Option<&str>) -> PathBuf {
 #[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
 fn the_three_tools_agree_on_a_real_bazel_workspace() {
     let Some(bazel) = bazelisk() else {
-        eprintln!("no ~/.cache/cambium/bin/bazelisk; skipping");
+        skip("no ~/.cache/cambium/bin/bazelisk");
         return;
     };
     let version = bazel_version();
@@ -266,7 +277,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     .flatten()
     .collect();
     if tools.is_empty() {
-        eprintln!("neither bazel-diff nor tango is installed; skipping");
+        skip("neither bazel-diff nor tango is installed");
         return;
     }
     let refs: Vec<&dyn Tool> = tools.iter().map(|p| p.as_ref()).collect();
@@ -447,7 +458,7 @@ cat_rule(
 #[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
 fn the_full_oracle_matches_hand_computed_rdeps() {
     let Some(bazel) = bazelisk() else {
-        eprintln!("no ~/.cache/cambium/bin/bazelisk; skipping");
+        skip("no ~/.cache/cambium/bin/bazelisk");
         return;
     };
     let version = bazel_version();

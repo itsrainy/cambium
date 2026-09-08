@@ -24,17 +24,24 @@ find_instance() {
     --query 'Reservations[0].Instances[0].[InstanceId,State.Name,PublicDnsName]' --output text 2>/dev/null | grep -v None || true
 }
 
+# The instance the subcommand needs, or a clear failure instead of an `aws`
+# call with an empty --instance-ids.
+need_instance() {
+  read -r ID STATE HOST <<<"$(find_instance)"
+  [ -n "${ID:-}" ] || { echo "no cambium benchmark instance in $R; run $0 launch" >&2; exit 1; }
+}
+
 case "${1:-launch}" in
   ssh)
-    read -r ID STATE HOST <<<"$(find_instance)"
+    need_instance
     exec ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" "${@:2}" ;;
   stop|start|terminate)
-    read -r ID STATE HOST <<<"$(find_instance)"
+    need_instance
     aws ec2 "$1-instances" --region "$R" --instance-ids "$ID" --query "*[0].[InstanceId,CurrentState.Name]" --output text ;;
   launch)
     EXISTING=$(find_instance)
     if [ -n "$EXISTING" ]; then echo "already exists: $EXISTING"; exit 0; fi
-    SG=$(aws ec2 describe-security-groups --region "$R" --filters Name=group-name,Values=$SG_NAME --query 'SecurityGroups[0].GroupId' --output text)
+    SG=$(aws ec2 describe-security-groups --region "$R" --filters "Name=group-name,Values=$SG_NAME" --query 'SecurityGroups[0].GroupId' --output text)
     AMI=$(aws ec2 describe-images --region "$R" --owners 099720109477 \
       --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" Name=state,Values=available \
       --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
@@ -52,12 +59,13 @@ case "${1:-launch}" in
     echo "then: tools/ec2/launch.sh sync   # copies this tree and builds cambi, bazel-diff-rust, tango" ;;
   sync)
     # The repository is private; the box gets the working tree, not a clone.
-    read -r ID STATE HOST <<<"$(find_instance)"
+    need_instance
     ROOT=$(cd "$HERE/../.." && pwd)
-    tar -C "$ROOT" -czf - --exclude=./target --exclude=./bench-results --exclude='./bench-results-*' \
-      --exclude=./corpus-results --exclude='./corpus-results-*' \
-      --exclude=./.claude --exclude=./.git/worktrees . 2>/dev/null \
-      | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium 2>/dev/null'
+    # No `2>/dev/null` on either side: under pipefail a tar or ssh failure
+    # has to be visible, or a half-copied tree builds on the box.
+    tar -C "$ROOT" -czf - --exclude=./target --exclude='./bench-results*' \
+      --exclude='./corpus-results*' --exclude=./.claude --exclude=./.git/worktrees . \
+      | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium'
     ssh -i "$PEM" "ubuntu@$HOST" 'cat > ~/finish-bootstrap.sh <<"EOS"
 set -euxo pipefail
 source ~/.cargo/env

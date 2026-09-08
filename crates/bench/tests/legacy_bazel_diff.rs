@@ -1,24 +1,32 @@
 //! The bazel-diff comparison stage, at the smallest preset.
 //!
 //! Skipped with a message when the bazel-diff binary has not been built, so a
-//! clone without `tools/bazel-diff/fetch.sh` having run still tests green.
+//! clone without `tools/bazel-diff/fetch.sh` having run still tests green —
+//! unless `CAMBIUM_REQUIRE_TOOLS=1`, which is what CI's matrix job sets right
+//! after building the tool: there a skip would hide a broken fetch.
 
 use cambium_bench::legacy::{self, LegacyOptions};
 use cambium_bench::stages::StageContext;
+use cambium_bench::tools::bazeldiff::{BazelDiff, Implementation};
+use cambium_bench::tools::Tool as _;
 
 #[test]
 fn cambium_and_bazel_diff_agree_on_the_impacted_targets() {
-    let Some(binary) = legacy::bazel_diff_binary(None) else {
-        eprintln!(
-            "skipping: no bazel-diff binary; run tools/bazel-diff/fetch.sh \
-             or set CAMBIUM_BAZEL_DIFF"
-        );
-        return;
+    let bazel_diff = match BazelDiff::discover(Implementation::Rust) {
+        Ok(b) => b,
+        Err(e) if std::env::var_os("CAMBIUM_REQUIRE_TOOLS").is_some_and(|v| v == "1") => {
+            panic!("CAMBIUM_REQUIRE_TOOLS is set and bazel-diff is missing: {e:#}")
+        }
+        Err(e) => {
+            eprintln!("skipping: {e:#}");
+            return;
+        }
     };
-    eprintln!("using bazel-diff at {}", binary.display());
+    eprintln!("using {} {}", bazel_diff.name(), bazel_diff.version());
 
     let ctx = StageContext::new("tiny", 1).expect("tiny preset");
-    let run = legacy::run(&ctx, &LegacyOptions::default()).expect("stage runs and the sets agree");
+    let run = legacy::run(&ctx, &bazel_diff, &LegacyOptions::default())
+        .expect("stage runs and the sets agree");
 
     // Something must have been impacted, or the comparison is vacuous.
     assert!(

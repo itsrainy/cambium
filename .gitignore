@@ -1,9 +1,7 @@
 /target
 **/*.rs.bk
 *.bin.tmp
-# Benchmark runs. `corpus-results*/` is the old layout, kept on disk as
-# history; nothing writes there any more.
+# Benchmark runs.
 bench-results*/
-corpus-results*/
 .claude/
 .cambium-logs/

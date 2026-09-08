@@ -44,17 +44,3 @@ sudo -u ubuntu -H bash -c 'curl -fsSL https://sh.rustup.rs | sh -s -- -y --profi
 # half only prepares the machine; the repository half is `finish-bootstrap.sh`
 # in the home directory, written by launch.sh.
 echo "MACHINE READY"
-exit 0
-
-sudo -u ubuntu -H bash -c '
-  set -euxo pipefail
-  source ~/.cargo/env
-  export PATH=/usr/local/go/bin:$PATH
-  cd ~/cambium
-  cargo build --release
-  mkdir -p ~/.cache/cambium/bin
-  ln -sf /usr/local/bin/bazelisk ~/.cache/cambium/bin/bazelisk
-  tools/bazel-diff/fetch.sh
-  tools/tango/fetch.sh
-'
-echo "BOOTSTRAP DONE"
