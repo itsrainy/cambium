@@ -77,7 +77,7 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ```console
 $ cambi affected --base <sha> [--head <sha>] [--tests-only] [--include-manual]
                    [--output text|json|query] [--explain] [--max-depth n]
-                   [--no-full-build] [--publish-base] [--write-index <file>]
+                   [--no-full-build] [--publish-base] [--out <index file>]
 $ cambi baseline build  [--commit <sha>] [--publish] [--out <file>]
 $ cambi baseline update --from <sha> [--to <sha>] [--publish] [--out <file>]
                    [--no-rebuild-on-global]
