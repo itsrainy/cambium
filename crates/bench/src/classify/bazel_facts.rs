@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 use cambium_bazel::Bazel;
 use cambium_index::{IndexRef, WalkOptions};
-use cambium_proto::blaze_query::{attribute::Discriminator, Rule, Target};
+use cambium_proto::blaze_query::{attribute::Discriminator, Rule};
 
 use super::Facts;
 
@@ -379,29 +379,7 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
 /// the labels Bazel could resolve are on stdout, and the ones it could not are
 /// cached as `None` by the caller.
 fn query_rules(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
-    let out = bazel
-        .command("query")
-        .args([
-            expr,
-            "--output=streamed_proto",
-            "--proto:flatten_selects=false",
-            "--proto:locations=false",
-            // No `--noimplicit_deps`, matching `cambium_bazel::QUERY_FLAGS`:
-            // the index carries implicit edges, so a proto compared against it
-            // has to carry them too.
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() && out.status.code() != Some(3) {
-        tracing::debug!(status = %out.status, "the batched rule query failed");
-        return None;
-    }
-    let targets: Vec<Target> = cambium_proto::decode_all(out.stdout.as_slice()).ok()?;
-    Some(targets.into_iter().filter_map(|t| t.rule).collect())
+    crate::tools::bazel_query::rules(bazel, expr)
 }
 
 /// Whether a rule names a label outside the main repository among its
@@ -420,27 +398,7 @@ pub fn names_external_input(rule: &Rule) -> bool {
 /// `selector_list` field is gone, so there is no way to tell a `select`ed dep
 /// from an unconditional one.
 fn query_rule(bazel: &Bazel, label: &str) -> Option<Rule> {
-    let out = bazel
-        .command("query")
-        .args([
-            label,
-            "--output=streamed_proto",
-            "--proto:flatten_selects=false",
-            "--proto:locations=false",
-            // See `query_rules`.
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        tracing::debug!(label, "bazel query for the rule proto failed");
-        return None;
-    }
-    let targets: Vec<Target> = cambium_proto::decode_all(out.stdout.as_slice()).ok()?;
-    targets.into_iter().find_map(|t| t.rule)
+    crate::tools::bazel_query::rules(bazel, label)?.into_iter().next()
 }
 
 /// The labels a rule names in attributes the BUILD file wrote, and whether any

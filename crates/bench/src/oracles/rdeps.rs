@@ -62,8 +62,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use cambium_bazel::Bazel;
+
+use crate::tools::bazel_query;
 use cambium_classify::PackageSet;
 use cambium_index::IndexRef;
 use rand::seq::SliceRandom;
@@ -481,28 +483,14 @@ fn external_routes(bazel: &Bazel, roots: &[String], missing: &[String]) -> Vec<S
     let union = label_set(head);
     let mut out = Vec::new();
     for label in missing.iter().take(MAX_ROUTE_PROBES) {
+        // A probe that will not run says nothing either way, and the caller
+        // leaves the label unexplained -- the safe direction, since it fails
+        // the change set whichever way this lands.
         let expr = format!("somepath({label}, {union})");
-        let Ok(o) = bazel
-            .command("query")
-            .args([
-                expr.as_str(),
-                "--output=label",
-                "--order_output=no",
-                "--keep_going",
-                "--noshow_progress",
-                "--ui_event_filters=-info",
-            ])
-            .output()
-        else {
+        let Ok((path, _partial)) = bazel_query::labels(bazel, &expr, "somepath") else {
             continue;
         };
-        if !o.status.success() && o.status.code() != Some(3) {
-            continue;
-        }
-        if parse_labels(&String::from_utf8_lossy(&o.stdout))
-            .iter()
-            .any(|l| is_external(l))
-        {
+        if path.iter().any(|l| is_external(l)) {
             out.push(label.clone());
         }
     }
@@ -597,32 +585,7 @@ struct Batch {
 /// [`RdepsOracle::run_batch`].
 fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     let expr = rdeps_expression(roots);
-    let out = bazel
-        .command("query")
-        .args([
-            expr.as_str(),
-            "--output=label",
-            // No `--noimplicit_deps`: the index carries implicit edges (see
-            // `cambium_bazel::QUERY_FLAGS`), and the oracle has to ask the same
-            // question or the two sides are not comparable. Asking it with the
-            // implicit edges in is also the stronger check — it is the version
-            // that catches a main-repo tool reaching its consumers.
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ])
-        .output()
-        .context("spawning bazel query rdeps")?;
-    let partial = out.status.code() == Some(3);
-    anyhow::ensure!(
-        out.status.success() || partial,
-        "bazel query {} failed with {}\n{}",
-        crate::tools::tail(&expr, 1),
-        out.status,
-        crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 20)
-    );
-    let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
+    let (labels, partial) = bazel_query::labels(bazel, &expr, &crate::tools::tail(&expr, 1))?;
     if partial {
         tracing::warn!(
             roots = roots.len(),
@@ -649,26 +612,7 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
 /// under `--keep_going` under-counts N, which understates cambium's
 /// over-approximation rather than flattering it.
 pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
-    let out = bazel
-        .command("query")
-        .args([
-            "kind(rule, //...)",
-            "--output=label",
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ])
-        .output()
-        .context("spawning bazel query kind(rule, //...)")?;
-    let partial = out.status.code() == Some(3);
-    anyhow::ensure!(
-        out.status.success() || partial,
-        "bazel query kind(rule, //...) failed with {}\n{}",
-        out.status,
-        crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 20)
-    );
-    let labels = parse_labels(&String::from_utf8_lossy(&out.stdout));
+    let (labels, partial) = bazel_query::labels(bazel, "kind(rule, //...)", "kind(rule, //...)")?;
     if partial {
         tracing::warn!(
             labels = labels.len(),
@@ -678,14 +622,6 @@ pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
     Ok(labels)
 }
 
-/// One label per line, blank lines dropped.
-pub fn parse_labels(out: &str) -> BTreeSet<String> {
-    out.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -747,12 +683,6 @@ mod tests {
         assert!(batches(&[], 10, 10).is_empty());
         // A label alone over the cap still gets asked about.
         assert_eq!(batches(&labels(1), 10, 1).len(), 1);
-    }
-
-    #[test]
-    fn labels_parse_from_query_output() {
-        let got = parse_labels("//a:a\n\n  //b:b \n");
-        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["//a:a", "//b:b"]);
     }
 
     #[test]

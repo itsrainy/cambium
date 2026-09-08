@@ -414,7 +414,7 @@ mod tests {
         let tango = Tango::at(stub, "test".into());
         let run = tango
             .affected(&repo, &base, &head, &ctx)
-            .expect("the change_set runs despite the stale locked worktree");
+            .expect("the change set runs despite the stale locked worktree");
         assert_eq!(
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string()]

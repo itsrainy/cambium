@@ -885,7 +885,7 @@ pub fn compare_change_set_with(
         tracing::info!(
             %reason,
             tools = tools.len(),
-            "the change_set is globally invalidated: cambium answers //..., and the tools run anyway so the cost of that is recorded"
+            "the change set is globally invalidated: cambium answers //..., and the tools run anyway so the cost of that is recorded"
         );
         // A failure here must not take the run down: the universe is a
         // reporting number, not a gate, and a repository whose `//...` will
@@ -895,7 +895,7 @@ pub fn compare_change_set_with(
             Err(e) => {
                 tracing::warn!(
                     error = format!("{e:#}"),
-                    "could not count the rule universe; the global change_set records 0"
+                    "could not count the rule universe; the global change set records 0"
                 );
                 BTreeSet::new()
             }
@@ -939,7 +939,7 @@ pub fn compare_change_set_with(
                         tracing::warn!(
                             tool = p.name(),
                             error = format!("{e:#}"),
-                            "tool failed on this global change_set"
+                            "tool failed on this global change set"
                         );
                         ToolComparison::failed(p.name(), p.version(), &e)
                     }
@@ -1104,7 +1104,7 @@ pub fn compare_change_set_with(
                 tracing::warn!(
                     tool = p.name(),
                     error = format!("{e:#}"),
-                    "tool failed on this change_set"
+                    "tool failed on this change set"
                 );
                 ToolComparison::failed(p.name(), p.version(), &e)
             }
@@ -1281,7 +1281,7 @@ pub fn compare_change_sets(
         );
         let cmp = compare_change_set_with(engine, checkout, change_set, &running, opts)?;
         if !cmp.pass {
-            tracing::warn!(%key, "change_set failed the three-way comparison");
+            tracing::warn!(%key, "change set failed the three-way comparison");
         }
         result.change_sets.push(cmp);
         result.summarise();
@@ -1468,7 +1468,7 @@ mod tests {
         let s = summarise(&change_sets);
         assert_eq!(s.change_sets, 2);
         assert_eq!(s.passed, 1);
-        assert!(!s.pass, "one failing change_set fails the run");
+        assert!(!s.pass, "one failing change set fails the run");
         assert_eq!(s.by_class["cambium_extra_select"], 4);
         assert_eq!(s.by_class["cambium_missing"], 1);
         assert_eq!(
