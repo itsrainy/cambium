@@ -109,37 +109,58 @@ impl BazelDiff {
     /// Locates the requested implementation, or explains where it looked.
     pub fn discover(imp: Implementation) -> Result<Self> {
         let dir = default_dir();
+        let override_env = match imp {
+            Implementation::Rust => BIN_ENV,
+            Implementation::Kotlin => JAR_ENV,
+        };
+        match std::env::var_os(override_env) {
+            Some(p) => Self::at(imp, &dir, PathBuf::from(p)),
+            None => Self::discover_in(imp, &dir),
+        }
+    }
+
+    /// The installation under `dir`, as `tools/bazel-diff/fetch.sh` lays one
+    /// out.
+    ///
+    /// The environment is read by [`discover`](Self::discover) and nowhere
+    /// else, so a test can point at a directory of its own without setting a
+    /// process-wide variable that every other test in the binary shares.
+    pub fn discover_in(imp: Implementation, dir: &Path) -> Result<Self> {
+        let path = match imp {
+            Implementation::Rust => dir.join("bin/bazel-diff-rust"),
+            Implementation::Kotlin => dir.join("bazel-diff_deploy.jar"),
+        };
+        Self::at(imp, dir, path)
+    }
+
+    /// One implementation at an explicit path, with the version the
+    /// installation `dir` records beside it.
+    fn at(imp: Implementation, dir: &Path, path: PathBuf) -> Result<Self> {
         match imp {
             Implementation::Rust => {
-                let bin = std::env::var_os(BIN_ENV)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| dir.join("bin/bazel-diff-rust"));
                 anyhow::ensure!(
-                    bin.exists(),
+                    path.exists(),
                     "no bazel-diff binary at {}; set ${BIN_ENV}, or ${DIR_ENV}, \
                      or run tools/bazel-diff/fetch.sh",
-                    bin.display()
+                    path.display()
                 );
-                let version = read_version_file(&dir)
-                    .or_else(|| binary_version(&bin))
+                let version = read_version_file(dir)
+                    .or_else(|| binary_version(&path))
                     .unwrap_or_else(|| "unknown".into());
-                Ok(Self::new(imp, Exec::Binary(bin), version))
+                Ok(Self::new(imp, Exec::Binary(path), version))
             }
             Implementation::Kotlin => {
-                let jar = std::env::var_os(JAR_ENV)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| dir.join("bazel-diff_deploy.jar"));
                 anyhow::ensure!(
-                    jar.exists(),
+                    path.exists(),
                     "no bazel-diff jar at {}; set ${JAR_ENV}, or ${DIR_ENV}",
-                    jar.display()
+                    path.display()
                 );
                 let java = std::env::var_os("JAVA_HOME")
                     .map(|h| PathBuf::from(h).join("bin/java"))
                     .filter(|p| p.exists())
                     .unwrap_or_else(|| PathBuf::from("java"));
-                let version = read_version_file(&dir).unwrap_or_else(|| "unknown".into());
-                Ok(Self::new(imp, Exec::Jar { java, jar }, version))
+                let version = read_version_file(dir).unwrap_or_else(|| "unknown".into());
+                Ok(Self::new(imp, Exec::Jar { java, jar: path }, version))
             }
         }
     }
@@ -449,13 +470,15 @@ mod tests {
     #[test]
     fn a_missing_installation_says_where_it_looked() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var(DIR_ENV, dir.path());
-        std::env::remove_var(BIN_ENV);
-        let err = BazelDiff::discover(Implementation::Rust)
+        let err = BazelDiff::discover_in(Implementation::Rust, dir.path())
             .unwrap_err()
             .to_string();
-        std::env::remove_var(DIR_ENV);
         assert!(err.contains("bin/bazel-diff-rust"), "{err}");
         assert!(err.contains("fetch.sh"), "{err}");
+
+        let err = BazelDiff::discover_in(Implementation::Kotlin, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bazel-diff_deploy.jar"), "{err}");
     }
 }

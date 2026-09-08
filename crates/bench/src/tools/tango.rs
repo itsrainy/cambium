@@ -116,16 +116,29 @@ impl Tango {
     /// `~/.cache/cambium/tango/bin/tango-cli`.
     pub fn discover() -> Result<Self> {
         let dir = default_dir();
-        let bin = std::env::var_os(BIN_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| dir.join("bin/tango-cli"));
+        match std::env::var_os(BIN_ENV) {
+            Some(bin) => Ok(Self::at(
+                PathBuf::from(bin),
+                read_version_file(&dir).unwrap_or_else(|| "unknown".into()),
+            )),
+            None => Self::discover_in(&dir),
+        }
+    }
+
+    /// The installation under `dir`, as `tools/tango/fetch.sh` lays one out.
+    ///
+    /// The environment is read by [`discover`](Self::discover) and nowhere
+    /// else, so a test can point at a directory of its own without setting a
+    /// process-wide variable that every other test in the binary shares.
+    pub fn discover_in(dir: &Path) -> Result<Self> {
+        let bin = dir.join("bin/tango-cli");
         anyhow::ensure!(
             bin.exists(),
             "no tango-cli at {}; set ${BIN_ENV}, or ${DIR_ENV}, \
              or run tools/tango/fetch.sh",
             bin.display()
         );
-        let version = read_version_file(&dir).unwrap_or_else(|| "unknown".into());
+        let version = read_version_file(dir).unwrap_or_else(|| "unknown".into());
         Ok(Self::at(bin, version))
     }
 
@@ -505,10 +518,7 @@ JSON
     #[test]
     fn a_missing_installation_says_where_it_looked() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var(DIR_ENV, dir.path());
-        std::env::remove_var(BIN_ENV);
-        let err = Tango::discover().unwrap_err().to_string();
-        std::env::remove_var(DIR_ENV);
+        let err = Tango::discover_in(dir.path()).unwrap_err().to_string();
         assert!(err.contains("bin/tango-cli"), "{err}");
         assert!(err.contains("fetch.sh"), "{err}");
     }
