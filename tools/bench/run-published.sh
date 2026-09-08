@@ -17,7 +17,10 @@
 # change set again instead of resuming the ones state.json says are finished.
 # That is what a fix to a *tool driver* needs, since a resumed change set keeps
 # the old tool's answer; a fix to cambium itself changes the engine id and is
-# started over anyway.
+# started over anyway. RESTART_HISTORY=1 does the same for `bench history`,
+# for a fix that changes what the walk publishes without changing the engine
+# id (the splice fix of 2026-09-08 was one: same format, same config hash,
+# different side tables in every index the walk wrote).
 set -uo pipefail
 source ~/.cargo/env
 export PATH=/usr/local/go/bin:$PATH
@@ -31,6 +34,7 @@ CAMBI=${CAMBI:-./target/release/cambi}
 SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
 STEPS=${STEPS:-"fetch build history changes report"}
 RESTART_CHANGES=${RESTART_CHANGES:-0}
+RESTART_HISTORY=${RESTART_HISTORY:-0}
 
 step() { echo "=== $(date -u +%H:%M:%S) $* ==="; }
 wants() { case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
@@ -46,7 +50,9 @@ for S in $SUBJECTS; do
   fi
   if wants history; then
     step "$S history"
-    $CAMBI --log info bench history "$S" --oracle rebuild || echo "FAILED $S history"
+    history_args=(--oracle rebuild)
+    [ "$RESTART_HISTORY" = 1 ] && history_args+=(--restart)
+    $CAMBI --log info bench history "$S" "${history_args[@]}" || echo "FAILED $S history"
   fi
   if wants changes; then
     step "$S changes"
