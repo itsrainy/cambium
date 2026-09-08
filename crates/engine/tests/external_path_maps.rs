@@ -324,3 +324,89 @@ fn an_input_the_rule_reads_beats_a_target_only_path_in_the_same_commit() {
         r.dirty_packages
     );
 }
+
+/// A commit that dirties no package at all, materialised. Its index can only
+/// have come from the base's own tables, so it is the shape that shows what
+/// the read-back drops.
+fn spliced_over_nothing(cold: &IndexData) -> IndexData {
+    engine()
+        .compute_with_texts(
+            cold.view(),
+            &[Change::new(Status::Modified, "docs/notes.md")],
+            &Scanning(files()),
+            &AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+            &texts(MODULE_BASE, MODULE_BASE),
+        )
+        .unwrap()
+        .index
+        .expect("a materialised run yields an index")
+}
+
+/// A spliced index must carry every externals side table a cold build wrote.
+///
+/// The `.bzl` closure is read back out of the base index and handed to the
+/// splice, and a commit that dirties no package re-derives none of it: any
+/// column the read-back drops is dropped for good, in an index that gets
+/// published and spliced onto again. The rebuild oracle compares nodes,
+/// edges and rule hashes, so it sees none of this. The symptom is silent and
+/// expensive — [`cambium_engine::externals`] reads a repository with no
+/// recorded mapping as "the question cannot be answered", so rule (2) fires
+/// and every package that loads a `.bzl` from the repository is re-queried.
+#[test]
+fn a_splice_carries_the_externals_side_tables_a_cold_build_wrote() {
+    let cold = base();
+    let spliced = spliced_over_nothing(&cold);
+    let (c, s) = (cold.view(), spliced.view());
+    assert_eq!(s.num_repos(), c.num_repos(), "repositories");
+    for r in 0..c.num_repos() {
+        let name = c.repo_name(r);
+        let sr = (0..s.num_repos())
+            .find(|&i| s.repo_name(i) == name)
+            .unwrap_or_else(|| panic!("{name} survived the splice"));
+        assert_eq!(
+            s.repo_path_maps(sr),
+            c.repo_path_maps(r),
+            "path mapping of {name}"
+        );
+        assert_eq!(s.repo_canonical.get(sr), c.repo_canonical.get(r), "{name}");
+    }
+    assert_eq!(
+        s.repo_input_patterns.len(),
+        c.repo_input_patterns.len(),
+        "input patterns"
+    );
+    for p in 0..c.repo_input_patterns.len() {
+        let i = p as u32;
+        assert_eq!(
+            (
+                c.repo_input_patterns.get(i),
+                c.repo_input_prefix[p],
+                c.repo_input_target_only[p]
+            ),
+            (
+                s.repo_input_patterns.get(i),
+                s.repo_input_prefix[p],
+                s.repo_input_target_only[p]
+            ),
+            "input pattern {p}"
+        );
+    }
+}
+
+/// The consequence, end to end: the sparing survives a splice.
+#[test]
+fn an_input_edit_is_still_spared_against_a_spliced_base() {
+    let cold = base();
+    let spliced = spliced_over_nothing(&cold);
+    let r = run(
+        &spliced,
+        &["api/envoy/config/v3/x.proto"],
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_label_only, 1);
+    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+}
