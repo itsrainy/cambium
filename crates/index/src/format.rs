@@ -47,6 +47,13 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// to 8 when repository-rule inputs gained `repo_input_target_only`, which
 /// tells a path the rule reads apart from a label it merely writes into a
 /// generated BUILD file (issue #3).
+///
+/// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
+/// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
+/// no reader has consulted it since the static `.bzl` closure (format 4) began
+/// answering "did this package's loads move?" from `bzl_consumers`; it is 32
+/// bytes per package of write-only payload. Removing it moves the layout, so
+/// it has to wait for a bump that is happening anyway rather than cause one.
 pub const FORMAT_VERSION: u32 = 8;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
