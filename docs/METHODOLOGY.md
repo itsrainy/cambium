@@ -18,8 +18,10 @@ and every workload accepts either.
   (apollo, a WORKSPACE-only repository, runs under 7.4.1 because Bazel 9
   cannot load it). Bazel 7, 8 and 9 coverage of cambium itself is CI's
   synthetic version matrix; a subject is never pinned twice to exercise
-  another Bazel major. Today: `bazel`, `envoy`, `sourcegraph`, `apollo`, with
-  `xla` and `tensorflow` run only on the benchmark machine.
+  another Bazel major. Today: `bazel` and `envoy` on demand,
+  `sourcegraph`, `apollo` and `xla` on the weekly schedule, and `tensorflow`
+  -- the one entry carrying `skip = true` -- monthly or by hand
+  (`.github/workflows/bench-weekly.yml`).
 - *Synthetic*: a generated graph from a preset, named `synth:<preset>`
   (`synth:medium` is 4 551 packages and 50 167 rule targets, 250 507 index
   nodes once source files are counted). It is emitted as a
@@ -64,10 +66,14 @@ precision; see [What is not measured](#what-is-not-measured).
   - **adjacent** — `parent..commit` for first-parent commits with no PR
     reference. Same shape as a squash-merged PR; kept separate so the
     PR-shaped numbers are not diluted by fix-ups.
-  - **stress** — synthetic edits applied to the real subject at the pin: a
-    `.bzl` loaded by many packages, a BUILD file added and deleted, an edit
-    under a high in-degree "hub" package. These exist to hit paths a quiet
-    history might not.
+  - **stress** — the subject's own commits, chosen for what they touch rather
+    than for their shape: a `.bzl` file, a `BUILD` file added or deleted, a
+    path under a high in-degree "hub" package (`crates/index`'s
+    top-in-degree list), or a path the manifest names as an invalidator. Not
+    synthetic edits -- every one is a real commit in the window, filed under
+    the category that selected it, so a subject whose history never deletes a
+    `BUILD` file simply has no change set in that category. They exist to
+    reach paths a quiet stretch of history would not.
 
 **Run.** One benchmark run is the tuple *(subject, workload, tools, oracles,
 window size, machine)* and the identity of the cambium build that ran it
@@ -126,8 +132,11 @@ How each tool is invoked, so the comparison can be checked for fairness.
 
 - **cambium**: `cambi affected --base <base> --head <head>` with the
   subject's generated `cambium.toml` (defaults plus a per-subject output base
-  and store). No subject-specific tuning: the manifest's invalidator list is
-  empty for every bzlmod subject.
+  and store). The only subject-specific configuration is the manifest's
+  invalidator list -- paths whose change invalidates everything, which is a
+  soundness escape hatch rather than tuning. `bazel` and `envoy` have none;
+  `sourcegraph`, `apollo`, `xla` and `tensorflow` each name a handful, and
+  every one of them is in `subject_repos.toml` with the reason beside it.
 - **bazel-diff-rust** v46.1.0: `generate-hashes` at base and head in two
   worktrees, then `get-impacted-targets`, with `-k` (keep going) so a package
   that fails to load does not abort the run. External repositories are

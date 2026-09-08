@@ -58,7 +58,7 @@ Only the splice touches the whole index, and only because v1 writes a complete
 new one. It is ~52% of a run on a 500k-target graph. The fix — a delta overlay
 for the `affected` path, leaving `baseline update` materialising, since its
 output is what gets published — is described in
-[BENCHMARKS.md](BENCHMARKS.md#where-the-time-actually-goes).
+[docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md#where-the-time-actually-goes).
 
 ## Install
 
@@ -134,7 +134,7 @@ if one exists the other way round. `stats` reports counts, the in-degree
 distribution, and per-component byte sizes — which is how you find out what an
 index is actually spending its bytes on. It also projects what labels would
 cost stored as `(package_id, relative_name)`, which is the measurement behind
-[not doing that](BENCHMARKS.md#labels-33-and-not-compressed); run it on an index
+[not doing that](docs/ENGINE_COSTS.md#labels-33-and-not-compressed); run it on an index
 of your own repository, where package paths are longer than the generators'
 and the answer may well come out differently.
 
@@ -339,7 +339,8 @@ time each in-memory stage at sizes no real repository reaches.
 
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
 measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
-numbers.
+numbers; [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where an `affected`
+run spends its time and where an index spends its bytes.
 
 ## Layout
 
