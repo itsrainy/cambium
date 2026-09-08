@@ -166,6 +166,18 @@ impl BzlClosure {
             inputs
                 .canonical
                 .insert(name.clone(), v.repo_canonical.get(r).to_string());
+            // The mapping matters as much as the repository does: without it
+            // the engine cannot tell an input-path edit from an edit to a
+            // `.bzl` the repository exports, and falls back to re-querying
+            // every package that loads one. A repository that genuinely has
+            // no derivable mapping keeps its empty entry out of the map, so
+            // the two cases stay distinguishable.
+            let maps = v.repo_path_maps(r);
+            if !maps.is_empty() {
+                inputs
+                    .path_maps
+                    .insert(name.clone(), maps.into_iter().collect());
+            }
             inputs.repos.insert(name);
         }
         for p in 0..v.repo_input_patterns.len() as u32 {
