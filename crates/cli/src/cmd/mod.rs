@@ -2,6 +2,7 @@ pub mod affected;
 pub mod baseline;
 pub mod bench;
 pub mod index;
+pub mod replay;
 pub mod synth;
 
 use std::path::PathBuf;

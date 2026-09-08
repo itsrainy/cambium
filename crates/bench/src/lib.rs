@@ -23,6 +23,11 @@
 //!   [`report`] renders `docs/RESULTS.md`, and [`state`] is what makes a
 //!   killed run resumable.
 //!
+//! Beside them sits [`replay`], which is not a workload: it drives the
+//! engine's static stages from a stored index and a list of changed paths, so
+//! that an engine change can be checked against a published run's own answers
+//! offline, in milliseconds, before the benchmark machine is started.
+//!
 //! Underneath those sit the engine micro-benchmarks the workloads do not
 //! cover: [`stages`] times each in-memory stage over a generated graph at
 //! sizes no real subject reaches, [`runner`] drives them and the sweeps, and
@@ -38,6 +43,7 @@ pub mod history;
 pub mod legacy;
 pub mod manifest;
 pub mod oracles;
+pub mod replay;
 pub mod report;
 pub mod runner;
 pub mod stages;
@@ -57,6 +63,10 @@ pub use history::{history, CommitRecord, Driver, HistoryOptions, HistoryResult};
 pub use manifest::{Manifest, RepoEntry};
 pub use oracles::load::{LoadOracleResult, LoadOracleSummary};
 pub use oracles::rdeps::{RdepsOracle, RdepsResult};
+pub use replay::{
+    diverge, recorded_from_changes, recorded_from_history, replay, Divergence, PackageRule,
+    PathsCache, RecordedAnswer, ReplayOutcome, ReplayRun, RepoRule, REPLAY_SCHEMA,
+};
 pub use report::{
     render_bench_section, render_subject_section, render_top_table, top_row, update_doc,
     BenchLegacy, SubjectResults, TopRow,
