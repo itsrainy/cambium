@@ -366,6 +366,27 @@ pub struct IndexRef<'a> {
 }
 
 impl<'a> IndexRef<'a> {
+    /// Checks every string table's invariants, so that the rest of the crate
+    /// can read entries without re-validating UTF-8 on each lookup.
+    ///
+    /// Called once per file at open; see [`StrTabRef::validate`].
+    pub fn validate_strings(&self) -> std::result::Result<(), String> {
+        for (what, t) in [
+            ("labels", self.labels),
+            ("classes", self.classes),
+            ("pkg_names", self.pkg_names),
+            ("bzl_paths", self.bzl_paths),
+            ("bzl_ext_labels", self.bzl_ext_labels),
+            ("repo_names", self.repo_names),
+            ("repo_canonical", self.repo_canonical),
+            ("repo_input_patterns", self.repo_input_patterns),
+            ("repo_maps", self.repo_maps),
+        ] {
+            t.validate(what)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn num_nodes(&self) -> u32 {
         self.kind.len() as u32
