@@ -271,7 +271,11 @@ impl ToolComparison {
     /// failures) and apollo without Tango (40/40 stale worktrees) as though
     /// both were three-way comparisons: the summary tables simply omit a tool
     /// that reported nothing, so the absence is invisible in the output.
-    pub fn failed(name: impl Into<String>, version: impl Into<String>, err: &anyhow::Error) -> Self {
+    pub fn failed(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        err: &anyhow::Error,
+    ) -> Self {
         Self {
             // `{:#}` and not `{}`: anyhow's `Display` prints only the outermost
             // context, so `hashing <sha> in <dir>` would arrive without the
@@ -471,4 +475,3 @@ impl ChangesResult {
 }
 
 // ------------------------------------------------------------------- the math
-

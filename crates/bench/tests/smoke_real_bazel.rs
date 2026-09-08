@@ -24,10 +24,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cambium_bench::manifest::RepoEntry;
 use cambium_bench::changes;
 use cambium_bench::checkout::SubjectsDir;
 use cambium_bench::compare::{compare_change_sets, ChangesOptions};
+use cambium_bench::manifest::RepoEntry;
 use cambium_bench::tools::Tool;
 
 fn bazelisk() -> Option<PathBuf> {
@@ -268,9 +268,11 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     );
 
     let tools: Vec<Box<dyn Tool>> = [
-        cambium_bench::tools::bazeldiff::BazelDiff::discover(cambium_bench::tools::bazeldiff::Implementation::Rust)
-            .ok()
-            .map(|b| Box::new(b) as Box<dyn Tool>),
+        cambium_bench::tools::bazeldiff::BazelDiff::discover(
+            cambium_bench::tools::bazeldiff::Implementation::Rust,
+        )
+        .ok()
+        .map(|b| Box::new(b) as Box<dyn Tool>),
         cambium_bench::tools::tango::Tango::discover()
             .ok()
             .map(|t| Box::new(t) as Box<dyn Tool>),
@@ -322,7 +324,8 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     println!(
         "{}",
         cambium_bench::report::render_subject_section(
-            &cambium_bench::report::SubjectResults::new("bazel").with_compares(vec![result.clone()]),
+            &cambium_bench::report::SubjectResults::new("bazel")
+                .with_compares(vec![result.clone()]),
             None,
         )
     );

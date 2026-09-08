@@ -622,7 +622,6 @@ pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
     Ok(labels)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
