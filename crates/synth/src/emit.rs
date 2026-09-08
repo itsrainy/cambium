@@ -10,11 +10,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::graph::{Kind, SynthGraph};
-
-/// Number of external libraries the emitted `@synth_ext` module provides.
-/// Must match the pool `SynthGraph::ext_label` draws from.
-const EXT_LIBS: u32 = 64;
+use crate::graph::{Kind, SynthGraph, EXT_LIBS};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
@@ -24,6 +20,14 @@ pub enum EmitError {
         #[source]
         source: std::io::Error,
     },
+    /// `out` already holds something that is not a synthetic workspace.
+    #[error(
+        "{path} is not empty and was not written by `cambi synth emit-bazel`; \
+         refusing to delete its contents (pass --force to override)"
+    )]
+    NotSynthetic { path: PathBuf },
+    #[error("git {args}: {stderr}")]
+    Git { args: String, stderr: String },
 }
 
 type Result<T> = std::result::Result<T, EmitError>;
@@ -42,7 +46,17 @@ fn write(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// Writes the whole workspace, replacing whatever was there (except `.git`).
+///
+/// `out` must be empty, missing, or a workspace this emitter wrote earlier —
+/// recognised by its `MODULE.bazel` naming the `synth` module. Anything else is
+/// refused with [`EmitError::NotSynthetic`]; a caller that really means it can
+/// [`force_clear`] first.
 pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
+    if !is_synthetic_workspace(out)? {
+        return Err(EmitError::NotSynthetic {
+            path: out.to_path_buf(),
+        });
+    }
     clear(out)?;
     write(&out.join("MODULE.bazel"), &module_bazel())?;
     write(&out.join(".bazelversion"), "7.4.1\n")?;
@@ -62,6 +76,39 @@ pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
         emit_package(g, pkg, out)?;
     }
     Ok(())
+}
+
+/// The line `module_bazel` starts with, which is how a later run knows the
+/// directory is one of ours.
+const MODULE_MARKER: &str = "module(name = \"synth\"";
+
+/// Whether `out` is missing, empty apart from `.git`, or carries the emitter's
+/// marker.
+fn is_synthetic_workspace(out: &Path) -> Result<bool> {
+    if !out.exists() {
+        return Ok(true);
+    }
+    let io = |source| EmitError::Io {
+        path: out.to_path_buf(),
+        source,
+    };
+    let mut entries = std::fs::read_dir(out).map_err(io)?.flatten();
+    if entries.all(|e| e.file_name() == ".git") {
+        return Ok(true);
+    }
+    match std::fs::read_to_string(out.join("MODULE.bazel")) {
+        Ok(text) => Ok(text.starts_with(MODULE_MARKER)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io(e)),
+    }
+}
+
+/// Deletes everything under `out` except `.git`, whatever wrote it.
+///
+/// This is the `--force` path; [`emit_workspace`] on its own only clears a
+/// directory it recognises as its own.
+pub fn force_clear(out: &Path) -> Result<()> {
+    clear(out)
 }
 
 fn clear(out: &Path) -> Result<()> {
@@ -132,8 +179,8 @@ impl cambium_index::FileText for SynthFiles<'_> {
         if path == "rules/synth.bzl" {
             return Some(RULES_BZL.to_string());
         }
-        if let Some(b) = g.bzl.iter().position(|b| b.path == path) {
-            return Some(generated_bzl(b as u32, g.bzl[b].version));
+        if let Some(&b) = g.bzl_by_path.get(path) {
+            return Some(generated_bzl(b, g.bzl[b as usize].version));
         }
         let dir = path.strip_suffix("/BUILD.bazel").or_else(|| {
             // The root package, and the `BUILD` spelling, neither of which the
@@ -440,13 +487,9 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
             source,
         })?;
     if !out.status.success() {
-        return Err(EmitError::Io {
-            path: dir.to_path_buf(),
-            source: std::io::Error::other(format!(
-                "git {}: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
+        return Err(EmitError::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -477,6 +520,45 @@ mod tests {
         for &slot in &g.targets[0].srcs {
             assert!(dir.path().join(g.src_path(0, slot)).exists());
         }
+    }
+
+    #[test]
+    fn refuses_to_clear_a_directory_it_did_not_write() {
+        let g = crate::generate(&GraphSpec::preset("tiny").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let precious = dir.path().join("notes.txt");
+        std::fs::write(&precious, "mine").unwrap();
+        let err = emit_workspace(&g, dir.path()).unwrap_err();
+        assert!(matches!(err, EmitError::NotSynthetic { .. }), "{err}");
+        assert_eq!(std::fs::read_to_string(&precious).unwrap(), "mine");
+
+        // A MODULE.bazel that is not ours is not a marker either.
+        std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"real\")\n").unwrap();
+        assert!(emit_workspace(&g, dir.path()).is_err());
+        assert!(precious.exists());
+
+        // --force is the only way through, and it takes everything.
+        force_clear(dir.path()).unwrap();
+        emit_workspace(&g, dir.path()).unwrap();
+        assert!(!precious.exists());
+        assert!(dir.path().join("MODULE.bazel").exists());
+    }
+
+    #[test]
+    fn an_empty_or_git_only_directory_is_fine() {
+        let g = crate::generate(&GraphSpec::preset("tiny").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        emit_workspace(&g, dir.path()).unwrap();
+        assert!(dir.path().join(".git/HEAD").exists());
+        // And a second emit sees the marker and proceeds.
+        emit_workspace(&g, dir.path()).unwrap();
+    }
+
+    #[test]
+    fn the_marker_is_what_module_bazel_starts_with() {
+        assert!(module_bazel().starts_with(MODULE_MARKER));
     }
 
     #[test]

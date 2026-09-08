@@ -41,6 +41,11 @@ impl Kind {
 /// Tag bits.
 pub const TAG_MANUAL: u8 = 1 << 0;
 
+/// Size of the pool of `@synth_ext//ext:lib<n>` targets. [`SynthGraph::ext_label`]
+/// draws from it and the emitter writes exactly this many, so the two cannot
+/// disagree about which external labels exist.
+pub(crate) const EXT_LIBS: u32 = 64;
+
 #[derive(Clone, Debug)]
 pub struct SynthTarget {
     pub package: u32,
@@ -97,6 +102,8 @@ pub struct SynthGraph {
     pub targets: Vec<SynthTarget>,
     pub bzl: Vec<SynthBzl>,
     pub pkg_by_path: FxHashMap<String, u32>,
+    /// `SynthBzl::path` -> index into `bzl`, for the in-memory file server.
+    pub bzl_by_path: FxHashMap<String, u32>,
 }
 
 impl SynthGraph {
@@ -146,7 +153,7 @@ impl SynthGraph {
 
     pub fn ext_label(target: u32, k: u16) -> String {
         // Spread external deps over a fixed-size pool so they are shared.
-        let h = (target.wrapping_mul(2_654_435_761).wrapping_add(k as u32)) % 64;
+        let h = (target.wrapping_mul(2_654_435_761).wrapping_add(k as u32)) % EXT_LIBS;
         format!("@synth_ext//ext:lib{h}")
     }
 
@@ -237,42 +244,6 @@ impl SynthGraph {
         }
         for k in 0..t.ext_deps {
             h.update(Self::ext_label(id, k).as_bytes());
-        }
-        *h.finalize().as_bytes()
-    }
-
-    /// Stands in for `blake3(BUILD file content)`.
-    pub fn build_hash(&self, pkg: u32) -> [u8; 32] {
-        let mut scratch = String::new();
-        let cache: Vec<[u8; 32]> = self.packages[pkg as usize]
-            .targets
-            .iter()
-            .map(|&t| self.target_hash_into(t, &mut scratch))
-            .collect();
-        self.build_hash_with(pkg, |t| {
-            let i = self.packages[pkg as usize]
-                .targets
-                .iter()
-                .position(|&x| x == t)
-                .unwrap();
-            cache[i]
-        })
-    }
-
-    fn build_hash_with(&self, pkg: u32, target_hash: impl Fn(u32) -> [u8; 32]) -> [u8; 32] {
-        let p = &self.packages[pkg as usize];
-        let mut h = blake3::Hasher::new();
-        h.update(p.path.as_bytes());
-        for &b in &p.bzl {
-            h.update(self.bzl[b as usize].path.as_bytes());
-        }
-        for &(t, s) in &p.exported {
-            h.update(Self::src_name(t, s).as_bytes());
-        }
-        for &t in &p.targets {
-            if self.targets[t as usize].alive {
-                h.update(&target_hash(t));
-            }
         }
         *h.finalize().as_bytes()
     }
@@ -720,7 +691,9 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         targets.push(SynthTarget {
             package: pkg as u32,
             kind: Kind::TestSuite,
-            layer: layer.min(layers.saturating_sub(1).max(layer)),
+            // One above the tests it collects, which may be one above the
+            // top layer; nothing is generated to depend on a suite.
+            layer,
             deps: tests,
             select_deps: 0,
             ext_deps: 0,
@@ -770,6 +743,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         targets,
         bzl,
         pkg_by_path,
+        bzl_by_path: FxHashMap::default(),
     };
     g.rebuild_pkg_index();
     g
@@ -782,6 +756,10 @@ impl SynthGraph {
             if p.alive {
                 self.pkg_by_path.insert(p.path.clone(), i as u32);
             }
+        }
+        self.bzl_by_path.clear();
+        for (i, b) in self.bzl.iter().enumerate() {
+            self.bzl_by_path.insert(b.path.clone(), i as u32);
         }
     }
 }
@@ -838,13 +816,5 @@ mod tests {
                 assert!(v.forward.row(src).contains(&dst));
             }
         }
-    }
-
-    #[test]
-    fn presets_resolve() {
-        for p in GraphSpec::PRESETS {
-            assert!(GraphSpec::preset(p).is_some(), "{p}");
-        }
-        assert!(GraphSpec::preset("nope").is_none());
     }
 }

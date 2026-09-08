@@ -27,6 +27,12 @@ pub enum QueryError {
     UnknownPackage(String),
     #[error("{0} is not a node kind; try rule, source_file, generated_file, package_group, or tombstone")]
     UnknownKind(String),
+    #[error("index contains no rule targets")]
+    NoRuleTargets,
+    #[error("--sample must be at least 1")]
+    ZeroSample,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 type Result<T> = std::result::Result<T, QueryError>;
@@ -811,4 +817,134 @@ pub fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// Differential check against Bazel (spec 12.3).
+///
+/// For a random sample of rule targets, our reverse closure must be a superset
+/// of `bazel query rdeps(//..., label)`. Missing targets are soundness bugs and
+/// fail the check; extra targets are the over-approximation the design accepts,
+/// and are reported as a precision percentage.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyResult {
+    #[serde(default = "schema_version")]
+    pub schema: u32,
+    pub query: String,
+    pub checked: usize,
+    pub unsound: usize,
+    pub ours_total: usize,
+    pub theirs_total: usize,
+    pub precision_pct: f64,
+    pub failures: Vec<VerifyFailure>,
+}
+
+impl VerifyResult {
+    pub fn is_sound(&self) -> bool {
+        self.unsound == 0
+    }
+}
+
+/// One target whose Bazel-reported rdeps our index missed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyFailure {
+    pub label: String,
+    pub missing: Vec<String>,
+}
+
+/// Runs the sampled cross-check described by [`VerifyResult`] against a live
+/// `bazel query` for a random sample of rule targets in `view`.
+pub fn verify(
+    bazel: &cambium_bazel::Bazel,
+    view: IndexRef<'_>,
+    sample: usize,
+    seed: u64,
+) -> Result<VerifyResult> {
+    if sample == 0 {
+        return Err(QueryError::ZeroSample);
+    }
+
+    let rules: Vec<u32> = (0..view.num_nodes())
+        .filter(|&i| view.kind_of(i) == NodeKind::Rule && !view.is_tombstone(i))
+        .collect();
+    if rules.is_empty() {
+        return Err(QueryError::NoRuleTargets);
+    }
+
+    // Deterministic sample: stride through the rule ids from a seeded offset.
+    let stride = (rules.len() / sample.max(1)).max(1);
+    let start = (seed as usize) % rules.len();
+    let picked: Vec<u32> = (0..sample.min(rules.len()))
+        .map(|i| rules[(start + i * stride) % rules.len()])
+        .collect();
+
+    let mut checked = 0usize;
+    let mut ours_total = 0usize;
+    let mut theirs_total = 0usize;
+    let mut failures = Vec::new();
+
+    for id in picked {
+        let label = view.label(id);
+        let out = bazel
+            .command("query")
+            .args([
+                &format!("rdeps(//..., {label})"),
+                "--output=label",
+                // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
+                // implicit edges, so the cross-check must too.
+                "--order_output=no",
+                "--keep_going",
+                "--noshow_progress",
+                "--ui_event_filters=-info",
+            ])
+            .output()?;
+        if !out.status.success() {
+            eprintln!("cambium: skipping {label}: bazel query failed");
+            continue;
+        }
+        let theirs: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let r = walk::walk(
+            view,
+            &[id],
+            &WalkOptions {
+                include_manual: true,
+                explain: false,
+                max_depth: None,
+            },
+        );
+        let ours: std::collections::HashSet<String> = view::labels_sorted(&view, &r.affected)
+            .into_iter()
+            .collect();
+
+        let missing: Vec<String> = theirs.difference(&ours).cloned().collect();
+        checked += 1;
+        ours_total += ours.len();
+        theirs_total += theirs.len();
+        if !missing.is_empty() {
+            failures.push(VerifyFailure {
+                label: label.to_string(),
+                missing,
+            });
+        }
+    }
+
+    let precision_pct = if ours_total == 0 {
+        100.0
+    } else {
+        theirs_total as f64 / ours_total as f64 * 100.0
+    };
+
+    Ok(VerifyResult {
+        schema: SCHEMA_VERSION,
+        query: "verify".into(),
+        checked,
+        unsound: failures.len(),
+        ours_total,
+        theirs_total,
+        precision_pct,
+        failures,
+    })
 }

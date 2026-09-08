@@ -16,7 +16,8 @@ pub enum Args {
         /// Upload the result to the configured store.
         #[arg(long)]
         publish: bool,
-        /// Also write the index here.
+        /// Write the index here. Required unless `--publish`, which can
+        /// upload from a temporary file that is deleted afterwards.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
         /// Publish even if `bazel query` could not load every package.
@@ -31,15 +32,17 @@ pub enum Args {
         to: String,
         #[arg(long)]
         publish: bool,
+        /// Write the index here. Required unless `--publish`.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
         /// Publish even if `bazel query` could not load every package.
         #[arg(long)]
         allow_partial: bool,
-        /// Rebuild from scratch if the range invalidates everything, rather
-        /// than failing.
-        #[arg(long, default_value_t = true)]
-        rebuild_on_global: bool,
+        /// Fail instead of rebuilding from scratch when the range invalidates
+        /// everything. By default a global invalidation mints a fresh
+        /// lineage.
+        #[arg(long)]
+        no_rebuild_on_global: bool,
     },
     /// Delete published indexes older than the configured retention.
     Gc {
@@ -61,7 +64,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             allow_partial,
         } => {
             engine.cfg.baseline.publish_partial |= allow_partial;
-            let sha = engine.repo.rev_parse(&commit).unwrap_or(commit);
+            let sha = engine.repo.rev_parse(&commit).with_context(|| {
+                format!("--commit {commit} is not a revision in this repository")
+            })?;
             let index = engine.full_build(&sha)?;
             emit(&engine, &index, out.as_deref(), publish)?;
             Ok(crate::EXIT_OK)
@@ -71,11 +76,14 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             to,
             publish,
             out,
-            rebuild_on_global,
+            no_rebuild_on_global,
             allow_partial,
         } => {
             engine.cfg.baseline.publish_partial |= allow_partial;
-            let to_sha = engine.repo.rev_parse(&to).unwrap_or(to);
+            let to_sha = engine
+                .repo
+                .rev_parse(&to)
+                .with_context(|| format!("--to {to} is not a revision in this repository"))?;
             let req = AffectedRequest {
                 base: from,
                 head: to_sha.clone(),
@@ -94,10 +102,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             let index = match outcome.index {
                 Some(i) => i,
                 None => {
-                    if !rebuild_on_global {
+                    if no_rebuild_on_global {
                         anyhow::bail!(
-                            "the range invalidates everything ({}); pass --rebuild-on-global to \
-                             mint a fresh lineage instead",
+                            "the range invalidates everything ({}); drop --no-rebuild-on-global \
+                             to mint a fresh lineage instead",
                             outcome
                                 .report
                                 .global_reason
@@ -149,11 +157,21 @@ fn emit(
     out: Option<&std::path::Path>,
     publish: bool,
 ) -> Result<()> {
-    let key = cambium_index::index_key(&index.header.lineage, &index.provenance.commit);
-    let name = key.rsplit('/').next().unwrap_or(&key).to_string();
-    let path = match out {
-        Some(p) => p.to_path_buf(),
-        None => std::env::temp_dir().join(&name),
+    // An index is routinely gigabytes. Writing one into `temp_dir()` under a
+    // content-addressed name and walking away leaves it there for good, so
+    // the only run allowed to skip `--out` is one that publishes, and that
+    // one writes through a `NamedTempFile` that is deleted on the way out.
+    let scratch = match (out, publish) {
+        (None, false) => anyhow::bail!(
+            "pass --out <file> to say where the index goes, or --publish to upload it"
+        ),
+        (None, true) => Some(tempfile::NamedTempFile::new()?),
+        (Some(_), _) => None,
+    };
+    let path = match (out, &scratch) {
+        (Some(p), _) => p.to_path_buf(),
+        (None, Some(t)) => t.path().to_path_buf(),
+        (None, None) => unreachable!("the None/false arm bailed"),
     };
     cambium_index::format::write_index(&path, index)?;
     let c = &index.header.counts;
