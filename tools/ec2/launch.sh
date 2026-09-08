@@ -10,14 +10,17 @@ set -euo pipefail
 R=${AWS_REGION:-us-east-2}
 SIZE=${SIZE:-c7i.4xlarge}
 DISK=${DISK:-500}
-KEY=${KEY:-cambium-bench}
-PEM=${PEM:-$HOME/.ssh/cambium-bench.pem}
-SG_NAME=cambium-bench
+# The AWS resources predate the corpus->bench rename and keep their old names:
+# a key pair and a security group cannot be renamed in place. Only the words
+# inside the repository were swept. The instance carries both `cambium` tags.
+KEY=${KEY:-cambium-corpus}
+PEM=${PEM:-$HOME/.ssh/cambium-corpus.pem}
+SG_NAME=${SG_NAME:-cambium-corpus}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 find_instance() {
   aws ec2 describe-instances --region "$R" \
-    --filters Name=tag:cambium,Values=bench "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --filters Name=tag:cambium,Values=bench,corpus "Name=instance-state-name,Values=pending,running,stopping,stopped" \
     --query 'Reservations[0].Instances[0].[InstanceId,State.Name,PublicDnsName]' --output text 2>/dev/null | grep -v None || true
 }
 
