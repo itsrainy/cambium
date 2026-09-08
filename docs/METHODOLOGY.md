@@ -324,7 +324,13 @@ The loop is honest about its four blind spots, and says so in its own output:
   that goes global depends on which flags moved, which needs the file's text at
   both revisions), and one that adds or removes a `BUILD` file (the package set
   at the base is not the package set at the pin, and the engine asks the head
-  worktree whether a deleted `BUILD` really deleted its package).
+  worktree whether a deleted `BUILD` really deleted its package). With `--repo`
+  it also declines the two shapes of pin drift that are large enough to change
+  the externals stage's whole input: a repository the stage dirtied that the
+  base's `MODULE.bazel` does not declare, and a modified `.bzl` the stored load
+  closure does not contain. envoy's three hundred history commits straddle a
+  Bzlmod migration and produce both; without these, twenty-two of its forty
+  change sets diverge and the run is right about eighteen of them.
 
 A clean precheck is not a substitute for the run. It is what makes the run
 worth starting.
