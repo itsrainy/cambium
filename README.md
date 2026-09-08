@@ -90,7 +90,7 @@ $ cambi index consumers <file> <path>...  [--transitive] [--include-manual] [--t
 $ cambi index owner     <file> <path>...
 $ cambi index targets   <file> <package> [--kind rule]
 $ cambi index stats     <file>
-$ cambi index verify    <file> [--sample n] [--seed n]
+$ cambi index verify    <file> [--sample n] [--seed n] [--output text|json]
 $ cambi bench subjects list|fetch|build [<subject>]
 $ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
 $ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
@@ -105,6 +105,11 @@ $ cambi synth build-index [--spec <preset>] --out <file> [--seed n]
 $ cambi synth presets
 $ cambi config
 ```
+
+`baseline build` and `baseline update` need `--out <file>` to say where the
+index goes; only a run that also `--publish`es may omit it, and that run
+writes through a temporary file it deletes once the upload is done. An index
+is routinely gigabytes, so there is no default path.
 
 Every subcommand also accepts these global options, declared once on `cambi`
 itself: `-C, --workspace <dir>` (defaults to the current directory),
