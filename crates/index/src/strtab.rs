@@ -57,11 +57,19 @@ impl<'a> StrTabRef<'a> {
 /// `HashMap<Box<str>, u32>`: entries point back into `bytes`, so a label is
 /// stored exactly once. At a million labels that is 40 MB instead of 90 MB and
 /// a million fewer allocations.
-#[derive(Default)]
 pub struct Interner {
     bytes: Vec<u8>,
     offsets: Vec<u32>,
     table: hashbrown::HashTable<u32>,
+}
+
+impl Default for Interner {
+    /// `#[derive(Default)]` would leave `offsets` empty instead of the
+    /// single leading `0` every entry range needs; go through `new()` so the
+    /// invariant `offsets.len() == len() + 1` always holds.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Clone for Interner {
@@ -203,6 +211,19 @@ mod tests {
         assert_eq!(j.len(), 3);
         assert_eq!(j.lookup("//c:d"), Some(1));
         assert_eq!(j.get(2), "//e:f");
+    }
+
+    #[test]
+    fn default_matches_new() {
+        // `#[derive(Default)]` would give `offsets == []`, which makes `len()`
+        // underflow; `Default` must go through `new()`.
+        let d = Interner::default();
+        assert_eq!(d.len(), 0);
+        assert!(d.is_empty());
+        assert_eq!(d.as_ref().len(), 0);
+        let mut d = d;
+        assert_eq!(d.intern("//a:b"), 0);
+        assert_eq!(d.get(0), "//a:b");
     }
 
     #[test]
