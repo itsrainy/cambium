@@ -1135,12 +1135,16 @@ fn render_compare(r: &SubjectResults) -> String {
         s.push_str("No change_set changed a `.bzl` file.\n\n");
     } else {
         s.push_str(
-            "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
+            "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |\n",
         );
-        s.push_str("|---:|---:|---:|---:|\n");
+        s.push_str("|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
-            "| {} | {} | {} | {} |\n\n",
-            bzl.change_sets, bzl.checked, bzl.partial, bzl.missing_packages
+            "| {} | {} | {} | {} | {} |\n\n",
+            bzl.change_sets,
+            bzl.checked,
+            bzl.partial,
+            bzl.repository_evaluation,
+            bzl.missing_packages
         ));
         s.push_str(
             "cambium resolves a changed `.bzl` from the static load closure it \
@@ -1151,7 +1155,14 @@ fn render_compare(r: &SubjectResults) -> String {
              packages under `cambium_missing_bzl_closure`. A *partial* answer \
              is a Sky Query that exited 3 — the very failure mode the static \
              closure removes, since `rbuildfiles` loads every external \
-             subject and the closure loads none.\n\n",
+             subject and the closure loads none. A *repository-evaluation* \
+             answer is one where Bazel named a package whose `BUILD` file has \
+             no `load()` in it at all: `rbuildfiles` walks Skyframe's file \
+             nodes, so a change to a repository-declaring `.bzl` reaches every \
+             package through the repository mapping rather than through a load \
+             edge, and containment against a load closure is not a question \
+             that answer can settle. Those change sets are counted here and \
+             checked by the `rdeps` oracle instead.\n\n",
         );
     }
 
