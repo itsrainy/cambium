@@ -243,6 +243,15 @@ pub struct OracleInputs<'a> {
     pub changed: &'a BTreeSet<String>,
     /// cambium's affected set: rule labels, the thing under test.
     pub cambium: &'a BTreeSet<String>,
+    /// The packages cambium marked dirty for this change set.
+    ///
+    /// Only the deleted half reads it, and it is the *whole* answer for a
+    /// package deleted outright: every rule in it is tombstoned, so cambium
+    /// rightly emits no label carrying that package, and the package name
+    /// survives nowhere else in the report. Without this the escape hatch in
+    /// [`deleted_consumers`] — "the rule, or its package" — is unsatisfiable
+    /// by construction for exactly the case it was written for.
+    pub dirty_packages: &'a BTreeSet<String>,
 }
 
 impl RdepsOracle {
@@ -300,7 +309,13 @@ impl RdepsOracle {
 
         if let Some(base) = inputs.base {
             result.deleted_checked = true;
-            let deleted_missing = deleted_consumers(base, &deleted, inputs.cambium, &mut result);
+            let deleted_missing = deleted_consumers(
+                base,
+                &deleted,
+                inputs.cambium,
+                inputs.dirty_packages,
+                &mut result,
+            );
             // They gate the change set exactly as a queried miss does.
             result.missing.extend(deleted_missing.iter().cloned());
             result.deleted_missing = deleted_missing;
@@ -384,15 +399,30 @@ pub fn package_of_label(label: &str) -> Option<&str> {
 /// with its source and so exists at neither end, as its package. Requiring the
 /// label alone would fail a change set for being right about a target that is
 /// gone.
+///
+/// "Its package" means the affected set *or* `dirty_packages`. A package
+/// deleted in its entirety only ever has the latter: cambium tombstones every
+/// rule in it and correctly reports none of them, so reading packages off the
+/// affected labels alone would fail every wholly-deleted package. That was the
+/// whole of sourcegraph's and apollo's change-set failures on the 2026-09-08
+/// published run.
 fn deleted_consumers(
     base: IndexRef<'_>,
     deleted: &[&String],
     cambium: &BTreeSet<String>,
+    dirty_packages: &BTreeSet<String>,
     result: &mut RdepsResult,
 ) -> Vec<String> {
     let packages = PackageSet::from_index(base);
-    let cambium_packages: BTreeSet<&str> =
-        cambium.iter().filter_map(|l| package_of_label(l)).collect();
+    // Both spellings of "cambium accounted for this package": a surviving
+    // affected target inside it, or the package itself in the dirty set. A
+    // package deleted outright has only the second — all its rules are
+    // tombstoned and none can appear in the affected set.
+    let cambium_packages: BTreeSet<&str> = cambium
+        .iter()
+        .filter_map(|l| package_of_label(l))
+        .chain(dirty_packages.iter().map(String::as_str))
+        .collect();
     let mut consumers = BTreeSet::new();
     for path in deleted {
         let Some(pkg) = packages.owner_of(path) else {
@@ -809,6 +839,7 @@ mod tests {
                     base: None,
                     changed: &changed,
                     cambium: &loads_only,
+                    dirty_packages: &BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -834,6 +865,7 @@ mod tests {
                     base: None,
                     changed: &changed,
                     cambium: &with_consumers,
+                    dirty_packages: &BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -860,6 +892,7 @@ mod tests {
                     base: None,
                     changed: &changed,
                     cambium: &BTreeSet::new(),
+                    dirty_packages: &BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -886,6 +919,7 @@ mod tests {
                     base: None,
                     changed: &set(&["defs/defs.bzl"]),
                     cambium: &set(&["//defs:bzl_srcs"]),
+                    dirty_packages: &BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -918,7 +952,7 @@ mod tests {
         let head = bzl_filegroup_index();
         let base = base_index_with_a_consumed_source();
         let changed = set(&["lib/gone.cc"]);
-        let run = |cambium: &BTreeSet<String>| {
+        let run = |cambium: &BTreeSet<String>, dirty: &BTreeSet<String>| {
             RdepsOracle::default()
                 .run(
                     &bazel,
@@ -927,12 +961,14 @@ mod tests {
                         base: Some(base.view()),
                         changed: &changed,
                         cambium,
+                        dirty_packages: dirty,
                     },
                 )
                 .unwrap()
         };
+        let none = BTreeSet::new();
 
-        let r = run(&BTreeSet::new());
+        let r = run(&none, &none);
         assert!(r.roots.is_empty(), "a deleted path cannot be named at head");
         assert!(r.deleted_checked);
         assert_eq!(r.deleted_paths, 1);
@@ -942,10 +978,22 @@ mod tests {
         assert!(!r.ok());
 
         // The label itself satisfies it.
-        assert!(run(&set(&["//lib:core"])).ok());
+        assert!(run(&set(&["//lib:core"]), &none).ok());
         // So does anything else in its package: the rule may have been deleted
         // with its source, and then it is in nobody's answer at head.
-        assert!(run(&set(&["//lib:other"])).ok());
+        assert!(run(&set(&["//lib:other"]), &none).ok());
+        // And so does the dirty package alone, with an empty affected set.
+        //
+        // This is the wholly-deleted package: every rule in `lib` is
+        // tombstoned, so cambium rightly reports no label carrying the
+        // package and `dirty_packages` is the only place its name survives.
+        // Before the dirty set was consulted this case could not be satisfied
+        // at all, and it failed every such change set on the 2026-09-08
+        // published run — `//internal/search/smartsearch` on sourcegraph,
+        // `//modules/drivers/lidar/vanjeelidar` on apollo.
+        assert!(run(&none, &set(&["lib"])).ok());
+        // A different package does not satisfy it.
+        assert!(!run(&none, &set(&["other"])).ok());
         // And with no base index the half is skipped rather than failed.
         let r = RdepsOracle::default()
             .run(
@@ -955,6 +1003,7 @@ mod tests {
                     base: None,
                     changed: &changed,
                     cambium: &BTreeSet::new(),
+                    dirty_packages: &BTreeSet::new(),
                 },
             )
             .unwrap();
@@ -980,6 +1029,7 @@ mod tests {
             base: None,
             changed: &changed,
             cambium: &changed,
+            dirty_packages: &BTreeSet::new(),
         };
         let full = RdepsOracle::default().run(&bazel, &inputs).unwrap();
         assert_eq!(full.roots.len(), 10);

@@ -22,6 +22,7 @@
 //! | `bazeldiff_extra_external_content` | tool only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
 //! | `bazeldiff_extra_line_shift` | tool only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
 //! | `bazeldiff_extra_workspace_path` | tool only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the tool's base checkout is a different directory from head |
+//! | `tool_missing` | cambium only | the tool missed a target the reverse-dependency oracle independently confirms is affected; cambium is right and the tool is wrong. Reported, not failed — it is not a defect of cambium |
 //! | `cambium_missing` | tool only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
 //!
@@ -43,7 +44,7 @@ pub enum Side {
     Tool,
 }
 
-/// The fourteen disagreement classes.
+/// The fifteen disagreement classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
@@ -132,6 +133,29 @@ pub enum Class {
     /// source-input condition is checked first, so the `glob(["**"])`
     /// filegroup that really does eat its own `BUILD` file never lands here.
     BazeldiffExtraLineShift,
+    /// The *tool* missed it, and the reverse-dependency oracle says cambium
+    /// is right.
+    ///
+    /// The mirror image of [`Class::CambiumMissing`]: no benign predicate
+    /// explains why cambium reported the label, and an independent
+    /// `rdeps(//..., <changed files>)` reached it too. Two witnesses against
+    /// one make this the tool's miss, not cambium's over-approximation.
+    ///
+    /// Deliberately ranked last on cambium's side, after every benign class.
+    /// The oracle is an *unconfigured* query, so it contains the `select()`
+    /// branches and macro-loaded packages that `cambium_extra_select` and
+    /// `cambium_extra_bzl` already name; asking it first would relabel most of
+    /// those as tool misses and say nothing about mechanism. Only a label
+    /// nothing else explains reaches here.
+    ///
+    /// Not a failure. It is a fact about the foil, and gating cambium's run on
+    /// another tool's defect would make the suite unrunnable for a reason that
+    /// is not cambium's to fix. First seen on `bazel/bazel`, where Tango
+    /// dropped `//docs:docs`, `//docs:srcs` and
+    /// `//scripts/docs:gen_mdx_release_docs` — three plain consumers of a
+    /// changed `docs/docs/user-manual.mdx` that both cambium and bazel-diff
+    /// reported and the oracle confirmed.
+    ToolMissing,
     /// A failure: a tool or an oracle found something cambium missed.
     ///
     /// This is unsoundness, and it is the one thing the benchmark exists to
@@ -158,6 +182,7 @@ impl Class {
             Class::BazeldiffExtraExternalContent => "bazeldiff_extra_external_content",
             Class::BazeldiffExtraWorkspacePath => "bazeldiff_extra_workspace_path",
             Class::BazeldiffExtraLineShift => "bazeldiff_extra_line_shift",
+            Class::ToolMissing => "tool_missing",
             Class::CambiumMissing => "cambium_missing",
             Class::Unclassified => "unclassified",
         }
@@ -212,6 +237,10 @@ impl Class {
                 "an unchanged rule whose `BUILD` file changed around it: only its line number \
                  moved, and cambium's rule hash excludes `generator_location`"
             }
+            Class::ToolMissing => {
+                "the tool missed a target the reverse-dependency oracle confirms is \
+                 affected: the tool's miss, not cambium's extra"
+            }
             Class::CambiumMissing => {
                 "**fails**: the oracle or a tool reached something cambium did not — \
                  unsoundness"
@@ -227,7 +256,7 @@ impl Class {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
 
-    pub const ALL: [Class; 14] = [
+    pub const ALL: [Class; 15] = [
         Class::CambiumExtraSelect,
         Class::CambiumExtraExternalRepo,
         Class::CambiumExtraImplicit,
@@ -240,6 +269,7 @@ impl Class {
         Class::BazeldiffExtraExternalContent,
         Class::BazeldiffExtraWorkspacePath,
         Class::BazeldiffExtraLineShift,
+        Class::ToolMissing,
         Class::CambiumMissing,
         Class::Unclassified,
     ];
@@ -383,6 +413,20 @@ pub trait Facts {
     /// not of either tool: run both sides in the same directory and the
     /// difference is gone.
     fn workspace_path_only_change(&self, label: &str) -> bool;
+
+    /// The reverse-dependency oracle's answer contains this label.
+    ///
+    /// The oracle is `rdeps(//..., <every changed file's label>)` run against
+    /// Bazel itself, so a `true` here is an independent witness that the
+    /// target really is affected. Only ever asked once every benign
+    /// cambium-side class has been ruled out; see [`Class::ToolMissing`].
+    ///
+    /// Defaults to `false`, which keeps the label in `unclassified`: without
+    /// an oracle to appeal to there is no evidence either way, and the safe
+    /// direction is a human's attention.
+    fn confirmed_by_oracle(&self, _label: &str) -> bool {
+        false
+    }
 }
 
 /// Classifies one label of the symmetric difference.
@@ -414,6 +458,11 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
                 Class::CambiumExtraDeleted
             } else if facts.reached_via_build_file(label) {
                 Class::CambiumExtraBuildGlob
+            } else if facts.confirmed_by_oracle(label) {
+                // Nothing benign explains the extra, but Bazel's own
+                // `rdeps` reached it as well: the tool is the one that is
+                // short, so it is not cambium's failure to answer for.
+                Class::ToolMissing
             } else {
                 Class::Unclassified
             }
@@ -596,6 +645,9 @@ pub struct BazelFacts<'a> {
     external_repo: BTreeSet<String>,
     /// Affected labels whose `--explain` reason is a changed `BUILD` file.
     build_file: BTreeSet<String>,
+    /// The reverse-dependency oracle's answer, when the run computed one.
+    /// Empty disables `tool_missing`, leaving those labels `unclassified`.
+    oracle: BTreeSet<String>,
     /// For an affected label, the shortest path back to the direct-set member
     /// that reached it (`--explain`). Lets the `select` test look along the
     /// whole path instead of one hop.
@@ -641,6 +693,7 @@ impl<'a> BazelFacts<'a> {
             deleted_dep: BTreeSet::new(),
             external_repo: BTreeSet::new(),
             build_file: BTreeSet::new(),
+            oracle: BTreeSet::new(),
             paths: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             base_cache: RefCell::new(HashMap::new()),
@@ -678,6 +731,14 @@ impl<'a> BazelFacts<'a> {
     /// enabling `cambium_extra_build_glob`.
     pub fn with_build_file(mut self, labels: impl IntoIterator<Item = String>) -> Self {
         self.build_file = labels.into_iter().collect();
+        self
+    }
+
+    /// Records the reverse-dependency oracle's answer, enabling
+    /// `tool_missing`. Without it an extra nothing else explains stays
+    /// `unclassified`, which is the safe direction.
+    pub fn with_oracle(mut self, labels: impl IntoIterator<Item = String>) -> Self {
+        self.oracle = labels.into_iter().collect();
         self
     }
 
@@ -1224,6 +1285,10 @@ impl Facts for BazelFacts<'_> {
         self.dep_facts(label).has_external
     }
 
+    fn confirmed_by_oracle(&self, label: &str) -> bool {
+        self.oracle.contains(label)
+    }
+
     fn workspace_path_only_change(&self, label: &str) -> bool {
         let Some(base) = self.base.as_ref() else {
             return false;
@@ -1355,6 +1420,7 @@ mod tests {
         external_input: BTreeSet<String>,
         workspace_path: BTreeSet<String>,
         build_changed: BTreeSet<String>,
+        oracle: BTreeSet<String>,
     }
 
     impl Hand {
@@ -1410,6 +1476,9 @@ mod tests {
         }
         fn build_file_changed(&self, l: &str) -> bool {
             self.build_changed.contains(l)
+        }
+        fn confirmed_by_oracle(&self, l: &str) -> bool {
+            self.oracle.contains(l)
         }
     }
 
@@ -1698,6 +1767,62 @@ mod tests {
     }
 
     #[test]
+    fn an_extra_the_oracle_confirms_is_the_tools_miss_and_does_not_fail() {
+        // Nothing benign explains cambium reporting it, but `rdeps` reached
+        // it too: two witnesses against the tool's one. `bazel/bazel`'s
+        // `//docs:docs` on the 2026-09-08 run.
+        let h = Hand::with(|h| {
+            h.oracle.insert("//docs:docs".into());
+        });
+        let c = classify("//docs:docs", Side::Cambium, &h);
+        assert_eq!(c, Class::ToolMissing);
+        assert!(!c.is_failure(), "another tool's defect is not cambium's");
+    }
+
+    #[test]
+    fn the_oracle_is_asked_last_so_benign_classes_keep_their_labels() {
+        // The oracle is an *unconfigured* query, so it contains the `select`
+        // branches and macro-loaded packages the benign classes name. If it
+        // were consulted first every one of those would become a tool miss
+        // and the taxonomy would stop explaining anything.
+        for (setup, want) in [
+            (
+                Hand::with(|h| {
+                    h.select.insert("//a:b".into());
+                    h.oracle.insert("//a:b".into());
+                }),
+                Class::CambiumExtraSelect,
+            ),
+            (
+                Hand::with(|h| {
+                    h.bzl.insert("//a:b".into());
+                    h.oracle.insert("//a:b".into());
+                }),
+                Class::CambiumExtraBzl,
+            ),
+            (
+                Hand::with(|h| {
+                    h.external_repo.insert("//a:b".into());
+                    h.oracle.insert("//a:b".into());
+                }),
+                Class::CambiumExtraExternalRepo,
+            ),
+        ] {
+            assert_eq!(classify("//a:b", Side::Cambium, &setup), want);
+        }
+    }
+
+    #[test]
+    fn without_an_oracle_an_unexplained_extra_stays_unclassified() {
+        // The default `confirmed_by_oracle` is `false`, so a run with the
+        // oracle switched off gets a human's attention rather than a silent
+        // "the tool must be wrong".
+        let c = classify("//a:b", Side::Cambium, &Hand::default());
+        assert_eq!(c, Class::Unclassified);
+        assert!(c.is_failure());
+    }
+
+    #[test]
     fn an_unexplained_cambium_extra_is_unclassified_and_fails() {
         let c = classify("//a:b", Side::Cambium, &Hand::default());
         assert_eq!(c, Class::Unclassified);
@@ -1706,11 +1831,19 @@ mod tests {
 
     #[test]
     fn the_benign_classes_do_not_fail_a_change_set() {
+        // Two kinds of class do not fail: an over-approximation by cambium
+        // (every one of them named `*_extra_*`), and `tool_missing`, which is
+        // a defect of the foil rather than of cambium. Nothing else may be
+        // waved through — a silent "other" bucket is how an unsoundness ships.
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
-            assert!(c.name().contains("extra"), "{c}");
+            assert!(
+                c.name().contains("extra") || *c == Class::ToolMissing,
+                "{c}"
+            );
         }
-        assert_eq!(Class::ALL.len(), 14);
+        assert_eq!(Class::ALL.len(), 15);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
+        assert_eq!(Class::ToolMissing.to_string(), "tool_missing");
     }
 
     #[test]

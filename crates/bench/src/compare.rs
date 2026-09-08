@@ -238,8 +238,13 @@ pub struct ToolComparison {
     /// and this says what cambium itself thought it was doing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cambium_only_reasons: BTreeMap<String, usize>,
+    /// Whether this tool's comparison agreed. `false` when a gating class
+    /// fired, and `false` when [`ToolComparison::error`] is set: a tool that
+    /// could not run has not agreed with anything.
     pub pass: bool,
-    /// Set when the tool itself failed; the change set is then not counted.
+    /// Set when the tool itself failed. Its timing and precision are left out
+    /// of every aggregate, and the change set fails: an absent tool must not
+    /// read as a passing three-way comparison.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -957,6 +962,42 @@ pub fn compare_change_set_with(
         DirectReason::File { path } => cambium_classify::is_build_file(path),
         _ => false,
     });
+    // ---- the oracle ----
+    //
+    // Before the tools, not after: its answer is one of the classifier's
+    // facts. A cambium-side extra that no benign predicate explains is
+    // `tool_missing` rather than `unclassified` when Bazel's own `rdeps`
+    // reached the label too, and that verdict has to be available while the
+    // difference is being classified.
+    //
+    // The base index is wanted only for the deleted half of the change set
+    // (see `crate::oracles::rdeps`): a file that is gone at head has no label
+    // to ask Bazel about, and the base index's `file -> consumers` rows are the
+    // only record of who read it. The run above published it, so this is a
+    // store read; when it is not there the oracle says so and checks the rest.
+    let dirty_packages: BTreeSet<String> = report.dirty_packages.iter().cloned().collect();
+    let oracle = match opts.rdeps_oracle {
+        true => {
+            let base_index = base_index_for_oracle(engine, &change_set.base);
+            Some(
+                RdepsOracle::new(opts.oracle_k, opts.seed)
+                    .run(
+                        &engine.bazel,
+                        &OracleInputs {
+                            head: index.view(),
+                            base: base_index.as_ref().map(|f| f.view()),
+                            changed: &changed,
+                            cambium: &cambium_set,
+                            dirty_packages: &dirty_packages,
+                        },
+                    )
+                    .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
+            )
+        }
+        false => None,
+    };
+    let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
+
     let facts = BazelFacts::new(
         &engine.bazel,
         index.view(),
@@ -968,6 +1009,7 @@ pub fn compare_change_set_with(
     .with_deleted_dep(deleted_dep)
     .with_external_repo(external_repo)
     .with_build_file(from_build_file)
+    .with_oracle(oracle.iter().flat_map(|o| o.oracle_set.iter().cloned()))
     .with_base(bazel_at(engine, base_wt.path()));
 
     // ---- the tools ----
@@ -1044,7 +1086,16 @@ pub fn compare_change_set_with(
                     counts: BTreeMap::new(),
                     examples: Vec::new(),
                     cambium_only_reasons: BTreeMap::new(),
-                    pass: true,
+                    // A tool that could not run produced no comparison, and a
+                    // comparison that did not happen is not a comparison that
+                    // agreed. Passing it here is how the 2026-09-08 published
+                    // run came to render sourcegraph without bazel-diff (40/40
+                    // `aspect query` failures) and apollo without Tango (40/40
+                    // stale worktrees) as though both were three-way
+                    // comparisons: the summary tables simply omit a tool that
+                    // reported nothing, so the absence is invisible in the
+                    // output. Failing the change set makes the run say so.
+                    pass: false,
                     // `{:#}` and not `{}`: anyhow's `Display` prints only the
                     // outermost context, so `hashing <sha> in <dir>` would
                     // arrive without the exit status and stderr tail the
@@ -1055,34 +1106,6 @@ pub fn compare_change_set_with(
         };
         results.push(cmp);
     }
-
-    // ---- the oracle ----
-    //
-    // The base index is wanted only for the deleted half of the change set
-    // (see `crate::oracles::rdeps`): a file that is gone at head has no label
-    // to ask Bazel about, and the base index's `file -> consumers` rows are the
-    // only record of who read it. The run above published it, so this is a
-    // store read; when it is not there the oracle says so and checks the rest.
-    let oracle = match opts.rdeps_oracle {
-        true => {
-            let base_index = base_index_for_oracle(engine, &change_set.base);
-            Some(
-                RdepsOracle::new(opts.oracle_k, opts.seed)
-                    .run(
-                        &engine.bazel,
-                        &OracleInputs {
-                            head: index.view(),
-                            base: base_index.as_ref().map(|f| f.view()),
-                            changed: &changed,
-                            cambium: &cambium_set,
-                        },
-                    )
-                    .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
-            )
-        }
-        false => None,
-    };
-    let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
 
     // ---- the `.bzl` load-closure oracle ----
     //
@@ -1422,6 +1445,22 @@ mod tests {
         );
         assert_eq!(s.cambium_warm.p50_ms, 30);
         assert_eq!(s.cambium_cold.p50_ms, 3000);
+    }
+
+    #[test]
+    fn a_tool_that_could_not_run_fails_its_change_set() {
+        // The absence has to be loud. A tool that errored contributes no
+        // labels, so every aggregate simply omits it and the summary renders
+        // as though the remaining tools were the whole comparison — which is
+        // how the 2026-09-08 run published sourcegraph with no bazel-diff and
+        // apollo with no Tango, both reading as clean.
+        let mut broken = change_set_comparison("1", 1.0, 100, 10, true);
+        broken.tools[0].error = Some("aspect query: ^D".into());
+        broken.tools[0].pass = false;
+        broken.pass = broken.tools.iter().all(|t| t.pass);
+        let s = summarise(&[broken]);
+        assert_eq!(s.passed, 0);
+        assert!(!s.pass, "a comparison that did not happen is not a pass");
     }
 
     #[test]
