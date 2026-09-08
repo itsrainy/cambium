@@ -165,14 +165,31 @@ Expect, and do not be alarmed by:
   pre-rename build, so a strict comparison wants a re-run of the old commit
   rather than a read of the old file. Worth checking first whether the
   history path exercises the externals stage at all.
-- **#4 is live, reproducible, and the one genuine cambium bug this run
-  found.** envoy's change sets produced `cambium_missing_bzl_closure=554`
-  over five occurrences, and the missing package set is *identical* every
-  time: `bazel/coverage`, `bazel/external`, the `bazel/external/c-ares/*`
-  config packages, and the root package `""`. That is a BUILD file's direct
-  `load()` of an external `.bzl` being invisible to rule (a) —
-  `LoadGraph::package_closure` drops the external half. Write the direct-load
-  e2e first.
+- **#4 was a real bug and is fixed (926df79), but it was never envoy's.**
+  The `cambium_missing_bzl_closure=554` the first run reported, and the second
+  run reported again *after* the fix, is not a load-closure gap at all. The
+  index that run built has a `pkg_ext` row for every one of those packages
+  (`bazel/external` → `@@rules_cc+//cc:cc_library.bzl`, `tools/*` →
+  `@@rules_python+//python:defs.bzl`), so rule (a) sees them; no `.bzl` in
+  those change sets declares a repository they load from. `rbuildfiles` was
+  naming the *whole repository*: it walks Skyframe's file nodes, and under
+  bzlmod every package's evaluation depends on the repository mapping, hence
+  on the `.bzl` files that declare repositories. Bazel named 1211 packages on
+  all five and the "missing" set was exactly the complement of cambium's dirty
+  set every time; one of the packages named is
+  `bazel/external/c-ares/include/config_linux`, whose whole `BUILD` file is
+  `exports_files(["ares_config.h"])`. The oracle now recognises that signature
+  (a named package whose `BUILD` file has no `load()`) and records the change
+  set under `repository_evaluation` instead of failing it. The `rdeps` oracle,
+  which checks the answer that matters, had recall 1.0 on all five.
+- **The four `unclassified` extras on those same change sets were a
+  classifier bug, now fixed.** `//bazel:libc++`, `//bazel:libc++_enabled`,
+  `//bazel:libstdc++`, `//bazel:libstdc++_enabled`: `+` is Bazel query's union
+  operator and its lexer ends a word there, so every rule-proto lookup for
+  them was a syntax error and every predicate that compares the two revisions
+  answered "no". They are `cambium_extra_bzl`, like the rest of the re-queried
+  `//bazel` package. `cambium_bazel::query_word` quotes such patterns; the
+  `rdeps` oracle's `set(...)` batches went through the same hole.
 - #5 sourcegraph's `go.mod` / `pnpm-lock.yaml` extension inputs should be
   derived like envoy's `api/` mapping.
 
