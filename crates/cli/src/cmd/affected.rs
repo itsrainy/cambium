@@ -39,9 +39,10 @@ pub struct Args {
     pub max_depth: Option<u32>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,
-    /// Write the head index produced by this run to a file.
-    #[arg(long)]
-    pub write_index: Option<std::path::PathBuf>,
+    /// Write the head index produced by this run to this file. (The report
+    /// itself goes to stdout; `--write-index` is the old spelling.)
+    #[arg(long = "out", alias = "write-index", value_name = "FILE")]
+    pub out: Option<std::path::PathBuf>,
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
@@ -53,7 +54,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         explain: args.explain,
         // Only materialise a head index when the caller asked for the file;
         // otherwise the run walks a delta overlay and never builds one.
-        materialize: args.write_index.is_some(),
+        materialize: args.out.is_some(),
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
         // `--publish-base` follows the config's `baseline.publish_partial`.
@@ -63,13 +64,22 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
 
-    if let (Some(path), Some(index)) = (&args.write_index, &outcome.index) {
+    if let (Some(path), Some(index)) = (&args.out, &outcome.index) {
         cambium_index::format::write_index(path, index)?;
     }
 
     match args.output {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(report)?);
+            if args.tests_only && !report.global {
+                // `--tests-only` restricts `affected` to test targets; every
+                // other field (including `direct`, which can name non-test
+                // labels the change touched directly) is unchanged.
+                let mut projected = report.clone();
+                projected.affected.retain(|t| t.test);
+                println!("{}", serde_json::to_string_pretty(&projected)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(report)?);
+            }
         }
         OutputFormat::Query => {
             println!("{}", report.as_query_expression(args.tests_only));
