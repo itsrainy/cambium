@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use cambium_bench::manifest::{Manifest, RepoEntry};
 use cambium_bench::util::{cache_dir, versioned_name};
-use cambium_bench::{changes, history, State, Subject, SubjectsDir};
+use cambium_bench::checkout::SubjectsDir;
+use cambium_bench::state::State;
+use cambium_bench::subject::Subject;
+use cambium_bench::{changes, history};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cmd::Context;
@@ -502,7 +505,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             let preset = preset_of(&subject, "stages")?;
             let dir = stage_dir(&subject, &common, "stages")?;
             let opts = cambium_bench::runner::RunOptions {
-                presets: vec![preset],
+                preset,
                 stages,
                 runs,
                 out: if stdout {
@@ -875,10 +878,10 @@ impl CompareArgs {
                 // no tool to disagree with it.
                 "cambium" => {}
                 "bazel-diff" | "bazel-diff-rust" | "rust" => {
-                    out.push(cambium_bench::Implementation::Rust.name().to_string())
+                    out.push(cambium_bench::tools::bazeldiff::Implementation::Rust.name().to_string())
                 }
                 "bazel-diff-kotlin" | "kotlin" => {
-                    out.push(cambium_bench::Implementation::Kotlin.name().to_string())
+                    out.push(cambium_bench::tools::bazeldiff::Implementation::Kotlin.name().to_string())
                 }
                 "tango" => out.push(cambium_bench::tools::tango::NAME.to_string()),
                 "none" | "" => {}
@@ -897,9 +900,10 @@ impl CompareArgs {
 /// nightly benchmark job may have bazel-diff and no Go toolchain, and a run that
 /// refuses to compare anything because one of two optional tools is absent is
 /// worse than a run that says so and compares the other.
-fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::Tool>>> {
-    use cambium_bench::{BazelDiff, Implementation, Tango};
-    let found: Result<Box<dyn cambium_bench::Tool>> = match name {
+fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::tools::Tool>>> {
+    use cambium_bench::tools::bazeldiff::{BazelDiff, Implementation};
+    use cambium_bench::tools::tango::Tango;
+    let found: Result<Box<dyn cambium_bench::tools::Tool>> = match name {
         "tango" => Tango::discover().map(|t| Box::new(t) as _),
         "bazel-diff-rust" | "rust" => {
             BazelDiff::discover(Implementation::Rust).map(|b| Box::new(b) as _)
@@ -925,7 +929,7 @@ fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::Tool>>> {
 
 fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let wanted = args.wanted()?;
-    let owned: Vec<Box<dyn cambium_bench::Tool>> = wanted
+    let owned: Vec<Box<dyn cambium_bench::tools::Tool>> = wanted
         .iter()
         .map(|n| open_tool(n))
         .collect::<Result<Vec<_>>>()?
@@ -936,7 +940,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         eprintln!("cambium: bench changes: no tool is installed; nothing to compare against");
         return Ok(crate::EXIT_ERROR);
     }
-    let tools: Vec<&dyn cambium_bench::Tool> = owned.iter().map(|p| p.as_ref()).collect();
+    let tools: Vec<&dyn cambium_bench::tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
     let checkout = run.checkout()?;
     let set = load_change_sets(run, args)?;
@@ -951,7 +955,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let engine = checkout.engine(&run.entry, run.version())?;
     let (rdeps, load) = parse_change_oracles(&args.oracles)?;
     let results = run.workload("changes")?;
-    let opts = cambium_bench::ChangesOptions {
+    let opts = cambium_bench::compare::ChangesOptions {
         bazel_version: run.version.clone(),
         rdeps_oracle: rdeps,
         oracle_k: args.oracle_sample,
@@ -961,7 +965,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         scratch: run.results.join("scratch"),
         state_dir: run.results.clone(),
         tango_change_sets: run.quick.then_some(cambium_bench::QUICK_TANGO_CHANGE_SETS),
-        ..cambium_bench::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
+        ..cambium_bench::compare::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
     };
     tracing::info!(
         change_sets = change_sets.len(),
@@ -971,7 +975,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         "comparing"
     );
     let result =
-        cambium_bench::compare_change_sets(&engine, &checkout, &change_sets, &tools, &opts)?;
+        cambium_bench::compare::compare_change_sets(&engine, &checkout, &change_sets, &tools, &opts)?;
     print_compare_summary(&result);
     println!("{}", opts.output_path().display());
     Ok(if result.summary.pass {
@@ -1018,7 +1022,7 @@ fn parse_kinds(kinds: &[String]) -> Result<Vec<changes::ChangeSetKind>> {
 }
 
 /// The table a person reads before opening the JSON.
-fn print_compare_summary(result: &cambium_bench::ChangesResult) {
+fn print_compare_summary(result: &cambium_bench::compare::ChangesResult) {
     let s = &result.summary;
     println!(
         "\n{} {}  change sets {}  passed {}  global {}  min recall {:.1}%",
@@ -1085,7 +1089,7 @@ fn do_report(
     // Every subject at once, not just the named one: a per-subject nightly job
     // rewrites the top table and the synthetic headline wholesale, and must not
     // drop its neighbours' rows on the way.
-    let results = cambium_bench::SubjectResults::collect(&manifest, &parent, &subjects)?;
+    let results = cambium_bench::report::SubjectResults::collect(&manifest, &parent, &subjects)?;
     if results.is_empty() {
         eprintln!(
             "cambium: bench report: no history-*.json or changes-*.json under {}",
@@ -1103,18 +1107,18 @@ fn do_report(
     }
 
     let bench =
-        cambium_bench::BenchLegacy::read(&ctx.root.join("docs/benchmarks/sweep-legacy.json"));
+        cambium_bench::report::BenchLegacy::read(&ctx.root.join("docs/benchmarks/sweep-legacy.json"));
     for r in &results {
         if only.as_ref().is_some_and(|id| &r.id != id) {
             continue;
         }
-        cambium_bench::update_doc(&doc, &r.id, &cambium_bench::render_subject_section(r, None))?;
+        cambium_bench::report::update_doc(&doc, &r.id, &cambium_bench::report::render_subject_section(r, None))?;
     }
-    cambium_bench::update_doc(&doc, "top", &cambium_bench::render_top_table(&results))?;
-    cambium_bench::update_doc(
+    cambium_bench::report::update_doc(&doc, "top", &cambium_bench::report::render_top_table(&results))?;
+    cambium_bench::report::update_doc(
         &doc,
         "synthetic",
-        &cambium_bench::render_bench_section(&bench, Some("bench-legacy.svg")),
+        &cambium_bench::report::render_bench_section(&bench, Some("bench-legacy.svg")),
     )?;
     tracing::info!(doc = %doc.display(), subjects = results.len(), "report written");
     println!("{}", doc.display());

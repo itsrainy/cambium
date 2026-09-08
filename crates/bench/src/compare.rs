@@ -27,7 +27,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::{ChangeSet, Checkout, State};
+use crate::changes::ChangeSet;
+use crate::checkout::Checkout;
+use crate::state::State;
 use anyhow::{Context as _, Result};
 use cambium_bazel::Bazel;
 use cambium_engine::Engine;

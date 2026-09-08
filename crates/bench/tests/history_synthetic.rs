@@ -8,7 +8,7 @@ use std::path::Path;
 
 use cambium_bench::changes::{self, ChangeSetKind, ChangeSetOptions};
 use cambium_bench::history::{history, Driver, HistoryOptions, HistoryResult};
-use cambium_bench::State;
+use cambium_bench::state::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 
@@ -220,7 +220,7 @@ fn change_sets_are_deterministic_and_cover_the_range() {
     let path = f.results.join("change_sets.json");
     set.write(&path).unwrap();
     assert_eq!(
-        cambium_bench::ChangeSetSet::read(&path)
+        cambium_bench::changes::ChangeSetSet::read(&path)
             .unwrap()
             .change_sets,
         set.change_sets

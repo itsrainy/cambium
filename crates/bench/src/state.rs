@@ -25,11 +25,13 @@ pub struct State {
     pub built: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub history: Option<HistoryState>,
-    /// ChangeSet keys (`<base>..<head>`) the comparison has finished.
+    /// ChangeSet keys (`<base>..<head>`) the comparison has finished. This is
+    /// what makes a killed `bench changes` resumable, and the only record of
+    /// what a run has already done -- there is no separate "reported" flag,
+    /// because `bench report` is a pure function of the result files and
+    /// re-running it is free.
     #[serde(default)]
     pub compared: BTreeSet<String>,
-    #[serde(default)]
-    pub reported: bool,
     /// Which cambium wrote the rest of this file: the index format version and
     /// the configuration hash. A result is only reusable by the build that
     /// made it, so a state written by another one is thrown away rather than

@@ -30,7 +30,7 @@ pub trait Driver {
 
 /// A driver over a subject's checkout and a real Bazel.
 pub struct BazelDriver<'a> {
-    pub checkout: &'a crate::Checkout,
+    pub checkout: &'a crate::checkout::Checkout,
     pub engine: &'a Engine,
 }
 
