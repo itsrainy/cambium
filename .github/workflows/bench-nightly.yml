@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CAMBIUM_TANGO_DIR }}
-          key: tango-${{ hashFiles('tools/tango/fetch.sh', 'tools/tango/cmd/**') }}
+          key: tango-${{ hashFiles('tools/tango/**') }}
       - run: tools/tango/fetch.sh
 
       - name: Cache per-repo Bazel repository/disk cache
@@ -83,7 +83,7 @@ jobs:
       - name: bench changes
         run: |
           ./target/release/cambi bench changes ${{ matrix.subject }} \
-            --kind pr,adjacent,stress --oracle rdeps,load --oracle-sample 100
+            --kind pr,adjacent,stress --oracle rdeps,load
       - name: bench report
         if: always()
         run: ./target/release/cambi bench report ${{ matrix.subject }}
@@ -92,4 +92,8 @@ jobs:
         if: always()
         with:
           name: bench-results-${{ matrix.subject }}
-          path: bench-results/
+          # The report rewrites docs/RESULTS.md in the runner's checkout and
+          # nothing commits it; the artifact is the only copy that leaves.
+          path: |
+            bench-results/
+            docs/RESULTS.md
