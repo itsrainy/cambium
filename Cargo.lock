@@ -226,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cambium-bench",
+ "cambium-diff",
  "cambium-engine",
  "cambium-index",
  "cambium-synth",

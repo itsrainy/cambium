@@ -177,6 +177,13 @@ pub enum Args {
         #[arg(long, default_value_t = 15.0)]
         threshold: f64,
     },
+    /// Replay the engine's static stages offline, against a stored index and
+    /// a published run's own answers.
+    ///
+    /// No Bazel, no checkout, milliseconds a change set: the check to run
+    /// before the benchmark machine is started. See
+    /// `docs/METHODOLOGY.md`, "Validating an engine change before a run".
+    Replay(Box<crate::cmd::replay::Args>),
     /// Regenerate docs/RESULTS.md from bench-results/.
     Report {
         /// Rewrite only this subject's section. Every subject that has results
@@ -386,6 +393,7 @@ fn preset_of(subject: &str, what: &str) -> Result<String> {
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match args {
         Args::Subjects { what } => do_subjects(ctx, what),
+        Args::Replay(args) => crate::cmd::replay::run(ctx, *args),
         Args::History {
             subject,
             commits,
