@@ -66,6 +66,28 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
 }
 
 #[test]
+fn hermetic_output_never_tells_a_caller_to_type_cambium() {
+    // `synth emit-bazel` never touches Bazel, so it is safe to run in any CI
+    // sandbox. It prints a "try: cambi ..." suggestion, which has regressed
+    // before to name the crate (`cambium`) rather than the binary (`cambi`).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("ws");
+    let (code, stdout, stderr) = run(&[
+        "synth",
+        "emit-bazel",
+        "--spec",
+        "small",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "emit-bazel failed: {stderr}");
+    assert!(
+        !stdout.contains("cambium "),
+        "hermetic output leaked the crate name as a binary a caller would type:\n{stdout}"
+    );
+}
+
+#[test]
 fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
     // A caller that mistypes must not have an empty stdout read as "nothing is
     // affected". clap uses 2 for usage errors; what matters here is that it is

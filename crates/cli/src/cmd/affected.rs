@@ -67,7 +67,16 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
     match args.output {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(report)?);
+            if args.tests_only && !report.global {
+                // `--tests-only` restricts `affected` to test targets; every
+                // other field (including `direct`, which can name non-test
+                // labels the change touched directly) is unchanged.
+                let mut projected = report.clone();
+                projected.affected.retain(|t| t.test);
+                println!("{}", serde_json::to_string_pretty(&projected)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(report)?);
+            }
         }
         OutputFormat::Query => {
             println!("{}", report.as_query_expression(args.tests_only));

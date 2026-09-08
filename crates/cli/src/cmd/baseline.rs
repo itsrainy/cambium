@@ -30,10 +30,11 @@ pub enum Args {
         publish: bool,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
-        /// Rebuild from scratch if the range invalidates everything, rather
-        /// than failing.
-        #[arg(long, default_value_t = true)]
-        rebuild_on_global: bool,
+        /// Fail instead of rebuilding from scratch when the range invalidates
+        /// everything. By default a global invalidation mints a fresh
+        /// lineage.
+        #[arg(long)]
+        no_rebuild_on_global: bool,
     },
     /// Delete published indexes older than the configured retention.
     Gc {
@@ -63,7 +64,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             to,
             publish,
             out,
-            rebuild_on_global,
+            no_rebuild_on_global,
         } => {
             let to_sha = engine.repo.rev_parse(&to).unwrap_or(to);
             let req = AffectedRequest {
@@ -83,10 +84,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             let index = match outcome.index {
                 Some(i) => i,
                 None => {
-                    if !rebuild_on_global {
+                    if no_rebuild_on_global {
                         anyhow::bail!(
-                            "the range invalidates everything ({}); pass --rebuild-on-global to \
-                             mint a fresh lineage instead",
+                            "the range invalidates everything ({}); drop --no-rebuild-on-global \
+                             to mint a fresh lineage instead",
                             outcome
                                 .report
                                 .global_reason
