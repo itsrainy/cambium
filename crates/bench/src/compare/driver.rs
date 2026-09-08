@@ -120,7 +120,21 @@ pub fn compare_change_set_with(
 ) -> Result<ChangeSetResult> {
     let mut owned = opts.clone();
     owned.make_absolute();
-    let opts = &owned;
+    compare_one(engine, checkout, change_set, tools, &owned)
+}
+
+/// One change set, with options already made absolute.
+///
+/// Separate from [`compare_change_set_with`] because the loop in
+/// [`compare_change_sets`] normalised the paths once and then cloned the whole
+/// options struct again for every change set of the run.
+fn compare_one(
+    engine: &Engine,
+    checkout: &Checkout,
+    change_set: &ChangeSet,
+    tools: &[&dyn Tool],
+    opts: &ChangesOptions,
+) -> Result<ChangeSetResult> {
     std::fs::create_dir_all(&opts.scratch)?;
 
     // ---- cambium, cold then warm ----
@@ -540,13 +554,8 @@ pub fn compare_change_sets(
     owned.make_absolute();
     let opts = &owned;
     let path = opts.output_path();
-    let mut state = State::load_for(
-        &opts.state_dir,
-        &opts.repo_id,
-        &opts.pin,
-        &State::engine_id(&engine.cfg.hash()),
-    )?;
     let engine_id = State::engine_id(&engine.cfg.hash());
+    let mut state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
     let mut result = match (opts.resume, ChangesResult::read(&path)) {
         (true, Ok(prev)) if resumable(&prev, opts, &engine_id) => prev,
         (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => {
@@ -596,7 +605,7 @@ pub fn compare_change_sets(
             tools = running.len(),
             "comparing"
         );
-        let cmp = compare_change_set_with(engine, checkout, change_set, &running, opts)?;
+        let cmp = compare_one(engine, checkout, change_set, &running, opts)?;
         if !cmp.pass {
             tracing::warn!(%key, "change set failed the three-way comparison");
         }

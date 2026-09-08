@@ -31,6 +31,21 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// The short git sha of the cambium that was built, or `"unknown"`.
+///
+/// Stamped in at build time by `build.rs`, and *not* asked of `git` at run
+/// time: a workload's working directory is a **subject's** checkout, so
+/// `git rev-parse HEAD` there answers with envoy's HEAD, not ours. The two
+/// call sites used to disagree about exactly that -- one ran `git` in the
+/// process's cwd, the other in `CARGO_MANIFEST_DIR` -- so a history and a
+/// stage report from the same binary could name two different cambiums.
+pub fn tool_sha() -> &'static str {
+    match option_env!("CAMBIUM_GIT_SHA") {
+        Some(s) if !s.is_empty() => s,
+        _ => "unknown",
+    }
+}
+
 /// `$HOME`, or the system temp directory when there is none — a CI runner or a
 /// daemon with no home still has to put a cache somewhere.
 pub fn home() -> PathBuf {
