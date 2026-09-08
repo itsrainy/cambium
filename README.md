@@ -50,15 +50,28 @@ whose inputs did not change. A run is:
 | load index | O(1) mmap, plus an O(labels) map only where a label lookup is needed |
 | dirty set | O(changed files × path depth), plus O(consumers) per changed `.bzl` from the stored load closure — no Bazel call |
 | query | O(targets in dirty packages) of Bazel loading time |
-| splice | O(edges) memcpy |
+| splice | O(changed edges) into an overlay, or O(edges) memcpy when a new index is written |
 | direct set | O(dirty targets + changed files) |
 | walk | O(affected + their in-edges) |
 
-Only the splice touches the whole index, and only because v1 writes a complete
-new one. It is ~52% of a run on a 500k-target graph. The fix — a delta overlay
-for the `affected` path, leaving `baseline update` materialising, since its
-output is what gets published — is described in
-[BENCHMARKS.md](BENCHMARKS.md#where-the-time-actually-goes).
+The splice comes in two forms, and which one a command uses follows from what
+it owes at the end:
+
+- **`affected` takes the delta overlay.** It answers a question and throws the
+  graph away, so there is no reason to write a whole new index for it. The
+  overlay holds only the rows the dirty packages replaced and the reverse-edge
+  corrections they imply, and reads through to the mmapped baseline for
+  everything else — so the step is proportional to the change rather than to
+  the repository. This is the default, not a flag.
+- **`baseline update` materialises.** Its output is the thing that gets
+  published, so it has to be a complete index.
+
+Both paths run the same direct-set derivation and the same walk over a
+`GraphView`, so they cannot disagree about the answer — only about what is left
+on disk afterwards. Materialising was once the only option, and at ~52% of a
+run on a 500k-target graph it was the single most expensive step;
+[BENCHMARKS.md](BENCHMARKS.md#where-the-time-actually-goes) has the numbers for
+both.
 
 ## Install
 

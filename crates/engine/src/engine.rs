@@ -219,8 +219,14 @@ impl Engine {
     /// same content is the same checkout as far as `bazel query` is concerned,
     /// and the store already keys indexes by tree for the same reason. A
     /// revision git cannot resolve (a synthetic id in the tests, a sha this
-    /// clone does not have) is left to the working tree, which is the only
-    /// thing there is.
+    /// clone does not have) is left to the working tree — not because that is
+    /// certainly right, but because it is the only checkout there is: `git
+    /// worktree add` on a revision git cannot name would fail, and failing the
+    /// whole run over it would break every synthetic test, which uses ids like
+    /// `"base"` that were never commits. On a real repository an unresolvable
+    /// revision means the caller passed a sha this clone does not have, and
+    /// the run goes on to fail at `git diff` a moment later with a message
+    /// that actually says so.
     ///
     /// A *dirty* working tree at HEAD stays on the fast path deliberately:
     /// `cambi affected` on a developer's checkout is meant to index the edits
