@@ -797,17 +797,17 @@ impl<'a> IndexBuilder<'a> {
             pkg_bzl_hash: self.pkg_bzl_hash,
             pkg_build_hash: self.pkg_build_hash,
             pkg_flags: self.pkg_flags,
-            bzl_path_bytes: bzl.path_bytes,
-            bzl_path_offsets: bzl.path_offsets,
-            bzl_load_offsets: bzl.load_offsets,
-            bzl_load_edges: bzl.load_edges,
-            bzl_consumer_offsets: bzl.consumer_offsets,
-            bzl_consumer_edges: bzl.consumer_edges,
-            bzl_workspace: bzl.workspace,
-            bzl_ext_label_bytes: bzl.ext_label_bytes,
-            bzl_ext_label_offsets: bzl.ext_label_offsets,
-            bzl_ext_offsets: bzl.ext_offsets,
-            bzl_ext_edges: bzl.ext_edges,
+            bzl_path_bytes: bzl.bzl_path_bytes,
+            bzl_path_offsets: bzl.bzl_path_offsets,
+            bzl_load_offsets: bzl.bzl_load_offsets,
+            bzl_load_edges: bzl.bzl_load_edges,
+            bzl_consumer_offsets: bzl.bzl_consumer_offsets,
+            bzl_consumer_edges: bzl.bzl_consumer_edges,
+            bzl_workspace: bzl.bzl_workspace,
+            bzl_ext_label_bytes: bzl.bzl_ext_label_bytes,
+            bzl_ext_label_offsets: bzl.bzl_ext_label_offsets,
+            bzl_ext_offsets: bzl.bzl_ext_offsets,
+            bzl_ext_edges: bzl.bzl_ext_edges,
             pkg_ext_offsets: bzl.pkg_ext_offsets,
             pkg_ext_edges: bzl.pkg_ext_edges,
             repo_name_bytes: bzl.repo_name_bytes,
@@ -820,8 +820,8 @@ impl<'a> IndexBuilder<'a> {
             repo_input_target_only: bzl.repo_input_target_only,
             repo_input_repo_offsets: bzl.repo_input_repo_offsets,
             repo_input_repo_edges: bzl.repo_input_repo_edges,
-            bzl_repo_offsets: bzl.repo_bzl_offsets,
-            bzl_repo_edges: bzl.repo_bzl_edges,
+            bzl_repo_offsets: bzl.bzl_repo_offsets,
+            bzl_repo_edges: bzl.bzl_repo_edges,
             repo_map_bytes: bzl.repo_map_bytes,
             repo_map_offsets: bzl.repo_map_offsets,
             repo_map_ranges: bzl.repo_map_ranges,
@@ -830,20 +830,26 @@ impl<'a> IndexBuilder<'a> {
 }
 
 /// The serialised form of the `.bzl` load closure.
+///
+/// Every field is named exactly as its [`IndexData`] counterpart, so the move
+/// in `finish` reads `x: bzl.x` throughout. It used to rename in flight —
+/// `bzl_repo_offsets: bzl.repo_bzl_offsets` next to twenty-odd sibling lines —
+/// where crossing two same-typed `Vec<u32>` fields would have compiled and
+/// silently produced an index whose repository rows were its load rows.
 #[derive(Default)]
 struct BzlTables {
     present: bool,
-    path_bytes: Vec<u8>,
-    path_offsets: Vec<u32>,
-    load_offsets: Vec<u32>,
-    load_edges: Vec<u32>,
-    consumer_offsets: Vec<u32>,
-    consumer_edges: Vec<u32>,
-    workspace: Vec<u32>,
-    ext_label_bytes: Vec<u8>,
-    ext_label_offsets: Vec<u32>,
-    ext_offsets: Vec<u32>,
-    ext_edges: Vec<u32>,
+    bzl_path_bytes: Vec<u8>,
+    bzl_path_offsets: Vec<u32>,
+    bzl_load_offsets: Vec<u32>,
+    bzl_load_edges: Vec<u32>,
+    bzl_consumer_offsets: Vec<u32>,
+    bzl_consumer_edges: Vec<u32>,
+    bzl_workspace: Vec<u32>,
+    bzl_ext_label_bytes: Vec<u8>,
+    bzl_ext_label_offsets: Vec<u32>,
+    bzl_ext_offsets: Vec<u32>,
+    bzl_ext_edges: Vec<u32>,
     pkg_ext_offsets: Vec<u32>,
     pkg_ext_edges: Vec<u32>,
     repo_name_bytes: Vec<u8>,
@@ -856,8 +862,8 @@ struct BzlTables {
     repo_input_target_only: Vec<bool>,
     repo_input_repo_offsets: Vec<u32>,
     repo_input_repo_edges: Vec<u32>,
-    repo_bzl_offsets: Vec<u32>,
-    repo_bzl_edges: Vec<u32>,
+    bzl_repo_offsets: Vec<u32>,
+    bzl_repo_edges: Vec<u32>,
     repo_map_bytes: Vec<u8>,
     repo_map_offsets: Vec<u32>,
     repo_map_ranges: Vec<u32>,
@@ -866,17 +872,17 @@ struct BzlTables {
 impl BzlTables {
     fn empty() -> Self {
         Self {
-            path_offsets: vec![0],
-            load_offsets: vec![0],
-            consumer_offsets: vec![0],
-            ext_label_offsets: vec![0],
-            ext_offsets: vec![0],
+            bzl_path_offsets: vec![0],
+            bzl_load_offsets: vec![0],
+            bzl_consumer_offsets: vec![0],
+            bzl_ext_label_offsets: vec![0],
+            bzl_ext_offsets: vec![0],
             pkg_ext_offsets: vec![0],
             repo_name_offsets: vec![0],
             repo_canonical_offsets: vec![0],
             repo_input_offsets: vec![0],
             repo_input_repo_offsets: vec![0],
-            repo_bzl_offsets: vec![0],
+            bzl_repo_offsets: vec![0],
             repo_map_offsets: vec![0],
             repo_map_ranges: vec![0],
             ..Default::default()
@@ -907,8 +913,9 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
     t.present = true;
     let mut ext_labels = Interner::new();
     for &old in &order {
-        t.path_bytes.extend_from_slice(c.graph.path(old).as_bytes());
-        t.path_offsets.push(t.path_bytes.len() as u32);
+        t.bzl_path_bytes
+            .extend_from_slice(c.graph.path(old).as_bytes());
+        t.bzl_path_offsets.push(t.bzl_path_bytes.len() as u32);
         let mut row: Vec<u32> = c
             .graph
             .loads(old)
@@ -917,8 +924,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             .collect();
         row.sort_unstable();
         row.dedup();
-        t.load_edges.extend_from_slice(&row);
-        t.load_offsets.push(t.load_edges.len() as u32);
+        t.bzl_load_edges.extend_from_slice(&row);
+        t.bzl_load_offsets.push(t.bzl_load_edges.len() as u32);
         let mut ext: Vec<u32> = c
             .graph
             .external(old)
@@ -927,8 +934,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             .collect();
         ext.sort_unstable();
         ext.dedup();
-        t.ext_edges.extend_from_slice(&ext);
-        t.ext_offsets.push(t.ext_edges.len() as u32);
+        t.bzl_ext_edges.extend_from_slice(&ext);
+        t.bzl_ext_offsets.push(t.bzl_ext_edges.len() as u32);
     }
     // The BUILD files' own external loads, one row per package id, into the
     // same label table.
@@ -947,8 +954,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         t.pkg_ext_offsets.push(t.pkg_ext_edges.len() as u32);
     }
     let (b, o) = ext_labels.into_parts();
-    t.ext_label_bytes = b;
-    t.ext_label_offsets = o;
+    t.bzl_ext_label_bytes = b;
+    t.bzl_ext_label_offsets = o;
 
     // Invert: package closures -> consumers per `.bzl`.
     let mut consumers: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -965,13 +972,14 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
     for row in &mut consumers {
         row.sort_unstable();
         row.dedup();
-        t.consumer_edges.extend_from_slice(row);
-        t.consumer_offsets.push(t.consumer_edges.len() as u32);
+        t.bzl_consumer_edges.extend_from_slice(row);
+        t.bzl_consumer_offsets
+            .push(t.bzl_consumer_edges.len() as u32);
     }
 
-    t.workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
-    t.workspace.sort_unstable();
-    t.workspace.dedup();
+    t.bzl_workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
+    t.bzl_workspace.sort_unstable();
+    t.bzl_workspace.dedup();
 
     // ---- external repositories ----
     //
@@ -1030,8 +1038,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         row.dedup();
     }
     for row in &per_bzl {
-        t.repo_bzl_edges.extend_from_slice(row);
-        t.repo_bzl_offsets.push(t.repo_bzl_edges.len() as u32);
+        t.bzl_repo_edges.extend_from_slice(row);
+        t.bzl_repo_offsets.push(t.bzl_repo_edges.len() as u32);
     }
     t
 }
