@@ -540,7 +540,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
         s.min_recall = s.min_recall.min(p.recall);
         if let Some(o) = &p.load_oracle {
             s.load_oracle.add(o);
-            if !o.missing_packages.is_empty() {
+            if !o.missing_packages.is_empty() && o.repository_evaluation.is_empty() {
                 *s.by_class
                     .entry(crate::oracles::load::MISSING_CLASS.to_string())
                     .or_default() += o.missing_packages.len();
@@ -1134,7 +1134,15 @@ pub fn compare_change_set_with(
         false => None,
     };
     if let Some(o) = &load_oracle {
-        if !o.ok() {
+        if !o.repository_evaluation.is_empty() {
+            tracing::info!(
+                witnesses = ?o.repository_evaluation,
+                named = o.bazel_packages.len(),
+                checked = ?o.checked,
+                "rbuildfiles named packages whose BUILD file loads nothing; \
+                 this answer came through repository evaluation, not load edges"
+            );
+        } else if !o.ok() {
             tracing::error!(
                 missing = ?o.missing_packages,
                 checked = ?o.checked,
