@@ -31,11 +31,6 @@ pub enum BazelError {
         status: String,
         stderr: String,
     },
-    /// Bazel exited 3: `--keep_going` let it finish, but some package or
-    /// external repository failed to load, so the answer is incomplete.
-    /// Callers that need a complete answer (`rbuildfiles`) must not trust it.
-    #[error("bazel {args} finished with errors under --keep_going (exit 3); the answer is incomplete\n--- last stderr ---\n{stderr}")]
-    Partial { args: String, stderr: String },
     #[error("reading bazel output: {0}")]
     Read(#[from] ReadError),
     #[error("io error: {0}")]

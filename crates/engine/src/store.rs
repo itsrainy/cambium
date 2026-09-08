@@ -21,8 +21,10 @@
 //! internal CLI without any Rust changes. `docs/STORE.md` has the exact
 //! templates for S3 and GCS, and the design note for content-addressed blobs.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::config::StoreConfig;
 
@@ -76,11 +78,69 @@ pub fn from_config(cfg: &StoreConfig) -> Option<Box<dyn ArtifactStore>> {
             fetch_cmd,
             push_cmd,
             list_cmd,
+            not_found_exit,
         } => Some(Box::new(CommandStore {
             fetch_cmd: fetch_cmd.clone(),
             push_cmd: push_cmd.clone(),
             list_cmd: list_cmd.clone(),
+            not_found_exit: *not_found_exit,
         })),
+    }
+}
+
+/// A file being fetched into `dest`, written next to it and renamed into
+/// place once complete, so a reader (or a second fetcher) never sees a
+/// half-written index. Dropping it before `commit` removes the temp file.
+struct PendingFetch {
+    tmp: PathBuf,
+    dest: PathBuf,
+}
+
+impl PendingFetch {
+    fn start(dest: &Path) -> Result<(Self, File)> {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let tmp = dest.with_extension(format!(
+            "fetching.{}",
+            cambium_index::format::temp_suffix()
+        ));
+        let file = File::create(&tmp).map_err(|source| StoreError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        Ok((
+            Self {
+                tmp,
+                dest: dest.to_path_buf(),
+            },
+            file,
+        ))
+    }
+
+    fn commit(self) -> Result<()> {
+        std::fs::rename(&self.tmp, &self.dest).map_err(|source| StoreError::Io {
+            path: self.dest.clone(),
+            source,
+        })?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for PendingFetch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
+fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
+    move |source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
@@ -138,16 +198,10 @@ impl ArtifactStore for DirStore {
         if src == dest {
             return Ok(true);
         }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        std::fs::copy(&src, dest).map_err(|source| StoreError::Io {
-            path: src.clone(),
-            source,
-        })?;
+        let (pending, mut out) = PendingFetch::start(dest)?;
+        let mut input = File::open(&src).map_err(io_err(&src))?;
+        std::io::copy(&mut input, &mut out).map_err(io_err(&src))?;
+        pending.commit()?;
         Ok(true)
     }
 
@@ -218,7 +272,15 @@ impl ArtifactStore for DirStore {
 pub struct HttpStore {
     base: String,
     headers: Vec<(String, String)>,
+    /// One agent for the store's lifetime: connection reuse across the
+    /// ancestor walk's many GETs, and one place for the timeouts.
+    agent: ureq::Agent,
 }
+
+/// Time to first byte and per-read stall before a store call is a failure.
+/// Indexes are hundreds of megabytes, so this bounds silence, not the whole
+/// transfer.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl HttpStore {
     pub fn new(base: String, headers: Vec<String>) -> Self {
@@ -227,36 +289,51 @@ impl HttpStore {
             .filter_map(|h| h.split_once(':'))
             .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
             .collect();
-        Self { base, headers }
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(HTTP_TIMEOUT)
+            .timeout_read(HTTP_TIMEOUT)
+            .timeout_write(HTTP_TIMEOUT)
+            .build();
+        Self {
+            base,
+            headers,
+            agent,
+        }
     }
 
     fn url(&self, name: &str) -> String {
         format!("{}/{}", self.base.trim_end_matches('/'), name)
     }
+
+    fn request(&self, method: &str, name: &str) -> ureq::Request {
+        let mut req = self.agent.request(method, &self.url(name));
+        for (k, v) in &self.headers {
+            req = req.set(k, v);
+        }
+        req
+    }
 }
 
 impl ArtifactStore for HttpStore {
     fn fetch(&self, name: &str, dest: &Path) -> Result<bool> {
-        let mut req = ureq::get(&self.url(name));
-        for (k, v) in &self.headers {
-            req = req.set(k, v);
-        }
-        match req.call() {
+        match self.request("GET", name).call() {
             Ok(resp) => {
-                let mut out = Vec::new();
-                resp.into_reader()
-                    .read_to_end(&mut out)
-                    .map_err(|source| StoreError::Io {
-                        path: dest.to_path_buf(),
-                        source,
-                    })?;
-                std::fs::write(dest, out).map_err(|source| StoreError::Io {
-                    path: dest.to_path_buf(),
-                    source,
-                })?;
+                let (pending, mut out) = PendingFetch::start(dest)?;
+                std::io::copy(&mut resp.into_reader(), &mut out).map_err(io_err(dest))?;
+                pending.commit()?;
                 Ok(true)
             }
             Err(ureq::Error::Status(404, _)) => Ok(false),
+            // S3 and GCS answer 403 rather than 404 for a missing key when the
+            // caller may not list the bucket, which is the usual shape of a
+            // read-only CI credential. The ancestor walk asks for many keys
+            // that do not exist, so this is a miss, not an outage; a
+            // credential that is actually wrong shows up as the publish
+            // failing, which is loud.
+            Err(ureq::Error::Status(403, _)) => {
+                tracing::debug!(name, "403 on GET; reading it as not found");
+                Ok(false)
+            }
             Err(e) => Err(StoreError::Backend {
                 op: "fetch",
                 name: name.to_string(),
@@ -266,19 +343,16 @@ impl ArtifactStore for HttpStore {
     }
 
     fn publish(&self, name: &str, src: &Path) -> Result<()> {
-        let body = std::fs::read(src).map_err(|source| StoreError::Io {
-            path: src.to_path_buf(),
-            source,
-        })?;
-        let mut req = ureq::put(&self.url(name));
-        for (k, v) in &self.headers {
-            req = req.set(k, v);
-        }
-        req.send_bytes(&body).map_err(|e| StoreError::Backend {
-            op: "publish",
-            name: name.to_string(),
-            detail: e.to_string(),
-        })?;
+        let file = File::open(src).map_err(io_err(src))?;
+        let len = file.metadata().map_err(io_err(src))?.len();
+        self.request("PUT", name)
+            .set("Content-Length", &len.to_string())
+            .send(file)
+            .map_err(|e| StoreError::Backend {
+                op: "publish",
+                name: name.to_string(),
+                detail: e.to_string(),
+            })?;
         Ok(())
     }
 
@@ -291,8 +365,6 @@ impl ArtifactStore for HttpStore {
     }
 }
 
-use std::io::Read;
-
 // ------------------------------------------------------------------ command
 
 /// Runs user-supplied commands. `{name}` and `{path}` are substituted in every
@@ -302,6 +374,8 @@ pub struct CommandStore {
     fetch_cmd: Vec<String>,
     push_cmd: Vec<String>,
     list_cmd: Vec<String>,
+    /// See [`StoreConfig::Command::not_found_exit`].
+    not_found_exit: Option<i32>,
 }
 
 impl CommandStore {
@@ -337,15 +411,36 @@ impl ArtifactStore for CommandStore {
         if out.status.success() && dest.exists() {
             return Ok(true);
         }
-        // A non-zero exit is how "not found" is reported by most CLIs; only
-        // surface it as an error if the command could not run at all.
-        tracing::debug!(
-            name,
-            status = ?out.status.code(),
-            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-            "fetch command reported no artifact"
-        );
-        Ok(false)
+        let _ = std::fs::remove_file(dest);
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let code = out.status.code();
+        match self.not_found_exit {
+            // The command told us which exit means "no such object", so any
+            // other failure is the store misbehaving, not a miss.
+            Some(nf) if code != Some(nf) => Err(StoreError::Backend {
+                op: "fetch",
+                name: name.to_string(),
+                detail: format!("exit {code:?}: {stderr}"),
+            }),
+            // A non-zero exit is how most CLIs report "not found", and the
+            // ancestor walk asks for many keys that do not exist. But a
+            // missing key is usually silent; a message on stderr may be an
+            // expired credential or a wrong bucket, and reading that as "no
+            // baseline" turns into a cold build with no explanation.
+            _ => {
+                if stderr.is_empty() {
+                    tracing::debug!(name, status = ?code, "fetch command reported no artifact");
+                } else {
+                    tracing::warn!(
+                        name,
+                        status = ?code,
+                        %stderr,
+                        "fetch command failed; treating the artifact as absent"
+                    );
+                }
+                Ok(false)
+            }
+        }
     }
 
     fn publish(&self, name: &str, src: &Path) -> Result<()> {
@@ -372,8 +467,7 @@ impl ArtifactStore for CommandStore {
         }
         Ok(String::from_utf8_lossy(&out.stdout)
             .lines()
-            .map(|l| l.trim().rsplit('/').next().unwrap_or_default().to_string())
-            .filter(|l| !l.is_empty())
+            .filter_map(list_line_to_key)
             .collect())
     }
 
@@ -383,6 +477,36 @@ impl ArtifactStore for CommandStore {
             self.fetch_cmd.first().cloned().unwrap_or_default()
         )
     }
+}
+
+/// The store key on one line of `list_cmd` output, or `None` for a line that
+/// is not one (a directory header, a blank).
+///
+/// Listings come in several shapes — `aws s3 ls --recursive` prints
+/// `<date> <time> <size> <key>`, `gsutil ls -r` prints one full URL per line
+/// with `<prefix>/:` headers, a plain `find` prints paths — and the key is
+/// what comes after the store's own prefix. That prefix is not known here, but
+/// every key starts with `indexes/` or `commits/`, so the key is the last
+/// whitespace-separated token from its first such segment onward. A flat
+/// `cambium-index-*.bin` name from the pre-lineage layout is still recognised
+/// by its basename.
+fn list_line_to_key(line: &str) -> Option<String> {
+    let token = line.split_whitespace().last()?;
+    if token.ends_with('/') || token.ends_with(':') {
+        return None;
+    }
+    for marker in ["indexes/", "commits/"] {
+        let at = if let Some(rest) = token.strip_prefix(marker) {
+            Some(token.len() - rest.len() - marker.len())
+        } else {
+            token.find(&format!("/{marker}")).map(|i| i + 1)
+        };
+        if let Some(i) = at {
+            return Some(token[i..].to_string());
+        }
+    }
+    let base = token.rsplit('/').next().unwrap_or(token);
+    (base.starts_with("cambium-index-") && base.ends_with(".bin")).then(|| base.to_string())
 }
 
 #[cfg(test)]
@@ -434,6 +558,7 @@ mod tests {
             ],
             push_cmd: vec!["true".into()],
             list_cmd: vec!["ls".into(), dir.path().display().to_string()],
+            not_found_exit: None,
         };
         let dest = dir.path().join("out.bin");
         assert!(store.fetch("cambium-index-x-1.bin", &dest).unwrap());
@@ -445,5 +570,63 @@ mod tests {
             .list()
             .unwrap()
             .contains(&"cambium-index-x-1.bin".to_string()));
+    }
+
+    #[test]
+    fn list_lines_keep_the_whole_key_from_the_layout_root() {
+        // `aws s3 ls --recursive`
+        assert_eq!(
+            list_line_to_key("2026-09-01 12:00:00    260000000 cambium/indexes/ab/cd.bin").as_deref(),
+            Some("indexes/ab/cd.bin")
+        );
+        // `gsutil ls -r`: full URLs, plus directory headers to skip.
+        assert_eq!(
+            list_line_to_key("gs://bucket/cambium/commits/ab/deadbeef").as_deref(),
+            Some("commits/ab/deadbeef")
+        );
+        assert_eq!(list_line_to_key("gs://bucket/cambium/indexes/ab/:"), None);
+        assert_eq!(list_line_to_key(""), None);
+        // A plain relative listing.
+        assert_eq!(
+            list_line_to_key("indexes/by-tree/t1.bin").as_deref(),
+            Some("indexes/by-tree/t1.bin")
+        );
+        // The flat pre-lineage layout.
+        assert_eq!(
+            list_line_to_key("bucket/cambium-index-a-1.bin").as_deref(),
+            Some("cambium-index-a-1.bin")
+        );
+        assert_eq!(list_line_to_key("bucket/README.md"), None);
+    }
+
+    #[test]
+    fn a_configured_not_found_exit_makes_other_failures_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CommandStore {
+            fetch_cmd: vec!["sh".into(), "-c".into(), "exit 2".into()],
+            push_cmd: vec![],
+            list_cmd: vec![],
+            not_found_exit: Some(1),
+        };
+        assert!(store.fetch("x", &dir.path().join("x")).is_err());
+        let store = CommandStore {
+            fetch_cmd: vec!["sh".into(), "-c".into(), "exit 1".into()],
+            push_cmd: vec![],
+            list_cmd: vec![],
+            not_found_exit: Some(1),
+        };
+        assert!(!store.fetch("x", &dir.path().join("x")).unwrap());
+    }
+
+    #[test]
+    fn a_failed_fetch_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirStore::new(dir.path().join("store"));
+        let dest = dir.path().join("cache/out.bin");
+        assert!(!store.fetch("indexes/a/b.bin", &dest).unwrap());
+        assert!(!dest.exists());
+        assert!(std::fs::read_dir(dir.path().join("cache"))
+            .map(|d| d.count() == 0)
+            .unwrap_or(true));
     }
 }

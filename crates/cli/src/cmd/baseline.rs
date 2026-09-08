@@ -19,6 +19,9 @@ pub enum Args {
         /// Also write the index here.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// Publish even if `bazel query` could not load every package.
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// Bring a baseline forward from one revision to another.
     Update {
@@ -30,6 +33,9 @@ pub enum Args {
         publish: bool,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// Publish even if `bazel query` could not load every package.
+        #[arg(long)]
+        allow_partial: bool,
         /// Rebuild from scratch if the range invalidates everything, rather
         /// than failing.
         #[arg(long, default_value_t = true)]
@@ -46,13 +52,15 @@ pub enum Args {
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    let engine = ctx.engine()?;
+    let mut engine = ctx.engine()?;
     match args {
         Args::Build {
             commit,
             publish,
             out,
+            allow_partial,
         } => {
+            engine.cfg.baseline.publish_partial |= allow_partial;
             let sha = engine.repo.rev_parse(&commit).unwrap_or(commit);
             let index = engine.full_build(&sha)?;
             emit(&engine, &index, out.as_deref(), publish)?;
@@ -64,7 +72,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             publish,
             out,
             rebuild_on_global,
+            allow_partial,
         } => {
+            engine.cfg.baseline.publish_partial |= allow_partial;
             let to_sha = engine.repo.rev_parse(&to).unwrap_or(to);
             let req = AffectedRequest {
                 base: from,
@@ -77,6 +87,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 // `baseline update` publishes its own output below; there is
                 // nothing for the base-side publish to add.
                 publish_base: false,
+                allow_partial,
                 max_depth: None,
             };
             let outcome = engine.affected(&req)?;

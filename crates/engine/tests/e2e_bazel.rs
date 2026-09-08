@@ -222,6 +222,7 @@ impl Golden {
             materialize: true,
             publish_base: false,
             max_depth: None,
+            allow_partial: false,
         };
         let out = engine
             .compute(
@@ -674,6 +675,7 @@ fn synthetic_workspace_through_real_bazel() {
             materialize: true,
             publish_base: false,
             max_depth: None,
+            allow_partial: false,
         };
         let out = engine
             .run_incremental(index.view(), &req)
@@ -935,6 +937,7 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
                 materialize: false,
                 publish_base: false,
                 max_depth: None,
+                allow_partial: false,
             };
             let out = engine
                 .compute(
@@ -1123,6 +1126,7 @@ fn a_build_files_direct_external_load_reaches_its_package() {
             materialize: false,
             publish_base: false,
             max_depth: None,
+            allow_partial: false,
         };
         let out = engine
             .compute(

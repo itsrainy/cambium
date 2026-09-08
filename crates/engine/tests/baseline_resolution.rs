@@ -57,6 +57,7 @@ impl Fixture {
             materialize: true,
             publish_base: false,
             max_depth: None,
+            allow_partial: false,
         }
     }
 
@@ -193,7 +194,7 @@ fn publish_base_publishes_the_replayed_index_under_the_base_commit() {
         .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[2]))
         .unwrap();
     assert!(matches!(origin, BaselineOrigin::Replayed { .. }));
-    f.engine.publish_baseline_for_test(&index).unwrap();
+    f.engine.publish_baseline(&index, false).unwrap();
 
     let after = f.store_keys();
     assert_eq!(after.len(), 2, "the replayed base should now be published");
@@ -227,7 +228,7 @@ fn affected_never_publishes_the_head_index() {
         .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[1]))
         .unwrap();
     assert!(matches!(origin, BaselineOrigin::Replayed { .. }));
-    f.engine.publish_baseline_for_test(&base_index).unwrap();
+    f.engine.publish_baseline(&base_index, false).unwrap();
 
     let changes = f.engine.repo.diff(&base, &head).unwrap();
     let out = f

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
-use cambium_engine::query::Universe;
+use cambium_engine::query::Rows;
 use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
 use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
 
@@ -73,11 +73,11 @@ const PACKAGES: &[&str] = &["app", "bazel", "lib"];
 struct Scanning(Files);
 
 impl PackageQuerier for Scanning {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect())
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
+        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
     }
 
-    fn universe(&self) -> Result<Universe, EngineError> {
+    fn universe(&self) -> Result<Rows, EngineError> {
         Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
     }
 
@@ -91,11 +91,11 @@ impl PackageQuerier for Scanning {
 struct Blind;
 
 impl PackageQuerier for Blind {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect())
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
+        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
     }
 
-    fn universe(&self) -> Result<Universe, EngineError> {
+    fn universe(&self) -> Result<Rows, EngineError> {
         Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
     }
 }
@@ -120,6 +120,7 @@ fn req() -> AffectedRequest {
         materialize: false,
         publish_base: false,
         max_depth: None,
+        allow_partial: false,
     }
 }
 

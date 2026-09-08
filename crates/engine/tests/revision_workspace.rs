@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cambium_engine::query::Rows;
 use cambium_engine::{Config, Engine, PackageQuerier};
 use cambium_index::{NodeKind, PackageUpdate, TargetRow};
 
@@ -67,11 +68,15 @@ impl DirQuerier {
 }
 
 impl PackageQuerier for DirQuerier {
-    fn query(&self, packages: &[String]) -> cambium_engine::Result<Vec<PackageUpdate>> {
-        Ok(packages.iter().map(|p| self.update(p)).collect())
+    fn query(&self, packages: &[String]) -> cambium_engine::Result<Rows> {
+        Ok(packages
+            .iter()
+            .map(|p| self.update(p))
+            .collect::<Vec<_>>()
+            .into())
     }
 
-    fn universe(&self) -> cambium_engine::Result<cambium_engine::query::Universe> {
+    fn universe(&self) -> cambium_engine::Result<Rows> {
         Ok(self
             .packages()
             .iter()

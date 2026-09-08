@@ -11,9 +11,9 @@
 //! Bazel 9, which no longer reads it, 770 of 771 packages fail to load.
 
 use cambium_bazel::LoadErrors;
-use cambium_engine::query::Universe;
+use cambium_engine::query::Rows;
 use cambium_engine::{Config, Engine, EngineError, PackageQuerier, SynthQuerier};
-use cambium_index::{IndexBuilder, PackageUpdate};
+use cambium_index::IndexBuilder;
 use cambium_synth::{generate, GraphSpec};
 
 /// A querier whose universe query "exited 3": the same rows, plus the load
@@ -21,11 +21,11 @@ use cambium_synth::{generate, GraphSpec};
 struct PartialUniverse<'a>(SynthQuerier<'a>, LoadErrors);
 
 impl PackageQuerier for PartialUniverse<'_> {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         self.0.query(packages)
     }
-    fn universe(&self) -> Result<Universe, EngineError> {
-        Ok(Universe {
+    fn universe(&self) -> Result<Rows, EngineError> {
+        Ok(Rows {
             updates: self.0.universe()?.updates,
             partial: Some(self.1.clone()),
         })

@@ -9,7 +9,7 @@ use cambium_index::PackageUpdate;
 use cambium_synth::{SynthFiles, SynthGraph};
 
 use crate::error::EngineError;
-use crate::query::PackageQuerier;
+use crate::query::{PackageQuerier, Rows};
 
 pub struct SynthQuerier<'a> {
     pub graph: &'a SynthGraph,
@@ -26,7 +26,7 @@ impl<'a> SynthQuerier<'a> {
 }
 
 impl PackageQuerier for SynthQuerier<'_> {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         Ok(packages
             .iter()
             .map(|p| match self.graph.pkg_by_path.get(p) {
@@ -41,10 +41,11 @@ impl PackageQuerier for SynthQuerier<'_> {
                     ..Default::default()
                 },
             })
-            .collect())
+            .collect::<Vec<_>>()
+            .into())
     }
 
-    fn universe(&self) -> Result<crate::query::Universe, EngineError> {
+    fn universe(&self) -> Result<Rows, EngineError> {
         Ok(self.graph.package_updates().into())
     }
 
