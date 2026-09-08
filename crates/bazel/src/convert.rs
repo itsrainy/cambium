@@ -2,8 +2,8 @@
 
 use cambium_index::{label, NodeKind, TargetRow};
 
-use crate::blaze_query::{target::Discriminator, Target};
-use crate::hash::rule_hash;
+use cambium_proto::blaze_query::{target::Discriminator, Target};
+use cambium_proto::hash::rule_hash;
 
 /// Knobs that come from `cambium.toml` (spec 9).
 #[derive(Clone, Debug)]
@@ -60,7 +60,7 @@ impl ConvertOptions {
 /// spell a label — and that is the direction this crate is allowed to be
 /// wrong in: an edge too many is over-approximation, an edge too few is
 /// unsoundness.
-fn rule_inputs(r: &crate::blaze_query::Rule) -> Vec<String> {
+fn rule_inputs(r: &cambium_proto::blaze_query::Rule) -> Vec<String> {
     let mut inputs = r.rule_input.clone();
     for a in &r.attribute {
         if a.name != "build_setting_default" {
@@ -147,16 +147,17 @@ pub fn convert(t: &Target, opts: &ConvertOptions) -> Option<ParsedTarget> {
         }
         Discriminator::EnvironmentGroup => return None,
     };
-    let package = label::main_repo_package(&row.label)
-        .unwrap_or_default()
-        .to_string();
+    // A label outside the main repository has no package we index. Falling
+    // back to `""` here would file every external target under the *root*
+    // package, which is a real package with real rows.
+    let package = label::main_repo_package(&row.label)?.to_string();
     Some(ParsedTarget { package, row })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blaze_query::{
+    use cambium_proto::blaze_query::{
         attribute::Discriminator as AttrKind, Attribute, GeneratedFile, Rule,
     };
 
@@ -176,6 +177,18 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn skips_targets_outside_the_main_repository() {
+        // `@dep//pkg:t` has no main-repo package; it must be dropped, not
+        // filed under the root package.
+        let opts = ConvertOptions::default();
+        for label in ["@dep//pkg:t", "@@dep~1.0//pkg:t"] {
+            let mut t = tagged_rule("cc_library", &[]);
+            t.rule.as_mut().unwrap().name = label.into();
+            assert!(convert(&t, &opts).is_none(), "{label} should be skipped");
         }
     }
 

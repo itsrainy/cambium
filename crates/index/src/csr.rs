@@ -151,28 +151,32 @@ impl Csr {
         let total = offsets[n] as usize;
 
         let cursor: Vec<AtomicU32> = offsets[..n].iter().map(|&o| AtomicU32::new(o)).collect();
-        let mut edges = vec![0u32; total];
-        {
-            // Each slot is claimed exactly once via fetch_add, so the writes are
-            // disjoint; the atomics are only used to hand out the slots.
-            let slots = edges.as_mut_ptr() as usize;
-            (0..fwd.len().min(n) as u32).into_par_iter().for_each(|u| {
-                for &d in fwd.row(u) {
-                    if (d as usize) < n {
-                        let at = cursor[d as usize].fetch_add(1, Ordering::Relaxed) as usize;
-                        unsafe { *(slots as *mut u32).add(at) = u };
-                    }
+        // The scatter target is atomic rather than a raw pointer cast to a
+        // usize: each slot is claimed exactly once by a `fetch_add` on the
+        // cursor, so the writes really are disjoint, but saying so to the
+        // compiler needed `unsafe` and a pointer laundered through an integer.
+        // `AtomicU32` says the same thing in safe code, and `Relaxed` stores
+        // compile to plain stores on every target we build for.
+        let scatter: Vec<AtomicU32> = (0..total).map(|_| AtomicU32::new(0)).collect();
+        (0..fwd.len().min(n) as u32).into_par_iter().for_each(|u| {
+            for &d in fwd.row(u) {
+                if (d as usize) < n {
+                    let at = cursor[d as usize].fetch_add(1, Ordering::Relaxed) as usize;
+                    scatter[at].store(u, Ordering::Relaxed);
                 }
-            });
-        }
+            }
+        });
+        let edges: Vec<u32> = scatter.into_iter().map(AtomicU32::into_inner).collect();
         let mut out = Self { offsets, edges };
         out.sort_rows_parallel();
         out
     }
 
-    /// Sorts and deduplicates every row in parallel. Offsets are left untouched,
-    /// so this is only valid when rows are known to be duplicate-free (the
-    /// reverse of a deduplicated forward CSR is).
+    /// Sorts every row in parallel. It does *not* deduplicate: offsets are
+    /// left untouched, so dropping an edge would leave the row pointing past
+    /// its own end. That is sound only because the caller's rows are already
+    /// duplicate-free — the reverse of a deduplicated forward CSR has each
+    /// `(dst, src)` at most once — so there is nothing to drop.
     fn sort_rows_parallel(&mut self) {
         let offsets = std::mem::take(&mut self.offsets);
         {
@@ -195,11 +199,22 @@ impl Csr {
     }
 }
 
+/// Turns per-row counts into CSR offsets in place.
+///
+/// # Panics
+/// If the edges do not fit in a `u32` offset. A CSR that overflows cannot be
+/// represented at all — every offset and every edge id in the format is 32
+/// bits — so the alternative to failing here is a silently wrapped offset
+/// array and an index whose rows point at other rows' edges. Four billion
+/// edges is far beyond any Bazel graph we build for; a build that reaches it
+/// needs a wider format, not a wrapped one.
 #[inline]
 pub(crate) fn prefix_sum(offsets: &mut [u32]) {
     let mut acc = 0u32;
     for o in offsets.iter_mut() {
-        acc += *o;
+        acc = acc
+            .checked_add(*o)
+            .expect("CSR has more than u32::MAX edges; the index format cannot hold it");
         *o = acc;
     }
 }

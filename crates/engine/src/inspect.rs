@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use cambium_classify::PackageSet;
-use cambium_index::{label, walk, IndexRef, NodeKind, WalkOptions};
+use cambium_index::{label, view, walk, IndexRef, NodeKind, WalkOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::report::SCHEMA_VERSION;
@@ -351,7 +351,7 @@ impl<'a> IndexQuery<'a> {
     }
 
     fn collect(&self, ids: &[u32]) -> Vec<String> {
-        walk::labels_sorted(self.view, ids)
+        view::labels_sorted(&self.view, ids)
     }
 
     /// Targets that depend on `label`, directly or transitively.
@@ -569,8 +569,8 @@ impl<'a> IndexQuery<'a> {
             manual: self.view.is_manual(id),
             tombstone: self.view.is_tombstone(id),
             rule_hash: hex(&self.view.hash[id as usize]),
-            deps: walk::labels_sorted(self.view, self.view.forward.row(id)),
-            rdeps: walk::labels_sorted(self.view, self.view.reverse.row(id)),
+            deps: view::labels_sorted(&self.view, self.view.forward.row(id)),
+            rdeps: view::labels_sorted(&self.view, self.view.reverse.row(id)),
         })
     }
 

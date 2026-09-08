@@ -41,10 +41,20 @@ pub fn is_external(label: &str) -> bool {
 /// assert_eq!(source_label("", "README.md"), "//:README.md");
 /// ```
 pub fn source_label(package: &str, path: &str) -> String {
+    // Callers guarantee `path` is under `package` (i.e. `path` starts with
+    // `package` followed by '/'); we only debug_assert it since checking on
+    // every call would defeat the point of a cheap label builder.
+    debug_assert!(
+        package.is_empty()
+            || (path.len() > package.len()
+                && path.starts_with(package)
+                && path.as_bytes()[package.len()] == b'/'),
+        "source_label: {path:?} is not under package {package:?}"
+    );
     let name = if package.is_empty() {
         path
     } else {
-        // +1 skips the '/' separator. Callers guarantee `path` is under `package`.
+        // +1 skips the '/' separator.
         &path[package.len() + 1..]
     };
     let mut s = String::with_capacity(2 + package.len() + 1 + name.len());

@@ -9,7 +9,8 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::csr::{Csr, CsrRef};
+use crate::csr::CsrRef;
+use crate::space::NodeMeta;
 use crate::strtab::StrTabRef;
 
 #[cfg(target_endian = "big")]
@@ -76,16 +77,18 @@ impl NodeKind {
 }
 
 /// Node flag bits.
+///
+/// Bit 1 was `EXTERNAL` ("label lives outside the main repository"). No
+/// reader ever consulted it — `label::is_external` answers from the label —
+/// so writers stopped setting it; files written before that may still carry
+/// the bit, and it is ignored. Bit 3 was reserved and never written. Neither
+/// retirement moves the layout, so neither bumped `FORMAT_VERSION`.
 pub mod flags {
     /// Rule carries the `manual` tag.
     pub const MANUAL: u8 = 1 << 0;
-    /// Label lives outside the main repository.
-    pub const EXTERNAL: u8 = 1 << 1;
     /// Node is tombstoned (mirrors `NodeKind::Tombstone`, kept as a bit so the
     /// walk can mask without a kind comparison).
     pub const TOMBSTONE: u8 = 1 << 2;
-    /// Rule is testonly-ish: reserved for future use by output filters.
-    pub const RESERVED_3: u8 = 1 << 3;
 }
 
 /// Package flag bits.
@@ -137,7 +140,7 @@ pub struct Header {
 ///
 /// Kept out of the payload (see [`Header`]) and written to the file's trailer.
 /// Skipped by rkyv rather than merely unset, so it cannot accidentally
-/// contribute bytes: `crates/index/tests/index_core.rs` asserts that two
+/// contribute bytes: `crates/engine/tests/store_layout.rs` asserts that two
 /// indexes built from the same graph at different commits have identical
 /// payloads.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +212,10 @@ pub struct IndexData {
 
     // ---- the static `.bzl` load closure (format 4) ----
     //
+    // Format numbers in the comments below name the version that added a
+    // section; `crate::format::FORMAT_VERSION` carries the authoritative
+    // history.
+    //
     // Three tables over one id space, whose ids are assigned in path order so
     // a path can be found by binary search:
     //
@@ -263,7 +270,7 @@ pub struct IndexData {
     pub repo_input_bytes: Vec<u8>,
     pub repo_input_offsets: Vec<u32>,
     pub repo_input_prefix: Vec<bool>,
-    // - `repo_input_target_only` (format 7) marks, per pattern, one whose
+    // - `repo_input_target_only` (format 8) marks, per pattern, one whose
     //   every derivation was a label embedded in text the repository rule
     //   writes — a generated BUILD file's `srcs` — rather than a label the
     //   rule resolves. Such a path moves the repository's targets, never a
@@ -359,6 +366,27 @@ pub struct IndexRef<'a> {
 }
 
 impl<'a> IndexRef<'a> {
+    /// Checks every string table's invariants, so that the rest of the crate
+    /// can read entries without re-validating UTF-8 on each lookup.
+    ///
+    /// Called once per file at open; see [`StrTabRef::validate`].
+    pub fn validate_strings(&self) -> std::result::Result<(), String> {
+        for (what, t) in [
+            ("labels", self.labels),
+            ("classes", self.classes),
+            ("pkg_names", self.pkg_names),
+            ("bzl_paths", self.bzl_paths),
+            ("bzl_ext_labels", self.bzl_ext_labels),
+            ("repo_names", self.repo_names),
+            ("repo_canonical", self.repo_canonical),
+            ("repo_input_patterns", self.repo_input_patterns),
+            ("repo_maps", self.repo_maps),
+        ] {
+            t.validate(what)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn num_nodes(&self) -> u32 {
         self.kind.len() as u32
@@ -394,6 +422,22 @@ impl<'a> IndexRef<'a> {
     #[inline]
     pub fn kind_of(&self, id: u32) -> NodeKind {
         NodeKind::from_u8(self.kind[id as usize])
+    }
+
+    /// Every node column for `id`, gathered. The one place the struct-of-arrays
+    /// layout is folded back into a record, so the builder and the overlay
+    /// read a base node the same way.
+    #[inline]
+    pub fn meta(&self, id: u32) -> NodeMeta {
+        let i = id as usize;
+        NodeMeta {
+            kind: self.kind[i],
+            package: self.package[i],
+            class: self.class[i],
+            hash: self.hash[i],
+            is_test: self.is_test[i],
+            flags: self.flags[i],
+        }
     }
 
     #[inline]
@@ -447,10 +491,9 @@ impl<'a> IndexRef<'a> {
 
     /// Rules consuming a source-file node.
     ///
-    /// This is exactly the reverse row: only rules hold forward edges, so every
-    /// in-edge of a file node comes from a rule. The spec's separate `files`
-    /// CSR would be a byte-for-byte copy of these rows, so it is kept as a view
-    /// (spec 5.3 explicitly allows this).
+    /// This is exactly the reverse row: a file node's in-edges all come from
+    /// rules (a generated file's one forward edge goes *to* its generator), so
+    /// a separate `files` CSR would be a byte-for-byte copy of these rows.
     #[inline]
     pub fn file_consumers(&self, id: u32) -> &'a [u32] {
         self.reverse.row(id)
@@ -555,27 +598,16 @@ impl<'a> IndexRef<'a> {
     /// entry — a prefix match cannot be answered by binary search, and the
     /// alternative (a trie) would not pay for itself at this size.
     pub fn repos_for_path(&self, path: &str) -> Vec<u32> {
-        let mut out = Vec::new();
-        for p in 0..self.repo_input_patterns.len() as u32 {
-            let pat = self.repo_input_patterns.get(p);
-            let hit = if self.repo_input_prefix[p as usize] {
-                path.starts_with(pat)
-            } else {
-                path == pat
-            };
-            if hit {
-                out.extend_from_slice(self.repo_inputs.row(p));
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
+        self.repos_for_path_kinds(path)
+            .into_iter()
+            .map(|(repo, _)| repo)
+            .collect()
     }
 
     /// As [`IndexRef::repos_for_path`], with whether the path *feeds* each
     /// repository's rule (`true`) or is only named by a target the rule writes
     /// (`false`; see [`crate::externals::RepoInputs::target_only`]). A
-    /// repository named both ways feeds.
+    /// repository named both ways feeds. Ascending by repo id, no duplicates.
     pub fn repos_for_path_kinds(&self, path: &str) -> Vec<(u32, bool)> {
         let mut out: std::collections::BTreeMap<u32, bool> = Default::default();
         for p in 0..self.repo_input_patterns.len() as u32 {
@@ -642,114 +674,129 @@ impl<'a> IndexRef<'a> {
     }
 }
 
-impl IndexData {
-    pub fn view(&self) -> IndexRef<'_> {
+/// The one field list behind [`IndexData::view`] and
+/// [`ArchivedIndexData::view_with`].
+///
+/// The two only differ in how a stored `u32` array is reached: the owned
+/// struct holds `Vec<u32>`, the archive holds `ArchivedVec<u32_le>` and needs
+/// [`le::u32s`] to reinterpret it. Passing that adapter in as `$u32s` lets one
+/// list serve both, so a new section is added in exactly one place instead of
+/// being hand-mirrored twice.
+///
+/// `$d` is the data struct, `$p` the provenance, `$ver` the format version
+/// (already widened out of its archived representation).
+macro_rules! index_view {
+    ($d:expr, $p:expr, $u32s:path, $ver:expr) => {
         IndexRef {
-            format_version: self.header.format_version,
-            commit: &self.provenance.commit,
-            lineage: self.header.lineage,
-            bazel_version: &self.header.bazel_version,
-            config_hash: self.header.config_hash,
-            created_unix: self.provenance.created_unix,
-            partial: self.provenance.partial,
-            packages_in_error: self.provenance.packages_in_error,
-            error_packages: &self.provenance.error_packages,
+            format_version: $ver,
+            commit: &$p.commit,
+            lineage: $d.header.lineage,
+            bazel_version: &$d.header.bazel_version,
+            config_hash: $d.header.config_hash,
+            created_unix: $p.created_unix,
+            partial: $p.partial,
+            packages_in_error: $p.packages_in_error,
+            error_packages: &$p.error_packages,
             labels: StrTabRef {
-                bytes: &self.label_bytes,
-                offsets: &self.label_offsets,
+                bytes: &$d.label_bytes,
+                offsets: $u32s(&$d.label_offsets),
             },
-            label_sorted: &self.label_sorted,
+            label_sorted: $u32s(&$d.label_sorted),
             classes: StrTabRef {
-                bytes: &self.class_bytes,
-                offsets: &self.class_offsets,
+                bytes: &$d.class_bytes,
+                offsets: $u32s(&$d.class_offsets),
             },
-            kind: &self.node_kind,
-            package: &self.node_package,
-            class: &self.node_class,
-            hash: &self.node_hash,
-            is_test: &self.node_is_test,
-            flags: &self.node_flags,
+            kind: &$d.node_kind,
+            package: $u32s(&$d.node_package),
+            class: $u32s(&$d.node_class),
+            hash: &$d.node_hash,
+            is_test: &$d.node_is_test,
+            flags: &$d.node_flags,
             forward: CsrRef {
-                offsets: &self.fwd_offsets,
-                edges: &self.fwd_edges,
+                offsets: $u32s(&$d.fwd_offsets),
+                edges: $u32s(&$d.fwd_edges),
             },
             reverse: CsrRef {
-                offsets: &self.rev_offsets,
-                edges: &self.rev_edges,
+                offsets: $u32s(&$d.rev_offsets),
+                edges: $u32s(&$d.rev_edges),
             },
             pkg_names: StrTabRef {
-                bytes: &self.pkg_name_bytes,
-                offsets: &self.pkg_name_offsets,
+                bytes: &$d.pkg_name_bytes,
+                offsets: $u32s(&$d.pkg_name_offsets),
             },
             pkg_nodes: CsrRef {
-                offsets: &self.pkg_node_offsets,
-                edges: &self.pkg_nodes,
+                offsets: $u32s(&$d.pkg_node_offsets),
+                edges: $u32s(&$d.pkg_nodes),
             },
-            pkg_bzl_hash: &self.pkg_bzl_hash,
-            pkg_build_hash: &self.pkg_build_hash,
-            pkg_flags: &self.pkg_flags,
-            bzl_closure: self.header.bzl_closure,
+            pkg_bzl_hash: &$d.pkg_bzl_hash,
+            pkg_build_hash: &$d.pkg_build_hash,
+            pkg_flags: &$d.pkg_flags,
+            bzl_closure: $d.header.bzl_closure,
             bzl_paths: StrTabRef {
-                bytes: &self.bzl_path_bytes,
-                offsets: &self.bzl_path_offsets,
+                bytes: &$d.bzl_path_bytes,
+                offsets: $u32s(&$d.bzl_path_offsets),
             },
             bzl_loads: CsrRef {
-                offsets: &self.bzl_load_offsets,
-                edges: &self.bzl_load_edges,
+                offsets: $u32s(&$d.bzl_load_offsets),
+                edges: $u32s(&$d.bzl_load_edges),
             },
             bzl_consumers: CsrRef {
-                offsets: &self.bzl_consumer_offsets,
-                edges: &self.bzl_consumer_edges,
+                offsets: $u32s(&$d.bzl_consumer_offsets),
+                edges: $u32s(&$d.bzl_consumer_edges),
             },
-            bzl_workspace: &self.bzl_workspace,
+            bzl_workspace: $u32s(&$d.bzl_workspace),
             bzl_ext_labels: StrTabRef {
-                bytes: &self.bzl_ext_label_bytes,
-                offsets: &self.bzl_ext_label_offsets,
+                bytes: &$d.bzl_ext_label_bytes,
+                offsets: $u32s(&$d.bzl_ext_label_offsets),
             },
             bzl_ext: CsrRef {
-                offsets: &self.bzl_ext_offsets,
-                edges: &self.bzl_ext_edges,
+                offsets: $u32s(&$d.bzl_ext_offsets),
+                edges: $u32s(&$d.bzl_ext_edges),
             },
             pkg_ext: CsrRef {
-                offsets: &self.pkg_ext_offsets,
-                edges: &self.pkg_ext_edges,
+                offsets: $u32s(&$d.pkg_ext_offsets),
+                edges: $u32s(&$d.pkg_ext_edges),
             },
             repo_names: StrTabRef {
-                bytes: &self.repo_name_bytes,
-                offsets: &self.repo_name_offsets,
+                bytes: &$d.repo_name_bytes,
+                offsets: $u32s(&$d.repo_name_offsets),
             },
             repo_canonical: StrTabRef {
-                bytes: &self.repo_canonical_bytes,
-                offsets: &self.repo_canonical_offsets,
+                bytes: &$d.repo_canonical_bytes,
+                offsets: $u32s(&$d.repo_canonical_offsets),
             },
             repo_input_patterns: StrTabRef {
-                bytes: &self.repo_input_bytes,
-                offsets: &self.repo_input_offsets,
+                bytes: &$d.repo_input_bytes,
+                offsets: $u32s(&$d.repo_input_offsets),
             },
-            repo_input_prefix: &self.repo_input_prefix,
-            repo_input_target_only: &self.repo_input_target_only,
+            repo_input_prefix: &$d.repo_input_prefix,
+            repo_input_target_only: &$d.repo_input_target_only,
             repo_inputs: CsrRef {
-                offsets: &self.repo_input_repo_offsets,
-                edges: &self.repo_input_repo_edges,
+                offsets: $u32s(&$d.repo_input_repo_offsets),
+                edges: $u32s(&$d.repo_input_repo_edges),
             },
             bzl_repos: CsrRef {
-                offsets: &self.bzl_repo_offsets,
-                edges: &self.bzl_repo_edges,
+                offsets: $u32s(&$d.bzl_repo_offsets),
+                edges: $u32s(&$d.bzl_repo_edges),
             },
             repo_maps: StrTabRef {
-                bytes: &self.repo_map_bytes,
-                offsets: &self.repo_map_offsets,
+                bytes: &$d.repo_map_bytes,
+                offsets: $u32s(&$d.repo_map_offsets),
             },
-            repo_map_ranges: &self.repo_map_ranges,
+            repo_map_ranges: $u32s(&$d.repo_map_ranges),
         }
-    }
+    };
+}
 
-    /// Forward CSR as a borrowed pair, for splice input.
-    pub fn forward(&self) -> Csr {
-        Csr {
-            offsets: self.fwd_offsets.clone(),
-            edges: self.fwd_edges.clone(),
-        }
+/// The `$u32s` adapter for the owned struct: its arrays are already `[u32]`.
+#[inline]
+fn as_u32s(v: &[u32]) -> &[u32] {
+    v
+}
+
+impl IndexData {
+    pub fn view(&self) -> IndexRef<'_> {
+        index_view!(self, self.provenance, as_u32s, self.header.format_version)
     }
 }
 
@@ -757,103 +804,11 @@ impl ArchivedIndexData {
     /// A view over the archive. Provenance is not in the archive — it comes
     /// from the file's trailer — so the caller supplies it.
     pub fn view_with<'a>(&'a self, provenance: &'a Provenance) -> IndexRef<'a> {
-        IndexRef {
-            format_version: self.header.format_version.into(),
-            commit: &provenance.commit,
-            lineage: self.header.lineage,
-            bazel_version: &self.header.bazel_version,
-            config_hash: self.header.config_hash,
-            created_unix: provenance.created_unix,
-            partial: provenance.partial,
-            packages_in_error: provenance.packages_in_error,
-            error_packages: &provenance.error_packages,
-            labels: StrTabRef {
-                bytes: &self.label_bytes,
-                offsets: le::u32s(&self.label_offsets),
-            },
-            label_sorted: le::u32s(&self.label_sorted),
-            classes: StrTabRef {
-                bytes: &self.class_bytes,
-                offsets: le::u32s(&self.class_offsets),
-            },
-            kind: &self.node_kind,
-            package: le::u32s(&self.node_package),
-            class: le::u32s(&self.node_class),
-            hash: &self.node_hash,
-            is_test: &self.node_is_test,
-            flags: &self.node_flags,
-            forward: CsrRef {
-                offsets: le::u32s(&self.fwd_offsets),
-                edges: le::u32s(&self.fwd_edges),
-            },
-            reverse: CsrRef {
-                offsets: le::u32s(&self.rev_offsets),
-                edges: le::u32s(&self.rev_edges),
-            },
-            pkg_names: StrTabRef {
-                bytes: &self.pkg_name_bytes,
-                offsets: le::u32s(&self.pkg_name_offsets),
-            },
-            pkg_nodes: CsrRef {
-                offsets: le::u32s(&self.pkg_node_offsets),
-                edges: le::u32s(&self.pkg_nodes),
-            },
-            pkg_bzl_hash: &self.pkg_bzl_hash,
-            pkg_build_hash: &self.pkg_build_hash,
-            pkg_flags: &self.pkg_flags,
-            bzl_closure: self.header.bzl_closure,
-            bzl_paths: StrTabRef {
-                bytes: &self.bzl_path_bytes,
-                offsets: le::u32s(&self.bzl_path_offsets),
-            },
-            bzl_loads: CsrRef {
-                offsets: le::u32s(&self.bzl_load_offsets),
-                edges: le::u32s(&self.bzl_load_edges),
-            },
-            bzl_consumers: CsrRef {
-                offsets: le::u32s(&self.bzl_consumer_offsets),
-                edges: le::u32s(&self.bzl_consumer_edges),
-            },
-            bzl_workspace: le::u32s(&self.bzl_workspace),
-            bzl_ext_labels: StrTabRef {
-                bytes: &self.bzl_ext_label_bytes,
-                offsets: le::u32s(&self.bzl_ext_label_offsets),
-            },
-            bzl_ext: CsrRef {
-                offsets: le::u32s(&self.bzl_ext_offsets),
-                edges: le::u32s(&self.bzl_ext_edges),
-            },
-            pkg_ext: CsrRef {
-                offsets: le::u32s(&self.pkg_ext_offsets),
-                edges: le::u32s(&self.pkg_ext_edges),
-            },
-            repo_names: StrTabRef {
-                bytes: &self.repo_name_bytes,
-                offsets: le::u32s(&self.repo_name_offsets),
-            },
-            repo_canonical: StrTabRef {
-                bytes: &self.repo_canonical_bytes,
-                offsets: le::u32s(&self.repo_canonical_offsets),
-            },
-            repo_input_patterns: StrTabRef {
-                bytes: &self.repo_input_bytes,
-                offsets: le::u32s(&self.repo_input_offsets),
-            },
-            repo_input_prefix: &self.repo_input_prefix,
-            repo_input_target_only: &self.repo_input_target_only,
-            repo_inputs: CsrRef {
-                offsets: le::u32s(&self.repo_input_repo_offsets),
-                edges: le::u32s(&self.repo_input_repo_edges),
-            },
-            bzl_repos: CsrRef {
-                offsets: le::u32s(&self.bzl_repo_offsets),
-                edges: le::u32s(&self.bzl_repo_edges),
-            },
-            repo_maps: StrTabRef {
-                bytes: &self.repo_map_bytes,
-                offsets: le::u32s(&self.repo_map_offsets),
-            },
-            repo_map_ranges: le::u32s(&self.repo_map_ranges),
-        }
+        index_view!(
+            self,
+            provenance,
+            le::u32s,
+            self.header.format_version.into()
+        )
     }
 }

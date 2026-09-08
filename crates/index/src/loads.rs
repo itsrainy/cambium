@@ -126,15 +126,18 @@ impl RepoMapping {
     /// error. Getting this wrong costs precision on external load *names*, not
     /// soundness.
     pub fn from_dump(s: &str) -> Self {
-        let Some(start) = s.find('{') else {
-            return Self::identity();
-        };
-        let Some(end) = s.rfind('}') else {
+        let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) else {
+            tracing::warn!(
+                "dump_repo_mapping output had no JSON object; falling back to identity mapping"
+            );
             return Self::identity();
         };
         match serde_json::from_str::<FxHashMap<String, String>>(&s[start..=end]) {
             Ok(map) => Self { map },
-            Err(_) => Self::identity(),
+            Err(e) => {
+                tracing::warn!("dump_repo_mapping output was not valid JSON ({e}); falling back to identity mapping");
+                Self::identity()
+            }
         }
     }
 
