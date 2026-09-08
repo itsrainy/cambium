@@ -636,8 +636,21 @@ impl LoadGraph {
 
     /// The `.bzl` closure of a package, read from its BUILD file. Empty when
     /// the package has no BUILD file in this checkout.
-    pub fn package_closure(&mut self, pkg: &str, src: &dyn FileText, m: &RepoMapping) -> Vec<u32> {
+    ///
+    /// The external labels the BUILD file loads *directly* come back
+    /// alongside. They have no `.bzl` node to hang on — the walk stops at an
+    /// external repository, and the BUILD file is not a node itself — so
+    /// they would otherwise be lost, and a package that loads
+    /// `@rules_foo//:defs.bzl` without a main-repo `.bzl` in between would be
+    /// invisible to the repository-dirtying rule. (Issue #4.)
+    pub fn package_closure(
+        &mut self,
+        pkg: &str,
+        src: &dyn FileText,
+        m: &RepoMapping,
+    ) -> PackageClosure {
         let mut roots = Vec::new();
+        let mut external = Vec::new();
         for name in ["BUILD.bazel", "BUILD"] {
             let path = if pkg.is_empty() {
                 name.to_string()
@@ -647,12 +660,16 @@ impl LoadGraph {
             let Some(text) = src.text(&path) else {
                 continue;
             };
-            let (main, _) = self.resolve_all(&scan_loads(&text), pkg, m);
+            let (main, ext) = self.resolve_all(&scan_loads(&text), pkg, m);
             roots.extend(main);
+            external = ext;
             // Bazel reads exactly one of the two, preferring BUILD.bazel.
             break;
         }
-        self.closure(roots, src, m)
+        PackageClosure {
+            bzl: self.closure(roots, src, m),
+            external,
+        }
     }
 
     /// The `.bzl` closure of the workspace files: `load()` in `WORKSPACE`, and
@@ -669,6 +686,16 @@ impl LoadGraph {
         }
         self.closure(roots, src, m)
     }
+}
+
+/// What one package's BUILD file loads, transitively: the main-repo `.bzl`
+/// ids, and the canonical external labels its own `load()`s name. The external
+/// labels the *`.bzl` files* stop at are recorded on those files
+/// ([`LoadGraph::external`]); these are the BUILD file's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PackageClosure {
+    pub bzl: Vec<u32>,
+    pub external: Vec<String>,
 }
 
 /// The directory a file sits in, which for a `.bzl` is the package it is
@@ -826,7 +853,7 @@ mod tests {
         ]);
         let m = RepoMapping::identity();
         let mut g = LoadGraph::new();
-        let c = g.package_closure("app", &f, &m);
+        let c = g.package_closure("app", &f, &m).bzl;
         assert_eq!(
             closure_paths(&g, &c),
             vec![
@@ -846,7 +873,7 @@ mod tests {
             ("p/b.bzl", "load(\"//p:a.bzl\", \"a\")\n"),
         ]);
         let mut g = LoadGraph::new();
-        let c = g.package_closure("p", &f, &RepoMapping::identity());
+        let c = g.package_closure("p", &f, &RepoMapping::identity()).bzl;
         assert_eq!(closure_paths(&g, &c), vec!["p/a.bzl", "p/b.bzl"]);
     }
 
@@ -862,17 +889,53 @@ mod tests {
         let m = RepoMapping::from_dump("{\"rules_shell\":\"rules_shell+\"}");
         let mut g = LoadGraph::new();
         let c = g.package_closure("app", &f, &m);
-        assert_eq!(closure_paths(&g, &c), vec!["bazel/defs.bzl"]);
+        assert_eq!(closure_paths(&g, &c.bzl), vec!["bazel/defs.bzl"]);
         let id = g.id_of("bazel/defs.bzl").unwrap();
         assert_eq!(g.external(id), ["@@rules_shell+//shell:sh_binary.bzl"]);
+        assert!(
+            c.external.is_empty(),
+            "the BUILD file itself loads nothing external"
+        );
+    }
+
+    #[test]
+    fn a_build_files_own_external_load_is_kept() {
+        // Issue #4: the external half of the BUILD file's direct loads used
+        // to be discarded, so a package in this shape had no way to be found
+        // when `rules_shell` moved.
+        let f = Files(vec![
+            (
+                "app/BUILD",
+                "load(\"@rules_shell//shell:sh_binary.bzl\", \"sh_binary\")\n\
+                 load(\"//bazel:defs.bzl\", \"x\")\n\
+                 load(\"@rules_cc//cc:defs.bzl\", \"cc_library\")\n",
+            ),
+            ("bazel/defs.bzl", "X = 1\n"),
+        ]);
+        let m =
+            RepoMapping::from_dump("{\"rules_shell\":\"rules_shell+\",\"rules_cc\":\"rules_cc+\"}");
+        let mut g = LoadGraph::new();
+        let c = g.package_closure("app", &f, &m);
+        assert_eq!(closure_paths(&g, &c.bzl), vec!["bazel/defs.bzl"]);
+        assert_eq!(
+            c.external,
+            [
+                "@@rules_cc+//cc:defs.bzl".to_string(),
+                "@@rules_shell+//shell:sh_binary.bzl".into()
+            ],
+            "sorted, and only the BUILD file's own"
+        );
+        let id = g.id_of("bazel/defs.bzl").unwrap();
+        assert!(g.external(id).is_empty());
     }
 
     #[test]
     fn a_missing_build_file_has_an_empty_closure() {
         let mut g = LoadGraph::new();
-        assert!(g
-            .package_closure("nope", &Files(vec![]), &RepoMapping::identity())
-            .is_empty());
+        assert_eq!(
+            g.package_closure("nope", &Files(vec![]), &RepoMapping::identity()),
+            PackageClosure::default()
+        );
     }
 
     #[test]
@@ -884,7 +947,7 @@ mod tests {
             ("p/b.bzl", ""),
         ]);
         let mut g = LoadGraph::new();
-        let c = g.package_closure("p", &f, &RepoMapping::identity());
+        let c = g.package_closure("p", &f, &RepoMapping::identity()).bzl;
         assert_eq!(closure_paths(&g, &c), vec!["p/a.bzl"]);
     }
 
@@ -896,15 +959,15 @@ mod tests {
             ("p/BUILD", "load(\"//p:a.bzl\", \"a\")\n"),
             ("p/a.bzl", ""),
         ]);
-        assert_eq!(g.package_closure("p", &f1, &m).len(), 1);
+        assert_eq!(g.package_closure("p", &f1, &m).bzl.len(), 1);
         let f2 = Files(vec![
             ("p/BUILD", "load(\"//p:a.bzl\", \"a\")\n"),
             ("p/a.bzl", "load(\"//p:b.bzl\", \"b\")\n"),
             ("p/b.bzl", ""),
         ]);
         // Without invalidation the memoised parse stands.
-        assert_eq!(g.package_closure("p", &f2, &m).len(), 1);
+        assert_eq!(g.package_closure("p", &f2, &m).bzl.len(), 1);
         g.invalidate("p/a.bzl");
-        assert_eq!(g.package_closure("p", &f2, &m).len(), 2);
+        assert_eq!(g.package_closure("p", &f2, &m).bzl.len(), 2);
     }
 }

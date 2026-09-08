@@ -55,6 +55,10 @@ fn files() -> Files {
     );
     put("app/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
     put("lib/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
+    // Issue #4: a BUILD file that loads a dependency's `.bzl` *directly*,
+    // with no main-repo `.bzl` in between. Its rules can change when `fmt`
+    // does, even though nothing in it names a `@fmt` label.
+    put("direct/BUILD", "load(\"@fmt//:defs.bzl\", \"f\")\n");
     put("bazel/defs.bzl", "R = 1\n");
     put("bazel/BUILD", "");
     Files(m)
@@ -93,6 +97,7 @@ fn rows(pkg: &str) -> PackageUpdate {
                 vec!["//bazel:bzl_srcs".into()],
             ),
         ],
+        "direct" => vec![TargetRow::rule("//direct:d", "demo_lib", Vec::new())],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -102,7 +107,7 @@ fn rows(pkg: &str) -> PackageUpdate {
     }
 }
 
-const PACKAGES: &[&str] = &["app", "lib", "bazel"];
+const PACKAGES: &[&str] = &["app", "lib", "bazel", "direct"];
 
 struct Scanning(Files);
 
@@ -290,6 +295,32 @@ fn a_bazel_dep_bump_reaches_only_that_dependencys_consumers() {
     assert_eq!(r.stats.repos_dirty_by_module, 1);
     // Only `//app:app` names `@@fmt+//:fmt`, and nothing depends on it.
     assert_eq!(r.direct, vec!["//app:app".to_string()]);
+    assert_eq!(affected(&r), vec!["//app:app".to_string()]);
+}
+
+#[test]
+fn a_build_files_direct_external_load_is_seen_by_rule_a() {
+    // Issue #4. `//direct` loads `@fmt//:defs.bzl` from its BUILD file, so a
+    // `fmt` bump must re-query it: the macro it loads can now emit different
+    // rules. `//app` and `//lib` load only main-repo `.bzl` files and stay put.
+    let (_e, index) = base();
+    let head = MODULE_BASE.replace(
+        "bazel_dep(name = \"fmt\", version = \"1.0\")",
+        "bazel_dep(name = \"fmt\", version = \"2.0\")",
+    );
+    let r = run(
+        &index,
+        &changed(&["MODULE.bazel"]),
+        &texts(MODULE_BASE, &head),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(
+        r.dirty_packages,
+        vec!["direct".to_string()],
+        "rule (a) must see a BUILD file's own external load"
+    );
+    // The re-query returned the same rows, so the label consumer is still the
+    // only affected target.
     assert_eq!(affected(&r), vec!["//app:app".to_string()]);
 }
 

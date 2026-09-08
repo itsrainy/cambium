@@ -1466,10 +1466,16 @@ fn rescan_closure(
     }
     for p in deleted {
         c.packages.remove(p);
+        c.package_external.remove(p);
     }
     for p in packages {
-        let ids = c.graph.package_closure(p, src, &mapping);
-        c.packages.insert(p.clone(), ids);
+        let pc = c.graph.package_closure(p, src, &mapping);
+        c.packages.insert(p.clone(), pc.bzl);
+        if pc.external.is_empty() {
+            c.package_external.remove(p);
+        } else {
+            c.package_external.insert(p.clone(), pc.external);
+        }
     }
     c.workspace = c.graph.workspace_closure(src, &mapping);
     // The workspace closure just moved, so what the main repository feeds its

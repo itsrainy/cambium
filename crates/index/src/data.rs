@@ -223,7 +223,9 @@ pub struct IndexData {
     //
     // `bzl_ext_labels` records the canonical `@@repo//pkg:f.bzl` labels the
     // walk stopped at, so a later MODULE-diffing pass can map a module version
-    // bump onto the files that load it.
+    // bump onto the files that load it. `bzl_ext` is that per `.bzl`;
+    // `pkg_ext` (format 7) is the same per *package*, for the labels a BUILD
+    // file loads directly, which have no `.bzl` row to live on.
     pub bzl_path_bytes: Vec<u8>,
     pub bzl_path_offsets: Vec<u32>,
     pub bzl_load_offsets: Vec<u32>,
@@ -235,6 +237,8 @@ pub struct IndexData {
     pub bzl_ext_label_offsets: Vec<u32>,
     pub bzl_ext_offsets: Vec<u32>,
     pub bzl_ext_edges: Vec<u32>,
+    pub pkg_ext_offsets: Vec<u32>,
+    pub pkg_ext_edges: Vec<u32>,
 
     // ---- external repositories built from main-repo files (format 5) ----
     //
@@ -324,6 +328,9 @@ pub struct IndexRef<'a> {
     pub bzl_workspace: &'a [u32],
     pub bzl_ext_labels: StrTabRef<'a>,
     pub bzl_ext: CsrRef<'a>,
+    /// External labels each *package's* BUILD file loads directly, into
+    /// `bzl_ext_labels`. One row per package id.
+    pub pkg_ext: CsrRef<'a>,
 
     /// Apparent external-repository names, sorted, one per repo id.
     pub repo_names: StrTabRef<'a>,
@@ -485,6 +492,19 @@ impl<'a> IndexRef<'a> {
     pub fn bzl_external(&self, id: u32) -> Vec<&'a str> {
         self.bzl_ext
             .row(id)
+            .iter()
+            .map(|&e| self.bzl_ext_labels.get(e))
+            .collect()
+    }
+
+    /// Canonical external labels this package's BUILD file loads directly.
+    /// Empty for an index without a closure, or one older than format 7.
+    pub fn package_external(&self, pkg: u32) -> Vec<&'a str> {
+        if pkg as usize >= self.pkg_ext.len() {
+            return Vec::new();
+        }
+        self.pkg_ext
+            .row(pkg)
             .iter()
             .map(|&e| self.bzl_ext_labels.get(e))
             .collect()
@@ -658,6 +678,10 @@ impl IndexData {
                 offsets: &self.bzl_ext_offsets,
                 edges: &self.bzl_ext_edges,
             },
+            pkg_ext: CsrRef {
+                offsets: &self.pkg_ext_offsets,
+                edges: &self.pkg_ext_edges,
+            },
             repo_names: StrTabRef {
                 bytes: &self.repo_name_bytes,
                 offsets: &self.repo_name_offsets,
@@ -765,6 +789,10 @@ impl ArchivedIndexData {
             bzl_ext: CsrRef {
                 offsets: le::u32s(&self.bzl_ext_offsets),
                 edges: le::u32s(&self.bzl_ext_edges),
+            },
+            pkg_ext: CsrRef {
+                offsets: le::u32s(&self.pkg_ext_offsets),
+                edges: le::u32s(&self.pkg_ext_edges),
             },
             repo_names: StrTabRef {
                 bytes: &self.repo_name_bytes,

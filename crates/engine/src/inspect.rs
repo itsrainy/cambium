@@ -671,7 +671,9 @@ impl<'a> IndexQuery<'a> {
             + v.bzl_ext_labels.bytes.len()
             + v.bzl_ext_labels.offsets.len() * 4
             + v.bzl_ext.offsets.len() * 4
-            + v.bzl_ext.edges.len() * 4) as u64;
+            + v.bzl_ext.edges.len() * 4
+            + v.pkg_ext.offsets.len() * 4
+            + v.pkg_ext.edges.len() * 4) as u64;
 
         let accounted = label_table
             + label_sorted

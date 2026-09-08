@@ -1024,3 +1024,80 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
         assert!(!b.contains("//app:unrelated"), "{version}: {b:?}");
     }
 }
+
+/// Issue #4: the same `@mod_a//:defs.bzl` edit, reached by a BUILD file's
+/// *own* `load()` rather than through a main-repo `.bzl` intermediary.
+///
+/// `//app` above goes through `//tools:macros.bzl`, and the external half of
+/// a `.bzl`'s loads has always been recorded. The external half of a BUILD
+/// file's loads was not, so a package in this shape — envoy's `bazel/coverage`,
+/// `bazel/external` and the root package — was invisible to rule (a).
+#[test]
+fn a_build_files_direct_external_load_reaches_its_package() {
+    skip_unless_e2e!();
+    for version in ["7.4.1", "9.2.0"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = root.join("_store");
+        std::fs::create_dir_all(&store).unwrap();
+        write_external_workspace(&root, &store, version);
+        write(
+            &root,
+            "direct/BUILD.bazel",
+            "load(\"@mod_a//:defs.bzl\", \"via_macro\")\n\n\
+             via_macro(name = \"direct\")\n\n\
+             genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
+        );
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "t"]);
+        let base = commit_all(&root, "base");
+
+        let config = root.join("cambium.toml");
+        let engine = engine_for(&root, &config);
+        let base_index = engine
+            .full_build(&base)
+            .unwrap_or_else(|e| panic!("{version}: cold build: {e}"));
+
+        write(
+            &root,
+            "mod_a/defs.bzl",
+            "def via_macro(name):\n\
+            \x20   native.genrule(name = name, outs = [name + \".txt\"], cmd = \"echo v2 > $@\")\n",
+        );
+        let head = commit_all(&root, "edit mod_a defs.bzl");
+        let engine = engine_for(&root, &config);
+        let req = AffectedRequest {
+            base: base.clone(),
+            head: head.clone(),
+            include_manual: true,
+            explain: true,
+            no_full_build: true,
+            materialize: false,
+            publish_base: false,
+            max_depth: None,
+        };
+        let out = engine
+            .compute(
+                base_index.view(),
+                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.bazel_querier(&head).expect("querier"),
+                &req,
+            )
+            .unwrap_or_else(|e| panic!("{version}: {e}"));
+        let r = out.report;
+        assert!(!r.global, "{version}: went global: {:?}", r.global_reason);
+        for pkg in ["app", "direct"] {
+            assert!(
+                r.dirty_packages.contains(&pkg.to_string()),
+                "{version}: `{pkg}` loads the edited .bzl and must be re-queried: {:?}",
+                r.dirty_packages
+            );
+        }
+        let d: BTreeSet<String> = r.affected_labels().into_iter().collect();
+        assert!(d.contains("//direct:direct"), "{version}: {d:?}");
+        assert!(d.contains("//app:via_macro"), "{version}: {d:?}");
+        assert!(!d.contains("//direct:unrelated"), "{version}: {d:?}");
+        assert!(!d.contains("//app:unrelated"), "{version}: {d:?}");
+    }
+}
