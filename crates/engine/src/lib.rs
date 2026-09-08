@@ -20,8 +20,8 @@ pub mod revision;
 pub mod store;
 pub mod synthq;
 
-pub use config::Config;
 pub use baseline::BaselineCache;
+pub use config::Config;
 pub use engine::{AffectedRequest, BaselineOrigin, Engine, RunOutcome};
 pub use error::{EngineError, Result};
 pub use inspect::{IndexQuery, QueryOptions};
