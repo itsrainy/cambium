@@ -5,47 +5,23 @@
 //! synthetic graph, no Bazel. `.bazelrc` is a default invalidator, so the first
 //! test is also the check that the screen runs *before* the generic rule.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
 use cambium_engine::{AffectedRequest, Config, Engine, RunOutcome, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, SynthGraph};
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+use common::{commit, git, git_repo, synthetic_engine};
 
 /// A repository with `.bazelrc` at `base` and then at `head`, and the engine
 /// over it. Returns the two shas.
 fn repo_with(base_rc: &str, head_rc: &str) -> (tempfile::TempDir, Engine, String, String) {
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path();
-    git(p, &["init", "-q", "-b", "main"]);
-    git(p, &["config", "user.email", "t@example.com"]);
-    git(p, &["config", "user.name", "t"]);
-    std::fs::write(p.join(".bazelrc"), base_rc).unwrap();
-    git(p, &["add", "-A"]);
-    git(p, &["commit", "-q", "-m", "base"]);
-    let base = git(p, &["rev-parse", "HEAD"]);
-    std::fs::write(p.join(".bazelrc"), head_rc).unwrap();
-    git(p, &["add", "-A"]);
-    git(p, &["commit", "-q", "-m", "head"]);
-    let head = git(p, &["rev-parse", "HEAD"]);
-    let engine = Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(p.to_path_buf()),
-        cambium_bazel::Bazel::at(p.to_path_buf(), Some("/nonexistent/bazel")),
-    );
+    let root = dir.path().to_path_buf();
+    git_repo(&root);
+    common::write(&root, ".bazelrc", base_rc);
+    let base = commit(&root, "base");
+    common::write(&root, ".bazelrc", head_rc);
+    let head = commit(&root, "head");
+    let engine = synthetic_engine(&root, Config::default());
     (dir, engine, base, head)
 }
 
@@ -133,7 +109,7 @@ fn envoy_bazelrc_commits() {
     // envoy's pin; another entry is surveyed from its own HEAD.
     let pin = &std::env::var("CAMBIUM_BAZELRC_PIN")
         .unwrap_or_else(|_| "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf".into());
-    let known = Command::new("git")
+    let known = std::process::Command::new("git")
         .current_dir(&root)
         .args([
             "rev-parse",
