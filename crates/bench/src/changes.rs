@@ -9,6 +9,34 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+/// The packages of an index's busiest targets, sorted and deduplicated.
+///
+/// An edit anywhere in one of these reaches the largest share of the graph,
+/// which is what the stress change sets are for: `in_degree.top` is the
+/// targets most depended on, and a change set that touches their package is
+/// the worst case a CI job actually meets.
+pub fn hub_packages(index: cambium_index::IndexRef<'_>) -> Vec<String> {
+    let stats = cambium_engine::IndexQuery::new(index).stats(0);
+    let mut pkgs: Vec<String> = stats
+        .in_degree
+        .top
+        .iter()
+        .map(|h| package_of(&h.label))
+        .collect();
+    pkgs.sort();
+    pkgs.dedup();
+    pkgs
+}
+
+/// `//src/main/java/foo:bar` -> `src/main/java/foo`.
+pub fn package_of(label: &str) -> String {
+    let l = label.strip_prefix("//").unwrap_or(label);
+    match l.split_once(':') {
+        Some((pkg, _)) => pkg.to_string(),
+        None => l.to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSetKind {
@@ -413,6 +441,15 @@ pub fn select(repo: &Repo, kinds: &[ChangeSetKind], o: &ChangeSetOptions) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn labels_reduce_to_their_package() {
+        use super::package_of;
+        assert_eq!(package_of("//src/main/java/foo:bar"), "src/main/java/foo");
+        assert_eq!(package_of("//:root"), "");
+        assert_eq!(package_of("//a/b"), "a/b");
+        assert_eq!(package_of("@repo//a:b"), "@repo//a");
+    }
+
     use super::*;
 
     #[test]
