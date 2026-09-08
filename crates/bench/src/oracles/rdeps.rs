@@ -63,7 +63,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use cambium_bazel::Bazel;
+use cambium_bazel::{query_word, Bazel};
 use cambium_classify::PackageSet;
 use cambium_index::IndexRef;
 use rand::seq::SliceRandom;
@@ -553,10 +553,21 @@ pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[S
     out
 }
 
-/// `set(a b c)`: Bazel's literal set, which needs no operator precedence and
-/// no quoting of the individual labels.
+/// `set(a b c)`: Bazel's literal set, which needs no operator precedence.
+///
+/// The individual labels still need [`cambium_bazel::query_word`]: `set` takes
+/// query *words*, and the lexer ends a word at a `+`, so one unquoted
+/// `//bazel:libc++` makes the whole batch a syntax error rather than one
+/// missing label.
 pub fn label_set(labels: &[String]) -> String {
-    format!("set({})", labels.join(" "))
+    format!(
+        "set({})",
+        labels
+            .iter()
+            .map(|l| query_word(l))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 /// `kind(rule, rdeps(//..., set(a b c)))`: every rule that reaches any of the
@@ -727,6 +738,16 @@ mod tests {
         assert_eq!(
             rdeps_expression(&["//a:a.cc".into(), "//b:b.cc".into()]),
             "kind(rule, rdeps(//..., set(//a:a.cc //b:b.cc)))"
+        );
+    }
+
+    #[test]
+    fn a_root_the_lexer_would_split_is_quoted_inside_the_set() {
+        // One `+` label used to make the whole batch a syntax error, which
+        // reads as an oracle that reached nothing.
+        assert_eq!(
+            rdeps_expression(&["//bazel:libc++".into(), "//b:b.cc".into()]),
+            "kind(rule, rdeps(//..., set(\"//bazel:libc++\" //b:b.cc)))"
         );
     }
 

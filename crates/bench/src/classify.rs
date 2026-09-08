@@ -698,7 +698,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use cambium_bazel::Bazel;
+use cambium_bazel::{query_word, Bazel};
 use cambium_index::{IndexRef, WalkOptions};
 use cambium_proto::blaze_query::{attribute::Discriminator, Rule, Target};
 
@@ -1016,7 +1016,7 @@ impl<'a> BazelFacts<'a> {
                 let expr = format!(
                     "set({})",
                     todo.iter()
-                        .map(|l| l.as_str())
+                        .map(|l| query_word(l))
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
@@ -1097,7 +1097,7 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
         let expr = format!(
             "set({})",
             todo.iter()
-                .map(|l| l.as_str())
+                .map(|l| query_word(l))
                 .collect::<Vec<_>>()
                 .join(" ")
         );
@@ -1163,7 +1163,7 @@ fn query_rule(bazel: &Bazel, label: &str) -> Option<Rule> {
     let out = bazel
         .command("query")
         .args([
-            label,
+            query_word(label).as_str(),
             "--output=streamed_proto",
             "--proto:flatten_selects=false",
             "--proto:locations=false",
