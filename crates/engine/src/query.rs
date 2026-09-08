@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cambium_bazel::{convert, ConvertOptions, ParsedTarget};
 use cambium_bazel::{Bazel, BazelError, QueryOutcome};
 use cambium_index::PackageUpdate;
 use cambium_proto::blaze_query::Target;
-use cambium_proto::{convert, ConvertOptions, ParsedTarget};
 use prost::Message;
 use rayon::prelude::*;
 

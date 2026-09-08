@@ -74,7 +74,7 @@ fn bench_parse_proto(c: &mut Criterion) {
     for preset in ["small", "medium"] {
         let graph = generate(&GraphSpec::preset(preset).unwrap());
         let bytes = cambium_synth::proto::to_streamed_proto(&graph);
-        let opts = cambium_proto::ConvertOptions::default();
+        let opts = cambium_bazel::ConvertOptions::default();
         let files = cambium_engine::query::no_files();
         g.throughput(Throughput::Bytes(bytes.len() as u64));
         g.bench_with_input(BenchmarkId::from_parameter(preset), &bytes, |b, bytes| {

@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
+pub mod convert;
+
+pub use convert::{convert, ConvertOptions, ParsedTarget};
+
 use cambium_proto::reader::{read_frames, ReadError};
 
 #[derive(Debug, thiserror::Error)]
