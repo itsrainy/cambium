@@ -34,6 +34,13 @@
 //!   That is why a divergence from a recorded answer is a *lead*, not a
 //!   verdict, and why the tight loop compares one replay against another
 //!   ([`ReplayRun::divergences_against`]) rather than against the run.
+//!
+//!   Two shapes of that drift are large enough to be worth naming rather
+//!   than leaving for a reader to rediscover, and both are recorded as
+//!   indeterminate when `--repo` makes them visible: the stage naming a
+//!   repository the base's `MODULE.bazel` does not declare, and the diff
+//!   modifying a `.bzl` the stored load closure has never heard of. envoy's
+//!   three hundred commits straddle a Bzlmod migration and produce both.
 //! - **`MODULE.bazel` at either revision**, without a git repository to read
 //!   it from. A change set that touches it is marked
 //!   [`ReplayOutcome::indeterminate`] and excluded from gating unless
@@ -248,6 +255,58 @@ impl WorkspaceText for NoText {
     }
 }
 
+/// Whether the stored index's repository set is the one the base revision
+/// actually had.
+///
+/// The index is at the pin and the change set's base is an ancestor of it, so
+/// the graph the replay walks is always a little ahead of the graph the run
+/// walked. Usually that is drift of a package or two and the answers still
+/// line up. `MODULE.bazel` is different in kind: the externals stage's whole
+/// input — which repositories exist, which main-repo paths feed them, which
+/// of those have a derivable path mapping — is derived from it, so a base
+/// whose module file declares a different set of repositories is not a
+/// smaller version of the pin's graph but a different one, and comparing the
+/// replay's answer against the run's says nothing about the engine.
+///
+/// envoy is the case that motivated this. Its three hundred history commits
+/// straddle a Bzlmod migration: at the pin `MODULE.bazel` declares fifty-three
+/// repositories, and two hundred and eighty-eight commits earlier it declares
+/// three, all `local_path_override`s. Nine change sets replayed to a tenth of
+/// the dirty set the run recorded, and every one of them is on the far side
+/// of that migration. Replaying each against the base index the run actually
+/// used reproduces the run's number exactly.
+///
+/// It is deliberately narrow. envoy's `MODULE.bazel` moves on most of those
+/// three hundred commits, and declaring every change set indeterminate for
+/// that would throw the gate away to catch nine cases. What is asked instead
+/// is whether *this* change set's answer rests on the drift: a repository the
+/// replay dirtied that the base never declared is one the run cannot have
+/// dirtied, whatever the engine does.
+///
+/// Needs `--repo`; without a git repository to read `MODULE.bazel` at the
+/// base there is nothing to compare and the replay says nothing.
+fn repos_declared_at(base_rev: &str, texts: &dyn WorkspaceText) -> Option<BTreeSet<String>> {
+    let text = texts.text_at(base_rev, externals::MODULE_FILE)?;
+    let facts = cambium_index::scan_module(&text);
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    for e in facts.extensions.values() {
+        declared.extend(e.repos.iter().cloned());
+    }
+    for r in facts.repo_rules.values() {
+        declared.extend(r.repos.iter().cloned());
+    }
+    for module in facts.local_paths.keys() {
+        let name = facts
+            .deps
+            .values()
+            .find(|d| &d.module == module)
+            .map(|d| d.repo_name.clone())
+            .unwrap_or_else(|| module.clone());
+        declared.insert(name);
+    }
+    Some(declared)
+}
+
 /// Runs the static stages over one diff.
 pub fn replay(
     base: IndexRef<'_>,
@@ -316,6 +375,57 @@ pub fn replay(
     } else {
         externals::Externals::default()
     };
+
+    // The same drift, one level down. A `.bzl` the diff *modified* existed at
+    // the base by definition; one the stored index's load graph has never
+    // heard of is one whose loaders and repositories the replay cannot see, so
+    // it silently contributes nothing where the run may have gone global on
+    // it. envoy's `bazel/repositories.bzl` is the case: the whole WORKSPACE
+    // dependency file, in the closure at every change set's base and absent
+    // from the pin's fifty-five `.bzl` files, because by then envoy is on
+    // Bzlmod.
+    if base.bzl_closure {
+        let unknown: Vec<&str> = changes
+            .iter()
+            .filter(|c| {
+                c.status == Status::Modified
+                    && c.path.ends_with(".bzl")
+                    && base.bzl_id(&c.path).is_none()
+            })
+            .map(|c| c.path.as_str())
+            .collect();
+        if !unknown.is_empty() {
+            out.indeterminate.push(format!(
+                "the change set modifies {}, and the stored index's load closure does not \
+                 contain {} at all; whatever they loaded at the base is not in this graph",
+                unknown.join(", "),
+                if unknown.len() == 1 { "it" } else { "them" },
+            ));
+        }
+    }
+
+    if let Some(declared) = repos_declared_at(base_rev, texts) {
+        let undeclared: Vec<&str> = ext
+            .repos
+            .iter()
+            .filter(|r| !declared.contains(*r))
+            .map(String::as_str)
+            .collect();
+        if !undeclared.is_empty() {
+            out.indeterminate.push(format!(
+                "the stage dirtied {} that {} at the base does not declare ({}); those \
+                 repositories arrived between the base and the pin, so this answer is the \
+                 stored index's graph rather than the run's",
+                if undeclared.len() == 1 {
+                    "a repository".to_string()
+                } else {
+                    format!("{} repositories", undeclared.len())
+                },
+                externals::MODULE_FILE,
+                undeclared.join(", "),
+            ));
+        }
+    }
 
     let mut matchers = match cambium_classify::Matchers::compile(&cfg.rules()) {
         Ok(m) => m,
@@ -808,6 +918,88 @@ mod tests {
             cold_rebuild: cold,
             ..Default::default()
         }
+    }
+
+    /// A stored index with one package, one workspace `.bzl` and one
+    /// repository, standing in for the pin.
+    fn stored_index() -> cambium_index::IndexData {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[cambium_index::PackageUpdate {
+            package: "lib".into(),
+            targets: vec![cambium_index::TargetRow::rule(
+                "//lib:core",
+                "cc_library",
+                vec![],
+            )],
+            ..Default::default()
+        }]);
+        struct Src;
+        impl cambium_index::FileText for Src {
+            fn text(&self, path: &str) -> Option<String> {
+                match path {
+                    "WORKSPACE" => Some("load(\"//bazel:known.bzl\", \"x\")\n".into()),
+                    "bazel/known.bzl" => Some(String::new()),
+                    _ => None,
+                }
+            }
+        }
+        let mut c = cambium_index::BzlClosure::default();
+        c.workspace = c
+            .graph
+            .workspace_closure(&Src, &cambium_index::RepoMapping::identity());
+        assert!(!c.workspace.is_empty());
+        c.inputs.repos.insert("late_arrival".into());
+        b.set_bzl_closure(c);
+        b.finish("pin")
+    }
+
+    fn module_at(rev: &str, text: &str) -> cambium_engine::externals::FixedText {
+        let mut m = BTreeMap::new();
+        m.insert(
+            (rev.to_string(), externals::MODULE_FILE.to_string()),
+            text.to_string(),
+        );
+        cambium_engine::externals::FixedText(m)
+    }
+
+    /// Both drift guards, on the shapes envoy produced: the stage names a
+    /// repository the base's `MODULE.bazel` never declared, and the diff
+    /// modifies a `.bzl` the stored closure does not contain. Neither is a
+    /// statement about the engine, so neither is gated on.
+    #[test]
+    fn a_graph_the_base_never_had_is_indeterminate_rather_than_a_divergence() {
+        let index = stored_index();
+        let cfg = Config::default();
+        let texts = module_at("base", "module(name = \"demo\", version = \"1\")\n");
+
+        let o = replay(
+            index.view(),
+            &cfg,
+            "base",
+            "head",
+            &[Change::new(Status::Modified, "bazel/gone.bzl")],
+            &texts,
+        );
+        assert!(
+            o.indeterminate.iter().any(|s| s.contains("bazel/gone.bzl")),
+            "{:?}",
+            o.indeterminate
+        );
+
+        // A `.bzl` the closure does know says nothing, so the guard is silent.
+        let o = replay(
+            index.view(),
+            &cfg,
+            "base",
+            "head",
+            &[Change::new(Status::Modified, "bazel/known.bzl")],
+            &texts,
+        );
+        assert!(
+            !o.indeterminate.iter().any(|s| s.contains("load closure")),
+            "{:?}",
+            o.indeterminate
+        );
     }
 
     #[test]
