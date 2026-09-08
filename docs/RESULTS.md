@@ -50,6 +50,57 @@ stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
 them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
+**The first run (unpublished) is the shape of the answer, not the answer.**
+One full run of all five subjects on the benchmark machine, 2026-09-08: 5
+histories over 1 274 commits, 200 change sets, ~7.5 h wall. It is recorded
+here and not in the generated tables because it was never published --
+sourcegraph lost bazel-diff and apollo lost Tango to harness failures the
+run's own gates did not notice --- a comparison with a hole in it recorded
+`pass: true`, since fixed. The
+numbers below therefore describe a run with two holes in it; the tables in
+the sections that follow are the published ones, and where they disagree with
+this paragraph, they win.
+
+All five rebuild oracles passed: a cold index at the pin matched the
+incrementally-updated one node for node, edge for edge and rule hash for rule.
+That part is clean, and it is the suite's strongest correctness evidence.
+
+| subject | change sets | min recall | history: commits / p50 / globals / cold rebuilds |
+|---|---|---|---|
+| bazel | 39/40 | 1.000 | 300 / 2 ms / 4 / 0 |
+| sourcegraph | 39/40 | 1.000 | 300 / 3 ms / 24 / 0 |
+| apollo | 38/40 | 1.000 | 74 / 216 ms / 11 / 0 |
+| envoy | 29/40 | 0.911 | 300 / 4 920 ms / 22 / 130 |
+| xla | 40/40 | 1.000 | 300 / 9 ms / 31 / 0 |
+
+Warm change-set timings, p50 ms (cambium against the foils):
+
+| subject | cambium | bazel-diff | Tango (no cache, cold) |
+|---|---|---|---|
+| bazel | 23 | 1 730 | 19 750 |
+| sourcegraph | 33 | *errored ×40* | 58 208 |
+| apollo | 23 | 8 053 | *errored ×40* |
+| envoy | 427 | 2 466 | 184 567 |
+| xla | 39 | 11 335 | 211 831 |
+
+Envoy is the honest outlier: 427 ms warm, an order of magnitude slower than
+the rest and the only subject where bazel-diff is within reach. Deep `.bzl`
+layering and 444 k edges. It is also the subject whose graph is closest to
+the production repo this is all aimed at, so understanding that number is
+worth more than any of the fast ones.
+
+The no-inflation rule Rainy set holds up. Including the change sets where
+cambium answers `//...` moves the median by about a millisecond (apollo
+23 -> 24, xla 39 -> 35), because a global answer is *cheap* — cambium returns
+`//...` without querying anything. What a global costs is precision, and
+that is priced separately in `global_stats` (apollo's globals: mean 12 975
+cambium labels against bazel-diff's 5 615). The expensive fallback is the
+cold rebuild, and it **fired zero times in the change-set workload on every
+subject**, so no published change-set timing includes one. If you want the
+splice-limit overflow priced, it needs change sets chosen to exceed
+`limits.max_dirty_packages`, or the history numbers cited alongside — envoy's
+130 cold rebuilds in 300 commits are what drag its history p50 to 4 920 ms.
+
 **Laptop timings are not comparable and are not published.** Some subjects'
 external repositories cannot be fetched on macOS x86_64 — a GraalVM
 `macos-x64` distribution that does not exist, RBE configurations that shell out
