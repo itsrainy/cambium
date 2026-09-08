@@ -97,6 +97,16 @@ All three were the harness's fault, not cambium's.
    The rdeps oracle now runs **before** the tools, because its answer is one
    of the classifier's facts.
 
+## Before merging an engine change
+
+Run `tools/bench/precheck.sh` and paste what it said. It replays the engine's
+static stages — the externals rules, the dirty-package set, the cold-rebuild
+decision — against every recorded change set of the real subjects, offline,
+from the stored indexes, in minutes and with no Bazel. It exits 1 on
+divergence. `docs/METHODOLOGY.md`, "Validating an engine change before a run",
+says what it cannot see; a clean precheck does not replace the run, it is what
+makes starting one worth the money.
+
 ## Next: the second published run
 
 Nothing is blocked on Rainy. The box is theirs to pay for, so say you are
