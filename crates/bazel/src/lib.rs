@@ -187,6 +187,36 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
     None
 }
 
+/// A target pattern as a query *word*, quoted when Bazel's query lexer would
+/// not read it as one.
+///
+/// Bazel's query language is a language, not a list of labels: `+` is the
+/// union operator, and its lexer ends a word at a `+` unless the word began
+/// `@@` (the escape hatch added for canonical repository names like
+/// `@@rules_jvm_external++maven+maven//:bar`). So `//bazel:libc++` — envoy's
+/// `bool_flag` — lexes as `//bazel:libc`, `+`, `+` and the query is a syntax
+/// error, *including* inside `set(...)`, which parses words like everywhere
+/// else. A label with a `-` in a leading position, or one containing a space,
+/// has the same problem.
+///
+/// Quoting is the lexer's own answer: a double-quoted word is taken literally.
+/// The published run of 2026-09-08 is what this is for: every rule-proto
+/// lookup for `//bazel:libc++`, `//bazel:libc++_enabled`, `//bazel:libstdc++`
+/// and `//bazel:libstdc++_enabled` failed, so every classifier predicate that
+/// needs the proto answered "no" and four benign extras were reported as
+/// `unclassified` on five change sets.
+pub fn query_word(pattern: &str) -> String {
+    if pattern.contains('"') {
+        // A label cannot contain a quote; anything that does is not a label
+        // and is left for Bazel to reject on its own terms.
+        return pattern.to_string();
+    }
+    if pattern.starts_with("@@") || !pattern.contains(['+', ' ']) {
+        return pattern.to_string();
+    }
+    format!("\"{pattern}\"")
+}
+
 /// Every load error in a stderr buffer. Used on a tail in tests, and on the
 /// live stream by [`drain_stderr`].
 pub fn parse_load_errors(stderr: &str) -> LoadErrors {
@@ -763,6 +793,27 @@ mod tests {
         "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0mpackage contains errors: third_party/bazel: name 'py_library' is not defined (did you mean 'cc_library'?)\n",
         "\u{1b}[35mWARNING: \u{1b}[0m--keep_going specified, ignoring errors. Results may be inaccurate\n",
     );
+
+    #[test]
+    fn a_label_the_query_lexer_would_split_is_quoted() {
+        // envoy's `bool_flag`s and the `config_setting`s over them: `+` is the
+        // union operator, so unquoted these are three tokens, not one.
+        assert_eq!(query_word("//bazel:libc++"), "\"//bazel:libc++\"");
+        assert_eq!(
+            query_word("//bazel:libstdc++_enabled"),
+            "\"//bazel:libstdc++_enabled\""
+        );
+        // Ordinary labels are left alone, so the queries the suite already
+        // sends do not change shape.
+        assert_eq!(query_word("//bazel:envoy"), "//bazel:envoy");
+        assert_eq!(query_word("//:BUILD"), "//:BUILD");
+        // A canonical repository name already lexes as one word, and quoting
+        // it would be noise in every log line.
+        assert_eq!(
+            query_word("@@rules_jvm_external++maven+maven//:bar"),
+            "@@rules_jvm_external++maven+maven//:bar"
+        );
+    }
 
     #[test]
     fn parses_load_errors_from_coloured_stderr() {
