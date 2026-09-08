@@ -82,7 +82,12 @@ Three separate things, and they are not interchangeable:
   `local_path_override`, `local_repository` / `new_local_repository`, and a
   `repository_ctx.symlink` whose source is a literal main-repo path or label —
   and a repository with no entries keeps the old, wider answer.
-  It went to **7** when each input-map pattern gained a *target-only* flag
+  It went to **7** when the closure gained the *external labels each BUILD file
+  loads directly* (`pkg_ext_*`). `bzl_ext` already recorded the external labels
+  a `.bzl` stopped at, but a BUILD file that loads `@rules_foo//:defs.bzl`
+  itself has no `.bzl` row to hang that on, so those labels were dropped
+  (issue #4); `pkg_ext` is the same table per *package*.
+  It went to **8** when each input-map pattern gained a *target-only* flag
   (`repo_input_target_only`): set when every derivation of the pattern was a
   label embedded in text the repository rule writes — envoy's `bazel/repo.bzl`
   generates a BUILD file listing `@envoy//changelogs` in a `genrule`'s `tools`
@@ -90,10 +95,14 @@ Three separate things, and they are not interchangeable:
   repository's targets and cannot move a `.bzl` in it, so an edit to it marks
   the label consumers direct and re-queries nothing; without the flag, every
   changelog entry re-queried the eleven hundred packages whose closure reaches
-  `@envoy_repo//:compiler.bzl`. As at 4, 5 and 6,
+  `@envoy_repo//:compiler.bzl` (issue #3). As at 4, 5 and 6,
   an empty table in an older index would read as "no mapping is needed" rather
   than "we never looked", which is the unsound direction, so the layout bump is
   what stops that answer being given silently.
+
+  The list above is a summary. The authoritative, always-current history is the
+  doc comment on `FORMAT_VERSION` in `crates/index/src/format.rs`; if the two
+  disagree, that one is right.
 - **`config_hash`**, stamped into the index header from
   `cambium_engine::Config::hash`, versions the *meaning of the rows*. An index
   whose `config_hash` differs from the running config is refused for splicing
@@ -107,7 +116,8 @@ Three separate things, and they are not interchangeable:
 hashing in `crates/cambium-proto/src/hash.rs`. Dropping `generator_location`
 from the canonical rule (a macro's BUILD line, which shifts whenever a line is
 inserted above it, and which bazel-diff and Tango both ignore) took that
-constant to **2**. Every index published by an older cambium has the old
+constant to **2**; it now stands at **4**, and the doc comment on the constant
+itself carries the per-version history. Every index published by an older cambium has the old
 `config_hash`, so it can never be spliced against rows hashed the new way —
 the run says so and rebuilds. Any future change to `canonical_rule` bumps the
 same constant.

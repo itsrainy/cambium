@@ -292,7 +292,10 @@ fn a_generated_file_is_one_hop_between_consumer_and_generator() {
     assert_eq!(v.forward.row(m["//g:out.h"]), &[m["//g:gen"]]);
     // ...and a change to the generator reaches the consumer through it.
     let r = walk(v, &[m["//g:gen"]], &WalkOptions::default());
-    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//g:gen", "//u:u"]);
+    assert_eq!(
+        view::labels_sorted(&v, &r.affected),
+        vec!["//g:gen", "//u:u"]
+    );
     assert_eq!(r.depth_of(m["//u:u"]), Some(2));
 }
 

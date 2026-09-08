@@ -653,106 +653,129 @@ impl<'a> IndexRef<'a> {
     }
 }
 
-impl IndexData {
-    pub fn view(&self) -> IndexRef<'_> {
+/// The one field list behind [`IndexData::view`] and
+/// [`ArchivedIndexData::view_with`].
+///
+/// The two only differ in how a stored `u32` array is reached: the owned
+/// struct holds `Vec<u32>`, the archive holds `ArchivedVec<u32_le>` and needs
+/// [`le::u32s`] to reinterpret it. Passing that adapter in as `$u32s` lets one
+/// list serve both, so a new section is added in exactly one place instead of
+/// being hand-mirrored twice.
+///
+/// `$d` is the data struct, `$p` the provenance, `$ver` the format version
+/// (already widened out of its archived representation).
+macro_rules! index_view {
+    ($d:expr, $p:expr, $u32s:path, $ver:expr) => {
         IndexRef {
-            format_version: self.header.format_version,
-            commit: &self.provenance.commit,
-            lineage: self.header.lineage,
-            bazel_version: &self.header.bazel_version,
-            config_hash: self.header.config_hash,
-            created_unix: self.provenance.created_unix,
-            partial: self.provenance.partial,
-            packages_in_error: self.provenance.packages_in_error,
-            error_packages: &self.provenance.error_packages,
+            format_version: $ver,
+            commit: &$p.commit,
+            lineage: $d.header.lineage,
+            bazel_version: &$d.header.bazel_version,
+            config_hash: $d.header.config_hash,
+            created_unix: $p.created_unix,
+            partial: $p.partial,
+            packages_in_error: $p.packages_in_error,
+            error_packages: &$p.error_packages,
             labels: StrTabRef {
-                bytes: &self.label_bytes,
-                offsets: &self.label_offsets,
+                bytes: &$d.label_bytes,
+                offsets: $u32s(&$d.label_offsets),
             },
-            label_sorted: &self.label_sorted,
+            label_sorted: $u32s(&$d.label_sorted),
             classes: StrTabRef {
-                bytes: &self.class_bytes,
-                offsets: &self.class_offsets,
+                bytes: &$d.class_bytes,
+                offsets: $u32s(&$d.class_offsets),
             },
-            kind: &self.node_kind,
-            package: &self.node_package,
-            class: &self.node_class,
-            hash: &self.node_hash,
-            is_test: &self.node_is_test,
-            flags: &self.node_flags,
+            kind: &$d.node_kind,
+            package: $u32s(&$d.node_package),
+            class: $u32s(&$d.node_class),
+            hash: &$d.node_hash,
+            is_test: &$d.node_is_test,
+            flags: &$d.node_flags,
             forward: CsrRef {
-                offsets: &self.fwd_offsets,
-                edges: &self.fwd_edges,
+                offsets: $u32s(&$d.fwd_offsets),
+                edges: $u32s(&$d.fwd_edges),
             },
             reverse: CsrRef {
-                offsets: &self.rev_offsets,
-                edges: &self.rev_edges,
+                offsets: $u32s(&$d.rev_offsets),
+                edges: $u32s(&$d.rev_edges),
             },
             pkg_names: StrTabRef {
-                bytes: &self.pkg_name_bytes,
-                offsets: &self.pkg_name_offsets,
+                bytes: &$d.pkg_name_bytes,
+                offsets: $u32s(&$d.pkg_name_offsets),
             },
             pkg_nodes: CsrRef {
-                offsets: &self.pkg_node_offsets,
-                edges: &self.pkg_nodes,
+                offsets: $u32s(&$d.pkg_node_offsets),
+                edges: $u32s(&$d.pkg_nodes),
             },
-            pkg_bzl_hash: &self.pkg_bzl_hash,
-            pkg_build_hash: &self.pkg_build_hash,
-            pkg_flags: &self.pkg_flags,
-            bzl_closure: self.header.bzl_closure,
+            pkg_bzl_hash: &$d.pkg_bzl_hash,
+            pkg_build_hash: &$d.pkg_build_hash,
+            pkg_flags: &$d.pkg_flags,
+            bzl_closure: $d.header.bzl_closure,
             bzl_paths: StrTabRef {
-                bytes: &self.bzl_path_bytes,
-                offsets: &self.bzl_path_offsets,
+                bytes: &$d.bzl_path_bytes,
+                offsets: $u32s(&$d.bzl_path_offsets),
             },
             bzl_loads: CsrRef {
-                offsets: &self.bzl_load_offsets,
-                edges: &self.bzl_load_edges,
+                offsets: $u32s(&$d.bzl_load_offsets),
+                edges: $u32s(&$d.bzl_load_edges),
             },
             bzl_consumers: CsrRef {
-                offsets: &self.bzl_consumer_offsets,
-                edges: &self.bzl_consumer_edges,
+                offsets: $u32s(&$d.bzl_consumer_offsets),
+                edges: $u32s(&$d.bzl_consumer_edges),
             },
-            bzl_workspace: &self.bzl_workspace,
+            bzl_workspace: $u32s(&$d.bzl_workspace),
             bzl_ext_labels: StrTabRef {
-                bytes: &self.bzl_ext_label_bytes,
-                offsets: &self.bzl_ext_label_offsets,
+                bytes: &$d.bzl_ext_label_bytes,
+                offsets: $u32s(&$d.bzl_ext_label_offsets),
             },
             bzl_ext: CsrRef {
-                offsets: &self.bzl_ext_offsets,
-                edges: &self.bzl_ext_edges,
+                offsets: $u32s(&$d.bzl_ext_offsets),
+                edges: $u32s(&$d.bzl_ext_edges),
             },
             pkg_ext: CsrRef {
-                offsets: &self.pkg_ext_offsets,
-                edges: &self.pkg_ext_edges,
+                offsets: $u32s(&$d.pkg_ext_offsets),
+                edges: $u32s(&$d.pkg_ext_edges),
             },
             repo_names: StrTabRef {
-                bytes: &self.repo_name_bytes,
-                offsets: &self.repo_name_offsets,
+                bytes: &$d.repo_name_bytes,
+                offsets: $u32s(&$d.repo_name_offsets),
             },
             repo_canonical: StrTabRef {
-                bytes: &self.repo_canonical_bytes,
-                offsets: &self.repo_canonical_offsets,
+                bytes: &$d.repo_canonical_bytes,
+                offsets: $u32s(&$d.repo_canonical_offsets),
             },
             repo_input_patterns: StrTabRef {
-                bytes: &self.repo_input_bytes,
-                offsets: &self.repo_input_offsets,
+                bytes: &$d.repo_input_bytes,
+                offsets: $u32s(&$d.repo_input_offsets),
             },
-            repo_input_prefix: &self.repo_input_prefix,
-            repo_input_target_only: &self.repo_input_target_only,
+            repo_input_prefix: &$d.repo_input_prefix,
+            repo_input_target_only: &$d.repo_input_target_only,
             repo_inputs: CsrRef {
-                offsets: &self.repo_input_repo_offsets,
-                edges: &self.repo_input_repo_edges,
+                offsets: $u32s(&$d.repo_input_repo_offsets),
+                edges: $u32s(&$d.repo_input_repo_edges),
             },
             bzl_repos: CsrRef {
-                offsets: &self.bzl_repo_offsets,
-                edges: &self.bzl_repo_edges,
+                offsets: $u32s(&$d.bzl_repo_offsets),
+                edges: $u32s(&$d.bzl_repo_edges),
             },
             repo_maps: StrTabRef {
-                bytes: &self.repo_map_bytes,
-                offsets: &self.repo_map_offsets,
+                bytes: &$d.repo_map_bytes,
+                offsets: $u32s(&$d.repo_map_offsets),
             },
-            repo_map_ranges: &self.repo_map_ranges,
+            repo_map_ranges: $u32s(&$d.repo_map_ranges),
         }
+    };
+}
+
+/// The `$u32s` adapter for the owned struct: its arrays are already `[u32]`.
+#[inline]
+fn as_u32s(v: &[u32]) -> &[u32] {
+    v
+}
+
+impl IndexData {
+    pub fn view(&self) -> IndexRef<'_> {
+        index_view!(self, self.provenance, as_u32s, self.header.format_version)
     }
 }
 
@@ -760,103 +783,11 @@ impl ArchivedIndexData {
     /// A view over the archive. Provenance is not in the archive — it comes
     /// from the file's trailer — so the caller supplies it.
     pub fn view_with<'a>(&'a self, provenance: &'a Provenance) -> IndexRef<'a> {
-        IndexRef {
-            format_version: self.header.format_version.into(),
-            commit: &provenance.commit,
-            lineage: self.header.lineage,
-            bazel_version: &self.header.bazel_version,
-            config_hash: self.header.config_hash,
-            created_unix: provenance.created_unix,
-            partial: provenance.partial,
-            packages_in_error: provenance.packages_in_error,
-            error_packages: &provenance.error_packages,
-            labels: StrTabRef {
-                bytes: &self.label_bytes,
-                offsets: le::u32s(&self.label_offsets),
-            },
-            label_sorted: le::u32s(&self.label_sorted),
-            classes: StrTabRef {
-                bytes: &self.class_bytes,
-                offsets: le::u32s(&self.class_offsets),
-            },
-            kind: &self.node_kind,
-            package: le::u32s(&self.node_package),
-            class: le::u32s(&self.node_class),
-            hash: &self.node_hash,
-            is_test: &self.node_is_test,
-            flags: &self.node_flags,
-            forward: CsrRef {
-                offsets: le::u32s(&self.fwd_offsets),
-                edges: le::u32s(&self.fwd_edges),
-            },
-            reverse: CsrRef {
-                offsets: le::u32s(&self.rev_offsets),
-                edges: le::u32s(&self.rev_edges),
-            },
-            pkg_names: StrTabRef {
-                bytes: &self.pkg_name_bytes,
-                offsets: le::u32s(&self.pkg_name_offsets),
-            },
-            pkg_nodes: CsrRef {
-                offsets: le::u32s(&self.pkg_node_offsets),
-                edges: le::u32s(&self.pkg_nodes),
-            },
-            pkg_bzl_hash: &self.pkg_bzl_hash,
-            pkg_build_hash: &self.pkg_build_hash,
-            pkg_flags: &self.pkg_flags,
-            bzl_closure: self.header.bzl_closure,
-            bzl_paths: StrTabRef {
-                bytes: &self.bzl_path_bytes,
-                offsets: le::u32s(&self.bzl_path_offsets),
-            },
-            bzl_loads: CsrRef {
-                offsets: le::u32s(&self.bzl_load_offsets),
-                edges: le::u32s(&self.bzl_load_edges),
-            },
-            bzl_consumers: CsrRef {
-                offsets: le::u32s(&self.bzl_consumer_offsets),
-                edges: le::u32s(&self.bzl_consumer_edges),
-            },
-            bzl_workspace: le::u32s(&self.bzl_workspace),
-            bzl_ext_labels: StrTabRef {
-                bytes: &self.bzl_ext_label_bytes,
-                offsets: le::u32s(&self.bzl_ext_label_offsets),
-            },
-            bzl_ext: CsrRef {
-                offsets: le::u32s(&self.bzl_ext_offsets),
-                edges: le::u32s(&self.bzl_ext_edges),
-            },
-            pkg_ext: CsrRef {
-                offsets: le::u32s(&self.pkg_ext_offsets),
-                edges: le::u32s(&self.pkg_ext_edges),
-            },
-            repo_names: StrTabRef {
-                bytes: &self.repo_name_bytes,
-                offsets: le::u32s(&self.repo_name_offsets),
-            },
-            repo_canonical: StrTabRef {
-                bytes: &self.repo_canonical_bytes,
-                offsets: le::u32s(&self.repo_canonical_offsets),
-            },
-            repo_input_patterns: StrTabRef {
-                bytes: &self.repo_input_bytes,
-                offsets: le::u32s(&self.repo_input_offsets),
-            },
-            repo_input_prefix: &self.repo_input_prefix,
-            repo_input_target_only: &self.repo_input_target_only,
-            repo_inputs: CsrRef {
-                offsets: le::u32s(&self.repo_input_repo_offsets),
-                edges: le::u32s(&self.repo_input_repo_edges),
-            },
-            bzl_repos: CsrRef {
-                offsets: le::u32s(&self.bzl_repo_offsets),
-                edges: le::u32s(&self.bzl_repo_edges),
-            },
-            repo_maps: StrTabRef {
-                bytes: &self.repo_map_bytes,
-                offsets: le::u32s(&self.repo_map_offsets),
-            },
-            repo_map_ranges: le::u32s(&self.repo_map_ranges),
-        }
+        index_view!(
+            self,
+            provenance,
+            le::u32s,
+            self.header.format_version.into()
+        )
     }
 }
