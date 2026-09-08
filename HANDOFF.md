@@ -1,138 +1,221 @@
 # Handoff: cambium benchmark suite
 
-Written 2026-09-07 (night) for the next orchestrator. Read this, then
+Written 2026-09-08 for the next orchestrator. Read this, then
 `docs/METHODOLOGY.md`. The owner is Rainy (they/them).
 
 ## Where things stand
 
-Everything the previous handoff had in flight is on `main` and pushed. Tasks
-14-17 are done; only task 18 (the published run) remains, and it needs Rainy's
-go because it starts the box.
+Task 18 — the published run — has been **run once**, on the EC2 box, with
+Rainy's go. It finished. It is **not published**: `docs/RESULTS.md` was
+deliberately left uncommitted because two of the five subjects lost a
+comparison tool to a harness failure, and the run's own gates did not notice.
+The three defects it exposed are fixed and pushed (`7f2c666`); the run needs
+doing again on top of them.
 
 | commit | what |
 |---|---|
-| `aab1997` | issue #3: per-repository path maps (`local_path_override`, `local_repository`, literal `ctx.symlink`) decide whether an input edit is the loaded `.bzl`; envoy's `api/**` edits no longer dirty ~1200 packages. Index FORMAT_VERSION 6, `stats.repos_label_only`, SCHEMA_VERSION 6. |
-| `54edacf` | task 14: `crates/corpus` + `crates/compare` -> `crates/bench`; CLI is `cambi bench {subjects,history,changes,stages,sweep,regress,report}` and `cambi synth`; manifest `subject_repos.toml`; results under `bench-results/<subject>/<workload>/`; `docs/RESULTS.md` generated, `docs/METHODOLOGY.md` hand-written; old words swept. |
-| `4445ab9` | task 16: PR-shaped change sets. `pr_reference` matches `Merge pull request #N`, `PR #N`, trailing `(#N)` and trailing `(https://github.com/o/r/pull/N)`; a commit is in exactly one kind; cap fills PR-shaped first, then stress <= cap/4, then adjacent. |
-| `faa95c8` | task 15: full rdeps oracle. `kind(rule, rdeps(//..., set(<every changed file's label>)))` at head, batched (500 labels / 96 KiB) with bisection of failing batches; deleted files resolved from the base index's consumers; `--oracle-sample N` is an escape hatch, default 0 = full; `ChangesOptions::rdeps_oracle` toggles it (the CLI's `--oracle rdeps`). |
-| `d57c76e` | smoke-test fixup after merging 15 and 16 together |
+| `1562325` | `tools/ec2/launch.sh` points at the AWS resource names that exist. The corpus->bench sweep renamed the key pair, PEM path, security group and instance-tag filter; the AWS resources kept the old names, because a key pair and a security group cannot be renamed in place. Defaults are `cambium-corpus` again, with a comment; the finder accepts tag `bench` or `corpus`. |
+| `7f2c666` | The three fixes below. |
 
-Gates run on the merged tree: fmt, clippy `-D warnings`, `cargo test
---workspace`, the engine e2e (4/4) and the bench real-Bazel smoke
-(`CAMBIUM_E2E=1 CAMBIUM_BAZEL=$HOME/.cache/cambium/bin/bazelisk cargo test -p
-cambium-bench --test smoke_real_bazel -- --ignored`, 2/2).
+Everything before that is described in `git log` and in the previous
+handoff's table (tasks 14-17, issue #3, PR-shaped change sets).
 
-Earlier engine commits (`b5a7211`, `5bcb978`, `f4cf76d`, `7036fa0`,
-`11ae8e0`, `726d913`, `5596e64`) are described in `git log`; the evidence
-they produced is in the old vocabulary under `corpus-results/` and
-`corpus-results-box/`, which this build can no longer read (RESULT_SCHEMA 6,
-renamed fields and paths). Those directories are history only.
+### What the run produced
 
-PR-shape counts over the last 300 first-parent commits (read-only on the
-mirrors): bazel 101 PR-shaped / 199 adjacent (the 199 are Piper exports with
-no PR), envoy 287 / 13, sourcegraph 300 / 0.
+5 subjects, 5 histories (1 274 commits), 200 change sets, ~7.5 h wall.
+**All five rebuild oracles passed** — a cold index at the pin matched the
+incrementally-updated one node, edge and rule hash for rule. That is the
+suite's strongest correctness evidence and it is clean.
 
-## The direction (signed off by Rainy)
+| subject | change sets | min recall | history: commits / p50 / globals / cold rebuilds |
+|---|---|---|---|
+| bazel | 39/40 | 1.000 | 300 / 2 ms / 4 / 0 |
+| sourcegraph | 39/40 | 1.000 | 300 / 3 ms / 24 / 0 |
+| apollo | 38/40 | 1.000 | 74 / 216 ms / 11 / 0 |
+| envoy | 29/40 | 0.911 | 300 / 4 920 ms / 22 / 130 |
+| xla | 40/40 | 1.000 | 300 / 9 ms / 31 / 0 |
 
-`docs/METHODOLOGY.md` is the spec. Summary: "corpus" is retired. The
-benchmark is `cambi bench` over **subjects** (real from `subject_repos.toml`,
-synthetic `synth:<preset>`), **tools** (cambium, bazel-diff, Tango),
-**oracles** (reverse-dependency = full `rdeps(//..., changed files)`,
-rebuild, load), **workloads** (history; change sets of kinds PR-shaped
-[primary], adjacent, stress), **runs** keyed by subject/workload/engine
-identity under `bench-results/`. `docs/RESULTS.md` is generated for a reader
-deciding whether to adopt cambium; `docs/METHODOLOGY.md` is hand-written.
+Warm change-set timings, p50 ms (cambium against the foils):
 
-Rules Rainy set, in their words where it matters:
+| subject | cambium | bazel-diff | Tango (no cache, cold) |
+|---|---|---|---|
+| bazel | 23 | 1 730 | 19 750 |
+| sourcegraph | 33 | *errored ×40* | 58 208 |
+| apollo | 23 | 8 053 | *errored ×40* |
+| envoy | 427 | 2 466 | 184 567 |
+| xla | 39 | 11 335 | 211 831 |
 
-- The benchmark is for timing and accuracy numbers against bazel-diff and
-  Tango, "not for us to test our changes; we should have quicker methods".
-  Validate with unit tests, the synthetic soundness sweep, the real-Bazel e2e
-  (`CAMBIUM_E2E=1 CAMBIUM_BAZEL=$HOME/.cache/cambium/bin/bazelisk cargo test
-  -p cambium-engine --test e2e_bazel`), and targeted runs. The
-  "Choosing what to run" table in METHODOLOGY.md says which workload a change
-  needs.
-- Timing rows must include the change sets where cambium goes global or cold
-  rebuilds, "so we don't artificially inflate our advantage".
-- One Bazel per subject (its `.bazelversion`); 7/8/9 coverage is CI's
-  synthetic matrix, never extra subject checkouts.
-- Commit and push as you go. Agents work in isolated worktrees and commit to
-  branches; the orchestrator merges, gates, pushes.
-- Issue #3 lands before the published run. PR-shaped change sets are primary.
+Envoy is the honest outlier: 427 ms warm, an order of magnitude slower than
+the rest and the only subject where bazel-diff is within reach. Deep `.bzl`
+layering and 444 k edges. It is also the subject whose graph is closest to
+the production repo this is all aimed at, so understanding that number is
+worth more than any of the fast ones.
 
-## Nothing is running
+The no-inflation rule Rainy set holds up. Including the change sets where
+cambium answers `//...` moves the median by about a millisecond (apollo
+23 -> 24, xla 39 -> 35), because a global answer is *cheap* — cambium returns
+`//...` without querying anything. What a global costs is precision, and
+that is priced separately in `global_stats` (apollo's globals: mean 12 975
+cambium labels against bazel-diff's 5 615). The expensive fallback is the
+cold rebuild, and it **fired zero times in the change-set workload on every
+subject**, so no published change-set timing includes one. If you want the
+splice-limit overflow priced, it needs change sets chosen to exceed
+`limits.max_dirty_packages`, or the history numbers cited alongside — envoy's
+130 cold rebuilds in 300 commits are what drag its history p50 to 4 920 ms.
 
-No agents, no worktrees with unmerged work. Two stale worktrees under
-`.claude/worktrees/` (`agent-a1477d118ede418ed`, `agent-a32a183a90cb3eb84`)
-hold nothing unmerged; `git worktree remove --force` them when convenient
-(the auto-mode classifier blocked that command in this session).
+### The three fixes in `7f2c666`
 
-When an agent reports: `git merge --no-edit <branch>`, resolve, run
-`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo test --workspace`, the e2e if engine/index changed, the
-bench smoke if crates/bench changed, then push and `git worktree remove
---force` + `git branch -d`. Watch for `.claude/` or `ubuntu@...` directories
-sneaking into a commit.
+All three were the harness's fault, not cambium's.
 
-## Next: task 18, the published run (needs Rainy's go)
+1. **The deleted half of the rdeps oracle now sees `dirty_packages`.** Its
+   escape hatch has always been "the rule, or its package" — a rule deleted
+   along with its source exists at neither end, and failing a change set for
+   being right about a target that is gone would be wrong. But it read
+   packages off cambium's *affected labels*, and a package deleted in its
+   entirety has none: every rule is tombstoned, cambium correctly reports not
+   one of them, and the package name survives only in `dirty_packages`. The
+   hatch was unsatisfiable for exactly the case it existed for. Confirmed by
+   re-running sourcegraph's `50dbc74f..5c5ed6ca` directly: cambium puts
+   `internal/search/smartsearch` in `dirty_packages` and emits no label for
+   it. This was **every** deleted-half failure on sourcegraph and apollo.
+2. **A tool that could not run no longer passes its change set.** It used to
+   record `pass: true, labels: 0`. Aggregates skip a tool that reported
+   nothing, so the summary tables simply omit it and the subject renders as a
+   comparison that agreed. That is how this run published sourcegraph without
+   bazel-diff and apollo without Tango and looked clean doing it.
+3. **`tool_missing`, a new class** — the taxonomy's first statement about a
+   foil rather than about cambium. It fires only when no benign predicate
+   explains a cambium-side extra *and* the rdeps oracle independently
+   confirms the label, and it is reported rather than gated: cambium's run
+   should not fail on another tool's defect. It is ranked **last** on
+   cambium's side on purpose — the oracle is an unconfigured query, so it
+   contains the `select` branches and macro-loaded packages
+   `cambium_extra_select` and `cambium_extra_bzl` already name, and asking it
+   first would relabel most of those as tool misses while saying nothing
+   about mechanism. A test pins that ordering; do not reorder it without
+   reading `the_oracle_is_asked_last_so_benign_classes_keep_their_labels`.
+   The rdeps oracle now runs **before** the tools, because its answer is one
+   of the classifier's facts.
 
-Blocked on Rainy: starting the box costs money and the security group must
-allow their current IP. Once they say go, follow the recipe under "The box".
-`tools/ec2/launch.sh` already uses the renamed tree. The mirrors on this Mac
-still live under
-`~/.cache/cambium/corpus/`; the renamed code looks in
-`~/.cache/cambium/subjects/` (or `$CAMBIUM_SUBJECTS_DIR`), so on the box
-either move the directory or set the variable rather than re-fetching.
+## Next: the second published run
 
-## The box
+Nothing is blocked on Rainy. The box is theirs to pay for, so say you are
+starting it, but the go for task 18 was given and these fixes are what it was
+waiting on.
 
-- `i-03c826487f1ab30ac`, c7i.4xlarge, us-east-2, 500 GB gp3, **stopped**.
-  Volume bills ~$45/month while stopped. Key `~/.ssh/cambium-corpus.pem`,
-  security group `cambium-corpus` allows SSH from Rainy's current IP only
-  (revoke the old CIDR and authorize the new one with `aws ec2
-  revoke-security-group-ingress` / `authorize-security-group-ingress` when
-  their IP changes).
-- `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
-  private: `sync` tars the working tree over ssh and rebuilds cambi,
-  bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
-  `BOOTSTRAP DONE`). Mirrors, caches and indexes live under
-  `~/.cache/cambium/` on the box and survive stop/start.
-- Published run recipe (when Rainy says go): `launch.sh
-  start`, `launch.sh sync`, wait for BOOTSTRAP DONE, then per subject
-  `bench subjects fetch`, `bench subjects build`, `bench history --oracle
-  rebuild`, `bench changes --tools cambium,bazel-diff,tango --oracle
-  rdeps,load`, then `bench report`; tar `bench-results/` back; commit
-  RESULTS.md; `launch.sh stop`. Run under `nohup` with a log and watch it with
-  a Monitor; the box takes ~1 min per subject for a 300-commit history and
-  the change sets are the long part (Tango up to minutes per change set on
-  envoy).
+Before starting, two things the last run tripped over:
 
-## Gotchas
+- `git -C ~/.cache/cambium/corpus/apollo.git worktree prune` — stale Tango
+  worktrees failed all 40 apollo change sets with `'…/tango-worktrees/base'
+  is not a working tree`. The driver's recovery did not fire; find out why,
+  because this is the second time this gotcha has cost a subject.
+- **bazel-diff's `aspect query` fails on sourcegraph**, all 40 change sets:
+  `[Error] Bazel query failed, exit code 1: Error: failed to run 'aspect
+  query': ^D`. Not diagnosed at all. Start here — it is the only one of these
+  problems nobody has looked into.
 
-- The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
-  driver scripts and logs under the repo (ignored) or on the box.
-- Tango, bazel-diff and cambium must never share an `--output_base`.
-- macOS x86_64 cannot fetch some subjects' externals (toolchains_llvm,
-  GraalVM, Docker-generated RBE configs): local tool timings are inflated and
-  not publishable; bazelisk for the suite is `~/.cache/cambium/bin/bazelisk`.
-- A killed change-set run leaves tango worktrees registered on the subject
-  mirror; the driver now recovers, but `git -C <mirror>.git worktree prune`
-  is the manual fix.
-- Results written by another cambium build (format version or config hash)
-  are started over, not resumed; that identity is in every state file.
-- apollo: WORKSPACE-only, pinned to Bazel 7.4.1, history capped at 74
-  commits because a deeper revision does not load.
-- zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
+Then the recipe under "The box". Both re-runs are cheap: `changes` resumes
+from `state.json`, so a subject that already has results only redoes what
+changed.
+
+Expect, and do not be alarmed by:
+
+- **envoy failing ~6 change sets on recall.** All six have
+  `external_route == missing`: entirely the documented limitation where Bazel
+  reaches a target by leaving `//...` and coming back
+  (`//distribution/dockerhub:*` through `@envoy_repo//:project`, and
+  `//source/common/quic:*` through `@quiche`). cambium stops at the first
+  external node. `rdeps.rs` says outright this "is a real cambium miss and it
+  fails the change set" — it is designed to fail, with the cause named.
 
 ## Open issues
 
 - #1 live TUI for the benchmark matrix (`bench watch`).
 - #2 CLI surface: intent-first verbs, diagnostics with codes, one output
   contract.
-- #3 externals input-path precision: landed (`aab1997`); close it after the
-  published run confirms envoy's cold-rebuild count dropped.
-- #4 a BUILD file's direct `load()` of an external `.bzl` is invisible to
-  rule (a) (`LoadGraph::package_closure` drops the external half). Found
-  while landing #3; write the direct-load e2e first.
+- **#3 externals input-path precision: do NOT close it.** The evidence the
+  last handoff nominated does not show the effect. Envoy's history at the
+  same pin, before (`corpus-results-box/`) against after: globals 22 -> 22,
+  cold rebuilds 140 -> 130, `largest_dirty_packages` 1115 -> 1115 on the same
+  commit, and `mean_affected` identical to four decimal places
+  (4101.2467). The projected "21 of 23 commits stop being global" did not
+  happen. Caveat before you conclude anything: the before-file comes from a
+  pre-rename build, so a strict comparison wants a re-run of the old commit
+  rather than a read of the old file. Worth checking first whether the
+  history path exercises the externals stage at all.
+- **#4 is live, reproducible, and the one genuine cambium bug this run
+  found.** envoy's change sets produced `cambium_missing_bzl_closure=554`
+  over five occurrences, and the missing package set is *identical* every
+  time: `bazel/coverage`, `bazel/external`, the `bazel/external/c-ares/*`
+  config packages, and the root package `""`. That is a BUILD file's direct
+  `load()` of an external `.bzl` being invisible to rule (a) —
+  `LoadGraph::package_closure` drops the external half. Write the direct-load
+  e2e first.
 - #5 sourcegraph's `go.mod` / `pnpm-lock.yaml` extension inputs should be
   derived like envoy's `api/` mapping.
+
+## The box
+
+- `i-03c826487f1ab30ac`, c7i.4xlarge, us-east-2, 500 GB gp3, **stopped**.
+  Volume bills ~$45/month while stopped. Key `~/.ssh/cambium-corpus.pem`,
+  security group `cambium-corpus`. The AWS names are all `cambium-corpus` and
+  will stay that way; only the words in this repository were swept. The
+  instance carries both `cambium=bench` and the old tag value in the finder's
+  filter.
+- The SG allows SSH from Rainy's current IP only. When it changes, `aws ec2
+  revoke-security-group-ingress` the old CIDR and
+  `authorize-security-group-ingress` the new one.
+- `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
+  private: `sync` tars the working tree over ssh and rebuilds cambi,
+  bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
+  `BOOTSTRAP DONE`).
+- **The mirrors on the box are still under `~/.cache/cambium/corpus/`** (61 GB,
+  all five subjects fetched and built). Do not move them: the Bazel
+  `--output_base` directories under there have absolute paths baked in, and
+  moving the tree costs a full re-fetch and re-analysis. Set
+  `CAMBIUM_SUBJECTS_DIR=$HOME/.cache/cambium/corpus` instead — the driver
+  does.
+- The driver from the last run is at `~/run-published.sh` on the box: one
+  subject at a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla),
+  `fetch` / `build` / `history --oracle rebuild` / `changes --tools
+  cambium,bazel-diff,tango --oracle rdeps,load` / `report`, then a final
+  `bench report`. A failing subject does not stop the rest. Run it under
+  `nohup` with a log and watch it with a Monitor; grep the log for
+  `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`, `unclassified`,
+  `cambium_missing`, `No space left`.
+- Timings from the last run, for planning: bazel ~23 min, sourcegraph ~57 min,
+  apollo ~32 min, envoy ~2 h 34 m (Tango is ~3 min per change set there),
+  xla ~3 h. Fetches and cold builds are ~free now that the caches exist.
+- When it is done: tar `bench-results/` back, regenerate and commit
+  `docs/RESULTS.md`, and `launch.sh stop`.
+
+## Gotchas
+
+- The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
+  driver scripts and logs under the repo (ignored) or on the box. Note the
+  engine's own index cache sits in `/tmp/cambium-cache/` on the box, which is
+  the same kind of place.
+- Tango, bazel-diff and cambium must never share an `--output_base`.
+- macOS x86_64 cannot fetch some subjects' externals (toolchains_llvm,
+  GraalVM, Docker-generated RBE configs): local tool timings are inflated and
+  not publishable; bazelisk for the suite is `~/.cache/cambium/bin/bazelisk`.
+- A killed change-set run leaves tango worktrees registered on the subject
+  mirror; `git -C <mirror>.git worktree prune` is the manual fix. See the
+  apollo item above — the automatic recovery did not work.
+- Results written by another cambium build (format version or config hash)
+  are started over, not resumed; that identity is in every state file. You
+  will see `WARN skipping an index this build cannot read` for the same
+  reason, which is benign.
+- apollo: WORKSPACE-only, pinned to Bazel 7.4.1, history capped at 74
+  commits because a deeper revision does not load. Its rebuild oracle is
+  `partial` with 1 package in error — `@local_config_cuda`, no CUDA on the
+  box. Expected.
+- xla loads in ~25 s and indexes 455 packages against 449 BUILD files on
+  disk, so that is a *complete* load, not a truncated one. The manifest's
+  "~1 h loading, large fetch" note is about analysis with externals, which a
+  loading-phase `bazel query` never pays. Its 4 `PARTIAL` packages are the
+  Windows `tools/toolchains/win_1803/py3{8,9}` toolchains failing on Linux.
+- `corpus-results/` and `corpus-results-box/` are the old vocabulary and this
+  build cannot read them. They are history, and the only thing they are still
+  good for is the issue #3 before-comparison above.
+- zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
