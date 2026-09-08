@@ -131,9 +131,13 @@ impl Default for GraphSpec {
 
 impl GraphSpec {
     /// Stable hash of the spec, recorded in benchmark results.
+    ///
+    /// Hashes the serde form, so it moves when a field's value moves and not
+    /// when `Debug` output is reformatted.
     pub fn hash(&self) -> String {
         let mut h = blake3::Hasher::new();
-        h.update(format!("{self:?}").as_bytes());
+        let json = serde_json::to_vec(self).expect("a GraphSpec serialises");
+        h.update(&json);
         h.finalize().to_hex()[..16].to_string()
     }
 
@@ -142,8 +146,15 @@ impl GraphSpec {
         self
     }
 
-    /// Named presets from spec 13.2. Size presets may be suffixed with a shape:
-    /// `large-hubby`, `medium-deep`, `small-flat`, `xl-wide-packages`.
+    /// The size presets, smallest first.
+    pub const SIZES: &[&str] = &["tiny", "small", "medium", "large", "xl", "xxl"];
+
+    /// The shape suffixes a size may carry, as in `large-hubby`.
+    pub const SHAPES: &[&str] = &["hubby", "deep", "flat", "wide-packages"];
+
+    /// Named presets from spec 13.2: every [`Self::SIZES`] entry, optionally
+    /// suffixed with one of [`Self::SHAPES`]: `large-hubby`, `medium-deep`,
+    /// `small-flat`, `xl-wide-packages`.
     pub fn preset(name: &str) -> Option<GraphSpec> {
         let (size, shape) = match name.split_once('-') {
             Some((s, sh)) => (s, Some(sh)),
@@ -192,18 +203,78 @@ impl GraphSpec {
         Some(spec)
     }
 
-    pub const PRESETS: &'static [&'static str] = &[
+    /// Every name [`Self::preset`] accepts: the sizes, then each size with each
+    /// shape. `presets()` derives the same list from `SIZES` and `SHAPES`, and
+    /// a test holds the two together.
+    pub const PRESETS: &[&str] = &[
         "tiny",
         "small",
         "medium",
         "large",
         "xl",
         "xxl",
+        "tiny-hubby",
+        "tiny-deep",
+        "tiny-flat",
+        "tiny-wide-packages",
         "small-hubby",
+        "small-deep",
+        "small-flat",
+        "small-wide-packages",
         "medium-hubby",
-        "large-hubby",
         "medium-deep",
         "medium-flat",
         "medium-wide-packages",
+        "large-hubby",
+        "large-deep",
+        "large-flat",
+        "large-wide-packages",
+        "xl-hubby",
+        "xl-deep",
+        "xl-flat",
+        "xl-wide-packages",
+        "xxl-hubby",
+        "xxl-deep",
+        "xxl-flat",
+        "xxl-wide-packages",
     ];
+
+    /// [`Self::PRESETS`], derived rather than written out.
+    pub fn presets() -> Vec<String> {
+        let mut out: Vec<String> = Self::SIZES.iter().map(|s| s.to_string()).collect();
+        for size in Self::SIZES {
+            for shape in Self::SHAPES {
+                out.push(format!("{size}-{shape}"));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_preset_resolves_and_nothing_else_does() {
+        for p in GraphSpec::presets() {
+            assert!(GraphSpec::preset(&p).is_some(), "{p}");
+        }
+        assert_eq!(
+            GraphSpec::presets(),
+            GraphSpec::PRESETS,
+            "PRESETS is SIZES x SHAPES"
+        );
+        assert!(GraphSpec::preset("nope").is_none());
+        assert!(GraphSpec::preset("medium-nope").is_none());
+        assert!(GraphSpec::preset("-hubby").is_none());
+    }
+
+    #[test]
+    fn the_hash_follows_values_not_formatting() {
+        let a = GraphSpec::preset("small").unwrap();
+        assert_eq!(a.hash(), a.clone().hash());
+        assert_ne!(a.hash(), a.clone().with_seed(7).hash());
+        assert_ne!(a.hash(), GraphSpec::preset("small-hubby").unwrap().hash());
+    }
 }

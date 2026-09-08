@@ -817,12 +817,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn presets_resolve() {
-        for p in GraphSpec::PRESETS {
-            assert!(GraphSpec::preset(p).is_some(), "{p}");
-        }
-        assert!(GraphSpec::preset("nope").is_none());
-    }
 }
