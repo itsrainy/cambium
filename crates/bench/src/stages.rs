@@ -93,7 +93,10 @@ pub fn run_stage(ctx: &StageContext, stage: &str) -> anyhow::Result<StageResult>
         "e2e_memory" => Ok(e2e_memory(ctx)),
         "e2e_materialize" => Ok(e2e_materialize(ctx)),
         "legacy_bazel_diff" => {
-            Ok(crate::legacy::run(ctx, &crate::legacy::LegacyOptions::default())?.result)
+            let bd = crate::tools::bazeldiff::BazelDiff::discover(
+                crate::tools::bazeldiff::Implementation::Rust,
+            )?;
+            Ok(crate::legacy::run(ctx, &bd, &crate::legacy::LegacyOptions::default())?.result)
         }
         other => anyhow::bail!("unknown stage {other}"),
     }
