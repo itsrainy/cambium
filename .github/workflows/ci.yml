@@ -176,9 +176,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/cambium/tango
-          key: tango-${{ hashFiles('tools/tango/fetch.sh') }}
+          key: tango-${{ hashFiles('tools/tango/**') }}
       - run: tools/tango/fetch.sh
-      - run: cargo test -p cambium-bench --test smoke_real_bazel -- --ignored --nocapture
+      # Both real-tool tests skip when a tool is absent, so a fetch.sh that
+      # silently produced nothing would still read green; here the tools were
+      # just built, and CAMBIUM_REQUIRE_TOOLS turns a skip into a failure.
+      - run: cargo test -p cambium-bench --test legacy_bazel_diff --test smoke_real_bazel -- --include-ignored --nocapture
+        env:
+          CAMBIUM_REQUIRE_TOOLS: "1"
       - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
         env:
           CAMBIUM_E2E: "1"

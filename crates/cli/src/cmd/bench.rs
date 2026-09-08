@@ -14,9 +14,12 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
+use cambium_bench::checkout::SubjectsDir;
 use cambium_bench::manifest::{Manifest, RepoEntry};
-use cambium_bench::{changes, history, State, Subject, SubjectsDir};
-use cambium_engine::inspect::{IndexQuery, IndexStats};
+use cambium_bench::state::State;
+use cambium_bench::subject::Subject;
+use cambium_bench::util::{cache_dir, versioned_name};
+use cambium_bench::{changes, history};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::cmd::Context;
@@ -232,6 +235,9 @@ pub enum SubjectArgs {
 /// Everything a subcommand resolves once: the subject (with its Bazel binary
 /// made absolute), the subjects directory, and where its results go.
 struct Run {
+    /// What the person named, kept so a checkout knows whether it may be
+    /// produced on the spot (a synthetic subject) or must already exist.
+    subject: Subject,
     entry: RepoEntry,
     subjects: SubjectsDir,
     /// `<root>/<subject>`: the state file and the cold indexes, shared by
@@ -280,6 +286,7 @@ impl Run {
             .or_else(|| entry.bazel_version.clone())
             .filter(|v| !v.is_empty());
         Ok(Self {
+            subject,
             entry,
             subjects,
             results,
@@ -287,6 +294,11 @@ impl Run {
             seed: c.seed,
             quick: c.quick,
         })
+    }
+
+    /// The subject's worktree, emitted and cloned first if it is synthetic.
+    fn checkout(&self) -> Result<cambium_bench::checkout::Checkout> {
+        self.subjects.open_or_fetch(&self.subject, &self.entry)
     }
 
     /// `bench-results/<subject>/<workload>/`, created.
@@ -317,21 +329,91 @@ impl Run {
     /// `<stem>[-<version>].<ext>` — one result file per Bazel version, since
     /// the whole point of naming one is that two can disagree.
     fn result_path(&self, dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
-        dir.join(suffixed(stem, self.version(), ext))
+        dir.join(versioned_name(stem, self.version(), ext))
     }
 
     fn index_path(&self, sha: &str) -> PathBuf {
         self.result_path(&self.results, &format!("index-{sha}"), "bin")
     }
+
+    /// The packages of the index's busiest targets, for the stress change
+    /// sets. Needs the cold index at the pin, which is a `subjects build`.
+    fn hub_packages(&self) -> Result<Vec<String>> {
+        let state = self.state()?;
+        let path = state
+            .built
+            .get(&self.entry.pin)
+            .cloned()
+            .unwrap_or_else(|| self.index_path(&self.entry.pin));
+        anyhow::ensure!(
+            path.exists(),
+            "stress change sets need the index at the pin; run \
+             `cambi bench subjects build {}` first",
+            self.entry.id
+        );
+        let data = cambium_index::IndexFile::open(&path)?.deserialize()?;
+        let pkgs = changes::hub_packages(data.view());
+        tracing::info!(hubs = pkgs.len(), "hub packages from the index");
+        Ok(pkgs)
+    }
 }
 
-/// `<stem>[-<version>].<ext>`, with anything path-hostile in the version
-/// flattened (`7.x` is fine, `latest/rc` would not be).
-pub fn suffixed(stem: &str, version: Option<&str>, ext: &str) -> String {
-    match version.filter(|v| !v.is_empty()) {
-        Some(v) => format!("{stem}-{}.{ext}", v.replace(['/', ' ', ':'], "_")),
-        None => format!("{stem}.{ext}"),
-    }
+/// Selects `run`'s change sets and records them under `<subject>/changes/`.
+///
+/// The one selector: `bench change-sets` and `bench changes` used to have a
+/// copy each, which is how only the first of them came to pass `hub_packages`
+/// -- so a `--kind stress` comparison silently drew its change sets from an
+/// empty hub list and stressed nothing.
+fn select_change_sets(
+    run: &Run,
+    kinds: &[String],
+    cap: usize,
+    stress_cap: usize,
+) -> Result<(PathBuf, changes::ChangeSetSet)> {
+    let explicit = !kinds.is_empty();
+    let kinds = parse_kinds(kinds)?;
+    let checkout = run.checkout()?;
+    let (paths, globs) = run.entry.invalidator_rules();
+    let opts = changes::ChangeSetOptions {
+        repo_id: run.entry.id.clone(),
+        pin: run.entry.pin.clone(),
+        history_window: run.entry.history_window,
+        seed: run.seed,
+        cap: stress_cap,
+        total_cap: Some(cap),
+        // Only when a stress change set is actually wanted: the hubs cost an
+        // index open, and every other kind ignores them.
+        //
+        // Best effort when `stress` came from the default set of kinds rather
+        // than from a `--kind stress` the person typed: three of the four
+        // stress categories (`bzl`, `build_add_delete`, `invalidator`) need no
+        // index at all, and refusing to select any of them because
+        // `subjects build` has not run yet would make the default
+        // `bench changes` unrunnable on a fresh subject. Asking for stress
+        // explicitly and silently getting no hub change sets is the other
+        // failure, so that one is an error.
+        hub_packages: match kinds.contains(&changes::ChangeSetKind::Stress) {
+            false => Vec::new(),
+            true if !explicit => run.hub_packages().unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "no hub packages; the stress selection covers every category but `hub`"
+                );
+                Vec::new()
+            }),
+            true => run.hub_packages()?,
+        },
+        invalidator_paths: paths,
+        invalidator_globs: globs,
+    };
+    let set = changes::select(&checkout.repo, &kinds, &opts)?;
+    let path = run.result_path(
+        &run.workload("changes")?,
+        &format!("change-sets-{}", run.entry.pin),
+        "json",
+    );
+    set.write(&path)?;
+    Ok((path, set))
 }
 
 /// A Bazel binary the benchmark can run: an explicit path as given, otherwise
@@ -345,13 +427,13 @@ fn resolve_bazel(binary: &str) -> Result<String> {
     if let Some(found) = which(binary) {
         return Ok(found.display().to_string());
     }
-    let fallback = home().join(".cache/cambium/bin").join(binary);
+    let fallback = cache_dir("bin").join(binary);
     if fallback.exists() {
         return Ok(fallback.display().to_string());
     }
     anyhow::bail!(
         "no {binary} on PATH or in {}; pass --bazel-binary",
-        home().join(".cache/cambium/bin").display()
+        cache_dir("bin").display()
     )
 }
 
@@ -362,15 +444,9 @@ fn which(binary: &str) -> Option<PathBuf> {
         .find(|c| c.is_file())
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 fn expand_tilde(s: &str) -> PathBuf {
     match s.strip_prefix("~/") {
-        Some(rest) => home().join(rest),
+        Some(rest) => cambium_bench::util::home().join(rest),
         None => PathBuf::from(s),
     }
 }
@@ -454,7 +530,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             let preset = preset_of(&subject, "stages")?;
             let dir = stage_dir(&subject, &common, "stages")?;
             let opts = cambium_bench::runner::RunOptions {
-                presets: vec![preset],
+                preset,
                 stages,
                 runs,
                 out: if stdout {
@@ -533,13 +609,7 @@ fn stage_dir(subject: &str, c: &Common, workload: &str) -> Result<PathBuf> {
 }
 
 fn timestamped() -> String {
-    format!(
-        "{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    )
+    format!("{}.json", cambium_bench::util::now_unix())
 }
 
 /// Accepts `1000`, `1e6`, `2M`, `500k`.
@@ -636,7 +706,7 @@ fn fetch(run: &Run) -> Result<()> {
 }
 
 fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let want = at.unwrap_or(&run.entry.pin);
     let sha = checkout
         .repo
@@ -696,7 +766,7 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
 
 fn do_history(run: &Run, commits: Option<usize>, oracles: &[String], resume: bool) -> Result<()> {
     let rebuild_oracle = parse_history_oracles(oracles)?;
-    let checkout = run.subjects.open(&run.entry)?;
+    let checkout = run.checkout()?;
     let engine = checkout.engine(&run.entry, run.version())?;
     let results = run.workload("history")?;
     let range = commits.unwrap_or(run.entry.history_window);
@@ -779,48 +849,7 @@ fn do_change_sets(
     stress_cap: usize,
     output: DataFormat,
 ) -> Result<()> {
-    let kinds = if kinds.is_empty() {
-        vec![
-            changes::ChangeSetKind::Adjacent,
-            changes::ChangeSetKind::Pr,
-            changes::ChangeSetKind::Stress,
-        ]
-    } else {
-        kinds
-            .iter()
-            .map(|k| {
-                changes::ChangeSetKind::parse(k).ok_or_else(|| {
-                    anyhow::anyhow!("unknown change-set kind {k:?}: pr, adjacent, stress")
-                })
-            })
-            .collect::<Result<Vec<_>>>()?
-    };
-    let checkout = run.subjects.open(&run.entry)?;
-    let wants_hubs = kinds.contains(&changes::ChangeSetKind::Stress);
-    let hub_packages = if wants_hubs {
-        hub_packages(run)?
-    } else {
-        Vec::new()
-    };
-    let (paths, globs) = run.entry.invalidator_rules();
-    let opts = changes::ChangeSetOptions {
-        repo_id: run.entry.id.clone(),
-        pin: run.entry.pin.clone(),
-        history_window: run.entry.history_window,
-        seed: run.seed,
-        cap: stress_cap,
-        total_cap: Some(cap),
-        hub_packages,
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
-    let set = changes::select(&checkout.repo, &kinds, &opts)?;
-    let path = run.result_path(
-        &run.workload("changes")?,
-        &format!("change-sets-{}", run.entry.pin),
-        "json",
-    );
-    set.write(&path)?;
+    let (path, set) = select_change_sets(run, kinds, cap, stress_cap)?;
     tracing::info!(change_sets = set.change_sets.len(), path = %path.display(), "selected the change sets");
     match output {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(&set)?),
@@ -829,7 +858,7 @@ fn do_change_sets(
                 println!(
                     "{}\t{}\t{}\t{}",
                     p.kind.name(),
-                    p.category.as_deref().unwrap_or("-"),
+                    p.category.map_or("-", |c| c.name()),
                     p.base,
                     p.head
                 );
@@ -873,12 +902,16 @@ impl CompareArgs {
                 // is named. Naming it alone is how a run measures cambium with
                 // no tool to disagree with it.
                 "cambium" => {}
-                "bazel-diff" | "bazel-diff-rust" | "rust" => {
-                    out.push(cambium_bench::Implementation::Rust.name().to_string())
-                }
-                "bazel-diff-kotlin" | "kotlin" => {
-                    out.push(cambium_bench::Implementation::Kotlin.name().to_string())
-                }
+                "bazel-diff" | "bazel-diff-rust" | "rust" => out.push(
+                    cambium_bench::tools::bazeldiff::Implementation::Rust
+                        .name()
+                        .to_string(),
+                ),
+                "bazel-diff-kotlin" | "kotlin" => out.push(
+                    cambium_bench::tools::bazeldiff::Implementation::Kotlin
+                        .name()
+                        .to_string(),
+                ),
                 "tango" => out.push(cambium_bench::tools::tango::NAME.to_string()),
                 "none" | "" => {}
                 other => anyhow::bail!(
@@ -896,9 +929,10 @@ impl CompareArgs {
 /// nightly benchmark job may have bazel-diff and no Go toolchain, and a run that
 /// refuses to compare anything because one of two optional tools is absent is
 /// worse than a run that says so and compares the other.
-fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::Tool>>> {
-    use cambium_bench::{BazelDiff, Implementation, Tango};
-    let found: Result<Box<dyn cambium_bench::Tool>> = match name {
+fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::tools::Tool>>> {
+    use cambium_bench::tools::bazeldiff::{BazelDiff, Implementation};
+    use cambium_bench::tools::tango::Tango;
+    let found: Result<Box<dyn cambium_bench::tools::Tool>> = match name {
         "tango" => Tango::discover().map(|t| Box::new(t) as _),
         "bazel-diff-rust" | "rust" => {
             BazelDiff::discover(Implementation::Rust).map(|b| Box::new(b) as _)
@@ -924,7 +958,7 @@ fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::Tool>>> {
 
 fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let wanted = args.wanted()?;
-    let owned: Vec<Box<dyn cambium_bench::Tool>> = wanted
+    let owned: Vec<Box<dyn cambium_bench::tools::Tool>> = wanted
         .iter()
         .map(|n| open_tool(n))
         .collect::<Result<Vec<_>>>()?
@@ -935,10 +969,10 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         eprintln!("cambium: bench changes: no tool is installed; nothing to compare against");
         return Ok(crate::EXIT_ERROR);
     }
-    let tools: Vec<&dyn cambium_bench::Tool> = owned.iter().map(|p| p.as_ref()).collect();
+    let tools: Vec<&dyn cambium_bench::tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
-    let checkout = run.subjects.open(&run.entry)?;
-    let set = load_change_sets(run, &checkout, args)?;
+    let checkout = run.checkout()?;
+    let set = load_change_sets(run, args)?;
     let change_sets: Vec<_> = set
         .change_sets
         .iter()
@@ -950,7 +984,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     let engine = checkout.engine(&run.entry, run.version())?;
     let (rdeps, load) = parse_change_oracles(&args.oracles)?;
     let results = run.workload("changes")?;
-    let opts = cambium_bench::ChangesOptions {
+    let opts = cambium_bench::compare::ChangesOptions {
         bazel_version: run.version.clone(),
         rdeps_oracle: rdeps,
         oracle_k: args.oracle_sample,
@@ -960,7 +994,11 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         scratch: run.results.join("scratch"),
         state_dir: run.results.clone(),
         tango_change_sets: run.quick.then_some(cambium_bench::QUICK_TANGO_CHANGE_SETS),
-        ..cambium_bench::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
+        ..cambium_bench::compare::ChangesOptions::new(
+            run.entry.id.clone(),
+            run.entry.pin.clone(),
+            results,
+        )
     };
     tracing::info!(
         change_sets = change_sets.len(),
@@ -969,8 +1007,13 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         tango_change_sets = opts.tango_change_sets.unwrap_or(change_sets.len()),
         "comparing"
     );
-    let result =
-        cambium_bench::compare_change_sets(&engine, &checkout, &change_sets, &tools, &opts)?;
+    let result = cambium_bench::compare::compare_change_sets(
+        &engine,
+        &checkout,
+        &change_sets,
+        &tools,
+        &opts,
+    )?;
     print_compare_summary(&result);
     println!("{}", opts.output_path().display());
     Ok(if result.summary.pass {
@@ -982,11 +1025,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
 
 /// The change sets to compare: an explicit file, else the one a previous run wrote
 /// for this pin, else a fresh selection with the requested kinds.
-fn load_change_sets(
-    run: &Run,
-    checkout: &cambium_bench::Checkout,
-    args: &CompareArgs,
-) -> Result<changes::ChangeSetSet> {
+fn load_change_sets(run: &Run, args: &CompareArgs) -> Result<changes::ChangeSetSet> {
     if let Some(p) = &args.change_sets {
         return changes::ChangeSetSet::read(p).with_context(|| format!("reading {}", p.display()));
     }
@@ -999,22 +1038,7 @@ fn load_change_sets(
         tracing::info!(path = %default.display(), "using the recorded change sets");
         return changes::ChangeSetSet::read(&default);
     }
-    let kinds = parse_kinds(&args.kinds)?;
-    let (paths, globs) = run.entry.invalidator_rules();
-    let opts = changes::ChangeSetOptions {
-        repo_id: run.entry.id.clone(),
-        pin: run.entry.pin.clone(),
-        history_window: run.entry.history_window,
-        seed: run.seed,
-        cap: args.stress_cap,
-        total_cap: Some(args.cap),
-        hub_packages: Vec::new(),
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
-    let set = changes::select(&checkout.repo, &kinds, &opts)?;
-    set.write(&default)?;
-    Ok(set)
+    Ok(select_change_sets(run, &args.kinds, args.cap, args.stress_cap)?.1)
 }
 
 fn parse_kinds(kinds: &[String]) -> Result<Vec<changes::ChangeSetKind>> {
@@ -1036,7 +1060,7 @@ fn parse_kinds(kinds: &[String]) -> Result<Vec<changes::ChangeSetKind>> {
 }
 
 /// The table a person reads before opening the JSON.
-fn print_compare_summary(result: &cambium_bench::ChangesResult) {
+fn print_compare_summary(result: &cambium_bench::compare::ChangesResult) {
     let s = &result.summary;
     println!(
         "\n{} {}  change sets {}  passed {}  global {}  min recall {:.1}%",
@@ -1103,7 +1127,7 @@ fn do_report(
     // Every subject at once, not just the named one: a per-subject nightly job
     // rewrites the top table and the synthetic headline wholesale, and must not
     // drop its neighbours' rows on the way.
-    let results = collect_subjects(&manifest, &parent, &subjects)?;
+    let results = cambium_bench::report::SubjectResults::collect(&manifest, &parent, &subjects)?;
     if results.is_empty() {
         eprintln!(
             "cambium: bench report: no history-*.json or changes-*.json under {}",
@@ -1120,240 +1144,32 @@ fn do_report(
         );
     }
 
-    let bench = read_bench_legacy(&ctx.root.join("docs/benchmarks/sweep-legacy.json"))?;
+    let bench = cambium_bench::report::BenchLegacy::read(
+        &ctx.root.join("docs/benchmarks/sweep-legacy.json"),
+    );
     for r in &results {
         if only.as_ref().is_some_and(|id| &r.id != id) {
             continue;
         }
-        cambium_bench::update_doc(&doc, &r.id, &cambium_bench::render_subject_section(r, None))?;
+        cambium_bench::report::update_doc(
+            &doc,
+            &r.id,
+            &cambium_bench::report::render_subject_section(r, None),
+        )?;
     }
-    cambium_bench::update_doc(&doc, "top", &cambium_bench::render_top_table(&results))?;
-    cambium_bench::update_doc(
+    cambium_bench::report::update_doc(
+        &doc,
+        "top",
+        &cambium_bench::report::render_top_table(&results),
+    )?;
+    cambium_bench::report::update_doc(
         &doc,
         "synthetic",
-        &cambium_bench::render_bench_section(&bench, Some("bench-legacy.svg")),
+        &cambium_bench::report::render_bench_section(&bench, Some("bench-legacy.svg")),
     )?;
     tracing::info!(doc = %doc.display(), subjects = results.len(), "report written");
     println!("{}", doc.display());
     Ok(crate::EXIT_OK)
-}
-
-/// Results for every manifest entry that has a results directory, in manifest
-/// order, plus any stray directory the manifest no longer names (a renamed or
-/// removed entry still has numbers worth showing rather than silently losing).
-fn collect_subjects(
-    manifest: &Manifest,
-    parent: &std::path::Path,
-    subjects: &SubjectsDir,
-) -> Result<Vec<cambium_bench::SubjectResults>> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for entry in &manifest.repos {
-        let dir = parent.join(&entry.id);
-        seen.insert(entry.id.clone());
-        if !dir.is_dir() {
-            continue;
-        }
-        let (mut history, compares) = read_results(&dir)?;
-        // A history written before `bazel_version_used` existed, with no
-        // version override, ran whatever the worktree's `.bazelversion`
-        // asked bazelisk for; that file is the honest record.
-        if let Some(r) = history.as_mut() {
-            if r.bazel_version_used.is_empty() && r.bazel_version.is_empty() {
-                let path = subjects.worktree(&entry.id).join(".bazelversion");
-                if let Ok(v) = std::fs::read_to_string(path) {
-                    r.bazel_version_used = v.trim().to_string();
-                }
-            }
-        }
-        let r = cambium_bench::SubjectResults::new(&entry.id)
-            .with_history(history)
-            .with_compares(compares);
-        if !r.is_empty() {
-            out.push(r);
-        }
-    }
-    let mut strays: Vec<PathBuf> = std::fs::read_dir(parent)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    strays.sort();
-    for dir in strays {
-        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if seen.contains(id) {
-            continue;
-        }
-        let (history, compares) = read_results(&dir)?;
-        let r = cambium_bench::SubjectResults::new(id)
-            .with_history(history)
-            .with_compares(compares);
-        if !r.is_empty() {
-            out.push(r);
-        }
-    }
-    Ok(out)
-}
-
-/// The saved `bench sweep --stage legacy_bazel_diff` run, as report rows.
-///
-/// Missing or unparseable is not an error: the synthetic section then says the
-/// sweep has not been recorded, which is true and better than failing a
-/// benchmark report over a benchmark file.
-fn read_bench_legacy(path: &std::path::Path) -> Result<Vec<cambium_bench::BenchLegacy>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(Vec::new());
-    };
-    let v: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "ignoring an unreadable bench file");
-            return Ok(Vec::new());
-        }
-    };
-    let mut rows = Vec::new();
-    for r in v
-        .get("results")
-        .and_then(|r| r.as_array())
-        .into_iter()
-        .flatten()
-    {
-        if r.get("stage").and_then(|s| s.as_str()) != Some("legacy_bazel_diff") {
-            continue;
-        }
-        let n = |k: &str| -> u64 {
-            r.get("extra")
-                .and_then(|e| e.get(k))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0)
-                .round() as u64
-        };
-        let top =
-            |k: &str| -> u64 { r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).round() as u64 };
-        let targets = match n("targets") {
-            0 => top("param"),
-            t => t,
-        };
-        let cambium_only = n("cambium_only");
-        let legacy_only = n("bazel_diff_only");
-        rows.push(cambium_bench::BenchLegacy {
-            preset: r
-                .get("preset")
-                .and_then(|p| p.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            targets,
-            legacy_cold_ms: n("bazel_diff_cold_ms"),
-            legacy_warm_ms: n("bazel_diff_warm_ms"),
-            cambium_cold_ms: 0,
-            cambium_warm_ms: match n("cambium_ms") {
-                0 => top("median_ms"),
-                v => v,
-            },
-            cambium_p90_ms: match n("cambium_p90_ms") {
-                0 => top("p90_ms"),
-                v => v,
-            },
-            agreed_labels: n("agreed"),
-            cambium_only,
-            legacy_only,
-            agreed: cambium_only == 0 && legacy_only == 0,
-        });
-    }
-    Ok(rows)
-}
-
-/// The `history-*.json` and `changes-*.json` under one subject's results.
-///
-/// They live in the workload directory that produced them —
-/// `<subject>/history/` and `<subject>/changes/` — so this looks in both and
-/// nowhere else. More than one history can be present (a subject whose
-/// `bazel_version` changed leaves the older file behind); the newest by name
-/// wins for the section's history tables, while every change-set result is
-/// rendered.
-fn read_results(
-    dir: &std::path::Path,
-) -> Result<(
-    Option<cambium_bench::HistoryResult>,
-    Vec<cambium_bench::ChangesResult>,
-)> {
-    let mut histories = json_files(&dir.join("history"), "history-");
-    let mut compares = json_files(&dir.join("changes"), "changes-");
-    histories.sort();
-    compares.sort();
-    let history = histories
-        .last()
-        .map(|p| {
-            cambium_bench::HistoryResult::read(p)
-                .with_context(|| format!("reading {}", p.display()))
-        })
-        .transpose()?;
-    let compares = compares
-        .iter()
-        .map(|p| {
-            cambium_bench::ChangesResult::read(p)
-                .with_context(|| format!("reading {}", p.display()))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok((history, compares))
-}
-
-/// The `<prefix>*.json` files in `dir`, if it is one.
-fn json_files(dir: &std::path::Path, prefix: &str) -> Vec<PathBuf> {
-    std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
-        })
-        .collect()
-}
-
-/// The packages of the built index's busiest targets: an edit anywhere in one
-/// of these reaches the largest share of the graph, which is what the stress
-/// change sets are for.
-fn hub_packages(run: &Run) -> Result<Vec<String>> {
-    let state = run.state()?;
-    let path = state
-        .built
-        .get(&run.entry.pin)
-        .cloned()
-        .unwrap_or_else(|| run.index_path(&run.entry.pin));
-    anyhow::ensure!(
-        path.exists(),
-        "stress change sets need the index at the pin; run `cambi bench subjects build {}` first",
-        run.entry.id
-    );
-    let file = cambium_index::IndexFile::open(&path)?;
-    let data = file.deserialize()?;
-    let stats: IndexStats = IndexQuery::new(data.view()).stats(0);
-    let mut pkgs: Vec<String> = stats
-        .in_degree
-        .top
-        .iter()
-        .map(|h| package_of(&h.label))
-        .collect();
-    pkgs.sort();
-    pkgs.dedup();
-    tracing::info!(hubs = pkgs.len(), "hub packages from the index");
-    Ok(pkgs)
-}
-
-/// `//src/main/java/foo:bar` -> `src/main/java/foo`.
-fn package_of(label: &str) -> String {
-    let l = label.strip_prefix("//").unwrap_or(label);
-    match l.split_once(':') {
-        Some((pkg, _)) => pkg.to_string(),
-        None => l.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -1378,26 +1194,5 @@ mod tests {
         assert_eq!(path, dir.path().join("subject_repos.toml"));
         assert_eq!(m.get("bazel").unwrap().history_window, 300);
         assert!(Manifest::discover(Path::new("/")).is_err());
-    }
-
-    #[test]
-    fn result_names_carry_the_bazel_version() {
-        assert_eq!(suffixed("index-abc", None, "bin"), "index-abc.bin");
-        assert_eq!(suffixed("index-abc", Some(""), "bin"), "index-abc.bin");
-        assert_eq!(
-            suffixed("history-abc", Some("7.x"), "json"),
-            "history-abc-7.x.json"
-        );
-        assert_eq!(
-            suffixed("index-abc", Some("last/green"), "bin"),
-            "index-abc-last_green.bin"
-        );
-    }
-
-    #[test]
-    fn labels_reduce_to_their_package() {
-        assert_eq!(package_of("//src/main/java/foo:bar"), "src/main/java/foo");
-        assert_eq!(package_of("//:root"), "");
-        assert_eq!(package_of("//a/b"), "a/b");
     }
 }

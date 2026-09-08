@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::oracles::rebuild::{compare_by_label, GraphDiff};
 use crate::state::{HistoryState, State};
+use crate::util::{now_unix, percentile};
 
 /// What the history needs from the world at a revision.
 pub trait Driver {
@@ -29,7 +30,7 @@ pub trait Driver {
 
 /// A driver over a subject's checkout and a real Bazel.
 pub struct BazelDriver<'a> {
-    pub checkout: &'a crate::Checkout,
+    pub checkout: &'a crate::checkout::Checkout,
     pub engine: &'a Engine,
 }
 
@@ -205,17 +206,15 @@ impl HistoryResult {
     /// empty version) is the repo's own `.bazelversion` and keeps the plain
     /// name.
     pub fn path_versioned(results_dir: &Path, pin: &str, version: Option<&str>) -> PathBuf {
-        match version.filter(|v| !v.is_empty()) {
-            Some(v) => results_dir.join(format!(
-                "history-{pin}-{}.json",
-                v.replace(['/', ' ', ':'], "_")
-            )),
-            None => Self::path(results_dir, pin),
-        }
+        results_dir.join(crate::util::versioned_name(
+            &format!("history-{pin}"),
+            version,
+            "json",
+        ))
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        crate::util::read_result(path)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -231,13 +230,6 @@ impl HistoryResult {
     pub fn summarise(&mut self) {
         self.summary = summarise(&self.commits);
     }
-}
-
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
 }
 
 pub fn summarise(commits: &[CommitRecord]) -> Summary {
@@ -277,30 +269,12 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
     }
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// `bazel --version` in the subject's worktree, so the report can say which Bazel
 /// actually answered rather than which one was asked for. Best effort: an
 /// unavailable binary yields an empty string rather than failing the history.
 fn bazel_version_used(engine: &Engine) -> String {
     let v = engine.bazel.version();
     v.lines().next().unwrap_or("").trim().to_string()
-}
-
-fn tool_sha() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".into())
 }
 
 fn describe(index: &IndexData, wall_ms: u64) -> Result<ColdBuild> {
@@ -548,7 +522,7 @@ fn start(
         to: to.to_string(),
         bazel_version: opts.bazel_version.clone(),
         bazel_version_used: bazel_version_used(engine),
-        tool_sha: tool_sha(),
+        tool_sha: crate::util::tool_sha().to_string(),
         engine: State::engine_id(&engine.cfg.hash()),
         started_unix: now_unix(),
         cold,

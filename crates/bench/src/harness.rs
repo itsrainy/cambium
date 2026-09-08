@@ -34,7 +34,28 @@ impl Machine {
     }
 }
 
+/// One `sysctl -n <name>`, trimmed. macOS has no `/proc`, and the alternative
+/// to shelling out once per run is a dependency on `libc` for `sysctlbyname`.
+#[cfg(target_os = "macos")]
+fn sysctl(name: &str) -> Option<String> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", name])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
 fn cpu_model() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(v) = sysctl("machdep.cpu.brand_string") {
+            return v;
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
@@ -51,6 +72,12 @@ fn cpu_model() -> String {
 }
 
 fn total_ram_gb() -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(b) = sysctl("hw.memsize").and_then(|v| v.parse::<f64>().ok()) {
+            return b / 1024.0 / 1024.0 / 1024.0;
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
@@ -133,11 +160,8 @@ impl BenchReport {
         Self {
             schema: schema_version(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            tool_sha: git_sha(),
-            timestamp_unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            tool_sha: crate::util::tool_sha().to_string(),
+            timestamp_unix: crate::util::now_unix(),
             machine: Machine::detect(),
             results,
         }
@@ -182,16 +206,6 @@ fn fmt_num(v: f64) -> String {
     } else {
         format!("{v:.2}")
     }
-}
-
-fn git_sha() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// One stage's change between two reports.
@@ -430,6 +444,18 @@ mod tests {
         let mut other = report(10.0);
         other.machine.cores = 4;
         assert!(compare(&base, &other, 15.0).is_err());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn the_machine_this_runs_on_is_described_rather_than_unknown() {
+        // A run on the box records its machine so a later run can refuse to
+        // compare across two; "unknown, 0 cores, 0 GB" refuses nothing.
+        let m = Machine::detect();
+        assert_ne!(m.cpu, "unknown", "{m:?}");
+        assert!(m.cores > 0, "{m:?}");
+        assert!(m.ram_gb > 0.5, "{m:?}");
+        assert!(m.fingerprint().contains(std::env::consts::ARCH), "{m:?}");
     }
 
     #[test]

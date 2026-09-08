@@ -44,8 +44,62 @@ at its pin; one of them, `@quiche` re-exporting `@envoy//source/…`, has no
 cheap invalidator, so the change set keeps failing rather than being waved
 through. Indexing external repositories is the precise answer and is not
 implemented. Where the changed side of the round trip is a nameable path an
-invalidator is the sound fix, which is why `subject_repos.toml` lists `api/**`
-and `changelogs/**` for envoy.
+invalidator is the sound fix -- which is how `subject_repos.toml` came to list
+`api/**` and `changelogs/**` for envoy. It no longer does: the external-repository
+stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
+them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
+and the mapping is what the rebuild oracle checks.
+
+**The first run (unpublished) is the shape of the answer, not the answer.**
+One full run of all five subjects on the benchmark machine, 2026-09-08: 5
+histories over 1 274 commits, 200 change sets, ~7.5 h wall. It is recorded
+here and not in the generated tables because it was never published --
+sourcegraph lost bazel-diff and apollo lost Tango to harness failures the
+run's own gates did not notice --- a comparison with a hole in it recorded
+`pass: true`, since fixed. The
+numbers below therefore describe a run with two holes in it; the tables in
+the sections that follow are the published ones, and where they disagree with
+this paragraph, they win.
+
+All five rebuild oracles passed: a cold index at the pin matched the
+incrementally-updated one node for node, edge for edge and rule hash for rule.
+That part is clean, and it is the suite's strongest correctness evidence.
+
+| subject | change sets | min recall | history: commits / p50 / globals / cold rebuilds |
+|---|---|---|---|
+| bazel | 39/40 | 1.000 | 300 / 2 ms / 4 / 0 |
+| sourcegraph | 39/40 | 1.000 | 300 / 3 ms / 24 / 0 |
+| apollo | 38/40 | 1.000 | 74 / 216 ms / 11 / 0 |
+| envoy | 29/40 | 0.911 | 300 / 4 920 ms / 22 / 130 |
+| xla | 40/40 | 1.000 | 300 / 9 ms / 31 / 0 |
+
+Warm change-set timings, p50 ms (cambium against the foils):
+
+| subject | cambium | bazel-diff | Tango (no cache, cold) |
+|---|---|---|---|
+| bazel | 23 | 1 730 | 19 750 |
+| sourcegraph | 33 | *errored ×40* | 58 208 |
+| apollo | 23 | 8 053 | *errored ×40* |
+| envoy | 427 | 2 466 | 184 567 |
+| xla | 39 | 11 335 | 211 831 |
+
+Envoy is the honest outlier: 427 ms warm, an order of magnitude slower than
+the rest and the only subject where bazel-diff is within reach. Deep `.bzl`
+layering and 444 k edges. It is also the subject whose graph is closest to
+the production repo this is all aimed at, so understanding that number is
+worth more than any of the fast ones.
+
+The no-inflation rule Rainy set holds up. Including the change sets where
+cambium answers `//...` moves the median by about a millisecond (apollo
+23 -> 24, xla 39 -> 35), because a global answer is *cheap* — cambium returns
+`//...` without querying anything. What a global costs is precision, and
+that is priced separately in `global_stats` (apollo's globals: mean 12 975
+cambium labels against bazel-diff's 5 615). The expensive fallback is the
+cold rebuild, and it **fired zero times in the change-set workload on every
+subject**, so no published change-set timing includes one. If you want the
+splice-limit overflow priced, it needs change sets chosen to exceed
+`limits.max_dirty_packages`, or the history numbers cited alongside — envoy's
+130 cold rebuilds in 300 commits are what drag its history p50 to 4 920 ms.
 
 **Laptop timings are not comparable and are not published.** Some subjects'
 external repositories cannot be fetched on macOS x86_64 — a GraalVM
@@ -62,6 +116,115 @@ not yet run
 <!-- bench:top:end -->
 
 ## Synthetic scaling
+
+Two kinds of number live here, and they are not the same kind. The tables in
+this section are hand-written engine measurements over *generated* graphs at
+sizes no real subject reaches — no Bazel, no repository, one machine (an Intel
+Xeon @ 2.10 GHz, 4 cores, 16 GiB). The generated region below them is the
+`legacy_bazel_diff` stage: cambium and bazel-diff on one synthetic workspace
+with Bazel replaced by a shim that replays a recorded query, which is the only
+like-for-like comparison a laptop can make. Where an `affected` run spends
+those milliseconds, and where an index spends its bytes, is
+[ENGINE_COSTS.md](ENGINE_COSTS.md).
+
+### Presets
+
+| preset | targets | index nodes | index edges | index on disk |
+|---|---:|---:|---:|---:|
+| `small` | 2 007 | 10.3k | 19.1k | 1.0 MB |
+| `medium` | 50 176 | 251k | 495k | 25.3 MB |
+| `large` | 501 759 | 2.5M | 5.0M | 261 MB |
+| `xl` | 2 000 000 | ~10M | ~20M | ~1 GB |
+
+Index nodes exceed the target count because source files are nodes too. Shape
+variants (`-hubby`, `-deep`, `-flat`, `-wide-packages`) keep the size and change
+the topology; `cambi synth presets` lists them all.
+
+### In-memory stages
+
+Median of 5 runs (3 at `large`).
+
+| stage | small | medium | large |
+|---|---:|---:|---:|
+| `build_index` | 3.8 ms | 192 ms | 4.50 s |
+| `load_index`, mmap only | 0.01 ms | 0.01 ms | 0.01 ms |
+| `load_index`, + label map | 0.21 ms | 8.7 ms | 279 ms |
+| `classify` | 1.1 ms | 31 ms | 63 ms |
+| `parse_proto` | 8.1 ms | 239 ms | — |
+| `rule_hash` | 4.7 ms | 141 ms | — |
+| `splice`, 8 dirty packages (materialised) | 0.46 ms | 16 ms | 308 ms |
+| `splice`, 42 dirty packages (delta overlay) | — | — | 32 ms |
+| `reverse_rebuild` | 0.06 ms | 3.0 ms | 82 ms |
+| `walk`, 10 starting points | 0.00 ms | 0.01 ms | 11 ms |
+| `walk`, hub starting point | — | — | 34 ms |
+| `e2e_memory`, `typical-pr` (overlay) | 3.9 ms | 22 ms | 207 ms |
+| `e2e_materialize`, `typical-pr` | — | 31 ms | 541 ms |
+
+Throughputs at `large`: 623k targets/s indexed, 757k paths/s classified, 61M
+edges/s for the reverse rebuild. At `medium`, 150 MB/s of streamed proto and
+355k rule hashes/s. Peak RSS: 13 MiB, 194 MiB and 1.84 GiB for the three sizes.
+
+`parse_proto` and `rule_hash` are not run at `large`: they materialise the
+whole proto stream in memory, which is a multiple of the index size. They are
+parse-rate measurements, and the parse rate does not depend on the size of the
+repository.
+
+The `walk` row is the one number that needs reading carefully. It is not
+proportional to the graph, it is proportional to the answer, and the answer
+depends entirely on where you start. The 11 ms at `large` enumerates 121 000
+affected targets — a quarter of the graph — at about 90 ns each. The 0.01 ms at
+`medium` enumerates 337.
+
+#### Against the spec's absolute targets
+
+| target | spec | measured | |
+|---|---|---|---|
+| `walk` on `large`, non-hub start | < 5 ms | 11 ms, 121k affected | see above |
+| `walk` on `large`, hub start | < 50 ms, ~40% affected | 34 ms, 50% affected | ✅ |
+| `splice` + `reverse_rebuild` on `large` | < 300 ms | 32 ms (overlay) / 308 + 82 ms (materialised) | ✅ on the path that matters |
+| `load_index` on `large`, warm | < 20 ms | 0.01 ms | ✅ the label map is separate and off the walk path |
+| `build_index` on `xl` | < 60 s, < 6 GiB | ~18 s, ~7 GiB (extrapolated) | time ✅, memory over |
+| `e2e_memory` `typical-pr` on `xl` | < 1 s | ~0.8 s (extrapolated) | ✅ with the overlay |
+
+On four cores. The two targets the splice used to miss are met now that the
+`affected` path no longer materialises an index; `build_index` peak memory is
+the one still over, and it is a cold-build cost paid once per lineage.
+
+### Scaling
+
+`bench sweep` varies one parameter and plots the result on log-log axes, where
+linear scaling is a line parallel to the dashed reference.
+
+![walk scaling](sweep-walk.svg)
+
+```
+walk from a hub    10k targets    0.27 ms      6.1k affected (60%)
+                   50k            2.06 ms     29.5k affected (60%)
+                  200k           11.39 ms    119.7k affected (60%)
+                    1M          116.86 ms    587.3k affected (60%)
+```
+
+The sweep starts from the highest in-degree target, so the affected fraction
+stays at 60% as the graph grows and the curve is comparable across sizes.
+100x the graph costs 433x the time: linear in the answer, with a constant that
+degrades as the visited set outgrows cache. Sweeping `walk` from arbitrary
+starting points instead produces a scatter rather than a curve, because the
+cost tracks the size of the answer and not the size of the graph — which is the
+point.
+
+![splice scaling](sweep-splice.svg)
+
+```
+splice, 8 dirty     99k edges      4.94 ms
+packages           495k           30.15 ms
+                  1.98M          157.79 ms
+                  9.91M         1028.45 ms
+```
+
+100x the edges costs 208x the time — linear in the graph, as designed, and
+independent of how many packages are dirty.
+
+### Against bazel-diff, on one synthetic graph
 
 <!-- bench:synthetic:begin -->
 not yet run

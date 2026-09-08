@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
+pub mod bazel_query;
 pub mod bazeldiff;
 pub mod cambium;
 pub mod tango;
@@ -393,21 +394,7 @@ impl BaseWorktree {
     }
 }
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .with_context(|| format!("running git {args:?} in {}", dir.display()))?;
-    anyhow::ensure!(
-        out.status.success(),
-        "git {} in {} failed: {}",
-        args.join(" "),
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
+pub(crate) use crate::checkout::git;
 
 #[cfg(test)]
 mod tests {

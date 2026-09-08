@@ -13,11 +13,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use cambium_bench::checkout::SubjectsDir;
+use cambium_bench::compare::ChangesResult;
+use cambium_bench::history::HistoryResult;
 use cambium_bench::manifest::Manifest;
 use cambium_bench::replay::{
     self, PackageRule, PathsCache, RecordedAnswer, ReplayOutcome, ReplayRun,
 };
-use cambium_bench::{ChangesResult, HistoryResult, SubjectsDir};
 use cambium_index::IndexFile;
 use clap::Args as ClapArgs;
 
@@ -115,7 +117,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     let results = args.results_dir.join(&entry.id);
     let index_path = match &args.index {
         Some(p) => p.clone(),
-        None => results.join(crate::cmd::bench::suffixed(
+        None => results.join(cambium_bench::util::versioned_name(
             &format!("index-{}", entry.pin),
             version.as_deref(),
             "bin",
@@ -293,7 +295,7 @@ fn pre(a: &str, b: &str) -> bool {
 }
 
 fn default_paths_file(results: &Path, pin: &str, version: Option<&str>) -> PathBuf {
-    results.join(crate::cmd::bench::suffixed(
+    results.join(cambium_bench::util::versioned_name(
         &format!("paths-{pin}"),
         version,
         "json",
@@ -309,22 +311,26 @@ fn load_recorded(
     history: bool,
 ) -> Result<Vec<RecordedAnswer>> {
     let mut out = Vec::new();
-    let changes = results.join("changes").join(crate::cmd::bench::suffixed(
-        &format!("changes-{pin}"),
-        version,
-        "json",
-    ));
+    let changes = results
+        .join("changes")
+        .join(cambium_bench::util::versioned_name(
+            &format!("changes-{pin}"),
+            version,
+            "json",
+        ));
     if changes.exists() {
         out.extend(replay::recorded_from_changes(&ChangesResult::read(
             &changes,
         )?));
     }
     if history {
-        let h = results.join("history").join(crate::cmd::bench::suffixed(
-            &format!("history-{pin}"),
-            version,
-            "json",
-        ));
+        let h = results
+            .join("history")
+            .join(cambium_bench::util::versioned_name(
+                &format!("history-{pin}"),
+                version,
+                "json",
+            ));
         if h.exists() {
             let s = std::fs::read_to_string(&h)?;
             let r: HistoryResult =
