@@ -1432,6 +1432,7 @@ mod tests {
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 0,
             oracle_k: 0,
+            engine: String::new(),
             tango_change_sets: None,
             change_sets: vec![change_set, global_change_set()],
             summary: ChangesSummary::default(),

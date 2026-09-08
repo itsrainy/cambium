@@ -401,6 +401,12 @@ pub struct ChangesResult {
     pub bazel_version_used: Option<String>,
     pub seed: u64,
     pub oracle_k: usize,
+    /// `State::engine_id` of the build that wrote this; a resume by any other
+    /// build starts over. `state.json` already starts over on its own, but the
+    /// change sets live in this file, and the first published run's re-run
+    /// resumed every one of them from the previous engine's answers.
+    #[serde(default)]
+    pub engine: String,
     /// How many change sets Tango was asked to run on, when it was capped.
     /// Tango costs 30-500 s a change set, so a run that quotes its p50 has to
     /// say how many change sets that p50 is taken over.
@@ -1179,6 +1185,29 @@ fn base_index_for_oracle(engine: &Engine, base: &str) -> Option<cambium_index::I
     }
 }
 
+/// A previous file continues this run only when the same cambium wrote it:
+/// the engine id names the index format and the engine configuration, and a
+/// change set answered under another one is a different experiment.
+fn resumable(prev: &ChangesResult, opts: &ChangesOptions, engine_id: &str) -> bool {
+    prev.repo == opts.repo_id && prev.pin == opts.pin && prev.engine == engine_id
+}
+
+fn fresh_result(opts: &ChangesOptions, engine_id: &str) -> ChangesResult {
+    ChangesResult {
+        schema: crate::RESULT_SCHEMA,
+        repo: opts.repo_id.clone(),
+        pin: opts.pin.clone(),
+        bazel_version: opts.bazel_version.clone(),
+        bazel_version_used: None,
+        seed: opts.seed,
+        oracle_k: opts.oracle_k,
+        engine: engine_id.to_string(),
+        tango_change_sets: opts.tango_change_sets,
+        change_sets: Vec::new(),
+        summary: ChangesSummary::default(),
+    }
+}
+
 /// Every change set, resumable, writing after each one.
 ///
 /// A change set that errors outright (a tool that cannot run at all, a base
@@ -1201,20 +1230,18 @@ pub fn compare_change_sets(
         &opts.pin,
         &State::engine_id(&engine.cfg.hash()),
     )?;
+    let engine_id = State::engine_id(&engine.cfg.hash());
     let mut result = match (opts.resume, ChangesResult::read(&path)) {
-        (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => prev,
-        _ => ChangesResult {
-            schema: crate::RESULT_SCHEMA,
-            repo: opts.repo_id.clone(),
-            pin: opts.pin.clone(),
-            bazel_version: opts.bazel_version.clone(),
-            bazel_version_used: None,
-            seed: opts.seed,
-            oracle_k: opts.oracle_k,
-            tango_change_sets: opts.tango_change_sets,
-            change_sets: Vec::new(),
-            summary: ChangesSummary::default(),
-        },
+        (true, Ok(prev)) if resumable(&prev, opts, &engine_id) => prev,
+        (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => {
+            tracing::warn!(
+                was = %prev.engine,
+                now = %engine_id,
+                "change sets were compared by a different cambium; starting over"
+            );
+            fresh_result(opts, &engine_id)
+        }
+        _ => fresh_result(opts, &engine_id),
     };
     // Recorded once per run, and re-recorded on a resume whose earlier half
     // predates the field: the report's numbers are only worth reading if they
@@ -1688,6 +1715,18 @@ mod tests {
     }
 
     #[test]
+    fn change_sets_compared_by_another_cambium_are_not_resumed() {
+        let opts = ChangesOptions::new("bazel", "abc", PathBuf::from("/r/bazel"));
+        let mut prev = fresh_result(&opts, "f8/0123456789abcdef");
+        assert!(resumable(&prev, &opts, "f8/0123456789abcdef"));
+        prev.engine = "f6/0123456789abcdef".into();
+        assert!(!resumable(&prev, &opts, "f8/0123456789abcdef"));
+        // Files written before the field existed carry no engine at all.
+        prev.engine.clear();
+        assert!(!resumable(&prev, &opts, "f8/0123456789abcdef"));
+    }
+
+    #[test]
     fn the_output_file_names_the_bazel_version_only_in_the_matrix() {
         let dir = Path::new("/r");
         assert_eq!(
@@ -1715,6 +1754,7 @@ mod tests {
             bazel_version_used: Some("bazel 7.4.1".into()),
             seed: 7,
             oracle_k: 0,
+            engine: String::new(),
             tango_change_sets: None,
             change_sets: vec![change_set_comparison("1", 1.0, 100, 10, true)],
             summary: ChangesSummary::default(),
