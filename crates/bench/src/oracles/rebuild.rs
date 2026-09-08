@@ -23,6 +23,13 @@ pub struct GraphDiff {
     /// `(from, to)` edges present only in one side.
     pub edges_only_in_applied: Vec<(String, String)>,
     pub edges_only_in_rebuilt: Vec<(String, String)>,
+    /// Externals side tables that disagree, one line each: the repository
+    /// input map, the per-repository path mapping and its `target_only`
+    /// flags, the `.bzl` and package external-label rows. These decide how
+    /// wide a diff goes before any query happens, and none of them is a node,
+    /// an edge or a rule hash — an index that lost one describes the same
+    /// graph and answers a different question.
+    pub externals_mismatch: Vec<String>,
     /// Totals, so a capped report still says how big the disagreement is.
     pub counts: DiffCounts,
 }
@@ -35,6 +42,8 @@ pub struct DiffCounts {
     pub rule_hash_mismatch: usize,
     pub edges_only_in_applied: usize,
     pub edges_only_in_rebuilt: usize,
+    #[serde(default)]
+    pub externals_mismatch: usize,
 }
 
 impl GraphDiff {
@@ -46,13 +55,15 @@ impl GraphDiff {
         let c = &self.counts;
         format!(
             "nodes only in applied: {}, only in rebuilt: {}; kind mismatches: {}; \
-             rule hash mismatches: {}; edges only in applied: {}, only in rebuilt: {}",
+             rule hash mismatches: {}; edges only in applied: {}, only in rebuilt: {}; \
+             externals mismatches: {}",
             c.nodes_only_in_applied,
             c.nodes_only_in_rebuilt,
             c.kind_mismatch,
             c.rule_hash_mismatch,
             c.edges_only_in_applied,
-            c.edges_only_in_rebuilt
+            c.edges_only_in_rebuilt,
+            c.externals_mismatch
         )
     }
 }
@@ -145,7 +156,137 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
                 .push((e.0.to_string(), e.1.to_string()));
         }
     }
+    compare_externals(applied, rebuilt, cap, &mut d);
     d
+}
+
+/// The externals side tables, keyed by name rather than by id.
+///
+/// Every one of these is derived from the same walk over the same workspace
+/// `.bzl` files as the load closure, carried through a splice rather than
+/// recomputed, and read by [`cambium_engine::externals`] *before* anything is
+/// queried. A column a splice drops therefore changes how wide a diff goes
+/// while leaving the graph itself byte-identical, which is exactly the shape
+/// the node/edge/hash comparison above cannot see.
+fn compare_externals(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d: &mut GraphDiff) {
+    let mut note = |s: String| {
+        d.counts.externals_mismatch += 1;
+        if d.externals_mismatch.len() < cap {
+            d.externals_mismatch.push(s);
+        }
+    };
+    if applied.bzl_closure != rebuilt.bzl_closure {
+        note(format!(
+            "bzl closure present: applied {}, rebuilt {}",
+            applied.bzl_closure, rebuilt.bzl_closure
+        ));
+        return;
+    }
+    if !applied.bzl_closure {
+        return;
+    }
+
+    // Repositories: canonical name and path mapping, by apparent name.
+    fn repos(v: IndexRef<'_>) -> BTreeMap<&str, (&str, Vec<String>)> {
+        (0..v.num_repos())
+            .map(|r| {
+                let maps = v
+                    .repo_path_maps(r)
+                    .into_iter()
+                    .map(|m| format!("{} -> {}", m.from, m.to))
+                    .collect();
+                (v.repo_name(r), (v.repo_canonical.get(r), maps))
+            })
+            .collect()
+    }
+    let (ra, rb) = (repos(applied), repos(rebuilt));
+    for (name, a) in &ra {
+        match rb.get(name) {
+            None => note(format!("repository `{name}` only in applied")),
+            Some(b) if a != b => note(format!(
+                "repository `{name}`: applied {a:?}, rebuilt {b:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for name in rb.keys() {
+        if !ra.contains_key(name) {
+            note(format!("repository `{name}` only in rebuilt"));
+        }
+    }
+
+    // Input patterns, with their `target_only` flag and the repositories they
+    // feed, keyed by the pattern's own text.
+    fn patterns(v: IndexRef<'_>) -> BTreeMap<String, (bool, Vec<&str>)> {
+        (0..v.repo_input_patterns.len())
+            .map(|i| {
+                let p = i as u32;
+                let key = format!(
+                    "{}{}",
+                    v.repo_input_patterns.get(p),
+                    if v.repo_input_prefix[i] { "**" } else { "" }
+                );
+                let repos = v.repo_inputs.row(p).iter().map(|&r| v.repo_name(r)).collect();
+                (key, (v.repo_input_target_only[i], repos))
+            })
+            .collect()
+    }
+    let (pa, pb) = (patterns(applied), patterns(rebuilt));
+    for (key, a) in &pa {
+        match pb.get(key) {
+            None => note(format!("input pattern `{key}` only in applied")),
+            Some(b) if a != b => {
+                note(format!("input pattern `{key}`: applied {a:?}, rebuilt {b:?}"))
+            }
+            Some(_) => {}
+        }
+    }
+    for key in pb.keys() {
+        if !pa.contains_key(key) {
+            note(format!("input pattern `{key}` only in rebuilt"));
+        }
+    }
+
+    // The `.bzl` rows: which repositories a workspace-closure file defines,
+    // and the external labels it and each BUILD file load.
+    fn bzl_rows(v: IndexRef<'_>) -> BTreeMap<&str, (Vec<&str>, Vec<&str>)> {
+        (0..v.num_bzl())
+            .map(|id| {
+                let repos = v.bzl_repos_of(id).iter().map(|&r| v.repo_name(r)).collect();
+                (v.bzl_path(id), (repos, v.bzl_external(id)))
+            })
+            .collect()
+    }
+    let (ba, bb) = (bzl_rows(applied), bzl_rows(rebuilt));
+    for (path, a) in &ba {
+        if let Some(b) = bb.get(path) {
+            if a != b {
+                note(format!("`{path}`: applied {a:?}, rebuilt {b:?}"));
+            }
+        }
+    }
+
+    fn pkg_ext(v: IndexRef<'_>) -> BTreeMap<&str, Vec<&str>> {
+        (0..v.num_packages())
+            .map(|p| (v.package_name(p), v.package_external(p)))
+            .filter(|(_, e)| !e.is_empty())
+            .collect()
+    }
+    let (ka, kb) = (pkg_ext(applied), pkg_ext(rebuilt));
+    for (pkg, a) in &ka {
+        match kb.get(pkg) {
+            None => note(format!("external loads of `{pkg}` only in applied")),
+            Some(b) if a != b => note(format!(
+                "external loads of `{pkg}`: applied {a:?}, rebuilt {b:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for pkg in kb.keys() {
+        if !ka.contains_key(pkg) {
+            note(format!("external loads of `{pkg}` only in rebuilt"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,5 +334,42 @@ mod tests {
         );
         assert!(!d.is_empty());
         assert!(d.summary().contains("rule hash mismatches: 1"));
+    }
+
+    /// The regression this half of the oracle exists for: two indexes with
+    /// identical nodes, edges and rule hashes, one of which lost a
+    /// repository's path mapping on the way through a splice. Before this,
+    /// the diff was empty and the run went on to re-query eleven hundred
+    /// packages.
+    #[test]
+    fn a_dropped_path_mapping_is_reported_though_the_graph_is_identical() {
+        fn index(mapped: bool) -> cambium_index::IndexData {
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.apply_packages(&[PackageUpdate {
+                package: "lib".into(),
+                targets: vec![TargetRow::rule("//lib:core", "cc_library", vec![])],
+                ..Default::default()
+            }]);
+            let mut c = cambium_index::BzlClosure::default();
+            c.inputs.repos.insert("mod".into());
+            if mapped {
+                c.inputs.path_maps.entry("mod".into()).or_default().insert(
+                    cambium_index::externals::PathMap {
+                        from: "api/".into(),
+                        to: String::new(),
+                    },
+                );
+            }
+            b.set_bzl_closure(c);
+            b.finish("c")
+        }
+        let (a, b) = (index(false), index(true));
+        let d = compare_by_label(a.view(), b.view(), 10);
+        assert_eq!(d.counts.nodes_only_in_applied, 0);
+        assert_eq!(d.counts.rule_hash_mismatch, 0);
+        assert_eq!(d.counts.edges_only_in_applied, 0);
+        assert_eq!(d.counts.externals_mismatch, 1, "{:?}", d.externals_mismatch);
+        assert!(d.externals_mismatch[0].contains("api/"), "{d:?}");
+        assert!(!d.is_empty());
     }
 }
