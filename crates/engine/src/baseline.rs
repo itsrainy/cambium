@@ -293,9 +293,15 @@ mod tests {
 
         let names = c.publish(&path, &[2; 16], "sha1", "tree1").unwrap();
         assert!(names.contains(&tree_addressed_key("tree1")), "{names:?}");
-        assert!(names.contains(&commit_addressed_pointer("sha1")), "{names:?}");
+        assert!(
+            names.contains(&commit_addressed_pointer("sha1")),
+            "{names:?}"
+        );
         assert!(c.fetch("sha1", "tree1").unwrap().is_some());
-        assert!(c.fetch("sha1", "sha1").unwrap().is_some(), "via the pointer");
+        assert!(
+            c.fetch("sha1", "sha1").unwrap().is_some(),
+            "via the pointer"
+        );
     }
 
     #[test]

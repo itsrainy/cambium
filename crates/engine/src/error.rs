@@ -47,7 +47,10 @@ pub enum EngineError {
          under-report for every run spliced onto it. Pass --allow-partial, or set \
          baseline.publish_partial = true, to publish it anyway."
     )]
-    PartialIndex { commit: String, packages_in_error: u32 },
+    PartialIndex {
+        commit: String,
+        packages_in_error: u32,
+    },
 }
 
 impl EngineError {

@@ -104,10 +104,7 @@ impl PendingFetch {
                 source,
             })?;
         }
-        let tmp = dest.with_extension(format!(
-            "fetching.{}",
-            cambium_index::format::temp_suffix()
-        ));
+        let tmp = dest.with_extension(format!("fetching.{}", cambium_index::format::temp_suffix()));
         let file = File::create(&tmp).map_err(|source| StoreError::Io {
             path: tmp.clone(),
             source,
@@ -576,7 +573,8 @@ mod tests {
     fn list_lines_keep_the_whole_key_from_the_layout_root() {
         // `aws s3 ls --recursive`
         assert_eq!(
-            list_line_to_key("2026-09-01 12:00:00    260000000 cambium/indexes/ab/cd.bin").as_deref(),
+            list_line_to_key("2026-09-01 12:00:00    260000000 cambium/indexes/ab/cd.bin")
+                .as_deref(),
             Some("indexes/ab/cd.bin")
         );
         // `gsutil ls -r`: full URLs, plus directory headers to skip.

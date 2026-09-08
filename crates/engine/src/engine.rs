@@ -482,8 +482,12 @@ impl Engine {
         std::fs::create_dir_all(&dir).map_err(EngineError::io_at(&dir))?;
         let path = dir.join(format!("{commit}.bin"));
         cambium_index::format::write_index(&path, index)?;
-        let names =
-            self.publish_index_allowing_partial(&path, &index.header.lineage, &commit, allow_partial);
+        let names = self.publish_index_allowing_partial(
+            &path,
+            &index.header.lineage,
+            &commit,
+            allow_partial,
+        );
         let _ = std::fs::remove_file(&path);
         names
     }
@@ -908,8 +912,8 @@ impl Engine {
             // The overlay knows the base's edge count and every edge it added
             // or removed, which is the same number the materialised index
             // would report.
-            run.stats.head_edges =
-                base_view.num_edges() as u64 + delta.edges_added as u64 - delta.edges_removed as u64;
+            run.stats.head_edges = base_view.num_edges() as u64 + delta.edges_added as u64
+                - delta.edges_removed as u64;
             tracing::debug!(delta = ?delta, "walking a delta overlay");
             let report = run.answer(&overlay, &direct_inputs);
             Ok(RunOutcome {
@@ -1077,7 +1081,11 @@ impl RunState<'_> {
     /// Direct set, walk, report — over a materialised head index or an
     /// overlay. One implementation for both, so the two paths cannot disagree
     /// about anything after the splice.
-    fn answer<V: GraphView + ?Sized>(mut self, view: &V, inputs: &DirectInputs<'_>) -> AffectedReport {
+    fn answer<V: GraphView + ?Sized>(
+        mut self,
+        view: &V,
+        inputs: &DirectInputs<'_>,
+    ) -> AffectedReport {
         self.timings.splice = self.sw.lap();
 
         let (direct, reasons) = derive_direct(view, inputs);
