@@ -414,7 +414,7 @@ fn the_label_packing_projection_adds_up() {
 /// The measurement item 7 turns on: how much of an index is labels, and how
 /// much of that a `(package_id, relative_name)` encoding would give back.
 ///
-/// The numbers for the `large` and `xl` presets are in `BENCHMARKS.md`; this
+/// The numbers for the `large` and `xl` presets are in `docs/ENGINE_COSTS.md`; this
 /// only pins that the two quantities stay coherent with each other, since the
 /// decision not to pack rests on them.
 #[test]
@@ -436,7 +436,7 @@ fn the_label_share_and_the_saving_are_consistent() {
     );
 }
 
-/// Longer package paths mean a bigger label table, and `BENCHMARKS.md`
+/// Longer package paths mean a bigger label table, and `docs/ENGINE_COSTS.md`
 /// extrapolates from the synthetic presets to a real repository on exactly that
 /// basis: every byte added to a package path lands once in each of its nodes'
 /// labels and once in the package name table, and nowhere else.
@@ -508,7 +508,7 @@ fn label_share_grows_with_package_path_length_as_predicted() {
         "all of which packing would give back"
     );
 
-    // The predicted share, which is what BENCHMARKS.md extrapolates with.
+    // The predicted share, which is what docs/ENGINE_COSTS.md extrapolates with.
     let predicted = (base.bytes.label_table + base.bytes.label_sorted + d * n) as f64
         / (base.bytes.file_total + d * (n + p)) as f64;
     assert!(

@@ -271,7 +271,7 @@ impl<'a> IndexBuilder<'a> {
     ///
     /// This copies the whole index — labels, hashes, edges — and rebuilds the
     /// interner's table, which is the single most expensive step in a
-    /// pull-request run (see BENCHMARKS.md). Before optimising it, note which
+    /// pull-request run (see docs/ENGINE_COSTS.md). Before optimising it, note which
     /// path you are optimising:
     ///
     /// - `baseline update` **must** keep materialising. Its output is the index
