@@ -4,31 +4,11 @@
 //! Real git, no Bazel: the index itself is hand-built, and what is under test
 //! is which key a commit resolves to.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
 use cambium_engine::{Config, Engine};
 use cambium_index::{format, IndexBuilder, IndexData, IndexFile, PackageUpdate, TargetRow};
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn commit(dir: &Path, msg: &str) -> String {
-    git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "--allow-empty", "-m", msg]);
-    git(dir, &["rev-parse", "HEAD"])
-}
+use common::{commit, git, git_repo, synthetic_engine};
 
 fn index_for(commit: &str, config_hash: [u8; 32]) -> IndexData {
     index_in_lineage(commit, [3u8; 16], config_hash)
@@ -59,23 +39,15 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    std::fs::create_dir_all(root.join("lib")).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "user.email", "t@example.com"]);
-    git(&root, &["config", "user.name", "t"]);
-    std::fs::write(root.join("MODULE.bazel"), "").unwrap();
-    std::fs::write(root.join("lib/a.cc"), "one").unwrap();
+    git_repo(&root);
+    common::write(&root, "MODULE.bazel", "");
+    common::write(&root, "lib/a.cc", "one");
 
     let mut cfg = Config::default();
     cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
         path: dir.path().join("store"),
     };
-    let engine = Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(root.clone()),
-        cambium_bazel::Bazel::at(root.clone(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(dir.path().join("cache"));
+    let engine = synthetic_engine(&root, cfg);
     Fixture {
         _dir: dir,
         root,
@@ -226,12 +198,7 @@ fn a_sha_git_cannot_resolve_follows_the_pointer() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::default();
     cfg.baseline.store = f.engine.cfg.baseline.store.clone();
-    let blind = Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(dir.path().to_path_buf()),
-        cambium_bazel::Bazel::at(dir.path().to_path_buf(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(dir.path().join("cache"));
+    let blind = synthetic_engine(dir.path(), cfg);
     let found = blind
         .fetch_baseline(&a)
         .unwrap()

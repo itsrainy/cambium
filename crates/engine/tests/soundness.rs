@@ -58,6 +58,7 @@ fn sweep(max_dirty_packages: usize) {
         materialize: true,
         publish_base: false,
         max_depth: None,
+        allow_partial: false,
     };
 
     // Every iteration lands in exactly one of these, and the totals are checked

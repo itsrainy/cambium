@@ -40,6 +40,11 @@ struct Cli {
     #[arg(long, global = true)]
     bazel_binary: Option<String>,
 
+    /// Where fetched indexes and per-revision worktrees are kept; overrides
+    /// `baseline.cache_dir` (default: <tmp>/cambium-cache).
+    #[arg(long, global = true, env = "CAMBIUM_CACHE_DIR")]
+    cache_dir: Option<PathBuf>,
+
     /// Log level: error, warn, info, debug, trace.
     #[arg(long, global = true, default_value = "warn", env = "CAMBIUM_LOG")]
     log: String,
@@ -100,6 +105,7 @@ fn main() -> ExitCode {
         root,
         config: cli.config.clone(),
         bazel_binary: cli.bazel_binary.clone(),
+        cache_dir: cli.cache_dir.clone(),
     };
 
     let code = match cli.command {

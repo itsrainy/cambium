@@ -11,9 +11,9 @@
 //! Bazel 9, which no longer reads it, 770 of 771 packages fail to load.
 
 use cambium_bazel::LoadErrors;
-use cambium_engine::query::Universe;
-use cambium_engine::{Config, Engine, EngineError, PackageQuerier, SynthQuerier};
-use cambium_index::{IndexBuilder, PackageUpdate};
+use cambium_engine::query::Rows;
+use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier, SynthQuerier};
+use cambium_index::IndexBuilder;
 use cambium_synth::{generate, GraphSpec};
 
 /// A querier whose universe query "exited 3": the same rows, plus the load
@@ -21,11 +21,11 @@ use cambium_synth::{generate, GraphSpec};
 struct PartialUniverse<'a>(SynthQuerier<'a>, LoadErrors);
 
 impl PackageQuerier for PartialUniverse<'_> {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, EngineError> {
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         self.0.query(packages)
     }
-    fn universe(&self) -> Result<Universe, EngineError> {
-        Ok(Universe {
+    fn universe(&self) -> Result<Rows, EngineError> {
+        Ok(Rows {
             updates: self.0.universe()?.updates,
             partial: Some(self.1.clone()),
         })
@@ -117,4 +117,132 @@ fn a_splice_onto_a_partial_base_stays_partial() {
         "an update over a base that is missing packages is still missing them"
     );
     assert_eq!(spliced.view().packages_in_error, 2);
+}
+
+/// A querier whose *incremental* query "exited 3": the rows it could load,
+/// plus the load errors for the packages it could not.
+///
+/// This is the transient-failure shape — an unreachable registry, a flaky
+/// network — which is exactly when it matters: the packages that failed to
+/// load come back as empty updates and are tombstoned, and the index built on
+/// them is missing them for good.
+struct PartialQuery<'a>(SynthQuerier<'a>, LoadErrors);
+
+impl PackageQuerier for PartialQuery<'_> {
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
+        Ok(Rows {
+            updates: self.0.query(packages)?.updates,
+            partial: Some(self.1.clone()),
+        })
+    }
+    fn universe(&self) -> Result<Rows, EngineError> {
+        self.0.universe()
+    }
+}
+
+fn incremental_head(e: &Engine, partial: bool) -> cambium_index::IndexData {
+    use cambium_synth::Mutation;
+
+    let before = generate(&GraphSpec {
+        packages: 20,
+        seed: 7,
+        ..Default::default()
+    });
+    let base = e
+        .full_build_with("base", &SynthQuerier::new(&before))
+        .unwrap();
+    let t = (0..before.targets.len() as u32)
+        .find(|&i| !before.targets[i as usize].srcs.is_empty())
+        .unwrap();
+    let slot = before.targets[t as usize].srcs[0];
+    let mut after = before.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+
+    let req = AffectedRequest {
+        materialize: true,
+        no_full_build: true,
+        ..AffectedRequest::new("base", "head")
+    };
+    let q = SynthQuerier::new(&after);
+    let out = if partial {
+        e.compute(base.view(), &changes, &PartialQuery(q, load_errors()), &req)
+    } else {
+        e.compute(base.view(), &changes, &q, &req)
+    };
+    out.unwrap().index.expect("a spliced head index")
+}
+
+#[test]
+fn an_incremental_query_that_exits_three_yields_a_partial_index() {
+    // Before this, the incremental path threw the load errors away: the
+    // packages were tombstoned and the resulting head index claimed to be
+    // complete. `baseline update` would then publish an index permanently
+    // missing them, with nothing to say so.
+    let index = incremental_head(&engine(), true);
+    assert!(index.view().partial);
+    assert_eq!(index.view().packages_in_error, 2);
+    assert_eq!(
+        index.view().error_packages,
+        [
+            "modules/planning".to_string(),
+            "third_party/bazel".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_complete_incremental_query_leaves_the_index_unflagged() {
+    assert!(!incremental_head(&engine(), false).view().partial);
+}
+
+#[test]
+fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
+        path: dir.path().join("store"),
+    };
+    let e = Engine::with_parts(
+        cfg,
+        cambium_diff::Repo::new(dir.path().to_path_buf()),
+        cambium_bazel::Bazel::at(dir.path().to_path_buf(), Some("/nonexistent/bazel")),
+    )
+    .with_cache_dir(dir.path().join("cache"));
+
+    let mut index = incremental_head(&e, true);
+    index.header.config_hash = e.cfg.hash();
+    let path = dir.path().join("head.bin");
+    cambium_index::format::write_index(&path, &index).unwrap();
+
+    let err = e
+        .publish_index(&path, &index.header.lineage, "head")
+        .expect_err("a partial head index must not be published silently");
+    assert!(
+        matches!(
+            err,
+            EngineError::PartialIndex {
+                packages_in_error: 2,
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    // The escape hatch: a repository that genuinely cannot load everything —
+    // apollo under Bazel 9 — has to be able to say so once and get on with it.
+    let mut e = e;
+    e.cfg.baseline.publish_partial = true;
+    let keys = e
+        .publish_index(&path, &index.header.lineage, "head")
+        .expect("publish_partial makes it explicit and allowed");
+    assert!(!keys.is_empty());
+
+    // And a complete index was never in question.
+    let mut good = incremental_head(&e, false);
+    good.header.config_hash = e.cfg.hash();
+    e.cfg.baseline.publish_partial = false;
+    let path = dir.path().join("good.bin");
+    cambium_index::format::write_index(&path, &good).unwrap();
+    e.publish_index(&path, &good.header.lineage, "head2")
+        .unwrap();
 }

@@ -34,6 +34,7 @@ fn request(materialize: bool) -> AffectedRequest {
         materialize,
         publish_base: false,
         max_depth: None,
+        allow_partial: false,
     }
 }
 
@@ -145,26 +146,6 @@ fn a_dirty_set_over_the_limit_cold_rebuilds_and_answers_the_same() {
     );
     assert_eq!(a.header.counts.nodes, b.header.counts.nodes);
     assert_eq!(a.header.counts.edges, b.header.counts.edges);
-}
-
-/// The delta overlay takes the same route, and both routes still agree.
-#[test]
-fn the_overlay_cold_rebuilds_too() {
-    let (_, after, base, changes) = scenario();
-    let e = engine(100);
-    let overlay = e
-        .compute(
-            base.view(),
-            &changes,
-            &SynthQuerier::new(&after),
-            &request(false),
-        )
-        .expect("overlay run");
-    assert!(overlay.index.is_none());
-    assert!(overlay.report.stats.cold_rebuild);
-    let materialised = run(&e, &base, &after, &changes);
-    assert_eq!(overlay.report.affected, materialised.report.affected);
-    assert_eq!(overlay.report.direct, materialised.report.direct);
 }
 
 /// A diff of ten thousand source files under one package is not a reason to

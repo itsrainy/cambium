@@ -14,15 +14,20 @@ pub struct Context {
     pub root: PathBuf,
     pub config: Option<PathBuf>,
     pub bazel_binary: Option<String>,
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Context {
     pub fn engine(&self) -> Result<Engine> {
-        Ok(Engine::open(
+        let engine = Engine::open(
             &self.root,
             self.config.as_deref(),
             self.bazel_binary.as_deref(),
-        )?)
+        )?;
+        Ok(match &self.cache_dir {
+            Some(d) => engine.with_cache_dir(d.clone()),
+            None => engine,
+        })
     }
 
     pub fn config(&self) -> Result<Config> {

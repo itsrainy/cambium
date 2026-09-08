@@ -11,79 +11,12 @@
 //! run, and a BUILD-file-reading stand-in is pointed at that same directory —
 //! which is exactly the substitution the bug was about.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
-use cambium_engine::{Config, Engine, PackageQuerier};
-use cambium_index::{NodeKind, PackageUpdate, TargetRow};
-
-/// A `PackageQuerier` that reads a toy BUILD syntax out of a directory.
-///
-/// One rule per line, `name dep dep ...`, so a test can assert which revision's
-/// BUILD files reached the index by naming the rules that came back.
-struct DirQuerier {
-    root: PathBuf,
-}
-
-impl DirQuerier {
-    fn packages(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
-            return out;
-        };
-        for e in entries.flatten() {
-            if e.path().join("BUILD").exists() {
-                out.push(e.file_name().to_string_lossy().into_owned());
-            }
-        }
-        out.sort();
-        out
-    }
-
-    fn update(&self, pkg: &str) -> PackageUpdate {
-        let text = std::fs::read_to_string(self.root.join(pkg).join("BUILD")).unwrap_or_default();
-        let mut targets = Vec::new();
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            let mut words = line.split_whitespace();
-            let name = words.next().unwrap();
-            let inputs: Vec<String> = words.map(|d| d.to_string()).collect();
-            targets.push(TargetRow {
-                label: format!("//{pkg}:{name}"),
-                kind: NodeKind::Rule,
-                rule_class: Some("toy_library".into()),
-                rule_hash: *blake3::hash(line.as_bytes()).as_bytes(),
-                is_test: false,
-                manual: false,
-                inputs,
-                generating_rule: None,
-            });
-        }
-        PackageUpdate {
-            package: pkg.to_string(),
-            build_hash: *blake3::hash(text.as_bytes()).as_bytes(),
-            bzl_hash: [0; 32],
-            targets,
-        }
-    }
-}
-
-impl PackageQuerier for DirQuerier {
-    fn query(&self, packages: &[String]) -> cambium_engine::Result<Vec<PackageUpdate>> {
-        Ok(packages.iter().map(|p| self.update(p)).collect())
-    }
-
-    fn universe(&self) -> cambium_engine::Result<cambium_engine::query::Universe> {
-        Ok(self
-            .packages()
-            .iter()
-            .map(|p| self.update(p))
-            .collect::<Vec<_>>()
-            .into())
-    }
-
-    fn workspace(&self) -> Option<&Path> {
-        Some(&self.root)
-    }
-}
+use cambium_engine::{Config, Engine};
+use common::{commit, git_repo, synthetic_engine, write, DirQuerier};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -93,40 +26,21 @@ struct Fixture {
     head: String,
 }
 
-fn git(root: &Path, args: &[&str]) {
-    cambium_diff::Repo::new(root)
-        .git(args)
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-}
-
 /// Two commits: base has `//lib:a`, head adds `//lib:b`. The working tree is
 /// left at head, which is what a CI worker running `affected` has.
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    std::fs::create_dir_all(root.join("lib")).unwrap();
-    std::fs::write(root.join("MODULE.bazel"), "").unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "user.email", "t@example.com"]);
-    git(&root, &["config", "user.name", "t"]);
+    git_repo(&root);
+    write(&root, "MODULE.bazel", "");
 
-    std::fs::write(root.join("lib/BUILD"), "a\n").unwrap();
-    git(&root, &["add", "-A"]);
-    git(&root, &["commit", "-qm", "base"]);
-    let base = cambium_diff::Repo::new(&root).rev_parse("HEAD").unwrap();
+    write(&root, "lib/BUILD", "a\n");
+    let base = commit(&root, "base");
 
-    std::fs::write(root.join("lib/BUILD"), "a\nb a\n").unwrap();
-    git(&root, &["add", "-A"]);
-    git(&root, &["commit", "-qm", "head adds b"]);
-    let head = cambium_diff::Repo::new(&root).rev_parse("HEAD").unwrap();
+    write(&root, "lib/BUILD", "a\nb a\n");
+    let head = commit(&root, "head adds b");
 
-    let engine = Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(root.clone()),
-        cambium_bazel::Bazel::at(root.clone(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(dir.path().join("_cache"));
-
+    let engine = synthetic_engine(&root, Config::default());
     Fixture {
         _dir: dir,
         root,

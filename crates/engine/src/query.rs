@@ -73,12 +73,14 @@ impl cambium_index::FileText for FileSource {
 /// synthetic graph, without Bazel and at sizes Bazel could never reach.
 pub trait PackageQuerier {
     /// Rows for the named packages. A requested package with no targets must
-    /// still come back with an empty update, so its old rows are tombstoned.
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, crate::error::EngineError>;
+    /// still come back with an empty update, so its old rows are tombstoned —
+    /// and when that happened because the package failed to *load*, the
+    /// answer says so in `partial`.
+    fn query(&self, packages: &[String]) -> Result<Rows, crate::error::EngineError>;
 
     /// Rows for the whole repository (cold build), plus whether Bazel managed
     /// to load all of it.
-    fn universe(&self) -> Result<Universe, crate::error::EngineError>;
+    fn universe(&self) -> Result<Rows, crate::error::EngineError>;
 
     /// Version string recorded in the index header.
     fn version(&self) -> String {
@@ -127,7 +129,7 @@ pub struct BazelQuerier {
 }
 
 impl PackageQuerier for BazelQuerier {
-    fn query(&self, packages: &[String]) -> Result<Vec<PackageUpdate>, crate::error::EngineError> {
+    fn query(&self, packages: &[String]) -> Result<Rows, crate::error::EngineError> {
         let q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
         // Exit 3 is `--keep_going` finishing with errors: every package that
         // could load is in the output, and the ones that could not are the
@@ -136,6 +138,13 @@ impl PackageQuerier for BazelQuerier {
         // empty updates tombstone their rows, and consumers become direct via
         // `DeletedDep`. Envoy's `.bazelrc` lists `--deleted_packages` that still
         // have BUILD files on disk; that is where this shows up in practice.
+        //
+        // The load errors travel with the rows so the index built from them
+        // is flagged partial, exactly as a cold build's would be: a package
+        // that failed to load because a registry was unreachable is missing
+        // from the index, not deleted from the repository, and a `baseline
+        // update` that published the result without saying so would leave
+        // every later run silently short of it.
         if q.outcome.exit_code == Some(3) {
             if q.packages_seen < packages.len() {
                 tracing::warn!(
@@ -145,7 +154,10 @@ impl PackageQuerier for BazelQuerier {
                     "some dirty packages failed to load under --keep_going; tombstoning them, as a cold build would"
                 );
             }
-            return Ok(q.updates);
+            return Ok(Rows {
+                updates: q.updates,
+                partial: Some(q.outcome.load_errors),
+            });
         }
         // Any other failure is not a partial answer: if a requested package
         // produced nothing while Bazel reported failure, the honest answer is
@@ -157,10 +169,10 @@ impl PackageQuerier for BazelQuerier {
                 stderr: q.outcome.stderr_tail,
             });
         }
-        Ok(q.updates)
+        Ok(q.updates.into())
     }
 
-    fn universe(&self) -> Result<Universe, crate::error::EngineError> {
+    fn universe(&self) -> Result<Rows, crate::error::EngineError> {
         let q = query_universe(&self.bazel, &self.opts, &self.files)?;
         // Exit 3 is accepted here for the same reason `query` accepts it, and
         // for consistency with it: the incremental path tombstones a package
@@ -186,7 +198,7 @@ impl PackageQuerier for BazelQuerier {
             );
             q.outcome.load_errors.clone()
         });
-        Ok(Universe {
+        Ok(Rows {
             updates: q.updates,
             partial,
         })
@@ -212,15 +224,15 @@ impl PackageQuerier for BazelQuerier {
     }
 }
 
-/// A cold-build answer: every package Bazel could load, and — when it could
-/// not load them all — what it said about the ones it dropped.
-pub struct Universe {
+/// A query's answer: every package Bazel could load, and — when it could not
+/// load them all — what it said about the ones it dropped.
+pub struct Rows {
     pub updates: Vec<PackageUpdate>,
     /// `Some` when the query exited 3 under `--keep_going`.
     pub partial: Option<cambium_bazel::LoadErrors>,
 }
 
-impl From<Vec<PackageUpdate>> for Universe {
+impl From<Vec<PackageUpdate>> for Rows {
     fn from(updates: Vec<PackageUpdate>) -> Self {
         Self {
             updates,
@@ -277,9 +289,17 @@ pub fn query_universe(
     Ok(finish(grouped, outcome, files, None))
 }
 
-/// Decodes one batch of frames. Decoding is the expensive half of ingestion and
-/// each message is independent, so it fans out; `collect` preserves order, which
-/// keeps the run deterministic.
+/// Decodes one batch of frames.
+///
+/// Decoding is the expensive half of ingestion and each message is
+/// independent, so it fans out — but per batch, not per stream or per
+/// message. The reader hands over a slab of a few thousand frames at a time,
+/// which is what bounds memory while Bazel is still writing: the whole stream
+/// of a large repository never has to be resident at once. Inside a batch,
+/// one message is too little work to be worth a rayon task on its own, so the
+/// batch is the unit and `par_iter` splits it. `collect` preserves order,
+/// which keeps id assignment, and therefore the serialised index,
+/// deterministic.
 fn decode_batch(
     slab: &[u8],
     ranges: &[(usize, usize)],

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
-use cambium_engine::query::{no_files, parse_stream};
+use cambium_engine::query::{no_files, parse_stream, Rows};
 use cambium_engine::{AffectedRequest, Config, Engine, PackageQuerier};
 use cambium_index::PackageUpdate;
 use cambium_synth::{generate, GraphSpec};
@@ -36,7 +36,7 @@ impl Canned {
 }
 
 impl PackageQuerier for Canned {
-    fn query(&self, packages: &[String]) -> cambium_engine::Result<Vec<PackageUpdate>> {
+    fn query(&self, packages: &[String]) -> cambium_engine::Result<Rows> {
         Ok(packages
             .iter()
             .map(|p| {
@@ -45,10 +45,11 @@ impl PackageQuerier for Canned {
                     ..Default::default()
                 })
             })
-            .collect())
+            .collect::<Vec<_>>()
+            .into())
     }
 
-    fn universe(&self) -> cambium_engine::Result<cambium_engine::query::Universe> {
+    fn universe(&self) -> cambium_engine::Result<Rows> {
         Ok(self.0.values().cloned().collect::<Vec<_>>().into())
     }
 
@@ -136,6 +137,7 @@ fn shifting_every_generator_location_affects_nothing() {
                 materialize: true,
                 publish_base: false,
                 max_depth: None,
+                allow_partial: false,
             },
         )
         .unwrap();

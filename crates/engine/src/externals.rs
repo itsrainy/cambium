@@ -104,6 +104,7 @@
 //! - A repository-rule input that no label names. See the soundness gap
 //!   documented on [`cambium_index::externals`].
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
@@ -177,7 +178,7 @@ pub struct Externals {
 /// `MODULE.bazel` at either revision.
 pub fn analyse(
     base: IndexRef<'_>,
-    changes: &[Change],
+    changes: &[impl Borrow<Change>],
     base_rev: &str,
     head_rev: &str,
     texts: &dyn WorkspaceText,
@@ -187,6 +188,7 @@ pub fn analyse(
     let mut module_changed = false;
     let mut lock_changed = false;
     for c in changes {
+        let c = c.borrow();
         if LEGACY_WORKSPACE_FILES.contains(&c.path.as_str()) {
             out.global = Some(format!(
                 "`{}` changed; WORKSPACE is imperative (macro-declared repositories, \
@@ -227,14 +229,8 @@ pub fn analyse(
             }
         }
     }
-    // A lockfile that moved *without* `MODULE.bazel` records a registry that
-    // moved under unchanged declarations, which can re-point any repository.
-    // The stage deliberately does not handle that case: it leaves the file
-    // alone, so the invalidator rules decide — and `MODULE.bazel.lock` is a
-    // default invalidator, so the default answer is still global. A repository
-    // that has removed it from its `cambium.toml` has said the file does not
-    // matter, and this stage is not the place to overrule that.
-    let _ = lock_changed;
+    // A lockfile that moved *without* `MODULE.bazel` is left to the
+    // invalidator rules (it is a default invalidator, so the answer is global).
 
     // Repository-rule inputs: main-repo files an external repository is built
     // from. Keyed by repo id, because deciding whether rule (2) applies needs
@@ -245,6 +241,7 @@ pub fn analyse(
     let mut by_input: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     let mut by_target: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     for c in changes {
+        let c = c.borrow();
         for (r, feeds_rule) in base.repos_for_path_kinds(&c.path) {
             let map = if feeds_rule {
                 &mut by_input
