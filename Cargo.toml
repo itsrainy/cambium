@@ -46,7 +46,11 @@ rand = "0.8"
 rand_chacha = "0.3"
 rand_distr = "0.4"
 rayon = "1"
-rkyv = "0.8"
+# Pinned exactly: rkyv's derive decides the on-disk layout, so a minor
+# upgrade can move the bytes without a line of cambium changing. See the
+# fixture test in crates/index/tests/format_fixture.rs, and bump this and
+# FORMAT_VERSION together and deliberately.
+rkyv = "=0.8.18"
 rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
