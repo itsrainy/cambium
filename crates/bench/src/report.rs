@@ -1542,6 +1542,31 @@ mod tests {
     }
 
     #[test]
+    fn a_package_the_load_closure_missed_lands_in_the_class_table() {
+        // The one class no label is filed under: it is counted per missing
+        // package, straight off the oracle, and it fails the run.
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.change_sets[0].load_oracle = Some(crate::oracles::load::LoadOracleResult {
+                checked: vec!["bazel/defs.bzl".into()],
+                bazel_packages: ["app".to_string(), "lib".to_string()].into_iter().collect(),
+                missing_packages: ["lib".to_string()].into_iter().collect(),
+                ..Default::default()
+            });
+            c.summarise();
+        }
+        let s = render_subject_section(&r, None);
+        assert!(
+            s.contains("| `cambium_missing_bzl_closure` | 1 | **yes** |"),
+            "the missing package is counted under a class this binary knows: {s}"
+        );
+        assert!(
+            !s.contains("a class this binary does not know"),
+            "and not under the unknown-class fallback: {s}"
+        );
+    }
+
+    #[test]
     fn the_section_reports_the_oracles_partial_batches() {
         let s = render_subject_section(&bazel_results(), None);
         assert!(s.contains("| 1 | 2 | 0 | 1 | 2 | 0 | 0 |"), "{s}");

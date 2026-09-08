@@ -162,7 +162,7 @@ from every tool's answer so that only rule targets are compared.
 ## Disagreement taxonomy
 
 Every disagreement between cambium and a tool, or between cambium and an
-oracle, is filed under exactly one class (`crates/bench/src/classify.rs`).
+oracle, is filed under exactly one class (`crates/bench/src/classify/mod.rs`).
 The three that fail a run are marked.
 
 | class | meaning |

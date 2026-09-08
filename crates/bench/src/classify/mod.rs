@@ -3,10 +3,9 @@
 //! A raw symmetric difference between cambium's answer and bazel-diff's is not
 //! actionable: on a real repository it is thousands of labels, almost all of
 //! them explained by a handful of known, *expected* differences in what the
-//! two tools model. The spec names seven classes; the real runs turned up four
-//! more (`cambium_extra_bzl`, `cambium_extra_deleted`,
-//! `cambium_extra_build_glob`, `bazeldiff_extra_external_content`). Nine of the
-//! eleven are benign and two fail the run:
+//! two tools model. The spec named seven classes; the real runs turned up the
+//! rest. Twelve of the sixteen are benign and three fail the run — plus
+//! `tool_missing`, which is a fact about the foil and gates nothing:
 //!
 //! | class | side | meaning |
 //! |---|---|---|
@@ -23,6 +22,7 @@
 //! | `bazeldiff_extra_line_shift` | tool only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
 //! | `bazeldiff_extra_workspace_path` | tool only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the tool's base checkout is a different directory from head |
 //! | `tool_missing` | cambium only | the tool missed a target the reverse-dependency oracle independently confirms is affected; cambium is right and the tool is wrong. Reported, not failed — it is not a defect of cambium |
+//! | `cambium_missing_bzl_closure` | oracle only | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty. Not a per-label class — it is counted from the load oracle's `missing_packages` |
 //! | `cambium_missing` | tool only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
 //!
@@ -42,7 +42,7 @@ pub enum Side {
     Tool,
 }
 
-/// The fifteen disagreement classes.
+/// The sixteen disagreement classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
@@ -159,6 +159,16 @@ pub enum Class {
     /// This is unsoundness, and it is the one thing the benchmark exists to
     /// catch. There is no version of it that is acceptable.
     CambiumMissing,
+    /// A failure: Bazel's `rbuildfiles` named a loading package that
+    /// cambium's static `.bzl` load closure did not dirty.
+    ///
+    /// The one class no *label* is ever filed under: it is counted from the
+    /// load oracle's `missing_packages` (`oracles::load`), one per package,
+    /// not from a symmetric difference. It is the same defect as
+    /// [`Class::CambiumMissing`] one level up — a package cambium should have
+    /// marked direct and did not — caught by an oracle rather than a tool,
+    /// and it fails the run for the same reason.
+    CambiumMissingBzlClosure,
     /// A failure: no predicate explained the disagreement.
     ///
     /// It needs a new class or a real bug fix before it can be waved through.
@@ -182,6 +192,7 @@ impl Class {
             Class::BazeldiffExtraLineShift => "bazeldiff_extra_line_shift",
             Class::ToolMissing => "tool_missing",
             Class::CambiumMissing => "cambium_missing",
+            Class::CambiumMissingBzlClosure => "cambium_missing_bzl_closure",
             Class::Unclassified => "unclassified",
         }
     }
@@ -243,6 +254,10 @@ impl Class {
                 "**fails**: the oracle or a tool reached something cambium did not — \
                  unsoundness"
             }
+            Class::CambiumMissingBzlClosure => {
+                "**fails**: `rbuildfiles` names a loading package the static `.bzl` closure \
+                 did not dirty"
+            }
             Class::Unclassified => {
                 "**fails**: no predicate explains the disagreement; needs a new class or a fix"
             }
@@ -251,10 +266,13 @@ impl Class {
 
     /// Whether a label in this class fails the change set.
     pub fn is_failure(self) -> bool {
-        matches!(self, Class::CambiumMissing | Class::Unclassified)
+        matches!(
+            self,
+            Class::CambiumMissing | Class::CambiumMissingBzlClosure | Class::Unclassified
+        )
     }
 
-    pub const ALL: [Class; 15] = [
+    pub const ALL: [Class; 16] = [
         Class::CambiumExtraSelect,
         Class::CambiumExtraExternalRepo,
         Class::CambiumExtraImplicit,
@@ -269,6 +287,7 @@ impl Class {
         Class::BazeldiffExtraLineShift,
         Class::ToolMissing,
         Class::CambiumMissing,
+        Class::CambiumMissingBzlClosure,
         Class::Unclassified,
     ];
 }
@@ -987,9 +1006,50 @@ mod tests {
                 "{c}"
             );
         }
-        assert_eq!(Class::ALL.len(), 15);
+        assert_eq!(Class::ALL.len(), 16);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
         assert_eq!(Class::ToolMissing.to_string(), "tool_missing");
+    }
+
+    /// docs/METHODOLOGY.md's taxonomy table is the published contract, and a
+    /// class that exists only in one of the two is the failure mode: a run
+    /// reports a name no reader can look up, or the docs promise a class the
+    /// binary cannot produce.
+    #[test]
+    fn the_methodology_table_lists_exactly_the_classes_this_binary_knows() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/METHODOLOGY.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/METHODOLOGY.md");
+        let documented: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split_once("` |"))
+            .map(|(name, _)| name)
+            // The file has more than one table; a class name is the only cell
+            // that matches one of ours, and unknown names are caught below.
+            .filter(|n| !n.contains(' '))
+            .collect();
+        assert!(
+            documented.len() >= Class::ALL.len(),
+            "the table did not parse: {documented:?}"
+        );
+        for c in Class::ALL {
+            assert!(
+                documented.contains(&c.name()),
+                "{c} is missing from docs/METHODOLOGY.md's taxonomy table"
+            );
+        }
+        for name in documented {
+            if name.contains("extra")
+                || name.contains("missing")
+                || name == "unclassified"
+            {
+                assert!(
+                    Class::ALL.iter().any(|c| c.name() == name),
+                    "docs/METHODOLOGY.md documents `{name}`, which is not a Class"
+                );
+            }
+        }
     }
 
     #[test]

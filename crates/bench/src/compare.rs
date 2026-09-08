@@ -542,7 +542,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
             s.load_oracle.add(o);
             if !o.missing_packages.is_empty() {
                 *s.by_class
-                    .entry(crate::oracles::load::MISSING_CLASS.to_string())
+                    .entry(Class::CambiumMissingBzlClosure.name().to_string())
                     .or_default() += o.missing_packages.len();
             }
         }
