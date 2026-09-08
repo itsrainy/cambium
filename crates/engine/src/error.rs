@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("no Bazel workspace found above {0}")]
-    NoWorkspace(PathBuf),
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
     #[error(transparent)]
@@ -28,6 +26,12 @@ pub enum EngineError {
     Proto(#[from] cambium_proto::ReadError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("io error on {path}: {source}")]
+    IoAt {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("no baseline index available for {base} and --no-full-build was given")]
     BaselineUnavailable { base: String },
     #[error(
@@ -37,9 +41,26 @@ pub enum EngineError {
     ConfigHashMismatch { path: PathBuf },
     #[error("no baseline store is configured; set [baseline].store in cambium.toml")]
     NoStore,
+    #[error(
+        "refusing to publish the index for {commit}: bazel could not load every package \
+         ({packages_in_error} error lines), and an index missing packages would silently \
+         under-report for every run spliced onto it. Pass --allow-partial, or set \
+         baseline.publish_partial = true, to publish it anyway."
+    )]
+    PartialIndex {
+        commit: String,
+        packages_in_error: u32,
+    },
 }
 
 impl EngineError {
+    /// `map_err` adapter that records which path an io error was about:
+    /// `std::fs::read(&p).map_err(EngineError::io_at(&p))?`.
+    pub fn io_at(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> EngineError {
+        let path = path.into();
+        move |source| EngineError::IoAt { path, source }
+    }
+
     /// Exit code for this failure (spec 10).
     pub fn exit_code(&self) -> i32 {
         match self {

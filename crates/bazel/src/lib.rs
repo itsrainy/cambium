@@ -35,11 +35,6 @@ pub enum BazelError {
         status: String,
         stderr: String,
     },
-    /// Bazel exited 3: `--keep_going` let it finish, but some package or
-    /// external repository failed to load, so the answer is incomplete.
-    /// Callers that need a complete answer (`rbuildfiles`) must not trust it.
-    #[error("bazel {args} finished with errors under --keep_going (exit 3); the answer is incomplete\n--- last stderr ---\n{stderr}")]
-    Partial { args: String, stderr: String },
     #[error("reading bazel output: {0}")]
     Read(#[from] ReadError),
     #[error("io error: {0}")]
@@ -492,20 +487,16 @@ impl Bazel {
     }
 
     /// `rbuildfiles(...)`: what loads any of `bzl_paths` (spec 7.2). Paths are
-    /// workspace-relative. See [`Rbuildfiles`] for why the answer is not just
-    /// a list of packages.
-    /// Hands back what Bazel managed to answer even when Sky Query finished
-    /// with errors, plus a flag saying that it did.
+    /// workspace-relative; see [`Rbuildfiles`] for why the answer is not just
+    /// a list of packages. The `bool` says Sky Query finished with errors, so
+    /// the answer is whatever it managed.
     ///
-    /// Only the comparison suite's `.bzl` oracle calls this. The engine reads
-    /// the answer out of the index's static load closure instead — a partial
-    /// `rbuildfiles` can be missing exactly the package that loads the changed
-    /// file, which is an under-approximation, and on the real subjects that made
-    /// every `.bzl` commit on a machine that could not fetch some external
-    /// repository fall back to invalidating everything. The oracle can live
-    /// with a partial answer because it only asks whether cambium's answer
-    /// *contains* Bazel's: a smaller Bazel answer weakens the check, it cannot
-    /// make it wrong.
+    /// **Oracle only.** The engine reads this out of the index's static load
+    /// closure instead; nothing on the `affected` path calls Bazel here. A
+    /// partial `rbuildfiles` can be missing exactly the package that loads the
+    /// changed file, and an under-approximation is unusable for an answer. The
+    /// comparison suite can live with one, because it only asks whether
+    /// cambium's answer *contains* Bazel's.
     pub fn rbuildfiles(&self, bzl_paths: &[String]) -> Result<(Rbuildfiles, bool)> {
         if bzl_paths.is_empty() {
             return Ok((Rbuildfiles::default(), false));
@@ -599,14 +590,11 @@ impl Bazel {
 
 /// What `rbuildfiles` said, split by what cambium can act on.
 ///
-/// The distinction matters for soundness. `rbuildfiles` answers with labels,
-/// and only some of them name a package in the main repository that cambium
-/// can re-query. A `.bzl` that defines repository rules — loaded from
-/// `MODULE.bazel` through a module extension or `use_repo_rule`, or from
-/// `WORKSPACE` — comes back naming the *external* repository it builds
-/// (`@my_repo//:BUILD`), or `//external:WORKSPACE`, and never a main-repo
-/// package. Flattening that to "no packages" would mark nothing dirty while
-/// the contents of every external repository just changed underneath us.
+/// `rbuildfiles` answers with labels, and only some of them name a main-repo
+/// package. A `.bzl` defining repository rules comes back naming the
+/// *external* repository it builds, or `//external:WORKSPACE`, and never a
+/// package — so flattening the answer to "no packages" would mark nothing
+/// dirty while the contents of every external repository changed underneath.
 ///
 /// Observed on 9.2.0 / 8.5.1 / 7.4.1 against a workspace whose `//app` target
 /// depends on `@my_repo//:x`:
@@ -619,24 +607,18 @@ impl Bazel {
 /// | WORKSPACE (7.4.1, 8.5.1 with `--noenable_bzlmod --enable_workspace`) | `rbuildfiles(bazel/ext.bzl)` | `//external:WORKSPACE`, `@my_repo//:BUILD`, every package |
 /// | either, any version | `rbuildfiles(<.bzl nothing loads>)` | *(empty)* |
 ///
-/// So: a repository-rule `.bzl` is never silent — it always names at least the
-/// external repository it defines — and a genuinely dead `.bzl` is the only
-/// thing that comes back empty. That is what made "empty means nothing is
-/// dirty" sound, and why anything non-empty that is not a main-repo package
-/// had to be treated as global.
+/// So a repository-rule `.bzl` is never silent, and a genuinely dead one is
+/// the only thing that comes back empty — which is why anything non-empty
+/// that is not a main-repo package is treated as global.
 ///
-/// The engine no longer asks: it reads the same answer out of the index's
-/// static load closure (`cambium_index::loads`), where the repository-rule
-/// case is "the file is in the closure of `MODULE.bazel`/`WORKSPACE`". The
-/// call survives as the comparison suite's oracle over that closure
-/// (`cambium_compare::bzloracle`), which is why the measurements above are
-/// still worth having: they are what the oracle is calibrated against.
+/// Oracle only: the engine reads the same answer out of the index's static
+/// load closure (`cambium_index::loads`). The table is kept because it is what
+/// the oracle (`cambium_compare::bzloracle`) is calibrated against.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rbuildfiles {
-    /// Main-repository packages whose `BUILD` loads one of the paths. The
-    /// engine used to re-query exactly these; it now reads the same set out of
-    /// the index's static load closure, and the comparison suite checks one
-    /// against the other.
+    /// Main-repository packages whose `BUILD` loads one of the paths — the
+    /// set the engine now reads out of the load closure instead, and that the
+    /// comparison suite checks against this.
     pub packages: Vec<String>,
     /// Labels that name a loader outside any main-repo package:
     /// `//:MODULE.bazel`, `//:WORKSPACE[.bazel|.bzlmod]`, `//external:*`, and

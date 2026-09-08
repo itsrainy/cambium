@@ -56,6 +56,8 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         materialize: args.write_index.is_some(),
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
+        // `--publish-base` follows the config's `baseline.publish_partial`.
+        allow_partial: false,
         max_depth: args.max_depth,
     };
     let outcome = engine.affected(&req)?;

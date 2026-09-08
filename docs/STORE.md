@@ -161,7 +161,8 @@ no AWS SDK in the dependency tree. `{name}` is substituted with the store key
 store = { kind = "command", \
   fetch_cmd = ["aws", "s3", "cp", "--quiet", "s3://my-bucket/cambium/{name}", "{path}"], \
   push_cmd  = ["aws", "s3", "cp", "--quiet", "{path}", "s3://my-bucket/cambium/{name}"], \
-  list_cmd  = ["aws", "s3", "ls", "--recursive", "s3://my-bucket/cambium/"] }
+  list_cmd  = ["aws", "s3", "ls", "--recursive", "s3://my-bucket/cambium/"], \
+  not_found_exit = 1 }
 ```
 
 GCS is the same shape:
@@ -170,7 +171,8 @@ GCS is the same shape:
 store = { kind = "command", \
   fetch_cmd = ["gsutil", "-q", "cp", "gs://my-bucket/cambium/{name}", "{path}"], \
   push_cmd  = ["gsutil", "-q", "cp", "{path}", "gs://my-bucket/cambium/{name}"], \
-  list_cmd  = ["gsutil", "ls", "-r", "gs://my-bucket/cambium/"] }
+  list_cmd  = ["gsutil", "ls", "-r", "gs://my-bucket/cambium/"], \
+  not_found_exit = 1 }
 ```
 
 Notes that matter in practice:
@@ -178,10 +180,32 @@ Notes that matter in practice:
 - **`fetch_cmd` must tolerate a missing object.** A non-zero exit is read as
   "not present", which is an ordinary outcome — the ancestor walk asks for many
   keys that do not exist. `aws s3 cp` exits 1 for a missing key, which is
-  exactly right.
-- **`list_cmd` output is read one key per line**, and only the part after the
-  last `/` is kept for matching, so the verbose `aws s3 ls` format works.
-  Prefer `--recursive`: the layout is nested.
+  exactly right. If the command wrote anything to stderr, the miss is logged at
+  `warn` rather than `debug`, because a silent fall back to a cold build is how
+  an expired credential hides.
+- **`not_found_exit` names the exit status that means "no such object"**, when
+  the command has one. With it set, every *other* non-zero exit is a store
+  error and the run fails instead of quietly rebuilding from scratch; without
+  it, any non-zero exit is a miss. `aws s3 cp` and `gsutil cp` both use 1, so
+  `not_found_exit = 1` is the right setting for both templates above.
+- **`list_cmd` output is read one key per line**, and the key kept is the whole
+  path from its first `indexes/` or `commits/` segment onward — the store's own
+  URL or bucket prefix is stripped, and lines that are directory headers or
+  blank are ignored. That is what makes the verbose `aws s3 ls --recursive`
+  format (`<date> <time> <size> <key>`) and `gsutil ls -r`'s full `gs://` URLs
+  both work. Use `--recursive`/`-r`: the layout is nested, and a listing that
+  stops at the top level finds nothing.
+
+  Listing matters because it decides what gets published: against a store that
+  can list, cambium keeps only the lineage-addressed keys and lets the walk
+  find them, and against one that cannot it writes extra lineage-less copies to
+  fetch blind. A listing that returned bare basenames would satisfy neither —
+  nothing would ever be found.
+- Fetched indexes land in the local cache directory — `<tmp>/cambium-cache` by
+  default, `baseline.cache_dir` in `cambium.toml`, or `--cache-dir` on the
+  command line. Each fetch is written under a temporary name and renamed into
+  place, so a concurrent reader never opens a half-transferred index, and an
+  interrupted fetch leaves nothing behind to be mistaken for one.
 - Credentials are the command's business, not cambium's. Instance roles,
   `AWS_PROFILE`, workload identity — whatever the CLI already does.
 - If you want server-side encryption, a storage class, or a retention policy,

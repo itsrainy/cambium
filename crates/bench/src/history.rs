@@ -440,6 +440,7 @@ pub fn history(
             no_full_build: true,
             materialize: true,
             publish_base: false,
+            allow_partial: false,
             max_depth: None,
         };
         let t = Instant::now();

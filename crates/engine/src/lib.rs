@@ -7,6 +7,7 @@
 //! the splice memcpy, which is proportional to the graph but measured in tens
 //! of milliseconds.
 
+pub mod baseline;
 pub mod bazelrc;
 pub mod config;
 pub mod engine;
@@ -19,6 +20,7 @@ pub mod revision;
 pub mod store;
 pub mod synthq;
 
+pub use baseline::BaselineCache;
 pub use config::Config;
 pub use engine::{AffectedRequest, BaselineOrigin, Engine, RunOutcome};
 pub use error::{EngineError, Result};

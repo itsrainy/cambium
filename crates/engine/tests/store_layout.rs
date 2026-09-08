@@ -32,8 +32,13 @@ fn identical_graphs_at_different_commits_have_identical_payloads() {
     // depend on: a commit that does not change the graph — a README edit, a
     // comment, a revert — produces the same bytes.
     let a = index_at("aaaaaaaa", false);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let b = index_at("bbbbbbbb", false);
+    // The two indexes must have been built at different times for the
+    // assertion to mean anything — `created_unix` is what would leak into the
+    // payload if provenance were not held out of it. Set it rather than
+    // sleeping past a second boundary to make it true.
+    let mut b = index_at("bbbbbbbb", false);
+    b.provenance.created_unix = a.provenance.created_unix + 3600;
+    assert_ne!(a.provenance.created_unix, b.provenance.created_unix);
 
     assert_ne!(
         a.provenance.commit, b.provenance.commit,
@@ -240,4 +245,89 @@ fn a_store_key_is_a_safe_relative_path() {
         Path::new(&key).components().count() == 3,
         "indexes/<lineage>/<commit>.bin is three components: {key}"
     );
+}
+
+/// The same round trip, through a `command` store over a nested directory.
+///
+/// This is the shape every real deployment uses — `aws s3 cp` and friends —
+/// and it was broken end to end: `list` returned only the basename of each
+/// key, so `fetch_baseline`, which looks for a key ending `/{tree}.bin` and
+/// for a `commits/` pointer, matched nothing, while `publish_index` skipped
+/// writing the lineage-less copies *because* the store could list. A listable
+/// command store therefore published indexes that could never be found again.
+///
+/// The store is three shell scripts. `list` prints `aws s3 ls --recursive`'s
+/// verbose format over a URL-ish prefix, because that is the output that has
+/// to parse, not a tidy one.
+#[test]
+fn a_command_store_over_a_nested_directory_round_trips() {
+    use cambium_engine::{Config, Engine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("bucket/cambium");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let script = |name: &str, body: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, format!("#!/bin/sh\nset -e\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p.display().to_string()
+    };
+    let r = root.display();
+    let fetch = script(
+        "fetch.sh",
+        &format!("[ -f \"{r}/$1\" ] || exit 7\ncp \"{r}/$1\" \"$2\""),
+    );
+    let push = script(
+        "push.sh",
+        &format!("mkdir -p \"$(dirname \"{r}/$1\")\"\ncp \"$2\" \"{r}/$1\""),
+    );
+    // `<date> <time> <size> s3://bucket/cambium/<key>`, one per line.
+    let list = script(
+        "list.sh",
+        &format!(
+            "cd \"{r}\" 2>/dev/null || exit 0\n\
+             find . -type f | sed 's|^\\./||' | \
+             while read -r k; do echo \"2026-09-08 12:00:00 1 s3://bucket/cambium/$k\"; done"
+        ),
+    );
+
+    let mut cfg = Config::default();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::Command {
+        fetch_cmd: vec![fetch, "{name}".into(), "{path}".into()],
+        push_cmd: vec![push, "{name}".into(), "{path}".into()],
+        list_cmd: vec![list],
+        // The fetch script says 7 for "no such key", so any other failure is a
+        // store error rather than a silently missing baseline.
+        not_found_exit: Some(7),
+    };
+    let engine = Engine::with_parts(
+        cfg,
+        cambium_diff::Repo::new(dir.path().to_path_buf()),
+        cambium_bazel::Bazel::at(dir.path().to_path_buf(), Some("/nonexistent/bazel")),
+    )
+    .with_cache_dir(dir.path().join("cache"));
+
+    let src = dir.path().join("idx.bin");
+    let mut d = index_at("feedface", false);
+    d.header.config_hash = engine.cfg.hash();
+    format::write_index(&src, &d).unwrap();
+    let written = engine
+        .publish_index(&src, &d.header.lineage, "feedface")
+        .unwrap();
+    assert!(
+        written.iter().all(|k| k.contains('/')),
+        "a listable store gets the nested keys only: {written:?}"
+    );
+
+    let found = engine
+        .fetch_baseline("feedface")
+        .unwrap()
+        .expect("a published index must be findable through a listing store");
+    assert_eq!(IndexFile::open(&found).unwrap().view().commit, "feedface");
+    assert!(engine.fetch_baseline("nosuchcommit").unwrap().is_none());
 }

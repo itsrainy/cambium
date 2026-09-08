@@ -106,6 +106,19 @@ pub struct Baseline {
     pub store: StoreConfig,
     pub max_ancestor_walk: usize,
     pub retention_days: u64,
+    /// Where fetched indexes, per-revision worktrees and publish scratch
+    /// files live. Defaults to `<tmp>/cambium-cache`; `--cache-dir` on the
+    /// command line overrides it. Not part of the config hash: it says where a
+    /// run keeps its files, not what the graph is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
+    /// Allow publishing an index whose `bazel query` finished with load errors
+    /// (exit 3 under `--keep_going`). Off by default: a partial index answers
+    /// correctly about the packages it has and knows nothing about the rest,
+    /// and once it is in the store every later run splices onto it. Not part
+    /// of the config hash, for the same reason as `cache_dir`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_partial: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -155,6 +168,13 @@ pub enum StoreConfig {
         push_cmd: Vec<String>,
         #[serde(default)]
         list_cmd: Vec<String>,
+        /// The exit status `fetch_cmd` uses for "no such object". When set,
+        /// any other non-zero exit is a store error rather than a miss; when
+        /// unset, every non-zero exit is read as a miss (and logged with its
+        /// stderr when there is any). `aws s3 cp` and `gsutil cp` both exit 1
+        /// for a missing key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_found_exit: Option<i32>,
     },
 }
 
@@ -215,6 +235,8 @@ impl Default for Baseline {
             store: StoreConfig::None,
             max_ancestor_walk: 20,
             retention_days: 30,
+            cache_dir: None,
+            publish_partial: false,
         }
     }
 }
@@ -313,6 +335,8 @@ impl Config {
     pub fn hash(&self) -> [u8; 32] {
         let mut graph_relevant = self.clone();
         graph_relevant.bazel.startup_flags.clear();
+        graph_relevant.baseline.cache_dir = None;
+        graph_relevant.baseline.publish_partial = false;
         let mut h = blake3::Hasher::new();
         h.update(b"cambium-rule-hash-v");
         h.update(&cambium_proto::RULE_HASH_VERSION.to_le_bytes());

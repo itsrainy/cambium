@@ -213,6 +213,7 @@ pub fn run(ctx: &StageContext, opts: &LegacyOptions) -> Result<LegacyRun> {
         no_full_build: true,
         materialize: false,
         publish_base: false,
+        allow_partial: false,
         max_depth: None,
     };
     let (cambium_median, cambium_p90) = crate::harness::time(ctx.runs, || {

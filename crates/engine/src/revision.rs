@@ -30,11 +30,10 @@ use std::path::{Path, PathBuf};
 
 use cambium_bazel::Bazel;
 use cambium_diff::Worktree;
-use cambium_index::PackageUpdate;
 
 use crate::config::CONFIG_FILE;
 use crate::error::{EngineError, Result};
-use crate::query::{BazelQuerier, PackageQuerier};
+use crate::query::{BazelQuerier, PackageQuerier, Rows};
 
 /// How many characters of a sha name a derived output base.
 const SHORT_SHA: usize = 12;
@@ -160,11 +159,11 @@ impl RevisionQuerier {
 }
 
 impl PackageQuerier for RevisionQuerier {
-    fn query(&self, packages: &[String]) -> std::result::Result<Vec<PackageUpdate>, EngineError> {
+    fn query(&self, packages: &[String]) -> std::result::Result<Rows, EngineError> {
         self.querier.query(packages)
     }
 
-    fn universe(&self) -> std::result::Result<crate::query::Universe, EngineError> {
+    fn universe(&self) -> std::result::Result<Rows, EngineError> {
         self.querier.universe()
     }
 

@@ -1,20 +1,21 @@
 //! The run: load a baseline, work out what is dirty, re-query it, splice, walk.
 
-use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use cambium_bazel::Bazel;
 use cambium_classify::{DirtySet, Matchers, PackageSet};
-use cambium_diff::Repo;
+use cambium_diff::{Change, Repo};
 use cambium_index::{
-    format, walk, GraphView, IndexBuilder, IndexData, IndexFile, IndexRef, NodeKind, WalkOptions,
+    walk, GraphView, IndexBuilder, IndexData, IndexFile, IndexRef, SpliceReport, WalkOptions,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::baseline::BaselineCache;
 use crate::bazelrc;
 use crate::config::Config;
 use crate::error::{EngineError, Result};
+use crate::externals::Externals;
 use crate::query::{BazelQuerier, FileSource, PackageQuerier};
 use crate::report::{AffectedReport, DirectReason, Explanation, Stats, Stopwatch, Timings};
 use crate::revision::{worktrees_dir, RevisionQuerier, RevisionWorkspace};
@@ -41,6 +42,14 @@ pub struct AffectedRequest {
     /// ancestor, or built cold. The head-side index is never published from
     /// `affected`; only `baseline update` publishes that.
     pub publish_base: bool,
+    /// Let `publish_base` publish an index Bazel could not load all of.
+    ///
+    /// A partial index answers `affected` correctly about the packages it has
+    /// and knows nothing about the rest, and once it is in the store every
+    /// later run splices onto it. So a run publishes one only when told to,
+    /// here or by `baseline.publish_partial` in the config; otherwise the
+    /// index is kept locally and the publish is skipped with a warning.
+    pub allow_partial: bool,
     /// Stop the reverse walk after this many hops from the direct set.
     /// `None` reports the whole closure.
     pub max_depth: Option<u32>,
@@ -56,6 +65,7 @@ impl AffectedRequest {
             no_full_build: false,
             materialize: false,
             publish_base: false,
+            allow_partial: false,
             max_depth: None,
         }
     }
@@ -66,16 +76,6 @@ impl AffectedRequest {
 /// A fetched index stays mmapped rather than being deserialised into owned
 /// memory: the `affected` path only ever reads it, and copying a few hundred
 /// megabytes to read it would undo what the delta overlay bought.
-impl std::fmt::Debug for Baseline {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let v = self.view();
-        f.debug_struct("Baseline")
-            .field("commit", &v.commit)
-            .field("nodes", &v.num_nodes())
-            .finish()
-    }
-}
-
 pub enum Baseline {
     Mapped(IndexFile),
     Owned(Box<IndexData>),
@@ -99,6 +99,16 @@ impl Baseline {
     }
 }
 
+impl std::fmt::Debug for Baseline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let v = self.view();
+        f.debug_struct("Baseline")
+            .field("commit", &v.commit)
+            .field("nodes", &v.num_nodes())
+            .finish()
+    }
+}
+
 /// How a run came by its base index. Only a computed one is worth publishing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaselineOrigin {
@@ -112,7 +122,7 @@ pub enum BaselineOrigin {
 
 /// A diff with the bazelrc changes it can prove irrelevant removed.
 struct ScreenedDiff<'a> {
-    changes: Cow<'a, [cambium_diff::Change]>,
+    changes: Vec<&'a Change>,
     /// Bazelrc files whose edit was classified safe.
     safe: usize,
     /// Set when a bazelrc edit invalidates the whole run.
@@ -135,6 +145,12 @@ pub struct Engine {
     cache_dir: PathBuf,
 }
 
+/// Where fetched indexes, revision worktrees and publish scratch files go
+/// when neither the config nor the caller says.
+pub fn default_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("cambium-cache")
+}
+
 impl Engine {
     /// Opens an engine rooted at the Bazel workspace containing `start`.
     pub fn open(
@@ -142,42 +158,40 @@ impl Engine {
         config_path: Option<&Path>,
         bazel_binary: Option<&str>,
     ) -> Result<Self> {
-        let workspace = cambium_bazel::find_workspace_root(start)
-            .ok_or_else(|| EngineError::NoWorkspace(start.to_path_buf()))?;
+        let mut bazel = Bazel::discover(start, bazel_binary)?;
+        let workspace = bazel.workspace().to_path_buf();
         let cfg = match config_path {
             Some(p) => Config::load_from(p)?,
             None => Config::load(&workspace)?,
         };
-        let binary = bazel_binary
-            .map(str::to_string)
-            .or_else(|| (!cfg.bazel.binary.is_empty()).then(|| cfg.bazel.binary.clone()));
-        let bazel = Bazel::at(workspace.clone(), binary.as_deref())
+        if bazel_binary.is_none() && !cfg.bazel.binary.is_empty() {
+            bazel = Bazel::at(workspace.clone(), Some(&cfg.bazel.binary));
+        }
+        let bazel = bazel
             .with_extra_query_flags(cfg.bazel.extra_query_flags.clone())
             .with_startup_flags(cfg.bazel.startup_flags.clone());
         let repo = Repo::discover(&workspace).unwrap_or_else(|_| Repo::new(workspace.clone()));
-        let store = store::from_config(&cfg.baseline.store);
-        let cache_dir = std::env::temp_dir().join("cambium-cache");
-        Ok(Self {
-            cfg,
-            repo,
-            bazel,
-            store,
-            cache_dir,
-        })
+        Ok(Self::with_parts(cfg, repo, bazel))
     }
 
-    /// Engine over an already-known workspace, for tests.
+    /// Engine over an already-known workspace.
     pub fn with_parts(cfg: Config, repo: Repo, bazel: Bazel) -> Self {
         let store = store::from_config(&cfg.baseline.store);
+        let cache_dir = cfg
+            .baseline
+            .cache_dir
+            .clone()
+            .unwrap_or_else(default_cache_dir);
         Self {
             cfg,
             repo,
             bazel,
             store,
-            cache_dir: std::env::temp_dir().join("cambium-cache"),
+            cache_dir,
         }
     }
 
+    /// Overrides the cache directory (`--cache-dir` on the command line).
     pub fn with_cache_dir(mut self, dir: PathBuf) -> Self {
         self.cache_dir = dir;
         self
@@ -185,6 +199,10 @@ impl Engine {
 
     pub fn workspace(&self) -> &Path {
         self.bazel.workspace()
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
     }
 
     /// Reads BUILD files from `root`, falling back to `git show` at `rev` for
@@ -201,8 +219,14 @@ impl Engine {
     /// same content is the same checkout as far as `bazel query` is concerned,
     /// and the store already keys indexes by tree for the same reason. A
     /// revision git cannot resolve (a synthetic id in the tests, a sha this
-    /// clone does not have) is left to the working tree, which is the only
-    /// thing there is.
+    /// clone does not have) is left to the working tree — not because that is
+    /// certainly right, but because it is the only checkout there is: `git
+    /// worktree add` on a revision git cannot name would fail, and failing the
+    /// whole run over it would break every synthetic test, which uses ids like
+    /// `"base"` that were never commits. On a real repository an unresolvable
+    /// revision means the caller passed a sha this clone does not have, and
+    /// the run goes on to fail at `git diff` a moment later with a message
+    /// that actually says so.
     ///
     /// A *dirty* working tree at HEAD stays on the fast path deliberately:
     /// `cambi affected` on a developer's checkout is meant to index the edits
@@ -278,161 +302,58 @@ impl Engine {
         self.repo.tree_of(rev).unwrap_or_else(|_| rev.to_string())
     }
 
-    /// Finds an index for `commit` in the artifact store.
-    ///
-    /// Indexes are keyed by tree hash — `indexes/<lineage>/<tree>.bin` — so the
-    /// commit is first resolved to its tree, and any commit with the same
-    /// content (a rebase, a squash-merge, a cherry-pick) hits the same blob. A
-    /// run does not know the lineage before it has an index, so a store that
-    /// can enumerate is asked for the key ending in this tree; failing that,
-    /// for the `commits/<lineage>/<sha>` pointer, which names the tree when
-    /// git could not. A store that cannot enumerate (plain HTTP) is asked for
-    /// the lineage-less fallback keys the publisher also writes. Keys from the
-    /// sha-addressed layout this replaces are still recognised.
+    /// The store, with the cache directory and config hash a fetch needs.
+    fn baselines(&self) -> Option<BaselineCache<'_>> {
+        self.store
+            .as_deref()
+            .map(|s| BaselineCache::new(s, &self.cache_dir, self.cfg.hash()))
+    }
+
+    /// Finds an index for `commit` in the artifact store and caches it
+    /// locally. See [`BaselineCache::fetch`] for how a commit becomes a key.
     pub fn fetch_baseline(&self, commit: &str) -> Result<Option<PathBuf>> {
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        std::fs::create_dir_all(&self.cache_dir)?;
-        let tree = self.tree_of(commit);
-        let mut suffixes = vec![format!("/{tree}.bin")];
-        if tree != commit {
-            suffixes.push(format!("/{commit}.bin"));
+        match self.baselines() {
+            Some(c) => c.fetch(commit, &self.tree_of(commit)),
+            None => Ok(None),
         }
-        suffixes.push(format!("-{commit}.bin"));
-        if let Ok(names) = store.list() {
-            // Several lineages can hold this tree: every `baseline build`
-            // mints one, and a config change (or a rule-hash version bump)
-            // leaves the old lineage's blobs behind. Take the first one built
-            // with this configuration; an incompatible blob is not a baseline,
-            // it is a leftover.
-            let candidates = names
-                .iter()
-                .filter(|n| suffixes.iter().any(|s| n.ends_with(s)));
-            for name in candidates {
-                if let Some(dest) = self.fetch_if_compatible(store.as_ref(), name)? {
-                    return Ok(Some(dest));
-                }
-            }
-            // Tooling that only has a sha: follow the pointer to the tree.
-            let pointer_suffix = format!("/{commit}");
-            let pointers = names
-                .iter()
-                .filter(|n| n.starts_with("commits/") && n.ends_with(&pointer_suffix));
-            for name in pointers {
-                let dest = self.cache_dir.join(cache_name(name));
-                if !store.fetch(name, &dest)? {
-                    continue;
-                }
-                let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
-                let suffix = format!("/{pointed}.bin");
-                for name in names.iter().filter(|n| n.ends_with(&suffix)) {
-                    if let Some(dest) = self.fetch_if_compatible(store.as_ref(), name)? {
-                        return Ok(Some(dest));
-                    }
-                }
-            }
-            return Ok(None);
-        }
-        for name in [tree_addressed_key(&tree), commit_addressed_key(commit)] {
-            if let Some(dest) = self.fetch_if_compatible(store.as_ref(), &name)? {
-                return Ok(Some(dest));
-            }
-        }
-        let pointer = commit_addressed_pointer(commit);
-        let dest = self.cache_dir.join(cache_name(&pointer));
-        if store.fetch(&pointer, &dest)? {
-            let pointed = std::fs::read_to_string(&dest)?.trim().to_string();
-            let name = tree_addressed_key(&pointed);
-            if let Some(dest) = self.fetch_if_compatible(store.as_ref(), &name)? {
-                return Ok(Some(dest));
-            }
-        }
-        Ok(None)
     }
 
-    /// Fetches one index blob into the cache and keeps it only if it was
-    /// built with this configuration. An incompatible blob is logged and
-    /// skipped, so that a store carrying an older lineage neither wins over a
-    /// compatible one nor stops the ancestor walk.
-    fn fetch_if_compatible(
-        &self,
-        store: &dyn ArtifactStore,
-        name: &str,
-    ) -> Result<Option<PathBuf>> {
-        let dest = self.cache_dir.join(cache_name(name));
-        if !store.fetch(name, &dest)? {
-            return Ok(None);
-        }
-        // A blob written by an older build of cambium is not corrupt, just
-        // stale: a store outlives format bumps the same way it outlives config
-        // edits, and the walk must step past it rather than stop.
-        let f = match IndexFile::open(&dest) {
-            Ok(f) => f,
-            Err(
-                e @ (cambium_index::IndexError::BadVersion { .. }
-                | cambium_index::IndexError::BadMagic { .. }),
-            ) => {
-                tracing::warn!(key = name, error = %e, "skipping an index this build cannot read");
-                let _ = std::fs::remove_file(&dest);
-                return Ok(None);
-            }
-            Err(e) => return Err(e.into()),
-        };
-        if f.view().config_hash != self.cfg.hash() {
-            tracing::warn!(
-                key = name,
-                "skipping an index built with a different cambium.toml (or an older rule-hash version)"
-            );
-            return Ok(None);
-        }
-        Ok(Some(dest))
-    }
-
-    /// Publishes an index under `indexes/<lineage>/<tree>.bin`, with a
-    /// `commits/<lineage>/<sha>` pointer naming the tree, plus lineage-less
-    /// copies of both when the store cannot be listed.
+    /// Publishes the index file at `path` under every key the store layout
+    /// wants for `commit` (see [`BaselineCache::publish`]), and returns them.
     ///
-    /// Idempotent: the payload is a function of the graph, so republishing the
-    /// same tree rewrites identical bytes and concurrent publishers cannot
-    /// disagree. Two commits with the same tree publish to the same key and
-    /// differ only in the provenance trailer, which records whichever commit
-    /// wrote last.
+    /// A partial index — one whose query finished with load errors — is
+    /// refused unless `baseline.publish_partial` is set: publishing it would
+    /// hand every later run a base that silently lacks packages.
     pub fn publish_index(
         &self,
         path: &Path,
         lineage: &[u8; 16],
         commit: &str,
     ) -> Result<Vec<String>> {
-        let Some(store) = &self.store else {
+        self.publish_index_allowing_partial(path, lineage, commit, false)
+    }
+
+    fn publish_index_allowing_partial(
+        &self,
+        path: &Path,
+        lineage: &[u8; 16],
+        commit: &str,
+        allow_partial: bool,
+    ) -> Result<Vec<String>> {
+        let Some(cache) = self.baselines() else {
             return Err(EngineError::NoStore);
         };
-        let tree = self.tree_of(commit);
-        let listable = store.list().is_ok();
-        let mut names = vec![format::index_key(lineage, &tree)];
-        if !listable {
-            names.push(tree_addressed_key(&tree));
-        }
-        for n in &names {
-            store.publish(n, path)?;
-        }
-        if tree != commit {
-            let pointer_file = self
-                .cache_dir
-                .join(format!("pointer.{}", format::temp_suffix()));
-            std::fs::create_dir_all(&self.cache_dir)?;
-            std::fs::write(&pointer_file, format!("{tree}\n"))?;
-            let mut pointers = vec![format::commit_pointer_key(lineage, commit)];
-            if !listable {
-                pointers.push(commit_addressed_pointer(commit));
+        if !(allow_partial || self.cfg.baseline.publish_partial) {
+            let f = IndexFile::open(path)?;
+            let load = crate::inspect::PartialLoad::from(f.view());
+            if load.partial {
+                return Err(EngineError::PartialIndex {
+                    commit: commit.to_string(),
+                    packages_in_error: load.packages_in_error,
+                });
             }
-            for p in &pointers {
-                store.publish(p, &pointer_file)?;
-            }
-            let _ = std::fs::remove_file(&pointer_file);
-            names.extend(pointers);
         }
-        Ok(names)
+        cache.publish(path, lineage, commit, &self.tree_of(commit))
     }
 
     /// Locates a usable baseline for `base` (spec 6.5): the store, then
@@ -442,6 +363,9 @@ impl Engine {
         base: &str,
         req: &AffectedRequest,
     ) -> Result<(Baseline, BaselineOrigin)> {
+        if let Some(found) = self.fetch_mapped(base)? {
+            return Ok(found);
+        }
         // The replay's head is `base`, so its querier is the one built for
         // `base` — not the one the outer run uses for its own head. On a
         // checkout that is at head (the usual `affected` shape) that querier
@@ -453,13 +377,7 @@ impl Engine {
         // `base` itself: on a checkout at head, building it means a detached
         // worktree and a second Bazel server, which is seconds of work that a
         // fetched baseline never needs.
-        if let Some(path) = self.fetch_baseline(base)? {
-            let f = IndexFile::open(&path)?;
-            self.check_compatible(f.view(), &path)?;
-            tracing::info!(%base, path = %path.display(), "loaded baseline index");
-            return Ok((Baseline::Mapped(f), BaselineOrigin::Fetched));
-        }
-        self.resolve_baseline_with(base, req, &self.bazel_querier(base)?)
+        self.replay_or_build(base, req, &self.bazel_querier(base)?)
     }
 
     /// As [`Engine::resolve_baseline`], with the row source for the replay step
@@ -471,13 +389,31 @@ impl Engine {
         req: &AffectedRequest,
         querier: &dyn PackageQuerier,
     ) -> Result<(Baseline, BaselineOrigin)> {
-        if let Some(path) = self.fetch_baseline(base)? {
-            let f = IndexFile::open(&path)?;
-            self.check_compatible(f.view(), &path)?;
-            tracing::info!(%base, path = %path.display(), "loaded baseline index");
-            return Ok((Baseline::Mapped(f), BaselineOrigin::Fetched));
+        if let Some(found) = self.fetch_mapped(base)? {
+            return Ok(found);
         }
+        self.replay_or_build(base, req, querier)
+    }
 
+    /// The store's index for `base`, mapped and checked against the config.
+    fn fetch_mapped(&self, base: &str) -> Result<Option<(Baseline, BaselineOrigin)>> {
+        let Some(path) = self.fetch_baseline(base)? else {
+            return Ok(None);
+        };
+        let f = IndexFile::open(&path)?;
+        self.check_compatible(f.view(), &path)?;
+        tracing::info!(%base, path = %path.display(), "loaded baseline index");
+        Ok(Some((Baseline::Mapped(f), BaselineOrigin::Fetched)))
+    }
+
+    /// The store had nothing for `base`: bring the nearest indexed ancestor
+    /// forward, or build from scratch.
+    fn replay_or_build(
+        &self,
+        base: &str,
+        req: &AffectedRequest,
+        querier: &dyn PackageQuerier,
+    ) -> Result<(Baseline, BaselineOrigin)> {
         let max = self.cfg.baseline.max_ancestor_walk;
         for anc in self.repo.first_parent_ancestors(base, max)? {
             let Some(path) = self.fetch_baseline(&anc)? else {
@@ -508,21 +444,18 @@ impl Engine {
                 )),
                 // The ancestor..base range invalidated everything, so the
                 // ancestor's index cannot be brought forward.
-                None => {
-                    if req.no_full_build {
-                        Err(EngineError::BaselineUnavailable {
-                            base: base.to_string(),
-                        })
-                    } else {
-                        Ok((
-                            Baseline::Owned(Box::new(self.full_build_with(base, querier)?)),
-                            BaselineOrigin::ColdBuild,
-                        ))
-                    }
-                }
+                None => self.cold_baseline(base, req, querier),
             };
         }
+        self.cold_baseline(base, req, querier)
+    }
 
+    fn cold_baseline(
+        &self,
+        base: &str,
+        req: &AffectedRequest,
+        querier: &dyn PackageQuerier,
+    ) -> Result<(Baseline, BaselineOrigin)> {
         if req.no_full_build {
             return Err(EngineError::BaselineUnavailable {
                 base: base.to_string(),
@@ -537,33 +470,42 @@ impl Engine {
     /// Publishes a base index this run had to compute, under the base commit.
     ///
     /// Only ever the base. The head-side index of an `affected` run is not
-    /// published: a pull-request head is not on the main line, and publishing
-    /// it would fill the store with indexes nothing will ever ask for again —
-    /// and, once the delta overlay lands, an `affected` run will not even
-    /// materialise one. `baseline update` is what publishes head indexes.
+    /// published: a pull-request head is not on the main line, publishing it
+    /// would fill the store with indexes nothing will ever ask for again, and
+    /// an `affected` run does not even materialise one. `baseline update` is
+    /// what publishes head indexes.
     pub fn publish_base_index(&self, index: &IndexData) -> Result<Vec<String>> {
+        self.publish_base_index_allowing_partial(index, false)
+    }
+
+    fn publish_base_index_allowing_partial(
+        &self,
+        index: &IndexData,
+        allow_partial: bool,
+    ) -> Result<Vec<String>> {
         let commit = index.provenance.commit.clone();
         let dir = self.cache_dir.join("publish");
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir).map_err(EngineError::io_at(&dir))?;
         let path = dir.join(format!("{commit}.bin"));
         cambium_index::format::write_index(&path, index)?;
-        let names = self.publish_index(&path, &index.header.lineage, &commit)?;
+        let names = self.publish_index_allowing_partial(
+            &path,
+            &index.header.lineage,
+            &commit,
+            allow_partial,
+        );
         let _ = std::fs::remove_file(&path);
-        Ok(names)
+        names
     }
 
     /// Publishes a base index that is already a file on disk (a mapped
     /// baseline), or one held in memory.
-    pub fn publish_baseline_for_test(&self, base: &Baseline) -> Result<Vec<String>> {
-        self.publish_baseline(base)
-    }
-
-    fn publish_baseline(&self, base: &Baseline) -> Result<Vec<String>> {
+    pub fn publish_baseline(&self, base: &Baseline, allow_partial: bool) -> Result<Vec<String>> {
         match base {
-            Baseline::Owned(d) => self.publish_base_index(d),
+            Baseline::Owned(d) => self.publish_base_index_allowing_partial(d, allow_partial),
             Baseline::Mapped(f) => {
                 let v = f.view();
-                self.publish_index(f.path(), &v.lineage, v.commit)
+                self.publish_index_allowing_partial(f.path(), &v.lineage, v.commit, allow_partial)
             }
         }
     }
@@ -605,7 +547,7 @@ impl Engine {
                 BaselineOrigin::Fetched => {
                     tracing::debug!(%base, "base index came from the store; nothing to publish")
                 }
-                origin => match self.publish_baseline(&base_index) {
+                origin => match self.publish_baseline(&base_index, req.allow_partial) {
                     Ok(names) => tracing::info!(
                         %base, ?origin, published = ?names,
                         "published the computed base index"
@@ -647,23 +589,12 @@ impl Engine {
     /// the file was added, removed, or is not text, the run is global exactly as
     /// before. The screen can only ever shrink an answer that would otherwise
     /// have been `//...`.
-    fn screen_bazelrc<'a>(
-        &self,
-        changes: &'a [cambium_diff::Change],
-        req: &AffectedRequest,
-    ) -> ScreenedDiff<'a> {
-        if !changes.iter().any(|c| bazelrc::is_bazelrc_path(&c.path)) {
-            return ScreenedDiff {
-                changes: Cow::Borrowed(changes),
-                safe: 0,
-                global_reason: None,
-            };
-        }
-        let mut kept: Vec<cambium_diff::Change> = Vec::with_capacity(changes.len());
+    fn screen_bazelrc<'a>(&self, changes: &'a [Change], req: &AffectedRequest) -> ScreenedDiff<'a> {
+        let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
         let mut safe = 0usize;
         for c in changes {
             if !bazelrc::is_bazelrc_path(&c.path) {
-                kept.push(c.clone());
+                kept.push(c);
                 continue;
             }
             match self.bazelrc_verdict(c, req) {
@@ -677,7 +608,7 @@ impl Engine {
                 Err(reason) => {
                     tracing::info!(path = %c.path, %reason, "bazelrc edit forces a global run");
                     return ScreenedDiff {
-                        changes: Cow::Borrowed(changes),
+                        changes: changes.iter().collect(),
                         safe,
                         global_reason: Some(reason),
                     };
@@ -685,7 +616,7 @@ impl Engine {
             }
         }
         ScreenedDiff {
-            changes: Cow::Owned(kept),
+            changes: kept,
             safe,
             global_reason: None,
         }
@@ -695,7 +626,7 @@ impl Engine {
     /// `Err(reason)` if it is not or cannot be read.
     fn bazelrc_verdict(
         &self,
-        c: &cambium_diff::Change,
+        c: &Change,
         req: &AffectedRequest,
     ) -> std::result::Result<usize, String> {
         use cambium_diff::Status;
@@ -729,7 +660,7 @@ impl Engine {
     pub fn compute(
         &self,
         base_view: IndexRef<'_>,
-        changes: &[cambium_diff::Change],
+        changes: &[Change],
         querier: &dyn PackageQuerier,
         req: &AffectedRequest,
     ) -> Result<RunOutcome> {
@@ -750,7 +681,7 @@ impl Engine {
     pub fn compute_with_texts(
         &self,
         base_view: IndexRef<'_>,
-        changes: &[cambium_diff::Change],
+        changes: &[Change],
         querier: &dyn PackageQuerier,
         req: &AffectedRequest,
         texts: &dyn crate::externals::WorkspaceText,
@@ -759,11 +690,9 @@ impl Engine {
         let mut timings = Timings::default();
         let mut stats = Stats {
             base_nodes: base_view.num_nodes(),
+            changed_files: changes.len(),
             ..Default::default()
         };
-
-        // ---- dirty set ----
-        stats.changed_files = changes.len();
 
         // ---- external repositories ----
         //
@@ -774,7 +703,7 @@ impl Engine {
         let mut ext = if self.cfg.externals.enabled {
             crate::externals::analyse(base_view, changes, &req.base, &req.head, texts)
         } else {
-            crate::externals::Externals::default()
+            Externals::default()
         };
         stats.repos_dirty_by_input = ext.by_input;
         stats.repos_dirty_by_module = ext.by_module;
@@ -784,6 +713,8 @@ impl Engine {
         matchers.exempt(ext.handled.clone());
         let mut packages = PackageSet::from_index(base_view);
 
+        // ---- dirty set ----
+        //
         // A changed bazelrc is read before the generic invalidator check, and
         // dropped from the diff when every flag it changed is known not to
         // reach loading or analysis. Anything else about it — an unknown flag,
@@ -804,137 +735,16 @@ impl Engine {
                 index: None,
             });
         }
-        let changes: &[cambium_diff::Change] = &screened.changes;
 
         let mut dirty = cambium_classify::dirty_set(
-            changes,
+            &screened.changes,
             &mut packages,
             &matchers,
             &cambium_classify::IndexConsumers(base_view),
         );
 
-        // ---- changed `.bzl` files ----
-        //
-        // Answered from the index's static load closure (see
-        // `cambium_index::loads`), not from Bazel. The `rbuildfiles` call this
-        // replaces needed Sky Query, which loads every external repository and
-        // therefore fails with exit 3 on any machine that cannot fetch one of
-        // them — and a partial answer there is unusable, so the run had to
-        // invalidate everything. The closure is computed at index time from the
-        // text of the BUILD and `.bzl` files, so this path has no Bazel process
-        // in it and no failure mode: one binary search and one CSR row per
-        // changed file.
-        let mut bzl_dirty: BTreeSet<String> = BTreeSet::new();
-        if !dirty.global && !dirty.changed_bzl.is_empty() {
-            let paths: Vec<String> = dirty.changed_bzl.iter().cloned().collect();
-            if !base_view.bzl_closure {
-                // An index built by a row source that could not read the tree.
-                // "No consumers" and "we never looked" are the same empty
-                // table, and only one of them is safe to act on.
-                tracing::warn!(
-                    count = paths.len(),
-                    "the base index carries no static .bzl load closure; treating the change as global"
-                );
-                dirty.global = true;
-                dirty.global_reason = Some(no_closure_reason(&paths));
-            } else {
-                let mut workspace_level: Vec<String> = Vec::new();
-                for path in &paths {
-                    // A `.bzl` the closure does not know is loaded by nothing:
-                    // a dead file, or one added by this very commit (in which
-                    // case whatever BUILD file started loading it changed too,
-                    // and that dirties the package on its own).
-                    let Some(id) = base_view.bzl_id(path) else {
-                        tracing::debug!(%path, "no package or workspace file loads this .bzl");
-                        continue;
-                    };
-                    // Reachable from MODULE.bazel/WORKSPACE: it can define
-                    // repository rules, whose output is not in the index at
-                    // all. The index records which repositories each such
-                    // `.bzl` defines (format 5), so the usual answer is "these
-                    // repositories moved"; only a file no extension and no
-                    // repo rule reaches still escalates, as the `rbuildfiles`
-                    // path always did.
-                    if base_view.bzl_in_workspace(id) {
-                        match self
-                            .cfg
-                            .externals
-                            .enabled
-                            .then(|| crate::externals::repos_of_workspace_bzl(base_view, id))
-                            .flatten()
-                        {
-                            Some(repos) => {
-                                tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
-                                ext.by_bzl += repos.len();
-                                // The rule's implementation moved, so what it
-                                // writes into the repository can be anything.
-                                ext.load_repos.extend(repos.iter().cloned());
-                                ext.repos.extend(repos);
-                            }
-                            None => workspace_level.push(path.clone()),
-                        }
-                    }
-                    for &p in base_view.bzl_consumers(id) {
-                        if base_view.package_tombstoned(p) {
-                            continue;
-                        }
-                        let pkg = base_view.package_name(p).to_string();
-                        bzl_dirty.insert(pkg.clone());
-                        dirty.dirty.insert(pkg);
-                    }
-                }
-                stats.bzl_closure_hits = bzl_dirty.len();
-                tracing::debug!(
-                    changed = paths.len(),
-                    packages = bzl_dirty.len(),
-                    "resolved changed .bzl files from the static load closure"
-                );
-                if !workspace_level.is_empty() {
-                    tracing::warn!(
-                        files = ?workspace_level,
-                        "a changed .bzl is loaded outside any package; treating the change as global"
-                    );
-                    dirty.global = true;
-                    dirty.global_reason = Some(workspace_level_reason(&workspace_level));
-                }
-            }
-        }
-        // A deleted `BUILD` does not always delete the package. `bazel/bazel`
-        // spent several commits carrying both `docs/BUILD` and
-        // `docs/BUILD.bazel`, and the commit that removed the old one reads,
-        // in the diff alone, exactly like a package deletion — after which
-        // the package is dropped from the index and every target in it
-        // becomes invisible to every later revision. (The change-set comparison
-        // found this: `//docs:docs` and `//docs:srcs` were reported by both
-        // bazel-diff and Tango, on pairs where cambium's index no longer had
-        // a `docs` package at all.) The diff cannot tell the two cases apart,
-        // but the head worktree can: if either BUILD file is still on disk,
-        // the package lives and is merely dirty.
-        if !dirty.global && !dirty.deleted_packages.is_empty() {
-            // The querier's own checkout, which for a revision the working
-            // tree is not on is a worktree at that revision — asking the
-            // working tree whether a BUILD file survived would answer for the
-            // wrong revision.
-            let ws = querier
-                .workspace()
-                .unwrap_or_else(|| self.bazel.workspace())
-                .to_path_buf();
-            let survivors: Vec<String> = dirty
-                .deleted_packages
-                .iter()
-                .filter(|p| {
-                    let dir = ws.join(p.as_str());
-                    dir.join("BUILD").exists() || dir.join("BUILD.bazel").exists()
-                })
-                .cloned()
-                .collect();
-            for p in survivors {
-                tracing::debug!(package = %p, "a BUILD file went away but the package did not");
-                dirty.deleted_packages.remove(&p);
-                dirty.dirty.insert(p);
-            }
-        }
-
+        let bzl_dirty = self.resolve_changed_bzl(base_view, &mut dirty, &mut ext, &mut stats);
+        keep_surviving_packages(&mut dirty, querier, self.workspace());
         stats.ignored_files = dirty.ignored;
 
         // ---- from dirty repositories to graph work ----
@@ -997,15 +807,13 @@ impl Engine {
         let limit = self.cfg.limits.max_dirty_packages;
         let cold = limit > 0 && dirty.dirty.len() > limit;
         let mut cold_reason = None;
-        let mut partial = None;
-        let (to_query, updates) = if cold {
+        let (to_query, rows) = if cold {
             let reason = cold_rebuild_reason(dirty.dirty.len(), limit);
             tracing::info!(%reason, "re-indexing the whole repository at head");
             cold_reason = Some(reason);
             let u = querier.universe()?;
-            partial = u.partial;
             let names: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
-            (names, u.updates)
+            (names, u)
         } else {
             let to_query: Vec<String> = dirty
                 .dirty
@@ -1013,20 +821,21 @@ impl Engine {
                 .filter(|p| !dirty.deleted_packages.contains(*p))
                 .cloned()
                 .collect();
-            let updates = querier.query(&to_query)?;
-            (to_query, updates)
+            let rows = querier.query(&to_query)?;
+            (to_query, rows)
         };
         stats.cold_rebuild = cold;
-        stats.queried_targets = updates.iter().map(|u| u.targets.len()).sum();
+        stats.queried_targets = rows.updates.iter().map(|u| u.targets.len()).sum();
         timings.query = sw.lap();
 
         // ---- splice ----
         let mut builder = IndexBuilder::from_view(base_view);
         builder.set_config_hash(self.cfg.hash());
-        // A `//...` query that exited 3 under `--keep_going` loaded some of the
-        // repository, and the index has to say which part, exactly as
-        // `full_build_with` records it.
-        if let Some(e) = &partial {
+        // A query that exited 3 under `--keep_going` loaded some of what it
+        // was asked for, and the index has to say so — a package that failed
+        // to load was tombstoned as if deleted, and only this flag tells a
+        // reader that its targets are missing rather than gone.
+        if let Some(e) = &rows.partial {
             builder.set_partial(e.count, e.packages.clone());
         }
         // Only the materialised path: an overlay is never published, and the
@@ -1050,17 +859,12 @@ impl Engine {
             let ids = builder.delete_package(p);
             deleted_by_package.push((p.clone(), ids));
         }
-        let splice = builder.apply_packages(&updates);
+        let splice = builder.apply_packages(&rows.updates);
 
         // Resolve changed source files to node ids while the builder still has
         // its interner: rebuilding a label map over a finished index costs
         // O(labels), and at a few million labels that is the single most
         // expensive thing in an otherwise change-proportional run.
-        let wopts = WalkOptions {
-            include_manual: req.include_manual,
-            explain: req.explain,
-            max_depth: req.max_depth,
-        };
         let mut changed_file_ids: Vec<(u32, String)> = Vec::with_capacity(dirty.direct_files.len());
         for path in &dirty.direct_files {
             let Some(pkg) = packages.owner_of(path) else {
@@ -1075,118 +879,275 @@ impl Engine {
             }
         }
 
+        let direct_inputs = DirectInputs {
+            splice: &splice,
+            deleted_by_package: &deleted_by_package,
+            changed_file_ids: &changed_file_ids,
+            bzl_dirty: &bzl_dirty,
+            external_nodes: &external_nodes,
+        };
+        let mut run = RunState {
+            req,
+            dirty: &dirty,
+            timings,
+            stats,
+            cold_reason,
+            sw,
+        };
+
         // Materialise a whole new index, or take only the delta.
         //
         // Both answer the same question over the same graph — one implements it
         // as a complete index, the other as the base plus corrections — and the
         // property tests compute every synthetic revision both ways and require
         // the answers to be identical.
-        let (report, index) = if req.materialize {
+        if req.materialize {
             let head_index = builder.finish(&req.head);
             let hv = head_index.view();
-            stats.head_nodes = hv.num_nodes();
-            stats.head_edges = hv.num_edges() as u64;
-            timings.splice = sw.lap();
-
-            let (direct, reasons) = derive_direct(
-                &hv,
-                &splice,
-                &deleted_by_package,
-                &changed_file_ids,
-                &bzl_dirty,
-                &external_nodes,
-            );
-            stats.direct_targets = direct.len();
-            timings.direct = sw.lap();
-
-            let result = walk::walk_view(&hv, &direct, &wopts);
-            stats.affected_targets = result.affected.len();
-            timings.walk = sw.lap();
-
-            (
-                finish_report(
-                    &hv,
-                    req,
-                    &dirty,
-                    &direct,
-                    &result,
-                    &reasons,
-                    timings,
-                    stats,
-                    cold_reason,
-                ),
-                Some(head_index),
-            )
+            run.stats.head_nodes = hv.num_nodes();
+            run.stats.head_edges = hv.num_edges() as u64;
+            let report = run.answer(&hv, &direct_inputs);
+            Ok(RunOutcome {
+                report,
+                index: Some(head_index),
+            })
         } else {
             let overlay = builder.finish_overlay();
-            stats.head_nodes = overlay.num_nodes();
-            // The overlay never counts the graph's edges; it only knows the
-            // ones it changed.
-            stats.head_edges = base_view.num_edges() as u64;
-            timings.splice = sw.lap();
-            tracing::debug!(delta = ?overlay.delta_size(), "walking a delta overlay");
+            let delta = overlay.delta_size();
+            run.stats.head_nodes = overlay.num_nodes();
+            // The overlay knows the base's edge count and every edge it added
+            // or removed, which is the same number the materialised index
+            // would report.
+            run.stats.head_edges = base_view.num_edges() as u64 + delta.edges_added as u64
+                - delta.edges_removed as u64;
+            tracing::debug!(delta = ?delta, "walking a delta overlay");
+            let report = run.answer(&overlay, &direct_inputs);
+            Ok(RunOutcome {
+                report,
+                index: None,
+            })
+        }
+    }
 
-            let (direct, reasons) = derive_direct(
-                &overlay,
-                &splice,
-                &deleted_by_package,
-                &changed_file_ids,
-                &bzl_dirty,
-                &external_nodes,
+    /// Turns the changed `.bzl` files into dirty packages, and returns the
+    /// packages dirtied that way (they need the `BzlClosure` direct reason).
+    ///
+    /// Answered from the index's static load closure (see
+    /// `cambium_index::loads`), not from Bazel. The `rbuildfiles` call this
+    /// replaces needed Sky Query, which loads every external repository and
+    /// therefore fails with exit 3 on any machine that cannot fetch one of
+    /// them — and a partial answer there is unusable, so the run had to
+    /// invalidate everything. The closure is computed at index time from the
+    /// text of the BUILD and `.bzl` files, so this path has no Bazel process
+    /// in it and no failure mode: one binary search and one CSR row per
+    /// changed file.
+    fn resolve_changed_bzl(
+        &self,
+        base_view: IndexRef<'_>,
+        dirty: &mut DirtySet,
+        ext: &mut Externals,
+        stats: &mut Stats,
+    ) -> BTreeSet<String> {
+        let mut bzl_dirty: BTreeSet<String> = BTreeSet::new();
+        if dirty.global || dirty.changed_bzl.is_empty() {
+            return bzl_dirty;
+        }
+        let paths: Vec<String> = dirty.changed_bzl.iter().cloned().collect();
+        if !base_view.bzl_closure {
+            // An index built by a row source that could not read the tree.
+            // "No consumers" and "we never looked" are the same empty
+            // table, and only one of them is safe to act on.
+            tracing::warn!(
+                count = paths.len(),
+                "the base index carries no static .bzl load closure; treating the change as global"
             );
-            stats.direct_targets = direct.len();
-            timings.direct = sw.lap();
+            dirty.global = true;
+            dirty.global_reason = Some(no_closure_reason(&paths));
+            return bzl_dirty;
+        }
+        let mut workspace_level: Vec<String> = Vec::new();
+        for path in &paths {
+            // A `.bzl` the closure does not know is loaded by nothing: a dead
+            // file, or one added by this very commit (in which case whatever
+            // BUILD file started loading it changed too, and that dirties the
+            // package on its own).
+            let Some(id) = base_view.bzl_id(path) else {
+                tracing::debug!(%path, "no package or workspace file loads this .bzl");
+                continue;
+            };
+            // Reachable from MODULE.bazel/WORKSPACE: it can define repository
+            // rules, whose output is not in the index at all. The index
+            // records which repositories each such `.bzl` defines (format 5),
+            // so the usual answer is "these repositories moved"; only a file
+            // no extension and no repo rule reaches still escalates, as the
+            // `rbuildfiles` path always did.
+            if base_view.bzl_in_workspace(id) {
+                match self
+                    .cfg
+                    .externals
+                    .enabled
+                    .then(|| crate::externals::repos_of_workspace_bzl(base_view, id))
+                    .flatten()
+                {
+                    Some(repos) => {
+                        tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
+                        ext.by_bzl += repos.len();
+                        // The rule's implementation moved, so what it writes
+                        // into the repository can be anything.
+                        ext.load_repos.extend(repos.iter().cloned());
+                        ext.repos.extend(repos);
+                    }
+                    None => workspace_level.push(path.clone()),
+                }
+            }
+            for &p in base_view.bzl_consumers(id) {
+                if base_view.package_tombstoned(p) {
+                    continue;
+                }
+                let pkg = base_view.package_name(p).to_string();
+                bzl_dirty.insert(pkg.clone());
+                dirty.dirty.insert(pkg);
+            }
+        }
+        stats.bzl_closure_hits = bzl_dirty.len();
+        tracing::debug!(
+            changed = paths.len(),
+            packages = bzl_dirty.len(),
+            "resolved changed .bzl files from the static load closure"
+        );
+        if !workspace_level.is_empty() {
+            tracing::warn!(
+                files = ?workspace_level,
+                "a changed .bzl is loaded outside any package; treating the change as global"
+            );
+            dirty.global = true;
+            dirty.global_reason = Some(workspace_level_reason(&workspace_level));
+        }
+        bzl_dirty
+    }
+}
 
-            let result = walk::walk_view(&overlay, &direct, &wopts);
-            stats.affected_targets = result.affected.len();
-            timings.walk = sw.lap();
+/// A deleted `BUILD` does not always delete the package.
+///
+/// `bazel/bazel` spent several commits carrying both `docs/BUILD` and
+/// `docs/BUILD.bazel`, and the commit that removed the old one reads, in the
+/// diff alone, exactly like a package deletion — after which the package is
+/// dropped from the index and every target in it becomes invisible to every
+/// later revision. (The change-set comparison found this: `//docs:docs` and
+/// `//docs:srcs` were reported by both bazel-diff and Tango, on pairs where
+/// cambium's index no longer had a `docs` package at all.) The diff cannot
+/// tell the two cases apart, but the head checkout can: if either BUILD file
+/// is still on disk, the package lives and is merely dirty.
+///
+/// The check runs in the querier's own checkout, which for a revision the
+/// working tree is not on is a worktree at that revision — asking the working
+/// tree whether a BUILD file survived would answer for the wrong revision.
+/// `fallback` is for a querier with no checkout at all (the synthetic one).
+fn keep_surviving_packages(dirty: &mut DirtySet, querier: &dyn PackageQuerier, fallback: &Path) {
+    if dirty.global || dirty.deleted_packages.is_empty() {
+        return;
+    }
+    let ws = querier.workspace().unwrap_or(fallback);
+    let survivors: Vec<String> = dirty
+        .deleted_packages
+        .iter()
+        .filter(|p| {
+            let dir = ws.join(p.as_str());
+            dir.join("BUILD").exists() || dir.join("BUILD.bazel").exists()
+        })
+        .cloned()
+        .collect();
+    for p in survivors {
+        tracing::debug!(package = %p, "a BUILD file went away but the package did not");
+        dirty.deleted_packages.remove(&p);
+        dirty.dirty.insert(p);
+    }
+}
 
-            (
-                finish_report(
-                    &overlay,
-                    req,
-                    &dirty,
-                    &direct,
-                    &result,
-                    &reasons,
-                    timings,
-                    stats,
-                    cold_reason,
-                ),
-                None,
-            )
+/// Everything the direct set is derived from, once the splice has happened.
+struct DirectInputs<'a> {
+    splice: &'a SpliceReport,
+    deleted_by_package: &'a [(String, Vec<u32>)],
+    changed_file_ids: &'a [(u32, String)],
+    bzl_dirty: &'a BTreeSet<String>,
+    external_nodes: &'a [(u32, String)],
+}
+
+/// What the tail of a run carries from the splice to the report.
+struct RunState<'a> {
+    req: &'a AffectedRequest,
+    dirty: &'a DirtySet,
+    timings: Timings,
+    stats: Stats,
+    cold_reason: Option<String>,
+    sw: Stopwatch,
+}
+
+impl RunState<'_> {
+    /// Direct set, walk, report — over a materialised head index or an
+    /// overlay. One implementation for both, so the two paths cannot disagree
+    /// about anything after the splice.
+    fn answer<V: GraphView + ?Sized>(
+        mut self,
+        view: &V,
+        inputs: &DirectInputs<'_>,
+    ) -> AffectedReport {
+        self.timings.splice = self.sw.lap();
+
+        let (direct, reasons) = derive_direct(view, inputs);
+        self.stats.direct_targets = direct.len();
+        self.timings.direct = self.sw.lap();
+
+        let wopts = WalkOptions {
+            include_manual: self.req.include_manual,
+            explain: self.req.explain,
+            max_depth: self.req.max_depth,
         };
+        let result = walk::walk_view(view, &direct, &wopts);
+        self.stats.affected_targets = result.affected.len();
+        self.timings.walk = self.sw.lap();
 
-        Ok(RunOutcome { report, index })
+        AffectedReport {
+            schema: crate::report::SCHEMA_VERSION,
+            base: self.req.base.clone(),
+            head: self.req.head.clone(),
+            global: false,
+            global_reason: None,
+            cold_rebuild_reason: self.cold_reason,
+            dirty_packages: self.dirty.dirty.iter().cloned().collect(),
+            direct: cambium_index::view::labels_sorted(view, &direct),
+            affected: affected_targets(view, &result),
+            tests: cambium_index::view::labels_sorted(view, &result.tests),
+            timings_ms: self.timings,
+            stats: self.stats,
+            explanations: self.req.explain.then(|| explain(view, &result, &reasons)),
+        }
     }
 }
 
 /// The direct set (spec 6.7), over either a materialised index or an overlay.
-///
-/// One implementation for both, so the two paths cannot disagree about what a
-/// change made direct.
 fn derive_direct<V: GraphView + ?Sized>(
     view: &V,
-    splice: &cambium_index::SpliceReport,
-    deleted_by_package: &[(String, Vec<u32>)],
-    changed_file_ids: &[(u32, String)],
-    bzl_dirty: &BTreeSet<String>,
-    external_nodes: &[(u32, String)],
+    inputs: &DirectInputs<'_>,
 ) -> (Vec<u32>, FxHashMap<u32, DirectReason>) {
-    let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
-    let mut direct: FxHashSet<u32> = FxHashSet::default();
-    let mut scratch: Vec<u32> = Vec::new();
-    let add = |id: u32,
-               reason: DirectReason,
-               direct: &mut FxHashSet<u32>,
-               reasons: &mut FxHashMap<u32, DirectReason>| {
+    /// First reason wins: a target is direct once, for the first cause seen.
+    fn add(
+        direct: &mut FxHashSet<u32>,
+        reasons: &mut FxHashMap<u32, DirectReason>,
+        id: u32,
+        reason: DirectReason,
+    ) {
         if direct.insert(id) {
             reasons.insert(id, reason);
         }
-    };
+    }
 
-    for pd in &splice.packages {
-        if bzl_dirty.contains(&pd.package) {
+    let mut reasons: FxHashMap<u32, DirectReason> = FxHashMap::default();
+    let mut direct: FxHashSet<u32> = FxHashSet::default();
+    let mut scratch: Vec<u32> = Vec::new();
+
+    for pd in &inputs.splice.packages {
+        if inputs.bzl_dirty.contains(&pd.package) {
             // Spec 6.7's "bzl closure hash changed" branch, keyed on
             // membership of the stored load closure instead of a stored hash,
             // and load-bearing rather than an optimisation.
@@ -1205,66 +1166,47 @@ fn derive_direct<V: GraphView + ?Sized>(
             // asserts this is *why* those targets are reported.)
             for &id in &pd.current {
                 if view.is_rule(id) {
-                    add(
-                        id,
-                        DirectReason::BzlClosure {
-                            package: pd.package.clone(),
-                        },
-                        &mut direct,
-                        &mut reasons,
-                    );
+                    let reason = DirectReason::BzlClosure {
+                        package: pd.package.clone(),
+                    };
+                    add(&mut direct, &mut reasons, id, reason);
                 }
             }
         } else {
             for &id in &pd.changed {
-                add(id, DirectReason::RuleHash, &mut direct, &mut reasons);
+                add(&mut direct, &mut reasons, id, DirectReason::RuleHash);
             }
         }
         for &id in &pd.deleted {
             let label = view.label(id).to_string();
-            let consumers = view.reverse_row(id, &mut scratch).to_vec();
-            for consumer in consumers {
-                add(
-                    consumer,
-                    DirectReason::DeletedDep {
-                        label: label.clone(),
-                    },
-                    &mut direct,
-                    &mut reasons,
-                );
+            for &consumer in view.reverse_row(id, &mut scratch) {
+                let reason = DirectReason::DeletedDep {
+                    label: label.clone(),
+                };
+                add(&mut direct, &mut reasons, consumer, reason);
             }
         }
     }
 
-    for (pkg, ids) in deleted_by_package {
+    for (pkg, ids) in inputs.deleted_by_package {
         for &id in ids {
             let label = view.label(id).to_string();
             tracing::debug!(package = %pkg, %label, "package deleted");
-            let consumers = view.reverse_row(id, &mut scratch).to_vec();
-            for consumer in consumers {
-                add(
-                    consumer,
-                    DirectReason::DeletedDep {
-                        label: label.clone(),
-                    },
-                    &mut direct,
-                    &mut reasons,
-                );
+            for &consumer in view.reverse_row(id, &mut scratch) {
+                let reason = DirectReason::DeletedDep {
+                    label: label.clone(),
+                };
+                add(&mut direct, &mut reasons, consumer, reason);
             }
         }
     }
 
     // A file node's in-edges all come from rules, so its reverse row is its
     // consumer list.
-    for (id, path) in changed_file_ids {
-        let consumers = view.reverse_row(*id, &mut scratch).to_vec();
-        for consumer in consumers {
-            add(
-                consumer,
-                DirectReason::File { path: path.clone() },
-                &mut direct,
-                &mut reasons,
-            );
+    for (id, path) in inputs.changed_file_ids {
+        for &consumer in view.reverse_row(*id, &mut scratch) {
+            let reason = DirectReason::File { path: path.clone() };
+            add(&mut direct, &mut reasons, consumer, reason);
         }
     }
 
@@ -1272,52 +1214,18 @@ fn derive_direct<V: GraphView + ?Sized>(
     // leaves here — nothing ever queried them — so the change cannot be seen
     // as a rule-hash movement; what can be seen is every main-repo rule that
     // names one of its labels, which is exactly the leaf node's reverse row.
-    for (id, label) in external_nodes {
-        let consumers = view.reverse_row(*id, &mut scratch).to_vec();
-        for consumer in consumers {
-            add(
-                consumer,
-                DirectReason::ExternalRepo {
-                    label: label.clone(),
-                },
-                &mut direct,
-                &mut reasons,
-            );
+    for (id, label) in inputs.external_nodes {
+        for &consumer in view.reverse_row(*id, &mut scratch) {
+            let reason = DirectReason::ExternalRepo {
+                label: label.clone(),
+            };
+            add(&mut direct, &mut reasons, consumer, reason);
         }
     }
 
     let mut direct: Vec<u32> = direct.into_iter().collect();
     direct.sort_unstable();
     (direct, reasons)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish_report<V: GraphView + ?Sized>(
-    view: &V,
-    req: &AffectedRequest,
-    dirty: &DirtySet,
-    direct: &[u32],
-    result: &walk::WalkResult,
-    reasons: &FxHashMap<u32, DirectReason>,
-    timings: Timings,
-    stats: Stats,
-    cold_rebuild_reason: Option<String>,
-) -> AffectedReport {
-    AffectedReport {
-        schema: crate::report::SCHEMA_VERSION,
-        base: req.base.clone(),
-        head: req.head.clone(),
-        global: false,
-        global_reason: None,
-        cold_rebuild_reason,
-        dirty_packages: dirty.dirty.iter().cloned().collect(),
-        direct: cambium_index::view::labels_sorted(view, direct),
-        affected: affected_targets(view, result),
-        tests: cambium_index::view::labels_sorted(view, &result.tests),
-        timings_ms: timings,
-        stats,
-        explanations: req.explain.then(|| explain(view, result, reasons)),
-    }
 }
 
 /// The affected list with each target's BFS depth, sorted by label.
@@ -1388,46 +1296,6 @@ fn global_report(
         stats,
         explanations: None,
     }
-}
-
-/// Fallback key for stores that cannot be listed: no lineage in the path,
-/// because a fetcher has no way to learn it first.
-fn tree_addressed_key(tree: &str) -> String {
-    format!("indexes/by-tree/{tree}.bin")
-}
-
-/// The sha-addressed pointer for unlistable stores.
-fn commit_addressed_pointer(commit: &str) -> String {
-    format!("commits/by-commit/{commit}")
-}
-
-/// The key the previous, sha-addressed layout wrote for unlistable stores.
-/// Still read, never written.
-fn commit_addressed_key(commit: &str) -> String {
-    format!("indexes/by-commit/{commit}.bin")
-}
-
-/// Local cache file name for a store key.
-fn cache_name(key: &str) -> String {
-    key.replace('/', "_")
-}
-
-/// Counts by node kind, for `index inspect`.
-pub fn kind_histogram(v: IndexRef<'_>) -> HashMap<&'static str, u32> {
-    let mut h = HashMap::new();
-    for id in 0..v.num_nodes() {
-        let k = match v.kind_of(id) {
-            NodeKind::Rule => "rule",
-            NodeKind::SourceFile => "source_file",
-            NodeKind::GeneratedFile => "generated_file",
-            NodeKind::PackageGroup => "package_group",
-            NodeKind::EnvironmentGroup => "environment_group",
-            NodeKind::Unknown => "unknown",
-            NodeKind::Tombstone => "tombstone",
-        };
-        *h.entry(k).or_insert(0) += 1;
-    }
-    h
 }
 
 /// Recomputes the static `.bzl` load closure for the packages a run touched.

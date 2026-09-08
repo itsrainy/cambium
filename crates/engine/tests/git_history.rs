@@ -49,6 +49,7 @@ fn walks_a_real_git_history() {
             materialize: true,
             publish_base: false,
             max_depth: None,
+            allow_partial: false,
         };
         let out = engine
             .compute(
