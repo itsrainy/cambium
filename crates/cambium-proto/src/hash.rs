@@ -50,7 +50,7 @@ const LOCATION_ATTRS: &[&str] = &["generator_location"];
 /// - 1: the original canonicalisation.
 /// - 2: `generator_location` dropped.
 /// - 3: `build_setting_default` became a dependency edge
-///   (see [`crate::convert`]), so older indexes are missing every edge out of
+///   (see `cambium_bazel::convert`), so older indexes are missing every edge out of
 ///   a `label_flag` or `label_setting`.
 /// - 4: that edge actually fires. Version 3 gated on the attribute's type
 ///   being `LABEL`; Bazel types `build_setting_default` as `STRING`, so no

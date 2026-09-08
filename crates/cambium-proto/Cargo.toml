@@ -8,7 +8,6 @@ repository.workspace = true
 description = "blaze_query proto types and streamed_proto reader for cambium"
 
 [dependencies]
-cambium-index.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 prost.workspace = true

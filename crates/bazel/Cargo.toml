@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Bazel process invocation for cambium: query, rbuildfiles, workspace detection"
 
 [dependencies]
+cambium-index.workspace = true
 cambium-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

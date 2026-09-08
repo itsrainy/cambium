@@ -1,6 +1,6 @@
 //! Index construction and splicing.
 //!
-//! One code path serves both cases the spec describes: a cold full build is a
+//! One code path serves both cases: a cold full build is a
 //! splice of every package into an empty index, and an incremental update is a
 //! splice of the dirty packages into a loaded one. The difference is only how
 //! many rows get rebuilt.
@@ -76,7 +76,7 @@ pub struct PackageUpdate {
     pub targets: Vec<TargetRow>,
 }
 
-/// What a splice changed in one package, for direct-set derivation (spec 6.7).
+/// What a splice changed in one package, for direct-set derivation.
 #[derive(Clone, Debug, Default)]
 pub struct PackageDelta {
     pub package_id: u32,
@@ -240,10 +240,13 @@ pub struct IndexBuilder<'a> {
     rebuilt: FixedBitSet,
     /// Staged `(src, dst)` edges for rebuilt rows.
     pairs: Vec<(u32, u32)>,
-    /// Generated file -> generating rule, for edge redirection.
-    gen_rule: FxHashMap<u32, u32>,
 
+    /// The `.bzl` closure this generation will write, once known. For a splice
+    /// it starts out unread (`bzl_unread`): reading it back out of the base is
+    /// O(closure), and only [`IndexBuilder::finish`] or a caller updating it
+    /// needs it — `affected` never does.
     bzl: Option<BzlClosure>,
+    bzl_unread: bool,
 
     lineage: [u8; 16],
     bazel_version: String,
@@ -268,8 +271,8 @@ impl<'a> IndexBuilder<'a> {
             pkg_flags: Vec::new(),
             rebuilt: FixedBitSet::with_capacity(0),
             pairs: Vec::new(),
-            gen_rule: FxHashMap::default(),
             bzl: None,
+            bzl_unread: false,
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
@@ -279,24 +282,24 @@ impl<'a> IndexBuilder<'a> {
         }
     }
 
-    /// Loads a base index into mutable form, preserving every id and the lineage.
+    /// Opens a base index for splicing, preserving every id and the lineage.
     ///
-    /// This copies the whole index — labels, hashes, edges — and rebuilds the
-    /// interner's table, which is the single most expensive step in a
-    /// pull-request run (see BENCHMARKS.md). Before optimising it, note which
-    /// path you are optimising:
+    /// Nothing large is copied here. Labels and node columns are read from
+    /// `v` through [`LabelSpace`] and [`NodeSpace`], which record only what the
+    /// splice appends or overrides; the base forward rows are consulted when a
+    /// finalizer needs them. Only the small per-package and per-class tables
+    /// are copied, because they are thousands of entries rather than millions.
     ///
-    /// - `baseline update` **must** keep materialising. Its output is the index
-    ///   that gets published and spliced onto next time, and the property that
-    ///   a spliced index equals a full rebuild is what the correctness oracles
-    ///   check on every commit.
-    /// - `affected` does not need a new index at all. It needs the base reverse
-    ///   CSR plus a small delta for the dirty packages — the overlay the design
-    ///   spec defers to v2 — and that is where the win is.
+    /// Which finalizer is called decides what the splice costs in the end:
     ///
-    /// Making the shared path lazy to speed up `affected` would take the
-    /// published artifact with it. Add the overlay alongside this, not instead
-    /// of it.
+    /// - [`IndexBuilder::finish`] materialises a complete new index — labels,
+    ///   columns, both CSRs — for `baseline update`, whose output is published
+    ///   and spliced onto next time. The property that a spliced index equals
+    ///   a full rebuild is what the correctness oracles check on every commit.
+    /// - [`IndexBuilder::finish_overlay`] produces only the delta, for
+    ///   `affected`, which needs to walk the spliced graph once and never
+    ///   needs an artifact. It costs the staged rows and the reverse
+    ///   corrections they imply, proportional to the change.
     pub fn from_view(v: IndexRef<'a>) -> Self {
         let (cb, co) = (v.classes.bytes.to_vec(), v.classes.offsets.to_vec());
         let (pb, po) = (v.pkg_names.bytes.to_vec(), v.pkg_names.offsets.to_vec());
@@ -318,8 +321,8 @@ impl<'a> IndexBuilder<'a> {
             pkg_flags: v.pkg_flags.to_vec(),
             rebuilt: FixedBitSet::with_capacity(n),
             pairs: Vec::new(),
-            gen_rule: FxHashMap::default(),
-            bzl: BzlClosure::from_view(v),
+            bzl: None,
+            bzl_unread: v.bzl_closure,
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -348,12 +351,21 @@ impl<'a> IndexBuilder<'a> {
     /// Installs (or replaces) the static `.bzl` load closure.
     pub fn set_bzl_closure(&mut self, c: BzlClosure) {
         self.bzl = Some(c);
+        self.bzl_unread = false;
     }
 
     /// The closure carried over from the base, for a caller that wants to
-    /// update only the packages it re-queried.
+    /// update only the packages it re-queried. Read out of the base on first
+    /// use; a builder that is only ever asked for an overlay never pays for it.
     pub fn take_bzl_closure(&mut self) -> Option<BzlClosure> {
+        self.read_base_bzl();
         self.bzl.take()
+    }
+
+    fn read_base_bzl(&mut self) {
+        if std::mem::take(&mut self.bzl_unread) {
+            self.bzl = self.base.and_then(BzlClosure::from_view);
+        }
     }
 
     pub fn set_config_hash(&mut self, h: [u8; 32]) {
@@ -393,7 +405,7 @@ impl<'a> IndexBuilder<'a> {
     fn node_for(&mut self, label: &str) -> u32 {
         let (id, is_new) = self.labels.intern_new(label);
         if is_new {
-            self.nodes.push(NodeMeta::unknown(label));
+            self.nodes.push(NodeMeta::unknown());
         }
         id
     }
@@ -425,7 +437,21 @@ impl<'a> IndexBuilder<'a> {
     ///
     /// Runs in two phases so that a target may reference a label defined later
     /// in the same batch: phase one interns and stamps node metadata, phase two
-    /// resolves edges (including generated-file redirection).
+    /// resolves edges.
+    ///
+    /// A generated file is an ordinary node with one forward edge, to the rule
+    /// that generates it, so a consumer's edge to `//g:out.h` stays pointed at
+    /// the file and a change to the generator reaches the consumer in two
+    /// hops. The edge `out.h -> gen` is owned by the generator's package, which
+    /// is what makes a splice equal a full rebuild: re-querying that package
+    /// alone rewrites exactly the row that moved when a different rule starts
+    /// producing the file. Redirecting consumers straight at the generator
+    /// would be one hop shorter but would bake the *current* generator into
+    /// rows owned by packages the splice never touches, and a later splice of
+    /// the generator's package alone could not know which carried rows to fix
+    /// (a consumer's rebuilt row has no record of whether `gen` was in it
+    /// because of `out.h` or in its own right). One more visited node per
+    /// consumed generated file is a small price for that.
     pub fn apply_packages(&mut self, updates: &[PackageUpdate]) -> SpliceReport {
         // Phase 1: nodes.
         let mut deltas: Vec<PackageDelta> = Vec::with_capacity(updates.len());
@@ -497,17 +523,6 @@ impl<'a> IndexBuilder<'a> {
             });
         }
 
-        // Phase 1b: record generated-file -> generating-rule for this batch.
-        for up in updates {
-            for t in &up.targets {
-                if let (NodeKind::GeneratedFile, Some(gen)) = (t.kind, &t.generating_rule) {
-                    let file_id = self.node_for(&t.label);
-                    let rule_id = self.node_for(gen);
-                    self.gen_rule.insert(file_id, rule_id);
-                }
-            }
-        }
-
         // Phase 2: edges.
         for up in updates {
             for t in &up.targets {
@@ -522,7 +537,6 @@ impl<'a> IndexBuilder<'a> {
                     NodeKind::Rule => {
                         for inp in &t.inputs {
                             let dst = self.node_for(inp);
-                            let dst = self.redirect(dst);
                             if dst != src {
                                 self.pairs.push((src, dst));
                             }
@@ -534,26 +548,6 @@ impl<'a> IndexBuilder<'a> {
         }
 
         SpliceReport { packages: deltas }
-    }
-
-    /// Generated files stand in for their generating rule so the reverse walk
-    /// does not need an extra hop through the file node.
-    fn redirect(&mut self, id: u32) -> u32 {
-        if self.nodes.get(id).kind != NodeKind::GeneratedFile as u8 {
-            return id;
-        }
-        if let Some(&r) = self.gen_rule.get(&id) {
-            return r;
-        }
-        // Fall back to the base index: a generated file's forward row is exactly
-        // its generating rule.
-        match self.base_forward_row(id).first() {
-            Some(&r) => {
-                self.gen_rule.insert(id, r);
-                r
-            }
-            None => id,
-        }
     }
 
     /// Marks a node as gone: kind, flags and everything derived from its
@@ -719,16 +713,10 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
-        let (base_labels, base_n, new_labels) = self.labels.into_overlay_parts();
-        let base_sorted = self.base.map(|b| b.label_sorted).unwrap_or(&[]);
         Overlay {
             base: self.base,
-            base_labels,
-            base_sorted,
-            base_n,
-            new_labels,
-            new_meta: self.nodes.appended().to_vec(),
-            over_meta: self.nodes.overridden().clone(),
+            labels: self.labels,
+            nodes: self.nodes,
             rev_added,
             rev_removed,
         }
@@ -754,6 +742,7 @@ impl<'a> IndexBuilder<'a> {
             pkg_nodes_flat.extend_from_slice(r);
         }
 
+        self.read_base_bzl();
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
         let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
@@ -820,17 +809,17 @@ impl<'a> IndexBuilder<'a> {
             pkg_bzl_hash: self.pkg_bzl_hash,
             pkg_build_hash: self.pkg_build_hash,
             pkg_flags: self.pkg_flags,
-            bzl_path_bytes: bzl.path_bytes,
-            bzl_path_offsets: bzl.path_offsets,
-            bzl_load_offsets: bzl.load_offsets,
-            bzl_load_edges: bzl.load_edges,
-            bzl_consumer_offsets: bzl.consumer_offsets,
-            bzl_consumer_edges: bzl.consumer_edges,
-            bzl_workspace: bzl.workspace,
-            bzl_ext_label_bytes: bzl.ext_label_bytes,
-            bzl_ext_label_offsets: bzl.ext_label_offsets,
-            bzl_ext_offsets: bzl.ext_offsets,
-            bzl_ext_edges: bzl.ext_edges,
+            bzl_path_bytes: bzl.bzl_path_bytes,
+            bzl_path_offsets: bzl.bzl_path_offsets,
+            bzl_load_offsets: bzl.bzl_load_offsets,
+            bzl_load_edges: bzl.bzl_load_edges,
+            bzl_consumer_offsets: bzl.bzl_consumer_offsets,
+            bzl_consumer_edges: bzl.bzl_consumer_edges,
+            bzl_workspace: bzl.bzl_workspace,
+            bzl_ext_label_bytes: bzl.bzl_ext_label_bytes,
+            bzl_ext_label_offsets: bzl.bzl_ext_label_offsets,
+            bzl_ext_offsets: bzl.bzl_ext_offsets,
+            bzl_ext_edges: bzl.bzl_ext_edges,
             pkg_ext_offsets: bzl.pkg_ext_offsets,
             pkg_ext_edges: bzl.pkg_ext_edges,
             repo_name_bytes: bzl.repo_name_bytes,
@@ -843,8 +832,8 @@ impl<'a> IndexBuilder<'a> {
             repo_input_target_only: bzl.repo_input_target_only,
             repo_input_repo_offsets: bzl.repo_input_repo_offsets,
             repo_input_repo_edges: bzl.repo_input_repo_edges,
-            bzl_repo_offsets: bzl.repo_bzl_offsets,
-            bzl_repo_edges: bzl.repo_bzl_edges,
+            bzl_repo_offsets: bzl.bzl_repo_offsets,
+            bzl_repo_edges: bzl.bzl_repo_edges,
             repo_map_bytes: bzl.repo_map_bytes,
             repo_map_offsets: bzl.repo_map_offsets,
             repo_map_ranges: bzl.repo_map_ranges,
@@ -853,20 +842,26 @@ impl<'a> IndexBuilder<'a> {
 }
 
 /// The serialised form of the `.bzl` load closure.
+///
+/// Every field is named exactly as its [`IndexData`] counterpart, so the move
+/// in `finish` reads `x: bzl.x` throughout. It used to rename in flight —
+/// `bzl_repo_offsets: bzl.repo_bzl_offsets` next to twenty-odd sibling lines —
+/// where crossing two same-typed `Vec<u32>` fields would have compiled and
+/// silently produced an index whose repository rows were its load rows.
 #[derive(Default)]
 struct BzlTables {
     present: bool,
-    path_bytes: Vec<u8>,
-    path_offsets: Vec<u32>,
-    load_offsets: Vec<u32>,
-    load_edges: Vec<u32>,
-    consumer_offsets: Vec<u32>,
-    consumer_edges: Vec<u32>,
-    workspace: Vec<u32>,
-    ext_label_bytes: Vec<u8>,
-    ext_label_offsets: Vec<u32>,
-    ext_offsets: Vec<u32>,
-    ext_edges: Vec<u32>,
+    bzl_path_bytes: Vec<u8>,
+    bzl_path_offsets: Vec<u32>,
+    bzl_load_offsets: Vec<u32>,
+    bzl_load_edges: Vec<u32>,
+    bzl_consumer_offsets: Vec<u32>,
+    bzl_consumer_edges: Vec<u32>,
+    bzl_workspace: Vec<u32>,
+    bzl_ext_label_bytes: Vec<u8>,
+    bzl_ext_label_offsets: Vec<u32>,
+    bzl_ext_offsets: Vec<u32>,
+    bzl_ext_edges: Vec<u32>,
     pkg_ext_offsets: Vec<u32>,
     pkg_ext_edges: Vec<u32>,
     repo_name_bytes: Vec<u8>,
@@ -879,8 +874,8 @@ struct BzlTables {
     repo_input_target_only: Vec<bool>,
     repo_input_repo_offsets: Vec<u32>,
     repo_input_repo_edges: Vec<u32>,
-    repo_bzl_offsets: Vec<u32>,
-    repo_bzl_edges: Vec<u32>,
+    bzl_repo_offsets: Vec<u32>,
+    bzl_repo_edges: Vec<u32>,
     repo_map_bytes: Vec<u8>,
     repo_map_offsets: Vec<u32>,
     repo_map_ranges: Vec<u32>,
@@ -889,17 +884,17 @@ struct BzlTables {
 impl BzlTables {
     fn empty() -> Self {
         Self {
-            path_offsets: vec![0],
-            load_offsets: vec![0],
-            consumer_offsets: vec![0],
-            ext_label_offsets: vec![0],
-            ext_offsets: vec![0],
+            bzl_path_offsets: vec![0],
+            bzl_load_offsets: vec![0],
+            bzl_consumer_offsets: vec![0],
+            bzl_ext_label_offsets: vec![0],
+            bzl_ext_offsets: vec![0],
             pkg_ext_offsets: vec![0],
             repo_name_offsets: vec![0],
             repo_canonical_offsets: vec![0],
             repo_input_offsets: vec![0],
             repo_input_repo_offsets: vec![0],
-            repo_bzl_offsets: vec![0],
+            bzl_repo_offsets: vec![0],
             repo_map_offsets: vec![0],
             repo_map_ranges: vec![0],
             ..Default::default()
@@ -930,8 +925,9 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
     t.present = true;
     let mut ext_labels = Interner::new();
     for &old in &order {
-        t.path_bytes.extend_from_slice(c.graph.path(old).as_bytes());
-        t.path_offsets.push(t.path_bytes.len() as u32);
+        t.bzl_path_bytes
+            .extend_from_slice(c.graph.path(old).as_bytes());
+        t.bzl_path_offsets.push(t.bzl_path_bytes.len() as u32);
         let mut row: Vec<u32> = c
             .graph
             .loads(old)
@@ -940,8 +936,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             .collect();
         row.sort_unstable();
         row.dedup();
-        t.load_edges.extend_from_slice(&row);
-        t.load_offsets.push(t.load_edges.len() as u32);
+        t.bzl_load_edges.extend_from_slice(&row);
+        t.bzl_load_offsets.push(t.bzl_load_edges.len() as u32);
         let mut ext: Vec<u32> = c
             .graph
             .external(old)
@@ -950,8 +946,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             .collect();
         ext.sort_unstable();
         ext.dedup();
-        t.ext_edges.extend_from_slice(&ext);
-        t.ext_offsets.push(t.ext_edges.len() as u32);
+        t.bzl_ext_edges.extend_from_slice(&ext);
+        t.bzl_ext_offsets.push(t.bzl_ext_edges.len() as u32);
     }
     // The BUILD files' own external loads, one row per package id, into the
     // same label table.
@@ -970,8 +966,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         t.pkg_ext_offsets.push(t.pkg_ext_edges.len() as u32);
     }
     let (b, o) = ext_labels.into_parts();
-    t.ext_label_bytes = b;
-    t.ext_label_offsets = o;
+    t.bzl_ext_label_bytes = b;
+    t.bzl_ext_label_offsets = o;
 
     // Invert: package closures -> consumers per `.bzl`.
     let mut consumers: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -988,13 +984,14 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
     for row in &mut consumers {
         row.sort_unstable();
         row.dedup();
-        t.consumer_edges.extend_from_slice(row);
-        t.consumer_offsets.push(t.consumer_edges.len() as u32);
+        t.bzl_consumer_edges.extend_from_slice(row);
+        t.bzl_consumer_offsets
+            .push(t.bzl_consumer_edges.len() as u32);
     }
 
-    t.workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
-    t.workspace.sort_unstable();
-    t.workspace.dedup();
+    t.bzl_workspace = c.workspace.iter().map(|&i| remap[i as usize]).collect();
+    t.bzl_workspace.sort_unstable();
+    t.bzl_workspace.dedup();
 
     // ---- external repositories ----
     //
@@ -1053,8 +1050,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         row.dedup();
     }
     for row in &per_bzl {
-        t.repo_bzl_edges.extend_from_slice(row);
-        t.repo_bzl_offsets.push(t.repo_bzl_edges.len() as u32);
+        t.bzl_repo_edges.extend_from_slice(row);
+        t.bzl_repo_offsets.push(t.bzl_repo_edges.len() as u32);
     }
     t
 }

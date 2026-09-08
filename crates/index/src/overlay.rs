@@ -21,55 +21,31 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::data::{flags, IndexRef, NodeKind};
-use crate::space::NodeMeta;
-use crate::strtab::{Interner, StrTabRef};
+use crate::space::{LabelSpace, NodeSpace};
 use crate::view::GraphView;
 
 /// A base index plus one generation of changes, without the copy.
+///
+/// The labels and node columns are the builder's own [`LabelSpace`] and
+/// [`NodeSpace`], handed over as they were: the overlay reads them exactly the
+/// way the splice that produced it did.
 pub struct Overlay<'a> {
     pub(crate) base: Option<IndexRef<'a>>,
-    pub(crate) base_labels: Option<StrTabRef<'a>>,
-    pub(crate) base_sorted: &'a [u32],
-    pub(crate) base_n: u32,
-    /// Labels appended this generation, indexed by `id - base_n`.
-    pub(crate) new_labels: Interner,
-    /// Metadata for appended ids.
-    pub(crate) new_meta: Vec<NodeMeta>,
-    /// Metadata for base ids this generation changed.
-    pub(crate) over_meta: FxHashMap<u32, NodeMeta>,
+    pub(crate) labels: LabelSpace<'a>,
+    pub(crate) nodes: NodeSpace<'a>,
     /// Consumers gained, by consumed node.
     pub(crate) rev_added: FxHashMap<u32, Vec<u32>>,
     /// Consumers lost, by consumed node.
     pub(crate) rev_removed: FxHashMap<u32, FxHashSet<u32>>,
 }
 
-impl<'a> Overlay<'a> {
-    #[inline]
-    fn meta(&self, id: u32) -> NodeMeta {
-        if id >= self.base_n {
-            return self.new_meta[(id - self.base_n) as usize];
-        }
-        if let Some(m) = self.over_meta.get(&id) {
-            return *m;
-        }
-        let b = self.base.expect("base ids need a base view");
-        let i = id as usize;
-        NodeMeta {
-            kind: b.kind[i],
-            package: b.package[i],
-            class: b.class[i],
-            hash: b.hash[i],
-            is_test: b.is_test[i],
-            flags: b.flags[i],
-        }
-    }
-
+impl Overlay<'_> {
     /// How much the overlay is carrying, for reporting and for tests that care
     /// that it stayed small.
     pub fn delta_size(&self) -> OverlaySize {
         OverlaySize {
-            new_nodes: self.new_meta.len(),
-            changed_nodes: self.over_meta.len(),
+            new_nodes: self.nodes.appended().len(),
+            changed_nodes: self.nodes.overridden().len(),
             rows_gaining_edges: self.rev_added.len(),
             rows_losing_edges: self.rev_removed.len(),
             edges_added: self.rev_added.values().map(|v| v.len()).sum(),
@@ -90,38 +66,32 @@ pub struct OverlaySize {
 
 impl GraphView for Overlay<'_> {
     fn num_nodes(&self) -> u32 {
-        self.base_n + self.new_meta.len() as u32
+        self.nodes.len()
     }
 
     fn label(&self, id: u32) -> &str {
-        if id < self.base_n {
-            self.base_labels
-                .expect("base ids need a base table")
-                .get(id)
-        } else {
-            self.new_labels.get(id - self.base_n)
-        }
+        self.labels.get(id)
     }
 
     fn kind_of(&self, id: u32) -> NodeKind {
-        NodeKind::from_u8(self.meta(id).kind)
+        NodeKind::from_u8(self.nodes.get(id).kind)
     }
 
     fn is_test(&self, id: u32) -> bool {
-        self.meta(id).is_test
+        self.nodes.get(id).is_test
     }
 
     fn is_manual(&self, id: u32) -> bool {
-        self.meta(id).flags & flags::MANUAL != 0
+        self.nodes.get(id).flags & flags::MANUAL != 0
     }
 
     fn is_tombstone(&self, id: u32) -> bool {
-        self.meta(id).flags & flags::TOMBSTONE != 0
+        self.nodes.get(id).flags & flags::TOMBSTONE != 0
     }
 
     fn reverse_row<'s>(&'s self, id: u32, scratch: &'s mut Vec<u32>) -> &'s [u32] {
         let base: &[u32] = match self.base {
-            Some(b) if id < self.base_n => b.reverse.row(id),
+            Some(b) if id < self.nodes.base_len() => b.reverse.row(id),
             _ => &[],
         };
         let added = self.rev_added.get(&id);
@@ -145,14 +115,6 @@ impl GraphView for Overlay<'_> {
     }
 
     fn id_of(&self, label: &str) -> Option<u32> {
-        if let Some(base) = self.base_labels {
-            if let Ok(i) = self
-                .base_sorted
-                .binary_search_by(|&id| base.get(id).cmp(label))
-            {
-                return Some(self.base_sorted[i]);
-            }
-        }
-        self.new_labels.lookup(label).map(|i| i + self.base_n)
+        self.labels.lookup(label)
     }
 }

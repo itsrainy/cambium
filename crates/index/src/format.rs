@@ -47,6 +47,13 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// to 8 when repository-rule inputs gained `repo_input_target_only`, which
 /// tells a path the rule reads apart from a label it merely writes into a
 /// generated BUILD file (issue #3).
+///
+/// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
+/// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
+/// no reader has consulted it since the static `.bzl` closure (format 4) began
+/// answering "did this package's loads move?" from `bzl_consumers`; it is 32
+/// bytes per package of write-only payload. Removing it moves the layout, so
+/// it has to wait for a bump that is happening anyway rather than cause one.
 pub const FORMAT_VERSION: u32 = 8;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
@@ -75,6 +82,10 @@ pub enum IndexError {
     Truncated { path: PathBuf, want: u64, have: u64 },
     #[error("serialising index: {0}")]
     Serialize(String),
+    #[error("deserialising index at {path}: {reason}")]
+    Deserialize { path: PathBuf, reason: String },
+    #[error("{path} has a corrupt header: {reason}")]
+    BadHeader { path: PathBuf, reason: String },
 }
 
 type Result<T> = std::result::Result<T, IndexError>;
@@ -134,16 +145,27 @@ fn hex(bytes: &[u8]) -> String {
 /// what makes republishing an index idempotent and what a content-addressed
 /// store would key on.
 pub fn payload_bytes(data: &IndexData) -> Result<Vec<u8>> {
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(data)
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
-    Ok(payload.to_vec())
+    Ok(serialise(data)?.to_vec())
+}
+
+/// The payload archive, still in rkyv's aligned buffer.
+///
+/// [`to_bytes`] appends this straight into the framed output, so the payload —
+/// the large part, hundreds of megabytes on a big repository — is copied once
+/// rather than being flattened into a `Vec` first and copied again.
+fn serialise(data: &IndexData) -> Result<rkyv::util::AlignedVec> {
+    rkyv::to_bytes::<rkyv::rancor::Error>(data).map_err(|e| IndexError::Serialize(e.to_string()))
+}
+
+/// As [`serialise`], for the provenance trailer.
+fn serialise_provenance(p: &Provenance) -> Result<rkyv::util::AlignedVec> {
+    rkyv::to_bytes::<rkyv::rancor::Error>(p).map_err(|e| IndexError::Serialize(e.to_string()))
 }
 
 /// Serialises `data` into the framed on-disk form.
 pub fn to_bytes(data: &IndexData) -> Result<Vec<u8>> {
-    let payload = payload_bytes(data)?;
-    let trailer = rkyv::to_bytes::<rkyv::rancor::Error>(&data.provenance)
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
+    let payload = serialise(data)?;
+    let trailer = serialise_provenance(&data.provenance)?;
 
     let payload_off = PREFIX_LEN;
     let trailer_off = align_up(payload_off + payload.len());
@@ -221,6 +243,7 @@ pub fn write_index(path: &Path, data: &IndexData) -> Result<()> {
     })
 }
 
+#[derive(Debug)]
 struct Frame {
     payload: (usize, usize),
     trailer: (usize, usize),
@@ -247,7 +270,27 @@ fn check_prefix(path: &Path, bytes: &[u8], file_len: u64) -> Result<Frame> {
     }
     let read = |a: usize| u64::from_le_bytes(bytes[a..a + 8].try_into().unwrap());
     let (p_off, p_len, t_off, t_len) = (read(16), read(24), read(32), read(40));
-    let want = (t_off + t_len).max(p_off + p_len);
+    let bad_header = |reason: &str| IndexError::BadHeader {
+        path: path.to_path_buf(),
+        reason: reason.to_string(),
+    };
+    if p_off != PREFIX_LEN as u64 {
+        return Err(bad_header(&format!(
+            "payload offset {p_off} != PREFIX_LEN ({PREFIX_LEN})"
+        )));
+    }
+    if t_off % ALIGN as u64 != 0 {
+        return Err(bad_header(&format!(
+            "trailer offset {t_off} is not {ALIGN}-byte aligned"
+        )));
+    }
+    let trailer_end = t_off
+        .checked_add(t_len)
+        .ok_or_else(|| bad_header("offset/length overflow"))?;
+    let payload_end = p_off
+        .checked_add(p_len)
+        .ok_or_else(|| bad_header("offset/length overflow"))?;
+    let want = trailer_end.max(payload_end);
     if want > file_len {
         return Err(IndexError::Truncated {
             path: path.to_path_buf(),
@@ -255,9 +298,13 @@ fn check_prefix(path: &Path, bytes: &[u8], file_len: u64) -> Result<Frame> {
             have: file_len,
         });
     }
+    let p_off = usize::try_from(p_off).map_err(|_| bad_header("payload offset overflows usize"))?;
+    let p_len = usize::try_from(p_len).map_err(|_| bad_header("payload length overflows usize"))?;
+    let t_off = usize::try_from(t_off).map_err(|_| bad_header("trailer offset overflows usize"))?;
+    let t_len = usize::try_from(t_len).map_err(|_| bad_header("trailer length overflows usize"))?;
     Ok(Frame {
-        payload: (p_off as usize, p_len as usize),
-        trailer: (t_off as usize, t_len as usize),
+        payload: (p_off, p_len),
+        trailer: (t_off, t_len),
     })
 }
 
@@ -290,18 +337,44 @@ impl IndexFile {
             source,
         })?;
         let frame = check_prefix(path, &map, file_len)?;
+        // The payload must land on an alignment boundary the archive can be
+        // accessed at directly out of the mapping: `check_prefix` already
+        // requires `p_off == PREFIX_LEN`, and the mapping itself starts
+        // page-aligned, so this can only fail if those invariants regress.
+        if (map.as_ptr() as usize + frame.payload.0) % ALIGN != 0 {
+            return Err(IndexError::BadHeader {
+                path: path.to_path_buf(),
+                reason: format!("payload is not {ALIGN}-byte aligned"),
+            });
+        }
         let trailer = &map[frame.trailer.0..frame.trailer.0 + frame.trailer.1];
-        // SAFETY: as `archived`; the trailer is a few dozen bytes written by us.
-        let provenance = rkyv::deserialize::<Provenance, rkyv::rancor::Error>(unsafe {
-            rkyv::access_unchecked::<crate::data::ArchivedProvenance>(trailer)
-        })
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
-        Ok(Self {
+        let archived_trailer =
+            rkyv::access::<crate::data::ArchivedProvenance, rkyv::rancor::Error>(trailer).map_err(
+                |e| IndexError::Deserialize {
+                    path: path.to_path_buf(),
+                    reason: e.to_string(),
+                },
+            )?;
+        let provenance = rkyv::deserialize::<Provenance, rkyv::rancor::Error>(archived_trailer)
+            .map_err(|e| IndexError::Deserialize {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        let me = Self {
             path: path.to_path_buf(),
             map,
             frame,
             provenance,
-        })
+        };
+        // Once, here, rather than on every id-to-name lookup; see
+        // `StrTabRef::validate`.
+        me.view()
+            .validate_strings()
+            .map_err(|reason| IndexError::Deserialize {
+                path: path.to_path_buf(),
+                reason,
+            })?;
+        Ok(me)
     }
 
     pub fn path(&self) -> &Path {
@@ -356,11 +429,25 @@ impl OwnedIndexBytes {
         bytes.extend_from_slice(&raw[frame.payload.0..frame.payload.0 + frame.payload.1]);
         let mut trailer = rkyv::util::AlignedVec::<16>::with_capacity(frame.trailer.1);
         trailer.extend_from_slice(&raw[frame.trailer.0..frame.trailer.0 + frame.trailer.1]);
-        let provenance = rkyv::deserialize::<Provenance, rkyv::rancor::Error>(unsafe {
-            rkyv::access_unchecked::<crate::data::ArchivedProvenance>(&trailer)
-        })
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
-        Ok(Self { bytes, provenance })
+        let archived_trailer =
+            rkyv::access::<crate::data::ArchivedProvenance, rkyv::rancor::Error>(&trailer)
+                .map_err(|e| IndexError::Deserialize {
+                    path: PathBuf::from("<memory>"),
+                    reason: e.to_string(),
+                })?;
+        let provenance = rkyv::deserialize::<Provenance, rkyv::rancor::Error>(archived_trailer)
+            .map_err(|e| IndexError::Deserialize {
+                path: PathBuf::from("<memory>"),
+                reason: e.to_string(),
+            })?;
+        let me = Self { bytes, provenance };
+        me.view()
+            .validate_strings()
+            .map_err(|reason| IndexError::Deserialize {
+                path: PathBuf::from("<memory>"),
+                reason,
+            })?;
+        Ok(me)
     }
 
     pub fn archived(&self) -> &ArchivedIndexData {
@@ -370,5 +457,72 @@ impl OwnedIndexBytes {
 
     pub fn view(&self) -> IndexRef<'_> {
         self.archived().view_with(&self.provenance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::{new_lineage, IndexBuilder};
+
+    fn tiny() -> Vec<u8> {
+        let mut b = IndexBuilder::new(new_lineage());
+        b.set_bazel_version("test");
+        let data = b.finish("deadbeef");
+        to_bytes(&data).unwrap()
+    }
+
+    #[test]
+    fn round_trips_a_tiny_fixture() {
+        let bytes = tiny();
+        let frame = check_prefix(Path::new("<memory>"), &bytes, bytes.len() as u64).unwrap();
+        assert_eq!(frame.payload.0, PREFIX_LEN);
+    }
+
+    #[test]
+    fn rejects_a_truncated_file() {
+        let bytes = tiny();
+        let short = &bytes[..bytes.len() - 1];
+        let err = check_prefix(Path::new("x"), short, short.len() as u64).unwrap_err();
+        assert!(matches!(err, IndexError::Truncated { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_a_bad_version() {
+        let mut bytes = tiny();
+        bytes[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        let err = check_prefix(Path::new("x"), &bytes, bytes.len() as u64).unwrap_err();
+        assert!(matches!(err, IndexError::BadVersion { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_a_payload_offset_that_is_not_prefix_len() {
+        let mut bytes = tiny();
+        bytes[16..24].copy_from_slice(&((PREFIX_LEN as u64) + 16).to_le_bytes());
+        let err = check_prefix(Path::new("x"), &bytes, bytes.len() as u64).unwrap_err();
+        assert!(matches!(err, IndexError::BadHeader { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_a_misaligned_trailer_offset() {
+        let mut bytes = tiny();
+        // Nudge the trailer offset off its 16-byte alignment; keep it within
+        // bounds so this exercises the alignment check specifically.
+        let bad = bytes[32..40]
+            .try_into()
+            .map(u64::from_le_bytes)
+            .unwrap()
+            .saturating_sub(1);
+        bytes[32..40].copy_from_slice(&bad.to_le_bytes());
+        let err = check_prefix(Path::new("x"), &bytes, bytes.len() as u64).unwrap_err();
+        assert!(matches!(err, IndexError::BadHeader { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_an_overflowing_offset() {
+        let mut bytes = tiny();
+        bytes[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+        let err = check_prefix(Path::new("x"), &bytes, bytes.len() as u64).unwrap_err();
+        assert!(matches!(err, IndexError::BadHeader { .. }), "{err:?}");
     }
 }

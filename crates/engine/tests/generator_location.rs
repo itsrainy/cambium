@@ -70,7 +70,7 @@ fn engine() -> Engine {
 #[test]
 fn shifting_every_generator_location_affects_nothing() {
     let g = generate(&GraphSpec::preset("small").unwrap());
-    let opts = cambium_proto::ConvertOptions::default();
+    let opts = cambium_bazel::ConvertOptions::default();
 
     let base_bytes = cambium_synth::proto::to_streamed_proto(&g);
     let base_updates = parse_stream(&base_bytes, &opts, &no_files()).unwrap();

@@ -413,56 +413,26 @@ fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
 }
 
 /// Arguments of the call whose `(` is at `open`, which must be `Tok::Open`.
+/// The arguments of the call whose `(` is at `open`, with each argument
+/// flattened to the string literals inside it.
+///
+/// Argument splitting is [`arg_spans`]'s job — it is the same walk, and having
+/// two of them meant two chances to disagree about what starts a keyword
+/// argument. This adds only the flattening: a list or dict argument yields
+/// every literal in it, at any nesting depth, which is what the callers ask
+/// of `Args`.
 fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
     let mut out = Args::default();
-    let mut depth = 0i32;
-    let mut i = open;
-    // Current keyword argument being filled, if any.
-    let mut key: Option<String> = None;
-    let mut vals: Vec<String> = Vec::new();
-    let flush = |out: &mut Args, key: &mut Option<String>, vals: &mut Vec<String>| {
-        if let Some(k) = key.take() {
-            out.kw.push((k, std::mem::take(vals)));
-        } else {
-            out.positional.append(vals);
-        }
-    };
-    while i < toks.len() {
-        match toks[i].tok {
-            Tok::Open => {
-                depth += 1;
-                i += 1;
-            }
-            Tok::Close => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            Tok::Punct(b',') if depth == 1 => {
-                flush(&mut out, &mut key, &mut vals);
-                i += 1;
-            }
-            // `name = ...` starts a keyword argument; `==`, `>=` and friends
-            // do not, and neither does an `=` nested in a list or a dict.
-            Tok::Name(n)
-                if depth == 1
-                    && matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
-                    && !matches!(toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'='))) =>
-            {
-                flush(&mut out, &mut key, &mut vals);
-                key = Some(n.to_string());
-                i += 2;
-            }
-            Tok::Str(s, e) => {
-                vals.push(unescape(&text[s..e]));
-                i += 1;
-            }
-            _ => i += 1,
+    for (key, span) in arg_spans(toks, open) {
+        let vals = toks[span].iter().filter_map(|t| match t.tok {
+            Tok::Str(s, e) => Some(unescape(&text[s..e])),
+            _ => None,
+        });
+        match key {
+            Some(k) => out.kw.push((k, vals.collect())),
+            None => out.positional.extend(vals),
         }
     }
-    flush(&mut out, &mut key, &mut vals);
     out
 }
 
