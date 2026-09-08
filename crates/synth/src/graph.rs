@@ -411,9 +411,12 @@ impl SynthGraph {
             if !p.alive {
                 continue;
             }
-            let ids = c.graph.package_closure(&p.path, &files, &mapping);
+            let pc = c.graph.package_closure(&p.path, &files, &mapping);
             debug_assert_eq!(self.pkg_by_path.get(&p.path), Some(&(i as u32)));
-            c.packages.insert(p.path.clone(), ids);
+            c.packages.insert(p.path.clone(), pc.bzl);
+            if !pc.external.is_empty() {
+                c.package_external.insert(p.path.clone(), pc.external);
+            }
         }
         c.workspace = c.graph.workspace_closure(&files, &mapping);
         c

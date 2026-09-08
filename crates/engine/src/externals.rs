@@ -421,7 +421,9 @@ pub fn reach(
 
     // (2) loads. The static closure recorded the external labels every `.bzl`
     // load walk stopped at; a package whose closure contains one of them can
-    // have its rules change when that repository does.
+    // have its rules change when that repository does. The labels a BUILD
+    // file loads directly sit on the package itself (`pkg_ext`), since no
+    // `.bzl` row stands between it and the repository (issue #4).
     if base.bzl_closure && !load_repos.is_empty() {
         let hot: Vec<u32> = (0..base.bzl_ext_labels.len() as u32)
             .filter(|&e| {
@@ -437,6 +439,14 @@ pub fn reach(
                     if !base.package_tombstoned(p) {
                         out.packages.insert(base.package_name(p).to_string());
                     }
+                }
+            }
+            for p in 0..base.pkg_ext.len() as u32 {
+                if base.package_tombstoned(p) {
+                    continue;
+                }
+                if base.pkg_ext.row(p).iter().any(|e| hot.contains(e)) {
+                    out.packages.insert(base.package_name(p).to_string());
                 }
             }
         }

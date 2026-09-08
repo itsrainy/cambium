@@ -117,6 +117,10 @@ pub struct BzlClosure {
     pub graph: crate::loads::LoadGraph,
     /// Package name -> the `.bzl` ids its BUILD file transitively loads.
     pub packages: std::collections::BTreeMap<String, Vec<u32>>,
+    /// Package name -> the canonical external labels its BUILD file loads
+    /// *directly*. Only packages with at least one have an entry. See
+    /// [`crate::loads::PackageClosure`].
+    pub package_external: std::collections::BTreeMap<String, Vec<String>>,
     /// `.bzl` ids reachable from `MODULE.bazel` / `WORKSPACE`.
     pub workspace: Vec<u32>,
     /// Which main-repo files feed which external repositories, and which
@@ -144,6 +148,17 @@ impl BzlClosure {
         }
         for ids in packages.values_mut() {
             ids.sort_unstable();
+        }
+        let mut package_external: std::collections::BTreeMap<String, Vec<String>> =
+            Default::default();
+        for p in 0..v.num_packages() {
+            let ext = v.package_external(p);
+            if !ext.is_empty() {
+                package_external.insert(
+                    v.package_name(p).to_string(),
+                    ext.into_iter().map(str::to_string).collect(),
+                );
+            }
         }
         let mut inputs = crate::externals::RepoInputs::default();
         for r in 0..v.num_repos() {
@@ -176,6 +191,7 @@ impl BzlClosure {
         Some(Self {
             graph: crate::loads::LoadGraph::from_index(v),
             packages,
+            package_external,
             workspace: v.bzl_workspace.to_vec(),
             inputs,
         })
@@ -800,6 +816,8 @@ impl<'a> IndexBuilder<'a> {
             bzl_ext_label_offsets: bzl.ext_label_offsets,
             bzl_ext_offsets: bzl.ext_offsets,
             bzl_ext_edges: bzl.ext_edges,
+            pkg_ext_offsets: bzl.pkg_ext_offsets,
+            pkg_ext_edges: bzl.pkg_ext_edges,
             repo_name_bytes: bzl.repo_name_bytes,
             repo_name_offsets: bzl.repo_name_offsets,
             repo_canonical_bytes: bzl.repo_canonical_bytes,
@@ -833,6 +851,8 @@ struct BzlTables {
     ext_label_offsets: Vec<u32>,
     ext_offsets: Vec<u32>,
     ext_edges: Vec<u32>,
+    pkg_ext_offsets: Vec<u32>,
+    pkg_ext_edges: Vec<u32>,
     repo_name_bytes: Vec<u8>,
     repo_name_offsets: Vec<u32>,
     repo_canonical_bytes: Vec<u8>,
@@ -857,6 +877,7 @@ impl BzlTables {
             consumer_offsets: vec![0],
             ext_label_offsets: vec![0],
             ext_offsets: vec![0],
+            pkg_ext_offsets: vec![0],
             repo_name_offsets: vec![0],
             repo_canonical_offsets: vec![0],
             repo_input_offsets: vec![0],
@@ -914,6 +935,22 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         ext.dedup();
         t.ext_edges.extend_from_slice(&ext);
         t.ext_offsets.push(t.ext_edges.len() as u32);
+    }
+    // The BUILD files' own external loads, one row per package id, into the
+    // same label table.
+    let mut per_pkg: Vec<Vec<u32>> = vec![Vec::new(); pkg_names.len()];
+    for (pkg, labels) in &c.package_external {
+        let Some(p) = pkg_names.lookup(pkg) else {
+            continue;
+        };
+        let row = &mut per_pkg[p as usize];
+        row.extend(labels.iter().map(|l| ext_labels.intern(l)));
+        row.sort_unstable();
+        row.dedup();
+    }
+    for row in &per_pkg {
+        t.pkg_ext_edges.extend_from_slice(row);
+        t.pkg_ext_offsets.push(t.pkg_ext_edges.len() as u32);
     }
     let (b, o) = ext_labels.into_parts();
     t.ext_label_bytes = b;

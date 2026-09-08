@@ -41,8 +41,10 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// see [`crate::externals`]) that replaced whole-world invalidation on a
 /// `MODULE.bazel` or repository-rule-input edit, and to 6 when it gained the
 /// per-repository path mapping (`repo_map_*`) that tells an input-path edit
-/// apart from an edit to a `.bzl` the repository exports.
-pub const FORMAT_VERSION: u32 = 6;
+/// apart from an edit to a `.bzl` the repository exports, and to 7 when the
+/// closure gained the external labels each BUILD file loads *directly*
+/// (`pkg_ext_*`), which the per-`.bzl` table had no row for (issue #4).
+pub const FORMAT_VERSION: u32 = 7;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

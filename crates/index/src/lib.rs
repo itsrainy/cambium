@@ -45,7 +45,7 @@ pub use format::{
     commit_pointer_key, index_file_name, index_key, parse_commit_pointer_key, parse_index_key,
     temp_suffix, IndexError, IndexFile, OwnedIndexBytes, FORMAT_VERSION,
 };
-pub use loads::{FileText, Load, LoadGraph, RepoMapping};
+pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
 pub use view::GraphView;
