@@ -354,6 +354,26 @@ mod tests {
         );
     }
 
+    /// The exact shape the 2026-09-08 run published: every change set global,
+    /// every tool erroring, and the summary tables silent about it.
+    #[test]
+    fn a_global_change_set_whose_tool_failed_does_not_read_as_a_clean_run() {
+        let mut g = global_change_set("2");
+        let err = anyhow::anyhow!("aspect query: unexpected EOF on stdin");
+        g.tools = vec![ToolComparison::failed("bazel-diff-rust", "v46.1.0", &err)];
+        g.pass = g.tools.iter().all(|t| t.pass);
+        assert!(!g.pass, "a comparison that did not happen is not agreement");
+
+        let s = summarise(&[g]);
+        assert_eq!((s.change_sets, s.passed, s.globals), (1, 0, 1));
+        assert!(!s.pass, "and the run says so");
+        // The aggregates still skip the tool -- there is no timing to take
+        // from a run that produced none -- which is exactly why the `pass`
+        // flag has to carry the failure instead.
+        assert!(s.global_stats.tool_cold.is_empty());
+        assert!(s.all_tool_change_sets.is_empty());
+    }
+
     #[test]
     fn a_global_change_set_still_pays_for_its_tools_and_records_what_they_found() {
         let g = global_change_set("2");

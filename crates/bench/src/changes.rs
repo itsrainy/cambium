@@ -565,6 +565,36 @@ mod tests {
     }
 
     #[test]
+    fn a_cap_smaller_than_the_pr_count_spends_it_all_on_prs() {
+        // PR-shaped change sets are the primary kind and the one the headline
+        // numbers are drawn from, so they are served first and the stress
+        // budget is a quarter of what is *left*. Under a cap the PRs alone
+        // fill, that quarter is zero: `--change-sets 10` on a subject with
+        // twenty PRs is ten PRs and nothing else, deliberately.
+        let all = subject_shaped();
+        let capped = cap_total(&all, 10);
+        assert_eq!(capped.len(), 10);
+        assert!(
+            capped.iter().all(|p| p.kind == ChangeSetKind::Pr),
+            "{capped:?}"
+        );
+
+        // One more than the PRs can fill, and the leftover goes to stress
+        // before adjacent -- `min(cap / 4)` allows five at cap 21, and there
+        // are only ten.
+        let capped = cap_total(&all, 21);
+        let by = |k: ChangeSetKind| capped.iter().filter(|p| p.kind == k).count();
+        assert_eq!(by(ChangeSetKind::Pr), 20);
+        assert_eq!(by(ChangeSetKind::Stress), 1);
+        assert_eq!(by(ChangeSetKind::Adjacent), 0);
+        assert_eq!(capped.len(), 21);
+
+        // A cap of zero is an empty selection, not a panic: `cap - taken.len()`
+        // is the arithmetic to get wrong here.
+        assert!(cap_total(&all, 0).is_empty());
+    }
+
+    #[test]
     fn pr_reference_matches_squash_and_merge_markers() {
         // GitHub's squash-merge default: the PR number in parens at the end.
         assert_eq!(
