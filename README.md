@@ -75,20 +75,22 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ## Usage
 
 ```console
-$ cambi affected --base <sha> --head <sha> [--tests-only] [--include-manual]
+$ cambi affected --base <sha> [--head <sha>] [--tests-only] [--include-manual]
                    [--output text|json|query] [--explain] [--max-depth n]
-$ cambi baseline build  [--commit <sha>] [--publish]
-$ cambi baseline update --from <sha> --to <sha> [--publish]
-$ cambi baseline gc | list
+                   [--no-full-build] [--publish-base] [--write-index <file>]
+$ cambi baseline build  [--commit <sha>] [--publish] [--out <file>]
+$ cambi baseline update --from <sha> [--to <sha>] [--publish] [--out <file>]
+                   [--no-rebuild-on-global]
+$ cambi baseline gc [--keep <artifact>] | list
 $ cambi index inspect   <file> [--label //x:y] [--package p]
-$ cambi index rdeps     <file> //x:y  [--transitive] [--tests-only] [--max-depth n]
-$ cambi index deps      <file> //x:y  [--transitive]
+$ cambi index rdeps     <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
+$ cambi index deps      <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
 $ cambi index path      <file> //from:a //to:b
-$ cambi index consumers <file> <path>...  [--transitive]
+$ cambi index consumers <file> <path>...  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
 $ cambi index owner     <file> <path>...
 $ cambi index targets   <file> <package> [--kind rule]
 $ cambi index stats     <file>
-$ cambi index verify    <file> --against-bazel
+$ cambi index verify    <file> [--sample n] [--seed n]
 $ cambi bench subjects list|fetch|build [<subject>]
 $ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
 $ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
@@ -96,9 +98,19 @@ $ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
 $ cambi bench stages|sweep <subject>
 $ cambi bench regress <a.json> <b.json>
 $ cambi bench report  [<subject>]
-$ cambi synth emit-bazel|describe|presets
+$ cambi synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
+                   [--revisions n] [--seed n] [--force]
+$ cambi synth describe    [--spec <preset>] [--seed n]
+$ cambi synth build-index [--spec <preset>] --out <file> [--seed n]
+$ cambi synth presets
 $ cambi config
 ```
+
+Every subcommand also accepts these global options, declared once on `cambi`
+itself: `-C, --workspace <dir>` (defaults to the current directory),
+`--config <cambium.toml>`, `--bazel-binary <binary>` (overrides config and
+`$BAZEL_REAL`), and `--log <level>` (`error`, `warn`, `info`, `debug`,
+`trace`; also settable via `$CAMBIUM_LOG`, with an explicit `--log` winning).
 
 `--output query` emits a `set(...)` expression you can hand straight to Bazel:
 
@@ -198,6 +210,13 @@ affected report's shape and fails with instructions if it moves without a bump;
 Optional fields are omitted rather than null, so absence is meaningful. A
 document with no `schema` key predates the field and is version 1.
 
+`--tests-only` applies to `--output json` too: `affected` is restricted to the
+entries with `test: true` (`direct` and every other field are unchanged, so a
+label a change touched directly but that is not itself a test can still
+appear there). This does not change the document's shape, so it is not a
+`SCHEMA_VERSION` bump — a consumer that already reads `affected` sees a
+subset of what it would otherwise.
+
 `cambi index ... --output json` and `cambi bench` results carry `schema`
 on the same terms.
 
@@ -208,10 +227,8 @@ on the same terms.
 | 1 | the first published contract |
 | 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
-| 5 | `stats.cold_rebuild` and `cold_rebuild_reason`: past `limits.max_dirty_packages` a run re-queries `//...` at head instead of splicing the dirty set. It is not a global invalidation — `affected` is still exact — and `limits.max_changed_files`, which used to make that case global, is gone |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
-| 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head — still exact, not global); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}` — the target names something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
-
+| 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head — still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}` — the target names something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from — those repositories contribute their label consumers to the direct set, and their loading packages are not re-queried |
 
 The version is shared by every document, so a bump made for one of them moves
@@ -385,7 +402,7 @@ much they cost to run:
    `exports_files` across packages, a `select` branch change, a package split,
    a global invalidator, an ignored path. Each is also checked against a full
    rebuild, so the expectations cannot drift.
-4. **`cambi index verify --against-bazel`** — for a sample of targets, our
+4. **`cambi index verify`** — for a sample of targets, our
    reverse closure must contain everything `bazel query rdeps(//..., target)`
    reports. This is the soundness oracle, and it runs against production
    indexes too, reporting precision as a percentage.

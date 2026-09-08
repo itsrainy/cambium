@@ -92,10 +92,16 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(&cli.log);
 
-    let root = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().expect("current directory is readable"));
+    let root = match cli.workspace.clone() {
+        Some(w) => w,
+        None => match std::env::current_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("cambium: could not read the current directory: {e}");
+                return ExitCode::from(EXIT_ERROR);
+            }
+        },
+    };
     let ctx = cmd::Context {
         root,
         config: cli.config.clone(),
@@ -126,9 +132,11 @@ fn main() -> ExitCode {
 
 fn init_logging(level: &str) {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_env("CAMBIUM_LOG")
-        .or_else(|_| EnvFilter::try_new(level))
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    // `cli.log` already carries $CAMBIUM_LOG's value via clap's `env =
+    // "CAMBIUM_LOG"` (an explicit `--log` still wins over it there), so this
+    // must not consult the environment a second time — doing so let a stale
+    // $CAMBIUM_LOG silently override an explicit `--log`.
+    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

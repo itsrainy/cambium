@@ -5,11 +5,11 @@
 //! `cambium_engine::inspect`, which is the same walk the `affected` run uses;
 //! a query that disagreed with a run would be worse than no query at all.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use cambium_engine::inspect::{self, IndexQuery, QueryOptions};
-use cambium_index::{IndexFile, NodeKind};
+use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
@@ -53,8 +53,27 @@ impl From<&Reach> for QueryOptions {
     }
 }
 
+/// `index verify`, dispatched separately from the other subcommands: it does
+/// not take a [`Common`] (it shells out to Bazel rather than answering from
+/// the index alone), so it never shares `IndexQuery::common()`.
+#[derive(ClapArgs)]
+pub struct Verify {
+    file: PathBuf,
+    /// How many targets to sample.
+    #[arg(long, default_value_t = 200)]
+    sample: usize,
+    /// Seed for the sample, so a failure can be reproduced.
+    #[arg(long, default_value_t = 0)]
+    seed: u64,
+    #[arg(long, value_enum, default_value_t = DataFormat::Text)]
+    output: DataFormat,
+}
+
 #[derive(Subcommand)]
 pub enum Args {
+    /// Check an index against Bazel (spec 12.3): sample rule targets and
+    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
+    Verify(Verify),
     /// Print an index's header and counts, and optionally one target or package.
     Inspect {
         #[command(flatten)]
@@ -120,23 +139,10 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
-    /// Check an index against Bazel (spec 12.3): sample rule targets and
-    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
-    Verify {
-        file: PathBuf,
-        /// How many targets to sample.
-        #[arg(long, default_value_t = 200)]
-        sample: usize,
-        /// Seed for the sample, so a failure can be reproduced.
-        #[arg(long, default_value_t = 0)]
-        seed: u64,
-        #[arg(long = "against-bazel", default_value_t = true)]
-        against_bazel: bool,
-    },
 }
 
 impl Args {
-    fn common(&self) -> Option<&Common> {
+    fn common(&self) -> &Common {
         match self {
             Args::Inspect { common, .. }
             | Args::Rdeps { common, .. }
@@ -145,27 +151,56 @@ impl Args {
             | Args::Consumers { common, .. }
             | Args::Owner { common, .. }
             | Args::Targets { common, .. }
-            | Args::Stats { common } => Some(common),
-            Args::Verify { .. } => None,
+            | Args::Stats { common } => common,
+            Args::Verify(_) => unreachable!("index::run intercepts Verify before common()"),
         }
     }
 }
 
-pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    if let Args::Verify {
-        file,
-        sample,
-        seed,
-        against_bazel,
-    } = &args
-    {
-        if !against_bazel {
-            anyhow::bail!("index verify currently only supports --against-bazel");
-        }
-        return verify(ctx, file, *sample, *seed);
+/// Dispatches `index verify`, which does not go through [`Args`] or
+/// [`Args::common`] since it has no [`Common`] and talks to Bazel directly.
+pub fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
+    if args.sample == 0 {
+        anyhow::bail!("--sample must be at least 1");
     }
+    let engine = ctx.engine()?;
+    let f = IndexFile::open(&args.file)?;
+    let result = inspect::verify(&engine.bazel, f.view(), args.sample, args.seed)?;
+    match args.output {
+        DataFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        DataFormat::Text => print_verify(&result),
+    }
+    Ok(if result.is_sound() {
+        crate::EXIT_OK
+    } else {
+        crate::EXIT_ERROR
+    })
+}
 
-    let common = args.common().expect("verify handled above").clone();
+fn print_verify(r: &inspect::VerifyResult) {
+    for f in &r.failures {
+        eprintln!(
+            "UNSOUND {}: {} targets Bazel reports as rdeps are missing from the index",
+            f.label,
+            f.missing.len()
+        );
+        for m in f.missing.iter().take(10) {
+            eprintln!("    {m}");
+        }
+    }
+    println!("checked {} targets against bazel", r.checked);
+    println!("unsound: {}", r.unsound);
+    println!(
+        "precision: {:.1}% ({} of {} reported targets are real rdeps)",
+        r.precision_pct, r.theirs_total, r.ours_total
+    );
+}
+
+pub fn run(ctx: &Context, args: Args) -> Result<u8> {
+    if let Args::Verify(v) = args {
+        return run_verify(ctx, v);
+    }
+    let common = args.common().clone();
     let f = IndexFile::open(&common.file)?;
     let q = IndexQuery::new(f.view());
     let fmt = common.output;
@@ -202,7 +237,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             emit(&q.targets(&package, kind)?, fmt, print_package_targets)
         }
         Args::Stats { .. } => emit(&q.stats(f.file_size() as u64), fmt, print_stats),
-        Args::Verify { .. } => unreachable!("handled above"),
+        Args::Verify(_) => unreachable!("handled above"),
     }?;
     Ok(crate::EXIT_OK)
 }
@@ -463,104 +498,3 @@ fn print_detail(d: &inspect::TargetDetail) {
     }
 }
 
-/// Differential check against Bazel (spec 12.3).
-///
-/// For a random sample of rule targets, our reverse closure must be a superset
-/// of `bazel query rdeps(//..., label)`. Missing targets are soundness bugs and
-/// fail the check; extra targets are the over-approximation the design accepts,
-/// and are reported as a precision percentage.
-fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
-    let engine = ctx.engine()?;
-    let f = IndexFile::open(file)?;
-    let v = f.view();
-
-    let rules: Vec<u32> = (0..v.num_nodes())
-        .filter(|&i| v.kind_of(i) == NodeKind::Rule && !v.is_tombstone(i))
-        .collect();
-    if rules.is_empty() {
-        anyhow::bail!("index contains no rule targets");
-    }
-
-    // Deterministic sample: stride through the rule ids from a seeded offset.
-    let stride = (rules.len() / sample.max(1)).max(1);
-    let start = (seed as usize) % rules.len();
-    let picked: Vec<u32> = (0..sample.min(rules.len()))
-        .map(|i| rules[(start + i * stride) % rules.len()])
-        .collect();
-
-    let mut checked = 0usize;
-    let mut unsound = 0usize;
-    let mut ours_total = 0usize;
-    let mut theirs_total = 0usize;
-
-    for id in picked {
-        let label = v.label(id);
-        let out = engine
-            .bazel
-            .command("query")
-            .args([
-                &format!("rdeps(//..., {label})"),
-                "--output=label",
-                // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
-                // implicit edges, so the cross-check must too.
-                "--order_output=no",
-                "--keep_going",
-                "--noshow_progress",
-                "--ui_event_filters=-info",
-            ])
-            .output()?;
-        if !out.status.success() {
-            eprintln!("cambium: skipping {label}: bazel query failed");
-            continue;
-        }
-        let theirs: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let r = cambium_index::walk::walk(
-            v,
-            &[id],
-            &cambium_index::WalkOptions {
-                include_manual: true,
-                explain: false,
-                max_depth: None,
-            },
-        );
-        let ours: std::collections::HashSet<String> =
-            cambium_index::walk::labels_sorted(v, &r.affected)
-                .into_iter()
-                .collect();
-
-        let missing: Vec<&String> = theirs.difference(&ours).collect();
-        checked += 1;
-        ours_total += ours.len();
-        theirs_total += theirs.len();
-        if !missing.is_empty() {
-            unsound += 1;
-            eprintln!(
-                "UNSOUND {label}: {} targets Bazel reports as rdeps are missing from the index",
-                missing.len()
-            );
-            for m in missing.iter().take(10) {
-                eprintln!("    {m}");
-            }
-        }
-    }
-
-    let precision = if ours_total == 0 {
-        100.0
-    } else {
-        theirs_total as f64 / ours_total as f64 * 100.0
-    };
-    println!("checked {checked} targets against bazel");
-    println!("unsound: {unsound}");
-    println!(
-        "precision: {precision:.1}% ({theirs_total} of {ours_total} reported targets are real rdeps)"
-    );
-    Ok(if unsound == 0 {
-        crate::EXIT_OK
-    } else {
-        crate::EXIT_ERROR
-    })
-}
