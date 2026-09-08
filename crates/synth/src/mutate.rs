@@ -233,7 +233,7 @@ impl ChangeSpec {
         Some(c)
     }
 
-    pub const PRESETS: &'static [&'static str] = &[
+    pub const PRESETS: &[&str] = &[
         "typical-pr",
         "build-edit",
         "bzl-edit",
@@ -471,6 +471,9 @@ fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
                 t.srcs.remove(i);
                 t.src_versions.remove(i);
                 changes.push(Change::new(Status::Deleted, path));
+                // If the file was exported, its consumers' BUILD files just
+                // lost a src, and the exporting package its exports_files line.
+                unexport(g, *target, Some(*slot), changes);
             }
         }
         Mutation::EditRuleAttr { target } => {
@@ -540,6 +543,10 @@ fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
             for p in dependent_packages(g, &[*target]) {
                 changes.push(Change::new(Status::Modified, g.build_path(p)));
             }
+            // Its files are gone too, so nothing may still export or consume
+            // them: a consumer's `srcs` naming a deleted file is a BUILD error,
+            // and the reference oracle would read a dead target's versions.
+            unexport(g, *target, None, changes);
         }
         Mutation::EditBzl { bzl } => {
             g.bzl[*bzl as usize].version += 1;
@@ -623,6 +630,28 @@ fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<
             changes.push(Change::new(Status::Deleted, old_paths[i].clone()));
             changes.push(Change::new(Status::Added, g.src_path(t, s)));
         }
+        // An exported file moves with its owner: the `exports_files` line goes
+        // to the destination package, and every consumer's record of which
+        // package the file lives in follows it.
+        let exported: Vec<(u32, u32)> = g.packages[from as usize]
+            .exported
+            .iter()
+            .copied()
+            .filter(|&(et, _)| et == t)
+            .collect();
+        if !exported.is_empty() {
+            g.packages[from as usize]
+                .exported
+                .retain(|&(et, _)| et != t);
+            g.packages[dest as usize].exported.extend(exported);
+            for c in g.targets.iter_mut() {
+                for f in c.foreign_srcs.iter_mut() {
+                    if f.1 == t {
+                        f.0 = dest;
+                    }
+                }
+            }
+        }
     }
     // Anyone referring to a moved target now refers to a different label, so
     // their BUILD files changed too.
@@ -631,12 +660,47 @@ fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<
     }
 }
 
+/// Drops `target`'s exported files — one slot, or all of them — from its
+/// package's `exports_files` and from every consumer's `srcs`, recording the
+/// BUILD edits that implies.
+fn unexport(g: &mut SynthGraph, target: u32, slot: Option<u32>, changes: &mut Vec<Change>) {
+    let gone = |t: u32, s: u32| t == target && slot.map_or(true, |slot| slot == s);
+    let pkg = g.targets[target as usize].package;
+    let exported = &mut g.packages[pkg as usize].exported;
+    let before = exported.len();
+    exported.retain(|&(t, s)| !gone(t, s));
+    if exported.len() == before {
+        return;
+    }
+    changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+    let mut consumers: Vec<u32> = Vec::new();
+    for (id, c) in g.targets.iter_mut().enumerate() {
+        let before = c.foreign_srcs.len();
+        c.foreign_srcs.retain(|&(_, t, s)| !gone(t, s));
+        if c.alive && c.foreign_srcs.len() != before {
+            consumers.push(id as u32);
+        }
+    }
+    for c in consumers {
+        changes.push(Change::new(
+            Status::Modified,
+            g.build_path(g.targets[c as usize].package),
+        ));
+    }
+}
+
+/// Packages holding a live target that names one of `targets`, as a dep or as
+/// the owner of a file it consumes via `exports_files`.
 fn dependent_packages(g: &SynthGraph, targets: &[u32]) -> Vec<u32> {
     let set: std::collections::HashSet<u32> = targets.iter().copied().collect();
     let mut pkgs: Vec<u32> = g
         .targets
         .iter()
-        .filter(|t| t.alive && t.deps.iter().any(|d| set.contains(d)))
+        .filter(|t| {
+            t.alive
+                && (t.deps.iter().any(|d| set.contains(d))
+                    || t.foreign_srcs.iter().any(|&(_, ft, _)| set.contains(&ft)))
+        })
         .map(|t| t.package)
         .collect();
     pkgs.sort_unstable();
@@ -847,6 +911,142 @@ mod tests {
             changes.iter().find(|c| c.path == path).map(|c| c.status),
             Some(Status::Deleted)
         );
+    }
+
+    /// A package that exports a file, the target that owns it, and one
+    /// consumer of it.
+    fn an_export(g: &SynthGraph) -> (u32, u32, u32, u32) {
+        let (pkg, &(et, slot)) = g
+            .packages
+            .iter()
+            .enumerate()
+            .find_map(|(i, p)| p.exported.first().map(|e| (i as u32, e)))
+            .expect("the small preset exports something");
+        let consumer = (0..g.targets.len() as u32)
+            .find(|&c| {
+                g.targets[c as usize]
+                    .foreign_srcs
+                    .iter()
+                    .any(|&(_, t, s)| t == et && s == slot)
+            })
+            .expect("an exported file has a consumer");
+        (pkg, et, slot, consumer)
+    }
+
+    /// Every `exports_files` entry names a live target's live slot in that very
+    /// package, and every consumer's foreign src is exported by the package it
+    /// says it is.
+    fn assert_exports_consistent(g: &SynthGraph) {
+        for (pi, p) in g.packages.iter().enumerate() {
+            for &(t, s) in &p.exported {
+                let owner = &g.targets[t as usize];
+                assert!(owner.alive, "//{} exports dead t{t}_{s}.src", p.path);
+                assert_eq!(
+                    owner.package, pi as u32,
+                    "//{} exports a file it does not own",
+                    p.path
+                );
+                assert!(
+                    owner.srcs.contains(&s),
+                    "//{} exports a deleted slot",
+                    p.path
+                );
+            }
+        }
+        for c in g.targets.iter().filter(|t| t.alive) {
+            for &(fp, ft, fs) in &c.foreign_srcs {
+                assert!(
+                    g.targets[ft as usize].alive,
+                    "a consumer still names dead t{ft}"
+                );
+                assert_eq!(g.targets[ft as usize].package, fp);
+                assert!(g.packages[fp as usize].exported.contains(&(ft, fs)));
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_an_exporter_drops_its_consumers_foreign_srcs() {
+        let mut g = graph();
+        let (pkg, et, _, consumer) = an_export(&g);
+        let consumer_pkg = g.targets[consumer as usize].package;
+        let changes = apply_one(&mut g, &Mutation::DeleteTarget { target: et });
+        assert!(g.packages[pkg as usize]
+            .exported
+            .iter()
+            .all(|&(t, _)| t != et));
+        assert!(g.targets[consumer as usize]
+            .foreign_srcs
+            .iter()
+            .all(|&(_, t, _)| t != et));
+        // The consumer's BUILD file lost a src, so git saw it change.
+        let build = g.build_path(consumer_pkg);
+        assert!(changes.iter().any(|c| c.path == build), "{changes:?}");
+        assert_exports_consistent(&g);
+        // The oracle must not need a dead target's file versions.
+        crate::reference::deep_hashes(&g);
+    }
+
+    #[test]
+    fn deleting_an_exported_file_unexports_it() {
+        let mut g = graph();
+        let (pkg, et, slot, consumer) = an_export(&g);
+        apply_one(&mut g, &Mutation::DeleteSource { target: et, slot });
+        assert!(!g.packages[pkg as usize].exported.contains(&(et, slot)));
+        assert!(g.targets[consumer as usize]
+            .foreign_srcs
+            .iter()
+            .all(|&(_, t, s)| (t, s) != (et, slot)));
+        assert_exports_consistent(&g);
+    }
+
+    #[test]
+    fn splitting_moves_exports_with_their_owner() {
+        let mut g = graph();
+        let (pkg, et, slot, consumer) = an_export(&g);
+        let consumer_pkg = g.targets[consumer as usize].package;
+        let changes = apply_one(
+            &mut g,
+            &Mutation::SplitPackage {
+                package: pkg,
+                targets: vec![et],
+            },
+        );
+        let new_pkg = g.targets[et as usize].package;
+        assert_ne!(new_pkg, pkg);
+        assert!(!g.packages[pkg as usize].exported.contains(&(et, slot)));
+        assert!(g.packages[new_pkg as usize].exported.contains(&(et, slot)));
+        assert!(g.targets[consumer as usize]
+            .foreign_srcs
+            .contains(&(new_pkg, et, slot)));
+        // The consumer's srcs label changed, so its BUILD file did.
+        let build = g.build_path(consumer_pkg);
+        assert!(changes.iter().any(|c| c.path == build), "{changes:?}");
+        assert_exports_consistent(&g);
+
+        // And merging it back restores the original owner.
+        apply_one(&mut g, &Mutation::MergePackage { package: new_pkg });
+        assert!(g.packages[pkg as usize].exported.contains(&(et, slot)));
+        assert_exports_consistent(&g);
+    }
+
+    #[test]
+    fn a_long_mixed_history_keeps_exports_consistent() {
+        let spec = ChangeSpec {
+            weights: MutationWeights {
+                delete_target: 20,
+                delete_source: 20,
+                split_package: 20,
+                merge_package: 20,
+                ..MutationWeights::default()
+            },
+            ..ChangeSpec::default()
+        };
+        let mut g = graph();
+        for rev in 0..40 {
+            commit(&mut g, &spec, rev);
+            assert_exports_consistent(&g);
+        }
     }
 
     #[test]
