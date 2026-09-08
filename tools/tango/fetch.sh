@@ -16,8 +16,7 @@ TANGO_COMMIT="${TANGO_COMMIT:-005b0dec444d956cda42ebb62cce227362783948}"
 
 DIR="${CAMBIUM_TANGO_DIR:-$HOME/.cache/cambium/tango}"
 SRC="$DIR/src"
-GO="${GO:-/usr/local/bin/go}"
-command -v "$GO" >/dev/null 2>&1 || GO=go
+GO="${GO:-go}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

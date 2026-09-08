@@ -23,18 +23,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::harness::BenchReport;
 use crate::history::CommitRecord;
-use crate::HistoryResult;
+use crate::history::HistoryResult;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::compare::{ChangesResult, WallStats};
+use crate::util::percentile;
 
 /// `bench legacy`'s headline numbers at one graph size.
 ///
-/// Declared here rather than imported from `cambium-bench` so the reporting
-/// layer does not depend on the benchmark harness; the CLI deserialises the
-/// bench JSON into this.
+/// The reporting shape, not the measured one: a [`StageResult`] is a stage,
+/// a preset and a bag of `extra` numbers, and this is the handful of them the
+/// synthetic section prints. [`BenchLegacy::from_report`] does the projection.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BenchLegacy {
     /// The synthetic preset or repository scale the numbers describe.
@@ -63,6 +65,59 @@ pub struct BenchLegacy {
 }
 
 impl BenchLegacy {
+    /// The `legacy_bazel_diff` stages of one bench report, as report rows.
+    ///
+    /// The numbers live in two places for historical reasons: a sweep records
+    /// its size in `param` and its timing in `median_ms`/`p90_ms`, while a
+    /// plain run records both in `extra`. `extra` wins where it is present.
+    pub fn from_report(report: &BenchReport) -> Vec<Self> {
+        report
+            .results
+            .iter()
+            .filter(|r| r.stage == crate::legacy::STAGE)
+            .map(|r| {
+                let n = |k: &str| r.extra.get(k).copied().unwrap_or(0.0).round() as u64;
+                let or_else = |k: &str, fallback: u64| match n(k) {
+                    0 => fallback,
+                    v => v,
+                };
+                let cambium_only = n("cambium_only");
+                let legacy_only = n("bazel_diff_only");
+                Self {
+                    preset: r.preset.clone(),
+                    targets: or_else("targets", r.param.unwrap_or(0)),
+                    legacy_cold_ms: n("bazel_diff_cold_ms"),
+                    legacy_warm_ms: n("bazel_diff_warm_ms"),
+                    cambium_cold_ms: 0,
+                    cambium_warm_ms: or_else("cambium_ms", r.median_ms.round() as u64),
+                    cambium_p90_ms: or_else("cambium_p90_ms", r.p90_ms.round() as u64),
+                    agreed_labels: n("agreed"),
+                    cambium_only,
+                    legacy_only,
+                    agreed: cambium_only == 0 && legacy_only == 0,
+                }
+            })
+            .collect()
+    }
+
+    /// The saved `bench sweep --stage legacy_bazel_diff` run at `path`.
+    ///
+    /// Missing or unparseable is not an error: the synthetic section then says
+    /// the sweep has not been recorded, which is true and better than failing
+    /// a benchmark report over a benchmark file.
+    pub fn read(path: &Path) -> Vec<Self> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        match serde_json::from_str::<BenchReport>(&text) {
+            Ok(r) => Self::from_report(&r),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "ignoring an unreadable bench file");
+                Vec::new()
+            }
+        }
+    }
+
     fn speedup(&self) -> f64 {
         if self.cambium_warm_ms == 0 {
             return f64::INFINITY;
@@ -76,6 +131,22 @@ impl BenchLegacy {
         }
         self.legacy_cold_ms as f64 / self.cambium_warm_ms as f64
     }
+}
+
+/// The `<prefix>*.json` files in `dir`, if it is one. A missing directory is
+/// a subject that has not run that workload, not an error.
+fn json_files(dir: &Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
+        })
+        .collect()
 }
 
 /// One repository's results: what `bench-results/<id>/` held, plus the one
@@ -108,6 +179,94 @@ impl SubjectResults {
 
     pub fn is_empty(&self) -> bool {
         self.history.is_none() && self.compares.is_empty()
+    }
+
+    /// Everything `bench-results/<id>/` holds.
+    ///
+    /// The two workloads write into the directory that produced them,
+    /// `<id>/history/` and `<id>/changes/`, so this looks in both and nowhere
+    /// else. More than one history can be present -- a subject whose
+    /// `bazel_version` changed leaves the older file behind -- and the newest
+    /// by name wins for the history tables, while every change-set result is
+    /// rendered.
+    pub fn load(dir: &Path, id: &str) -> Result<Self> {
+        let mut histories = json_files(&dir.join("history"), "history-");
+        let mut compares = json_files(&dir.join("changes"), "changes-");
+        histories.sort();
+        compares.sort();
+        Ok(Self::new(id)
+            .with_history(
+                histories
+                    .last()
+                    .map(|p| HistoryResult::read(p))
+                    .transpose()?,
+            )
+            .with_compares(
+                compares
+                    .iter()
+                    .map(|p| ChangesResult::read(p))
+                    .collect::<Result<Vec<_>>>()?,
+            ))
+    }
+
+    /// Every manifest entry that has a results directory under `parent`, in
+    /// manifest order, plus any stray directory the manifest no longer names.
+    ///
+    /// The strays are deliberate: a renamed or removed entry still has numbers
+    /// worth showing, and silently dropping a subject's rows from
+    /// `docs/RESULTS.md` is worse than an unexplained row.
+    ///
+    /// `subjects` is consulted only to fill in the Bazel version of a history
+    /// written before `bazel_version_used` existed: with no override, that run
+    /// took whatever the worktree's `.bazelversion` asked bazelisk for, and
+    /// that file is the honest record.
+    pub fn collect(
+        manifest: &crate::manifest::Manifest,
+        parent: &Path,
+        subjects: &crate::checkout::SubjectsDir,
+    ) -> Result<Vec<Self>> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for entry in &manifest.repos {
+            seen.insert(entry.id.clone());
+            let dir = parent.join(&entry.id);
+            if !dir.is_dir() {
+                continue;
+            }
+            let mut r = Self::load(&dir, &entry.id)?;
+            if let Some(h) = r.history.as_mut() {
+                if h.bazel_version_used.is_empty() && h.bazel_version.is_empty() {
+                    let path = subjects.worktree(&entry.id).join(".bazelversion");
+                    if let Ok(v) = std::fs::read_to_string(path) {
+                        h.bazel_version_used = v.trim().to_string();
+                    }
+                }
+            }
+            if !r.is_empty() {
+                out.push(r);
+            }
+        }
+        let mut strays: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        strays.sort();
+        for dir in strays {
+            let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if seen.contains(id) {
+                continue;
+            }
+            let r = Self::load(&dir, id)?;
+            if !r.is_empty() {
+                out.push(r);
+            }
+        }
+        Ok(out)
     }
 
     fn pin(&self) -> String {
@@ -173,7 +332,7 @@ impl SubjectResults {
             }
         } else {
             for c in &self.compares {
-                for p in self.change_sets(c).filter(|p| p.global) {
+                for p in c.change_sets.iter().filter(|p| p.global) {
                     n += 1;
                     *h.entry(reason(p.cambium.global_reason.as_deref()))
                         .or_default() += 1;
@@ -183,13 +342,6 @@ impl SubjectResults {
         let mut v: Vec<(String, usize)> = h.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         (n, v)
-    }
-
-    fn change_sets<'a>(
-        &self,
-        c: &'a ChangesResult,
-    ) -> impl Iterator<Item = &'a crate::compare::ChangeSetResult> {
-        c.change_sets.iter()
     }
 
     fn change_sets_total(&self) -> usize {
@@ -390,10 +542,7 @@ fn lines(cells: &[String]) -> String {
 /// Today, as `YYYY-MM-DD`, from the system clock. Rendered into the section so
 /// a stale table is visible as stale.
 fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = crate::util::now_unix();
     let days = (secs / 86_400) as i64;
     let (y, m, d) = civil_from_days(days + 719_468);
     format!("{y:04}-{m:02}-{d:02}")
@@ -410,13 +559,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
 }
 
 /// p50/p90/p99/max over a set of commits' total update wall.
@@ -788,7 +930,7 @@ fn tool_ran(
 fn render_globals(compares: &[ChangesResult]) -> String {
     let mut s = String::from("#### Globals\n\n");
     if compares.iter().all(|c| c.summary.global_stats.is_empty()) {
-        s.push_str("No compared change_set was globally invalidated.\n\n");
+        s.push_str("No compared change set was globally invalidated.\n\n");
         return s;
     }
     s.push_str(
@@ -975,15 +1117,18 @@ fn render_compare(r: &SubjectResults) -> String {
 
     // ---- classes ----
     s.push_str("#### Disagreements by class\n\n");
-    let mut totals: BTreeMap<String, usize> = BTreeMap::new();
+    // Every class, at zero if it never fired: a failing class missing from
+    // the table reads as "not measured", and the whole point of printing
+    // `cambium_missing | 0` is that a reader can see it was looked for.
+    let mut totals: BTreeMap<crate::classify::Class, usize> = BTreeMap::new();
     for c in compares {
         for (k, v) in &c.summary.by_class {
-            *totals.entry(k.clone()).or_default() += v;
+            *totals.entry(*k).or_default() += v;
         }
     }
     s.push_str("| class | labels | fails the run | meaning |\n|---|---:|---|---|\n");
     for class in crate::classify::Class::ALL {
-        let n = totals.get(class.name()).copied().unwrap_or(0);
+        let n = totals.get(&class).copied().unwrap_or(0);
         s.push_str(&format!(
             "| `{}` | {} | {} | {} |\n",
             class.name(),
@@ -992,18 +1137,7 @@ fn render_compare(r: &SubjectResults) -> String {
             class.meaning(),
         ));
     }
-    for (class, n) in &totals {
-        if !crate::classify::Class::ALL
-            .iter()
-            .any(|c| c.name() == class.as_str())
-        {
-            s.push_str(&format!(
-                "| `{class}` | {n} | unknown | a class this binary does not know; \
-                 the results were written by a different version |\n"
-            ));
-        }
-    }
-    s.push_str("\nCounts are labels, summed over every change_set and tool.\n\n");
+    s.push_str("\nCounts are labels, summed over every change set and tool.\n\n");
 
     // ---- why cambium reported the extras ----
     let mut reasons: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
@@ -1051,7 +1185,7 @@ fn render_compare(r: &SubjectResults) -> String {
                     "depth agrees on {} of shared labels ({count} {})",
                     pct(sum / *count as f64),
                     if *count == 1 {
-                        "change_set"
+                        "change set"
                     } else {
                         "change sets"
                     }
@@ -1132,7 +1266,7 @@ fn render_compare(r: &SubjectResults) -> String {
     }
     s.push_str("#### `.bzl` load-closure oracle\n\n");
     if bzl.is_empty() {
-        s.push_str("No change_set changed a `.bzl` file.\n\n");
+        s.push_str("No change set changed a `.bzl` file.\n\n");
     } else {
         s.push_str(
             "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |\n",
@@ -1309,6 +1443,7 @@ pub fn update_doc(path: &Path, subject_id: &str, section: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classify::Class;
     use crate::compare::{CambiumRun, ChangeSetResult, ChangesSummary, ToolComparison};
     use crate::history::{ColdBuild, Summary};
 
@@ -1370,7 +1505,7 @@ mod tests {
             ),
         ];
         let mut r = HistoryResult {
-            schema: 3,
+            schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
             from: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -1393,14 +1528,14 @@ mod tests {
 
     fn compare() -> ChangesResult {
         let mut counts = BTreeMap::new();
-        counts.insert("cambium_extra_select".to_string(), 3);
+        counts.insert(Class::CambiumExtraSelect, 3);
         let mut why = BTreeMap::new();
         why.insert("rule definition changed".to_string(), 233);
         let change_set = ChangeSetResult {
-            schema: 3,
+            schema: crate::RESULT_SCHEMA,
             base: "b".into(),
             head: "h".into(),
-            kind: "adjacent".into(),
+            kind: crate::changes::ChangeSetKind::Adjacent,
             category: None,
             cambium: CambiumRun {
                 cold_wall_ms: 4200,
@@ -1436,7 +1571,7 @@ mod tests {
             pass: true,
         };
         let mut c = ChangesResult {
-            schema: 3,
+            schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
             bazel_version: Some("7.x".into()),
@@ -1457,10 +1592,10 @@ mod tests {
     /// 100 s and found 40 targets precisely.
     fn global_change_set() -> ChangeSetResult {
         ChangeSetResult {
-            schema: 3,
+            schema: crate::RESULT_SCHEMA,
             base: "gb".into(),
             head: "gh".into(),
-            kind: "adjacent".into(),
+            kind: crate::changes::ChangeSetKind::Adjacent,
             category: None,
             cambium: CambiumRun {
                 global: true,
@@ -1501,6 +1636,130 @@ mod tests {
             .with_compares(vec![compare()])
     }
 
+    /// The whole path a `cambi bench report` walks, with no CLI in it: write
+    /// what a run writes, discover it, render it, and update the document.
+    #[test]
+    fn results_are_discovered_from_disk_and_rendered_into_the_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let subject = dir.path().join("bench-results/bazel");
+        let c = compare();
+        c.write(&subject.join("changes").join("changes-0123456789ab.json"))
+            .unwrap();
+        history("bazel 9.0.0")
+            .write(&subject.join("history").join("history-0123456789ab.json"))
+            .unwrap();
+        // Not a result file, and not in a workload directory: neither must be
+        // picked up.
+        std::fs::write(subject.join("state.json"), "{}").unwrap();
+        std::fs::write(subject.join("changes/notes.txt"), "hi").unwrap();
+
+        let r = SubjectResults::load(&subject, "bazel").unwrap();
+        assert!(r.history.is_some());
+        assert_eq!(r.compares.len(), 1);
+        assert_eq!(r.compares[0].change_sets.len(), 2);
+
+        let doc = dir.path().join("RESULTS.md");
+        std::fs::write(&doc, "# Results\n\nProse a person wrote.\n").unwrap();
+        update_doc(&doc, &r.id, &render_subject_section(&r, None)).unwrap();
+        update_doc(&doc, "top", &render_top_table(std::slice::from_ref(&r))).unwrap();
+        let text = std::fs::read_to_string(&doc).unwrap();
+        assert!(text.contains("Prose a person wrote."), "{text}");
+        assert!(text.contains("<!-- bench:bazel:begin -->"), "{text}");
+        assert!(text.contains("<!-- bench:top:begin -->"), "{text}");
+        assert!(text.contains("`cambium_extra_select`"), "{text}");
+
+        // Idempotent: a second report over the same results is a no-op, so a
+        // nightly job that changes nothing leaves no diff to commit.
+        let before = text.clone();
+        update_doc(&doc, &r.id, &render_subject_section(&r, None)).unwrap();
+        update_doc(&doc, "top", &render_top_table(std::slice::from_ref(&r))).unwrap();
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), before);
+    }
+
+    /// A subject with no results directory at all, and one the manifest has
+    /// forgotten: neither may take the report down, and the stray's numbers
+    /// are still worth showing.
+    #[test]
+    fn collect_skips_the_absent_and_keeps_the_stray() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("bench-results");
+        compare()
+            .write(&parent.join("gone/changes/changes-0123456789ab.json"))
+            .unwrap();
+        std::fs::create_dir_all(parent.join("empty")).unwrap();
+        let manifest: crate::manifest::Manifest = toml::from_str(&format!(
+            "[[repo]]\nid = \"bazel\"\nurl = \"u\"\npin = \"{}\"\n",
+            "a".repeat(40)
+        ))
+        .unwrap();
+        let subjects = crate::checkout::SubjectsDir::new(dir.path().join("subjects"));
+        let all = SubjectResults::collect(&manifest, &parent, &subjects).unwrap();
+        let ids: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["gone"],
+            "the manifest entry has no results, the stray does"
+        );
+    }
+
+    #[test]
+    fn the_legacy_rows_are_projected_off_the_stage_results() {
+        use crate::harness::StageResult;
+        let stage = |name: &str, extra: &[(&str, f64)]| StageResult {
+            stage: name.into(),
+            preset: "small".into(),
+            spec_hash: "abc".into(),
+            param: Some(10_000),
+            runs: 3,
+            median_ms: 12.4,
+            p90_ms: 20.6,
+            peak_rss_mb: 10.0,
+            extra: extra.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            notes: BTreeMap::new(),
+        };
+        let report = BenchReport::new(vec![
+            stage("walk", &[]),
+            stage(crate::legacy::STAGE, &[("bazel_diff_warm_ms", 9000.0)]),
+            stage(
+                crate::legacy::STAGE,
+                &[
+                    ("targets", 50_000.0),
+                    ("cambium_ms", 7.0),
+                    ("cambium_p90_ms", 9.0),
+                    ("bazel_diff_cold_ms", 120_000.0),
+                    ("bazel_diff_warm_ms", 60_000.0),
+                    ("agreed", 4321.0),
+                    ("cambium_only", 3.0),
+                ],
+            ),
+        ]);
+        let rows = BenchLegacy::from_report(&report);
+        assert_eq!(rows.len(), 2, "only the legacy stage");
+
+        // A sweep records its size and timing at the top level; `extra` is
+        // empty, and the fallbacks round.
+        assert_eq!(rows[0].targets, 10_000);
+        assert_eq!(rows[0].cambium_warm_ms, 12);
+        assert_eq!(rows[0].cambium_p90_ms, 21);
+        assert!(rows[0].agreed, "no disagreement recorded is agreement");
+
+        // A plain run records both in `extra`, which wins.
+        assert_eq!(rows[1].targets, 50_000);
+        assert_eq!(rows[1].cambium_warm_ms, 7);
+        assert_eq!(rows[1].legacy_cold_ms, 120_000);
+        assert_eq!(rows[1].agreed_labels, 4321);
+        assert!(!rows[1].agreed, "cambium reported three the tool did not");
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_bench_file_is_no_rows_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(BenchLegacy::read(&dir.path().join("nope.json")).is_empty());
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "not json").unwrap();
+        assert!(BenchLegacy::read(&bad).is_empty());
+    }
+
     #[test]
     fn a_repo_section_reports_the_pin_the_versions_and_the_classes() {
         let s = render_subject_section(&bazel_results(), None);
@@ -1536,7 +1795,7 @@ mod tests {
     fn the_section_reports_the_bzl_load_closure_oracle() {
         // No `.bzl` in the fixture's change sets.
         let s = render_subject_section(&bazel_results(), None);
-        assert!(s.contains("No change_set changed a `.bzl` file."), "{s}");
+        assert!(s.contains("No change set changed a `.bzl` file."), "{s}");
 
         let mut r = bazel_results();
         for c in &mut r.compares {
@@ -1550,6 +1809,31 @@ mod tests {
         let s = render_subject_section(&r, None);
         assert!(s.contains("`.bzl` load-closure oracle"), "{s}");
         assert!(s.contains("| 1 | 2 | 1 | 0 |"), "{s}");
+    }
+
+    #[test]
+    fn a_package_the_load_closure_missed_lands_in_the_class_table() {
+        // The one class no label is filed under: it is counted per missing
+        // package, straight off the oracle, and it fails the run.
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.change_sets[0].load_oracle = Some(crate::oracles::load::LoadOracleResult {
+                checked: vec!["bazel/defs.bzl".into()],
+                bazel_packages: ["app".to_string(), "lib".to_string()].into_iter().collect(),
+                missing_packages: ["lib".to_string()].into_iter().collect(),
+                ..Default::default()
+            });
+            c.summarise();
+        }
+        let s = render_subject_section(&r, None);
+        assert!(
+            s.contains("| `cambium_missing_bzl_closure` | 1 | **yes** |"),
+            "the missing package is counted under a class this binary knows: {s}"
+        );
+        assert!(
+            !s.contains("a class this binary does not know"),
+            "and not under the unknown-class fallback: {s}"
+        );
     }
 
     #[test]
@@ -1606,7 +1890,7 @@ mod tests {
         }
         let s = render_subject_section(&r, None);
         assert!(
-            s.contains("No compared change_set was globally invalidated."),
+            s.contains("No compared change set was globally invalidated."),
             "{s}"
         );
         assert!(
@@ -1678,7 +1962,7 @@ mod tests {
         let row = top_row(&bazel_results());
         assert_eq!(
             row.change_sets, 2,
-            "the global change_set is a compared change_set"
+            "the global change set is a compared change set"
         );
         assert_eq!(row.failures, 0);
         assert_eq!(row.bazel_used, "7.4.1, 9.0.0");

@@ -1,10 +1,8 @@
 /target
 **/*.rs.bk
 *.bin.tmp
-# Benchmark runs. `corpus-results*/` is the old layout, kept on disk as
-# history; nothing writes there any more.
+# Benchmark runs.
 bench-results*/
-corpus-results*/
 # What tools/bench/precheck.sh pulls off the box to replay against, offline.
 bench-precheck/
 .claude/

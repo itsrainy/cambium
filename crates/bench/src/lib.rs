@@ -50,34 +50,12 @@ pub mod stages;
 pub mod state;
 pub mod subject;
 pub mod tools;
+pub mod util;
 
-pub use changes::{ChangeSet, ChangeSetKind, ChangeSetSet};
-pub use checkout::{Checkout, SubjectsDir};
-pub use classify::{classify, BazelFacts, Class, Facts, Side};
-pub use compare::{
-    compare_change_set, compare_change_set_with, compare_change_sets, ChangeSetResult,
-    ChangesOptions, ChangesResult, ChangesSummary, ToolComparison,
-};
-pub use harness::{BenchReport, Machine, StageResult};
-pub use history::{history, CommitRecord, Driver, HistoryOptions, HistoryResult};
-pub use manifest::{Manifest, RepoEntry};
-pub use oracles::load::{LoadOracleResult, LoadOracleSummary};
-pub use oracles::rdeps::{RdepsOracle, RdepsResult};
-pub use replay::{
-    diverge, recorded_from_changes, recorded_from_history, replay, Divergence, PackageRule,
-    PathsCache, RecordedAnswer, ReplayOutcome, ReplayRun, RepoRule, REPLAY_SCHEMA,
-};
-pub use report::{
-    render_bench_section, render_subject_section, render_top_table, top_row, update_doc,
-    BenchLegacy, SubjectResults, TopRow,
-};
-pub use stages::{StageContext, IN_MEMORY_STAGES};
-pub use state::State;
-pub use subject::{Subject, Synthetic};
-pub use tools::bazeldiff::{BazelDiff, Implementation};
-pub use tools::cambium::Cambium;
-pub use tools::tango::Tango;
-pub use tools::{normalise_label, BaseWorktree, RunContext, Tool, ToolRun};
+// No root re-exports. Every one of these types is named by the module it
+// belongs to -- `compare::ChangesResult`, `classify::Class`,
+// `tools::tango::Tango` -- and a second name for it at the crate root only
+// hides which of the four nouns above a thing is.
 
 /// The version stamped into every result file this crate writes.
 ///

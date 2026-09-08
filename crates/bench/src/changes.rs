@@ -9,6 +9,34 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+/// The packages of an index's busiest targets, sorted and deduplicated.
+///
+/// An edit anywhere in one of these reaches the largest share of the graph,
+/// which is what the stress change sets are for: `in_degree.top` is the
+/// targets most depended on, and a change set that touches their package is
+/// the worst case a CI job actually meets.
+pub fn hub_packages(index: cambium_index::IndexRef<'_>) -> Vec<String> {
+    let stats = cambium_engine::IndexQuery::new(index).stats(0);
+    let mut pkgs: Vec<String> = stats
+        .in_degree
+        .top
+        .iter()
+        .map(|h| package_of(&h.label))
+        .collect();
+    pkgs.sort();
+    pkgs.dedup();
+    pkgs
+}
+
+/// `//src/main/java/foo:bar` -> `src/main/java/foo`.
+pub fn package_of(label: &str) -> String {
+    let l = label.strip_prefix("//").unwrap_or(label);
+    match l.split_once(':') {
+        Some((pkg, _)) => pkg.to_string(),
+        None => l.to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSetKind {
@@ -43,14 +71,49 @@ impl ChangeSetKind {
     }
 }
 
+/// Why a stress change set was chosen. Only [`ChangeSetKind::Stress`] carries
+/// one; the other kinds are selected by their *shape*, not by what they touch.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum StressCategory {
+    /// The commit touches a `.bzl` file.
+    Bzl,
+    /// It adds or deletes a `BUILD` file: the two cases the hash-diffing tools
+    /// cannot see the whole of, since at one end the target does not exist.
+    BuildAddDelete,
+    /// It touches a package holding one of the index's highest in-degree
+    /// targets, so the reverse closure is as large as this subject gets.
+    Hub,
+    /// It touches a path the manifest names as an invalidator, which is the
+    /// only way to make cambium answer `//...` on purpose.
+    Invalidator,
+}
+
+impl StressCategory {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bzl => "bzl",
+            Self::BuildAddDelete => "build_add_delete",
+            Self::Hub => "hub",
+            Self::Invalidator => "invalidator",
+        }
+    }
+}
+
+impl std::fmt::Display for StressCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChangeSet {
     pub base: String,
     pub head: String,
     pub kind: ChangeSetKind,
-    /// Stress category: `bzl`, `build_add_delete`, `hub`, `invalidator`.
+    /// Why a stress change set was chosen; `None` for every other kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
+    pub category: Option<StressCategory>,
     /// The pull request number, when a PR-shaped change set's commit message
     /// named one, so the report can link it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,7 +153,7 @@ impl ChangeSetSet {
     }
 
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        crate::util::read_result(path)
     }
 }
 
@@ -283,14 +346,14 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
     let Some(oldest) = commits.first() else {
         return Ok(Vec::new());
     };
-    let categories: Vec<(&str, Vec<&str>, Vec<String>)> = vec![
+    let categories: Vec<(StressCategory, Vec<&str>, Vec<String>)> = vec![
         (
-            "bzl",
+            StressCategory::Bzl,
             vec![],
             vec![glob_pathspec("**/*.bzl"), glob_pathspec("*.bzl")],
         ),
         (
-            "build_add_delete",
+            StressCategory::BuildAddDelete,
             vec!["--diff-filter=AD"],
             vec![
                 glob_pathspec("**/BUILD"),
@@ -300,7 +363,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
             ],
         ),
         (
-            "hub",
+            StressCategory::Hub,
             vec![],
             o.hub_packages
                 .iter()
@@ -314,7 +377,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
                 .collect(),
         ),
         (
-            "invalidator",
+            StressCategory::Invalidator,
             vec![],
             o.invalidator_paths
                 .iter()
@@ -339,7 +402,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
                 base: parent.clone(),
                 head: c,
                 kind: ChangeSetKind::Stress,
-                category: Some(name.to_string()),
+                category: Some(name),
                 pr_number: None,
             });
         }
@@ -413,6 +476,15 @@ pub fn select(repo: &Repo, kinds: &[ChangeSetKind], o: &ChangeSetOptions) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn labels_reduce_to_their_package() {
+        use super::package_of;
+        assert_eq!(package_of("//src/main/java/foo:bar"), "src/main/java/foo");
+        assert_eq!(package_of("//:root"), "");
+        assert_eq!(package_of("//a/b"), "a/b");
+        assert_eq!(package_of("@repo//a:b"), "@repo//a");
+    }
+
     use super::*;
 
     #[test]
@@ -490,6 +562,36 @@ mod tests {
             change_set(ChangeSetKind::Pr, 1),
         ];
         assert_eq!(cap_total(&only, 10), only);
+    }
+
+    #[test]
+    fn a_cap_smaller_than_the_pr_count_spends_it_all_on_prs() {
+        // PR-shaped change sets are the primary kind and the one the headline
+        // numbers are drawn from, so they are served first and the stress
+        // budget is a quarter of what is *left*. Under a cap the PRs alone
+        // fill, that quarter is zero: `--change-sets 10` on a subject with
+        // twenty PRs is ten PRs and nothing else, deliberately.
+        let all = subject_shaped();
+        let capped = cap_total(&all, 10);
+        assert_eq!(capped.len(), 10);
+        assert!(
+            capped.iter().all(|p| p.kind == ChangeSetKind::Pr),
+            "{capped:?}"
+        );
+
+        // One more than the PRs can fill, and the leftover goes to stress
+        // before adjacent -- `min(cap / 4)` allows five at cap 21, and there
+        // are only ten.
+        let capped = cap_total(&all, 21);
+        let by = |k: ChangeSetKind| capped.iter().filter(|p| p.kind == k).count();
+        assert_eq!(by(ChangeSetKind::Pr), 20);
+        assert_eq!(by(ChangeSetKind::Stress), 1);
+        assert_eq!(by(ChangeSetKind::Adjacent), 0);
+        assert_eq!(capped.len(), 21);
+
+        // A cap of zero is an empty selection, not a panic: `cap - taken.len()`
+        // is the arithmetic to get wrong here.
+        assert!(cap_total(&all, 0).is_empty());
     }
 
     #[test]

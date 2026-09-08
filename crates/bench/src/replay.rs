@@ -715,7 +715,7 @@ impl RecordedAnswer {
 }
 
 /// Every change set of a `changes-<pin>.json`.
-pub fn recorded_from_changes(r: &crate::ChangesResult) -> Vec<RecordedAnswer> {
+pub fn recorded_from_changes(r: &crate::compare::ChangesResult) -> Vec<RecordedAnswer> {
     r.change_sets
         .iter()
         .map(|c| RecordedAnswer {
@@ -734,7 +734,7 @@ pub fn recorded_from_changes(r: &crate::ChangesResult) -> Vec<RecordedAnswer> {
 /// A history commit's base is the index the previous commit left behind, not
 /// the pin, so these diverge for reasons that are not the engine's; the CLI
 /// says so and keeps them off the default gate.
-pub fn recorded_from_history(r: &crate::HistoryResult) -> Vec<RecordedAnswer> {
+pub fn recorded_from_history(r: &crate::history::HistoryResult) -> Vec<RecordedAnswer> {
     r.commits
         .iter()
         .map(|c| RecordedAnswer {

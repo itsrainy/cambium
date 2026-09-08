@@ -71,10 +71,7 @@ pub fn default_dir() -> PathBuf {
     if let Some(d) = std::env::var_os(DIR_ENV) {
         return PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".cache/cambium/tango")
+    crate::util::cache_dir("tango")
 }
 
 /// The tag and commit `fetch.sh` recorded, as one line.
@@ -119,16 +116,29 @@ impl Tango {
     /// `~/.cache/cambium/tango/bin/tango-cli`.
     pub fn discover() -> Result<Self> {
         let dir = default_dir();
-        let bin = std::env::var_os(BIN_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| dir.join("bin/tango-cli"));
+        match std::env::var_os(BIN_ENV) {
+            Some(bin) => Ok(Self::at(
+                PathBuf::from(bin),
+                read_version_file(&dir).unwrap_or_else(|| "unknown".into()),
+            )),
+            None => Self::discover_in(&dir),
+        }
+    }
+
+    /// The installation under `dir`, as `tools/tango/fetch.sh` lays one out.
+    ///
+    /// The environment is read by [`discover`](Self::discover) and nowhere
+    /// else, so a test can point at a directory of its own without setting a
+    /// process-wide variable that every other test in the binary shares.
+    pub fn discover_in(dir: &Path) -> Result<Self> {
+        let bin = dir.join("bin/tango-cli");
         anyhow::ensure!(
             bin.exists(),
             "no tango-cli at {}; set ${BIN_ENV}, or ${DIR_ENV}, \
              or run tools/tango/fetch.sh",
             bin.display()
         );
-        let version = read_version_file(&dir).unwrap_or_else(|| "unknown".into());
+        let version = read_version_file(dir).unwrap_or_else(|| "unknown".into());
         Ok(Self::at(bin, version))
     }
 
@@ -404,7 +414,7 @@ mod tests {
         let tango = Tango::at(stub, "test".into());
         let run = tango
             .affected(&repo, &base, &head, &ctx)
-            .expect("the change_set runs despite the stale locked worktree");
+            .expect("the change set runs despite the stale locked worktree");
         assert_eq!(
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string()]
@@ -508,10 +518,7 @@ JSON
     #[test]
     fn a_missing_installation_says_where_it_looked() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var(DIR_ENV, dir.path());
-        std::env::remove_var(BIN_ENV);
-        let err = Tango::discover().unwrap_err().to_string();
-        std::env::remove_var(DIR_ENV);
+        let err = Tango::discover_in(dir.path()).unwrap_err().to_string();
         assert!(err.contains("bin/tango-cli"), "{err}");
         assert!(err.contains("fetch.sh"), "{err}");
     }
