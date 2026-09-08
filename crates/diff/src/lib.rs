@@ -87,10 +87,6 @@ impl Repo {
         .to_string())
     }
 
-    pub fn exists(&self, rev: &str) -> bool {
-        self.rev_parse(rev).is_ok()
-    }
-
     /// The tree object a revision points at.
     ///
     /// Two commits with identical content have identical trees whatever their

@@ -35,6 +35,7 @@ fn request() -> AffectedRequest {
         materialize: true,
         publish_base: false,
         max_depth: None,
+        allow_partial: false,
     }
 }
 

@@ -34,6 +34,7 @@ fn request(materialize: bool) -> AffectedRequest {
         materialize,
         publish_base: false,
         max_depth: None,
+        allow_partial: false,
     }
 }
 

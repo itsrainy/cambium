@@ -265,9 +265,12 @@ fn exit_codes_are_pinned() {
         "3 means: Bazel failed"
     );
     assert_eq!(
-        EngineError::NoWorkspace(PathBuf::from("/nowhere")).exit_code(),
-        1,
-        "1 is the generic failure"
+        EngineError::Bazel(cambium_bazel::BazelError::NoWorkspace(PathBuf::from(
+            "/nowhere"
+        )))
+        .exit_code(),
+        3,
+        "no workspace is discovered via Bazel, so it maps like any other Bazel failure"
     );
     // 0 (success) and 2 (global invalidation) are produced by the CLI rather
     // than by an error, and are pinned in crates/cli/src/main.rs.

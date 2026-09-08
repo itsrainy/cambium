@@ -333,6 +333,7 @@ fn e2e_memory_inner(ctx: &StageContext, change_preset: &str, materialize: bool) 
         no_full_build: true,
         materialize,
         publish_base: false,
+        allow_partial: false,
         max_depth: None,
     };
     let q = SynthQuerier::new(&g);
