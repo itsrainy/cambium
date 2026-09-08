@@ -272,6 +272,59 @@ The stage fails outright if bazel-diff reports a label cambium does not; the
 other direction is the `select()` over-approximation above, and is reported.
 Its sweep draws the headline chart (`bench-legacy.svg`).
 
+## Validating an engine change before a run
+
+A full run is seven hours on a rented machine, which is far too slow to be the
+first thing that tells you an engine change moved an answer. Most of what such
+a change touches needs no Bazel: between the diff and the `bazel query` the
+engine decides which external repositories moved and by which rule, which
+packages that dirties, and whether the dirty set exceeds
+`limits.max_dirty_packages` and the run therefore cold-rebuilds. A published
+run leaves the index at the pin behind, so all of that can be replayed against
+the real subjects offline, in milliseconds a change set.
+
+```console
+$ tools/bench/precheck.sh                       # every cached subject
+$ SUBJECTS="envoy apollo" tools/bench/precheck.sh
+```
+
+`precheck.sh` pulls each subject's stored index and recorded results off the
+benchmark box into `bench-precheck/` (git-ignored, and skipped once cached),
+builds `cambi` in release, and runs the check. Underneath it is one command:
+
+```console
+$ cambi bench replay envoy --change-set b352846f..a6871fc6   # one change set
+$ cambi bench replay envoy --paths 'M\tbazel/repo.bzl'       # a hypothetical
+$ cambi bench replay envoy --all                             # exit 1 on divergence
+```
+
+It prints the repositories dirtied and by which rule (input path, target-only,
+module diff, load) and whether each drags its loaders with it; the packages
+dirtied and by which route, separating rule (a) reached through a `.bzl` row
+from the same rule reached through `pkg_ext` — the direct `load()` issue #4 is
+about; the dirty-package count against the limit and whether that means a cold
+rebuild; and a diff against what the run recorded.
+
+The loop is honest about its four blind spots, and says so in its own output:
+
+- **The answer needs Bazel.** `direct` and `affected` come from rule hashes
+  after the head packages are re-queried. The replay reports an
+  `affected (lower bound)` — the reverse walk from what the base index already
+  knows changed — and never gates on it.
+- **A cold rebuild's answer needs Bazel.** The replay says the fallback fires,
+  which is the decision under test; not what `//...` would then return.
+- **The stored index is at the pin**, and a change set's base is an ancestor of
+  it. A divergence from a recorded answer is therefore a lead, not a verdict.
+  The tight loop is `--save-baseline` before the change and `--baseline` after
+  (`SAVE_BASELINE=1` / `BASELINE=1` for `precheck.sh`): both sides replay on
+  the same index, so every difference is the engine's.
+- **`MODULE.bazel` is not in the index.** A change set that edits it is marked
+  indeterminate and left out of the gate, unless `--repo <git dir>` gives the
+  replay somewhere to read it.
+
+A clean precheck is not a substitute for the run. It is what makes the run
+worth starting.
+
 ## Choosing what to run
 
 A change to cambium reruns only the workload it can affect:
@@ -282,6 +335,7 @@ A change to cambium reruns only the workload it can affect:
 | the walk, hashing, or the affected set | `cambi bench changes <subject> --kind pr --tools cambium --oracle rdeps` |
 | a tool driver | `cambi bench changes <subject> --tools <tool> --change-sets 5` |
 | an engine stage's cost | `cambi bench stages synth:medium` |
+| any of the static stages, before any of the above | `tools/bench/precheck.sh` — offline, minutes, no Bazel |
 | a timing claim against other tools | the full run on the benchmark machine, and only then |
 
 Unit tests, the synthetic soundness sweep and the real-Bazel end-to-end tests

@@ -5,5 +5,7 @@
 # history; nothing writes there any more.
 bench-results*/
 corpus-results*/
+# What tools/bench/precheck.sh pulls off the box to replay against, offline.
+bench-precheck/
 .claude/
 .cambium-logs/
