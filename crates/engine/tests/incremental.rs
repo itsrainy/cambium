@@ -116,12 +116,26 @@ fn the_overlay_stays_small() {
         base_nodes + size.new_nodes as u32,
         "the overlay's node space is the base plus what it appended"
     );
+    // The bound is on the *change*, not on a fraction of the graph: a
+    // fraction-of-the-graph bound passes for free as the graph grows, which is
+    // the opposite of the property. Each changed file can dirty at most its
+    // own package, and a package's rows are what get replaced, so the work is
+    // bounded by the rows those packages handed back — with room for the
+    // source-file nodes a rule row brings with it — and independent of
+    // `base_nodes`.
     let touched = size.changed_nodes + size.rows_gaining_edges + size.rows_losing_edges;
+    let rows_replaced: usize = updates.iter().map(|u| u.targets.len()).sum();
+    let budget = rows_replaced * 2;
     assert!(
-        touched < base_nodes as usize / 10,
-        "the overlay touched {touched} of {base_nodes} nodes; it should be \
-         proportional to the change, not the graph: {size:?}"
+        touched <= budget,
+        "the overlay touched {touched} nodes for {rows_replaced} replaced rows in \
+         {} packages (budget {budget}); it must be proportional to the change, \
+         not to the {base_nodes}-node graph: {size:?}",
+        dirty.len()
     );
+    // ...and the graph really is much bigger than that, so the bound is not
+    // vacuous.
+    assert!(touched < base_nodes as usize / 10);
 }
 
 /// The same run with the delta overlay instead of a materialised index.

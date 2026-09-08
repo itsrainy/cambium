@@ -262,6 +262,14 @@ impl Golden {
 
 /// The approach cambium replaces: hash every target together with the closure
 /// of its inputs at both revisions, and diff.
+///
+/// Deliberately a second implementation, not a call into
+/// `crates/bench/src/legacy.rs`, which does the same thing for the comparison
+/// suite. Its whole job here is to be an independent oracle: if the two shared
+/// code, a bug in the shared half would agree with itself and these assertions
+/// would pass through it. This one is the short, obvious version — no caching,
+/// no incrementality — and it is only ever run over the tiny golden workspace,
+/// where being slow costs nothing.
 fn legacy_affected(
     root: &Path,
     base_rev: &str,
@@ -349,14 +357,34 @@ fn set(report: &cambium_engine::AffectedReport) -> BTreeSet<&str> {
 
 // ------------------------------------------------------------------ scenarios
 
-#[test]
-fn golden_scenarios() {
-    skip_unless_e2e!();
-    let g = Golden::setup();
+/// The golden workspace, built once.
+///
+/// Setting it up is a real `bazel query` over the whole workspace, which is
+/// most of what these tests cost; every scenario then edits the checkout,
+/// commits, asserts, and resets to base. That shared mutable checkout is why
+/// the fixture is behind a mutex rather than merely a `OnceLock`: the tests
+/// are one per scenario, so a failure names the scenario that failed, but they
+/// still have to take their turn at the repository.
+fn golden() -> std::sync::MutexGuard<'static, Golden> {
+    static GOLDEN: std::sync::OnceLock<std::sync::Mutex<Golden>> = std::sync::OnceLock::new();
+    let m = GOLDEN.get_or_init(|| std::sync::Mutex::new(Golden::setup()));
+    // A scenario that panics mid-edit poisons the lock and leaves the checkout
+    // dirty; the next test resets it rather than inheriting the mess, so one
+    // failure does not cascade into twelve.
+    match m.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            let g = poisoned.into_inner();
+            g.reset();
+            g
+        }
+    }
+}
 
-    // The whole chain from //lib:core up: the alias, the app, its test, and the
-    // suite that lists it.
-    let downstream: BTreeSet<&str> = [
+/// The whole chain from `//lib:core` up: the alias, the app, its test, and the
+/// suite that lists it.
+fn downstream() -> BTreeSet<&'static str> {
+    [
         "//lib:core",
         "//app:core_alias",
         "//app:main",
@@ -364,39 +392,64 @@ fn golden_scenarios() {
         "//app:all_tests",
     ]
     .into_iter()
-    .collect();
+    .collect()
+}
 
-    // 1. Editing a source file reaches its consumers, and nothing else.
+/// Editing a source file reaches its consumers, and nothing else.
+#[test]
+fn a_modified_source_reaches_its_consumers() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("modify source", |root| {
         write(root, "lib/a.cc", "// a v2\n");
     });
-    assert_eq!(set(&r), downstream, "modify source");
+    assert_eq!(set(&r), downstream(), "modify source");
     assert!(
         r.dirty_packages.is_empty(),
         "a content edit dirties no package"
     );
     assert_eq!(r.tests, vec!["//app:all_tests", "//app:main_test"]);
+}
 
-    // 2. A file added under an existing glob changes the target's inputs.
+/// A file added under an existing glob changes the target's inputs.
+#[test]
+fn a_file_added_under_a_glob_changes_the_targets_inputs() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("add globbed source", |root| {
         write(root, "lib/b.cc", "// b\n");
     });
-    assert_eq!(set(&r), downstream, "add globbed source");
+    assert_eq!(set(&r), downstream(), "add globbed source");
     assert_eq!(r.dirty_packages, vec!["lib"]);
+}
 
-    // 3. ...and deleting one does too.
+/// ...and deleting one does too.
+#[test]
+fn a_deleted_globbed_source_does_too() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("delete source", |root| {
         std::fs::remove_file(root.join("lib/nested/deep.cc")).unwrap();
     });
-    assert_eq!(set(&r), downstream, "delete source");
+    assert_eq!(set(&r), downstream(), "delete source");
+}
 
-    // 4. Renaming a file is a delete plus an add.
+/// Renaming a file is a delete plus an add.
+#[test]
+fn a_renamed_source_is_a_delete_plus_an_add() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("rename source", |root| {
         std::fs::rename(root.join("lib/a.cc"), root.join("lib/renamed.cc")).unwrap();
     });
-    assert_eq!(set(&r), downstream, "rename source");
+    assert_eq!(set(&r), downstream(), "rename source");
+}
 
-    // 5. An attribute-only BUILD edit moves that target's hash and nothing below it.
+/// An attribute-only BUILD edit moves that target's hash and nothing below it.
+#[test]
+fn an_attribute_only_build_edit_moves_one_targets_hash() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("edit build attribute", |root| {
         let p = root.join("app/BUILD.bazel");
         let s = std::fs::read_to_string(&p).unwrap();
@@ -416,8 +469,13 @@ fn golden_scenarios() {
             .collect::<BTreeSet<_>>(),
         "edit build attribute"
     );
+}
 
-    // 6. A new target in a package affects only itself.
+/// A new target in a package affects only itself.
+#[test]
+fn a_new_target_affects_only_itself() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("add target", |root| {
         let p = root.join("app/BUILD.bazel");
         let s = std::fs::read_to_string(&p).unwrap();
@@ -431,8 +489,13 @@ fn golden_scenarios() {
         set(&r),
         ["//app:extra"].into_iter().collect::<BTreeSet<_>>()
     );
+}
 
-    // 7. Deleting a target makes its consumers direct.
+/// Deleting a target makes its consumers direct.
+#[test]
+fn a_deleted_target_makes_its_consumers_direct() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("delete target", |root| {
         let p = root.join("app/BUILD.bazel");
         let s = std::fs::read_to_string(&p).unwrap();
@@ -452,26 +515,31 @@ fn golden_scenarios() {
         "a deleted target is not affected: {:?}",
         r.affected
     );
+}
 
-    // 8. A .bzl edit reaches every package that loads it.
-    //
-    // The edited constant is used by nothing, so every rule proto in the
-    // loading packages comes back byte-identical and no rule hash moves: Bazel
-    // folds a rule's *definition* environment into the proto, not the loading
-    // BUILD file's load closure. (Verified against Bazel 7.4.1.) So this
-    // scenario isolates the only mechanism that can catch a changed rule
-    // implementation — every rule in a package the static load closure names
-    // is direct regardless of its hash — and the reason assertion below keeps it
-    // isolated. Should it ever start passing through the rule-hash path
-    // instead, that assertion fails and says so, rather than the coverage
-    // quietly evaporating.
+/// A .bzl edit reaches every package that loads it.
+///
+/// The edited constant is used by nothing, so every rule proto in the
+/// loading packages comes back byte-identical and no rule hash moves: Bazel
+/// folds a rule's *definition* environment into the proto, not the loading
+/// BUILD file's load closure. (Verified against Bazel 7.4.1.) So this
+/// scenario isolates the only mechanism that can catch a changed rule
+/// implementation — every rule in a package the static load closure names
+/// is direct regardless of its hash — and the reason assertion below keeps it
+/// isolated. Should it ever start passing through the rule-hash path
+/// instead, that assertion fails and says so, rather than the coverage
+/// quietly evaporating.
+#[test]
+fn a_bzl_edit_reaches_every_package_that_loads_it() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("edit bzl", |root| {
         let p = root.join("lib/defs.bzl");
         let s = std::fs::read_to_string(&p).unwrap();
         std::fs::write(&p, s.replace("SHARED = \"v1\"", "SHARED = \"v2\"")).unwrap();
     });
     let affected = set(&r);
-    for t in &downstream {
+    for t in &downstream() {
         assert!(
             affected.contains(t),
             "edit bzl should reach {t}: {affected:?}"
@@ -502,8 +570,13 @@ fn golden_scenarios() {
             e.reason
         );
     }
+}
 
-    // 9. A file exported by one package and consumed by another.
+/// A file exported by one package and consumed by another.
+#[test]
+fn a_file_exported_by_one_package_and_consumed_by_another() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("modify exported file", |root| {
         write(root, "tools/data.txt", "data v2\n");
     });
@@ -512,9 +585,14 @@ fn golden_scenarios() {
         ["//other:reader"].into_iter().collect::<BTreeSet<_>>(),
         "exports_files consumer"
     );
+}
 
-    // 10. A select branch changing is a change to the target's inputs, because
-    //     --proto:flatten_selects reports the union of the branches.
+/// A select branch changing is a change to the target's inputs, because
+/// --proto:flatten_selects reports the union of the branches.
+#[test]
+fn a_changed_select_branch_changes_the_targets_inputs() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("change select branch", |root| {
         let p = root.join("app/BUILD.bazel");
         let s = std::fs::read_to_string(&p).unwrap();
@@ -532,8 +610,13 @@ fn golden_scenarios() {
         "select branch change: {:?}",
         r.affected
     );
+}
 
-    // 11. Splitting a package: the parent's glob shrinks, so it changes too.
+/// Splitting a package: the parent's glob shrinks, so it changes too.
+#[test]
+fn splitting_a_package_dirties_the_parent_too() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("add sub package", |root| {
         write(
             root,
@@ -558,8 +641,13 @@ fn golden_scenarios() {
         "both packages dirty: {:?}",
         r.dirty_packages
     );
+}
 
-    // 12. A global invalidator short-circuits everything.
+/// A global invalidator short-circuits everything.
+#[test]
+fn a_global_invalidator_short_circuits_everything() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("edit MODULE.bazel", |root| {
         write(
             root,
@@ -569,8 +657,13 @@ fn golden_scenarios() {
     });
     assert!(r.global, "MODULE.bazel edit is global");
     assert_eq!(r.as_query_expression(false), "//...");
+}
 
-    // 13. An ignored path changes nothing.
+/// An ignored path changes nothing.
+#[test]
+fn an_ignored_path_changes_nothing() {
+    skip_unless_e2e!();
+    let g = golden();
     let r = g.scenario("edit ignored path", |root| {
         write(root, "lib/README.md", "docs\n");
     });
