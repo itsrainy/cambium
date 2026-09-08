@@ -932,7 +932,7 @@ fn tool_ran(
 fn render_globals(compares: &[ChangesResult]) -> String {
     let mut s = String::from("#### Globals\n\n");
     if compares.iter().all(|c| c.summary.global_stats.is_empty()) {
-        s.push_str("No compared change_set was globally invalidated.\n\n");
+        s.push_str("No compared change set was globally invalidated.\n\n");
         return s;
     }
     s.push_str(
@@ -1147,7 +1147,7 @@ fn render_compare(r: &SubjectResults) -> String {
             ));
         }
     }
-    s.push_str("\nCounts are labels, summed over every change_set and tool.\n\n");
+    s.push_str("\nCounts are labels, summed over every change set and tool.\n\n");
 
     // ---- why cambium reported the extras ----
     let mut reasons: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
@@ -1195,7 +1195,7 @@ fn render_compare(r: &SubjectResults) -> String {
                     "depth agrees on {} of shared labels ({count} {})",
                     pct(sum / *count as f64),
                     if *count == 1 {
-                        "change_set"
+                        "change set"
                     } else {
                         "change sets"
                     }
@@ -1276,7 +1276,7 @@ fn render_compare(r: &SubjectResults) -> String {
     }
     s.push_str("#### `.bzl` load-closure oracle\n\n");
     if bzl.is_empty() {
-        s.push_str("No change_set changed a `.bzl` file.\n\n");
+        s.push_str("No change set changed a `.bzl` file.\n\n");
     } else {
         s.push_str(
             "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | packages cambium missed |\n",
@@ -1789,7 +1789,7 @@ mod tests {
     fn the_section_reports_the_bzl_load_closure_oracle() {
         // No `.bzl` in the fixture's change sets.
         let s = render_subject_section(&bazel_results(), None);
-        assert!(s.contains("No change_set changed a `.bzl` file."), "{s}");
+        assert!(s.contains("No change set changed a `.bzl` file."), "{s}");
 
         let mut r = bazel_results();
         for c in &mut r.compares {
@@ -1884,7 +1884,7 @@ mod tests {
         }
         let s = render_subject_section(&r, None);
         assert!(
-            s.contains("No compared change_set was globally invalidated."),
+            s.contains("No compared change set was globally invalidated."),
             "{s}"
         );
         assert!(
@@ -1956,7 +1956,7 @@ mod tests {
         let row = top_row(&bazel_results());
         assert_eq!(
             row.change_sets, 2,
-            "the global change_set is a compared change_set"
+            "the global change set is a compared change set"
         );
         assert_eq!(row.failures, 0);
         assert_eq!(row.bazel_used, "7.4.1, 9.0.0");

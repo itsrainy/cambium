@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
+pub mod bazel_query;
 pub mod bazeldiff;
 pub mod cambium;
 pub mod tango;
