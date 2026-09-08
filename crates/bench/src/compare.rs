@@ -37,6 +37,7 @@ use crate::classify::{classify, BazelFacts, Class, Facts, Side};
 use crate::oracles::load::{LoadOracleResult, LoadOracleSummary};
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle, RdepsResult};
 use crate::tools::{BaseWorktree, RunContext, Tool};
+use crate::util::percentile;
 
 /// How many example labels of each class are kept in the JSON. The counts are
 /// exact; only the lists are capped, because a change set can disagree on tens of
@@ -142,12 +143,11 @@ impl ChangesOptions {
     }
 
     pub fn path(results_dir: &Path, pin: &str, bazel_version: Option<&str>) -> PathBuf {
-        match bazel_version.filter(|v| !v.is_empty()) {
-            Some(v) => {
-                results_dir.join(format!("changes-{pin}-{}.json", v.replace(['/', ' '], "_")))
-            }
-            None => results_dir.join(format!("changes-{pin}.json")),
-        }
+        results_dir.join(crate::util::versioned_name(
+            &format!("changes-{pin}"),
+            bazel_version,
+            "json",
+        ))
     }
 }
 
@@ -474,7 +474,7 @@ pub struct ChangesResult {
 
 impl ChangesResult {
     pub fn read(path: &Path) -> Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        crate::util::read_result(path)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -506,13 +506,6 @@ pub fn precision(tool: &BTreeSet<String>, cambium: &BTreeSet<String>) -> f64 {
         return 1.0;
     }
     tool.intersection(cambium).count() as f64 / cambium.len() as f64
-}
-
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
 }
 
 /// p50/p90 over a set of wall times.

@@ -29,6 +29,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::compare::{ChangesResult, WallStats};
+use crate::util::percentile;
 
 /// `bench legacy`'s headline numbers at one graph size.
 ///
@@ -390,10 +391,7 @@ fn lines(cells: &[String]) -> String {
 /// Today, as `YYYY-MM-DD`, from the system clock. Rendered into the section so
 /// a stale table is visible as stale.
 fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = crate::util::now_unix();
     let days = (secs / 86_400) as i64;
     let (y, m, d) = civil_from_days(days + 719_468);
     format!("{y:04}-{m:02}-{d:02}")
@@ -410,13 +408,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-fn percentile(sorted: &[u64], q: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
 }
 
 /// p50/p90/p99/max over a set of commits' total update wall.

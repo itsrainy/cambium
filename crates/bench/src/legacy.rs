@@ -87,13 +87,9 @@ pub fn bazel_diff_binary(explicit: Option<&Path>) -> Option<PathBuf> {
 fn default_binary() -> Option<PathBuf> {
     let dir = match std::env::var_os("CAMBIUM_BAZEL_DIFF_DIR") {
         Some(d) => PathBuf::from(d),
-        None => home()?.join(".cache/cambium/bazel-diff"),
+        None => crate::util::cache_dir("bazel-diff"),
     };
     Some(dir.join("bin/bazel-diff-rust"))
-}
-
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// `<commit> <tag>` from the VERSION file the fetch script writes next to

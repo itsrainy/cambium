@@ -134,10 +134,7 @@ impl BenchReport {
             schema: schema_version(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             tool_sha: git_sha(),
-            timestamp_unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            timestamp_unix: crate::util::now_unix(),
             machine: Machine::detect(),
             results,
         }

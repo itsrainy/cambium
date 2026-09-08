@@ -90,7 +90,7 @@ impl ChangeSetSet {
     }
 
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+        crate::util::read_result(path)
     }
 }
 
