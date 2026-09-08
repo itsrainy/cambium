@@ -161,10 +161,11 @@ pub struct Stats {
     /// changed.
     #[serde(default)]
     pub repos_dirty_by_bzl: usize,
-    /// Of `repos_dirty_by_input`, how many were dirtied by an edit that the
-    /// repository's derived path mapping proves cannot be one of the `.bzl`
-    /// files loaded from it: their label consumers are affected, their package
-    /// closures are not re-queried.
+    /// Of `repos_dirty_by_input`, how many were dirtied by an edit that
+    /// provably cannot be one of the `.bzl` files loaded from the repository —
+    /// the derived path mapping says so, or the path is named only by a target
+    /// the repository rule writes: their label consumers are affected, their
+    /// package closures are not re-queried.
     #[serde(default)]
     pub repos_label_only: usize,
     /// Targets in those repositories that the main repository names, and whose

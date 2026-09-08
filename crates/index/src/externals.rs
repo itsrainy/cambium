@@ -184,6 +184,16 @@ pub struct RepoInputs {
     /// Repository -> how main-repo paths map into it, where that could be
     /// derived statically. A repository with no entry has no known mapping.
     pub path_maps: BTreeMap<String, BTreeSet<PathMap>>,
+    /// The subset of [`RepoInputs::patterns`] whose every occurrence was a
+    /// label *embedded in text the repository rule writes* — the `srcs` and
+    /// `tools` of a BUILD file it generates — rather than a label the rule
+    /// itself resolves (`attr.label(default = ...)`, an extension tag, a
+    /// `local_path_override`). A file such a label names is a dependency of
+    /// the repository's *targets*; it cannot move a `.bzl` file inside the
+    /// repository, so the engine applies rule (1) alone for it. An embedded
+    /// label that is itself a `.bzl` is excluded — a generated `.bzl` may
+    /// `load()` it. See [`string_literals`].
+    pub target_only: BTreeSet<Pattern>,
     /// Every repository the main repository itself defines (extensions and
     /// repo rules whose `.bzl` is a main-repo label), plus every module the
     /// main repository overrides. The fallback attribution set.
@@ -1205,6 +1215,13 @@ pub fn build_repo_inputs(
     // Every main-repo label in a workspace-closure `.bzl` is an input of the
     // repositories that file defines — or, when it defines none we could
     // attribute, of every repository the main repository defines.
+    //
+    // Which *kind* of input is tracked alongside: everything derived so far
+    // (`MODULE.bazel` shapes) and every literal that is itself a label feeds
+    // the rule; a label embedded in a larger literal is text the rule writes.
+    // A pattern is target-only when no occurrence of it was the first kind.
+    let mut direct: BTreeSet<Pattern> = out.patterns.keys().cloned().collect();
+    let mut embedded: BTreeSet<Pattern> = BTreeSet::new();
     for &id in workspace {
         let path = graph.path(id).to_string();
         let repos = match owner.get(&id) {
@@ -1219,7 +1236,15 @@ pub fn build_repo_inputs(
             continue;
         };
         for l in string_literals(&text) {
-            for pat in main_repo_patterns(&l, m) {
+            // A generated `.bzl` can `load()` a main-repo `.bzl` it names, so
+            // an embedded `.bzl` label is still a real input.
+            let feeds_rule = !l.embedded || l.text.ends_with(".bzl");
+            for pat in main_repo_patterns(&l.text, m) {
+                if feeds_rule {
+                    direct.insert(pat.clone());
+                } else {
+                    embedded.insert(pat.clone());
+                }
                 out.patterns
                     .entry(pat)
                     .or_default()
@@ -1234,10 +1259,9 @@ pub fn build_repo_inputs(
         let maps = scan_bzl_path_maps(&text, m);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
-                out.patterns
-                    .entry(Pattern::Prefix(pm.from.clone()))
-                    .or_default()
-                    .insert(repo.clone());
+                let pat = Pattern::Prefix(pm.from.clone());
+                direct.insert(pat.clone());
+                out.patterns.entry(pat).or_default().insert(repo.clone());
                 out.path_maps.entry(repo).or_default().insert(pm);
             }
         }
@@ -1252,6 +1276,7 @@ pub fn build_repo_inputs(
             }
         }
     }
+    out.target_only = embedded.difference(&direct).cloned().collect();
 
     out
 }
@@ -1282,20 +1307,50 @@ fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
 /// repository will depend on are inside it. So each literal is scanned for
 /// label-shaped substrings as well as being offered whole.
 ///
+/// The two are not the same kind of input, and the flag says which is which.
+/// A literal that *is* a label is one the rule resolves: Bazel reads the file
+/// and the rule may write anything it likes from it, `.bzl` files included. A
+/// label found *inside* a larger literal is text the rule writes into the
+/// repository, and what it names is consumed by the repository's targets at
+/// build time — `@envoy_repo//:project` lists `@envoy//changelogs` in its
+/// `tools`. That file's content cannot move a `.bzl` the repository exports,
+/// which is what lets the engine skip re-querying the twelve hundred envoy
+/// packages whose load closure reaches `@envoy_repo//:compiler.bzl` on every
+/// commit that adds a changelog entry.
+///
 /// Comments and nesting are handled by the shared lexer, so a `//` in a
 /// comment is not a label. A `//` preceded by `:` or `/` is not either, which
 /// is what keeps `https://github.com/envoyproxy/envoy` out.
-fn string_literals(text: &str) -> Vec<String> {
+fn string_literals(text: &str) -> Vec<Literal> {
     let mut out = Vec::new();
     for t in lex(text) {
         let Tok::Str(s, e) = t.tok else {
             continue;
         };
         let lit = unescape(&text[s..e]);
-        out.extend(labels_in(&lit));
-        out.push(lit);
+        for l in labels_in(&lit) {
+            if l != lit {
+                out.push(Literal {
+                    text: l,
+                    embedded: true,
+                });
+            }
+        }
+        out.push(Literal {
+            text: lit,
+            embedded: false,
+        });
     }
     out
+}
+
+/// One string literal of a Starlark file, or a label found inside one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Literal {
+    text: String,
+    /// `true` for a label-shaped substring of a larger literal: text the
+    /// repository rule writes, not a label it resolves.
+    embedded: bool,
 }
 
 fn is_label_byte(c: u8) -> bool {
@@ -1610,6 +1665,87 @@ mod tests {
             ri.bzl_repos["bazel/repo.bzl"],
             ["envoy_repo".to_string()].into_iter().collect()
         );
+        // A label the rule resolves feeds it; neither of these is target-only.
+        assert!(ri.target_only.is_empty(), "{:?}", ri.target_only);
+    }
+
+    #[test]
+    fn a_label_inside_a_larger_literal_is_embedded() {
+        let lits = string_literals(
+            "A = \"@envoy//:VERSION.txt\"\nB = 'tools = [\"@envoy//changelogs\"]'\n",
+        );
+        let find = |text: &str| -> Vec<bool> {
+            lits.iter()
+                .filter(|l| l.text == text)
+                .map(|l| l.embedded)
+                .collect()
+        };
+        assert_eq!(find("@envoy//:VERSION.txt"), vec![false]);
+        assert_eq!(find("@envoy//changelogs"), vec![true]);
+    }
+
+    /// envoy's `bazel/repo.bzl`: three `attr.label` defaults the rule reads,
+    /// and a BUILD file it writes whose `genrule` lists `@envoy//changelogs`.
+    /// The changelog entry is an input of the generated *target*; it cannot
+    /// have moved `compiler.bzl`, which every package's closure loads.
+    #[test]
+    fn a_label_inside_text_the_rule_writes_names_targets_not_bzl_files() {
+        let module = "envoy_repo_ext = use_extension(\"//bazel:extensions.bzl\", \"envoy_repo_extension\")\n\
+                      use_repo(envoy_repo_ext, \"envoy_repo\")\n";
+        let repo_bzl = r#"
+def _impl(ctx):
+    version = ctx.read(ctx.path(ctx.attr.envoy_version))
+    ctx.file("version.bzl", "VERSION = '%s'" % version)
+    ctx.file("BUILD", '''
+genrule(
+    name = "project",
+    tools = ["@envoy//:VERSION.txt", "@envoy//changelogs", "@envoy//changelogs:summary"],
+)
+''')
+    ctx.file("defs.bzl", 'load("@envoy//bazel:helper.bzl", "h")')
+
+_envoy_repo = repository_rule(
+    implementation = _impl,
+    attrs = {"envoy_version": attr.label(default = "@envoy//:VERSION.txt")},
+)
+"#;
+        let files = Files(vec![
+            ("MODULE.bazel", module),
+            (
+                "bazel/extensions.bzl",
+                "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+            ),
+            ("bazel/repo.bzl", repo_bzl),
+        ]);
+        let m = m();
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(&files, &m);
+        let facts = read_module_facts(&files);
+        let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+        let envoy_repo: BTreeSet<String> = ["envoy_repo".to_string()].into_iter().collect();
+
+        // Named by the generated BUILD file: the repository is still built
+        // from it, so rule (1) still has a repository to resolve...
+        assert_eq!(ri.repos_for("changelogs/current/x.rst"), envoy_repo);
+        // ...but no `.bzl` in it can have moved.
+        assert!(ri
+            .target_only
+            .contains(&Pattern::Prefix("changelogs/".into())));
+        assert!(ri
+            .target_only
+            .contains(&Pattern::Exact("changelogs/summary".into())));
+        // Both resolved by the rule and written into its BUILD file: it feeds
+        // the rule, and `version.bzl` really does change with it.
+        assert_eq!(ri.repos_for("VERSION.txt"), envoy_repo);
+        assert!(!ri
+            .target_only
+            .contains(&Pattern::Exact("VERSION.txt".into())));
+        // An embedded label that is itself a `.bzl`: the generated `defs.bzl`
+        // loads it, so it stays a real input.
+        assert_eq!(ri.repos_for("bazel/helper.bzl"), envoy_repo);
+        assert!(!ri
+            .target_only
+            .contains(&Pattern::Exact("bazel/helper.bzl".into())));
     }
 
     // ---- the path mapping ----
