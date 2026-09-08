@@ -833,7 +833,7 @@ fn do_change_sets(
                 println!(
                     "{}\t{}\t{}\t{}",
                     p.kind.name(),
-                    p.category.as_deref().unwrap_or("-"),
+                    p.category.map_or("-", |c| c.name()),
                     p.base,
                     p.head
                 );

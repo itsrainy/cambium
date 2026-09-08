@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use cambium_bench::changes::{self, ChangeSetKind, ChangeSetOptions};
+use cambium_bench::changes::{self, ChangeSetKind, ChangeSetOptions, StressCategory};
 use cambium_bench::history::{history, Driver, HistoryOptions, HistoryResult};
 use cambium_bench::state::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
@@ -200,15 +200,14 @@ fn change_sets_are_deterministic_and_cover_the_range() {
         assert!(p.category.is_some());
         assert_eq!(f.engine.repo.parents(&p.head).unwrap()[0], p.base);
     }
-    let per_category = |name: &str| {
-        stress
-            .iter()
-            .filter(|p| p.category.as_deref() == Some(name))
-            .count()
-    };
-    assert!(per_category("bzl") <= 2 && per_category("build_add_delete") <= 2);
+    let per_category =
+        |c: StressCategory| stress.iter().filter(|p| p.category == Some(c)).count();
+    assert!(
+        per_category(StressCategory::Bzl) <= 2
+            && per_category(StressCategory::BuildAddDelete) <= 2
+    );
     // `mixed` edits .bzl files and adds packages, so both categories fire.
-    assert!(per_category("bzl") > 0, "{stress:?}");
+    assert!(per_category(StressCategory::Bzl) > 0, "{stress:?}");
 
     let set = changes::select(
         &f.engine.repo,

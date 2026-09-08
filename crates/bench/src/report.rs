@@ -1112,15 +1112,18 @@ fn render_compare(r: &SubjectResults) -> String {
 
     // ---- classes ----
     s.push_str("#### Disagreements by class\n\n");
-    let mut totals: BTreeMap<String, usize> = BTreeMap::new();
+    // Every class, at zero if it never fired: a failing class missing from
+    // the table reads as "not measured", and the whole point of printing
+    // `cambium_missing | 0` is that a reader can see it was looked for.
+    let mut totals: BTreeMap<crate::classify::Class, usize> = BTreeMap::new();
     for c in compares {
         for (k, v) in &c.summary.by_class {
-            *totals.entry(k.clone()).or_default() += v;
+            *totals.entry(*k).or_default() += v;
         }
     }
     s.push_str("| class | labels | fails the run | meaning |\n|---|---:|---|---|\n");
     for class in crate::classify::Class::ALL {
-        let n = totals.get(class.name()).copied().unwrap_or(0);
+        let n = totals.get(&class).copied().unwrap_or(0);
         s.push_str(&format!(
             "| `{}` | {} | {} | {} |\n",
             class.name(),
@@ -1128,17 +1131,6 @@ fn render_compare(r: &SubjectResults) -> String {
             if class.is_failure() { "**yes**" } else { "no" },
             class.meaning(),
         ));
-    }
-    for (class, n) in &totals {
-        if !crate::classify::Class::ALL
-            .iter()
-            .any(|c| c.name() == class.as_str())
-        {
-            s.push_str(&format!(
-                "| `{class}` | {n} | unknown | a class this binary does not know; \
-                 the results were written by a different version |\n"
-            ));
-        }
     }
     s.push_str("\nCounts are labels, summed over every change set and tool.\n\n");
 
@@ -1435,6 +1427,7 @@ pub fn update_doc(path: &Path, subject_id: &str, section: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classify::Class;
     use crate::compare::{CambiumRun, ChangeSetResult, ChangesSummary, ToolComparison};
     use crate::history::{ColdBuild, Summary};
 
@@ -1519,14 +1512,14 @@ mod tests {
 
     fn compare() -> ChangesResult {
         let mut counts = BTreeMap::new();
-        counts.insert("cambium_extra_select".to_string(), 3);
+        counts.insert(Class::CambiumExtraSelect, 3);
         let mut why = BTreeMap::new();
         why.insert("rule definition changed".to_string(), 233);
         let change_set = ChangeSetResult {
             schema: crate::RESULT_SCHEMA,
             base: "b".into(),
             head: "h".into(),
-            kind: "adjacent".into(),
+            kind: crate::changes::ChangeSetKind::Adjacent,
             category: None,
             cambium: CambiumRun {
                 cold_wall_ms: 4200,
@@ -1586,7 +1579,7 @@ mod tests {
             schema: crate::RESULT_SCHEMA,
             base: "gb".into(),
             head: "gh".into(),
-            kind: "adjacent".into(),
+            kind: crate::changes::ChangeSetKind::Adjacent,
             category: None,
             cambium: CambiumRun {
                 global: true,
