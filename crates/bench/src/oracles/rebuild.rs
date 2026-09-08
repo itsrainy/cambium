@@ -203,9 +203,7 @@ fn compare_externals(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d
     for (name, a) in &ra {
         match rb.get(name) {
             None => note(format!("repository `{name}` only in applied")),
-            Some(b) if a != b => note(format!(
-                "repository `{name}`: applied {a:?}, rebuilt {b:?}"
-            )),
+            Some(b) if a != b => note(format!("repository `{name}`: applied {a:?}, rebuilt {b:?}")),
             Some(_) => {}
         }
     }
@@ -226,7 +224,12 @@ fn compare_externals(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d
                     v.repo_input_patterns.get(p),
                     if v.repo_input_prefix[i] { "**" } else { "" }
                 );
-                let repos = v.repo_inputs.row(p).iter().map(|&r| v.repo_name(r)).collect();
+                let repos = v
+                    .repo_inputs
+                    .row(p)
+                    .iter()
+                    .map(|&r| v.repo_name(r))
+                    .collect();
                 (key, (v.repo_input_target_only[i], repos))
             })
             .collect()
@@ -235,9 +238,9 @@ fn compare_externals(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d
     for (key, a) in &pa {
         match pb.get(key) {
             None => note(format!("input pattern `{key}` only in applied")),
-            Some(b) if a != b => {
-                note(format!("input pattern `{key}`: applied {a:?}, rebuilt {b:?}"))
-            }
+            Some(b) if a != b => note(format!(
+                "input pattern `{key}`: applied {a:?}, rebuilt {b:?}"
+            )),
             Some(_) => {}
         }
     }
