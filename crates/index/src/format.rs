@@ -42,7 +42,7 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// `MODULE.bazel` or repository-rule-input edit, and to 6 when it gained the
 /// per-repository path mapping (`repo_map_*`) that tells an input-path edit
 /// apart from an edit to a `.bzl` the repository exports.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

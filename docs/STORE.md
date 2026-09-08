@@ -81,7 +81,16 @@ Three separate things, and they are not interchangeable:
   mapping is derived only from shapes that admit no guessing —
   `local_path_override`, `local_repository` / `new_local_repository`, and a
   `repository_ctx.symlink` whose source is a literal main-repo path or label —
-  and a repository with no entries keeps the old, wider answer. As at 4 and 5,
+  and a repository with no entries keeps the old, wider answer.
+  It went to **7** when each input-map pattern gained a *target-only* flag
+  (`repo_input_target_only`): set when every derivation of the pattern was a
+  label embedded in text the repository rule writes — envoy's `bazel/repo.bzl`
+  generates a BUILD file listing `@envoy//changelogs` in a `genrule`'s `tools`
+  — rather than a label the rule resolves. Such a file is a dependency of the
+  repository's targets and cannot move a `.bzl` in it, so an edit to it marks
+  the label consumers direct and re-queries nothing; without the flag, every
+  changelog entry re-queried the eleven hundred packages whose closure reaches
+  `@envoy_repo//:compiler.bzl`. As at 4, 5 and 6,
   an empty table in an older index would read as "no mapping is needed" rather
   than "we never looked", which is the unsound direction, so the layout bump is
   what stops that answer being given silently.
