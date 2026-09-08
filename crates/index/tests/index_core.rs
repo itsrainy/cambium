@@ -495,3 +495,116 @@ fn a_tombstoned_dependency_counts_as_a_hop() {
         vec!["//c:c", "//c:c_test"]
     );
 }
+
+/// `id_of` is the whole point of a splice: node ids stay comparable across
+/// generations, so a base id means the same node in the spliced index. Check
+/// every label, not a sample — a silent renumbering of one of them is exactly
+/// the bug this guards.
+#[test]
+fn splice_preserves_the_id_of_every_base_label() {
+    let base = sample();
+    let bv = base.view();
+
+    let mut b = IndexBuilder::from_view(bv);
+    // Touch one package; every other label must keep its id, and the touched
+    // package's labels must too, since none of them went away.
+    b.apply_packages(&[pkg(
+        "b",
+        vec![
+            rule("b", "b", &["//a:a"], &["//b:b.src", "//b:extra.src"]),
+            TargetRow::source_file("//b:b.src"),
+            TargetRow::source_file("//b:extra.src"),
+        ],
+    )]);
+    let head = b.finish("head");
+    let hv = head.view();
+
+    for label in bv.labels.iter() {
+        assert_eq!(
+            hv.id_of(label),
+            bv.id_of(label),
+            "{label} was renumbered by the splice"
+        );
+    }
+    // And the new label got an id past the base's.
+    assert!(hv.id_of("//b:extra.src").unwrap() >= bv.num_nodes());
+}
+
+/// The `affected` path: `finish_overlay` answers the same reverse-closure
+/// question as a materialised splice, while carrying only the delta.
+#[test]
+fn overlay_answers_like_a_materialised_splice() {
+    let base = sample();
+
+    let touch = |b: &mut IndexBuilder<'_>| {
+        // Give //a:a a second source; its consumers are unchanged, but the
+        // rule's row moves, so the reverse corrections are real.
+        b.apply_packages(&[pkg(
+            "a",
+            vec![
+                rule("a", "a", &[], &["//a:a.src", "//a:new.src"]),
+                TargetRow::source_file("//a:a.src"),
+                TargetRow::source_file("//a:new.src"),
+            ],
+        )]);
+    };
+
+    let mut m = IndexBuilder::from_view(base.view());
+    touch(&mut m);
+    let materialised = m.finish("head");
+    let mv = materialised.view();
+
+    let mut o = IndexBuilder::from_view(base.view());
+    touch(&mut o);
+    let overlay = o.finish_overlay();
+
+    let seed = "//a:new.src";
+    let opts = WalkOptions::default();
+    let from_index = walk(mv, &[mv.id_of(seed).unwrap()], &opts);
+    let from_overlay = walk_view(&overlay, &[overlay.id_of(seed).unwrap()], &opts);
+    assert_eq!(
+        view::labels_sorted(&overlay, &from_overlay.affected),
+        view::labels_sorted(&mv, &from_index.affected),
+    );
+    assert_eq!(
+        view::labels_sorted(&overlay, &from_overlay.affected),
+        vec!["//a:a", "//b:b", "//c:c", "//c:c_test"]
+    );
+
+    // It stayed a delta rather than a copy.
+    let size = overlay.delta_size();
+    assert!(size.new_nodes + size.changed_nodes < base.view().num_nodes() as usize);
+}
+
+/// `OwnedIndexBytes` is the "I already have the bytes" load path (the store
+/// hands them over in memory); it must produce the same view as the builder.
+#[test]
+fn owned_bytes_round_trip() {
+    let data = sample();
+    let raw = format::to_bytes(&data).unwrap();
+    let owned = format::OwnedIndexBytes::new(&raw).unwrap();
+    let (a, b) = (data.view(), owned.view());
+
+    assert_eq!(b.commit, a.commit);
+    assert_eq!(b.lineage, a.lineage);
+    assert_eq!(b.bazel_version, a.bazel_version);
+    assert_eq!(b.num_nodes(), a.num_nodes());
+    assert_eq!(b.num_packages(), a.num_packages());
+    assert_eq!(
+        b.labels.iter().collect::<Vec<_>>(),
+        a.labels.iter().collect::<Vec<_>>()
+    );
+    for u in 0..a.num_nodes() {
+        assert_eq!(b.forward.row(u), a.forward.row(u));
+        assert_eq!(b.reverse.row(u), a.reverse.row(u));
+        assert_eq!(b.kind_of(u), a.kind_of(u));
+        assert_eq!(b.package_of(u), a.package_of(u));
+        assert_eq!(b.rule_class(u), a.rule_class(u));
+    }
+
+    // A byte flipped inside the payload must not be read as valid rows.
+    let mut broken = raw.clone();
+    let off = u64::from_le_bytes(broken[16..24].try_into().unwrap()) as usize;
+    broken.truncate(off + 8);
+    assert!(format::OwnedIndexBytes::new(&broken).is_err());
+}
