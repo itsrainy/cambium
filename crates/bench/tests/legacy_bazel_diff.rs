@@ -25,7 +25,7 @@ fn cambium_and_bazel_diff_agree_on_the_impacted_targets() {
     eprintln!("using {} {}", bazel_diff.name(), bazel_diff.version());
 
     let ctx = StageContext::new("tiny", 1).expect("tiny preset");
-    let run = legacy::run(&ctx, &LegacyOptions::default())
+    let run = legacy::run(&ctx, &bazel_diff, &LegacyOptions::default())
         .expect("stage runs and the sets agree");
 
     // Something must have been impacted, or the comparison is vacuous.

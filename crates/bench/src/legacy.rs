@@ -20,7 +20,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use cambium_engine::{AffectedRequest, SynthQuerier};
@@ -28,6 +27,8 @@ use cambium_synth::ChangeSpec;
 
 use crate::harness::{peak_rss_mb, StageResult};
 use crate::stages::StageContext;
+use crate::tools::bazeldiff::BazelDiff;
+use crate::tools::RunContext;
 
 /// The stage's name, as `bench run --stage` and `bench sweep --stage` spell it.
 pub const STAGE: &str = "legacy_bazel_diff";
@@ -42,9 +43,6 @@ pub struct LegacyOptions {
     /// Change preset applied to get the head revision.
     pub change_preset: String,
     pub seed: u64,
-    /// Explicit bazel-diff binary; otherwise `CAMBIUM_BAZEL_DIFF`, otherwise
-    /// the path `tools/bazel-diff/fetch.sh` writes.
-    pub binary: Option<PathBuf>,
     /// Keep the scratch workspaces here instead of a temporary directory.
     pub workdir: Option<PathBuf>,
 }
@@ -54,7 +52,6 @@ impl Default for LegacyOptions {
         Self {
             change_preset: "typical-pr".to_string(),
             seed: 0,
-            binary: None,
             workdir: None,
         }
     }
@@ -73,48 +70,17 @@ pub struct LegacyRun {
     pub bazel_diff_only: BTreeSet<String>,
 }
 
-/// Locates the bazel-diff binary, honouring the explicit path, then the
-/// `CAMBIUM_BAZEL_DIFF` override, then the default cache location.
-pub fn bazel_diff_binary(explicit: Option<&Path>) -> Option<PathBuf> {
-    let candidates = [
-        explicit.map(PathBuf::from),
-        std::env::var_os("CAMBIUM_BAZEL_DIFF").map(PathBuf::from),
-        default_binary(),
-    ];
-    candidates.into_iter().flatten().find(|p| p.is_file())
-}
-
-fn default_binary() -> Option<PathBuf> {
-    let dir = match std::env::var_os("CAMBIUM_BAZEL_DIFF_DIR") {
-        Some(d) => PathBuf::from(d),
-        None => crate::util::cache_dir("bazel-diff"),
-    };
-    Some(dir.join("bin/bazel-diff-rust"))
-}
-
-/// `<commit> <tag>` from the VERSION file the fetch script writes next to
-/// `bin/`, so a result says which bazel-diff it was measured against.
-fn version_of(binary: &Path) -> String {
-    binary
-        .parent()
-        .and_then(|b| b.parent())
-        .map(|d| d.join("VERSION"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 /// Runs the stage. Errors when bazel-diff is missing, when it fails, or when
 /// it reports a label cambium does not.
-pub fn run(ctx: &StageContext, opts: &LegacyOptions) -> Result<LegacyRun> {
-    let binary = bazel_diff_binary(opts.binary.as_deref()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "bazel-diff binary not found; build it with tools/bazel-diff/fetch.sh \
-             or set CAMBIUM_BAZEL_DIFF"
-        )
-    })?;
-    let version = version_of(&binary);
+pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> Result<LegacyRun> {
+    // The stage's own bazel-diff: no `-k`, since the shim never fails to
+    // "load", and `--excludeExternalTargets`, since the generated graph has no
+    // externals and hashing them would be hashing nothing.
+    let tool = bazel_diff
+        .clone()
+        .with_keep_going(false)
+        .with_exclude_external_targets(true);
+    let version = crate::tools::Tool::version(&tool);
 
     // Base graph, and the head graph the same commit produces. The engine and
     // bazel-diff see byte-identical inputs from here on.
@@ -158,29 +124,33 @@ pub fn run(ctx: &StageContext, opts: &LegacyOptions) -> Result<LegacyRun> {
     let head_hashes = root.join("head.json");
     let impacted = root.join("impacted.txt");
 
-    let t = std::time::Instant::now();
-    generate_hashes(&binary, &shim, &base_ws, &base_hashes)?;
-    generate_hashes(&binary, &shim, &head_ws, &head_hashes)?;
-    get_impacted(
-        &binary,
-        &shim,
-        &head_ws,
-        &base_hashes,
-        &head_hashes,
-        &impacted,
-    )?;
-    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
+    // The shim *is* the Bazel: it serves the recorded query for whichever
+    // workspace it was pointed at, so the measurement is bazel-diff's own
+    // hashing and diffing with no server in it.
+    let ctx_for = |ws: &Path| RunContext {
+        bazel_binary: shim.clone(),
+        startup_flags: Vec::new(),
+        env: Vec::new(),
+        scratch: root.to_path_buf(),
+        base_worktree: ws.to_path_buf(),
+    };
+    let base_ctx = ctx_for(&base_ws);
+    let head_ctx = ctx_for(&head_ws);
+    let impact = |bd: &BazelDiff| -> Result<()> {
+        bd.get_impacted_targets(&head_ws, &base_hashes, &head_hashes, &impacted, &head_ctx)?;
+        Ok(())
+    };
 
     let t = std::time::Instant::now();
-    generate_hashes(&binary, &shim, &head_ws, &head_hashes)?;
-    get_impacted(
-        &binary,
-        &shim,
-        &head_ws,
-        &base_hashes,
-        &head_hashes,
-        &impacted,
-    )?;
+    tool.generate_hashes(&base_ws, &base_hashes, &base_ctx, &[])?;
+    tool.generate_hashes(&head_ws, &head_hashes, &head_ctx, &[])?;
+    impact(&tool)?;
+    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    // Warm: the base hashes are already on disk, so only head is rehashed.
+    let t = std::time::Instant::now();
+    tool.generate_hashes(&head_ws, &head_hashes, &head_ctx, &[])?;
+    impact(&tool)?;
     let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // Only rule labels are comparable: bazel-diff's hash files also cover
@@ -254,8 +224,8 @@ pub fn run(ctx: &StageContext, opts: &LegacyOptions) -> Result<LegacyRun> {
     let mut notes = BTreeMap::new();
     notes.insert("bazel_diff_version".to_string(), version.clone());
     notes.insert(
-        "bazel_diff_binary".to_string(),
-        binary.display().to_string(),
+        "bazel_diff_impl".to_string(),
+        tool.implementation().name().to_string(),
     );
     notes.insert("change_preset".to_string(), opts.change_preset.clone());
 
@@ -300,66 +270,6 @@ pub fn run(ctx: &StageContext, opts: &LegacyOptions) -> Result<LegacyRun> {
 }
 
 // ------------------------------------------------------------------- driving
-
-fn generate_hashes(binary: &Path, shim: &Path, workspace: &Path, out: &Path) -> Result<()> {
-    run_bazel_diff(
-        binary,
-        &[
-            "generate-hashes".as_ref(),
-            "-w".as_ref(),
-            workspace.as_os_str(),
-            "-b".as_ref(),
-            shim.as_os_str(),
-            "--excludeExternalTargets".as_ref(),
-            out.as_os_str(),
-        ],
-        workspace,
-    )
-}
-
-fn get_impacted(
-    binary: &Path,
-    shim: &Path,
-    workspace: &Path,
-    starting: &Path,
-    final_: &Path,
-    out: &Path,
-) -> Result<()> {
-    run_bazel_diff(
-        binary,
-        &[
-            "get-impacted-targets".as_ref(),
-            "--startingHashes".as_ref(),
-            starting.as_os_str(),
-            "--finalHashes".as_ref(),
-            final_.as_os_str(),
-            "-w".as_ref(),
-            workspace.as_os_str(),
-            "-b".as_ref(),
-            shim.as_os_str(),
-            "-o".as_ref(),
-            out.as_os_str(),
-        ],
-        workspace,
-    )
-}
-
-fn run_bazel_diff(binary: &Path, args: &[&std::ffi::OsStr], cwd: &Path) -> Result<()> {
-    let out = Command::new(binary)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("running {}", binary.display()))?;
-    if !out.status.success() {
-        bail!(
-            "bazel-diff {:?} failed ({}):\n{}",
-            args.first().map(|a| a.to_string_lossy().to_string()),
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
 
 /// Writes the fake `bazel`. It answers the four subcommands bazel-diff issues,
 /// and picks the fixture from the workspace it was pointed at, so one script

@@ -84,6 +84,12 @@ pub struct BazelDiff {
     name: String,
     /// `-k`, on by default; see the module docs.
     keep_going: bool,
+    /// `--excludeExternalTargets`. Off by default -- on a real subject
+    /// bazel-diff hashes the external graph, and that difference is one of the
+    /// things the comparison is measuring. The synthetic `legacy_bazel_diff`
+    /// stage turns it on because its graph has no externals to hash and the
+    /// shim serves none.
+    exclude_external_targets: bool,
 }
 
 /// `~/.cache/cambium/bazel-diff`, where `tools/bazel-diff/fetch.sh` installs.
@@ -177,6 +183,7 @@ impl BazelDiff {
             version,
             name: imp.name().to_string(),
             keep_going: true,
+            exclude_external_targets: false,
         }
     }
 
@@ -188,6 +195,12 @@ impl BazelDiff {
 
     pub fn keep_going(&self) -> bool {
         self.keep_going
+    }
+
+    /// Whether to pass `--excludeExternalTargets` to `generate-hashes`.
+    pub fn with_exclude_external_targets(mut self, yes: bool) -> Self {
+        self.exclude_external_targets = yes;
+        self
     }
 
     pub fn implementation(&self) -> Implementation {
@@ -227,6 +240,9 @@ impl BazelDiff {
             .arg(&ctx.bazel_binary);
         if self.keep_going {
             cmd.arg("-k");
+        }
+        if self.exclude_external_targets {
+            cmd.arg("--excludeExternalTargets");
         }
         let startup = ctx.tool_startup_flags();
         if !startup.is_empty() {
