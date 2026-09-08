@@ -194,7 +194,7 @@ pub fn classify(ctx: &StageContext) -> StageResult {
 pub fn parse_proto(ctx: &StageContext) -> StageResult {
     let g = graph(ctx);
     let bytes = cambium_synth::proto::to_streamed_proto(&g);
-    let opts = cambium_proto::ConvertOptions::default();
+    let opts = cambium_bazel::ConvertOptions::default();
     let files = cambium_engine::query::no_files();
     let (median, p90) = time(ctx.runs, || {
         cambium_engine::query::parse_stream(&bytes, &opts, &files).expect("parse")

@@ -329,8 +329,8 @@ impl Config {
         }
     }
 
-    pub fn convert_options(&self) -> cambium_proto::ConvertOptions {
-        cambium_proto::ConvertOptions {
+    pub fn convert_options(&self) -> cambium_bazel::ConvertOptions {
+        cambium_bazel::ConvertOptions {
             test_rule_suffixes: self.output.test_rule_suffixes.clone(),
             exclude_tags: self.output.exclude_tags.clone(),
         }
