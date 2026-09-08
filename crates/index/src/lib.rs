@@ -2,7 +2,7 @@
 //!
 //! The index is a compressed sparse row graph over interned Bazel labels, plus
 //! the per-package bookkeeping needed to replace one package's rows without
-//! touching the rest of the graph. See the design spec, sections 5 and 6.
+//! touching the rest of the graph.
 //!
 //! ```no_run
 //! use cambium_index::{IndexFile, walk::{walk, WalkOptions}};
@@ -48,5 +48,5 @@ pub use format::{
 pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
-pub use view::GraphView;
+pub use view::{labels_sorted, GraphView};
 pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};

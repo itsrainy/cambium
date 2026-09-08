@@ -9,7 +9,8 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::csr::{Csr, CsrRef};
+use crate::csr::CsrRef;
+use crate::space::NodeMeta;
 use crate::strtab::StrTabRef;
 
 #[cfg(target_endian = "big")]
@@ -76,16 +77,18 @@ impl NodeKind {
 }
 
 /// Node flag bits.
+///
+/// Bit 1 was `EXTERNAL` ("label lives outside the main repository"). No
+/// reader ever consulted it — `label::is_external` answers from the label —
+/// so writers stopped setting it; files written before that may still carry
+/// the bit, and it is ignored. Bit 3 was reserved and never written. Neither
+/// retirement moves the layout, so neither bumped `FORMAT_VERSION`.
 pub mod flags {
     /// Rule carries the `manual` tag.
     pub const MANUAL: u8 = 1 << 0;
-    /// Label lives outside the main repository.
-    pub const EXTERNAL: u8 = 1 << 1;
     /// Node is tombstoned (mirrors `NodeKind::Tombstone`, kept as a bit so the
     /// walk can mask without a kind comparison).
     pub const TOMBSTONE: u8 = 1 << 2;
-    /// Rule is testonly-ish: reserved for future use by output filters.
-    pub const RESERVED_3: u8 = 1 << 3;
 }
 
 /// Package flag bits.
@@ -137,7 +140,7 @@ pub struct Header {
 ///
 /// Kept out of the payload (see [`Header`]) and written to the file's trailer.
 /// Skipped by rkyv rather than merely unset, so it cannot accidentally
-/// contribute bytes: `crates/index/tests/index_core.rs` asserts that two
+/// contribute bytes: `crates/engine/tests/store_layout.rs` asserts that two
 /// indexes built from the same graph at different commits have identical
 /// payloads.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +212,10 @@ pub struct IndexData {
 
     // ---- the static `.bzl` load closure (format 4) ----
     //
+    // Format numbers in the comments below name the version that added a
+    // section; `crate::format::FORMAT_VERSION` carries the authoritative
+    // history.
+    //
     // Three tables over one id space, whose ids are assigned in path order so
     // a path can be found by binary search:
     //
@@ -263,7 +270,7 @@ pub struct IndexData {
     pub repo_input_bytes: Vec<u8>,
     pub repo_input_offsets: Vec<u32>,
     pub repo_input_prefix: Vec<bool>,
-    // - `repo_input_target_only` (format 7) marks, per pattern, one whose
+    // - `repo_input_target_only` (format 8) marks, per pattern, one whose
     //   every derivation was a label embedded in text the repository rule
     //   writes — a generated BUILD file's `srcs` — rather than a label the
     //   rule resolves. Such a path moves the repository's targets, never a
@@ -396,6 +403,22 @@ impl<'a> IndexRef<'a> {
         NodeKind::from_u8(self.kind[id as usize])
     }
 
+    /// Every node column for `id`, gathered. The one place the struct-of-arrays
+    /// layout is folded back into a record, so the builder and the overlay
+    /// read a base node the same way.
+    #[inline]
+    pub fn meta(&self, id: u32) -> NodeMeta {
+        let i = id as usize;
+        NodeMeta {
+            kind: self.kind[i],
+            package: self.package[i],
+            class: self.class[i],
+            hash: self.hash[i],
+            is_test: self.is_test[i],
+            flags: self.flags[i],
+        }
+    }
+
     #[inline]
     pub fn is_rule(&self, id: u32) -> bool {
         self.kind[id as usize] == NodeKind::Rule as u8
@@ -447,10 +470,9 @@ impl<'a> IndexRef<'a> {
 
     /// Rules consuming a source-file node.
     ///
-    /// This is exactly the reverse row: only rules hold forward edges, so every
-    /// in-edge of a file node comes from a rule. The spec's separate `files`
-    /// CSR would be a byte-for-byte copy of these rows, so it is kept as a view
-    /// (spec 5.3 explicitly allows this).
+    /// This is exactly the reverse row: a file node's in-edges all come from
+    /// rules (a generated file's one forward edge goes *to* its generator), so
+    /// a separate `files` CSR would be a byte-for-byte copy of these rows.
     #[inline]
     pub fn file_consumers(&self, id: u32) -> &'a [u32] {
         self.reverse.row(id)
@@ -555,27 +577,16 @@ impl<'a> IndexRef<'a> {
     /// entry — a prefix match cannot be answered by binary search, and the
     /// alternative (a trie) would not pay for itself at this size.
     pub fn repos_for_path(&self, path: &str) -> Vec<u32> {
-        let mut out = Vec::new();
-        for p in 0..self.repo_input_patterns.len() as u32 {
-            let pat = self.repo_input_patterns.get(p);
-            let hit = if self.repo_input_prefix[p as usize] {
-                path.starts_with(pat)
-            } else {
-                path == pat
-            };
-            if hit {
-                out.extend_from_slice(self.repo_inputs.row(p));
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
+        self.repos_for_path_kinds(path)
+            .into_iter()
+            .map(|(repo, _)| repo)
+            .collect()
     }
 
     /// As [`IndexRef::repos_for_path`], with whether the path *feeds* each
     /// repository's rule (`true`) or is only named by a target the rule writes
     /// (`false`; see [`crate::externals::RepoInputs::target_only`]). A
-    /// repository named both ways feeds.
+    /// repository named both ways feeds. Ascending by repo id, no duplicates.
     pub fn repos_for_path_kinds(&self, path: &str) -> Vec<(u32, bool)> {
         let mut out: std::collections::BTreeMap<u32, bool> = Default::default();
         for p in 0..self.repo_input_patterns.len() as u32 {
@@ -741,14 +752,6 @@ impl IndexData {
                 offsets: &self.repo_map_offsets,
             },
             repo_map_ranges: &self.repo_map_ranges,
-        }
-    }
-
-    /// Forward CSR as a borrowed pair, for splice input.
-    pub fn forward(&self) -> Csr {
-        Csr {
-            offsets: self.fwd_offsets.clone(),
-            edges: self.fwd_edges.clone(),
         }
     }
 }

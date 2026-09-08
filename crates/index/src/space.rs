@@ -5,14 +5,14 @@
 //! is 52% of a pull-request run — so existing entries are read straight from
 //! the mmapped index and only what the splice actually touches is stored.
 //!
-//! The two finalizers on top of this are what item 6 of the design is about:
-//! `finish` materialises a complete new index (for `baseline update`, whose
-//! output gets published), and `finish_overlay` produces only the delta (for
-//! `affected`, which just needs to walk).
+//! Two finalizers sit on top of this: [`crate::IndexBuilder::finish`]
+//! materialises a complete new index (for `baseline update`, whose output gets
+//! published), and [`crate::IndexBuilder::finish_overlay`] produces only the
+//! delta (for `affected`, which just needs to walk).
 
 use rustc_hash::FxHashMap;
 
-use crate::data::{flags, IndexRef, NO_ID};
+use crate::data::{IndexRef, NO_ID};
 use crate::strtab::{Interner, StrTabRef};
 
 /// Everything the node columns hold for one node.
@@ -27,18 +27,17 @@ pub struct NodeMeta {
 }
 
 impl NodeMeta {
-    pub fn unknown(label: &str) -> Self {
+    /// A node for a label some rule references but no queried package
+    /// defines: an external repository's target, or one in a package that
+    /// failed to load.
+    pub fn unknown() -> Self {
         Self {
             kind: crate::data::NodeKind::Unknown as u8,
             package: NO_ID,
             class: NO_ID,
             hash: [0; 32],
             is_test: false,
-            flags: if crate::label::is_external(label) {
-                flags::EXTERNAL
-            } else {
-                0
-            },
+            flags: 0,
         }
     }
 }
@@ -170,11 +169,6 @@ impl<'a> LabelSpace<'a> {
         debug_assert_eq!(sorted.len(), n as usize);
         (bytes, offsets, sorted)
     }
-
-    /// Splits into the parts an overlay needs to keep.
-    pub fn into_overlay_parts(self) -> (Option<StrTabRef<'a>>, u32, Interner) {
-        (self.base, self.base_n, self.new)
-    }
 }
 
 /// Node columns: read from the base, written into an override map or the
@@ -231,16 +225,7 @@ impl<'a> NodeSpace<'a> {
         if let Some(m) = self.over.get(&id) {
             return *m;
         }
-        let b = self.base.expect("base ids need a base view");
-        let i = id as usize;
-        NodeMeta {
-            kind: b.kind[i],
-            package: b.package[i],
-            class: b.class[i],
-            hash: b.hash[i],
-            is_test: b.is_test[i],
-            flags: b.flags[i],
-        }
+        self.base.expect("base ids need a base view").meta(id)
     }
 
     #[inline]

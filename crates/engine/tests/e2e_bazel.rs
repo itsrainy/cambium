@@ -623,7 +623,7 @@ fn differential_check_against_bazel_rdeps() {
                 max_depth: None,
             },
         );
-        let ours: BTreeSet<String> = cambium_index::walk::labels_sorted(v, &r.affected)
+        let ours: BTreeSet<String> = cambium_index::view::labels_sorted(&v, &r.affected)
             .into_iter()
             .collect();
         let missing: Vec<&String> = theirs.difference(&ours).collect();

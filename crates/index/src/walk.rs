@@ -83,6 +83,59 @@ pub fn walk_view<V: GraphView + ?Sized>(
     direct: &[u32],
     opts: &WalkOptions,
 ) -> WalkResult {
+    bfs(view, &Reverse(view), direct, opts)
+}
+
+/// The same walk over the forward edges: everything the seeds depend on.
+pub fn walk_deps(index: IndexRef<'_>, seeds: &[u32], opts: &WalkOptions) -> WalkResult {
+    walk_edges(index, index.forward, seeds, opts)
+}
+
+/// Breadth-first walk over an arbitrary edge set of the index.
+///
+/// Both directions are the same traversal; which CSR is handed in decides
+/// whether the question is "what depends on this" or "what does this depend
+/// on". Keeping one implementation is what stops the two answers from drifting.
+pub fn walk_edges(
+    index: IndexRef<'_>,
+    edges: crate::CsrRef<'_>,
+    direct: &[u32],
+    opts: &WalkOptions,
+) -> WalkResult {
+    bfs(&index, &edges, direct, opts)
+}
+
+/// Where a walk's edges come from. Same shape as [`GraphView::reverse_row`]:
+/// a source that has the row contiguous hands back its own slice, one that has
+/// to compute it fills `scratch`.
+trait Rows {
+    fn row<'s>(&'s self, u: u32, scratch: &'s mut Vec<u32>) -> &'s [u32];
+}
+
+/// The reverse edges of a [`GraphView`].
+struct Reverse<'v, V: ?Sized>(&'v V);
+
+impl<V: GraphView + ?Sized> Rows for Reverse<'_, V> {
+    fn row<'s>(&'s self, u: u32, scratch: &'s mut Vec<u32>) -> &'s [u32] {
+        self.0.reverse_row(u, scratch)
+    }
+}
+
+/// Any CSR of the index, as handed to [`walk_edges`].
+impl Rows for crate::CsrRef<'_> {
+    fn row<'s>(&'s self, u: u32, _scratch: &'s mut Vec<u32>) -> &'s [u32] {
+        crate::CsrRef::row(self, u)
+    }
+}
+
+/// The one traversal behind every walk: node metadata comes from `view`, the
+/// edges out of a node from `rows`.
+fn bfs<V: GraphView + ?Sized, R: Rows + ?Sized>(
+    view: &V,
+    rows: &R,
+    direct: &[u32],
+    opts: &WalkOptions,
+) -> WalkResult {
     let n = view.num_nodes() as usize;
     let mut visited = FixedBitSet::with_capacity(n);
     let mut parent = opts.explain.then(|| vec![NO_ID; n]);
@@ -102,12 +155,7 @@ pub fn walk_view<V: GraphView + ?Sized>(
         if opts.max_depth.is_some_and(|m| du >= m) {
             continue;
         }
-        // The row is copied out before the loop body so `scratch` is free for
-        // the next iteration; rows are small (mean in-degree under 2 in real
-        // graphs) and untouched rows are borrowed rather than copied.
-        let row = view.reverse_row(u, &mut scratch);
-        let row: Vec<u32> = row.to_vec();
-        for v in row {
+        for &v in rows.row(u, &mut scratch) {
             if (v as usize) < n && !visited.put(v as usize) {
                 if let Some(p) = parent.as_mut() {
                     p[v as usize] = u;
@@ -143,86 +191,8 @@ pub fn walk_view<V: GraphView + ?Sized>(
     }
 }
 
-/// The same walk over the forward edges: everything the seeds depend on.
-pub fn walk_deps(index: IndexRef<'_>, seeds: &[u32], opts: &WalkOptions) -> WalkResult {
-    walk_edges(index, index.forward, seeds, opts)
-}
-
-/// Breadth-first walk over an arbitrary edge set of the index.
-///
-/// Both directions are the same traversal; which CSR is handed in decides
-/// whether the question is "what depends on this" or "what does this depend
-/// on". Keeping one implementation is what stops the two answers from drifting.
-pub fn walk_edges(
-    index: IndexRef<'_>,
-    edges: crate::CsrRef<'_>,
-    direct: &[u32],
-    opts: &WalkOptions,
-) -> WalkResult {
-    let n = IndexRef::num_nodes(&index) as usize;
-    let mut visited = FixedBitSet::with_capacity(n);
-    let mut parent = opts.explain.then(|| vec![NO_ID; n]);
-    let mut depth = vec![NO_ID; n];
-    let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));
-
-    for &d in direct {
-        if (d as usize) < n && !visited.put(d as usize) {
-            depth[d as usize] = 0;
-            queue.push_back(d);
-        }
-    }
-
-    while let Some(u) = queue.pop_front() {
-        let du = depth[u as usize];
-        if opts.max_depth.is_some_and(|m| du >= m) {
-            continue;
-        }
-        for &v in edges.row(u) {
-            if (v as usize) < n && !visited.put(v as usize) {
-                if let Some(p) = parent.as_mut() {
-                    p[v as usize] = u;
-                }
-                depth[v as usize] = du + 1;
-                queue.push_back(v);
-            }
-        }
-    }
-
-    let mut affected = Vec::new();
-    let mut tests = Vec::new();
-    for id in visited.ones() {
-        let id = id as u32;
-        if index.kind_of(id) != NodeKind::Rule || index.is_tombstone(id) {
-            continue;
-        }
-        if !opts.include_manual && index.is_manual(id) {
-            continue;
-        }
-        affected.push(id);
-        if index.is_test[id as usize] {
-            tests.push(id);
-        }
-    }
-
-    WalkResult {
-        visited,
-        affected,
-        tests,
-        parent,
-        depth,
-    }
-}
-
 /// Sorts ids by label. Output ordering is part of the contract: same inputs,
 /// byte-identical output.
 pub fn sort_by_label(index: IndexRef<'_>, ids: &mut [u32]) {
     ids.sort_unstable_by(|&a, &b| index.label(a).cmp(index.label(b)));
-}
-
-/// Labels for `ids`, sorted.
-pub fn labels_sorted(index: IndexRef<'_>, ids: &[u32]) -> Vec<String> {
-    let mut out: Vec<String> = ids.iter().map(|&i| index.label(i).to_string()).collect();
-    out.sort_unstable();
-    out.dedup();
-    out
 }
