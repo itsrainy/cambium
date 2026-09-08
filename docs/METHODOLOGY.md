@@ -39,7 +39,7 @@ precision; see [What is not measured](#what-is-not-measured).
 
 | oracle | question it answers | how |
 |---|---|---|
-| reverse-dependency | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path that belongs to a package at head, batched by command-line length and unioned. cambium's answer must be a superset. A file *deleted* at head has no label to name, so its consumers are read from the base index's file rows instead and must appear in cambium's answer by label or by package. Runs on every incremental change set; `--oracle-sample N` caps the labels queried and is an escape hatch for enormous subjects, not a mode a published number may use. |
+| reverse-dependency | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path that belongs to a package at head, batched by command-line length and unioned. cambium's answer must be a superset. A file *deleted* at head has no label to name, so its consumers are read from the base index's file rows instead and must appear in cambium's answer by label, by the package of an affected target, or in `dirty_packages`. The last spelling is the only one a package deleted in its entirety has: every rule in it is tombstoned, so cambium rightly reports none of them. Runs on every incremental change set; `--oracle-sample N` caps the labels queried and is an escape hatch for enormous subjects, not a mode a published number may use. |
 | rebuild | is the incremental updater exact? | after a history run, a cold index built at the pin is diffed node by node, edge by edge and rule hash by rule hash against the index the history produced. Any difference fails. |
 | load | is the static `.bzl` load closure complete? | on every change set touching a `.bzl`, Bazel's `rbuildfiles` must be a subset of the packages cambium dirtied. |
 
@@ -90,7 +90,10 @@ short local run and the published run differ only in size.
   (`cambium_missing`), the load oracle finding a package the closure missed
   (`cambium_missing_bzl_closure`), and a disagreement no rule explains
   (`unclassified`). Every other class is an over-approximation or a known
-  tool difference and is reported, not gated.
+  tool difference and is reported, not gated. A change set also fails when a
+  tool could not run at all: a comparison that did not happen must not read as
+  a comparison that agreed, because the summary tables omit a tool that
+  reported nothing and the absence is otherwise invisible.
 
 **Cost.** Wall time per tool per change set, in two populations. *All change
 sets* is the published number: it includes the change sets on which cambium
@@ -176,6 +179,7 @@ The three that fail a run are marked.
 | `bazeldiff_extra_external_content` | external load nondeterminism under `--keep_going` in bazel-diff |
 | `bazeldiff_extra_workspace_path` | a rule that bakes the absolute workspace root into its attributes; a harness artifact |
 | `bazeldiff_extra_line_shift` | only the rule's line number moved; bazel-diff hashes `generator_location`, cambium and Tango do not |
+| `tool_missing` | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra. Reported, not gated — cambium's run does not fail on another tool's defect |
 | `cambium_missing` | **fails** — a tool or the oracle reports a target cambium does not |
 | `cambium_missing_bzl_closure` | **fails** — `rbuildfiles` names a package the static closure did not dirty |
 | `unclassified` | **fails** — no rule explains it |
