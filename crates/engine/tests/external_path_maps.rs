@@ -22,7 +22,9 @@ use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
 
 /// `mod` is `api/`, by `local_path_override`; `opaque` is defined by an
 /// extension whose `.bzl` names `//conf:settings.yml` as an input, and no
-/// static shape says where that file lands inside it.
+/// static shape says where that file lands inside it. The same `.bzl` also
+/// writes a BUILD file whose target lists `//notes` — the `@envoy_repo`
+/// shape, where a generated `genrule` names `@envoy//changelogs`.
 const MODULE_BASE: &str = "module(name = \"demo\", version = \"1\")\n\
      bazel_dep(name = \"mod\", version = \"1.0\")\n\
      local_path_override(module_name = \"mod\", path = \"api\")\n\
@@ -43,12 +45,17 @@ fn files() -> Files {
     put("MODULE.bazel", MODULE_BASE);
     put(
         "bazel/ext.bzl",
-        "CONF = attr.label(default = \"@demo//conf:settings.yml\")\n",
+        "CONF = attr.label(default = \"@demo//conf:settings.yml\")\n\
+         BUILD = '''filegroup(name = \"thing\", srcs = [\"@demo//notes\"])'''\n",
     );
-    // `//app` loads a `.bzl` out of `@mod`, transitively; `//lib` only names a
-    // target in it. Those are rules (2) and (1).
+    // `//app` loads a `.bzl` out of `@mod` and out of `@opaque`, transitively;
+    // `//lib` and `//conf` only name a target in one. Those are rules (2)
+    // and (1).
     put("app/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
-    put("bazel/defs.bzl", "load(\"@mod//bazel:defs.bzl\", \"r\")\n");
+    put(
+        "bazel/defs.bzl",
+        "load(\"@mod//bazel:defs.bzl\", \"r\")\nload(\"@opaque//:defs.bzl\", \"o\")\n",
+    );
     put("lib/BUILD", "");
     put("conf/BUILD", "");
     Files(m)
@@ -268,4 +275,52 @@ fn a_repository_with_no_derivable_mapping_keeps_the_old_behaviour() {
     assert_eq!(r.stats.repos_dirty_by_input, 1);
     assert_eq!(r.stats.repos_label_only, 0);
     assert_eq!(r.direct, vec!["//conf:conf".to_string()]);
+    // The rule reads the file, so anything it writes — `defs.bzl` included —
+    // may have moved: the package whose closure loads it is re-queried.
+    assert!(
+        r.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        r.dirty_packages
+    );
+}
+
+/// `@opaque`'s rule writes a BUILD file whose target lists `//notes`. An edit
+/// under `notes/` is a build-time input of that *target*, not of the rule: the
+/// rule never reads it, so `@opaque//:defs.bzl` cannot have moved. `//conf`,
+/// which names `@opaque//:thing`, is direct; `//app`, whose closure loads
+/// `@opaque//:defs.bzl`, is not re-queried.
+#[test]
+fn a_path_named_only_by_a_generated_target_reaches_only_label_consumers() {
+    let index = base();
+    let r = run(
+        &index,
+        &["notes/README.md"],
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_input, 1);
+    assert_eq!(r.stats.repos_label_only, 1);
+    assert_eq!(r.direct, vec!["//conf:conf".to_string()]);
+    assert_eq!(r.affected_labels(), vec!["//conf:conf".to_string()]);
+    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+}
+
+/// The rule's own input and a target-only path in one commit: the input wins
+/// for that repository.
+#[test]
+fn an_input_the_rule_reads_beats_a_target_only_path_in_the_same_commit() {
+    let index = base();
+    let r = run(
+        &index,
+        &["conf/settings.yml", "notes/README.md"],
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_input, 1);
+    assert_eq!(r.stats.repos_label_only, 0);
+    assert!(
+        r.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        r.dirty_packages
+    );
 }

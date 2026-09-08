@@ -158,6 +158,9 @@ impl BzlClosure {
                 v.repo_input_patterns.get(p),
                 v.repo_input_prefix[p as usize],
             );
+            if v.repo_input_target_only[p as usize] {
+                inputs.target_only.insert(pat.clone());
+            }
             let set = inputs.patterns.entry(pat).or_default();
             for &r in v.repo_inputs.row(p) {
                 set.insert(v.repo_name(r).to_string());
@@ -807,6 +810,7 @@ impl<'a> IndexBuilder<'a> {
             repo_input_bytes: bzl.repo_input_bytes,
             repo_input_offsets: bzl.repo_input_offsets,
             repo_input_prefix: bzl.repo_input_prefix,
+            repo_input_target_only: bzl.repo_input_target_only,
             repo_input_repo_offsets: bzl.repo_input_repo_offsets,
             repo_input_repo_edges: bzl.repo_input_repo_edges,
             bzl_repo_offsets: bzl.repo_bzl_offsets,
@@ -840,6 +844,7 @@ struct BzlTables {
     repo_input_bytes: Vec<u8>,
     repo_input_offsets: Vec<u32>,
     repo_input_prefix: Vec<bool>,
+    repo_input_target_only: Vec<bool>,
     repo_input_repo_offsets: Vec<u32>,
     repo_input_repo_edges: Vec<u32>,
     repo_bzl_offsets: Vec<u32>,
@@ -982,6 +987,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             .extend_from_slice(pat.as_str().as_bytes());
         t.repo_input_offsets.push(t.repo_input_bytes.len() as u32);
         t.repo_input_prefix.push(pat.is_prefix());
+        t.repo_input_target_only
+            .push(c.inputs.target_only.contains(pat));
         t.repo_input_repo_edges.extend_from_slice(&row);
         t.repo_input_repo_offsets
             .push(t.repo_input_repo_edges.len() as u32);

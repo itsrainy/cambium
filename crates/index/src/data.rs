@@ -259,6 +259,13 @@ pub struct IndexData {
     pub repo_input_bytes: Vec<u8>,
     pub repo_input_offsets: Vec<u32>,
     pub repo_input_prefix: Vec<bool>,
+    // - `repo_input_target_only` (format 7) marks, per pattern, one whose
+    //   every derivation was a label embedded in text the repository rule
+    //   writes — a generated BUILD file's `srcs` — rather than a label the
+    //   rule resolves. Such a path moves the repository's targets, never a
+    //   `.bzl` in it, so the engine applies rule (1) alone for it. See
+    //   [`crate::externals::RepoInputs::target_only`].
+    pub repo_input_target_only: Vec<bool>,
     pub repo_input_repo_offsets: Vec<u32>,
     pub repo_input_repo_edges: Vec<u32>,
     pub bzl_repo_offsets: Vec<u32>,
@@ -333,6 +340,7 @@ pub struct IndexRef<'a> {
     pub repo_input_patterns: StrTabRef<'a>,
     /// Whether each pattern is a directory prefix rather than an exact path.
     pub repo_input_prefix: &'a [bool],
+    pub repo_input_target_only: &'a [bool],
     /// Pattern id -> repo ids.
     pub repo_inputs: CsrRef<'a>,
     /// `.bzl` id -> the repo ids that `.bzl` can define.
@@ -544,6 +552,30 @@ impl<'a> IndexRef<'a> {
         out
     }
 
+    /// As [`IndexRef::repos_for_path`], with whether the path *feeds* each
+    /// repository's rule (`true`) or is only named by a target the rule writes
+    /// (`false`; see [`crate::externals::RepoInputs::target_only`]). A
+    /// repository named both ways feeds.
+    pub fn repos_for_path_kinds(&self, path: &str) -> Vec<(u32, bool)> {
+        let mut out: std::collections::BTreeMap<u32, bool> = Default::default();
+        for p in 0..self.repo_input_patterns.len() as u32 {
+            let pat = self.repo_input_patterns.get(p);
+            let hit = if self.repo_input_prefix[p as usize] {
+                path.starts_with(pat)
+            } else {
+                path == pat
+            };
+            if !hit {
+                continue;
+            }
+            let feeds = !self.repo_input_target_only[p as usize];
+            for &r in self.repo_inputs.row(p) {
+                *out.entry(r).or_default() |= feeds;
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// How main-repo paths land inside a repository, when that could be
     /// derived statically. An empty answer means "unknown", and the engine
     /// keeps its wide behaviour for that repository.
@@ -671,6 +703,7 @@ impl IndexData {
                 offsets: &self.repo_input_offsets,
             },
             repo_input_prefix: &self.repo_input_prefix,
+            repo_input_target_only: &self.repo_input_target_only,
             repo_inputs: CsrRef {
                 offsets: &self.repo_input_repo_offsets,
                 edges: &self.repo_input_repo_edges,
@@ -779,6 +812,7 @@ impl ArchivedIndexData {
                 offsets: le::u32s(&self.repo_input_offsets),
             },
             repo_input_prefix: &self.repo_input_prefix,
+            repo_input_target_only: &self.repo_input_target_only,
             repo_inputs: CsrRef {
                 offsets: le::u32s(&self.repo_input_repo_offsets),
                 edges: le::u32s(&self.repo_input_repo_edges),
