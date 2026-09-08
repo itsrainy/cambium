@@ -22,6 +22,7 @@
 //! | `bazeldiff_extra_external_content` | tool only | a `//...` label whose rule, source inputs and `//...` dependencies are all unchanged, and which depends on something external: bazel-diff hashes the external graph, and how much of it loads varies between runs |
 //! | `bazeldiff_extra_line_shift` | tool only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
 //! | `bazeldiff_extra_workspace_path` | tool only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the tool's base checkout is a different directory from head |
+//! | `tool_extra_source_directory` | tool only | the target consumes a *directory* as a source file (`src_dir = ["."]`, rendered by Bazel as `//pkg:.`) and a changed path lies under it. Tango hashes a source directory's contents on disk; Bazel's own graph has no edge from a file to the directory above it, so neither `rdeps` nor cambium reaches the target. Bazel documents source directories as untracked, and the oracle is asked to make sure it did not reach the label anyway |
 //! | `tool_missing` | cambium only | the tool missed a target the reverse-dependency oracle independently confirms is affected; cambium is right and the tool is wrong. Reported, not failed — it is not a defect of cambium |
 //! | `cambium_missing` | tool only | **fails**: the other tool reached something cambium did not, with no benign explanation |
 //! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
@@ -44,7 +45,7 @@ pub enum Side {
     Tool,
 }
 
-/// The fifteen disagreement classes.
+/// The sixteen disagreement classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
@@ -133,6 +134,44 @@ pub enum Class {
     /// source-input condition is checked first, so the `glob(["**"])`
     /// filegroup that really does eat its own `BUILD` file never lands here.
     BazeldiffExtraLineShift,
+    /// The target consumes a *directory* as a source file, and a changed path
+    /// lies under that directory.
+    ///
+    /// `attr.label_list(allow_files = True)` given `["."]` is what `apollo`'s
+    /// `install_src_files` rule does in a hundred packages
+    /// (`tools/install/install.bzl`): Bazel renders the label as the source
+    /// file `//modules/perception:.`, and the install script copies the
+    /// directory at run time. Bazel's own graph has no edge from a file to the
+    /// directory above it — source directories are documented as untracked
+    /// (`label_directory`), and `rdeps(//..., //modules/perception/x:y.cc)`
+    /// stops at the rules naming `y.cc` — so neither cambium nor the
+    /// reverse-dependency oracle reaches the target. Tango hashes a source
+    /// directory by walking it on disk (`targethasher.hashDir`), so to Tango
+    /// every file under `modules/perception/` is an input of
+    /// `//modules/perception:install_perception_src`, and it reports the
+    /// target, its `install_src` parent, and the parent's parent up to
+    /// `//:install_src`.
+    ///
+    /// Tango is describing the filesystem truthfully and Bazel is not, but
+    /// the benchmark's definition of "affected" is Bazel's graph, which is
+    /// what the oracle measures and what cambium indexes. The class needs
+    /// two things: the mechanism — a directory source label on the target or
+    /// in its dependency closure with a changed path strictly under it — and
+    /// the oracle's silence. When `rdeps` *does* reach the label, the
+    /// directory is not the explanation and the label stays
+    /// [`Class::CambiumMissing`]; when the oracle did not run there is no
+    /// witness either way and it stays there too. Reported, not failed: it is
+    /// a limitation of Bazel's source model, not of cambium's walk, and the
+    /// one thing cambium could do about it — hash source directories itself
+    /// — would mean reading the tree on every run.
+    ///
+    /// Ranked ahead of the three "nothing could have impacted it"
+    /// conjunctions on the tool side, because when it holds it is the more
+    /// specific reason: the `install_src` parents would otherwise land in
+    /// `bazeldiff_extra_external_content` (they have an external toolchain
+    /// input) or `bazeldiff_extra_line_shift` (a `BUILD` edit *is* a changed
+    /// path under the package directory) and the mechanism would be lost.
+    ToolExtraSourceDirectory,
     /// The *tool* missed it, and the reverse-dependency oracle says cambium
     /// is right.
     ///
@@ -182,6 +221,7 @@ impl Class {
             Class::BazeldiffExtraExternalContent => "bazeldiff_extra_external_content",
             Class::BazeldiffExtraWorkspacePath => "bazeldiff_extra_workspace_path",
             Class::BazeldiffExtraLineShift => "bazeldiff_extra_line_shift",
+            Class::ToolExtraSourceDirectory => "tool_extra_source_directory",
             Class::ToolMissing => "tool_missing",
             Class::CambiumMissing => "cambium_missing",
             Class::Unclassified => "unclassified",
@@ -237,6 +277,11 @@ impl Class {
                 "an unchanged rule whose `BUILD` file changed around it: only its line number \
                  moved, and cambium's rule hash excludes `generator_location`"
             }
+            Class::ToolExtraSourceDirectory => {
+                "the target consumes a directory as a source file (`//pkg:.`) and a changed \
+                 path lies under it; the tool hashes the directory's contents, Bazel's graph \
+                 has no such edge and the reverse-dependency oracle did not reach the label"
+            }
             Class::ToolMissing => {
                 "the tool missed a target the reverse-dependency oracle confirms is \
                  affected: the tool's miss, not cambium's extra"
@@ -256,7 +301,7 @@ impl Class {
         matches!(self, Class::CambiumMissing | Class::Unclassified)
     }
 
-    pub const ALL: [Class; 15] = [
+    pub const ALL: [Class; 16] = [
         Class::CambiumExtraSelect,
         Class::CambiumExtraExternalRepo,
         Class::CambiumExtraImplicit,
@@ -269,6 +314,7 @@ impl Class {
         Class::BazeldiffExtraExternalContent,
         Class::BazeldiffExtraWorkspacePath,
         Class::BazeldiffExtraLineShift,
+        Class::ToolExtraSourceDirectory,
         Class::ToolMissing,
         Class::CambiumMissing,
         Class::Unclassified,
@@ -427,6 +473,28 @@ pub trait Facts {
     fn confirmed_by_oracle(&self, _label: &str) -> bool {
         false
     }
+
+    /// The reverse-dependency oracle ran on this change set, so
+    /// [`Facts::confirmed_by_oracle`] answering `false` means Bazel did not
+    /// reach the label rather than that nobody asked.
+    ///
+    /// Defaults to `false`: the classes that rest on the oracle's *silence*
+    /// (`tool_extra_source_directory`) then never fire, which is the safe
+    /// direction.
+    fn oracle_ran(&self) -> bool {
+        false
+    }
+
+    /// The target, or something in its dependency closure over the head
+    /// index, names a directory as a source file (`//pkg:.`, `//pkg:testdata`)
+    /// and some path in this change set lies strictly under that directory.
+    ///
+    /// Strictly under: a changed path *equal* to the label's path is a plain
+    /// source edit, which cambium's walk sees on its own, and explaining it
+    /// away here would hide a real miss.
+    fn consumes_source_directory_under_change(&self, _label: &str) -> bool {
+        false
+    }
 }
 
 /// Classifies one label of the symmetric difference.
@@ -472,6 +540,8 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
                 Class::BazeldiffExtraExternal
             } else if facts.changed_path_without_consumer(label) {
                 Class::BazeldiffExtraContent
+            } else if source_directory_untracked(label, facts) {
+                Class::ToolExtraSourceDirectory
             } else if workspace_path_artefact(label, facts) {
                 Class::BazeldiffExtraWorkspacePath
             } else if external_load_nondeterminism(label, facts) {
@@ -483,6 +553,29 @@ pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
             }
         }
     }
+}
+
+/// The conjunction behind `tool_extra_source_directory`.
+///
+/// Two facts, and the order is deliberate: the mechanism first, because it
+/// is a cheap index walk and names *why* the tool reported the label; then
+/// the oracle, which must have run and must not have reached the label. A
+/// label Bazel's own `rdeps` reaches is affected by the benchmark's
+/// definition whatever else is true of it, so an affirmative oracle sends it
+/// straight to `cambium_missing`. An oracle that did not run leaves the
+/// label there too: the directory alone is a story, not a witness.
+fn source_directory_untracked(label: &str, facts: &dyn Facts) -> bool {
+    let directory = facts.consumes_source_directory_under_change(label);
+    let asked = directory && facts.oracle_ran();
+    let silent = asked && !facts.confirmed_by_oracle(label);
+    tracing::debug!(
+        label,
+        directory,
+        asked,
+        silent,
+        "source-directory conditions"
+    );
+    silent
 }
 
 /// The conjunction behind `bazeldiff_extra_workspace_path`.
@@ -646,8 +739,11 @@ pub struct BazelFacts<'a> {
     /// Affected labels whose `--explain` reason is a changed `BUILD` file.
     build_file: BTreeSet<String>,
     /// The reverse-dependency oracle's answer, when the run computed one.
-    /// Empty disables `tool_missing`, leaving those labels `unclassified`.
-    oracle: BTreeSet<String>,
+    /// `None` disables `tool_missing`, leaving those labels `unclassified`,
+    /// and `tool_extra_source_directory`, leaving those `cambium_missing`.
+    /// `Some` and empty is an oracle that ran and reached nothing, which is
+    /// an answer.
+    oracle: Option<BTreeSet<String>>,
     /// For an affected label, the shortest path back to the direct-set member
     /// that reached it (`--explain`). Lets the `select` test look along the
     /// whole path instead of one hop.
@@ -662,6 +758,9 @@ pub struct BazelFacts<'a> {
     /// One forward walk per label, memoised: `bazeldiff_extra_external_content`
     /// asks two questions of the same traversal.
     dep_cache: RefCell<HashMap<String, DepFacts>>,
+    /// Memo for [`Facts::consumes_source_directory_under_change`], whose
+    /// fallback is a batched rule query over the closure.
+    source_dir_cache: RefCell<HashMap<String, bool>>,
 }
 
 /// What one forward walk over the head index found about a target.
@@ -693,12 +792,13 @@ impl<'a> BazelFacts<'a> {
             deleted_dep: BTreeSet::new(),
             external_repo: BTreeSet::new(),
             build_file: BTreeSet::new(),
-            oracle: BTreeSet::new(),
+            oracle: None,
             paths: HashMap::new(),
             cache: RefCell::new(HashMap::new()),
             base_cache: RefCell::new(HashMap::new()),
             implicit_cache: RefCell::new(HashMap::new()),
             dep_cache: RefCell::new(HashMap::new()),
+            source_dir_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -735,10 +835,13 @@ impl<'a> BazelFacts<'a> {
     }
 
     /// Records the reverse-dependency oracle's answer, enabling
-    /// `tool_missing`. Without it an extra nothing else explains stays
-    /// `unclassified`, which is the safe direction.
+    /// `tool_missing` and `tool_extra_source_directory`. Call it only when
+    /// the oracle ran: an empty answer is "Bazel reached nothing", which is
+    /// evidence, where not calling it is "nobody asked", which is not.
+    /// Without it an extra nothing else explains stays `unclassified` and a
+    /// tool-side extra stays `cambium_missing`, the safe directions.
     pub fn with_oracle(mut self, labels: impl IntoIterator<Item = String>) -> Self {
-        self.oracle = labels.into_iter().collect();
+        self.oracle = Some(labels.into_iter().collect());
         self
     }
 
@@ -862,12 +965,45 @@ impl<'a> BazelFacts<'a> {
         out
     }
 
-    /// Does any rule in `labels` name an external label among its inputs?
+    /// Whether the label's dependency cone names a directory a changed path
+    /// lies under.
+    ///
+    /// Two sources, cheapest first. The head index carries every source-file
+    /// target the `deps(//...)` query returned, and `//pkg:.` is one of them,
+    /// so the forward walk usually settles it without a Bazel. When the index
+    /// does not know the label, or the walk found nothing, the rule protos of
+    /// the label and every rule in its closure are asked the same question of
+    /// their `rule_input` — batched and memoised the way
+    /// [`Self::any_implicit_external`] is.
+    fn compute_source_directory(&self, label: &str) -> bool {
+        let under = |l: &str| directory_contains_changed_path(l, &self.changed_paths);
+        let mut closure: Vec<String> = vec![label.to_string()];
+        if let Some(id) = self.index.id_of(label) {
+            let walk = cambium_index::walk_deps(self.index, &[id], &WalkOptions::default());
+            for v in walk.visited.ones() {
+                let v = v as u32;
+                let l = self.index.label(v);
+                if self.index.is_rule(v) {
+                    if v != id {
+                        closure.push(l.to_string());
+                    }
+                } else if under(l) {
+                    return true;
+                }
+            }
+        }
+        closure.retain(|l| !self.is_external(l));
+        closure.sort();
+        closure.dedup();
+        self.any_rule_input(&closure, |input| under(input))
+    }
+
+    /// Does any rule in `labels` name an input `pred` accepts?
     ///
     /// Batched and memoised: the closures overlap heavily between the handful
     /// of labels one change set asks about, and one `query 'set(...)'` answers five
     /// hundred of them.
-    fn any_implicit_external(&self, labels: &[String]) -> bool {
+    fn any_rule_input(&self, labels: &[String], pred: impl Fn(&str) -> bool) -> bool {
         for chunk in labels.chunks(PREFETCH_CHUNK) {
             let todo: Vec<&String> = {
                 let c = self.implicit_cache.borrow();
@@ -899,12 +1035,19 @@ impl<'a> BazelFacts<'a> {
                 .iter()
                 .filter_map(|l| c.get(l.as_str()))
                 .flatten()
-                .any(names_external_input)
+                .any(|r| r.rule_input.iter().any(|i| pred(i)))
             {
                 return true;
             }
         }
         false
+    }
+
+    /// Does any rule in `labels` name an external label among its inputs?
+    fn any_implicit_external(&self, labels: &[String]) -> bool {
+        self.any_rule_input(labels, |i| {
+            i.starts_with('@') || i.starts_with("//external:")
+        })
     }
 
     /// Fetches the rule protos for `labels` in bulk, at both revisions.
@@ -1139,6 +1282,30 @@ pub fn substitute_paths(rule: &Rule, from: &str, to: &str) -> Rule {
     r
 }
 
+/// Whether `label` names a directory some path in `changed` lies strictly
+/// under.
+///
+/// `//pkg:.` is the package directory itself (`pkg`; the root package's
+/// `//:.` is the whole tree), `//pkg:sub` a subdirectory. Strictly under is
+/// the point: a changed path *equal* to the label's is a plain file edit
+/// that cambium's walk reports by itself, and a real file can have nothing
+/// beneath it, so `starts_with(dir + "/")` is exactly "the label is a
+/// directory and something in it moved" with no need to stat anything.
+pub fn directory_contains_changed_path(label: &str, changed: &BTreeSet<String>) -> bool {
+    let Some(path) = label_to_path(label) else {
+        return false;
+    };
+    let dir = path.strip_suffix("/.").unwrap_or(&path);
+    if dir == "." {
+        return !changed.is_empty();
+    }
+    let prefix = format!("{dir}/");
+    changed
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|p| p.starts_with(&prefix))
+}
+
 /// `//pkg:name` -> `pkg/name`, the workspace-relative path of a source label.
 /// `None` for anything that is not a main-repository label.
 pub fn label_to_path(label: &str) -> Option<String> {
@@ -1286,7 +1453,22 @@ impl Facts for BazelFacts<'_> {
     }
 
     fn confirmed_by_oracle(&self, label: &str) -> bool {
-        self.oracle.contains(label)
+        self.oracle.as_ref().is_some_and(|o| o.contains(label))
+    }
+
+    fn oracle_ran(&self) -> bool {
+        self.oracle.is_some()
+    }
+
+    fn consumes_source_directory_under_change(&self, label: &str) -> bool {
+        if let Some(hit) = self.source_dir_cache.borrow().get(label) {
+            return *hit;
+        }
+        let found = self.compute_source_directory(label);
+        self.source_dir_cache
+            .borrow_mut()
+            .insert(label.to_string(), found);
+        found
     }
 
     fn workspace_path_only_change(&self, label: &str) -> bool {
@@ -1421,6 +1603,9 @@ mod tests {
         workspace_path: BTreeSet<String>,
         build_changed: BTreeSet<String>,
         oracle: BTreeSet<String>,
+        /// The oracle ran (and `oracle` is its whole answer).
+        oracle_ran: bool,
+        source_dir: BTreeSet<String>,
     }
 
     impl Hand {
@@ -1479,6 +1664,12 @@ mod tests {
         }
         fn confirmed_by_oracle(&self, l: &str) -> bool {
             self.oracle.contains(l)
+        }
+        fn oracle_ran(&self) -> bool {
+            self.oracle_ran
+        }
+        fn consumes_source_directory_under_change(&self, l: &str) -> bool {
+            self.source_dir.contains(l)
         }
     }
 
@@ -1841,7 +2032,7 @@ mod tests {
                 "{c}"
             );
         }
-        assert_eq!(Class::ALL.len(), 15);
+        assert_eq!(Class::ALL.len(), 16);
         assert_eq!(Class::CambiumMissing.to_string(), "cambium_missing");
         assert_eq!(Class::ToolMissing.to_string(), "tool_missing");
     }
@@ -1960,5 +2151,124 @@ mod tests {
             cambium_proto::canonical_rule(&b).encode_to_vec(),
             "the hash does move, which is why cambium reports the target"
         );
+    }
+
+    /// The apollo shape: `install_src_files(src_dir = ["."])` in
+    /// `//modules/perception`, a `.cc` three directories down changed, the
+    /// oracle ran and did not reach the target.
+    fn source_directory_facts() -> Hand {
+        Hand::with(|h| {
+            h.source_dir
+                .insert("//modules/perception:install_perception_src".into());
+            h.oracle_ran = true;
+        })
+    }
+
+    #[test]
+    fn a_source_directory_the_oracle_cannot_see_is_the_tools_extra_not_cambiums_miss() {
+        let c = classify(
+            "//modules/perception:install_perception_src",
+            Side::Tool,
+            &source_directory_facts(),
+        );
+        assert_eq!(c, Class::ToolExtraSourceDirectory);
+        assert!(!c.is_failure());
+    }
+
+    #[test]
+    fn a_source_directory_the_oracle_does_reach_is_still_a_cambium_miss() {
+        // Bazel's own `rdeps` reached it: then it is affected by the
+        // benchmark's definition, the directory is a coincidence, and cambium
+        // has to answer for the label.
+        let h = Hand::with(|h| {
+            h.source_dir.insert("//a:b".into());
+            h.oracle_ran = true;
+            h.oracle.insert("//a:b".into());
+        });
+        assert_eq!(classify("//a:b", Side::Tool, &h), Class::CambiumMissing);
+    }
+
+    #[test]
+    fn without_an_oracle_a_source_directory_is_not_evidence() {
+        // `--oracle` off: nobody asked Bazel, so the directory is a story and
+        // the label keeps the failing class until someone does.
+        let h = Hand::with(|h| {
+            h.source_dir.insert("//a:b".into());
+        });
+        assert_eq!(classify("//a:b", Side::Tool, &h), Class::CambiumMissing);
+    }
+
+    #[test]
+    fn the_source_directory_outranks_the_nothing_could_have_impacted_it_classes() {
+        // The `install_src` parents satisfy the external-content conjunction
+        // (a toolchain input) and the line-shift one (a `BUILD` edit *is* a
+        // changed path under the package directory). Both are true and
+        // neither is why Tango reported the label; the directory is, so it
+        // is asked first. Pinned so a reorder has to argue with this.
+        let mut h = external_content_facts();
+        h.build_changed.insert("//a:b".into());
+        assert_eq!(
+            classify("//a:b", Side::Tool, &h),
+            Class::BazeldiffExtraExternalContent,
+            "without the directory the older explanation stands"
+        );
+        h.source_dir.insert("//a:b".into());
+        h.oracle_ran = true;
+        assert_eq!(
+            classify("//a:b", Side::Tool, &h),
+            Class::ToolExtraSourceDirectory
+        );
+        // But never ahead of the two cheap certainties on the tool side: an
+        // external label is a canonicalisation difference whatever it
+        // consumes, and a changed path with no consumer is content.
+        h.external.insert("//a:b".into());
+        assert_eq!(
+            classify("//a:b", Side::Tool, &h),
+            Class::BazeldiffExtraExternal
+        );
+    }
+
+    #[test]
+    fn a_directory_label_contains_paths_strictly_under_it() {
+        let changed: BTreeSet<String> = [
+            "modules/perception/onboard/component/lidar_tracking_component.cc",
+            "cyber/BUILD",
+            "top.txt",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        // `src_dir = ["."]` as Bazel renders it.
+        assert!(directory_contains_changed_path(
+            "//modules/perception:.",
+            &changed
+        ));
+        // A subdirectory named as a source (`srcs = ["testdata"]`).
+        assert!(directory_contains_changed_path(
+            "//modules/perception:onboard",
+            &changed
+        ));
+        assert!(directory_contains_changed_path("//cyber:.", &changed));
+        // The root package's own directory is the whole tree.
+        assert!(directory_contains_changed_path("//:.", &changed));
+        assert!(!directory_contains_changed_path("//:.", &BTreeSet::new()));
+        // Not under it.
+        assert!(!directory_contains_changed_path(
+            "//modules/planning:.",
+            &changed
+        ));
+        // A sibling whose name is a prefix of the directory's is not inside it.
+        assert!(!directory_contains_changed_path(
+            "//modules/percept:.",
+            &changed
+        ));
+        // Equal is a file edit, not a directory: the walk sees those itself.
+        assert!(!directory_contains_changed_path("//cyber:BUILD", &changed));
+        assert!(!directory_contains_changed_path("//:top.txt", &changed));
+        // External labels never.
+        assert!(!directory_contains_changed_path(
+            "@ext//modules:.",
+            &changed
+        ));
     }
 }

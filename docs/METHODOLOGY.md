@@ -179,6 +179,7 @@ The three that fail a run are marked.
 | `bazeldiff_extra_external_content` | external load nondeterminism under `--keep_going` in bazel-diff |
 | `bazeldiff_extra_workspace_path` | a rule that bakes the absolute workspace root into its attributes; a harness artifact |
 | `bazeldiff_extra_line_shift` | only the rule's line number moved; bazel-diff hashes `generator_location`, cambium and Tango do not |
+| `tool_extra_source_directory` | the target consumes a *directory* as a source file (`src_dir = ["."]`, which Bazel renders as `//pkg:.`) and a changed path lies under it. Tango hashes a source directory's contents on disk; Bazel's graph has no edge from a file to the directory above it, which Bazel documents as untracked, so neither the reverse-dependency oracle nor cambium reaches the target. Filed only when the oracle ran and did not reach the label; if it did, the label is `cambium_missing`. Reported, not gated — a limitation of Bazel's source model, seen on every apollo change set that touches a package with an `install_src_files` rule |
 | `tool_missing` | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra. Reported, not gated — cambium's run does not fail on another tool's defect |
 | `cambium_missing` | **fails** — a tool or the oracle reports a target cambium does not |
 | `cambium_missing_bzl_closure` | **fails** — `rbuildfiles` names a package the static closure did not dirty |

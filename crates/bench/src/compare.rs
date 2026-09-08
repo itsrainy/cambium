@@ -1015,8 +1015,14 @@ pub fn compare_change_set_with(
     .with_deleted_dep(deleted_dep)
     .with_external_repo(external_repo)
     .with_build_file(from_build_file)
-    .with_oracle(oracle.iter().flat_map(|o| o.oracle_set.iter().cloned()))
     .with_base(bazel_at(engine, base_wt.path()));
+    // Only when it ran: `with_oracle` on an empty answer means "Bazel reached
+    // nothing", which `tool_extra_source_directory` may lean on, and a run
+    // with `--oracle` off must not be able to say that.
+    let facts = match &oracle {
+        Some(o) => facts.with_oracle(o.oracle_set.iter().cloned()),
+        None => facts,
+    };
 
     // ---- the tools ----
     let ctx = run_context(engine, &opts.scratch, base_wt.path());
