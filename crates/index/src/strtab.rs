@@ -32,9 +32,52 @@ impl<'a> StrTabRef<'a> {
     pub fn get(&self, i: u32) -> &'a str {
         let s = self.offsets[i as usize] as usize;
         let e = self.offsets[i as usize + 1] as usize;
-        // Safety-by-construction: every entry was pushed from a &str and the
-        // table is immutable once written.
-        std::str::from_utf8(&self.bytes[s..e]).expect("string table holds UTF-8")
+        let raw = &self.bytes[s..e];
+        // SAFETY: `validate` has already checked, once, that `bytes` is UTF-8
+        // and that every offset lands on a character boundary — a table built
+        // in-process comes from `Interner`, which only ever appends a `&str`,
+        // and one read off disk goes through `validate` at open. The slicing
+        // above is still bounds-checked, so a bad `i` panics rather than
+        // reading out of range. Doing the UTF-8 check here instead costs a
+        // scan of the label on every id-to-name lookup, which a walk does
+        // millions of times.
+        unsafe { std::str::from_utf8_unchecked(raw) }
+    }
+
+    /// Checks the invariants [`StrTabRef::get`] relies on: offsets ascending,
+    /// in range, ending at `bytes.len()`, every one of them a character
+    /// boundary of a valid UTF-8 `bytes`.
+    ///
+    /// O(bytes + len), run once when a file is opened rather than per lookup.
+    pub fn validate(&self, what: &str) -> std::result::Result<(), String> {
+        if self.offsets.is_empty() {
+            return Err(format!(
+                "{what}: offsets array is empty (want at least [0])"
+            ));
+        }
+        if self.offsets[0] != 0 {
+            return Err(format!("{what}: offsets do not start at 0"));
+        }
+        if *self.offsets.last().unwrap() as usize != self.bytes.len() {
+            return Err(format!(
+                "{what}: last offset {} does not match the {}-byte table",
+                self.offsets.last().unwrap(),
+                self.bytes.len()
+            ));
+        }
+        let text = std::str::from_utf8(self.bytes).map_err(|e| format!("{what}: {e}"))?;
+        for w in self.offsets.windows(2) {
+            if w[1] < w[0] {
+                return Err(format!("{what}: offsets {} -> {} descend", w[0], w[1]));
+            }
+            if !text.is_char_boundary(w[0] as usize) {
+                return Err(format!(
+                    "{what}: offset {} is not a character boundary",
+                    w[0]
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
@@ -224,6 +267,55 @@ mod tests {
         let mut d = d;
         assert_eq!(d.intern("//a:b"), 0);
         assert_eq!(d.get(0), "//a:b");
+    }
+
+    #[test]
+    fn validate_accepts_a_real_table_and_rejects_corruption() {
+        let mut i = Interner::new();
+        for s in ["//a:b", "héllo", "//c:d"] {
+            i.intern(s);
+        }
+        let (bytes, offsets) = i.into_parts();
+        assert!(StrTabRef {
+            bytes: &bytes,
+            offsets: &offsets
+        }
+        .validate("t")
+        .is_ok());
+
+        // An offset in the middle of the two-byte 'é'.
+        let mut bad = offsets.clone();
+        bad[1] += 2;
+        assert!(StrTabRef {
+            bytes: &bytes,
+            offsets: &bad
+        }
+        .validate("t")
+        .is_err());
+
+        // Bytes that are not UTF-8 at all.
+        assert!(StrTabRef {
+            bytes: &[0xff, 0xfe],
+            offsets: &[0, 2]
+        }
+        .validate("t")
+        .is_err());
+
+        // A last offset that does not cover the table.
+        assert!(StrTabRef {
+            bytes: &bytes,
+            offsets: &offsets[..offsets.len() - 1]
+        }
+        .validate("t")
+        .is_err());
+
+        // No offsets at all.
+        assert!(StrTabRef {
+            bytes: &[],
+            offsets: &[]
+        }
+        .validate("t")
+        .is_err());
     }
 
     #[test]

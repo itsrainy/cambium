@@ -138,16 +138,27 @@ fn hex(bytes: &[u8]) -> String {
 /// what makes republishing an index idempotent and what a content-addressed
 /// store would key on.
 pub fn payload_bytes(data: &IndexData) -> Result<Vec<u8>> {
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(data)
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
-    Ok(payload.to_vec())
+    Ok(serialise(data)?.to_vec())
+}
+
+/// The payload archive, still in rkyv's aligned buffer.
+///
+/// [`to_bytes`] appends this straight into the framed output, so the payload —
+/// the large part, hundreds of megabytes on a big repository — is copied once
+/// rather than being flattened into a `Vec` first and copied again.
+fn serialise(data: &IndexData) -> Result<rkyv::util::AlignedVec> {
+    rkyv::to_bytes::<rkyv::rancor::Error>(data).map_err(|e| IndexError::Serialize(e.to_string()))
+}
+
+/// As [`serialise`], for the provenance trailer.
+fn serialise_provenance(p: &Provenance) -> Result<rkyv::util::AlignedVec> {
+    rkyv::to_bytes::<rkyv::rancor::Error>(p).map_err(|e| IndexError::Serialize(e.to_string()))
 }
 
 /// Serialises `data` into the framed on-disk form.
 pub fn to_bytes(data: &IndexData) -> Result<Vec<u8>> {
-    let payload = payload_bytes(data)?;
-    let trailer = rkyv::to_bytes::<rkyv::rancor::Error>(&data.provenance)
-        .map_err(|e| IndexError::Serialize(e.to_string()))?;
+    let payload = serialise(data)?;
+    let trailer = serialise_provenance(&data.provenance)?;
 
     let payload_off = PREFIX_LEN;
     let trailer_off = align_up(payload_off + payload.len());
@@ -342,12 +353,21 @@ impl IndexFile {
                 path: path.to_path_buf(),
                 reason: e.to_string(),
             })?;
-        Ok(Self {
+        let me = Self {
             path: path.to_path_buf(),
             map,
             frame,
             provenance,
-        })
+        };
+        // Once, here, rather than on every id-to-name lookup; see
+        // `StrTabRef::validate`.
+        me.view()
+            .validate_strings()
+            .map_err(|reason| IndexError::Deserialize {
+                path: path.to_path_buf(),
+                reason,
+            })?;
+        Ok(me)
     }
 
     pub fn path(&self) -> &Path {
@@ -413,7 +433,14 @@ impl OwnedIndexBytes {
                 path: PathBuf::from("<memory>"),
                 reason: e.to_string(),
             })?;
-        Ok(Self { bytes, provenance })
+        let me = Self { bytes, provenance };
+        me.view()
+            .validate_strings()
+            .map_err(|reason| IndexError::Deserialize {
+                path: PathBuf::from("<memory>"),
+                reason,
+            })?;
+        Ok(me)
     }
 
     pub fn archived(&self) -> &ArchivedIndexData {
