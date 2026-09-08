@@ -46,10 +46,6 @@ pub struct LoadOracleResult {
     pub missing_packages: BTreeSet<String>,
 }
 
-/// The class a non-empty [`LoadOracleResult::missing_packages`] is counted
-/// under, and reported in the class table.
-pub const MISSING_CLASS: &str = "cambium_missing_bzl_closure";
-
 impl LoadOracleResult {
     pub fn ok(&self) -> bool {
         self.missing_packages.is_empty()
