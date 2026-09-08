@@ -340,7 +340,9 @@ time each in-memory stage at sizes no real repository reaches.
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
 measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
 numbers; [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where an `affected`
-run spends its time and where an index spends its bytes.
+run spends its time and where an index spends its bytes; and
+[docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run the five real subjects
+at full size, which does not fit on a laptop.
 
 ## Layout
 
