@@ -69,21 +69,6 @@ pub fn reference_affected(before: &SynthGraph, after: &SynthGraph) -> BTreeSet<S
         .collect()
 }
 
-/// Test targets among a set of labels.
-pub fn only_tests(g: &SynthGraph, labels: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut tests = BTreeSet::new();
-    for id in 0..g.targets.len() as u32 {
-        let t = &g.targets[id as usize];
-        if t.alive && t.kind.is_test() {
-            let l = g.target_label(id);
-            if labels.contains(&l) {
-                tests.insert(l);
-            }
-        }
-    }
-    tests
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
