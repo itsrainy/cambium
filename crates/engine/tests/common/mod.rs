@@ -38,7 +38,20 @@ pub fn git_repo(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["config", "user.email", "t@example.com"]);
     git(root, &["config", "user.name", "t"]);
+    // [`synthetic_engine`] keeps its cache inside the repository, so it has to
+    // be invisible to `git add -A` — otherwise a fetched index lands in the
+    // next commit and moves the tree, which is precisely what the tree-keying
+    // tests measure. `.git/info/exclude` rather than a `.gitignore`, because
+    // that file would itself be in the tree.
+    std::fs::write(
+        root.join(".git/info/exclude"),
+        CACHE_DIR_NAME.to_string() + "/\n",
+    )
+    .unwrap();
 }
+
+/// Where [`synthetic_engine`] puts its cache, relative to the repository root.
+const CACHE_DIR_NAME: &str = "_cambium_cache";
 
 /// Writes a file, creating its parent directories.
 pub fn write(root: &Path, rel: &str, text: &str) {
@@ -50,9 +63,12 @@ pub fn write(root: &Path, rel: &str, text: &str) {
 }
 
 /// `git add -A && git commit`, returning the new commit's full sha.
+///
+/// Empty commits are allowed: the tree-keying tests want two commits with
+/// identical content, which is the whole case they are about.
 pub fn commit(root: &Path, message: &str) -> String {
     git(root, &["add", "-A"]);
-    git(root, &["commit", "-qm", message]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", message]);
     git(root, &["rev-parse", "HEAD"])
 }
 
@@ -62,14 +78,15 @@ pub fn commit(root: &Path, message: &str) -> String {
 /// binary path must never be reached; pointing it at a path that does not
 /// exist turns "the test accidentally shelled out to Bazel" from a slow
 /// success into a loud failure. The cache is put under `root` so the fixture's
-/// tempdir owns it, rather than the shared default cache directory.
+/// tempdir owns it, rather than the shared default cache directory —
+/// [`git_repo`] excludes it from the repository so it cannot reach a tree.
 pub fn synthetic_engine(root: &Path, cfg: Config) -> Engine {
     Engine::with_parts(
         cfg,
         cambium_diff::Repo::new(root.to_path_buf()),
         cambium_bazel::Bazel::at(root.to_path_buf(), Some("/nonexistent/bazel")),
     )
-    .with_cache_dir(root.join("_cache"))
+    .with_cache_dir(root.join(CACHE_DIR_NAME))
 }
 
 /// A querier that reads a toy BUILD syntax out of a directory: one rule per
