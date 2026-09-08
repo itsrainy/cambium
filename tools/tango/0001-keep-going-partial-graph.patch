@@ -42,7 +42,33 @@ diff --git a/core/targethasher/graph.go b/core/targethasher/graph.go
 index 52fb0b5..0083921 100644
 --- a/core/targethasher/graph.go
 +++ b/core/targethasher/graph.go
-@@ -625,7 +625,24 @@ func HashRecursively(ctx context.Context, p HashParam) ([]byte, error) {
+@@ -611,7 +611,24 @@ func HashRecursively(ctx context.Context, p HashParam) ([]byte, error) {
+ 					}
+ 					return []byte{}, nil
+ 				}
+-				return nil, fmt.Errorf("cannot find external repository %s from external target %s", translatedExternalTargetName, p.TargetName)
++				// cambium patch: a WORKSPACE repository under Bazel 7 runs with
++				// bzlmod on as well (7.x's default), and the repositories Bazel's
++				// own module extensions generate — `@@bazel_tools~cc_configure_extension~local_config_cc`
++				// on apollo, every change set — have no `//external:` rule to
++				// collapse a file target onto: they are not WORKSPACE repositories.
++				// Erroring here threw the whole revision away. Register the target
++				// as an opaque external node with an empty hash instead, on the
++				// same grounds as the missing-repository case below: it is the
++				// same generated repository at both revisions, so the node is
++				// constant and cannot manufacture or hide a difference.
++				p.Targets[p.TargetName] = &Target{
++					Name:            p.TargetName,
++					RuleType:        ExternalRuleType,
++					External:        true,
++					Hash:            []byte{},
++					HashWithoutDeps: []byte{},
++				}
++				return []byte{}, nil
+ 			}
+ 		} else {
+ 			// External rule target: hash via real deps so in-repo dep changes propagate correctly.
+@@ -625,7 +642,24 @@ func HashRecursively(ctx context.Context, p HashParam) ([]byte, error) {
  		// //third_party/github.com/docker/docker:com_github_docker_docker_invalid_host_fix.patch
  
  		if l.Repository != "" {

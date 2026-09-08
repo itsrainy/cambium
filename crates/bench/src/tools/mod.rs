@@ -231,25 +231,20 @@ impl RunContext {
     /// is set unless `env` already names `CI`.
     ///
     /// A tool never has a terminal to prompt against — it runs
-    /// unattended, in a batch of hundreds of change sets — but some of them assume
-    /// one anyway. The Aspect CLI (`bazelisk` resolves to it wherever a
-    /// repository's `.bazeliskrc` pins `USE_BAZEL_VERSION=aspect/...`, as
-    /// sourcegraph/sourcegraph does) asks a one-time "Would you like to
-    /// continue?" confirmation the first time a workspace directory runs a
-    /// `//...:all-targets`-shaped query — exactly what bazel-diff's
-    /// `generate-hashes` issues — and records the answer in
-    /// `~/.aspect/cli/config.yaml` so later runs skip it. A tool's base
-    /// worktree is a fresh scratch directory on every run, so it hits
-    /// this prompt new every time; reading it from a child process with no
-    /// controlling terminal gets an immediate EOF, which the Aspect CLI's
-    /// `readline`-based prompt renders as a literal `^D` and then fails the
-    /// whole query — the same shape of failure regardless of what actually
-    /// supplied the child's stdin, since it is never a terminal a human could
-    /// answer through. Nulling it removes any ambiguity about where that EOF
-    /// came from. `CI=1` is the general signal most such CLIs (Aspect's
-    /// plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the benchmark's subject
-    /// repositories) already check to skip interactive behaviour rather than
-    /// wait on a prompt no one will answer.
+    /// unattended, in a batch of hundreds of change sets — but some of them
+    /// assume one anyway. Nulling stdin makes any such prompt fail at once
+    /// with EOF instead of hanging, and removes any ambiguity about where
+    /// that EOF came from; `CI=1` is the general signal most such CLIs
+    /// (Aspect's plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the
+    /// benchmark's subject repositories) already check to skip interactive
+    /// behaviour rather than wait on a prompt no one will answer.
+    ///
+    /// Neither is a fix for a prompt that *cannot* be skipped. The Aspect
+    /// CLI's `query` wrapper opens an interactive preset picker whenever it
+    /// gets no positional expression — bazel-diff's `--query_file` invocation
+    /// exactly — and `CI=1` does not stop it; that is why the run never
+    /// reaches the Aspect CLI at all: see
+    /// [`crate::checkout::bazelisk_env`].
     fn apply_noninteractive(cmd: &mut Command, env: &[(String, String)]) {
         cmd.stdin(std::process::Stdio::null());
         if !env.iter().any(|(k, _)| k == "CI") {

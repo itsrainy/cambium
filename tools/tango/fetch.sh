@@ -43,8 +43,8 @@ if [ "$have" != "$TANGO_COMMIT" ]; then
 fi
 printf 'tag=%s\ncommit=%s\nrepo=%s\n' "$TANGO_TAG" "$TANGO_COMMIT" "$TANGO_REPO" > "$DIR/VERSION"
 
-# Apply any local patches to upstream (there are none today; keep the hook so a
-# future one is recorded as a .patch rather than a hand edit).
+# Apply the local patches to upstream, recorded as .patch files rather than
+# hand edits.
 for p in "$HERE"/*.patch; do
   [ -e "$p" ] || continue
   echo "fetch.sh: applying $(basename "$p")"
@@ -58,4 +58,6 @@ cp "$HERE"/cmd/tango-cli/*.go "$SRC/cmd/tango-cli/"
 
 cd "$SRC"
 "$GO" build -o "$DIR/bin/tango-cli" ./cmd/tango-cli
+# The driver's own tests ride along (main_test.go); they need only git.
+"$GO" test ./cmd/tango-cli
 echo "fetch.sh: built $DIR/bin/tango-cli ($TANGO_TAG / ${TANGO_COMMIT:0:12})"

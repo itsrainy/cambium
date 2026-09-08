@@ -103,16 +103,38 @@ Nothing is blocked on Rainy. The box is theirs to pay for, so say you are
 starting it, but the go for task 18 was given and these fixes are what it was
 waiting on.
 
-Before starting, two things the last run tripped over:
+The two tool failures the last run tripped over are diagnosed and fixed;
+both were misread at first, so the real causes are worth knowing:
 
-- `git -C ~/.cache/cambium/corpus/apollo.git worktree prune` — stale Tango
-  worktrees failed all 40 apollo change sets with `'…/tango-worktrees/base'
-  is not a working tree`. The driver's recovery did not fire; find out why,
-  because this is the second time this gotcha has cost a subject.
-- **bazel-diff's `aspect query` fails on sourcegraph**, all 40 change sets:
-  `[Error] Bazel query failed, exit code 1: Error: failed to run 'aspect
-  query': ^D`. Not diagnosed at all. Start here — it is the only one of these
-  problems nobody has looked into.
+- **apollo's Tango failures were never about worktrees.** The
+  `'…/tango-worktrees/base' is not a working tree` lines were the stale-worktree
+  recovery announcing itself on a *clean* registry (`git worktree
+  unlock`/`remove` on an unregistered path), four lines of noise above the real
+  error on every change set: `compute base graph: cannot find external
+  repository //external:bazel_tools~cc_configure_extension~local_config_cc`.
+  apollo has no tracked `MODULE.bazel` (Bazel 7 writes one into a checkout on
+  first run, which is why the head worktree has one and every fresh base
+  worktree does not), so tango-cli runs it as a WORKSPACE repo — correct, that
+  is where its deps are — but Bazel 7.4.1 has bzlmod on regardless, and the
+  repositories `bazel_tools`' own extensions generate have no `//external:` rule
+  to hash a file target against. `tools/tango/0001-keep-going-partial-graph.patch`
+  now registers those as opaque external nodes, the same treatment the patch
+  already gave a repository that failed to load; the recovery only runs (and
+  only speaks) when git still has an entry for the path; `main_test.go` covers
+  both, run by `fetch.sh`. Verified by hand on the box: tango-cli over
+  `b352846f..a6871fc6` completes with a clean stderr.
+- **bazel-diff's `^D` on sourcegraph is the Aspect CLI's preset picker.**
+  sourcegraph's `.bazeliskrc` routes bazelisk to `aspect/5.8.19`; bazel-diff
+  passes the query as `--query_file`, and `aspect query` with no positional
+  expression opens an interactive "Select a preset query" menu instead of
+  passing the flag through — it reads the nulled stdin, gets EOF, prints `^D`.
+  `CI=1` does not skip it. `bazelisk_env` in `crates/bench/src/checkout.rs` now
+  sets `USE_BAZEL_VERSION=<.bazelversion>` and `BAZELISK_BASE_URL` to the
+  official releases whenever a subject's rc points at the Aspect CLI, so every
+  tool and cambium alike run plain Bazel 7.2.0 there (env beats `.bazeliskrc`;
+  verified on the box, and `generate-hashes` then hashes 64 850 targets).
+  Expect sourcegraph's `bazel_version_used` to read `bazel 7.2.0` instead of
+  `aspect 5.8.19`.
 
 Then the recipe under "The box". Both re-runs are cheap: `changes` resumes
 from `state.json`, so a subject that already has results only redoes what
@@ -200,8 +222,10 @@ Expect, and do not be alarmed by:
   GraalVM, Docker-generated RBE configs): local tool timings are inflated and
   not publishable; bazelisk for the suite is `~/.cache/cambium/bin/bazelisk`.
 - A killed change-set run leaves tango worktrees registered on the subject
-  mirror; `git -C <mirror>.git worktree prune` is the manual fix. See the
-  apollo item above — the automatic recovery did not work.
+  mirror; tango-cli recovers them itself on the next run (and says so on
+  stderr when it does), `git -C <mirror>.git worktree prune` is the manual
+  fix. An `is not a working tree` line is *not* that failure — see the apollo
+  item above.
 - Results written by another cambium build (format version or config hash)
   are started over, not resumed; that identity is in every state file. You
   will see `WARN skipping an index this build cannot read` for the same
