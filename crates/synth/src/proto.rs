@@ -8,7 +8,7 @@ use cambium_proto::blaze_query::{
     Target,
 };
 
-use crate::graph::{Kind, SynthGraph};
+use crate::graph::SynthGraph;
 
 fn string_list(name: &str, values: Vec<String>) -> Attribute {
     Attribute {
@@ -147,7 +147,6 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                     ..Default::default()
                 });
             }
-            let _ = Kind::Lib;
         }
     }
     out

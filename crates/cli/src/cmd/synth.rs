@@ -28,6 +28,11 @@ pub enum Args {
         revisions: u64,
         #[arg(long, default_value_t = 0)]
         seed: u64,
+        /// Wipe --out even if it holds something this command did not write.
+        /// Without it, only an empty directory or a previously emitted
+        /// workspace is replaced.
+        #[arg(long)]
+        force: bool,
     },
     /// Report the shape of a generated graph without writing anything.
     Describe {
@@ -60,7 +65,11 @@ pub fn run(_ctx: &Context, args: Args) -> Result<u8> {
             changes,
             revisions,
             seed,
+            force,
         } => {
+            if force {
+                cambium_synth::force_clear(&out)?;
+            }
             let repo = runner::emit_bazel(&spec, &changes, revisions, seed, &out)?;
             println!("workspace: {}", repo.dir.display());
             println!("targets:   {}", repo.graph.num_alive_targets());
@@ -70,7 +79,7 @@ pub fn run(_ctx: &Context, args: Args) -> Result<u8> {
                 println!("  {i:>3} {c}");
             }
             println!(
-                "\ntry: cambium -C {} affected --base {} --head {}",
+                "\ntry: cambi -C {} affected --base {} --head {}",
                 repo.dir.display(),
                 repo.commits.first().cloned().unwrap_or_default(),
                 repo.commits.last().cloned().unwrap_or_default()
