@@ -77,6 +77,10 @@ url = "https://github.com/sourcegraph/sourcegraph-public-snapshot.git"
 pin = "c864f15af264f0f456a6d8a83290b5c940715349"
 history_window = 300
 bazel = "bazelisk"
+# Its .bazeliskrc routes bazelisk to the Aspect CLI (USE_BAZEL_VERSION=aspect/…),
+# whose `query` wrapper fails bazel-diff's --query_file invocation outright.
+# The suite runs the plain Bazel its .bazelversion names instead, for every
+# tool alike; see `bazelisk_env` in crates/bench/src/checkout.rs.
 extra_query_flags = []
 invalidators = ["dev/bazel/**", "go.mod", "go.sum", "pnpm-lock.yaml"]
 notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updater exercise"

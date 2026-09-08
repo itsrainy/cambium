@@ -372,7 +372,19 @@ func environMap() map[string]string {
 // it), then a force-remove as a last resort for the case prune does not
 // cover, a locked entry whose directory is still present but unusable
 // (interrupted mid-checkout, or dirty).
-func recoverStaleWorktree(ctx context.Context, repo, dir string) {
+//
+// It runs only when git still has an entry for dir, and reports whether it
+// did. On a clean registry — the common case — every one of those commands
+// fails with `fatal: '<dir>' is not a working tree`, and passing that through
+// to stderr put four such lines at the top of every apollo failure on the
+// first published run, above the real error (a Tango hashing failure, nothing
+// to do with worktrees). The handoff read them as the recovery not firing.
+// A recovery that has nothing to recover says nothing.
+func recoverStaleWorktree(ctx context.Context, repo, dir string) bool {
+	if !worktreeRegistered(ctx, repo, dir) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "tango-cli: recovering stale worktree registration %s\n", dir)
 	unlock := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "unlock", dir)
 	unlock.Stderr = os.Stderr
 	_ = unlock.Run()
@@ -384,6 +396,43 @@ func recoverStaleWorktree(ctx context.Context, repo, dir string) {
 	remove := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "remove", "--force", "--force", dir)
 	remove.Stderr = os.Stderr
 	_ = remove.Run()
+	return true
+}
+
+// worktreeRegistered reports whether repo's worktree list still names dir —
+// present, missing, locked or prunable alike. When git cannot be asked it
+// answers true, so the recovery runs rather than being skipped.
+func worktreeRegistered(ctx context.Context, repo, dir string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return true
+	}
+	want := canonicalPath(dir)
+	for _, line := range strings.Split(string(out), "\n") {
+		if p, ok := strings.CutPrefix(line, "worktree "); ok && canonicalPath(p) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalPath is the form git records a worktree path in: absolute, with
+// symlinks resolved. The path itself may no longer exist (that is the case
+// being recovered), so the resolution falls back to its nearest existing
+// ancestor.
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	parent, base := filepath.Split(filepath.Clean(abs))
+	if parent == "" || parent == abs {
+		return abs
+	}
+	return filepath.Join(canonicalPath(filepath.Clean(parent)), base)
 }
 
 func addWorktree(ctx context.Context, repo, dir, rev string) (string, func(), error) {

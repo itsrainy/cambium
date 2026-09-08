@@ -284,14 +284,91 @@ impl Checkout {
         let cfg_path = self.write_config(entry, bazel_version)?;
         let mut engine = Engine::open(&self.dir, Some(&cfg_path), Some(&entry.bazel))
             .with_context(|| format!("opening {}", self.dir.display()))?;
-        if let Some(v) = bazel_version.filter(|v| !v.is_empty()) {
-            engine.bazel = engine
-                .bazel
-                .clone()
-                .with_env(vec![("USE_BAZEL_VERSION".to_string(), v.to_string())]);
+        let env = bazelisk_env(&self.dir, bazel_version);
+        if !env.is_empty() {
+            engine.bazel = engine.bazel.clone().with_env(env);
         }
         Ok(engine)
     }
+}
+
+/// Where bazelisk downloads Bazel from when nothing redirects it.
+pub const BAZEL_RELEASES_URL: &str = "https://github.com/bazelbuild/bazel/releases/download";
+
+/// The bazelisk environment every Bazel invocation over `worktree` carries:
+/// the requested `USE_BAZEL_VERSION`, if any, and whatever it takes to keep
+/// the repository's own `.bazeliskrc` from routing the suite through the
+/// Aspect CLI.
+///
+/// sourcegraph/sourcegraph's `.bazeliskrc` pins `USE_BAZEL_VERSION=aspect/…`
+/// with `BAZELISK_BASE_URL` at the aspect-cli releases, so `bazelisk` there
+/// *is* the Aspect CLI, a wrapper that adds its own behaviour in front of the
+/// Bazel named by `.bazelversion`. One of those behaviours failed every
+/// bazel-diff change set on the first published run: bazel-diff hands the
+/// query expression over as `--query_file`, and `aspect query` with no
+/// positional expression does not pass the flag through but opens its
+/// interactive preset picker ("Select a preset query: why / deps / …"),
+/// which reads a nulled stdin, gets EOF, and fails the query with the literal
+/// `Error: failed to run 'aspect query': ^D`. `CI=1` does not skip that
+/// picker, and it cannot be disabled from outside.
+///
+/// The comparison wants every tool on the same plain Bazel anyway, so when
+/// the rc routes to the Aspect CLI this names the Bazel it would have run
+/// (`.bazelversion`, unless the run asked for one) and points bazelisk back
+/// at the official releases. bazelisk consults the environment before
+/// `.bazeliskrc`, so the two variables win in every workspace of the run —
+/// the subject's checkout, the tools' base worktree, Tango's scratch
+/// checkouts — without touching a tracked file.
+pub fn bazelisk_env(worktree: &Path, bazel_version: Option<&str>) -> Vec<(String, String)> {
+    let requested = bazel_version.filter(|v| !v.is_empty()).map(str::to_string);
+    let mut env = Vec::new();
+    if bazeliskrc_routes_to_aspect(worktree) {
+        let version = requested.clone().or_else(|| {
+            std::fs::read_to_string(worktree.join(".bazelversion"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+        let version = version.unwrap_or_else(|| {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                ".bazeliskrc routes to the Aspect CLI and there is no .bazelversion to name \
+                 the Bazel underneath; running the latest release instead"
+            );
+            "latest".to_string()
+        });
+        tracing::info!(
+            worktree = %worktree.display(),
+            %version,
+            ".bazeliskrc routes bazelisk to the Aspect CLI; running plain Bazel instead"
+        );
+        env.push(("USE_BAZEL_VERSION".to_string(), version));
+        env.push((
+            "BAZELISK_BASE_URL".to_string(),
+            BAZEL_RELEASES_URL.to_string(),
+        ));
+    } else if let Some(v) = requested {
+        env.push(("USE_BAZEL_VERSION".to_string(), v));
+    }
+    env
+}
+
+/// Whether `<worktree>/.bazeliskrc` makes `bazelisk` run the Aspect CLI: a
+/// `USE_BAZEL_VERSION=aspect/…` pin, or a `BAZELISK_BASE_URL` at the
+/// aspect-cli releases.
+fn bazeliskrc_routes_to_aspect(worktree: &Path) -> bool {
+    let Ok(rc) = std::fs::read_to_string(worktree.join(".bazeliskrc")) else {
+        return false;
+    };
+    rc.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('='))
+        .any(|(k, v)| match k.trim() {
+            "USE_BAZEL_VERSION" => v.trim().starts_with("aspect/"),
+            "BAZELISK_BASE_URL" => v.contains("aspect-build/aspect-cli"),
+            _ => false,
+        })
 }
 
 fn has_commit(repo: &Path, sha: &str) -> bool {
@@ -393,5 +470,63 @@ mod tests {
         let cfg = checkout().config_for(&e, None);
         assert_eq!(cfg.baseline.max_ancestor_walk, 300);
         assert_eq!(cfg.hash(), checkout().config_for(&e, None).hash());
+    }
+
+    fn worktree_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn a_repository_that_routes_bazelisk_to_the_aspect_cli_runs_plain_bazel() {
+        // sourcegraph/sourcegraph's actual files: the rc pins the Aspect CLI,
+        // .bazelversion names the Bazel it wraps.
+        let wt = worktree_with(&[
+            (
+                ".bazeliskrc",
+                "BAZELISK_BASE_URL=https://github.com/aspect-build/aspect-cli/releases/download\n\
+                 USE_BAZEL_VERSION=aspect/5.8.19\n",
+            ),
+            (".bazelversion", "7.2.0\n"),
+        ]);
+        let env = bazelisk_env(wt.path(), None);
+        assert_eq!(get(&env, "USE_BAZEL_VERSION"), Some("7.2.0"));
+        assert_eq!(get(&env, "BAZELISK_BASE_URL"), Some(BAZEL_RELEASES_URL));
+
+        // A run that asks for a version gets that version, still off the
+        // Aspect releases.
+        let env = bazelisk_env(wt.path(), Some("7.4.1"));
+        assert_eq!(get(&env, "USE_BAZEL_VERSION"), Some("7.4.1"));
+        assert_eq!(get(&env, "BAZELISK_BASE_URL"), Some(BAZEL_RELEASES_URL));
+    }
+
+    #[test]
+    fn a_repository_on_plain_bazelisk_is_left_alone() {
+        let wt = worktree_with(&[(".bazelversion", "7.4.1\n")]);
+        assert!(bazelisk_env(wt.path(), None).is_empty());
+        assert!(bazelisk_env(wt.path(), Some("")).is_empty());
+        let env = bazelisk_env(wt.path(), Some("8.0.0"));
+        assert_eq!(
+            env,
+            vec![("USE_BAZEL_VERSION".to_string(), "8.0.0".to_string())]
+        );
+
+        // An rc that does not mention aspect (a mirror, say) is not a route
+        // to the Aspect CLI either.
+        let wt = worktree_with(&[
+            (
+                ".bazeliskrc",
+                "# comment\nBAZELISK_BASE_URL=https://mirror.example/bazel\n",
+            ),
+            (".bazelversion", "7.4.1\n"),
+        ]);
+        assert!(bazelisk_env(wt.path(), None).is_empty());
     }
 }
