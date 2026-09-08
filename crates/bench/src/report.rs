@@ -327,7 +327,7 @@ impl SubjectResults {
             }
         } else {
             for c in &self.compares {
-                for p in self.change_sets(c).filter(|p| p.global) {
+                for p in c.change_sets.iter().filter(|p| p.global) {
                     n += 1;
                     *h.entry(reason(p.cambium.global_reason.as_deref()))
                         .or_default() += 1;
@@ -337,13 +337,6 @@ impl SubjectResults {
         let mut v: Vec<(String, usize)> = h.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         (n, v)
-    }
-
-    fn change_sets<'a>(
-        &self,
-        c: &'a ChangesResult,
-    ) -> impl Iterator<Item = &'a crate::compare::ChangeSetResult> {
-        c.change_sets.iter()
     }
 
     fn change_sets_total(&self) -> usize {

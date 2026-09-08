@@ -277,17 +277,6 @@ fn bazel_version_used(engine: &Engine) -> String {
     v.lines().next().unwrap_or("").trim().to_string()
 }
 
-fn tool_sha() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".into())
-}
-
 fn describe(index: &IndexData, wall_ms: u64) -> Result<ColdBuild> {
     let bytes = format::to_bytes(index)?.len() as u64;
     let v = index.view();
@@ -532,7 +521,7 @@ fn start(
         to: to.to_string(),
         bazel_version: opts.bazel_version.clone(),
         bazel_version_used: bazel_version_used(engine),
-        tool_sha: tool_sha(),
+        tool_sha: crate::util::tool_sha().to_string(),
         engine: State::engine_id(&engine.cfg.hash()),
         started_unix: now_unix(),
         cold,

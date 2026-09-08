@@ -160,7 +160,7 @@ impl BenchReport {
         Self {
             schema: schema_version(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            tool_sha: git_sha(),
+            tool_sha: crate::util::tool_sha().to_string(),
             timestamp_unix: crate::util::now_unix(),
             machine: Machine::detect(),
             results,
@@ -206,16 +206,6 @@ fn fmt_num(v: f64) -> String {
     } else {
         format!("{v:.2}")
     }
-}
-
-fn git_sha() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// One stage's change between two reports.
