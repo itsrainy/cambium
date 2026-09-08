@@ -25,7 +25,7 @@ use std::path::Path;
 
 use crate::history::CommitRecord;
 use crate::harness::BenchReport;
-use crate::HistoryResult;
+use crate::history::HistoryResult;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
@@ -216,9 +216,9 @@ impl SubjectResults {
     /// took whatever the worktree's `.bazelversion` asked bazelisk for, and
     /// that file is the honest record.
     pub fn collect(
-        manifest: &crate::Manifest,
+        manifest: &crate::manifest::Manifest,
         parent: &Path,
-        subjects: &crate::SubjectsDir,
+        subjects: &crate::checkout::SubjectsDir,
     ) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
@@ -1685,12 +1685,12 @@ mod tests {
             .write(&parent.join("gone/changes/changes-0123456789ab.json"))
             .unwrap();
         std::fs::create_dir_all(parent.join("empty")).unwrap();
-        let manifest: crate::Manifest = toml::from_str(&format!(
+        let manifest: crate::manifest::Manifest = toml::from_str(&format!(
             "[[repo]]\nid = \"bazel\"\nurl = \"u\"\npin = \"{}\"\n",
             "a".repeat(40)
         ))
         .unwrap();
-        let subjects = crate::SubjectsDir::new(dir.path().join("subjects"));
+        let subjects = crate::checkout::SubjectsDir::new(dir.path().join("subjects"));
         let all = SubjectResults::collect(&manifest, &parent, &subjects).unwrap();
         let ids: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["gone"], "the manifest entry has no results, the stray does");
