@@ -46,9 +46,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::driver::{fresh_result, resumable};
+    use super::*;
     use crate::changes::ChangeSetKind;
     use crate::classify::Class;
-    use super::*;
     use crate::classify::Facts;
 
     fn set(labels: &[&str]) -> BTreeSet<String> {
@@ -225,7 +225,8 @@ mod tests {
         assert_eq!(s.by_class[&Class::CambiumExtraSelect], 4);
         assert_eq!(s.by_class[&Class::CambiumMissing], 1);
         assert_eq!(
-            s.by_class[&Class::BazeldiffExtraExternal], 0,
+            s.by_class[&Class::BazeldiffExtraExternal],
+            0,
             "every class is listed"
         );
         assert_eq!(s.mean_precision["bazel-diff-rust"], 0.75);
@@ -345,7 +346,8 @@ mod tests {
             "the global change_set contributes no precision"
         );
         assert_eq!(
-            s.by_class[&Class::CambiumExtraSelect], 2,
+            s.by_class[&Class::CambiumExtraSelect],
+            2,
             "and no classified labels"
         );
         assert_eq!(
@@ -600,4 +602,3 @@ mod tests {
         assert!(back.summary.pass);
     }
 }
-

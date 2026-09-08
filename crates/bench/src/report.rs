@@ -23,8 +23,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::history::CommitRecord;
 use crate::harness::BenchReport;
+use crate::history::CommitRecord;
 use crate::history::HistoryResult;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -195,7 +195,12 @@ impl SubjectResults {
         histories.sort();
         compares.sort();
         Ok(Self::new(id)
-            .with_history(histories.last().map(|p| HistoryResult::read(p)).transpose()?)
+            .with_history(
+                histories
+                    .last()
+                    .map(|p| HistoryResult::read(p))
+                    .transpose()?,
+            )
             .with_compares(
                 compares
                     .iter()
@@ -1679,7 +1684,11 @@ mod tests {
         let subjects = crate::checkout::SubjectsDir::new(dir.path().join("subjects"));
         let all = SubjectResults::collect(&manifest, &parent, &subjects).unwrap();
         let ids: Vec<&str> = all.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["gone"], "the manifest entry has no results, the stray does");
+        assert_eq!(
+            ids,
+            ["gone"],
+            "the manifest entry has no results, the stray does"
+        );
     }
 
     #[test]

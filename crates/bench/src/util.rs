@@ -96,8 +96,8 @@ struct SchemaProbe {
 /// would print it. The three readers each did a bare `from_str` instead, so
 /// the version was written and never checked.
 pub fn read_result<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let probe: SchemaProbe = serde_json::from_str(&text)
         .with_context(|| format!("{} is not a result file", path.display()))?;
     anyhow::ensure!(
@@ -127,7 +127,10 @@ mod tests {
     #[test]
     fn a_version_that_cannot_be_a_filename_is_escaped() {
         assert_eq!(versioned_name("index-abc", None, "bin"), "index-abc.bin");
-        assert_eq!(versioned_name("index-abc", Some(""), "bin"), "index-abc.bin");
+        assert_eq!(
+            versioned_name("index-abc", Some(""), "bin"),
+            "index-abc.bin"
+        );
         assert_eq!(
             versioned_name("history-abc", Some("7.x"), "json"),
             "history-abc-7.x.json"
@@ -148,7 +151,9 @@ mod tests {
         let path = dir.path().join("r.json");
 
         std::fs::write(&path, r#"{"schema": 1, "repo": "bazel"}"#).unwrap();
-        let e = read_result::<serde_json::Value>(&path).unwrap_err().to_string();
+        let e = read_result::<serde_json::Value>(&path)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("schema 1"), "{e}");
 
         // A file with no `schema` at all is from before the field existed,

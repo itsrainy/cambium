@@ -880,7 +880,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn external_load_nondeterminism_explains_a_tool_extra() {
         let c = classify("//a:b", Side::Tool, &external_content_facts());
@@ -1017,8 +1016,8 @@ mod tests {
     /// binary cannot produce.
     #[test]
     fn the_methodology_table_lists_exactly_the_classes_this_binary_knows() {
-        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/METHODOLOGY.md");
+        let doc =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/METHODOLOGY.md");
         let text = std::fs::read_to_string(&doc).expect("docs/METHODOLOGY.md");
         let documented: Vec<&str> = text
             .lines()
@@ -1040,10 +1039,7 @@ mod tests {
             );
         }
         for name in documented {
-            if name.contains("extra")
-                || name.contains("missing")
-                || name == "unclassified"
-            {
+            if name.contains("extra") || name.contains("missing") || name == "unclassified" {
                 assert!(
                     Class::ALL.iter().any(|c| c.name() == name),
                     "docs/METHODOLOGY.md documents `{name}`, which is not a Class"
@@ -1069,5 +1065,4 @@ mod tests {
             Class::CambiumExtraSelect
         );
     }
-
 }

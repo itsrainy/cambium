@@ -398,7 +398,9 @@ pub fn names_external_input(rule: &Rule) -> bool {
 /// `selector_list` field is gone, so there is no way to tell a `select`ed dep
 /// from an unconditional one.
 fn query_rule(bazel: &Bazel, label: &str) -> Option<Rule> {
-    crate::tools::bazel_query::rules(bazel, label)?.into_iter().next()
+    crate::tools::bazel_query::rules(bazel, label)?
+        .into_iter()
+        .next()
 }
 
 /// The labels a rule names in attributes the BUILD file wrote, and whether any
@@ -762,7 +764,6 @@ mod tests {
         assert!(names_external_input(&rule));
     }
 
-
     /// The substitution reaches an `args` list, a `cmd` string and a `select`
     /// branch — the three shapes envoy's `@envoy_repo//:path.bzl` constant
     /// lands in.
@@ -825,7 +826,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn labels_map_to_workspace_paths() {
         assert_eq!(
@@ -836,7 +836,6 @@ mod tests {
         assert_eq!(label_to_path("@ext//a:b"), None);
         assert_eq!(label_to_path("//lib/core"), None, "a package is not a file");
     }
-
 
     fn attr(name: &str, values: &[&str]) -> cambium_proto::blaze_query::Attribute {
         cambium_proto::blaze_query::Attribute {

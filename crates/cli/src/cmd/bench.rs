@@ -14,11 +14,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use cambium_bench::manifest::{Manifest, RepoEntry};
-use cambium_bench::util::{cache_dir, versioned_name};
 use cambium_bench::checkout::SubjectsDir;
+use cambium_bench::manifest::{Manifest, RepoEntry};
 use cambium_bench::state::State;
 use cambium_bench::subject::Subject;
+use cambium_bench::util::{cache_dir, versioned_name};
 use cambium_bench::{changes, history};
 use clap::{Args as ClapArgs, Subcommand};
 
@@ -363,6 +363,7 @@ fn select_change_sets(
     cap: usize,
     stress_cap: usize,
 ) -> Result<(PathBuf, changes::ChangeSetSet)> {
+    let explicit = !kinds.is_empty();
     let kinds = parse_kinds(kinds)?;
     let checkout = run.checkout()?;
     let (paths, globs) = run.entry.invalidator_rules();
@@ -375,9 +376,25 @@ fn select_change_sets(
         total_cap: Some(cap),
         // Only when a stress change set is actually wanted: the hubs cost an
         // index open, and every other kind ignores them.
+        //
+        // Best effort when `stress` came from the default set of kinds rather
+        // than from a `--kind stress` the person typed: three of the four
+        // stress categories (`bzl`, `build_add_delete`, `invalidator`) need no
+        // index at all, and refusing to select any of them because
+        // `subjects build` has not run yet would make the default
+        // `bench changes` unrunnable on a fresh subject. Asking for stress
+        // explicitly and silently getting no hub change sets is the other
+        // failure, so that one is an error.
         hub_packages: match kinds.contains(&changes::ChangeSetKind::Stress) {
-            true => run.hub_packages()?,
             false => Vec::new(),
+            true if !explicit => run.hub_packages().unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "no hub packages; the stress selection covers every category but `hub`"
+                );
+                Vec::new()
+            }),
+            true => run.hub_packages()?,
         },
         invalidator_paths: paths,
         invalidator_globs: globs,
@@ -877,12 +894,16 @@ impl CompareArgs {
                 // is named. Naming it alone is how a run measures cambium with
                 // no tool to disagree with it.
                 "cambium" => {}
-                "bazel-diff" | "bazel-diff-rust" | "rust" => {
-                    out.push(cambium_bench::tools::bazeldiff::Implementation::Rust.name().to_string())
-                }
-                "bazel-diff-kotlin" | "kotlin" => {
-                    out.push(cambium_bench::tools::bazeldiff::Implementation::Kotlin.name().to_string())
-                }
+                "bazel-diff" | "bazel-diff-rust" | "rust" => out.push(
+                    cambium_bench::tools::bazeldiff::Implementation::Rust
+                        .name()
+                        .to_string(),
+                ),
+                "bazel-diff-kotlin" | "kotlin" => out.push(
+                    cambium_bench::tools::bazeldiff::Implementation::Kotlin
+                        .name()
+                        .to_string(),
+                ),
                 "tango" => out.push(cambium_bench::tools::tango::NAME.to_string()),
                 "none" | "" => {}
                 other => anyhow::bail!(
@@ -965,7 +986,11 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         scratch: run.results.join("scratch"),
         state_dir: run.results.clone(),
         tango_change_sets: run.quick.then_some(cambium_bench::QUICK_TANGO_CHANGE_SETS),
-        ..cambium_bench::compare::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
+        ..cambium_bench::compare::ChangesOptions::new(
+            run.entry.id.clone(),
+            run.entry.pin.clone(),
+            results,
+        )
     };
     tracing::info!(
         change_sets = change_sets.len(),
@@ -974,8 +999,13 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         tango_change_sets = opts.tango_change_sets.unwrap_or(change_sets.len()),
         "comparing"
     );
-    let result =
-        cambium_bench::compare::compare_change_sets(&engine, &checkout, &change_sets, &tools, &opts)?;
+    let result = cambium_bench::compare::compare_change_sets(
+        &engine,
+        &checkout,
+        &change_sets,
+        &tools,
+        &opts,
+    )?;
     print_compare_summary(&result);
     println!("{}", opts.output_path().display());
     Ok(if result.summary.pass {
@@ -1106,15 +1136,24 @@ fn do_report(
         );
     }
 
-    let bench =
-        cambium_bench::report::BenchLegacy::read(&ctx.root.join("docs/benchmarks/sweep-legacy.json"));
+    let bench = cambium_bench::report::BenchLegacy::read(
+        &ctx.root.join("docs/benchmarks/sweep-legacy.json"),
+    );
     for r in &results {
         if only.as_ref().is_some_and(|id| &r.id != id) {
             continue;
         }
-        cambium_bench::report::update_doc(&doc, &r.id, &cambium_bench::report::render_subject_section(r, None))?;
+        cambium_bench::report::update_doc(
+            &doc,
+            &r.id,
+            &cambium_bench::report::render_subject_section(r, None),
+        )?;
     }
-    cambium_bench::report::update_doc(&doc, "top", &cambium_bench::report::render_top_table(&results))?;
+    cambium_bench::report::update_doc(
+        &doc,
+        "top",
+        &cambium_bench::report::render_top_table(&results),
+    )?;
     cambium_bench::report::update_doc(
         &doc,
         "synthetic",
@@ -1148,5 +1187,4 @@ mod tests {
         assert_eq!(m.get("bazel").unwrap().history_window, 300);
         assert!(Manifest::discover(Path::new("/")).is_err());
     }
-
 }
