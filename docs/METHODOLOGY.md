@@ -318,9 +318,13 @@ The loop is honest about its four blind spots, and says so in its own output:
   The tight loop is `--save-baseline` before the change and `--baseline` after
   (`SAVE_BASELINE=1` / `BASELINE=1` for `precheck.sh`): both sides replay on
   the same index, so every difference is the engine's.
-- **`MODULE.bazel` is not in the index.** A change set that edits it is marked
-  indeterminate and left out of the gate, unless `--repo <git dir>` gives the
-  replay somewhere to read it.
+- **Some change sets it declines outright**, marking them indeterminate and
+  leaving them out of the gate: one that edits `MODULE.bazel` (not in the
+  index; `--repo <git dir>` settles it), one that edits a `.bazelrc` (whether
+  that goes global depends on which flags moved, which needs the file's text at
+  both revisions), and one that adds or removes a `BUILD` file (the package set
+  at the base is not the package set at the pin, and the engine asks the head
+  worktree whether a deleted `BUILD` really deleted its package).
 
 A clean precheck is not a substitute for the run. It is what makes the run
 worth starting.
