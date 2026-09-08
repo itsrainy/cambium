@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::changes::{ChangeSetKind, StressCategory};
 use crate::classify::{Class, Side};
 use crate::oracles::load::{LoadOracleResult, LoadOracleSummary};
 use crate::oracles::rdeps::RdepsResult;
@@ -205,7 +206,7 @@ pub struct ToolComparison {
     pub cambium_only: usize,
     pub tool_only: usize,
     /// Exact counts, keyed by class name.
-    pub counts: BTreeMap<String, usize>,
+    pub counts: BTreeMap<Class, usize>,
     /// A capped sample of the disagreements, failures first.
     pub examples: Vec<Disagreement>,
     /// Why cambium reached the labels the tool did not report, counted by
@@ -288,9 +289,9 @@ pub struct ChangeSetResult {
     pub schema: u32,
     pub base: String,
     pub head: String,
-    pub kind: String,
+    pub kind: ChangeSetKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
+    pub category: Option<StressCategory>,
     pub cambium: CambiumRun,
     pub tools: Vec<ToolComparison>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -373,7 +374,7 @@ pub struct ChangesSummary {
     #[serde(default)]
     pub cold_rebuild_change_sets: usize,
     /// Total labels in each disagreement class, over every change set and tool.
-    pub by_class: BTreeMap<String, usize>,
+    pub by_class: BTreeMap<Class, usize>,
     /// Mean precision per tool.
     pub mean_precision: BTreeMap<String, f64>,
     /// The worst recall any change set achieved. Anything below 1.0 fails the run.

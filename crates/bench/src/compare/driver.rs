@@ -13,7 +13,7 @@ use cambium_engine::Engine;
 
 use crate::changes::ChangeSet;
 use crate::checkout::Checkout;
-use crate::classify::{BazelFacts, Class};
+use crate::classify::BazelFacts;
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle};
 use crate::state::State;
 use crate::tools::{BaseWorktree, RunContext, Tool};
@@ -272,11 +272,7 @@ fn compare_one(
                     classify_difference(&cambium_set, &run.labels, &facts, opts.examples);
                 let failures: usize = counts
                     .iter()
-                    .filter(|(k, _)| {
-                        Class::ALL
-                            .iter()
-                            .any(|c| c.name() == k.as_str() && c.is_failure())
-                    })
+                    .filter(|(class, _)| class.is_failure())
                     .map(|(_, n)| n)
                     .sum();
                 ToolComparison {
@@ -345,8 +341,8 @@ fn compare_one(
         schema: crate::RESULT_SCHEMA,
         base: change_set.base.clone(),
         head: change_set.head.clone(),
-        kind: change_set.kind.name().to_string(),
-        category: change_set.category.clone(),
+        kind: change_set.kind,
+        category: change_set.category,
         cambium,
         tools: results,
         oracle,
@@ -470,8 +466,8 @@ fn compare_global(
         schema: crate::RESULT_SCHEMA,
         base: change_set.base.clone(),
         head: change_set.head.clone(),
-        kind: change_set.kind.name().to_string(),
-        category: change_set.category.clone(),
+        kind: change_set.kind,
+        category: change_set.category,
         cambium: CambiumRun {
             global: true,
             global_reason: Some(reason),

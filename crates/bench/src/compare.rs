@@ -46,6 +46,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::driver::{fresh_result, resumable};
+    use crate::changes::ChangeSetKind;
+    use crate::classify::Class;
     use super::*;
     use crate::classify::Facts;
 
@@ -125,11 +127,11 @@ mod tests {
         let cambium = set(&["//a:a", "//p:selected", "//shared:s"]);
         let tool = set(&["//shared:s", "@ext//x:y", "//missed:m"]);
         let (counts, examples) = classify_difference(&cambium, &tool, &NoFacts, 10);
-        assert_eq!(counts["cambium_extra_select"], 1);
-        assert_eq!(counts["unclassified"], 1, "//a:a has no explanation");
-        assert_eq!(counts["bazeldiff_extra_external"], 1);
-        assert_eq!(counts["cambium_missing"], 1);
-        assert!(!counts.contains_key("cambium_extra_visibility"));
+        assert_eq!(counts[&Class::CambiumExtraSelect], 1);
+        assert_eq!(counts[&Class::Unclassified], 1, "//a:a has no explanation");
+        assert_eq!(counts[&Class::BazeldiffExtraExternal], 1);
+        assert_eq!(counts[&Class::CambiumMissing], 1);
+        assert!(!counts.contains_key(&Class::CambiumExtraVisibility));
         assert_eq!(
             examples.iter().filter(|d| d.class.is_failure()).count(),
             2,
@@ -158,7 +160,7 @@ mod tests {
     fn the_example_list_is_capped_but_the_counts_are_not() {
         let cambium: BTreeSet<String> = (0..50).map(|i| format!("//a:t{i}")).collect();
         let (counts, examples) = classify_difference(&cambium, &BTreeSet::new(), &NoFacts, 3);
-        assert_eq!(counts["unclassified"], 50);
+        assert_eq!(counts[&Class::Unclassified], 50);
         assert_eq!(examples.len(), 3);
     }
 
@@ -170,15 +172,15 @@ mod tests {
         pass: bool,
     ) -> ChangeSetResult {
         let mut counts = BTreeMap::new();
-        counts.insert("cambium_extra_select".to_string(), 2);
+        counts.insert(Class::CambiumExtraSelect, 2);
         if !pass {
-            counts.insert("cambium_missing".to_string(), 1);
+            counts.insert(Class::CambiumMissing, 1);
         }
         ChangeSetResult {
             schema: crate::RESULT_SCHEMA,
             base: format!("b{name}"),
             head: format!("h{name}"),
-            kind: "adjacent".into(),
+            kind: ChangeSetKind::Adjacent,
             category: None,
             cambium: CambiumRun {
                 cold_wall_ms: cold * 10,
@@ -220,10 +222,10 @@ mod tests {
         assert_eq!(s.change_sets, 2);
         assert_eq!(s.passed, 1);
         assert!(!s.pass, "one failing change set fails the run");
-        assert_eq!(s.by_class["cambium_extra_select"], 4);
-        assert_eq!(s.by_class["cambium_missing"], 1);
+        assert_eq!(s.by_class[&Class::CambiumExtraSelect], 4);
+        assert_eq!(s.by_class[&Class::CambiumMissing], 1);
         assert_eq!(
-            s.by_class["bazeldiff_extra_external"], 0,
+            s.by_class[&Class::BazeldiffExtraExternal], 0,
             "every class is listed"
         );
         assert_eq!(s.mean_precision["bazel-diff-rust"], 0.75);
@@ -309,9 +311,9 @@ mod tests {
     }
 
     /// The class totals `uncapped` would have had with one fewer Tango row.
-    fn uncapped_minus_tango(uncapped: &ChangesSummary) -> BTreeMap<String, usize> {
+    fn uncapped_minus_tango(uncapped: &ChangesSummary) -> BTreeMap<Class, usize> {
         let mut totals = uncapped.by_class.clone();
-        *totals.get_mut("cambium_extra_select").unwrap() -= 2;
+        *totals.get_mut(&Class::CambiumExtraSelect).unwrap() -= 2;
         totals
     }
 
@@ -343,7 +345,7 @@ mod tests {
             "the global change_set contributes no precision"
         );
         assert_eq!(
-            s.by_class["cambium_extra_select"], 2,
+            s.by_class[&Class::CambiumExtraSelect], 2,
             "and no classified labels"
         );
         assert_eq!(
@@ -422,6 +424,50 @@ mod tests {
             !json.contains("global_stats"),
             "an empty table is left out of the JSON: {json}"
         );
+    }
+
+    /// `kind`, `category` and the class counts became enums; the JSON they
+    /// produce must not have. A result file on the box is what the report and
+    /// the next resume read, and the strings are also what a person greps for.
+    #[test]
+    fn the_typed_kind_category_and_classes_are_the_same_json_as_the_strings() {
+        let p = ChangeSetResult {
+            schema: crate::RESULT_SCHEMA,
+            base: "b".into(),
+            head: "h".into(),
+            kind: ChangeSetKind::Stress,
+            category: Some(crate::changes::StressCategory::BuildAddDelete),
+            cambium: CambiumRun::default(),
+            tools: vec![ToolComparison {
+                counts: [(Class::CambiumExtraSelect, 3), (Class::CambiumMissing, 1)]
+                    .into_iter()
+                    .collect(),
+                ..ToolComparison::new("bazel-diff-rust", "v46.1.0")
+            }],
+            oracle: None,
+            load_oracle: None,
+            recall: 1.0,
+            global: false,
+            pass: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""kind":"stress""#), "{json}");
+        assert!(json.contains(r#""category":"build_add_delete""#), "{json}");
+        assert!(json.contains(r#""cambium_extra_select":3"#), "{json}");
+        assert!(json.contains(r#""cambium_missing":1"#), "{json}");
+
+        let back: ChangeSetResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, ChangeSetKind::Stress);
+        assert_eq!(back.category, p.category);
+        assert_eq!(back.tools[0].counts[&Class::CambiumExtraSelect], 3);
+
+        // And a change set with no category still leaves the key out.
+        let mut plain = p.clone();
+        plain.category = None;
+        plain.kind = ChangeSetKind::Pr;
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("category"), "{json}");
+        assert!(json.contains(r#""kind":"pr""#), "{json}");
     }
 
     /// Every field added since the first `changes-*.json` was written has a

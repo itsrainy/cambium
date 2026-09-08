@@ -71,14 +71,49 @@ impl ChangeSetKind {
     }
 }
 
+/// Why a stress change set was chosen. Only [`ChangeSetKind::Stress`] carries
+/// one; the other kinds are selected by their *shape*, not by what they touch.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum StressCategory {
+    /// The commit touches a `.bzl` file.
+    Bzl,
+    /// It adds or deletes a `BUILD` file: the two cases the hash-diffing tools
+    /// cannot see the whole of, since at one end the target does not exist.
+    BuildAddDelete,
+    /// It touches a package holding one of the index's highest in-degree
+    /// targets, so the reverse closure is as large as this subject gets.
+    Hub,
+    /// It touches a path the manifest names as an invalidator, which is the
+    /// only way to make cambium answer `//...` on purpose.
+    Invalidator,
+}
+
+impl StressCategory {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bzl => "bzl",
+            Self::BuildAddDelete => "build_add_delete",
+            Self::Hub => "hub",
+            Self::Invalidator => "invalidator",
+        }
+    }
+}
+
+impl std::fmt::Display for StressCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChangeSet {
     pub base: String,
     pub head: String,
     pub kind: ChangeSetKind,
-    /// Stress category: `bzl`, `build_add_delete`, `hub`, `invalidator`.
+    /// Why a stress change set was chosen; `None` for every other kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
+    pub category: Option<StressCategory>,
     /// The pull request number, when a PR-shaped change set's commit message
     /// named one, so the report can link it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,14 +346,14 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
     let Some(oldest) = commits.first() else {
         return Ok(Vec::new());
     };
-    let categories: Vec<(&str, Vec<&str>, Vec<String>)> = vec![
+    let categories: Vec<(StressCategory, Vec<&str>, Vec<String>)> = vec![
         (
-            "bzl",
+            StressCategory::Bzl,
             vec![],
             vec![glob_pathspec("**/*.bzl"), glob_pathspec("*.bzl")],
         ),
         (
-            "build_add_delete",
+            StressCategory::BuildAddDelete,
             vec!["--diff-filter=AD"],
             vec![
                 glob_pathspec("**/BUILD"),
@@ -328,7 +363,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
             ],
         ),
         (
-            "hub",
+            StressCategory::Hub,
             vec![],
             o.hub_packages
                 .iter()
@@ -342,7 +377,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
                 .collect(),
         ),
         (
-            "invalidator",
+            StressCategory::Invalidator,
             vec![],
             o.invalidator_paths
                 .iter()
@@ -367,7 +402,7 @@ pub fn stress(repo: &Repo, o: &ChangeSetOptions) -> Result<Vec<ChangeSet>> {
                 base: parent.clone(),
                 head: c,
                 kind: ChangeSetKind::Stress,
-                category: Some(name.to_string()),
+                category: Some(name),
                 pr_number: None,
             });
         }

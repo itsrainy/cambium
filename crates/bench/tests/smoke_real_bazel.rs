@@ -345,7 +345,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     let failures: usize = cambium_bench::classify::Class::ALL
         .iter()
         .filter(|c| c.is_failure())
-        .filter_map(|c| result.summary.by_class.get(c.name()))
+        .filter_map(|c| result.summary.by_class.get(c))
         .sum();
     assert_eq!(
         failures, 0,

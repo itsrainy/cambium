@@ -60,7 +60,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
         ..Default::default()
     };
     for c in Class::ALL {
-        s.by_class.insert(c.name().to_string(), 0);
+        s.by_class.insert(c, 0);
     }
     let mut precisions: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut cold: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -109,7 +109,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
             s.load_oracle.add(o);
             if !o.missing_packages.is_empty() {
                 *s.by_class
-                    .entry(Class::CambiumMissingBzlClosure.name().to_string())
+                    .entry(Class::CambiumMissingBzlClosure)
                     .or_default() += o.missing_packages.len();
             }
         }
@@ -118,7 +118,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
                 continue;
             }
             for (class, n) in &pr.counts {
-                *s.by_class.entry(class.clone()).or_default() += n;
+                *s.by_class.entry(*class).or_default() += n;
             }
             *s.tool_change_sets.entry(pr.name.clone()).or_default() += 1;
             precisions
@@ -212,12 +212,12 @@ pub fn classify_difference(
     tool: &BTreeSet<String>,
     facts: &dyn Facts,
     examples: usize,
-) -> (BTreeMap<String, usize>, Vec<Disagreement>) {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+) -> (BTreeMap<Class, usize>, Vec<Disagreement>) {
+    let mut counts: BTreeMap<Class, usize> = BTreeMap::new();
     let mut found: Vec<Disagreement> = Vec::new();
     let mut push = |label: &str, side: Side| {
         let class = classify(label, side, facts);
-        *counts.entry(class.name().to_string()).or_default() += 1;
+        *counts.entry(class).or_default() += 1;
         found.push(Disagreement {
             label: label.to_string(),
             side,
