@@ -38,12 +38,15 @@ host() {
     | grep -v None
 }
 
-pin_of() {  # subject -> the manifest pin
-  awk -v id="$1" '
-    $1=="[[repos]]" { inrepo=1; found=0 }
-    inrepo && $1=="id" { gsub(/[",]/,"",$3); found=($3==id) }
-    inrepo && found && $1=="commit" { gsub(/[",]/,"",$3); print $3; exit }
-  ' "$ROOT/subject_repos.toml"
+# The pin, read off the index file the box just gave us rather than out of the
+# manifest: the two agree, and this spelling carries the Bazel-version suffix
+# (apollo's files have one), which is also the name `bench replay` looks for
+# the paths cache under.
+pin_of() {  # dir -> <pin>[-<bazel version>]
+  local f
+  f=$(ls "$1"/index-*.bin 2>/dev/null | head -1)
+  [ -n "$f" ] || return 1
+  basename "$f" .bin | sed 's/^index-//'
 }
 
 pull() {  # subject
@@ -72,7 +75,7 @@ pull() {  # subject
 # once, with git and nothing else.
 paths_from_box() {  # subject host dir
   local s=$1 h=$2 dir=$3 pin
-  pin=$(pin_of "$s")
+  pin=$(pin_of "$dir") || { echo "  no index pulled for $s" >&2; return 1; }
   local remote='
 set -eu
 S='"$s"'; PIN='"$pin"'
@@ -96,13 +99,7 @@ print(json.dumps({"schema":1,"repo":subject,"pin":pin,"entries":out}))
 PY'
   if ssh -i "$PEM" "ubuntu@$h" "$remote" > "$dir/paths-$pin.json.tmp" 2>/dev/null \
      && [ -s "$dir/paths-$pin.json.tmp" ]; then
-    # `cambi bench replay` looks for paths-<pin>[-<version>].json beside the
-    # index; apollo's files carry a Bazel-version suffix, so cover both names.
-    for f in "$dir"/index-*.bin; do
-      base=$(basename "$f" .bin); mv -f "$dir/paths-$pin.json.tmp" "$dir/${base/index-/paths-}.json"
-      cp -f "$dir/${base/index-/paths-}.json" "$dir/paths-$pin.json"
-    done
-    rm -f "$dir/paths-$pin.json.tmp"
+    mv -f "$dir/paths-$pin.json.tmp" "$dir/paths-$pin.json"
   else
     rm -f "$dir/paths-$pin.json.tmp"
     echo "  could not derive the change-set diffs on the box; pass --repo by hand" >&2

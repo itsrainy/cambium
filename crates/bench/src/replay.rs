@@ -277,12 +277,45 @@ pub fn replay(
         ));
     }
 
-    let ext = if cfg.externals.enabled {
+    // The bazelrc screen reads the file's *text* at both revisions and decides
+    // whether every flag it changed is one that cannot reach loading. There is
+    // no text here, and the outcomes are opposite extremes — a global run, or
+    // the file dropped from the diff entirely — so the replay declines.
+    if let Some(c) = changes
+        .iter()
+        .find(|c| cambium_engine::bazelrc::is_bazelrc_path(&c.path))
+    {
+        out.indeterminate.push(format!(
+            "the change set edits {}, and whether a bazelrc edit goes global depends on which \
+             flags it changed, which needs the file at both revisions",
+            c.path
+        ));
+    }
+
+    // A change set that adds or removes a package cannot be replayed against
+    // the index at the pin: there the package already exists, or is long gone,
+    // so the owner of every path under it differs from what the run saw. The
+    // engine also asks the head worktree whether a deleted `BUILD` really
+    // deleted its package, and there is no worktree here.
+    if let Some(c) = changes.iter().find(|c| {
+        c.status != Status::Modified
+            && matches!(
+                c.path.rsplit('/').next(),
+                Some("BUILD") | Some("BUILD.bazel")
+            )
+    }) {
+        out.indeterminate.push(format!(
+            "the change set adds or removes {}, so the package set at the base differs from the \
+             one in the stored index at the pin",
+            c.path
+        ));
+    }
+
+    let mut ext = if cfg.externals.enabled {
         externals::analyse(base, changes, base_rev, head_rev, texts)
     } else {
         externals::Externals::default()
     };
-    out.repos = attribute_repos(base, changes, &ext);
 
     let mut matchers = match cambium_classify::Matchers::compile(&cfg.rules()) {
         Ok(m) => m,
@@ -321,15 +354,28 @@ pub fn replay(
                 let Some(id) = base.bzl_id(path) else {
                     continue;
                 };
-                if base.bzl_in_workspace(id)
-                    && cfg.externals.enabled
-                    && externals::repos_of_workspace_bzl(base, id).is_none()
-                {
-                    global = true;
-                    reason = Some(format!(
-                        "a changed .bzl is loaded outside any package and no repository owns it: \
-                         {path}"
-                    ));
+                // A workspace-level `.bzl` can define repository rules, whose
+                // output is not in the index at all. The index says which
+                // repositories each one defines, and the rule's implementation
+                // moving means anything it writes into them can have moved —
+                // so they join `load_repos`, not just `repos`. Missing this
+                // was worth about eleven hundred packages a change set on
+                // envoy, where every dirty repository arrives this way.
+                if base.bzl_in_workspace(id) && cfg.externals.enabled {
+                    match externals::repos_of_workspace_bzl(base, id) {
+                        Some(repos) => {
+                            ext.by_bzl += repos.len();
+                            ext.load_repos.extend(repos.iter().cloned());
+                            ext.repos.extend(repos);
+                        }
+                        None => {
+                            global = true;
+                            reason = Some(format!(
+                                "a changed .bzl is loaded outside any package and no repository \
+                                 owns it: {path}"
+                            ));
+                        }
+                    }
                 }
                 for &p in base.bzl_consumers(id) {
                     if base.package_tombstoned(p) {
@@ -348,6 +394,7 @@ pub fn replay(
         reason = Some(r.clone());
     }
 
+    out.repos = attribute_repos(base, changes, &ext);
     let mut external_nodes: Vec<u32> = Vec::new();
     if !global && !ext.repos.is_empty() {
         let r = externals::reach(base, &ext.repos, &ext.load_repos);
@@ -484,6 +531,9 @@ fn attribute_repos(
                 (RepoRule::InputPath, p.clone())
             } else if let Some(p) = by_target.get(repo) {
                 (RepoRule::TargetOnly, p.clone())
+            // Neither the module diff nor a workspace `.bzl` records which
+            // repository it named, so with both in play the module is
+            // reported: it is the coarser and more alarming of the two.
             } else if ext.by_module > 0 {
                 (RepoRule::ModuleDiff, Vec::new())
             } else {
