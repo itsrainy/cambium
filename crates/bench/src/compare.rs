@@ -1424,7 +1424,7 @@ mod tests {
             counts.insert("cambium_missing".to_string(), 1);
         }
         ChangeSetResult {
-            schema: 3,
+            schema: crate::RESULT_SCHEMA,
             base: format!("b{name}"),
             head: format!("h{name}"),
             kind: "adjacent".into(),
