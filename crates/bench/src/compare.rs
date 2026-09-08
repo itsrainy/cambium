@@ -249,6 +249,62 @@ pub struct ToolComparison {
     pub error: Option<String>,
 }
 
+impl Default for ToolComparison {
+    /// An empty comparison: no labels, no timings, no disagreements, and
+    /// passing. The four real constructions differ from it in a handful of
+    /// fields each, and spelling all fourteen out at every one of them is how
+    /// the global branch came to record a failed tool as `pass: true`.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: String::new(),
+            labels: 0,
+            cold_wall_ms: 0,
+            warm_wall_ms: None,
+            precision: 0.0,
+            depth_agreement: None,
+            dropped_file_targets: 0,
+            cambium_only: 0,
+            tool_only: 0,
+            counts: BTreeMap::new(),
+            examples: Vec::new(),
+            cambium_only_reasons: BTreeMap::new(),
+            pass: true,
+            error: None,
+        }
+    }
+}
+
+impl ToolComparison {
+    /// A passing comparison against `name`, to be filled in.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The tool could not run at all.
+    ///
+    /// A comparison that did not happen is not a comparison that agreed, so
+    /// this fails the change set. Passing it is how the 2026-09-08 published
+    /// run came to render sourcegraph without bazel-diff (40/40 `aspect query`
+    /// failures) and apollo without Tango (40/40 stale worktrees) as though
+    /// both were three-way comparisons: the summary tables simply omit a tool
+    /// that reported nothing, so the absence is invisible in the output.
+    pub fn failed(name: impl Into<String>, version: impl Into<String>, err: &anyhow::Error) -> Self {
+        Self {
+            // `{:#}` and not `{}`: anyhow's `Display` prints only the outermost
+            // context, so `hashing <sha> in <dir>` would arrive without the
+            // exit status and stderr tail the tool attached underneath it.
+            error: Some(format!("{err:#}")),
+            pass: false,
+            ..Self::new(name, version)
+        }
+    }
+}
+
 /// Everything learned about one change set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChangeSetResult {
@@ -866,15 +922,13 @@ pub fn compare_change_set_with(
             &opts.scratch,
             base_wt.as_ref().map_or(&checkout.dir, |w| w.path()),
         );
-        let results = tools
+        let results: Vec<ToolComparison> = tools
             .iter()
             .map(
                 |p| match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
                     Ok(mut run) => {
                         run.restrict_to_rule_set(&universe);
                         ToolComparison {
-                            name: p.name().to_string(),
-                            version: p.version(),
                             labels: run.labels.len(),
                             cold_wall_ms: run.cold_wall.as_millis() as u64,
                             warm_wall_ms: run.warm_wall.map(|d| d.as_millis() as u64),
@@ -884,15 +938,8 @@ pub fn compare_change_set_with(
                             // by nothing: `summarise` takes no precision from a
                             // global change set.
                             precision: 1.0,
-                            depth_agreement: None,
                             dropped_file_targets: run.dropped_file_targets,
-                            cambium_only: 0,
-                            tool_only: 0,
-                            counts: BTreeMap::new(),
-                            examples: Vec::new(),
-                            cambium_only_reasons: BTreeMap::new(),
-                            pass: true,
-                            error: None,
+                            ..ToolComparison::new(p.name(), p.version())
                         }
                     }
                     Err(e) => {
@@ -901,27 +948,17 @@ pub fn compare_change_set_with(
                             error = format!("{e:#}"),
                             "tool failed on this global change_set"
                         );
-                        ToolComparison {
-                            name: p.name().to_string(),
-                            version: p.version(),
-                            labels: 0,
-                            cold_wall_ms: 0,
-                            warm_wall_ms: None,
-                            precision: 1.0,
-                            depth_agreement: None,
-                            dropped_file_targets: 0,
-                            cambium_only: 0,
-                            tool_only: 0,
-                            counts: BTreeMap::new(),
-                            examples: Vec::new(),
-                            cambium_only_reasons: BTreeMap::new(),
-                            pass: true,
-                            error: Some(format!("{e:#}")),
-                        }
+                        ToolComparison::failed(p.name(), p.version(), &e)
                     }
                 },
             )
             .collect();
+        // cambium cannot be unsound on a global change set -- it answered
+        // `//...` -- but a tool that could not run still fails it, exactly as
+        // on an incremental one. Otherwise a subject whose every change set is
+        // global reports a clean run against tools that never produced an
+        // answer.
+        let pass = results.iter().all(|t| t.pass);
         return Ok(ChangeSetResult {
             schema: crate::RESULT_SCHEMA,
             base: change_set.base.clone(),
@@ -939,7 +976,7 @@ pub fn compare_change_set_with(
             load_oracle: None,
             recall: 1.0,
             global: true,
-            pass: true,
+            pass,
         });
     };
 
@@ -1049,8 +1086,6 @@ pub fn compare_change_set_with(
                     .map(|(_, n)| n)
                     .sum();
                 ToolComparison {
-                    name: p.name().to_string(),
-                    version: p.version(),
                     labels: run.labels.len(),
                     cold_wall_ms: run.cold_wall.as_millis() as u64,
                     warm_wall_ms: run.warm_wall.map(|d| d.as_millis() as u64),
@@ -1069,7 +1104,7 @@ pub fn compare_change_set_with(
                         report.explanations.as_deref().unwrap_or_default(),
                     ),
                     pass: failures == 0,
-                    error: None,
+                    ..ToolComparison::new(p.name(), p.version())
                 }
             }
             Err(e) => {
@@ -1078,36 +1113,7 @@ pub fn compare_change_set_with(
                     error = format!("{e:#}"),
                     "tool failed on this change_set"
                 );
-                ToolComparison {
-                    name: p.name().to_string(),
-                    version: p.version(),
-                    labels: 0,
-                    cold_wall_ms: 0,
-                    warm_wall_ms: None,
-                    precision: 0.0,
-                    depth_agreement: None,
-                    dropped_file_targets: 0,
-                    cambium_only: 0,
-                    tool_only: 0,
-                    counts: BTreeMap::new(),
-                    examples: Vec::new(),
-                    cambium_only_reasons: BTreeMap::new(),
-                    // A tool that could not run produced no comparison, and a
-                    // comparison that did not happen is not a comparison that
-                    // agreed. Passing it here is how the 2026-09-08 published
-                    // run came to render sourcegraph without bazel-diff (40/40
-                    // `aspect query` failures) and apollo without Tango (40/40
-                    // stale worktrees) as though both were three-way
-                    // comparisons: the summary tables simply omit a tool that
-                    // reported nothing, so the absence is invisible in the
-                    // output. Failing the change set makes the run say so.
-                    pass: false,
-                    // `{:#}` and not `{}`: anyhow's `Display` prints only the
-                    // outermost context, so `hashing <sha> in <dir>` would
-                    // arrive without the exit status and stderr tail the
-                    // tool attached underneath it.
-                    error: Some(format!("{e:#}")),
-                }
+                ToolComparison::failed(p.name(), p.version(), &e)
             }
         };
         results.push(cmp);
@@ -1386,6 +1392,22 @@ mod tests {
             "failures come first: {examples:?}"
         );
         assert!(examples[0].class.is_failure() && examples[1].class.is_failure());
+    }
+
+    #[test]
+    fn a_tool_that_could_not_run_has_not_agreed_with_anything() {
+        let err = anyhow::anyhow!("exit 1: stderr tail").context("hashing abc123 in /tmp/base");
+        let c = ToolComparison::failed("bazel-diff-rust", "v46.1.0", &err);
+        assert!(!c.pass, "a comparison that did not happen does not pass");
+        // The whole chain, not just anyhow's outermost context: without the
+        // alternate flag the exit status the tool attached never arrives.
+        let e = c.error.unwrap();
+        assert!(e.contains("hashing abc123"), "{e}");
+        assert!(e.contains("exit 1"), "{e}");
+        assert_eq!(c.name, "bazel-diff-rust");
+        assert_eq!(c.version, "v46.1.0");
+        // And a tool that did run starts from the passing default.
+        assert!(ToolComparison::new("t", "v").pass);
     }
 
     #[test]
