@@ -528,7 +528,7 @@ fn verify(ctx: &Context, file: &Path, sample: usize, seed: u64) -> Result<u8> {
             },
         );
         let ours: std::collections::HashSet<String> =
-            cambium_index::walk::labels_sorted(v, &r.affected)
+            cambium_index::view::labels_sorted(&v, &r.affected)
                 .into_iter()
                 .collect();
 

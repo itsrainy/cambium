@@ -1,4 +1,4 @@
-//! Spec 12.1: CSR construction, splice, serialisation round trip.
+//! CSR construction, splice, serialisation round trip.
 
 use cambium_index::*;
 
@@ -128,9 +128,9 @@ fn walk_finds_reverse_closure() {
     let v = d.view();
     let m = v.labels.build_map();
     let r = walk(v, &[m["//a:a"]], &WalkOptions::default());
-    let labels = walk::labels_sorted(v, &r.affected);
+    let labels = view::labels_sorted(&v, &r.affected);
     assert_eq!(labels, vec!["//a:a", "//b:b", "//c:c", "//c:c_test"]);
-    let tests = walk::labels_sorted(v, &r.tests);
+    let tests = view::labels_sorted(&v, &r.tests);
     assert_eq!(tests, vec!["//c:c_test"]);
 }
 
@@ -143,7 +143,7 @@ fn walk_from_source_file_reaches_consumers() {
     assert_eq!(v.file_consumers(src).to_vec(), vec![m["//b:b"]]);
     let r = walk(v, &[src], &WalkOptions::default());
     assert_eq!(
-        walk::labels_sorted(v, &r.affected),
+        view::labels_sorted(&v, &r.affected),
         vec!["//b:b", "//c:c", "//c:c_test"]
     );
 }
@@ -246,16 +246,24 @@ fn ids_are_stable_across_splices() {
     }
 }
 
-#[test]
-fn generated_files_redirect_to_their_rule() {
-    let mut b = IndexBuilder::new(new_lineage());
-    let mut gen = TargetRow::source_file("//g:out.h");
-    gen.kind = NodeKind::GeneratedFile;
-    gen.generating_rule = Some("//g:gen".into());
-    b.apply_packages(&[
+fn generated(label: &str, by: &str) -> TargetRow {
+    let mut t = TargetRow::source_file(label);
+    t.kind = NodeKind::GeneratedFile;
+    t.generating_rule = Some(by.into());
+    t
+}
+
+/// The generator's package and a consumer of its output, with the generator
+/// named by `by`.
+fn generator_and_consumer(by: &str) -> Vec<PackageUpdate> {
+    vec![
         pkg(
             "g",
-            vec![TargetRow::rule("//g:gen", "genrule", vec![]), gen],
+            vec![
+                TargetRow::rule("//g:gen", "genrule", vec![]),
+                TargetRow::rule("//g:gen2", "genrule", vec![]),
+                generated("//g:out.h", by),
+            ],
         ),
         pkg(
             "u",
@@ -265,15 +273,68 @@ fn generated_files_redirect_to_their_rule() {
                 vec!["//g:out.h".into()],
             )],
         ),
-    ]);
+    ]
+}
+
+fn forward_labels(v: IndexRef<'_>, id: u32) -> Vec<String> {
+    view::labels_sorted(&v, v.forward.row(id))
+}
+
+#[test]
+fn a_generated_file_is_one_hop_between_consumer_and_generator() {
+    let mut b = IndexBuilder::new(new_lineage());
+    b.apply_packages(&generator_and_consumer("//g:gen"));
     let d = b.finish("1");
     let v = d.view();
     let m = v.labels.build_map();
-    // The consumer points straight at the generating rule.
-    assert_eq!(v.forward.row(m["//u:u"]), &[m["//g:gen"]]);
-    // ...and a change to the generator reaches the consumer in one hop.
+    // The consumer's edge is to the file, the file's to its generator...
+    assert_eq!(v.forward.row(m["//u:u"]), &[m["//g:out.h"]]);
+    assert_eq!(v.forward.row(m["//g:out.h"]), &[m["//g:gen"]]);
+    // ...and a change to the generator reaches the consumer through it.
     let r = walk(v, &[m["//g:gen"]], &WalkOptions::default());
-    assert!(walk::labels_sorted(v, &r.affected).contains(&"//u:u".to_string()));
+    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//g:gen", "//u:u"]);
+    assert_eq!(r.depth_of(m["//u:u"]), Some(2));
+}
+
+/// Re-querying only the generator's package after a different rule starts
+/// producing the file must leave the consumer's row identical to what a full
+/// rebuild writes. That is exactly what redirecting consumers straight at the
+/// generating rule broke: the carried row kept naming the old generator.
+#[test]
+fn splicing_a_changed_generator_alone_equals_a_full_rebuild() {
+    let mut b = IndexBuilder::new([3; 16]);
+    b.apply_packages(&generator_and_consumer("//g:gen"));
+    let base = b.finish("base");
+
+    let head = generator_and_consumer("//g:gen2");
+    // Splice: only package g is re-queried; u is carried.
+    let mut s = IndexBuilder::from_view(base.view());
+    s.apply_packages(&head[..1]);
+    let spliced = s.finish("head");
+    // Full rebuild of the same head state.
+    let mut f = IndexBuilder::new([3; 16]);
+    f.apply_packages(&head);
+    let rebuilt = f.finish("head");
+
+    let (sv, rv) = (spliced.view(), rebuilt.view());
+    let su = sv.id_of("//u:u").unwrap();
+    let ru = rv.id_of("//u:u").unwrap();
+    assert_eq!(forward_labels(sv, su), forward_labels(rv, ru));
+    assert_eq!(forward_labels(sv, su), vec!["//g:out.h"]);
+    let out = sv.id_of("//g:out.h").unwrap();
+    assert_eq!(forward_labels(sv, out), vec!["//g:gen2"]);
+
+    // And the walks agree: the new generator reaches the consumer, the old
+    // one no longer does.
+    for (label, expect) in [
+        ("//g:gen2", vec!["//g:gen2", "//u:u"]),
+        ("//g:gen", vec!["//g:gen"]),
+    ] {
+        for v in [sv, rv] {
+            let r = walk(v, &[v.id_of(label).unwrap()], &WalkOptions::default());
+            assert_eq!(view::labels_sorted(&v, &r.affected), expect, "from {label}");
+        }
+    }
 }
 
 #[test]
@@ -289,7 +350,7 @@ fn deleting_a_package_tombstones_its_targets() {
     assert!(v.package_tombstoned(v.package_id_of(m["//c:c"]).unwrap()));
     // A walk from //a:a no longer reports the deleted targets.
     let r = walk(v, &[m["//a:a"]], &WalkOptions::default());
-    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//a:a", "//b:b"]);
+    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//a:a", "//b:b"]);
 }
 
 #[test]
@@ -306,7 +367,7 @@ fn manual_targets_are_excluded_by_default() {
     let v = d.view();
     let m = v.labels.build_map();
     let r = walk(v, &[m["//m:dep"]], &WalkOptions::default());
-    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//m:dep"]);
+    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//m:dep"]);
     let r = walk(
         v,
         &[m["//m:dep"]],
@@ -316,7 +377,7 @@ fn manual_targets_are_excluded_by_default() {
         },
     );
     assert_eq!(
-        walk::labels_sorted(v, &r.affected),
+        view::labels_sorted(&v, &r.affected),
         vec!["//m:dep", "//m:m"]
     );
 }
@@ -350,7 +411,7 @@ fn round_trips_through_the_on_disk_format() {
     let hv = head.view();
     let m = hv.labels.build_map();
     let r = walk(hv, &[m["//a:a"]], &WalkOptions::default());
-    assert!(walk::labels_sorted(hv, &r.affected).contains(&"//e:e".to_string()));
+    assert!(view::labels_sorted(&hv, &r.affected).contains(&"//e:e".to_string()));
 }
 
 #[test]
@@ -397,7 +458,7 @@ fn walk_records_depth_and_honours_max_depth() {
             ..Default::default()
         },
     );
-    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//a:a", "//b:b"]);
+    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//a:a", "//b:b"]);
     let r = walk(
         v,
         &[m["//a:a"]],
@@ -406,7 +467,7 @@ fn walk_records_depth_and_honours_max_depth() {
             ..Default::default()
         },
     );
-    assert_eq!(walk::labels_sorted(v, &r.affected), vec!["//a:a"]);
+    assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//a:a"]);
 }
 
 /// A consumer of a deleted target is reached *through* the tombstone, so the
@@ -427,7 +488,7 @@ fn a_tombstoned_dependency_counts_as_a_hop() {
     assert_eq!(r.depth_of(m["//c:c_test"]), Some(2));
     // The tombstone itself is never reported.
     assert_eq!(
-        walk::labels_sorted(hv, &r.affected),
+        view::labels_sorted(&hv, &r.affected),
         vec!["//c:c", "//c:c_test"]
     );
 }
