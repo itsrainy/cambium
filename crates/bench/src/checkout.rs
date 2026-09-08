@@ -26,6 +26,7 @@ use cambium_diff::Repo;
 use cambium_engine::{Config, Engine};
 
 use crate::manifest::RepoEntry;
+use crate::subject::Subject;
 
 pub const SUBJECTS_DIR_ENV: &str = "CAMBIUM_SUBJECTS_DIR";
 
@@ -206,9 +207,26 @@ impl SubjectsDir {
         cfg
     }
 
-    /// An existing checkout, without touching the network.
+    /// An existing checkout, without touching the network. Prefer
+    /// [`open_or_fetch`](Self::open_or_fetch), which knows a synthetic
+    /// subject can be produced on the spot.
     pub fn open(&self, entry: &RepoEntry) -> Result<Checkout> {
         Checkout::open(self, entry)
+    }
+
+    /// An existing checkout, fetching first if `subject` is synthetic.
+    ///
+    /// Emitting and cloning a synthetic subject touches no network and is
+    /// idempotent, so a workload can run one without a separate `subjects
+    /// fetch` step first — which is what CI does. A real subject still needs
+    /// that step: [`fetch`](Self::fetch) clones from `entry.url`, which may
+    /// cost gigabytes or need credentials, and no workload should start that
+    /// by surprise.
+    pub fn open_or_fetch(&self, subject: &Subject, entry: &RepoEntry) -> Result<Checkout> {
+        if subject.is_synthetic() {
+            return self.fetch(entry);
+        }
+        self.open(entry)
     }
 }
 
@@ -227,6 +245,9 @@ impl Checkout {
         let dir = subjects.worktree(&entry.id);
         anyhow::ensure!(
             dir.join(".git").exists(),
+            // Only a real subject reaches this: `open_or_fetch` emits and
+            // clones a synthetic one instead of asking for it. So the id here
+            // is also the name a person types, and the suggestion is runnable.
             "no checkout of {} at {}; run `cambi bench subjects fetch {}`",
             entry.id,
             dir.display(),
