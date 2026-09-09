@@ -268,8 +268,8 @@ extra_query_flags = []
 [invalidators]               # any change here means "everything is affected"
 paths = ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel",
          "WORKSPACE.bzlmod", "WORKSPACE.bzlmod.lock", ".bazelrc",
-         ".bazelversion", "BUILD", "BUILD.bazel"]
-globs = ["tools/toolchains/**", "platforms/**", "third_party/**/*.bzl"]
+         ".bazelversion", "REPO.bazel"]
+globs = ["tools/toolchains/**", "platforms/**"]
 
 [bazelrc]                    # a changed bazelrc is read rather than assumed:
                              # if every flag it changed is known not to affect

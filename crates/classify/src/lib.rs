@@ -169,10 +169,10 @@ pub fn is_build_file(path: &str) -> bool {
 /// This is about *shape*, not about blast radius, and it is not the same
 /// question the invalidator globs answer. A `.bzl` file is handled precisely:
 /// the index's static load closure says which packages load it, and only those
-/// are dirtied. The default globs then name a few directories — `third_party/**/*.bzl`,
-/// `tools/toolchains/**` — where a `.bzl` edit is treated as global anyway,
-/// because the files there define toolchains and repository rules whose reach
-/// the load closure does not model: a toolchain swap changes what every action
+/// are dirtied. The default globs then name a few directories —
+/// `tools/toolchains/**`, `platforms/**` — where a `.bzl` edit is treated as
+/// global anyway, because the files there define toolchains whose reach the
+/// load closure does not model: a toolchain swap changes what every action
 /// in the repository runs without any BUILD file loading the `.bzl` that did
 /// it. So a path can be both, and the invalidator wins; that is a deliberate
 /// over-approximation over a small, hand-named set of directories, not a
