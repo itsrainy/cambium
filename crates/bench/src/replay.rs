@@ -45,6 +45,14 @@
 //!   it from. A change set that touches it is marked
 //!   [`ReplayOutcome::indeterminate`] and excluded from gating unless
 //!   `--repo` is given.
+//! - **A change to how the index derives its externals side tables.** The
+//!   stage does not derive which main-repo paths feed which repositories; it
+//!   reads tables `cambium_index::build_repo_inputs` wrote at index time, so a
+//!   replay of a build that changed that derivation still replays the old
+//!   one's output. [`rederive_externals`] — `--rederive` — closes that by
+//!   rebuilding those tables from the repository text at each base before
+//!   replaying. What stays the pin's is everything `bazel query` established:
+//!   the packages, the targets, the edges, the package closures.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -224,6 +232,18 @@ pub struct ReplayOutcome {
     /// must not be compared. The strings say what and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indeterminate: Vec<String>,
+    /// The externals side tables were rebuilt from the repository text at
+    /// [`ReplayOutcome::base`] by this build, rather than read back out of the
+    /// stored index as the run's cambium derived them. See
+    /// [`rederive_externals`]. A re-derived replay and a plain one are not
+    /// comparable as engine evidence — the derivation under them differs — so
+    /// this travels in the JSON and in every divergence report.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rederived: bool,
+    /// What the re-derivation cost, in milliseconds, when one happened. Zero
+    /// for a change set that reused a cached rebuild of the same base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rederive_ms: Option<u64>,
 }
 
 impl ReplayOutcome {
@@ -305,6 +325,170 @@ fn repos_declared_at(base_rev: &str, texts: &dyn WorkspaceText) -> Option<BTreeS
         declared.insert(name);
     }
     Some(declared)
+}
+
+// ------------------------------------------------------- re-derived externals
+//
+// The externals side tables in a stored index — the repository input patterns,
+// `bzl_repos`, the path maps, `target_only`, the repository set — were derived
+// at index time by `cambium_index::build_repo_inputs` from the text of
+// `MODULE.bazel` / `WORKSPACE` and the workspace `.bzl` closure. A replay that
+// reads them back is therefore blind to a change in that derivation: it
+// replays the *old* derivation's output whatever the build under test does.
+// `--rederive` closes that by rebuilding those tables from the repository text
+// at the change set's base, with the code in this build, before replaying.
+
+/// One revision of a [`WorkspaceText`], as the index's [`FileText`].
+///
+/// The git layer stays behind [`WorkspaceText`] so a test can re-derive from
+/// strings with no git anywhere; the CLI passes the same `git show`-backed
+/// implementation the rest of the replay uses.
+pub struct RevisionText<'a> {
+    pub texts: &'a dyn WorkspaceText,
+    pub rev: String,
+}
+
+impl cambium_index::FileText for RevisionText<'_> {
+    fn text(&self, path: &str) -> Option<String> {
+        self.texts.text_at(&self.rev, path)
+    }
+}
+
+/// Rebuilds a stored index's externals side tables from the repository text at
+/// `rev`, with this build's derivation.
+///
+/// What is re-derived is exactly what [`cambium_index::build_repo_inputs`]
+/// produces, plus which `.bzl` files the workspace closure contains. What is
+/// kept is everything the run's `bazel query` established: the packages, the
+/// targets, the edges, and the package -> `.bzl` closures. Those are the pin's
+/// and no amount of reading text can recover them; see the module docs.
+///
+/// The `.bzl` ids are the stored index's, because the package closures are
+/// expressed in them. The fresh walk gets its own [`LoadGraph`] and its
+/// workspace closure is mapped back onto the stored ids by path, so a `.bzl`
+/// in the base's workspace closure that the pin's index has never heard of is
+/// dropped here — which is the drift the `indeterminate` guard already names.
+pub fn rederive_externals(
+    base: IndexRef<'_>,
+    rev: &str,
+    texts: &dyn WorkspaceText,
+) -> Result<cambium_index::IndexData> {
+    let src = RevisionText {
+        texts,
+        rev: rev.to_string(),
+    };
+    anyhow::ensure!(
+        cambium_index::FileText::text(&src, externals::MODULE_FILE).is_some()
+            || externals::LEGACY_WORKSPACE_FILES
+                .iter()
+                .any(|f| cambium_index::FileText::text(&src, f).is_some()),
+        "no MODULE.bazel and no WORKSPACE at {rev}: nothing to re-derive the externals tables from"
+    );
+
+    let facts = cambium_index::read_module_facts(&src);
+    let mapping = cambium_index::RepoMapping::from_canonical(
+        (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
+    )
+    .with_main_alias(&facts.module_name);
+
+    let mut graph = cambium_index::LoadGraph::new();
+    let workspace = graph.workspace_closure(&src, &mapping);
+    let inputs = cambium_index::build_repo_inputs(&src, &mapping, &graph, &workspace, &facts);
+
+    let mut builder = cambium_index::IndexBuilder::from_view(base);
+    let mut closure = builder
+        .take_bzl_closure()
+        .context("the stored index carries no .bzl load closure to re-derive over")?;
+    // The stored graph and the stored package closures stay as they are: they
+    // are the ids the packages table speaks. Only the workspace membership and
+    // the input tables come from the fresh walk.
+    closure.workspace = workspace
+        .iter()
+        .filter_map(|&id| base.bzl_id(graph.path(id)))
+        .collect();
+    closure.workspace.sort_unstable();
+    closure.workspace.dedup();
+    closure.inputs = inputs;
+    builder.set_bzl_closure(closure);
+    Ok(builder.finish(rev))
+}
+
+/// The re-derived indexes of a `--rederive` run, a few base revisions at a
+/// time.
+///
+/// Re-deriving costs a full [`cambium_index::IndexBuilder::finish`] — every
+/// label and both CSRs materialised — which at envoy's size is the expensive
+/// part of the replay by an order of magnitude, while consecutive change sets
+/// and history commits frequently share a base. Building once per revision is
+/// what keeps `--rederive` in the same minutes-long budget as the plain
+/// replay.
+#[derive(Default)]
+pub struct RederiveCache {
+    built: BTreeMap<String, cambium_index::IndexData>,
+    /// Insertion order, for eviction.
+    order: Vec<String>,
+    cap: usize,
+}
+
+/// How many re-derived indexes to hold at once.
+///
+/// A re-derived index is the whole index in memory, a few hundred megabytes at
+/// envoy's size, and `--all --history` walks three hundred bases; holding them
+/// all would be tens of gigabytes for no gain. Replays are driven in recorded
+/// order, where a repeated base is a *consecutive* repeat — a change set and
+/// the history commit that shares its parent — so a handful of slots catch
+/// every reuse there is. A base that recurs later is simply rebuilt.
+const REDERIVE_CACHE_SLOTS: usize = 4;
+
+impl RederiveCache {
+    pub fn new() -> Self {
+        Self::with_slots(REDERIVE_CACHE_SLOTS)
+    }
+
+    pub fn with_slots(cap: usize) -> Self {
+        Self {
+            built: BTreeMap::new(),
+            order: Vec::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    /// Re-derives at `rev` unless it is already built. `Some(ms)` is what this
+    /// call cost; `None` means the cache answered.
+    pub fn ensure(
+        &mut self,
+        base: IndexRef<'_>,
+        rev: &str,
+        texts: &dyn WorkspaceText,
+    ) -> Result<Option<u64>> {
+        if self.built.contains_key(rev) {
+            return Ok(None);
+        }
+        let t = std::time::Instant::now();
+        let data = rederive_externals(base, rev, texts)?;
+        let ms = t.elapsed().as_millis() as u64;
+        self.built.insert(rev.to_string(), data);
+        self.order.push(rev.to_string());
+        while self.order.len() > self.cap {
+            let evicted = self.order.remove(0);
+            self.built.remove(&evicted);
+        }
+        Ok(Some(ms))
+    }
+
+    /// The re-derived index at `rev`, which [`RederiveCache::ensure`] must
+    /// have built.
+    pub fn get(&self, rev: &str) -> Option<IndexRef<'_>> {
+        self.built.get(rev).map(|d| d.view())
+    }
+
+    pub fn len(&self) -> usize {
+        self.built.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.built.is_empty()
+    }
 }
 
 /// Runs the static stages over one diff.
@@ -748,6 +932,18 @@ pub fn recorded_from_history(r: &crate::history::HistoryResult) -> Vec<RecordedA
         .collect()
 }
 
+/// How a side of a comparison derived its externals tables, for the
+/// `rederived` divergence: a re-derived replay is *expected* to differ from a
+/// plain one, and a report that only said `true`/`false` would leave a reader
+/// guessing which half of the pair that was.
+fn side(rederived: bool) -> String {
+    if rederived {
+        "re-derived from the repository text at the base".into()
+    } else {
+        "the stored index's tables".into()
+    }
+}
+
 /// One field on which the replay and something recorded disagree.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Divergence {
@@ -901,6 +1097,23 @@ impl ReplayRun {
                 });
             }
         }
+        // How each side derived its externals tables is a fact about the two
+        // runs, not about any one change set, so it is reported once and at
+        // the front: everything below it is being read across a derivation
+        // change and is expected to differ.
+        let sides = |rs: &[ReplayOutcome]| rs.iter().any(|o| o.rederived);
+        let (old_side, new_side) = (sides(&baseline.outcomes), sides(&self.outcomes));
+        if old_side != new_side {
+            out.insert(
+                0,
+                Divergence {
+                    key: "(whole run)".into(),
+                    field: "rederived".into(),
+                    recorded: side(old_side),
+                    replayed: side(new_side),
+                },
+            );
+        }
         out
     }
 }
@@ -951,6 +1164,127 @@ mod tests {
         c.inputs.repos.insert("late_arrival".into());
         b.set_bzl_closure(c);
         b.finish("pin")
+    }
+
+    /// The repository text at one revision, with no git anywhere: the
+    /// re-derivation reads its files through [`WorkspaceText`] exactly as the
+    /// CLI's `git show` implementation serves them.
+    fn files_at(rev: &str, files: &[(&str, &str)]) -> cambium_engine::externals::FixedText {
+        let mut m = BTreeMap::new();
+        for (path, text) in files {
+            m.insert((rev.to_string(), path.to_string()), text.to_string());
+        }
+        cambium_engine::externals::FixedText(m)
+    }
+
+    /// A stored index whose externals tables say one thing while the
+    /// repository text at the base says another.
+    ///
+    /// This is the whole point of `--rederive`: the tables in the index are
+    /// the output of the derivation that ran at index time, so a replay that
+    /// reads them back cannot see a change to the derivation itself. Here the
+    /// stored table feeds `stale_repo` from `stale/**` and knows nothing about
+    /// `.github/config.yml`; the text at the base derives `envoy_repo` from
+    /// it.
+    fn index_with_stale_externals() -> cambium_index::IndexData {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[cambium_index::PackageUpdate {
+            package: "lib".into(),
+            targets: vec![cambium_index::TargetRow::rule(
+                "//lib:core",
+                "cc_library",
+                vec![],
+            )],
+            ..Default::default()
+        }]);
+        let mut c = cambium_index::BzlClosure::default();
+        c.inputs.repos.insert("stale_repo".into());
+        c.inputs.patterns.insert(
+            cambium_index::Pattern::Prefix("stale/".into()),
+            ["stale_repo".to_string()].into_iter().collect(),
+        );
+        b.set_bzl_closure(c);
+        b.finish("pin")
+    }
+
+    const REDERIVE_MODULE: &str = "\
+module(name = \"envoy\", version = \"1\")\n\
+envoy_repo_ext = use_extension(\"//bazel:extensions.bzl\", \"envoy_repo_extension\")\n\
+use_repo(envoy_repo_ext, \"envoy_repo\")\n";
+
+    /// The re-derived replay dirties the repository the *text at the base*
+    /// feeds, not the one the stored table named.
+    #[test]
+    fn rederiving_replaces_the_stored_externals_tables_with_the_bases_own() {
+        let stored = index_with_stale_externals();
+        let cfg = Config::default();
+        let texts = files_at(
+            "base",
+            &[
+                (externals::MODULE_FILE, REDERIVE_MODULE),
+                (
+                    "bazel/extensions.bzl",
+                    "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+                ),
+                (
+                    "bazel/repo.bzl",
+                    "X = attr.label(default = \"@envoy//:.github/config.yml\")\n",
+                ),
+            ],
+        );
+        let changes = [Change::new(Status::Modified, ".github/config.yml")];
+
+        // As stored: nothing knows that path feeds anything.
+        let plain = replay(stored.view(), &cfg, "base", "head", &changes, &texts);
+        assert!(plain.repos.is_empty(), "{:?}", plain.repos);
+
+        let rebuilt = rederive_externals(stored.view(), "base", &texts).unwrap();
+        let rederived = replay(rebuilt.view(), &cfg, "base", "head", &changes, &texts);
+        let repos: Vec<&str> = rederived.repos.iter().map(|r| r.repo.as_str()).collect();
+        assert_eq!(repos, vec!["envoy_repo"], "{:?}", rederived.repos);
+        assert_eq!(rederived.repos[0].rule, RepoRule::InputPath);
+        assert_eq!(rederived.repos[0].paths, vec![".github/config.yml"]);
+
+        // The stale table is gone, and what the run's query established — the
+        // packages — is not.
+        let view = rebuilt.view();
+        assert!(!(0..view.num_repos()).any(|r| view.repo_name(r) == "stale_repo"));
+        assert_eq!(view.num_packages(), stored.view().num_packages());
+        assert_eq!(view.package_name(0), "lib");
+    }
+
+    /// The cache answers a repeated base and holds only its slots, so a run
+    /// over three hundred history commits does not accumulate three hundred
+    /// whole indexes.
+    #[test]
+    fn the_rederive_cache_reuses_a_repeated_base_and_evicts_the_oldest() {
+        let stored = index_with_stale_externals();
+        let files = [
+            (externals::MODULE_FILE, REDERIVE_MODULE),
+            (
+                "bazel/extensions.bzl",
+                "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+            ),
+        ];
+        let mut cache = RederiveCache::with_slots(2);
+        // The second visit to "a" is the cache answering; the rest are builds.
+        for (rev, cached) in [("a", false), ("a", true), ("b", false), ("c", false)] {
+            let texts = files_at(rev, &files);
+            let cost = cache.ensure(stored.view(), rev, &texts).unwrap();
+            assert_eq!(cost.is_none(), cached, "at {rev}");
+        }
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("a").is_none(), "the oldest slot was not evicted");
+        assert!(cache.get("b").is_some() && cache.get("c").is_some());
+    }
+
+    /// A re-derivation with nothing to read is an error rather than a silently
+    /// empty set of tables, which would read as "no repository moved".
+    #[test]
+    fn rederiving_without_repository_text_fails_rather_than_emptying_the_tables() {
+        let stored = index_with_stale_externals();
+        let e = rederive_externals(stored.view(), "base", &NoText).unwrap_err();
+        assert!(e.to_string().contains("nothing to re-derive"), "{e}");
     }
 
     fn module_at(rev: &str, text: &str) -> cambium_engine::externals::FixedText {
@@ -1118,6 +1452,32 @@ mod tests {
         let fields: Vec<&str> = d.iter().map(|x| x.field.as_str()).collect();
         assert!(fields.contains(&"dirty_packages"));
         assert_eq!(d.iter().filter(|x| x.field == "present").count(), 2);
+    }
+
+    /// A re-derived run compared against a plain one is expected to differ,
+    /// so the report says which side was which — once, at the front, rather
+    /// than once per change set.
+    #[test]
+    fn a_rederived_run_says_so_once_when_compared_against_a_plain_one() {
+        let run = |rederived: bool| ReplayRun {
+            schema: REPLAY_SCHEMA,
+            subject: "envoy".into(),
+            pin: "pin".into(),
+            outcomes: vec!["ab", "cd"]
+                .into_iter()
+                .map(|k| ReplayOutcome {
+                    rederived,
+                    ..outcome(k, k, false, 3, false)
+                })
+                .collect(),
+        };
+        let d = run(true).divergences_against(&run(false));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].field, "rederived");
+        assert!(d[0].replayed.contains("re-derived"), "{:?}", d[0]);
+        assert!(d[0].recorded.contains("stored index"), "{:?}", d[0]);
+        // Two runs derived the same way say nothing.
+        assert!(run(true).divergences_against(&run(true)).is_empty());
     }
 
     #[test]

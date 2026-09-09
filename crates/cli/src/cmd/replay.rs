@@ -79,6 +79,15 @@ pub struct Args {
     #[arg(long = "repo")]
     pub repo: Option<PathBuf>,
 
+    /// Rebuild the externals side tables from the repository text at each
+    /// change set's base before replaying it, instead of reading back the
+    /// tables the run's cambium derived. This is what makes an index-time
+    /// change — `build_repo_inputs` and what feeds it — visible offline.
+    /// Requires --repo. A re-derived replay is not comparable against a plain
+    /// one as engine evidence; --baseline says which side was which.
+    #[arg(long)]
+    pub rederive: bool,
+
     /// Compare against a previous `--all --save-baseline` file rather than
     /// against what the run recorded. This is the tight loop: both sides ran
     /// on the same stored index, so every difference is the engine's.
@@ -133,6 +142,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         .with_context(|| format!("opening {}", index_path.display()))?;
     let view = file.view();
 
+    anyhow::ensure!(
+        !args.rederive || args.repo.is_some(),
+        "--rederive reads MODULE.bazel, WORKSPACE and the workspace .bzl closure at each base \
+         revision, so it needs --repo <git dir>"
+    );
     let repo = args
         .repo
         .as_ref()
@@ -175,6 +189,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     };
 
     let explicit = !args.paths.is_empty();
+    let mut rederived = replay::RederiveCache::new();
     let mut outcomes: Vec<ReplayOutcome> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for want in &wanted {
@@ -201,14 +216,35 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Some(r) => Box::new(GitTextOwned(r.clone())),
             None => Box::new(replay::NoText),
         };
-        outcomes.push(replay::replay(
-            view,
+        // With --rederive the index the stages see is the stored one with its
+        // externals tables rebuilt from the base's own text; without it, the
+        // stored index exactly as the run left it.
+        let mut cost = None;
+        let replay_view = if args.rederive {
+            match rederived.ensure(view, &want.base, texts.as_ref()) {
+                Ok(ms) => {
+                    cost = ms;
+                    rederived.get(&want.base).unwrap_or(view)
+                }
+                Err(e) => {
+                    skipped.push(format!("{}: cannot re-derive: {e:#}", want.key()));
+                    continue;
+                }
+            }
+        } else {
+            view
+        };
+        let mut o = replay::replay(
+            replay_view,
             &cfg,
             &want.base,
             &want.head,
             &changes,
             texts.as_ref(),
-        ));
+        );
+        o.rederived = args.rederive;
+        o.rederive_ms = cost;
+        outcomes.push(o);
     }
 
     let run = ReplayRun {
@@ -246,6 +282,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 "pin": run.pin,
                 "index": index_path.display().to_string(),
                 "compared_against": against,
+                "rederived": args.rederive,
                 "replays": run.outcomes,
                 "divergences": divergences,
                 "skipped": skipped,
@@ -349,6 +386,17 @@ fn load_recorded(
 fn render_one(o: &ReplayOutcome, recorded: Option<&RecordedAnswer>, max: usize) {
     println!("{} .. {}", o.base, o.head);
     println!("  changed files:   {}", o.changed_files);
+    if o.rederived {
+        println!(
+            "  REDERIVED:       the externals tables were rebuilt from the repository text at \
+             {}{}",
+            o.base,
+            match o.rederive_ms {
+                Some(ms) => format!(" ({ms} ms)"),
+                None => " (cached from an earlier change set on this base)".into(),
+            }
+        );
+    }
     for note in &o.indeterminate {
         println!("  INDETERMINATE:   {note}");
     }
@@ -460,6 +508,19 @@ fn render_all(
         run.pin
     );
     println!("  global: {globals}   cold rebuild: {colds}   indeterminate (not gated): {indet}");
+    let rederived = run.outcomes.iter().filter(|o| o.rederived).count();
+    if rederived > 0 {
+        let costs: Vec<u64> = run.outcomes.iter().filter_map(|o| o.rederive_ms).collect();
+        let total: u64 = costs.iter().sum();
+        let worst = costs.iter().copied().max().unwrap_or(0);
+        println!(
+            "  REDERIVED: {rederived} of {} replays used externals tables rebuilt from the \
+             repository text at their own base, not the tables the run stored \
+             ({} rebuilds, {total} ms total, {worst} ms worst)",
+            run.outcomes.len(),
+            costs.len(),
+        );
+    }
     for s in skipped {
         println!("  SKIPPED {s}");
     }
