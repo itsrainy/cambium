@@ -5,6 +5,13 @@
 #   SUBJECTS="envoy apollo" tools/bench/precheck.sh
 #   SAVE_BASELINE=1 tools/bench/precheck.sh      # record today's answers
 #   BASELINE=1 tools/bench/precheck.sh           # gate against that record
+#   REDERIVE=1 tools/bench/precheck.sh           # also re-derive the externals
+#                                                # tables at each base
+#
+# REDERIVE=1 is for a change to how the *index* derives its externals side
+# tables (`cambium_index::build_repo_inputs` and what feeds it). Without it a
+# replay reads the tables the run's cambium already wrote, so such a change is
+# invisible. Compare a re-derived run only against another re-derived run.
 #
 # It pulls, per subject, the stored index at the pin and the recorded results
 # from the benchmark box into `bench-precheck/` (git-ignored), builds cambi in
@@ -116,7 +123,16 @@ for s in $SUBJECTS; do
   pull "$s" || { fail=1; continue; }
   args=("$s" --results-dir "$CACHE" --all)
   mirror=$LOCAL_MIRRORS/$s.git
-  [ -d "$mirror" ] && args+=(--repo "$mirror")
+  if [ -d "$mirror" ]; then
+    args+=(--repo "$mirror")
+    # REDERIVE=1 rebuilds the externals side tables from each base's own
+    # repository text instead of reading back the ones the run's cambium
+    # derived, which is the only way an index-time change is visible offline.
+    # It needs the mirror, so it is only added when there is one.
+    [ "${REDERIVE:-0}" = 1 ] && args+=(--rederive)
+  elif [ "${REDERIVE:-0}" = 1 ]; then
+    echo "  REDERIVE=1 but no mirror at $mirror; replaying the stored tables" >&2
+  fi
   [ "${BASELINE:-0}" = 1 ] && args+=(--baseline "$CACHE/$s/baseline.json")
   [ "${SAVE_BASELINE:-0}" = 1 ] && args+=(--save-baseline "$CACHE/$s/baseline.json")
   "$CAMBI" bench replay "${args[@]}" || fail=1
