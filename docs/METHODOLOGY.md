@@ -372,8 +372,12 @@ $ REDERIVE=1 tools/bench/precheck.sh
 With `--rederive` each change set is replayed against the stored index with
 those tables rebuilt, by this build, from the repository text at the change
 set's *own base* (`git show <base>:MODULE.bazel` and the workspace closure it
-loads). It needs `--repo`, it is cached per distinct base revision, and every
-outcome carries `rederived` in the JSON and a `REDERIVED` marker in the text.
+loads). It needs `--repo`, and every outcome carries `rederived` in the JSON and a
+`REDERIVED` marker in the text. It costs a whole index rebuild per distinct
+base — about 2.5 s on envoy's 7 MB index, 0.6 s on bazel's, so a forty
+change-set subject goes from seconds to a minute or two — and holds only a few
+bases at a time, because a re-derived index is the index in memory and a
+`--history` run walks three hundred of them.
 
 What it settles: whether an index-time derivation change moves the externals
 stage's answer on the real corpus, and — with the current derivation — whether
