@@ -1054,6 +1054,7 @@ impl Engine {
                     Some(repos) => {
                         tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
                         ext.by_bzl += repos.len();
+                        ext.name(path, repos.iter());
                         // The rule's implementation moved, so what it writes
                         // into the repository can be anything.
                         ext.load_repos.extend(repos.iter().cloned());
@@ -1616,28 +1617,30 @@ fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
 /// What actually filled the dirty set, when it overflowed.
 ///
 /// The repository set alone is hundreds of names and thousands of characters
-/// and says nothing about *why*; what diagnoses the overflow is which input
-/// path dirtied which repository, and how many packages each repository's rule
-/// (2) reach then contributed. Ten lines at most, the largest contributors
-/// first, at `info` — a run that just decided to re-query the whole repository
-/// can afford them.
+/// and says nothing about *why*; what diagnoses the overflow is which changed
+/// file dirtied which repository — an input path, a workspace `.bzl`,
+/// `MODULE.bazel` or its lock — and how many distinct packages each
+/// repository's rule (2) reach then contributed. Ten lines at most, the
+/// largest contributors first, at `info` — a run that just decided to
+/// re-query the whole repository can afford them.
 fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String, usize>) {
     const MAX_LINES: usize = 10;
     let mut rows: Vec<(&str, usize, &[String])> = ext
-        .input_paths
+        .dirtied_by
         .iter()
-        .map(|(repo, paths)| {
+        .map(|(repo, files)| {
             (
                 repo.as_str(),
                 packages_by_repo.get(repo).copied().unwrap_or(0),
-                paths.as_slice(),
+                files.as_slice(),
             )
         })
         .collect();
-    // A repository dirtied by `MODULE.bazel` or by a changed `.bzl` has no
-    // input paths, but can still be the one that reached the most packages.
+    // Every route that names a repository records what named it; a row with
+    // nothing here is a repository the reach found that no route claimed,
+    // which is worth seeing rather than hiding.
     for (repo, packages) in packages_by_repo {
-        if !ext.input_paths.contains_key(repo) {
+        if !ext.dirtied_by.contains_key(repo) {
             rows.push((repo.as_str(), *packages, &[]));
         }
     }
@@ -1653,7 +1656,7 @@ fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String
     for (repo, packages, paths) in rows.iter().take(MAX_LINES) {
         tracing::info!(
             repo = %repo,
-            packages_from_loads = packages,
+            packages = packages,
             dirtied_by = ?paths,
             "  contributor"
         );
@@ -1793,6 +1796,7 @@ fn dirty_known_bzl(id: u32, path: &str, w: &mut Witness<'_>, externals_enabled: 
         {
             Some(repos) => {
                 w.ext.by_bzl += repos.len();
+                w.ext.name(path, repos.iter());
                 w.ext.load_repos.extend(repos.iter().cloned());
                 w.ext.repos.extend(repos);
             }

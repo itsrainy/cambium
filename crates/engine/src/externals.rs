@@ -205,11 +205,26 @@ pub struct Externals {
     /// the repository rule writes: their label consumers are dirty, their
     /// loaders are not.
     pub label_only: usize,
-    /// For each repository an input-path edit named, the changed paths that
-    /// named it. Kept for the diagnostic a run prints when its dirty set
-    /// overflows `max_dirty_packages`: the repository set alone is hundreds of
-    /// names and says nothing about *why*.
-    pub input_paths: BTreeMap<String, Vec<String>>,
+    /// For each repository that moved, the changed files that moved it: an
+    /// input path the repository is built from, a workspace-closure `.bzl`
+    /// that defines it, `MODULE.bazel`, its lock, or `WORKSPACE`. Kept for the
+    /// diagnostic a run prints when its dirty set overflows
+    /// `max_dirty_packages`: the repository set alone is hundreds of names and
+    /// says nothing about *why*, and a route that named repositories without
+    /// saying which file did so left that line empty.
+    pub dirtied_by: BTreeMap<String, Vec<String>>,
+}
+
+impl Externals {
+    /// Record that `file` moved every repository in `repos`.
+    pub fn name<'a>(&mut self, file: &str, repos: impl IntoIterator<Item = &'a String>) {
+        for r in repos {
+            let by = self.dirtied_by.entry(r.clone()).or_default();
+            if !by.iter().any(|f| f == file) {
+                by.push(file.to_string());
+            }
+        }
+    }
 }
 
 /// Runs the stage over a diff.
@@ -274,10 +289,12 @@ pub fn analyse(
                         return out;
                     };
                     out.by_bzl += named.len();
+                    out.name(p, named.iter());
                     out.repos.extend(named.iter().cloned());
                     out.load_repos.extend(named);
                 }
                 out.by_module += repos.len();
+                out.name(path, repos.iter());
                 // A declaration that moved replaces its repository wholesale,
                 // `.bzl` files included: rule (2) applies.
                 out.load_repos.extend(repos.iter().cloned());
@@ -297,6 +314,7 @@ pub fn analyse(
             }
             ModuleChange::Repos(repos) => {
                 out.by_module = repos.len();
+                out.name(MODULE_FILE, repos.iter());
                 // A version bump replaces the repository wholesale, so every
                 // file in it, `.bzl` included, may have moved.
                 out.load_repos.extend(repos.iter().cloned());
@@ -336,6 +354,7 @@ pub fn analyse(
             }
             ModuleChange::Repos(repos) => {
                 out.by_module += repos.len();
+                out.name(MODULE_LOCK, repos.iter());
                 // The repository's *contents* moved, so a `.bzl` inside it may
                 // have moved with them: rule (2) applies, as it does for a
                 // `MODULE.bazel` version bump.
@@ -372,10 +391,9 @@ pub fn analyse(
         .len();
     for (repo, paths) in by_input {
         let name = base.repo_name(repo).to_string();
-        out.input_paths
-            .entry(name.clone())
-            .or_default()
-            .extend(paths.iter().map(|p| p.to_string()));
+        for p in &paths {
+            out.name(p, std::iter::once(&name));
+        }
         if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, &paths) {
             out.load_repos.insert(name.clone());
         } else {
@@ -390,10 +408,9 @@ pub fn analyse(
     }
     for (repo, paths) in by_target {
         let name = base.repo_name(repo).to_string();
-        out.input_paths
-            .entry(name.clone())
-            .or_default()
-            .extend(paths.iter().map(|p| p.to_string()));
+        for p in &paths {
+            out.name(p, std::iter::once(&name));
+        }
         if out.repos.insert(name.clone()) {
             out.label_only += 1;
             tracing::debug!(
@@ -613,12 +630,18 @@ pub fn reach(
             charged.insert(e, owner.as_str());
         }
         if !hot.is_empty() {
-            let charge = |out: &mut RepoReach, row: &[u32], pkg: &str| {
+            // Distinct packages per repository: a package whose closure
+            // reaches the repository through several `.bzl` rows, or whose
+            // rows carry several of its labels, is one package. Counting the
+            // (package, load) pairs instead once printed a contributor at
+            // nine times the repository's package count.
+            let mut by_repo: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+            let mut charge = |out: &mut RepoReach, row: &[u32], pkg: &str| {
                 let mut hit = false;
                 for e in row {
                     if let Some(owner) = charged.get(e) {
                         hit = true;
-                        *out.packages_by_repo.entry(owner.to_string()).or_default() += 1;
+                        by_repo.entry(owner).or_default().insert(pkg.to_string());
                     }
                 }
                 if hit {
@@ -644,6 +667,9 @@ pub fn reach(
                 if row.iter().any(|e| hot.contains(e)) {
                     charge(&mut out, &row, base.package_name(p));
                 }
+            }
+            for (repo, pkgs) in by_repo {
+                out.packages_by_repo.insert(repo.to_string(), pkgs.len());
             }
         }
     }
