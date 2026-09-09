@@ -28,7 +28,9 @@ pub struct GraphDiff {
     /// flags, the `.bzl` and package external-label rows. These decide how
     /// wide a diff goes before any query happens, and none of them is a node,
     /// an edge or a rule hash — an index that lost one describes the same
-    /// graph and answers a different question.
+    /// graph and answers a different question. Absent from records written
+    /// before the field existed; `bench report` reads every history file.
+    #[serde(default)]
     pub externals_mismatch: Vec<String>,
     /// Totals, so a capped report still says how big the disagreement is.
     pub counts: DiffCounts,
@@ -374,5 +376,16 @@ mod tests {
         assert_eq!(d.counts.externals_mismatch, 1, "{:?}", d.externals_mismatch);
         assert!(d.externals_mismatch[0].contains("api/"), "{d:?}");
         assert!(!d.is_empty());
+    }
+
+    #[test]
+    fn a_diff_written_before_externals_mismatch_existed_still_reads() {
+        let old = r#"{"nodes_only_in_applied":[],"nodes_only_in_rebuilt":[],"kind_mismatch":[],
+            "rule_hash_mismatch":[],"edges_only_in_applied":[],"edges_only_in_rebuilt":[],
+            "counts":{"nodes_only_in_applied":0,"nodes_only_in_rebuilt":0,"kind_mismatch":0,
+            "rule_hash_mismatch":0,"edges_only_in_applied":0,"edges_only_in_rebuilt":0}}"#;
+        let d: GraphDiff = serde_json::from_str(old).expect("pre-field record parses");
+        assert!(d.externals_mismatch.is_empty());
+        assert_eq!(d.counts.externals_mismatch, 0);
     }
 }
