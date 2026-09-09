@@ -91,8 +91,8 @@ rm -f ~/finish-bootstrap.log; nohup bash ~/finish-bootstrap.sh > ~/finish-bootst
     # The previous sync's log is removed before the new build starts, so a
     # DONE line here is this build's; without that the wait once returned
     # on the old line and the driver's preflight had to refuse the binary.
-    while ! ssh -i "$PEM" "ubuntu@$HOST" 'grep -qE "BOOTSTRAP (DONE|FAILED)" ~/finish-bootstrap.log' 2>/dev/null; do sleep 20; done
-    if ssh -i "$PEM" "ubuntu@$HOST" 'grep -q "BOOTSTRAP FAILED" ~/finish-bootstrap.log'; then
+    while ! ssh -i "$PEM" "ubuntu@$HOST" 'grep -qE "^BOOTSTRAP (DONE|FAILED)" ~/finish-bootstrap.log' 2>/dev/null; do sleep 20; done
+    if ssh -i "$PEM" "ubuntu@$HOST" 'grep -q "^BOOTSTRAP FAILED" ~/finish-bootstrap.log'; then
       echo "BUILD FAILED on the box:" >&2
       ssh -i "$PEM" "ubuntu@$HOST" 'grep -E "^error|BOOTSTRAP FAILED" -A4 ~/finish-bootstrap.log | tail -30' >&2
       exit 1
