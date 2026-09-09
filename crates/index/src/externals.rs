@@ -47,18 +47,71 @@
 //! # Attribution, and why it is conservative in the right direction
 //!
 //! A repository rule's implementation lives in a `.bzl`; the *instance* is
-//! named in `MODULE.bazel` (`use_repo(ext, "envoy_repo")`, or the `name =` of
-//! a `use_repo_rule` call). So the `.bzl` label in `use_extension` /
-//! `use_repo_rule` is the seed: that file, and everything it transitively
-//! `load()`s, is attributed to the repositories that use it. A label found in
-//! such a file is an input of those repositories.
+//! named where the rule is called — `use_repo(ext, "envoy_repo")` in
+//! `MODULE.bazel`, the `name =` of a `use_repo_rule` call, or a `name =` in
+//! Starlark itself. The question this module answers is which of those
+//! instances a given main-repo path feeds.
+//!
+//! Answering it per *file* is not good enough. envoy's `bazel/extensions.bzl`
+//! declares five module extensions and loads `bazel/repo.bzl`, so a file-level
+//! reading makes `repo.bzl`'s
+//! `attr.label(default = "@envoy//:.github/config.yml")` an input of all six
+//! repositories — `envoy_repo` among them, whose generated `compiler.bzl` is
+//! in eleven hundred package load closures. Every commit that touched that
+//! YAML then re-queried the whole repository. So attribution is per
+//! *occurrence*: the analysis in [`crate::attribution`] reads the closure's
+//! Starlark and asks, of each string literal, which repositories the code it
+//! sits in can create.
+//!
+//! Four rules, innermost first:
+//!
+//! 1. the nearest enclosing call with a literal `name =` — `pip_parse(name =
+//!    "base_pip3", requirements_lock = "@envoy//tools/base:requirements.txt")`
+//!    feeds `base_pip3` and nothing else;
+//! 2. otherwise, a literal inside an `X = repository_rule(...)` or
+//!    `E = module_extension(...)` declaration — an `attrs =` default the rule
+//!    itself resolves — feeds the instances of `X`, or the `use_repo` names of
+//!    `E`;
+//! 3. otherwise, the enclosing `def`: a rule or extension implementation feeds
+//!    that rule's instances, a forwarding wrapper (envoy's
+//!    `external_http_archive(name, **kwargs)`) feeds the names its callers
+//!    pass, and any other macro feeds what it and the macros it calls
+//!    instantiate;
+//! 4. otherwise — a literal at module level — the file's old answer: the
+//!    repositories whose extension or repo-rule `.bzl` reaches this file
+//!    through `load()`, and failing that every repository in the universe.
+//!
+//! The instantiation sets are two fixpoints over the closure's call graph, so
+//! a name that reaches a repository rule through three macros still lands on
+//! the right repository.
 //!
 //! Over-attribution is safe (more repositories dirty, more targets reported,
-//! never fewer) and under-attribution is not, so anything unattributable —
-//! a main-repo label in a workspace-closure `.bzl` that no extension or repo
-//! rule reaches — is attributed to *every* repository the main repository
-//! defines. That is bounded (a handful of repositories on every subject)
-//! and still far short of global.
+//! never fewer) and under-attribution is not, and every step above resolves an
+//! unknown to the wide answer rather than to a guess:
+//!
+//! - a `name =` the analysis cannot evaluate — string arithmetic, a loop
+//!   variable — makes its whole scope fall back, and makes the callable it
+//!   names instantiable under any name;
+//! - a call to a symbol the closure does not define and that is not one of
+//!   Starlark's own builtins may be a macro from another repository declaring
+//!   repositories under names nothing here can see, so it too makes its scope
+//!   fall back;
+//! - a rule whose instantiation is never seen, or a macro nothing calls, has
+//!   an empty answer, which is read as "nothing learned" and falls back;
+//! - a syntactic shape the reader cannot structure is simply not recorded, and
+//!   the file keeps its old answer.
+//!
+//! The fallback itself is a set, not the world: the repositories the main
+//! repository defines, plus every literal `name =` written anywhere in the
+//! closure. On a WORKSPACE-only repository the first half is empty and the
+//! second is the whole answer, which is what turns issue #6 — every
+//! `bazel/repositories.bzl` edit going global — into a named set.
+//!
+//! [`RepoInputs::bzl_repos`], the answer when a workspace `.bzl` *itself*
+//! changes, stays the union of the load-graph propagation and what the file
+//! can define. It is not narrowed below the propagation: a `.bzl` may export a
+//! constant that some other file's rule reads, and only the `load()` edge sees
+//! that.
 //!
 //! # The soundness gap, stated plainly
 //!
@@ -72,6 +125,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::attribution::{arg_spans, top_level_spans, Attribution};
 use crate::loads::{lex, unescape, FileText, Lexed, LoadGraph, RepoMapping, Tok};
 
 /// A main-repo path pattern that feeds an external repository.
@@ -141,6 +195,14 @@ pub struct PathMap {
     pub from: String,
     /// The corresponding repository-relative path or directory prefix.
     pub to: String,
+    /// True when this mapping accounts for *everything* in the repository: a
+    /// `local_path_override` directory, or a `local_repository` / a
+    /// `new_local_repository` whose `path` becomes the repository root. Such a
+    /// repository cannot contain a `.bzl` that lives outside the directory, so
+    /// a changed path the mapping does not cover is not a `.bzl` it exports —
+    /// which is what lets the engine skip rule (2) for it. A partial mapping,
+    /// such as one `symlink` out of several, is never exhaustive.
+    pub exhaustive: bool,
 }
 
 impl PathMap {
@@ -155,20 +217,42 @@ impl PathMap {
         }
     }
 
-    /// The stored form, `from` and `to` joined by a NUL.
+    /// A whole-directory mapping that accounts for the repository.
+    pub fn exhaustive_dir(from: String) -> PathMap {
+        PathMap {
+            from,
+            to: String::new(),
+            exhaustive: true,
+        }
+    }
+
+    /// The stored form: `from` and `to` joined by a NUL, with a third
+    /// NUL-separated field — `!` — appended when the mapping is exhaustive.
+    /// Two fields is what every index written before that field existed
+    /// contains, and it reads back as non-exhaustive, which is the wide
+    /// answer.
     pub fn encode(&self) -> String {
         let mut s = self.from.clone();
         s.push(SEP);
         s.push_str(&self.to);
+        if self.exhaustive {
+            s.push(SEP);
+            s.push('!');
+        }
         s
     }
 
-    /// Reads back [`PathMap::encode`].
+    /// Reads back [`PathMap::encode`], in either flavour.
     pub fn decode(s: &str) -> Option<PathMap> {
-        let (from, to) = s.split_once(SEP)?;
+        let (from, rest) = s.split_once(SEP)?;
+        let (to, exhaustive) = match rest.split_once(SEP) {
+            Some((to, mark)) => (to, mark == "!"),
+            None => (rest, false),
+        };
         Some(PathMap {
             from: from.to_string(),
             to: to.to_string(),
+            exhaustive,
         })
     }
 }
@@ -390,25 +474,9 @@ struct Stmt<'a, 't> {
 /// Splits a token stream into top-level statements: every token that starts a
 /// line at bracket depth zero begins one.
 fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
-    let mut starts = Vec::new();
-    let mut depth = 0i32;
-    for (i, t) in toks.iter().enumerate() {
-        if t.col0 && depth == 0 {
-            starts.push(i);
-        }
-        match t.tok {
-            Tok::Open => depth += 1,
-            Tok::Close => depth -= 1,
-            _ => {}
-        }
-    }
-    starts.push(toks.len());
-    starts
-        .windows(2)
-        .filter(|w| w[1] > w[0])
-        .map(|w| Stmt {
-            toks: &toks[w[0]..w[1]],
-        })
+    top_level_spans(toks)
+        .into_iter()
+        .map(|r| Stmt { toks: &toks[r] })
         .collect()
 }
 
@@ -697,8 +765,10 @@ pub struct BzlPathMaps {
     pub named: Vec<(String, PathMap)>,
     /// `repository_ctx.symlink(<main-repo path or label>, "<dest>")`: the call
     /// says nothing about which repository it builds, so these are attributed
-    /// to the repositories the file is known to define.
-    pub symlinks: Vec<PathMap>,
+    /// from the position of the call, which is inside the implementation of
+    /// the rule that makes the mapping true. The token index of the call's
+    /// `(` comes back alongside so the caller can ask for that attribution.
+    pub symlinks: Vec<(usize, PathMap)>,
 }
 
 /// Names a `symlink` source argument may contain and still be a literal.
@@ -734,13 +804,7 @@ pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
             let args = parse_args(text, &toks, i + 1);
             if let (Some(n), Some(d)) = (args.first("name"), args.first("path").and_then(local_dir))
             {
-                out.named.push((
-                    n.to_string(),
-                    PathMap {
-                        from: d,
-                        to: String::new(),
-                    },
-                ));
+                out.named.push((n.to_string(), PathMap::exhaustive_dir(d)));
             }
             continue;
         }
@@ -771,50 +835,8 @@ pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
             continue;
         };
         if let Some(pm) = symlink_map(&src, &dst, m) {
-            out.symlinks.push(pm);
+            out.symlinks.push((i + 1, pm));
         }
-    }
-    out
-}
-
-/// The `(keyword, token range)` of every argument of the call whose `(` is at
-/// `open`.
-fn arg_spans(toks: &[Lexed<'_>], open: usize) -> Vec<(Option<String>, std::ops::Range<usize>)> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = open + 1;
-    let mut key: Option<String> = None;
-    let mut i = open;
-    while i < toks.len() {
-        match toks[i].tok {
-            Tok::Open => depth += 1,
-            Tok::Close => {
-                depth -= 1;
-                if depth == 0 {
-                    if i > start {
-                        out.push((key.take(), start..i));
-                    }
-                    break;
-                }
-            }
-            Tok::Punct(b',') if depth == 1 => {
-                if i > start {
-                    out.push((key.take(), start..i));
-                }
-                start = i + 1;
-            }
-            Tok::Name(n)
-                if depth == 1
-                    && i == start
-                    && matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
-                    && !matches!(toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'='))) =>
-            {
-                key = Some(n.to_string());
-                start = i + 2;
-            }
-            _ => {}
-        }
-        i += 1;
     }
     out
 }
@@ -885,10 +907,12 @@ fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
             } else {
                 format!("{dst}/")
             },
+            exhaustive: false,
         }),
         None => (!dst.is_empty()).then(|| PathMap {
             from,
             to: dst.to_string(),
+            exhaustive: false,
         }),
     }
 }
@@ -1137,10 +1161,10 @@ pub fn build_repo_inputs(
             .entry(Pattern::Prefix(path.clone()))
             .or_default()
             .insert(repo.clone());
-        out.path_maps.entry(repo).or_default().insert(PathMap {
-            from: path.clone(),
-            to: String::new(),
-        });
+        out.path_maps
+            .entry(repo)
+            .or_default()
+            .insert(PathMap::exhaustive_dir(path.clone()));
     }
     // The same shape written as a repository rule in `MODULE.bazel`.
     for (repo, path) in &facts.local_repo_paths {
@@ -1154,10 +1178,7 @@ pub fn build_repo_inputs(
         out.path_maps
             .entry(repo.clone())
             .or_default()
-            .insert(PathMap {
-                from: path.clone(),
-                to: String::new(),
-            });
+            .insert(PathMap::exhaustive_dir(path.clone()));
     }
     for d in facts.deps.values() {
         out.canonical
@@ -1182,9 +1203,59 @@ pub fn build_repo_inputs(
         }
     }
 
-    // Every main-repo label in a workspace-closure `.bzl` is an input of the
-    // repositories that file defines — or, when it defines none we could
-    // attribute, of every repository the main repository defines.
+    // Per-occurrence attribution. The analysis reads every file of the
+    // closure, the workspace files included: a `local_repository(name = ...)`
+    // written in `WORKSPACE` names a repository nothing else does, and a
+    // `MODULE.bazel` tag call is a call site like any other.
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for name in crate::loads::WORKSPACE_FILES {
+        if let Some(t) = src.text(name) {
+            texts.push((name.to_string(), t));
+        }
+    }
+    for &id in workspace {
+        let path = graph.path(id).to_string();
+        if let Some(t) = src.text(&path) {
+            texts.push((path, t));
+        }
+    }
+    let mut att = Attribution::scan(&texts, m);
+    // The universe a fallback ranges over: every repository `MODULE.bazel`
+    // names, plus every literal `name =` written anywhere in the closure. On a
+    // WORKSPACE-only repository the first is empty and the second is the whole
+    // answer, which is what turns "no idea, invalidate everything" into a set.
+    out.repos.extend(att.literal_names.iter().cloned());
+    let fallbacks: BTreeMap<String, BTreeSet<String>> = texts
+        .iter()
+        .map(|(p, _)| {
+            let repos = match graph.id_of(p).and_then(|id| owner.get(&id)) {
+                Some(r) if !r.is_empty() => r.clone(),
+                _ => out.repos.clone(),
+            };
+            (p.clone(), repos)
+        })
+        .collect();
+    let mut seeds_by_sym: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for e in facts.extensions.values() {
+        if let Some(p) = main_bzl_path(&e.bzl, m) {
+            seeds_by_sym
+                .entry((p, e.name.clone()))
+                .or_default()
+                .extend(e.repos.iter().cloned());
+        }
+    }
+    for r in facts.repo_rules.values() {
+        if let Some(p) = main_bzl_path(&r.bzl, m) {
+            seeds_by_sym
+                .entry((p, r.rule.clone()))
+                .or_default()
+                .extend(r.repos.iter().cloned());
+        }
+    }
+    att.solve(&fallbacks, &seeds_by_sym);
+
+    // A main-repo label in a workspace-closure `.bzl` is an input of the
+    // repositories the *occurrence* is attributed to.
     //
     // Which *kind* of input is tracked alongside: everything derived so far
     // (`MODULE.bazel` shapes) and every literal that is itself a label feeds
@@ -1192,24 +1263,32 @@ pub fn build_repo_inputs(
     // A pattern is target-only when no occurrence of it was the first kind.
     let mut direct: BTreeSet<Pattern> = out.patterns.keys().cloned().collect();
     let mut embedded: BTreeSet<Pattern> = BTreeSet::new();
+    // A `.bzl` a repository rule loads is part of that rule's implementation,
+    // so a change to it moves everything the loader can define. That is what
+    // the load-graph propagation above says, and no per-occurrence reading
+    // narrows it: this file may export a constant some other file's rule
+    // reads. So the file-level answer stays the union of the two.
+    let mut own: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for &id in workspace {
         let path = graph.path(id).to_string();
-        let repos = match owner.get(&id) {
-            Some(r) if !r.is_empty() => r.clone(),
-            _ => out.repos.clone(),
-        };
-        out.bzl_repos.insert(path.clone(), repos.clone());
-        if repos.is_empty() {
-            continue;
-        }
         let Some(text) = src.text(&path) else {
             continue;
         };
-        for l in string_literals(&text) {
+        let mut file_repos = att.file_repos(&path).repos;
+        for (tok, l) in string_literals(&text) {
+            let pats = main_repo_patterns(&l.text, m);
+            if pats.is_empty() {
+                continue;
+            }
+            let a = att.at(&path, tok);
+            if a.repos.is_empty() {
+                continue;
+            }
+            file_repos.extend(a.repos.iter().cloned());
             // A generated `.bzl` can `load()` a main-repo `.bzl` it names, so
             // an embedded `.bzl` label is still a real input.
             let feeds_rule = !l.embedded || l.text.ends_with(".bzl");
-            for pat in main_repo_patterns(&l.text, m) {
+            for pat in pats {
                 if feeds_rule {
                     direct.insert(pat.clone());
                 } else {
@@ -1218,33 +1297,84 @@ pub fn build_repo_inputs(
                 out.patterns
                     .entry(pat)
                     .or_default()
-                    .extend(repos.iter().cloned());
+                    .extend(a.repos.iter().cloned());
             }
         }
-        // Path mappings the file declares. A `local_repository` call names its
-        // own repository; a `symlink` does not, so it is attributed only to
-        // the repositories this `.bzl` is *known* to define — never to the
-        // fallback "every repository" set, which would hand one rule's mapping
-        // to repositories built by something else entirely.
-        let maps = scan_bzl_path_maps(&text, m);
+        own.insert(path, file_repos);
+    }
+    // Path mappings, from the workspace files as well as the `.bzl` closure.
+    // A `local_repository` call names its own repository; a `symlink` does
+    // not, so it is attributed from the position of the call — inside the
+    // implementation of the rule the mapping is true of — and dropped when
+    // that position is unattributable, rather than being handed to every
+    // repository the main repository defines.
+    for (path, text) in &texts {
+        let maps = scan_bzl_path_maps(text, m);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
                 let pat = Pattern::Prefix(pm.from.clone());
                 direct.insert(pat.clone());
                 out.patterns.entry(pat).or_default().insert(repo.clone());
+                own.entry(path.clone()).or_default().insert(repo.clone());
                 out.path_maps.entry(repo).or_default().insert(pm);
             }
         }
-        if let Some(owned) = owner.get(&id).filter(|r| !r.is_empty()) {
-            for pm in &maps.symlinks {
-                for repo in owned {
-                    out.path_maps
-                        .entry(repo.clone())
-                        .or_default()
-                        .insert(pm.clone());
+        for (tok, pm) in &maps.symlinks {
+            let a = att.at(path, *tok);
+            if !a.exact || a.repos.is_empty() {
+                continue;
+            }
+            for repo in &a.repos {
+                out.path_maps
+                    .entry(repo.clone())
+                    .or_default()
+                    .insert(pm.clone());
+            }
+        }
+    }
+    // On a WORKSPACE-only repository there are no seeds at all, so the
+    // load-graph propagation says nothing and the fallback used to be the
+    // empty set — which the engine reads as "no idea", and goes global. What
+    // a `.bzl` there can define is instead its own attributed set plus that of
+    // every file that loads it: if `bazel/repositories.bzl` changes, the
+    // repositories `envoy_dependencies()` declares move, and so do those of
+    // the helpers it loads, but the pips of `bazel/python_dependencies.bzl` do
+    // not. That holds only while the workspace files themselves are readable:
+    // a `local_repository(name = SOME_CONSTANT)` in `WORKSPACE` would define a
+    // repository no file can be held responsible for, and then every file
+    // keeps the whole set.
+    let workspace_only = *facts == ModuleFacts::default();
+    let readable = !crate::loads::WORKSPACE_FILES
+        .iter()
+        .any(|p| src.text(p).is_some() && att.module_is_dynamic(p));
+    let mut prop: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+    if workspace_only && readable {
+        for &id in workspace {
+            prop.insert(id, own.get(graph.path(id)).cloned().unwrap_or_default());
+        }
+        let mut queue: Vec<u32> = workspace.to_vec();
+        while let Some(id) = queue.pop() {
+            let from = prop.get(&id).cloned().unwrap_or_default();
+            for &j in graph.loads(id) {
+                let e = prop.entry(j).or_default();
+                let before = e.len();
+                e.extend(from.iter().cloned());
+                if e.len() != before {
+                    queue.push(j);
                 }
             }
         }
+    }
+    for &id in workspace {
+        let path = graph.path(id).to_string();
+        let narrow = prop.get(&id).filter(|r| !r.is_empty());
+        let mut repos = match (owner.get(&id), narrow) {
+            (Some(r), _) if !r.is_empty() => r.clone(),
+            (_, Some(r)) => r.clone(),
+            _ => out.repos.clone(),
+        };
+        repos.extend(own.remove(&path).unwrap_or_default());
+        out.bzl_repos.insert(path, repos);
     }
     out.target_only = embedded.difference(&direct).cloned().collect();
 
@@ -1291,25 +1421,33 @@ fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
 /// Comments and nesting are handled by the shared lexer, so a `//` in a
 /// comment is not a label. A `//` preceded by `:` or `/` is not either, which
 /// is what keeps `https://github.com/envoyproxy/envoy` out.
-fn string_literals(text: &str) -> Vec<Literal> {
+/// Each literal comes back with the index of its token, which is what the
+/// per-occurrence attribution is keyed on.
+fn string_literals(text: &str) -> Vec<(usize, Literal)> {
     let mut out = Vec::new();
-    for t in lex(text) {
+    for (i, t) in lex(text).into_iter().enumerate() {
         let Tok::Str(s, e) = t.tok else {
             continue;
         };
         let lit = unescape(&text[s..e]);
         for l in labels_in(&lit) {
             if l != lit {
-                out.push(Literal {
-                    text: l,
-                    embedded: true,
-                });
+                out.push((
+                    i,
+                    Literal {
+                        text: l,
+                        embedded: true,
+                    },
+                ));
             }
         }
-        out.push(Literal {
-            text: lit,
-            embedded: false,
-        });
+        out.push((
+            i,
+            Literal {
+                text: lit,
+                embedded: false,
+            },
+        ));
     }
     out
 }
@@ -1646,8 +1784,8 @@ mod tests {
         );
         let find = |text: &str| -> Vec<bool> {
             lits.iter()
-                .filter(|l| l.text == text)
-                .map(|l| l.embedded)
+                .filter(|(_, l)| l.text == text)
+                .map(|(_, l)| l.embedded)
                 .collect()
         };
         assert_eq!(find("@envoy//:VERSION.txt"), vec![false]);
@@ -1725,6 +1863,7 @@ _envoy_repo = repository_rule(
         let dir = PathMap {
             from: "api/".into(),
             to: String::new(),
+            exhaustive: false,
         };
         assert_eq!(
             dir.translate("api/envoy/x.proto").as_deref(),
@@ -1739,12 +1878,14 @@ _envoy_repo = repository_rule(
         let nested = PathMap {
             from: "api/".into(),
             to: "sub/".into(),
+            exhaustive: false,
         };
         assert_eq!(nested.translate("api/a/b").as_deref(), Some("sub/a/b"));
 
         let one = PathMap {
             from: "api/BUILD".into(),
             to: "BUILD".into(),
+            exhaustive: false,
         };
         assert_eq!(one.translate("api/BUILD").as_deref(), Some("BUILD"));
         assert_eq!(one.translate("api/BUILD.bazel"), None);
@@ -1756,10 +1897,12 @@ _envoy_repo = repository_rule(
             PathMap {
                 from: "api/".into(),
                 to: String::new(),
+                exhaustive: false,
             },
             PathMap {
                 from: "a/b.txt".into(),
                 to: "c/d.txt".into(),
+                exhaustive: false,
             },
         ] {
             assert_eq!(PathMap::decode(&pm.encode()), Some(pm));
@@ -1778,19 +1921,10 @@ _envoy_repo = repository_rule(
         assert_eq!(
             maps.named,
             vec![
-                (
-                    "api".to_string(),
-                    PathMap {
-                        from: "api/".into(),
-                        to: String::new()
-                    }
-                ),
+                ("api".to_string(), PathMap::exhaustive_dir("api/".into())),
                 (
                     "x".to_string(),
-                    PathMap {
-                        from: "third_party/x/".into(),
-                        to: String::new()
-                    }
+                    PathMap::exhaustive_dir("third_party/x/".into())
                 ),
             ],
             "a path outside the repository cannot be matched against a diff"
@@ -1806,20 +1940,24 @@ _envoy_repo = repository_rule(
              \x20   rctx.symlink(target = Label(\"//api:versioning.txt\"), link_name = \"versioning.txt\")\n",
             &m(),
         );
+        let symlinks: Vec<PathMap> = maps.symlinks.iter().map(|(_, p)| p.clone()).collect();
         assert_eq!(
-            maps.symlinks,
+            symlinks,
             vec![
                 PathMap {
                     from: "api/BUILD".into(),
-                    to: "BUILD".into()
+                    to: "BUILD".into(),
+                    exhaustive: false,
                 },
                 PathMap {
                     from: "api/bazel/".into(),
-                    to: "bazel/".into()
+                    to: "bazel/".into(),
+                    exhaustive: false,
                 },
                 PathMap {
                     from: "api/versioning.txt".into(),
-                    to: "versioning.txt".into()
+                    to: "versioning.txt".into(),
+                    exhaustive: false,
                 },
             ]
         );
@@ -1858,12 +1996,9 @@ _envoy_repo = repository_rule(
         let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
         assert_eq!(
             ri.path_maps["envoy_api"],
-            [PathMap {
-                from: "api/".into(),
-                to: String::new()
-            }]
-            .into_iter()
-            .collect()
+            [PathMap::exhaustive_dir("api/".into())]
+                .into_iter()
+                .collect()
         );
     }
 
@@ -1911,5 +2046,318 @@ _envoy_repo = repository_rule(
             ri.repos_for("data/thing.txt"),
             ["r".to_string()].into_iter().collect()
         );
+    }
+
+    // ---- per-occurrence attribution ----
+
+    /// A working tree on disk, for the corpus check below.
+    struct Dir(std::path::PathBuf);
+
+    impl FileText for Dir {
+        fn text(&self, path: &str) -> Option<String> {
+            std::fs::read_to_string(self.0.join(path)).ok()
+        }
+    }
+
+    fn inputs(files: &dyn FileText, m: &RepoMapping) -> RepoInputs {
+        let mut g = LoadGraph::new();
+        let ws = g.workspace_closure(files, m);
+        let facts = read_module_facts(files);
+        build_repo_inputs(files, m, &g, &ws, &facts)
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// envoy at 7ba51266cc60: `//bazel:extensions.bzl` declares five module
+    /// extensions, and `bazel/repo.bzl` — which it loads — declares one
+    /// repository rule whose `attr.label` defaults name three main-repo files.
+    /// Per file, all three fed all six repositories, including `envoy_repo`,
+    /// whose generated `compiler.bzl` sits in eleven hundred package load
+    /// closures; per occurrence they feed `envoy_repo` alone.
+    #[test]
+    fn the_bzlmod_shape_attributes_an_attr_default_to_its_own_rule() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "module(name = \"envoy\", version = \"1\")\n\
+                 repo_ext = use_extension(\"//bazel:extensions.bzl\", \"envoy_repo_extension\")\n\
+                 use_repo(repo_ext, \"envoy_repo\")\n\
+                 cfg_ext = use_extension(\"//bazel:extensions.bzl\", \"envoy_build_config_ext\")\n\
+                 use_repo(cfg_ext, \"envoy_build_config\")\n\
+                 cargo_ext = use_extension(\"//bazel:extensions.bzl\", \"wasm_cargo\")\n\
+                 use_repo(cargo_ext, \"cu\")\n",
+            ),
+            (
+                "bazel/extensions.bzl",
+                "load(\"//bazel/external/cargo/remote:crates.bzl\", \"crate_repositories\")\n\
+                 load(\":envoy_build_config.bzl\", \"default_envoy_build_config\")\n\
+                 load(\":repo.bzl\", \"envoy_repo\")\n\
+                 \n\
+                 def _envoy_repo_impl(module_ctx):\n\
+                 \x20   envoy_repo()\n\
+                 \n\
+                 def _envoy_build_config_impl(module_ctx):\n\
+                 \x20   default_envoy_build_config(name = \"envoy_build_config\")\n\
+                 \n\
+                 def _wasm_cargo_impl(module_ctx):\n\
+                 \x20   crate_repositories()\n\
+                 \n\
+                 envoy_repo_extension = module_extension(implementation = _envoy_repo_impl)\n\
+                 envoy_build_config_ext = module_extension(implementation = _envoy_build_config_impl)\n\
+                 wasm_cargo = module_extension(implementation = _wasm_cargo_impl)\n",
+            ),
+            (
+                "bazel/repo.bzl",
+                "def _envoy_repo_impl(repository_ctx):\n\
+                 \x20   repository_ctx.file(\"BUILD\", '''\n\
+                 genrule(name = \"project\", tools = [\"@envoy//changelogs\"])\n\
+                 ''')\n\
+                 \n\
+                 _envoy_repo = repository_rule(\n\
+                 \x20   implementation = _envoy_repo_impl,\n\
+                 \x20   attrs = {\n\
+                 \x20       \"envoy_ci_config\": attr.label(default = \"@envoy//:.github/config.yml\"),\n\
+                 \x20   },\n\
+                 )\n\
+                 \n\
+                 def envoy_repo():\n\
+                 \x20   _envoy_repo(name = \"envoy_repo\")\n",
+            ),
+            (
+                "bazel/envoy_build_config.bzl",
+                "def _impl(ctx):\n\
+                 \x20   ctx.symlink(ctx.attr.config, \"extensions_build_config.bzl\")\n\
+                 \n\
+                 default_envoy_build_config = repository_rule(\n\
+                 \x20   implementation = _impl,\n\
+                 \x20   attrs = {\"config\": attr.label(\
+                 default = \"@envoy//source/extensions:extensions_build_config.bzl\")},\n\
+                 )\n",
+            ),
+            (
+                "bazel/external/cargo/remote/crates.bzl",
+                "def crate_repositories():\n\
+                 \x20   maybe(\n\
+                 \x20       crates_vendor_remote_repository,\n\
+                 \x20       name = \"cu\",\n\
+                 \x20       defs_module = Label(\"@envoy//bazel/external/cargo/remote:defs.bzl\"),\n\
+                 \x20   )\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump("{\"\":\"\",\"envoy\":\"\"}");
+        let ri = inputs(&files, &m);
+
+        assert_eq!(ri.repos_for(".github/config.yml"), set(&["envoy_repo"]));
+        assert_eq!(
+            ri.repos_for("source/extensions/extensions_build_config.bzl"),
+            set(&["envoy_build_config"])
+        );
+        assert_eq!(
+            ri.repos_for("bazel/external/cargo/remote/defs.bzl"),
+            set(&["cu"])
+        );
+        // The generated BUILD file's `tools` still name the repository, and
+        // still cannot have moved a `.bzl` inside it.
+        assert_eq!(
+            ri.repos_for("changelogs/current/x.rst"),
+            set(&["envoy_repo"])
+        );
+        assert!(ri
+            .target_only
+            .contains(&Pattern::Prefix("changelogs/".into())));
+    }
+
+    /// Pre-bzlmod envoy (issue #6): no `MODULE.bazel` at all, so every file
+    /// used to fall back to the empty set — no repository named, hence a
+    /// global invalidation. `envoy_dependencies()` reaches a forwarding
+    /// wrapper, and `pip_parse` is called with a literal name in a helper.
+    #[test]
+    fn the_workspace_shape_attributes_a_requirements_lock_to_one_pip() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"envoy\")\n\
+                 load(\"//bazel:repositories.bzl\", \"envoy_dependencies\")\n\
+                 envoy_dependencies()\n\
+                 load(\"//bazel:python_dependencies.bzl\", \"envoy_python_dependencies\")\n\
+                 envoy_python_dependencies()\n",
+            ),
+            (
+                "bazel/repositories.bzl",
+                "load(\"@envoy_api//bazel:envoy_http_archive.bzl\", \"envoy_http_archive\")\n\
+                 \n\
+                 def external_http_archive(name, **kwargs):\n\
+                 \x20   envoy_http_archive(name, locations = REPOSITORY_LOCATIONS, **kwargs)\n\
+                 \n\
+                 def _com_google_protobuf():\n\
+                 \x20   external_http_archive(\n\
+                 \x20       \"com_google_protobuf\",\n\
+                 \x20       patches = [\"@envoy//bazel:protobuf.patch\"],\n\
+                 \x20   )\n\
+                 \n\
+                 def envoy_dependencies():\n\
+                 \x20   local_repository(name = \"envoy_api\", path = \"api\")\n\
+                 \x20   _com_google_protobuf()\n",
+            ),
+            (
+                "bazel/python_dependencies.bzl",
+                "load(\"@rules_python//python:pip.bzl\", \"pip_parse\")\n\
+                 \n\
+                 def envoy_python_dependencies():\n\
+                 \x20   pip_parse(\n\
+                 \x20       name = \"base_pip3\",\n\
+                 \x20       requirements_lock = \"@envoy//tools/base:requirements.txt\",\n\
+                 \x20   )\n\
+                 \x20   pip_parse(\n\
+                 \x20       name = \"dev_pip3\",\n\
+                 \x20       requirements_lock = \"@envoy//tools/dev:requirements.txt\",\n\
+                 \x20   )\n",
+            ),
+        ]);
+        let m = RepoMapping::identity().with_main_alias("envoy");
+        let ri = inputs(&files, &m);
+
+        assert_eq!(
+            ri.repos_for("tools/base/requirements.txt"),
+            set(&["base_pip3"])
+        );
+        assert_eq!(
+            ri.repos_for("tools/dev/requirements.txt"),
+            set(&["dev_pip3"])
+        );
+        // A patch passed positionally to a forwarding wrapper.
+        assert_eq!(
+            ri.repos_for("bazel/protobuf.patch"),
+            set(&["com_google_protobuf"])
+        );
+        // `local_repository` is the whole of `@envoy_api`, so an edit under
+        // `api/` that is not a `.bzl` the closure loads cannot have moved one.
+        assert_eq!(ri.repos_for("api/envoy/x.proto"), set(&["envoy_api"]));
+        assert!(ri.path_maps["envoy_api"]
+            .iter()
+            .all(|pm| pm.exhaustive && pm.from == "api/"));
+        // And a `.bzl` change names a set rather than nothing at all.
+        assert_eq!(
+            ri.bzl_repos["bazel/python_dependencies.bzl"],
+            set(&["base_pip3", "dev_pip3"])
+        );
+    }
+
+    /// A name built by string arithmetic cannot be evaluated, so the enclosing
+    /// scope keeps the whole-file answer rather than a guess.
+    #[test]
+    fn a_dynamic_name_falls_back_to_the_file_set() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "module(name = \"demo\", version = \"1\")\n\
+                 e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
+                 use_repo(e, \"a\", \"b\")\n\
+                 load(\"//bazel:loose.bzl\", \"loose\")\n",
+            ),
+            ("bazel/ext.bzl", "E = 1\n"),
+            (
+                "bazel/loose.bzl",
+                "def loose():\n\
+                 \x20   for p in PLATFORMS:\n\
+                 \x20       http_archive(name = \"proto_\" + p, patches = [\"//bazel:x.patch\"])\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump("{\"\":\"\",\"demo\":\"\"}");
+        let ri = inputs(&files, &m);
+        assert_eq!(ri.repos_for("bazel/x.patch"), set(&["a", "b"]));
+    }
+
+    /// A label written at module level is attributed the way it always was:
+    /// the file's owner set. Nothing about the occurrence says more.
+    #[test]
+    fn a_module_level_label_keeps_the_old_answer() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "module(name = \"demo\", version = \"1\")\n\
+                 e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
+                 use_repo(e, \"a\", \"b\")\n",
+            ),
+            (
+                "bazel/ext.bzl",
+                "CONF = attr.label(default = \"@demo//conf:settings.yml\")\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump("{\"\":\"\",\"demo\":\"\"}");
+        let ri = inputs(&files, &m);
+        assert_eq!(ri.repos_for("conf/settings.yml"), set(&["a", "b"]));
+    }
+
+    #[test]
+    fn an_exhaustive_path_map_round_trips_through_the_index() {
+        let pm = PathMap::exhaustive_dir("api/".into());
+        assert_eq!(PathMap::decode(&pm.encode()), Some(pm.clone()));
+        assert!(pm.encode().ends_with("\u{0}!"));
+        // The two-field form every index written before the marker existed
+        // holds reads back as the wide answer.
+        assert_eq!(
+            PathMap::decode("api/\u{0}"),
+            Some(PathMap {
+                from: "api/".into(),
+                to: String::new(),
+                exhaustive: false,
+            })
+        );
+    }
+
+    /// Run against a working tree of the envoy corpus:
+    ///
+    /// ```text
+    /// CAMBIUM_CORPUS_DIR=/somewhere cargo test -p cambium-index \
+    ///     -- --ignored --nocapture corpus_attribution
+    /// ```
+    #[test]
+    #[ignore = "needs a working tree of the corpus; see the doc comment"]
+    fn corpus_attribution() {
+        let dir = std::env::var("CAMBIUM_CORPUS_DIR").expect("set CAMBIUM_CORPUS_DIR");
+        let files = Dir(dir.into());
+        let m = RepoMapping::identity().with_main_alias("envoy");
+        let ri = inputs(&files, &m);
+        println!("repos in the universe: {}", ri.repos.len());
+        for p in [
+            ".github/config.yml",
+            "source/extensions/extensions_build_config.bzl",
+            "bazel/external/cargo/remote/defs.bzl",
+            "tools/base/requirements.txt",
+            "api/envoy/config/core/v3/base.proto",
+        ] {
+            for (pat, repos) in &ri.patterns {
+                if pat.matches(p) {
+                    println!("   pattern {pat:?} -> {repos:?}");
+                }
+            }
+            let repos = ri.repos_for(p);
+            println!(
+                "{p}: {} repo(s) {:?}",
+                repos.len(),
+                repos.iter().take(12).collect::<Vec<_>>()
+            );
+        }
+        for (repo, maps) in &ri.path_maps {
+            println!(
+                "path map {repo}: {:?}",
+                maps.iter()
+                    .map(|m| (m.from.as_str(), m.to.as_str(), m.exhaustive))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for b in [
+            "bazel/repo.bzl",
+            "bazel/extensions.bzl",
+            "bazel/repositories.bzl",
+            "bazel/python_dependencies.bzl",
+        ] {
+            if let Some(r) = ri.bzl_repos.get(b) {
+                println!("bzl_repos {b}: {} repo(s)", r.len());
+            }
+        }
     }
 }

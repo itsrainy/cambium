@@ -17,6 +17,7 @@
 //! # Ok(()) }
 //! ```
 
+mod attribution;
 pub mod builder;
 pub mod csr;
 pub mod data;
