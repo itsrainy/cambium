@@ -28,7 +28,10 @@ use serde_json::Value;
 /// `stats.bzl_witness*` counters, which say what the engine did about a
 /// changed `.bzl` the base index's load closure had no node for, plus
 /// `stats.bazelrc_flag_nodes`, the `bazelrc_flags` list and the
-/// `starlark_flag` direct reason. The version is shared with
+/// `starlark_flag` direct reason; version 8 added
+/// `stats.repos_dirty_by_target` and the `external_repo_target` direct
+/// reason, for a repository whose generated targets name a main-repo rule
+/// target the walk reached. The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -70,6 +73,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.ignored_files",
     "stats.queried_targets",
     "stats.repos_dirty_by_bzl",
+    "stats.repos_dirty_by_target",
     "stats.repos_dirty_by_input",
     "stats.repos_dirty_by_module",
     "stats.repos_label_only",
@@ -141,6 +145,7 @@ fn fixture() -> AffectedReport {
             repos_dirty_by_input: 11,
             repos_dirty_by_module: 12,
             repos_dirty_by_bzl: 13,
+            repos_dirty_by_target: 20,
             repos_label_only: 15,
             external_direct_targets: 14,
             bazelrc_flag_nodes: 16,

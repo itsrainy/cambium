@@ -82,6 +82,32 @@
 //! applies rule (1) alone for them, which is exactly the edge Bazel would
 //! follow. A path a rule both resolves and writes counts as resolved.
 //!
+//! # A repository built around a rule target, and the fixpoint that finds it
+//!
+//! `@envoy//changelogs` in that generated `genrule` is not a file: it is the
+//! rule target `//changelogs:changelogs`, a `filegroup` over
+//! `glob(["current/*.rst"])`. `@envoy_repo`'s targets genuinely depend on it,
+//! so a new `changelogs/current/x.rst` does move them — but *which* files that
+//! filegroup globs is not knowable from the label. The index used to guess
+//! "everything under `changelogs/`", which on a real repository, applied to
+//! visibility specs and `config_setting` keys as well, claimed 91% of the
+//! packages (issue #8).
+//!
+//! The exact answer is in the graph, which has the filegroup's edges to its
+//! sources. So the index records the label itself
+//! ([`cambium_index::externals::Pattern::Label`]), the engine resolves it to a
+//! node once per run, and after the reverse walk has produced the affected set
+//! it asks which of those nodes the walk reached. Each repository named that
+//! way is seeded by **rule (1) alone** — its leaf nodes into the direct set —
+//! and the walk runs again, which can reach further such labels, so it is a
+//! fixpoint, bounded by the number of repositories.
+//!
+//! Rule (2) is never right here, for the same reason target-only inputs exist:
+//! a repository rule runs during loading, before anything is built, so it
+//! cannot read a rule target's *output*. A rule target it names can only be a
+//! dependency of what the rule *writes*, and nothing it wrote — no `.bzl` it
+//! exports — can have moved.
+//!
 //! There is no third way. A repository cannot affect a package's rules without
 //! appearing in that package's `load()` closure or in some rule's attributes —
 //! except through toolchain resolution, which has no edge to follow and which

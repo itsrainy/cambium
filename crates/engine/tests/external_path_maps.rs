@@ -68,6 +68,7 @@ fn files() -> Files {
     put("lib/BUILD", "");
     put("conf/BUILD", "");
     put("names/BUILD", "");
+    put("notes/BUILD", "");
     Files(m)
 }
 
@@ -89,6 +90,16 @@ fn rows(pkg: &str) -> PackageUpdate {
             "demo_lib",
             vec!["@vend//:thing".into()],
         )],
+        // `@demo//notes` is the rule target `//notes:notes`, a filegroup over
+        // a glob — what it is built from is an edge, not a path prefix.
+        "notes" => vec![
+            TargetRow::source_file("//notes:README.md"),
+            TargetRow::rule(
+                "//notes:notes",
+                "filegroup",
+                vec!["//notes:README.md".into()],
+            ),
+        ],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -98,7 +109,7 @@ fn rows(pkg: &str) -> PackageUpdate {
     }
 }
 
-const PACKAGES: &[&str] = &["app", "lib", "conf", "names"];
+const PACKAGES: &[&str] = &["app", "lib", "conf", "names", "notes"];
 
 struct Scanning(Files);
 
@@ -300,11 +311,17 @@ fn a_repository_with_no_derivable_mapping_keeps_the_old_behaviour() {
     );
 }
 
-/// `@opaque`'s rule writes a BUILD file whose target lists `//notes`. An edit
-/// under `notes/` is a build-time input of that *target*, not of the rule: the
-/// rule never reads it, so `@opaque//:defs.bzl` cannot have moved. `//conf`,
-/// which names `@opaque//:thing`, is direct; `//app`, whose closure loads
-/// `@opaque//:defs.bzl`, is not re-queried.
+/// `@opaque`'s rule writes a BUILD file whose target lists `//notes`. That is
+/// the rule target `//notes:notes`, a build-time input of the repository's
+/// *targets* and not of the rule: the rule never reads it, so
+/// `@opaque//:defs.bzl` cannot have moved.
+///
+/// Which files `//notes:notes` is built from is a question for the graph, not
+/// for a path prefix over `notes/` (issue #8): the walk from
+/// `notes/README.md` reaches the filegroup, the filegroup is a recorded label
+/// input of `@opaque`, and so `//conf`, which names `@opaque//:thing`, is
+/// direct. `//app`, whose closure loads `@opaque//:defs.bzl`, is not
+/// re-queried.
 #[test]
 fn a_path_named_only_by_a_generated_target_reaches_only_label_consumers() {
     let index = base();
@@ -314,10 +331,20 @@ fn a_path_named_only_by_a_generated_target_reaches_only_label_consumers() {
         &texts(MODULE_BASE, MODULE_BASE),
     );
     assert!(!r.global, "{:?}", r.global_reason);
-    assert_eq!(r.stats.repos_dirty_by_input, 1);
-    assert_eq!(r.stats.repos_label_only, 1);
-    assert_eq!(r.direct, vec!["//conf:conf".to_string()]);
-    assert_eq!(r.affected_labels(), vec!["//conf:conf".to_string()]);
+    // Nothing in the diff named a repository; the walk did.
+    assert_eq!(r.stats.repos_dirty_by_input, 0);
+    assert_eq!(r.stats.repos_dirty_by_target, 1);
+    assert!(
+        r.direct.contains(&"//conf:conf".to_string()),
+        "{:?}",
+        r.direct
+    );
+    let a = r.affected_labels();
+    assert!(a.contains(&"//conf:conf".to_string()), "{a:?}");
+    assert!(a.contains(&"//notes:notes".to_string()), "{a:?}");
+    // Nothing is re-queried at all: rule (2) never fires for a repository
+    // found this way, and a changed source file the graph already has edges
+    // for does not dirty its package either.
     assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
 }
 
