@@ -220,12 +220,13 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
 `package`), `file` (with `path`), `deleted_dep` (with `label`), `external_repo` (with
-`label`), `starlark_flag` (with `label`).
+`label`), `external_repo_target` (with `repo` and `via`), `starlark_flag` (with
+`label`).
 
 Optional fields are omitted rather than null, so absence is meaningful. A
 document with no `schema` key predates the field and is version 1.
@@ -250,6 +251,8 @@ on the same terms.
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
 | 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head — still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}` — the target names something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from — those repositories contribute their label consumers to the direct set, and their loading packages are not re-queried |
+| 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
+| 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did

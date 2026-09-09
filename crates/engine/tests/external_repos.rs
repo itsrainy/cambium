@@ -52,10 +52,23 @@ fn files() -> Files {
     put("bazel/ext.bzl", "load(\"//bazel:repo.bzl\", \"r\")\n");
     // The repository rule proper: three labels it resolves, all inside the
     // declaration, and one call that names the repository they feed.
+    // The BUILD file the rule *writes*: its `genrule` names a main-repo rule
+    // target (`@demo//changelogs`, a filegroup over a glob), which is the
+    // `@envoy_repo` shape — the repository's generated targets depend on it,
+    // but the rule never reads it. The visibility spec and the
+    // `config_setting` key beside it must yield no path pattern wider than the
+    // file they literally name (issue #8).
     put(
         "bazel/repo.bzl",
         "def _impl(ctx):\n\
-         \x20   ctx.file(\"BUILD\", \"\")\n\
+         \x20   ctx.file(\"BUILD\", '''\n\
+         genrule(\n\
+         \x20   name = \"project\",\n\
+         \x20   tools = [\"@demo//changelogs\"],\n\
+         \x20   visibility = [\"//some/team:__subpackages__\"],\n\
+         )\n\
+         config_setting(name = \"c\", flag_values = {\"//build:some_flag\": \"1\"})\n\
+         ''')\n\
          \n\
          _gen = repository_rule(\n\
          \x20   implementation = _impl,\n\
@@ -82,6 +95,7 @@ fn files() -> Files {
         "load(\"@generated//:defs.bzl\", \"g\")\nR = 1\n",
     );
     put("bazel/BUILD", "");
+    put("changelogs/BUILD", "");
     Files(m)
 }
 
@@ -119,6 +133,18 @@ fn rows(pkg: &str) -> PackageUpdate {
             ),
         ],
         "direct" => vec![TargetRow::rule("//direct:d", "demo_lib", Vec::new())],
+        // `@envoy//changelogs`: a filegroup over `glob(["current/*.rst"])`.
+        // Which files it globs is not knowable from the label, and is exactly
+        // what these edges say.
+        "changelogs" => vec![
+            TargetRow::source_file("//changelogs:current/x.rst"),
+            TargetRow::source_file("//changelogs:notes.txt"),
+            TargetRow::rule(
+                "//changelogs:changelogs",
+                "filegroup",
+                vec!["//changelogs:current/x.rst".into()],
+            ),
+        ],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -128,7 +154,7 @@ fn rows(pkg: &str) -> PackageUpdate {
     }
 }
 
-const PACKAGES: &[&str] = &["app", "lib", "bazel", "direct"];
+const PACKAGES: &[&str] = &["app", "lib", "bazel", "direct", "changelogs"];
 
 struct Scanning(Files);
 
@@ -234,13 +260,35 @@ fn the_index_stores_what_feeds_each_repository() {
             .map(|r| v.repo_name(r))
             .collect()
     };
+    let named_label = |l: &str| -> Vec<&str> {
+        v.repos_for_label_kinds(l)
+            .into_iter()
+            .map(|(r, _)| v.repo_name(r))
+            .collect()
+    };
     assert_eq!(named("config.yml"), ["generated"]);
-    assert_eq!(
-        named("data/thing.txt"),
-        ["generated"],
-        "a package label is a prefix"
-    );
+    // `@demo//data` is `//data:data`: the file that label names, and the
+    // target it names. Never `data/**` — issue #8.
+    assert_eq!(named("data/data"), ["generated"]);
+    assert_eq!(named_label("//data:data"), ["generated"]);
+    assert!(named("data/thing.txt").is_empty());
     assert!(named("app/main.cc").is_empty());
+
+    // A visibility token names no file and creates no edge, so it yields
+    // nothing at all...
+    assert!(named("some/team/anything/at/all").is_empty());
+    assert!(named_label("//some/team:__subpackages__").is_empty());
+    // ...and a `config_setting` key yields the target and the file it names,
+    // and nothing that claims `build/**`.
+    assert!(named("build/anything/at/all").is_empty());
+    assert_eq!(named_label("//build:some_flag"), ["generated"]);
+    assert_eq!(named("build/some_flag"), ["generated"]);
+    // Nothing in the table is a subtree prefix any more.
+    let prefixes: Vec<&str> = (0..v.repo_input_patterns.len() as u32)
+        .filter(|&p| v.repo_input_prefix[p as usize])
+        .map(|p| v.repo_input_patterns.get(p))
+        .collect();
+    assert!(prefixes.is_empty(), "{prefixes:?}");
     // The repository rule's own `.bzl` files name the repository they define,
     // which is what stops a change to them from being global.
     let repo_bzl = v.bzl_id("bazel/repo.bzl").unwrap();
@@ -304,8 +352,12 @@ fn a_bzl_named_inside_a_repository_rules_call_dirties_its_loaders() {
     );
 }
 
+/// `attr.label(default = "@demo//data")` is the label `//data:data`, and a
+/// repository rule can only ever *read* it — as the file `data/data`, since
+/// `repository_ctx.path` rejects a rule target. An arbitrary other file in
+/// that directory is not that file, and claiming `data/**` for it is issue #8.
 #[test]
-fn a_file_under_a_repository_rules_package_label_counts_too() {
+fn a_package_label_is_the_file_it_names_and_not_its_directory() {
     let (_e, index) = base();
     let r = run(
         &index,
@@ -313,6 +365,16 @@ fn a_file_under_a_repository_rules_package_label_counts_too() {
         &texts(MODULE_BASE, MODULE_BASE),
     );
     assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_input, 0);
+    assert!(r.direct.is_empty(), "{:?}", r.direct);
+
+    // The file the label does name still feeds the repository.
+    let r = run(
+        &index,
+        &changed(&["data/data"]),
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert_eq!(r.stats.repos_dirty_by_input, 1);
     assert_eq!(r.direct, vec!["//lib:lib".to_string()]);
 }
 
@@ -641,6 +703,97 @@ fn a_workspace_closure_bzl_still_reaches_the_filegroups_that_list_it() {
     );
     // Without losing the repository consequence.
     assert!(a.contains(&"//lib:lib".to_string()), "{a:?}");
+}
+
+/// The `@envoy_repo` shape, answered by the graph rather than by a subtree
+/// prefix (issue #8).
+///
+/// `@generated`'s rule writes a BUILD file whose `genrule` lists
+/// `@demo//changelogs` in `tools`, so the repository's targets depend on the
+/// filegroup `//changelogs:changelogs`. Which files that filegroup globs is
+/// not knowable from the label — the old code guessed `changelogs/**`, which
+/// on a real repository claimed 91% of the packages — but the graph has the
+/// edges: the reverse walk from `changelogs/current/x.rst` reaches the
+/// filegroup, the filegroup is a recorded label input of `@generated`, so
+/// `@generated`'s targets moved and `//lib:lib`, which names one, is direct.
+#[test]
+fn a_changed_file_reaching_a_repositorys_rule_label_moves_that_repository() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["changelogs/current/x.rst"]),
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    // Nothing in the diff named a repository: the walk did.
+    assert_eq!(r.stats.repos_dirty_by_input, 0);
+    assert_eq!(r.stats.repos_dirty_by_target, 1);
+    let a = affected(&r);
+    assert!(a.contains(&"//changelogs:changelogs".to_string()), "{a:?}");
+    assert!(a.contains(&"//lib:lib".to_string()), "{a:?}");
+    assert!(a.contains(&"//app:app".to_string()), "and above it: {a:?}");
+    assert!(
+        r.direct.contains(&"//lib:lib".to_string()),
+        "the repository's label consumer is direct, not merely affected: {:?}",
+        r.direct
+    );
+    // Rule (1) only: a repository rule cannot read a rule target's output, so
+    // nothing it wrote — no `.bzl` it exports — can have moved, and no
+    // package's load closure is re-queried on that account.
+    assert!(
+        !r.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        r.dirty_packages
+    );
+}
+
+/// The same directory, a file the filegroup's glob does not match. The graph
+/// has no edge from it, so no repository moved — which is the whole difference
+/// between the prefix and the label.
+#[test]
+fn a_file_the_glob_does_not_match_moves_nothing() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["changelogs/notes.txt"]),
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_target, 0);
+    assert_eq!(r.stats.repos_dirty_by_input, 0);
+    assert!(affected(&r).is_empty(), "{:?}", affected(&r));
+}
+
+/// `--explain` names the repository and the target that carried it.
+#[test]
+fn the_direct_reason_names_the_repository_and_the_label() {
+    let (_e, index) = base();
+    let e = engine();
+    let r = e
+        .compute_with_texts(
+            index.view(),
+            &changed(&["changelogs/current/x.rst"]),
+            &Scanning(files()),
+            &AffectedRequest {
+                explain: true,
+                ..req()
+            },
+            &texts(MODULE_BASE, MODULE_BASE),
+        )
+        .unwrap()
+        .report;
+    let x = r.explanations.expect("--explain was asked for");
+    let lib = x
+        .iter()
+        .find(|e| e.direct == "//lib:lib")
+        .expect("//lib:lib is direct");
+    assert_eq!(
+        lib.reason,
+        cambium_engine::DirectReason::ExternalRepoTarget {
+            repo: "generated".into(),
+            via: "//changelogs:changelogs".into(),
+        }
+    );
 }
 
 #[test]

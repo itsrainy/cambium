@@ -1,6 +1,6 @@
 //! The run: load a baseline, work out what is dirty, re-query it, splice, walk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cambium_bazel::Bazel;
@@ -909,6 +909,16 @@ impl Engine {
             }
         }
 
+        // Which repositories are built around a main-repo *target*, and which
+        // node each of those targets is. Resolved against the base index, whose
+        // ids the splice preserves.
+        let label_inputs = self
+            .cfg
+            .externals
+            .enabled
+            .then(|| label_inputs(base_view, ext.repos.clone()))
+            .flatten();
+
         let direct_inputs = DirectInputs {
             splice: &splice,
             deleted_by_package: &deleted_by_package,
@@ -916,6 +926,7 @@ impl Engine {
             bzl_dirty: &bzl_dirty,
             external_nodes: &external_nodes,
             flag_nodes: &flag_reach.nodes,
+            label_inputs: label_inputs.as_ref(),
         };
         let mut run = RunState {
             req,
@@ -1120,6 +1131,60 @@ struct DirectInputs<'a> {
     external_nodes: &'a [(u32, String)],
     /// Starlark build settings a `.bazelrc` edit changed, as `(id, label)`.
     flag_nodes: &'a [(u32, String)],
+    /// Main-repo rule targets that external repositories' generated targets
+    /// name, when the base index records any. `None` disables the fixpoint.
+    label_inputs: Option<&'a LabelInputs<'a>>,
+}
+
+/// The main-repo *targets* external repositories are built around.
+///
+/// The index's pattern table records these as
+/// [`cambium_index::externals::Pattern::Label`]: a repository rule wrote a
+/// BUILD file naming `@envoy//changelogs`, so `@envoy_repo`'s generated
+/// targets depend on `//changelogs:changelogs` — a `filegroup` over a glob
+/// whose members only the graph knows. Resolving the labels to node ids once
+/// per run turns "did the change reach that target?" into a lookup on the
+/// affected set.
+struct LabelInputs<'a> {
+    base: IndexRef<'a>,
+    /// Node id -> the apparent names of the repositories built around it.
+    by_node: FxHashMap<u32, Vec<String>>,
+    /// Repositories the diff already dirtied, which need no second look.
+    already: BTreeSet<String>,
+}
+
+/// Resolves the base index's label patterns to node ids, or `None` when there
+/// are none — which is every index written before this table had them, and
+/// every repository whose rules name no main-repo target.
+fn label_inputs(base: IndexRef<'_>, already: BTreeSet<String>) -> Option<LabelInputs<'_>> {
+    let rows = base.label_inputs();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut by_node: FxHashMap<u32, Vec<String>> = FxHashMap::default();
+    for (label, repos) in rows {
+        // A label naming no node in this index names nothing that can change.
+        let Some(id) = base.id_of(label) else {
+            continue;
+        };
+        let e: &mut Vec<String> = by_node.entry(id).or_default();
+        // `feeds` is not consulted: only rule (1) ever applies here. A
+        // repository rule cannot read a rule target's *output* — it runs
+        // during loading, before anything is built — so whatever moved this
+        // target cannot have moved a `.bzl` the repository exports, whether or
+        // not some other path also feeds the rule.
+        for (r, _feeds) in repos {
+            let n = base.repo_name(r).to_string();
+            if !e.contains(&n) {
+                e.push(n);
+            }
+        }
+    }
+    (!by_node.is_empty()).then_some(LabelInputs {
+        base,
+        by_node,
+        already,
+    })
 }
 
 /// What the tail of a run carries from the splice to the report.
@@ -1145,8 +1210,7 @@ impl RunState<'_> {
     ) -> AffectedReport {
         self.timings.splice = self.sw.lap();
 
-        let (direct, reasons) = derive_direct(view, inputs);
-        self.stats.direct_targets = direct.len();
+        let (mut direct, mut reasons) = derive_direct(view, inputs);
         self.timings.direct = self.sw.lap();
 
         let wopts = WalkOptions {
@@ -1154,7 +1218,18 @@ impl RunState<'_> {
             explain: self.req.explain,
             max_depth: self.req.max_depth,
         };
-        let result = walk::walk_view(view, &direct, &wopts);
+        let mut result = walk::walk_view(view, &direct, &wopts);
+        if let Some(li) = inputs.label_inputs {
+            self.stats.repos_dirty_by_target = close_over_repository_targets(
+                view,
+                li,
+                &mut direct,
+                &mut reasons,
+                &mut result,
+                &wopts,
+            );
+        }
+        self.stats.direct_targets = direct.len();
         self.stats.affected_targets = result.affected.len();
         self.timings.walk = self.sw.lap();
 
@@ -1174,6 +1249,99 @@ impl RunState<'_> {
             stats: self.stats,
             explanations: self.req.explain.then(|| explain(view, &result, &reasons)),
         }
+    }
+}
+
+/// Closes the answer over the repositories the walk itself dirtied.
+///
+/// A repository whose generated targets name a main-repo rule target moves
+/// when that target moves — envoy's `bazel/repo.bzl` writes a BUILD file whose
+/// `genrule` lists `@envoy//changelogs` in `tools`, so a new
+/// `changelogs/current/x.rst` moves `@envoy_repo`'s targets. Which files that
+/// `filegroup` globs is not knowable statically, but it is knowable from the
+/// graph: the filegroup node has edges to its sources, so the reverse walk
+/// from the changed file reaches `//changelogs:changelogs`, and this reads the
+/// answer off the affected set.
+///
+/// The repositories found that way are seeded by **rule (1) alone**: their
+/// leaf nodes go into the direct set, and the walk runs again. Rule (2) never
+/// applies. A repository rule runs during loading and cannot read a rule
+/// target's *output* — nothing is built yet — so a rule target it names can
+/// only be a dependency of what the rule *writes*, and nothing the rule wrote,
+/// no `.bzl` it exports, can have moved. That is the same argument that makes
+/// these inputs `target_only` in the index, arrived at from the other side.
+///
+/// Seeding those leaves can make more targets affected, which can reach more
+/// such labels, so this is a fixpoint. It terminates: every iteration either
+/// finds a repository not yet seen or stops, and there are finitely many
+/// repositories. Returns how many repositories it dirtied.
+fn close_over_repository_targets<V: GraphView + ?Sized>(
+    view: &V,
+    li: &LabelInputs<'_>,
+    direct: &mut Vec<u32>,
+    reasons: &mut FxHashMap<u32, DirectReason>,
+    result: &mut walk::WalkResult,
+    wopts: &WalkOptions,
+) -> usize {
+    let mut seen = li.already.clone();
+    let mut in_direct: FxHashSet<u32> = direct.iter().copied().collect();
+    let mut found = 0usize;
+    let mut scratch: Vec<u32> = Vec::new();
+    loop {
+        // Which repositories does the answer so far name, that the diff did
+        // not already dirty? `via` is the target that named each, for
+        // `--explain`.
+        let mut hit: BTreeMap<String, String> = BTreeMap::new();
+        for &id in &result.affected {
+            let Some(repos) = li.by_node.get(&id) else {
+                continue;
+            };
+            for r in repos {
+                if seen.contains(r) {
+                    continue;
+                }
+                hit.entry(r.clone())
+                    .or_insert_with(|| view.label(id).to_string());
+            }
+        }
+        if hit.is_empty() {
+            return found;
+        }
+        let mut added = false;
+        for (repo, via) in hit {
+            seen.insert(repo.clone());
+            found += 1;
+            tracing::debug!(
+                %repo, %via,
+                "an external repository is built around a target the change reached"
+            );
+            let one: BTreeSet<String> = [repo.clone()].into_iter().collect();
+            // Rule (1) only: the empty `load_repos` is what says so.
+            let r = crate::externals::reach(li.base, &one, &BTreeSet::new());
+            for id in r.nodes {
+                let consumers: Vec<u32> = view.reverse_row(id, &mut scratch).to_vec();
+                for c in consumers {
+                    if in_direct.insert(c) {
+                        direct.push(c);
+                        reasons.insert(
+                            c,
+                            DirectReason::ExternalRepoTarget {
+                                repo: repo.clone(),
+                                via: via.clone(),
+                            },
+                        );
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            // The repositories are accounted for and nothing new is direct, so
+            // walking again would return the set it just returned.
+            return found;
+        }
+        direct.sort_unstable();
+        *result = walk::walk_view(view, direct, wopts);
     }
 }
 
