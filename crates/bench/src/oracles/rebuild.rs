@@ -359,10 +359,7 @@ mod tests {
             c.inputs.repos.insert("mod".into());
             if mapped {
                 c.inputs.path_maps.entry("mod".into()).or_default().insert(
-                    cambium_index::externals::PathMap {
-                        from: "api/".into(),
-                        to: String::new(),
-                    },
+                    cambium_index::externals::PathMap::exhaustive_dir("api/".into()),
                 );
             }
             b.set_bzl_closure(c);
