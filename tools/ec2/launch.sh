@@ -85,6 +85,15 @@ tools/tango/fetch.sh
 echo "BOOTSTRAP DONE"
 EOS
 nohup bash ~/finish-bootstrap.sh > ~/finish-bootstrap.log 2>&1 &'
-    echo "synced; progress: tools/ec2/launch.sh ssh tail -f finish-bootstrap.log (ends with BOOTSTRAP DONE)" ;;
+    # Block until the build is done, and fail loudly: a sync that returns
+    # before the build has finished is how a run started on a stale binary.
+    echo "synced; building on the box (tools/ec2/launch.sh ssh tail -f finish-bootstrap.log)"
+    while ! ssh -i "$PEM" "ubuntu@$HOST" 'grep -qE "BOOTSTRAP (DONE|FAILED)" ~/finish-bootstrap.log' 2>/dev/null; do sleep 20; done
+    if ssh -i "$PEM" "ubuntu@$HOST" 'grep -q "BOOTSTRAP FAILED" ~/finish-bootstrap.log'; then
+      echo "BUILD FAILED on the box:" >&2
+      ssh -i "$PEM" "ubuntu@$HOST" 'grep -E "^error|BOOTSTRAP FAILED" -A4 ~/finish-bootstrap.log | tail -30' >&2
+      exit 1
+    fi
+    ssh -i "$PEM" "ubuntu@$HOST" 'cd ~/cambium && echo "box: $(./target/release/cambi --version) tree $(git rev-parse --short HEAD)"' ;;
   *) echo "usage: $0 [launch|sync|ssh|stop|start|terminate]"; exit 1 ;;
 esac
