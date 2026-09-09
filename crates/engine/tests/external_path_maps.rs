@@ -66,6 +66,7 @@ fn files() -> Files {
     put(
         "bazel/defs.bzl",
         "load(\"@mod//bazel:defs.bzl\", \"r\")\n\
+         load(\"@mod//bazel:more.bzl\", \"m\")\n\
          load(\"@opaque//:defs.bzl\", \"o\")\n\
          load(\"@vend//:defs.bzl\", \"v\")\n",
     );
@@ -505,4 +506,45 @@ fn an_input_edit_inside_an_exhaustive_mapping_still_re_queries() {
         "{:?}",
         r.dirty_packages
     );
+}
+
+/// The overflow diagnostic names, per repository, the changed file that moved
+/// it — whichever route did the naming — and counts the packages rule (2)
+/// reached once each, however many of the repository's labels a package's
+/// closure carries.
+#[test]
+fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
+    use cambium_engine::externals::{analyse, reach};
+    use std::collections::BTreeSet;
+    let index = base();
+    let v = index.view();
+
+    let change = |p: &str| vec![Change::new(Status::Modified, p)];
+    let e = analyse(
+        v,
+        &change("api/envoy/x.proto"),
+        "base",
+        "head",
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert_eq!(e.dirtied_by["mod"], vec!["api/envoy/x.proto".to_string()]);
+
+    let head = MODULE_BASE.replace(
+        "bazel_dep(name = \"mod\", version = \"1.0\")",
+        "bazel_dep(name = \"mod\", version = \"2.0\")",
+    );
+    let e = analyse(
+        v,
+        &change("MODULE.bazel"),
+        "base",
+        "head",
+        &texts(MODULE_BASE, &head),
+    );
+    assert_eq!(e.dirtied_by["mod"], vec!["MODULE.bazel".to_string()]);
+
+    // `//app`'s closure carries two `@mod` labels; it is one package.
+    let repos: BTreeSet<String> = ["mod".to_string()].into_iter().collect();
+    let r = reach(v, &repos, &repos);
+    assert_eq!(r.packages, ["app".to_string()].into_iter().collect());
+    assert_eq!(r.packages_by_repo["mod"], 1);
 }
