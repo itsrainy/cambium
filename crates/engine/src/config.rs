@@ -348,11 +348,19 @@ impl Config {
     /// rows hashed one way are never compared against rows hashed another —
     /// and it is cheaper than a format break, which would make old indexes
     /// unreadable rather than merely unspliceable.
+    ///
+    /// Only what decides the *content* of an index reaches the hash. The
+    /// whole `[baseline]` section is left out: the store is where an index
+    /// lives, `max_ancestor_walk` and `retention_days` are how far a run
+    /// looks for one and how long it keeps it, and none of them changes a
+    /// byte of what is built — bumping either used to invalidate every
+    /// published index. `[limits]` is a cost decision (splice or re-query
+    /// `//...`), not an accuracy one, and is left out for the same reason.
     pub fn hash(&self) -> [u8; 32] {
         let mut graph_relevant = self.clone();
         graph_relevant.bazel.startup_flags.clear();
-        graph_relevant.baseline.cache_dir = None;
-        graph_relevant.baseline.publish_partial = false;
+        graph_relevant.baseline = Baseline::default();
+        graph_relevant.limits = Limits::default();
         let mut h = blake3::Hasher::new();
         h.update(b"cambium-rule-hash-v");
         h.update(&cambium_proto::RULE_HASH_VERSION.to_le_bytes());
@@ -399,6 +407,22 @@ mod tests {
         assert_eq!(a.hash(), b.hash());
         b.invalidators.globs.push("extra/**".into());
         assert_ne!(a.hash(), b.hash());
+    }
+
+    /// Where an index lives, how far back a run looks for one, how long it
+    /// is kept, and when a run stops splicing: none of it changes a byte of
+    /// the index, so none of it may retire every published one.
+    #[test]
+    fn baseline_and_limits_do_not_reach_the_hash() {
+        let a = Config::default();
+        let mut b = Config::default();
+        b.baseline.max_ancestor_walk = 50;
+        b.baseline.retention_days = 90;
+        b.baseline.store = StoreConfig::Dir {
+            path: PathBuf::from("/srv/indexes"),
+        };
+        b.limits.max_dirty_packages = 5000;
+        assert_eq!(a.hash(), b.hash());
     }
 
     #[test]
