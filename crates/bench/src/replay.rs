@@ -1052,14 +1052,6 @@ impl ReplayRun {
                 },
                 new,
             ));
-            if old.rederived != new.rederived {
-                out.push(Divergence {
-                    key: key.clone(),
-                    field: "rederived".into(),
-                    recorded: side(old.rederived),
-                    replayed: side(new.rederived),
-                });
-            }
             if old.affected_lower_bound != new.affected_lower_bound {
                 out.push(Divergence {
                     key: key.clone(),
@@ -1078,6 +1070,23 @@ impl ReplayRun {
                     replayed: "yes".into(),
                 });
             }
+        }
+        // How each side derived its externals tables is a fact about the two
+        // runs, not about any one change set, so it is reported once and at
+        // the front: everything below it is being read across a derivation
+        // change and is expected to differ.
+        let sides = |rs: &[ReplayOutcome]| rs.iter().any(|o| o.rederived);
+        let (old_side, new_side) = (sides(&baseline.outcomes), sides(&self.outcomes));
+        if old_side != new_side {
+            out.insert(
+                0,
+                Divergence {
+                    key: "(whole run)".into(),
+                    field: "rederived".into(),
+                    recorded: side(old_side),
+                    replayed: side(new_side),
+                },
+            );
         }
         out
     }
@@ -1392,6 +1401,32 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         let fields: Vec<&str> = d.iter().map(|x| x.field.as_str()).collect();
         assert!(fields.contains(&"dirty_packages"));
         assert_eq!(d.iter().filter(|x| x.field == "present").count(), 2);
+    }
+
+    /// A re-derived run compared against a plain one is expected to differ,
+    /// so the report says which side was which — once, at the front, rather
+    /// than once per change set.
+    #[test]
+    fn a_rederived_run_says_so_once_when_compared_against_a_plain_one() {
+        let run = |rederived: bool| ReplayRun {
+            schema: REPLAY_SCHEMA,
+            subject: "envoy".into(),
+            pin: "pin".into(),
+            outcomes: vec!["ab", "cd"]
+                .into_iter()
+                .map(|k| ReplayOutcome {
+                    rederived,
+                    ..outcome(k, k, false, 3, false)
+                })
+                .collect(),
+        };
+        let d = run(true).divergences_against(&run(false));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].field, "rederived");
+        assert!(d[0].replayed.contains("re-derived"), "{:?}", d[0]);
+        assert!(d[0].recorded.contains("stored index"), "{:?}", d[0]);
+        // Two runs derived the same way say nothing.
+        assert!(run(true).divergences_against(&run(true)).is_empty());
     }
 
     #[test]
