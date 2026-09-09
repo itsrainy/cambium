@@ -108,6 +108,10 @@ Three separate things, and they are not interchangeable:
   whose `config_hash` differs from the running config is refused for splicing
   and the run mints a new lineage; the file stays readable. This is the knob for
   anything that changes what a hash or an edge means without moving the layout.
+  Only what decides an index's *content* is hashed: the `[baseline]` section
+  (store, `max_ancestor_walk`, `retention_days`, cache directory) and
+  `[limits]` say where an index lives, how it is found and when a run stops
+  splicing, not what is in it, so changing them retires nothing.
 - **`lineage`**, a random 16 bytes minted per full build, is what makes node
   ids comparable. It is a consequence of the other two, never bumped by hand.
 
