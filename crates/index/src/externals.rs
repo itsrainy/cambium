@@ -1128,40 +1128,37 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
             },
         },
     };
-    // `rest` is now `pkg:name` or `pkg`, without the leading `//`.
-    if rest.contains(|c: char| c.is_whitespace()) {
+    // `rest` is now `pkg:name` or `pkg`, without the leading `//`. A format
+    // placeholder, whitespace or any other byte a label cannot carry means
+    // this was never a label: `"//%s:foo"`, or text scraped out of a URL.
+    if !rest.bytes().all(is_label_byte) {
         return Vec::new();
     }
     let (pkg, name) = match rest.split_once(':') {
-        Some((p, n)) => (p, Some(n)),
-        None => (rest, None),
+        Some((p, n)) => (p, n),
+        // `//pkg` is `//pkg:pkg`, a rule target. Only the file it might also
+        // be — a source file called `pkg` in that directory — is an input.
+        None => (rest, rest.rsplit('/').next().unwrap_or(rest)),
     };
-    let dir = if pkg.is_empty() {
-        String::new()
-    } else {
-        format!("{pkg}/")
-    };
-    match name {
-        None => {
-            if pkg.is_empty() {
-                // `//` alone would claim the whole repository; that is what a
-                // global invalidation is for, not a pattern.
-                Vec::new()
-            } else {
-                vec![Pattern::Prefix(dir)]
-            }
-        }
-        Some("") => Vec::new(),
-        Some(n) => {
-            let path = format!("{dir}{n}");
-            let mut v = vec![Pattern::Exact(path)];
-            // A name with no extension is a rule, not a file.
-            if !n.contains('.') && !pkg.is_empty() {
-                v.push(Pattern::Prefix(dir));
-            }
-            v
-        }
+    // A visibility token names no file and can never be read by a rule.
+    if name.is_empty() || name.starts_with("__") {
+        return Vec::new();
     }
+    // A repository rule and a module extension run during loading and can
+    // read *source files* only: `repository_ctx.path(label)` and the
+    // `attr.label` of a repository rule both reject a rule target. So the
+    // one path a label can feed a repository from is the file it names,
+    // exactly. (A rule-shaped label used to claim its whole package subtree
+    // as well, on the theory that a rule's inputs live nearby; visibility
+    // specs and `config_setting` keys made that claim over hundreds of
+    // repositories at once and 91% of a large repository's packages —
+    // issue #8.)
+    let path = if pkg.is_empty() {
+        name.to_string()
+    } else {
+        format!("{pkg}/{name}")
+    };
+    vec![Pattern::Exact(path)]
 }
 
 /// Computes the repository-input map for a checkout.
