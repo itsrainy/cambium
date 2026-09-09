@@ -56,7 +56,12 @@ bazel = "bazelisk"
 # The suite runs the plain Bazel its .bazelversion names instead, for every
 # tool alike; see `bazelisk_env` in crates/bench/src/checkout.rs.
 extra_query_flags = []
-invalidators = ["dev/bazel/**", "go.mod", "go.sum", "pnpm-lock.yaml"]
+# `go.mod` / `go.sum` are not read by Bazel here (WORKSPACE mode; gazelle's
+# `go_repository` calls are checked in), `pnpm-lock.yaml` is the
+# `pnpm_lock =` label of WORKSPACE's `npm_translate_lock`, which the index
+# derives, and `dev/bazel/` does not exist at the pin. Fifteen of this
+# subject's twenty-four history globals were these entries.
+invalidators = []
 notes = "Go + TS, Gazelle-generated BUILD files, busy commit history; best updater exercise"
 
 [[repo]]
@@ -84,7 +89,12 @@ bazel_version = "7.4.1"
 # graph-affecting query options, so dropping it costs nothing here.
 extra_startup_flags = ["--noworkspace_rc"]
 extra_query_flags = []
-invalidators = ["tools/**", "third_party/**"]
+# Every file these globs caught in the published run is reached by label:
+# `*_configure.bzl` and `workspace.bzl` files are in the workspace load
+# closure, `BUILD.tpl` / `*.patch` / `*.BUILD` are `Label(...)` inputs of the
+# repository rules that read them, `install.py.in` is an attr default of an
+# ordinary rule. The recall oracle is what confirms it on the box.
+invalidators = []
 notes = "C++ AV stack; graph shape closest to the target production repo"
 
 [[repo]]
@@ -94,7 +104,12 @@ pin = "076fe93fad26cb2555e3bb86defa6a772d11cf35"
 history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["third_party/**", "xla/tsl/**/*.bzl", "workspace*.bzl"]
+# Same reasoning as apollo: the patches and templates under third_party/ are
+# `patch_file` / `attr.label` inputs of workspace-closure repository rules,
+# the `.bzl` files are closure-handled, and `third_party/tsl/**` sources are
+# ordinary packages. Unverified offline (no local mirror); the box's recall
+# oracle is the gate.
+invalidators = []
 notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loading, large fetch"
 
 [[repo]]

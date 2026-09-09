@@ -1485,10 +1485,22 @@ fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
 /// per-occurrence attribution is keyed on.
 fn string_literals(text: &str) -> Vec<(usize, Literal)> {
     let mut out = Vec::new();
-    for (i, t) in lex(text).into_iter().enumerate() {
+    let toks = lex(text);
+    for (i, t) in toks.iter().enumerate() {
         let Tok::Str(s, e) = t.tok else {
             continue;
         };
+        // The label of a `load()` is an edge of the load graph, not a file
+        // the repository rule reads: the `.bzl` it names is in the workspace
+        // closure, and a change to it is answered by that file's own
+        // repositories. Read as an input it would make every `.bzl` a root
+        // workspace file loads an input of everything that file can define.
+        if i >= 2
+            && matches!(toks[i - 1].tok, Tok::Open)
+            && matches!(toks[i - 2].tok, Tok::Name("load"))
+        {
+            continue;
+        }
         let lit = unescape(&text[s..e]);
         for l in labels_in(&lit) {
             if l != lit {
@@ -1887,6 +1899,53 @@ mod tests {
         );
         // A label the rule resolves feeds it; neither of these is target-only.
         assert!(ri.target_only.is_empty(), "{:?}", ri.target_only);
+    }
+
+    /// `tools/workspace.bzl` loads every `third_party/*/init.bzl` and calls
+    /// them: its `load()` labels are edges, and the loaded file's own
+    /// repositories answer for a change to it. Read as inputs, each init file
+    /// would feed everything the root file can define.
+    #[test]
+    fn a_load_label_is_not_a_repository_input() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"apollo\")\n\
+                 load(\"//tools:workspace.bzl\", \"apollo_repositories\")\n\
+                 apollo_repositories()\n",
+            ),
+            (
+                "tools/workspace.bzl",
+                "load(\"//third_party/pcl:init.bzl\", pcl = \"init\")\n\
+                 load(\"//third_party/absl:init.bzl\", absl = \"init\")\n\
+                 def apollo_repositories():\n\
+                 \x20   pcl()\n\
+                 \x20   absl()\n",
+            ),
+            (
+                "third_party/pcl/init.bzl",
+                "def init():\n\
+                 \x20   pcl_configure(name = \"local_config_pcl\", tpl = \"//third_party/pcl:BUILD.tpl\")\n",
+            ),
+            (
+                "third_party/absl/init.bzl",
+                "def init():\n\
+                 \x20   http_archive(name = \"com_google_absl\")\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity());
+        assert!(
+            ri.repos_for("third_party/pcl/init.bzl").is_empty(),
+            "{:?}",
+            ri.repos_for("third_party/pcl/init.bzl")
+        );
+        assert_eq!(
+            ri.repos_for("third_party/pcl/BUILD.tpl"),
+            set(&["local_config_pcl"])
+        );
+        // The file's own set is what answers a change to it; the loader's
+        // set is kept alongside because a loader may read a constant from it.
+        assert!(ri.bzl_repos["third_party/pcl/init.bzl"].contains("local_config_pcl"));
     }
 
     #[test]
@@ -2380,6 +2439,47 @@ _envoy_repo = repository_rule(
         let m = RepoMapping::from_dump("{\"\":\"\",\"demo\":\"\"}");
         let ri = inputs(&files, &m);
         assert_eq!(ri.repos_for("bazel/x.patch"), set(&["a", "b"]));
+    }
+
+    /// apollo's `clean_dep(dep)` is `str(Label(dep))`: a helper whose only
+    /// call forwards its parameter into a pure builtin. `Label(dep)` names no
+    /// repository, so the helper is not a wrapper, and
+    /// `build_file = clean_dep("//third_party/absl:absl.BUILD")` is an input
+    /// of `com_google_absl` rather than a repository called
+    /// `//third_party/absl:absl.BUILD`.
+    #[test]
+    fn a_helper_that_forwards_into_a_builtin_is_not_a_wrapper() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"apollo\")\n\
+                 load(\"//third_party/absl:workspace.bzl\", absl = \"repo\")\n\
+                 absl()\n",
+            ),
+            (
+                "third_party/absl/workspace.bzl",
+                "def clean_dep(dep):\n\
+                 \x20   return str(Label(dep))\n\
+                 \n\
+                 def repo():\n\
+                 \x20   native.new_local_repository(\n\
+                 \x20       name = \"com_google_absl\",\n\
+                 \x20       build_file = clean_dep(\"//third_party/absl:absl.BUILD\"),\n\
+                 \x20       path = \"/opt/apollo/absl/\",\n\
+                 \x20   )\n",
+            ),
+        ]);
+        let m = RepoMapping::identity();
+        let ri = inputs(&files, &m);
+        assert_eq!(
+            ri.repos_for("third_party/absl/absl.BUILD"),
+            set(&["com_google_absl"])
+        );
+        assert!(
+            !ri.repos.iter().any(|r| r.starts_with("//")),
+            "{:?}",
+            ri.repos
+        );
     }
 
     /// A label written at module level is attributed the way it always was:
