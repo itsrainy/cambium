@@ -194,7 +194,7 @@ fn call_shape<'a>(t: &[Lexed<'a>]) -> Option<&'a str> {
     let Some(Tok::Name(n)) = t.first().map(|x| x.tok) else {
         return None;
     };
-    if !matches!(t.get(1).map(|x| x.tok), Some(Tok::Open)) {
+    if !matches!(t.get(1).map(|x| x.tok), Some(Tok::Open(b'('))) {
         return None;
     }
     if !matches!(t.last().map(|x| x.tok), Some(Tok::Close)) {

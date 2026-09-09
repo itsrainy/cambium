@@ -286,7 +286,10 @@ fn split_target_body(rest: &str) -> Option<(&str, &str)> {
 pub(crate) enum Tok<'a> {
     Name(&'a str),
     Str(usize, usize),
-    Open,
+    /// An opening bracket, with the byte itself: `x(y)` is a call and `x[y]`
+    /// is a subscript, and reading the second as the first makes every
+    /// indexing expression look like a call to a symbol nothing declares.
+    Open(u8),
     Close,
     /// One punctuation byte: `=`, `.`, `,` and friends. Kept rather than
     /// collapsed into `Other` because [`crate::externals`] reads statement
@@ -321,7 +324,7 @@ pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
             b' ' | b'\t' | b'\r' | b'\n' => i += 1,
             b'(' | b'[' | b'{' => {
                 out.push(Lexed {
-                    tok: Tok::Open,
+                    tok: Tok::Open(c),
                     col0,
                 });
                 i += 1;
@@ -478,20 +481,20 @@ fn scan(text: &str, names: &[&str], top_level_only: bool) -> Vec<String> {
     let mut depth = 0i32;
     for (i, t) in toks.iter().enumerate() {
         match t.tok {
-            Tok::Open => depth += 1,
+            Tok::Open(_) => depth += 1,
             Tok::Close => depth -= 1,
             Tok::Name(n) if names.contains(&n) => {
                 if top_level_only && (!t.col0 || depth != 0) {
                     continue;
                 }
-                if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open)) {
+                if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(_))) {
                     continue;
                 }
                 // First string literal inside the call.
                 let mut d = 0i32;
                 for u in &toks[i + 1..] {
                     match u.tok {
-                        Tok::Open => d += 1,
+                        Tok::Open(_) => d += 1,
                         Tok::Close => {
                             d -= 1;
                             if d == 0 {
