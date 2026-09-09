@@ -205,6 +205,11 @@ pub struct Externals {
     /// the repository rule writes: their label consumers are dirty, their
     /// loaders are not.
     pub label_only: usize,
+    /// For each repository an input-path edit named, the changed paths that
+    /// named it. Kept for the diagnostic a run prints when its dirty set
+    /// overflows `max_dirty_packages`: the repository set alone is hundreds of
+    /// names and says nothing about *why*.
+    pub input_paths: BTreeMap<String, Vec<String>>,
 }
 
 /// Runs the stage over a diff.
@@ -367,6 +372,10 @@ pub fn analyse(
         .len();
     for (repo, paths) in by_input {
         let name = base.repo_name(repo).to_string();
+        out.input_paths
+            .entry(name.clone())
+            .or_default()
+            .extend(paths.iter().map(|p| p.to_string()));
         if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, &paths) {
             out.load_repos.insert(name.clone());
         } else {
@@ -381,6 +390,10 @@ pub fn analyse(
     }
     for (repo, paths) in by_target {
         let name = base.repo_name(repo).to_string();
+        out.input_paths
+            .entry(name.clone())
+            .or_default()
+            .extend(paths.iter().map(|p| p.to_string()));
         if out.repos.insert(name.clone()) {
             out.label_only += 1;
             tracing::debug!(
@@ -523,6 +536,11 @@ pub struct RepoReach {
     pub nodes: Vec<u32>,
     /// Packages whose `.bzl` closure loads from one of the repositories.
     pub packages: BTreeSet<String>,
+    /// How many of [`RepoReach::packages`] each repository accounted for.
+    /// Packages counted once per repository that reaches them, so the values
+    /// sum to at least `packages.len()`. Kept so that a run which overflows
+    /// `max_dirty_packages` can say which repositories cost it the most.
+    pub packages_by_repo: BTreeMap<String, usize>,
 }
 
 /// Resolves dirty repositories to graph work.
@@ -577,19 +595,44 @@ pub fn reach(
     // file loads directly sit on the package itself (`pkg_ext`), since no
     // `.bzl` row stands between it and the repository (issue #4).
     if base.bzl_closure && !load_repos.is_empty() {
-        let hot: Vec<u32> = (0..base.bzl_ext_labels.len() as u32)
-            .filter(|&e| {
-                label_repo(base.bzl_ext_labels.get(e)).is_some_and(|t| matching(load_repos, t))
-            })
-            .collect();
+        // Each hot external-label entry is charged to the repository whose
+        // name it carries, so the per-repository counts fall out of the same
+        // pass rather than costing a walk per repository.
+        let mut hot: Vec<u32> = Vec::new();
+        let mut charged: BTreeMap<u32, &str> = BTreeMap::new();
+        for e in 0..base.bzl_ext_labels.len() as u32 {
+            let Some(token) = label_repo(base.bzl_ext_labels.get(e)) else {
+                continue;
+            };
+            let Some(owner) = load_repos.iter().find(|a| {
+                repo_token_matches(token, a, canon.get(a.as_str()).copied().unwrap_or(""))
+            }) else {
+                continue;
+            };
+            hot.push(e);
+            charged.insert(e, owner.as_str());
+        }
         if !hot.is_empty() {
+            let charge = |out: &mut RepoReach, row: &[u32], pkg: &str| {
+                let mut hit = false;
+                for e in row {
+                    if let Some(owner) = charged.get(e) {
+                        hit = true;
+                        *out.packages_by_repo.entry(owner.to_string()).or_default() += 1;
+                    }
+                }
+                if hit {
+                    out.packages.insert(pkg.to_string());
+                }
+            };
             for id in 0..base.num_bzl() {
                 if !base.bzl_ext.row(id).iter().any(|e| hot.contains(e)) {
                     continue;
                 }
+                let row: Vec<u32> = base.bzl_ext.row(id).to_vec();
                 for &p in base.bzl_consumers(id) {
                     if !base.package_tombstoned(p) {
-                        out.packages.insert(base.package_name(p).to_string());
+                        charge(&mut out, &row, base.package_name(p));
                     }
                 }
             }
@@ -597,8 +640,9 @@ pub fn reach(
                 if base.package_tombstoned(p) {
                     continue;
                 }
-                if base.pkg_ext.row(p).iter().any(|e| hot.contains(e)) {
-                    out.packages.insert(base.package_name(p).to_string());
+                let row: Vec<u32> = base.pkg_ext.row(p).to_vec();
+                if row.iter().any(|e| hot.contains(e)) {
+                    charge(&mut out, &row, base.package_name(p));
                 }
             }
         }
