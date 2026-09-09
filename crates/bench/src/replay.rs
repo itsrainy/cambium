@@ -413,8 +413,8 @@ pub fn rederive_externals(
     Ok(builder.finish(rev))
 }
 
-/// The re-derived indexes of a `--rederive` run, one per distinct base
-/// revision.
+/// The re-derived indexes of a `--rederive` run, a few base revisions at a
+/// time.
 ///
 /// Re-deriving costs a full [`cambium_index::IndexBuilder::finish`] — every
 /// label and both CSRs materialised — which at envoy's size is the expensive
@@ -425,11 +425,32 @@ pub fn rederive_externals(
 #[derive(Default)]
 pub struct RederiveCache {
     built: BTreeMap<String, cambium_index::IndexData>,
+    /// Insertion order, for eviction.
+    order: Vec<String>,
+    cap: usize,
 }
+
+/// How many re-derived indexes to hold at once.
+///
+/// A re-derived index is the whole index in memory, a few hundred megabytes at
+/// envoy's size, and `--all --history` walks three hundred bases; holding them
+/// all would be tens of gigabytes for no gain. Replays are driven in recorded
+/// order, where a repeated base is a *consecutive* repeat — a change set and
+/// the history commit that shares its parent — so a handful of slots catch
+/// every reuse there is. A base that recurs later is simply rebuilt.
+const REDERIVE_CACHE_SLOTS: usize = 4;
 
 impl RederiveCache {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_slots(REDERIVE_CACHE_SLOTS)
+    }
+
+    pub fn with_slots(cap: usize) -> Self {
+        Self {
+            built: BTreeMap::new(),
+            order: Vec::new(),
+            cap: cap.max(1),
+        }
     }
 
     /// Re-derives at `rev` unless it is already built. `Some(ms)` is what this
@@ -447,6 +468,11 @@ impl RederiveCache {
         let data = rederive_externals(base, rev, texts)?;
         let ms = t.elapsed().as_millis() as u64;
         self.built.insert(rev.to_string(), data);
+        self.order.push(rev.to_string());
+        while self.order.len() > self.cap {
+            let evicted = self.order.remove(0);
+            self.built.remove(&evicted);
+        }
         Ok(Some(ms))
     }
 
@@ -1225,6 +1251,31 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert!(!(0..view.num_repos()).any(|r| view.repo_name(r) == "stale_repo"));
         assert_eq!(view.num_packages(), stored.view().num_packages());
         assert_eq!(view.package_name(0), "lib");
+    }
+
+    /// The cache answers a repeated base and holds only its slots, so a run
+    /// over three hundred history commits does not accumulate three hundred
+    /// whole indexes.
+    #[test]
+    fn the_rederive_cache_reuses_a_repeated_base_and_evicts_the_oldest() {
+        let stored = index_with_stale_externals();
+        let files = [
+            (externals::MODULE_FILE, REDERIVE_MODULE),
+            (
+                "bazel/extensions.bzl",
+                "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+            ),
+        ];
+        let mut cache = RederiveCache::with_slots(2);
+        // The second visit to "a" is the cache answering; the rest are builds.
+        for (rev, cached) in [("a", false), ("a", true), ("b", false), ("c", false)] {
+            let texts = files_at(rev, &files);
+            let cost = cache.ensure(stored.view(), rev, &texts).unwrap();
+            assert_eq!(cost.is_none(), cached, "at {rev}");
+        }
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("a").is_none(), "the oldest slot was not evicted");
+        assert!(cache.get("b").is_some() && cache.get("c").is_some());
     }
 
     /// A re-derivation with nothing to read is an error rather than a silently
