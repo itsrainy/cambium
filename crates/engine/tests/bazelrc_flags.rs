@@ -266,56 +266,20 @@ fn a_boolean_setting_written_as_a_negation_is_the_same_setting() {
 }
 
 #[test]
-fn a_setting_in_an_external_repository_the_closure_does_not_load_from_resolves() {
-    // Nothing in the closure loads a `.bzl` from `@quiche`, and no `.bzl`
-    // names the label, so the setting is answered from the graph: the rc file
-    // writes the repository apparently and the index canonically, and the two
-    // spellings are matched.
+fn a_setting_in_an_external_repository_keeps_the_global() {
+    // `@quiche//:ssl_lib` is a target in a repository the index does not
+    // cover: the config_settings and transitions that read it live there, and
+    // the main-repo rules that depend on them do so through ordinary targets.
+    // A main-repo rule naming the setting (`//q:q` does) is only part of the
+    // picture, so the run stays global and says why.
     let r = run(
         "build --@quiche//:ssl_lib=@envoy//bazel:ssl\n",
         "build --@quiche//:ssl_lib=@envoy//bazel:boring\n",
         DEFS,
     );
-    assert!(!r.global, "{:?}", r.global_reason);
-    assert_eq!(r.bazelrc_flags, vec!["@quiche//:ssl_lib".to_string()]);
-    assert_eq!(r.stats.bazelrc_flag_nodes, 1);
-    assert_eq!(r.affected_labels(), vec!["//q:q".to_string()]);
-}
-
-#[test]
-fn a_setting_in_a_repository_the_closure_loads_from_keeps_the_global() {
-    let mut f = files(DEFS);
-    f.0.insert(
-        "bazel/defs.bzl".into(),
-        "load(\"@quiche//:build.bzl\", \"q\")\n".into(),
-    );
-    let (_d, engine, base, head) = fixture(
-        "build --@quiche//:ssl_lib=a\n",
-        "build --@quiche//:ssl_lib=b\n",
-    );
-    let index = engine.full_build_with(&base, &Scanning(f)).unwrap();
-    let req = AffectedRequest {
-        materialize: true,
-        no_full_build: true,
-        ..AffectedRequest::new(&base, &head)
-    };
-    let mut f2 = files(DEFS);
-    f2.0.insert(
-        "bazel/defs.bzl".into(),
-        "load(\"@quiche//:build.bzl\", \"q\")\n".into(),
-    );
-    let t = texts(&base, &head);
-    let r = engine
-        .compute_with_texts(
-            index.view(),
-            &[Change::new(Status::Modified, ".bazelrc")],
-            &Scanning(f2),
-            &req,
-            &t as &dyn WorkspaceText,
-        )
-        .unwrap()
-        .report;
     assert!(r.global, "{:?}", r.bazelrc_flags);
     let why = r.global_reason.clone().unwrap();
     assert!(why.contains("quiche"), "{why}");
+    assert!(why.contains("external repository"), "{why}");
+    assert_eq!(r.stats.bazelrc_flag_nodes, 0);
 }
