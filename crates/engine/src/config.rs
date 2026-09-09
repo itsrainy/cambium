@@ -209,14 +209,18 @@ impl Default for Invalidators {
             .into_iter()
             .map(String::from)
             .collect(),
-            globs: [
-                "tools/toolchains/**",
-                "platforms/**",
-                "third_party/**/*.bzl",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+            // `third_party/**/*.bzl` used to be here. It is gone because a
+            // changed `.bzl` is now handled exhaustively without it: a file in
+            // a package's load closure dirties its consumers, a file in the
+            // workspace closure moves the repositories it defines (or goes
+            // global when they cannot be named), and a file the closure does
+            // not know is checked against every `load()` in the head tree.
+            // The glob only ever pre-empted one of those answers with a wider
+            // one.
+            globs: ["tools/toolchains/**", "platforms/**"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
         }
     }
 }
