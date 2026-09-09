@@ -58,11 +58,15 @@
 //! one of the results is a `.bzl` the closure actually loads from there.
 //!
 //! Three things keep that sound. A path the mapping does not cover translates
-//! to nothing, and an untranslatable path keeps rule (2). A repository with no
-//! derivable mapping keeps rule (2). And a repository dirtied by the
-//! `MODULE.bazel` diff — a version bump, a changed tag — keeps rule (2)
-//! unconditionally, because *any* file in it may have moved. Rule (1) is
-//! untouched in every case.
+//! to nothing, and an untranslatable path keeps rule (2) — unless the mapping
+//! is *exhaustive* ([`cambium_index::externals::PathMap::exhaustive`]): a
+//! repository whose whole content is one main-repo directory, because a
+//! `local_path_override` or a `local_repository` put it there, cannot hold a
+//! `.bzl` that lives outside that directory, so an uncovered path there is not
+//! a `.bzl` it exports. A repository with no derivable mapping keeps rule (2).
+//! And a repository dirtied by the `MODULE.bazel` diff — a version bump, a
+//! changed tag — keeps rule (2) unconditionally, because *any* file in it may
+//! have moved. Rule (1) is untouched in every case.
 //!
 //! The same question has a second static answer, for repositories with no
 //! mapping at all. The index's input map errs wide: every main-repo label in a
@@ -304,6 +308,12 @@ fn input_can_be_a_loaded_bzl(base: IndexRef<'_>, repo: u32, paths: &[&str]) -> b
     let loaded: BTreeSet<String> = (0..base.bzl_ext_labels.len() as u32)
         .filter_map(|e| repo_relative_path(base.bzl_ext_labels.get(e), apparent, canonical))
         .collect();
+    // A repository whose mapping is exhaustive — its whole content is one
+    // main-repo directory — cannot hold a `.bzl` that lives outside it, so a
+    // changed path the mapping does not cover is not a `.bzl` it exports. A
+    // partial mapping says nothing about what it does not cover, and an
+    // uncovered path there keeps rule (2).
+    let exhaustive = maps.iter().any(|m| m.exhaustive);
     paths.iter().any(|p| {
         let mut covered = false;
         for m in &maps {
@@ -315,7 +325,7 @@ fn input_can_be_a_loaded_bzl(base: IndexRef<'_>, repo: u32, paths: &[&str]) -> b
                 return true;
             }
         }
-        !covered
+        !covered && !exhaustive
     })
 }
 

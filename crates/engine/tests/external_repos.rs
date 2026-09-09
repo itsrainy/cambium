@@ -48,10 +48,24 @@ fn files() -> Files {
     // `use_extension` and one `load()`. Both of its main-repo labels are
     // inputs of `@generated`.
     put("bazel/ext.bzl", "load(\"//bazel:repo.bzl\", \"r\")\n");
+    // The repository rule proper: three labels it resolves, all inside the
+    // declaration, and one call that names the repository they feed.
     put(
         "bazel/repo.bzl",
-        "CONFIG = attr.label(default = \"@demo//:config.yml\")\n\
-         DATA = \"@demo//data\"\n",
+        "def _impl(ctx):\n\
+         \x20   ctx.file(\"BUILD\", \"\")\n\
+         \n\
+         _gen = repository_rule(\n\
+         \x20   implementation = _impl,\n\
+         \x20   attrs = {\n\
+         \x20       \"config\": attr.label(default = \"@demo//:config.yml\"),\n\
+         \x20       \"tpl\": attr.label(default = \"@demo//tpl:helper.bzl\"),\n\
+         \x20       \"data\": attr.label(default = \"@demo//data\"),\n\
+         \x20   },\n\
+         )\n\
+         \n\
+         def r():\n\
+         \x20   _gen(name = \"generated\")\n",
     );
     put("app/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
     put("lib/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
@@ -59,7 +73,12 @@ fn files() -> Files {
     // with no main-repo `.bzl` in between. Its rules can change when `fmt`
     // does, even though nothing in it names a `@fmt` label.
     put("direct/BUILD", "load(\"@fmt//:defs.bzl\", \"f\")\n");
-    put("bazel/defs.bzl", "R = 1\n");
+    // Both packages reach a `.bzl` inside `@generated` through this file, so
+    // rule (2) has somewhere to land.
+    put(
+        "bazel/defs.bzl",
+        "load(\"@generated//:defs.bzl\", \"g\")\nR = 1\n",
+    );
     put("bazel/BUILD", "");
     Files(m)
 }
@@ -248,6 +267,38 @@ fn a_repository_rule_input_reaches_only_the_repositorys_consumers() {
     assert_eq!(
         affected(&r),
         vec!["//app:app".to_string(), "//lib:lib".to_string()]
+    );
+}
+
+/// A `.bzl` the rule resolves is named *inside the call that names the
+/// repository*, so per-occurrence attribution lands it on `@generated` — and
+/// because a repository rule may write anything it reads into a `.bzl` of its
+/// own, the packages whose load closure reaches into that repository are
+/// re-queried. Narrowing attribution must not lose that edge.
+#[test]
+fn a_bzl_named_inside_a_repository_rules_call_dirties_its_loaders() {
+    let (_e, index) = base();
+    let v = index.view();
+    assert_eq!(
+        v.repos_for_path("tpl/helper.bzl")
+            .into_iter()
+            .map(|r| v.repo_name(r))
+            .collect::<Vec<_>>(),
+        ["generated"]
+    );
+    let r = run(
+        &index,
+        &changed(&["tpl/helper.bzl"]),
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_input, 1);
+    assert_eq!(r.stats.repos_label_only, 0);
+    assert!(
+        r.dirty_packages.contains(&"app".to_string())
+            && r.dirty_packages.contains(&"lib".to_string()),
+        "{:?}",
+        r.dirty_packages
     );
 }
 

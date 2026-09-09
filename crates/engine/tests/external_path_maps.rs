@@ -46,7 +46,14 @@ fn files() -> Files {
     put(
         "bazel/ext.bzl",
         "CONF = attr.label(default = \"@demo//conf:settings.yml\")\n\
-         BUILD = '''filegroup(name = \"thing\", srcs = [\"@demo//notes\"])'''\n",
+         BUILD = '''filegroup(name = \"thing\", srcs = [\"@demo//notes\"])'''\n\
+         \n\
+         def _vendored():\n\
+         \x20   new_local_repository(\n\
+         \x20       name = \"vend\",\n\
+         \x20       path = \"vendored\",\n\
+         \x20       build_file = \"@demo//bazel:vend.BUILD\",\n\
+         \x20   )\n",
     );
     // `//app` loads a `.bzl` out of `@mod` and out of `@opaque`, transitively;
     // `//lib` and `//conf` only name a target in one. Those are rules (2)
@@ -54,10 +61,13 @@ fn files() -> Files {
     put("app/BUILD", "load(\"//bazel:defs.bzl\", \"r\")\n");
     put(
         "bazel/defs.bzl",
-        "load(\"@mod//bazel:defs.bzl\", \"r\")\nload(\"@opaque//:defs.bzl\", \"o\")\n",
+        "load(\"@mod//bazel:defs.bzl\", \"r\")\n\
+         load(\"@opaque//:defs.bzl\", \"o\")\n\
+         load(\"@vend//:defs.bzl\", \"v\")\n",
     );
     put("lib/BUILD", "");
     put("conf/BUILD", "");
+    put("names/BUILD", "");
     Files(m)
 }
 
@@ -74,6 +84,11 @@ fn rows(pkg: &str) -> PackageUpdate {
             "demo_lib",
             vec!["@opaque//:thing".into()],
         )],
+        "names" => vec![TargetRow::rule(
+            "//names:names",
+            "demo_lib",
+            vec!["@vend//:thing".into()],
+        )],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -83,7 +98,7 @@ fn rows(pkg: &str) -> PackageUpdate {
     }
 }
 
-const PACKAGES: &[&str] = &["app", "lib", "conf"];
+const PACKAGES: &[&str] = &["app", "lib", "conf", "names"];
 
 struct Scanning(Files);
 
@@ -102,7 +117,7 @@ impl PackageQuerier for Scanning {
 
     fn repo_mapping(&self) -> cambium_index::RepoMapping {
         cambium_index::RepoMapping::from_dump(
-            "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\"}",
+            "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\",\"vend\":\"vend+\"}",
         )
     }
 }
@@ -410,4 +425,53 @@ fn an_input_edit_is_still_spared_against_a_spliced_base() {
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.stats.repos_label_only, 1);
     assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+}
+
+/// `@vend` is a `new_local_repository` over `vendored/`, so its mapping is
+/// exhaustive: everything it exports comes from that directory. Its
+/// `build_file` is an input of the repository, and editing it dirties the
+/// repository — but the file lives outside `vendored/`, so it cannot be one
+/// of the `.bzl` files `//app`'s load closure reaches into the repository for,
+/// and rule (2) does not fire. Before the `exhaustive` marker every uncovered
+/// path kept the wide answer.
+#[test]
+fn an_input_edit_outside_an_exhaustive_mapping_does_not_re_query() {
+    let index = base();
+    let v = index.view();
+    let vend = (0..v.num_repos())
+        .find(|&r| v.repo_name(r) == "vend")
+        .expect("the local repository");
+    let maps = v.repo_path_maps(vend);
+    assert_eq!(maps.len(), 1, "{maps:?}");
+    assert!(maps[0].exhaustive, "{maps:?}");
+
+    let r = run(
+        &index,
+        &["bazel/vend.BUILD"],
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_input, 1);
+    assert_eq!(r.stats.repos_label_only, 1);
+    assert_eq!(r.direct, vec!["//names:names".to_string()]);
+    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+}
+
+/// And a path the exhaustive mapping *does* cover, which is a `.bzl` the
+/// closure loads out of the repository, still fires rule (2).
+#[test]
+fn an_input_edit_inside_an_exhaustive_mapping_still_re_queries() {
+    let index = base();
+    let r = run(
+        &index,
+        &["vendored/defs.bzl"],
+        &texts(MODULE_BASE, MODULE_BASE),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_label_only, 0);
+    assert!(
+        r.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        r.dirty_packages
+    );
 }

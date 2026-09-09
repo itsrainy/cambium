@@ -76,7 +76,15 @@ pub const FORMAT_VERSION: u32 = 8;
 /// (fixed in "externals: read the path mapping back out of the base index").
 /// A run that fetched such a base treated every repository as unmapped and
 /// re-queried ~1100 packages per change set.
-pub const CONTENT_REVISION: u32 = 1;
+///
+/// 2 --- attribution of a repository's inputs became per-occurrence rather
+/// than per-file ("externals: attribute a repository's inputs per call, not
+/// per file"). An index written before that carries wider `patterns` and
+/// `bzl_repos` rows, and path mappings with no `exhaustive` marker, so a run
+/// that spliced onto one would keep re-querying the packages the change was
+/// written to spare — a correct answer at the old cost, which is exactly what
+/// this counter retires.
+pub const CONTENT_REVISION: u32 = 2;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
