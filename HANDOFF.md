@@ -1,7 +1,7 @@
 # Handoff: cambium benchmark suite
 
 Written 2026-09-08 for the next orchestrator. Read this, then
-`docs/METHODOLOGY.md`. The owner is Rainy (they/them).
+`docs/METHODOLOGY.md`.
 
 This file is session state and nothing else: what is in flight, what to do
 next, and what is known to be open. The durable material has moved out of it
@@ -37,7 +37,7 @@ makes starting one worth the money.
 
 ## Next: the second published run
 
-Nothing is blocked on Rainy. The box is theirs to pay for, so say you are
+Nothing is blocked on Rainy. The box costs money, so say you are
 starting it, but the go for task 18 was given and these fixes are what it was
 waiting on.
 
