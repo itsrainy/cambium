@@ -45,8 +45,9 @@ pub use externals::{
     ModuleChange, ModuleFacts, PathMap, Pattern, RepoInputs,
 };
 pub use format::{
-    commit_pointer_key, index_file_name, index_key, parse_commit_pointer_key, parse_index_key,
-    temp_suffix, IndexError, IndexFile, OwnedIndexBytes, CONTENT_REVISION, FORMAT_VERSION,
+    commit_pointer_key, index_file_name, index_key, is_zstd, parse_commit_pointer_key,
+    parse_index_key, temp_suffix, Compression, IndexError, IndexFile, OwnedIndexBytes,
+    CONTENT_REVISION, DEFAULT_ZSTD_LEVEL, FORMAT_VERSION, ZSTD_MAGIC,
 };
 pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
 pub use lockfile::diff_lock;

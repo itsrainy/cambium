@@ -75,6 +75,57 @@ fn the_whole_file_still_records_which_commit_it_is() {
     assert_eq!(f.deserialize().unwrap().provenance.commit, "deadbeef");
 }
 
+/// Publish and fetch move whatever bytes the writer produced, and the writer
+/// now produces a zstd frame: the key still ends `.bin`, the file on disk is
+/// compressed, and what comes back out of the store reads as the same index.
+#[test]
+fn a_published_index_is_compressed_and_fetches_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DirStore::new(dir.path().join("store"));
+    let src = dir.path().join("idx.bin");
+    format::write_index(&src, &index_at("deadbeef", false)).unwrap();
+    assert!(cambium_index::is_zstd(&std::fs::read(&src).unwrap()));
+
+    let key = format::index_key(&[7; 16], "deadbeef");
+    assert!(key.ends_with(".bin"));
+    store.publish(&key, &src).unwrap();
+
+    let landed = dir.path().join("store").join(&key);
+    let bytes = std::fs::read(&landed).unwrap();
+    assert!(cambium_index::is_zstd(&bytes), "the store holds the frame");
+    assert!(bytes.len() < std::fs::metadata(&src).unwrap().len() as usize * 2);
+
+    let dest = dir.path().join("back.bin");
+    assert!(store.fetch(&key, &dest).unwrap());
+    let f = IndexFile::open(&dest).unwrap();
+    assert!(f.is_compressed());
+    assert_eq!(f.view().commit, "deadbeef");
+    assert_eq!(f.view().lineage, [7u8; 16]);
+}
+
+/// The same, for a store told to keep the bytes verbatim.
+#[test]
+fn a_raw_published_index_still_fetches_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DirStore::new(dir.path().join("store"));
+    let src = dir.path().join("idx.bin");
+    format::write_index_with(
+        &src,
+        &index_at("deadbeef", false),
+        format::Compression::None,
+    )
+    .unwrap();
+    assert!(!cambium_index::is_zstd(&std::fs::read(&src).unwrap()));
+
+    let key = format::index_key(&[7; 16], "deadbeef");
+    store.publish(&key, &src).unwrap();
+    let dest = dir.path().join("back.bin");
+    assert!(store.fetch(&key, &dest).unwrap());
+    let f = IndexFile::open(&dest).unwrap();
+    assert!(!f.is_compressed());
+    assert_eq!(f.view().commit, "deadbeef");
+}
+
 #[test]
 fn store_keys_are_lineage_then_commit() {
     let key = format::index_key(&[0xab; 16], "cafebabe");

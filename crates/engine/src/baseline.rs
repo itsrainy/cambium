@@ -120,12 +120,17 @@ impl<'a> BaselineCache<'a> {
         }
         // A blob written by an older build of cambium is not corrupt, just
         // stale: a store outlives format bumps the same way it outlives config
-        // edits, and the walk must step past it rather than stop.
+        // edits, and the walk must step past it rather than stop. A blob that
+        // is not a readable file at all — a zstd frame that will not
+        // decompress, a truncated transfer some other tool left behind — is
+        // skipped for the same reason: it is one key in a walk over many, and
+        // the next one may be fine.
         let f = match IndexFile::open(&dest) {
             Ok(f) => f,
             Err(
                 e @ (cambium_index::IndexError::BadVersion { .. }
-                | cambium_index::IndexError::BadMagic { .. }),
+                | cambium_index::IndexError::BadMagic { .. }
+                | cambium_index::IndexError::Decompress { .. }),
             ) => {
                 tracing::warn!(key = name, error = %e, "skipping an index this build cannot read");
                 let _ = std::fs::remove_file(&dest);
