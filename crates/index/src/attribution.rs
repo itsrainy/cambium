@@ -446,7 +446,7 @@ impl<'a> Attribution<'a> {
                 let name = if dotted {
                     NameArg::Absent
                 } else {
-                    self.name_arg(scope, callee, toks, file.text, &spans)
+                    self.name_arg(scope, callee, head, toks, file.text, &spans)
                 };
                 if let NameArg::Literal(l) = &name {
                     if names_a_repository(head) {
@@ -524,6 +524,7 @@ impl<'a> Attribution<'a> {
         &self,
         scope: Option<usize>,
         callee: Option<Sym>,
+        head: &str,
         toks: &[Lexed<'_>],
         text: &str,
         spans: &[(Option<String>, Range<usize>)],
@@ -571,6 +572,11 @@ impl<'a> Attribution<'a> {
                 }
                 NameArg::Absent
             }
+            // `Label(dep)` / `str(name)` forward nothing: a pure builtin
+            // creates no repository, and reading its argument as a name would
+            // turn apollo's `clean_dep(dep)` into a wrapper whose every call
+            // site declares a label-shaped "repository".
+            _ if PURE_BUILTINS.contains(&head) => NameArg::Absent,
             _ => match classify(first.clone()) {
                 NameArg::Forward => NameArg::Forward,
                 _ => NameArg::Absent,
@@ -835,7 +841,8 @@ impl<'a> Attribution<'a> {
                 Some(Tok::Punct(b'.'))
             );
             let callee = if dotted { None } else { self.resolve(f, head) };
-            if let NameArg::Literal(l) = self.name_arg(scope, callee, &file.toks, file.text, &spans)
+            if let NameArg::Literal(l) =
+                self.name_arg(scope, callee, head, &file.toks, file.text, &spans)
             {
                 return Attributed {
                     repos: [l].into_iter().collect(),
