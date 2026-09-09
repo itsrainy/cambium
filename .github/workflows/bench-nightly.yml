@@ -33,12 +33,14 @@ env:
 jobs:
   bench:
     name: bench ${{ matrix.subject }}
-    if: github.event_name == 'schedule' || inputs.subject == 'both' || inputs.subject == matrix.subject
+    # `matrix.*` is not available in a job-level `if`; GitHub refused to parse
+    # the file and recorded a zero-job failure on every push. The dispatch
+    # input selects the matrix instead.
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        subject: [bazel, envoy]
+        subject: ${{ fromJSON(inputs.subject == 'bazel' && '["bazel"]' || inputs.subject == 'envoy' && '["envoy"]' || '["bazel","envoy"]') }}
     env:
       CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff

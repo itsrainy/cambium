@@ -30,14 +30,15 @@ env:
 jobs:
   weekly:
     name: bench ${{ matrix.subject }}
-    if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.subject == 'all-weekly' || inputs.subject == matrix.subject))
+    # `matrix.*` is not available in a job-level `if`; GitHub refused to parse
+    # the file and recorded a zero-job failure on every push. The dispatch
+    # input selects the matrix instead.
+    if: (github.event_name == 'workflow_dispatch' && inputs.subject != 'tensorflow') || github.event.schedule == '0 6 * * 0'
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        subject: [sourcegraph, apollo, xla]
+        subject: ${{ fromJSON(inputs.subject == 'sourcegraph' && '["sourcegraph"]' || inputs.subject == 'apollo' && '["apollo"]' || inputs.subject == 'xla' && '["xla"]' || '["sourcegraph","apollo","xla"]') }}
     env:
       CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
       CAMBIUM_BAZEL_DIFF_DIR: ${{ github.workspace }}/.cache/cambium/bazel-diff
