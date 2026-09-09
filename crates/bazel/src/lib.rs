@@ -116,6 +116,9 @@ pub struct QueryOutcome {
     /// Packages Bazel reported as failing to load, counted over the *whole*
     /// stderr stream rather than the 40-line tail.
     pub load_errors: LoadErrors,
+    /// Packages Bazel said were *declared* deleted by `--deleted_packages`.
+    /// Not load failures: see [`parse_deleted_package_line`].
+    pub deleted_packages: Vec<String>,
 }
 
 /// What `--keep_going` could not load, scraped from stderr.
@@ -163,6 +166,13 @@ pub const MAX_ERROR_PACKAGES: usize = 32;
 /// answer is an `Option` rather than a non-empty string.
 pub fn parse_load_error_line(line: &str) -> Option<String> {
     let l = strip_ansi(line);
+    // A package the *invocation itself* declared deleted is not a failure to
+    // load; see [`parse_deleted_package_line`]. It has to be tested first,
+    // because its line carries a `no such package '...'` clause that would
+    // otherwise be counted as a load error.
+    if deleted_package_of(&l).is_some() {
+        return None;
+    }
     let rest = l.trim().strip_prefix("ERROR: ")?.trim_start();
     if let Some(r) = rest.strip_prefix("error loading package ") {
         // `'pkg': msg` — quoted, and the message itself may contain quotes.
@@ -184,6 +194,74 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
         return Some(r.split(':').next().unwrap_or(r).trim().to_string());
     }
     None
+}
+
+/// The package one line names as *declared deleted*, if it is such a line.
+///
+/// `--deleted_packages` is the invocation telling Bazel that a directory with a
+/// `BUILD` file in it is not a package. Asking for one still exits 3 under
+/// `--keep_going`, with:
+///
+/// ```text
+/// ERROR: Skipping '//mobile/test/common/integration:*': no such package
+/// 'mobile/test/common/integration': Package is considered deleted due to
+/// --deleted_packages
+/// ```
+///
+/// That is not a failure to load: the package does not exist for this
+/// configuration, exactly as if its directory were gone, and a `//...` query —
+/// which never names it — succeeds without it. Envoy's generated `repo.bazelrc`
+/// is where the suite meets this.
+pub fn parse_deleted_package_line(line: &str) -> Option<String> {
+    deleted_package_of(&strip_ansi(line))
+}
+
+/// The deleted-package test, on already-stripped text.
+fn deleted_package_of(l: &str) -> Option<String> {
+    let l = l.trim();
+    if !l.contains("considered deleted due to --deleted_packages") {
+        return None;
+    }
+    // The last `no such package '<pkg>'` clause names the package itself; the
+    // `Skipping '<pattern>'` clause before it names what was asked for.
+    let r = l.rsplit_once("no such package ")?.1.trim_start();
+    let r = r.strip_prefix('\'')?;
+    let end = r.find('\'')?;
+    Some(r[..end].to_string())
+}
+
+/// What a query's stderr said, in one pass: the packages that failed to load,
+/// and the packages the invocation had declared deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StderrFacts {
+    pub load_errors: LoadErrors,
+    pub deleted_packages: Vec<String>,
+}
+
+impl StderrFacts {
+    /// Folds one stderr line in.
+    pub fn push_line(&mut self, line: &str) {
+        let l = strip_ansi(line);
+        if let Some(p) = deleted_package_of(&l) {
+            if self.deleted_packages.len() < MAX_ERROR_PACKAGES {
+                self.deleted_packages.push(p);
+            }
+            return;
+        }
+        if let Some(p) = parse_load_error_line(&l) {
+            self.load_errors.push(&p);
+        }
+    }
+}
+
+/// Every fact in a stderr buffer. Used on a tail in tests, and on the live
+/// stream by [`drain_stderr`].
+pub fn parse_stderr_facts(stderr: &str) -> StderrFacts {
+    let mut f = StderrFacts::default();
+    for line in stderr.lines() {
+        f.push_line(line);
+    }
+    f
 }
 
 /// A target pattern as a query *word*, quoted when Bazel's query lexer would
@@ -379,6 +457,7 @@ impl Bazel {
                 stderr_tail: String::new(),
                 targets_read: 0,
                 load_errors: LoadErrors::default(),
+                deleted_packages: Vec::new(),
             });
         }
         let mut expr = String::from("set(");
@@ -462,7 +541,7 @@ impl Bazel {
         );
 
         let status = child.wait()?;
-        let (stderr_tail, load_errors) = stderr_rx.recv().unwrap_or_default();
+        let (stderr_tail, facts) = stderr_rx.recv().unwrap_or_default();
 
         // A read error usually means bazel died mid-stream; the stderr tail is
         // the useful part of that story, so report it rather than the truncation.
@@ -482,7 +561,8 @@ impl Bazel {
             success: status.success(),
             stderr_tail,
             targets_read,
-            load_errors,
+            load_errors: facts.load_errors,
+            deleted_packages: facts.deleted_packages,
         })
     }
 
@@ -716,10 +796,10 @@ impl Drop for ScratchFile {
 
 /// Drains the child's stderr on a thread (otherwise a chatty Bazel can fill the
 /// pipe and deadlock us), keeping only the tail.
-fn drain_stderr(child: &mut Child) -> mpsc::Receiver<(String, LoadErrors)> {
+fn drain_stderr(child: &mut Child) -> mpsc::Receiver<(String, StderrFacts)> {
     let (tx, rx) = mpsc::channel();
     let Some(stderr) = child.stderr.take() else {
-        let _ = tx.send((String::new(), LoadErrors::default()));
+        let _ = tx.send((String::new(), StderrFacts::default()));
         return rx;
     };
     std::thread::spawn(move || {
@@ -728,17 +808,15 @@ fn drain_stderr(child: &mut Child) -> mpsc::Receiver<(String, LoadErrors)> {
         // Counted here rather than from `tail`: a repository whose external
         // deps do not resolve produces hundreds of these, and the tail keeps
         // forty lines.
-        let mut errors = LoadErrors::default();
+        let mut facts = StderrFacts::default();
         for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            if let Some(p) = parse_load_error_line(&line) {
-                errors.push(&p);
-            }
+            facts.push_line(&line);
             if tail.len() == STDERR_TAIL_LINES {
                 tail.pop_front();
             }
             tail.push_back(line);
         }
-        let _ = tx.send((tail.into_iter().collect::<Vec<_>>().join("\n"), errors));
+        let _ = tx.send((tail.into_iter().collect::<Vec<_>>().join("\n"), facts));
     });
     rx
 }
@@ -839,6 +917,37 @@ mod tests {
             .as_deref(),
             Some("@@local_config_cuda//cuda")
         );
+    }
+
+    /// The line envoy's own `--deleted_packages` produces when a dirty package
+    /// under `mobile/test/common/integration` is asked for by name.
+    const DELETED_LINE: &str = "ERROR: Skipping '//mobile/test/common/integration:*': \
+         no such package 'mobile/test/common/integration': Package is considered deleted \
+         due to --deleted_packages";
+
+    #[test]
+    fn a_declared_deleted_package_is_not_a_load_error() {
+        // It carries a `no such package '...'` clause, so before this it was
+        // counted as one — and a run that touched such a package published an
+        // index flagged partial with no error lines to show for it.
+        assert_eq!(parse_load_error_line(DELETED_LINE), None);
+        assert_eq!(
+            parse_deleted_package_line(DELETED_LINE).as_deref(),
+            Some("mobile/test/common/integration")
+        );
+        let f = parse_stderr_facts(&format!("{DELETED_LINE}\nINFO: Elapsed time: 3.2s\n"));
+        assert!(f.load_errors.is_empty());
+        assert_eq!(f.deleted_packages, ["mobile/test/common/integration"]);
+    }
+
+    #[test]
+    fn a_load_failure_next_to_a_deleted_package_still_counts() {
+        let f = parse_stderr_facts(&format!(
+            "{DELETED_LINE}\nERROR: error loading package 'modules/planning': boom\n"
+        ));
+        assert_eq!(f.load_errors.count, 1);
+        assert_eq!(f.load_errors.packages, ["modules/planning".to_string()]);
+        assert_eq!(f.deleted_packages.len(), 1);
     }
 
     #[test]

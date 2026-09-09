@@ -150,13 +150,14 @@ impl PackageQuerier for BazelQuerier {
                 tracing::warn!(
                     requested = packages.len(),
                     loaded = q.packages_seen,
+                    declared_deleted = ?q.outcome.deleted_packages,
                     stderr = %q.outcome.stderr_tail,
-                    "some dirty packages failed to load under --keep_going; tombstoning them, as a cold build would"
+                    "some dirty packages did not load under --keep_going; tombstoning them, as a cold build would"
                 );
             }
             return Ok(Rows {
                 updates: q.updates,
-                partial: Some(q.outcome.load_errors),
+                partial: partial_of(&q.outcome),
             });
         }
         // Any other failure is not a partial answer: if a requested package
@@ -189,14 +190,13 @@ impl PackageQuerier for BazelQuerier {
                 stderr: q.outcome.stderr_tail,
             });
         }
-        let partial = (q.outcome.exit_code == Some(3)).then(|| {
+        let partial = partial_of(&q.outcome).inspect(|e| {
             tracing::warn!(
-                packages_in_error = q.outcome.load_errors.count,
+                packages_in_error = e.count,
                 loaded = q.updates.len(),
-                first = ?q.outcome.load_errors.packages,
+                first = ?e.packages,
                 "bazel query //... finished with errors under --keep_going; the index will be PARTIAL"
             );
-            q.outcome.load_errors.clone()
         });
         Ok(Rows {
             updates: q.updates,
@@ -222,6 +222,36 @@ impl PackageQuerier for BazelQuerier {
     fn workspace(&self) -> Option<&Path> {
         Some(self.bazel.workspace())
     }
+}
+
+/// Whether a finished query left the index incomplete, and with what.
+///
+/// Exit 3 is `--keep_going` finishing with errors, and the errors are not all
+/// the same thing:
+///
+/// - A package that *failed to load* — an unreachable registry, a broken
+///   `.bzl` — is missing from an answer that should have had it. The index is
+///   partial and has to say so.
+/// - A package the invocation *declared deleted* (`--deleted_packages`) is not
+///   missing: it does not exist in this configuration. A `bazel query //...`
+///   never names it and exits 0, so a cold build's index is complete without
+///   it — and an incremental query that asked for it by name, because a file
+///   under it changed, must reach the same verdict. Its empty update
+///   tombstones whatever rows the base had for it, exactly as a deletion
+///   would.
+///
+/// So exit 3 whose only complaint is declared-deleted packages is a complete
+/// answer. Any *unexplained* exit 3 stays partial: zero recognised error lines
+/// means a stderr shape this does not know, and calling that complete would
+/// silently under-report for every run spliced onto the published index.
+pub fn partial_of(outcome: &QueryOutcome) -> Option<cambium_bazel::LoadErrors> {
+    if outcome.exit_code != Some(3) {
+        return None;
+    }
+    if outcome.load_errors.is_empty() && !outcome.deleted_packages.is_empty() {
+        return None;
+    }
+    Some(outcome.load_errors.clone())
 }
 
 /// A query's answer: every package Bazel could load, and — when it could not
@@ -378,6 +408,7 @@ pub fn parse_stream(
         stderr_tail: String::new(),
         targets_read: 0,
         load_errors: cambium_bazel::LoadErrors::default(),
+        deleted_packages: Vec::new(),
     };
     Ok(finish(grouped, outcome, files, None).updates)
 }

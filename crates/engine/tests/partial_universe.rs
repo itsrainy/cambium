@@ -246,3 +246,138 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
     e.publish_index(&path, &good.header.lineage, "head2")
         .unwrap();
 }
+
+// ------------------------------------------- packages declared deleted
+
+/// Envoy's stderr for a dirty package its own `--deleted_packages` names, as
+/// `bench history envoy` met it at 75994f65 ("test: Improve handling of repo
+/// source dir (#46740)", which touches `mobile/test/common/integration/BUILD`).
+const DELETED_PACKAGE_STDERR: &str = concat!(
+    "ERROR: Skipping '//mobile/test/common/integration:*': no such package \
+     'mobile/test/common/integration': Package is considered deleted due to \
+     --deleted_packages\n",
+    "WARNING: --keep_going specified, ignoring errors.\n",
+);
+
+fn outcome(stderr: &str) -> cambium_bazel::QueryOutcome {
+    let facts = cambium_bazel::parse_stderr_facts(stderr);
+    cambium_bazel::QueryOutcome {
+        exit_code: Some(3),
+        success: false,
+        stderr_tail: stderr.to_string(),
+        targets_read: 0,
+        load_errors: facts.load_errors,
+        deleted_packages: facts.deleted_packages,
+    }
+}
+
+/// A querier whose queries "exited 3" with the given stderr, judged by the
+/// same rule the real `BazelQuerier` applies to a real one.
+struct StderrQuery<'a>(SynthQuerier<'a>, &'static str);
+
+impl PackageQuerier for StderrQuery<'_> {
+    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
+        Ok(Rows {
+            updates: self.0.query(packages)?.updates,
+            partial: cambium_engine::query::partial_of(&outcome(self.1)),
+        })
+    }
+    fn universe(&self) -> Result<Rows, EngineError> {
+        Ok(Rows {
+            updates: self.0.universe()?.updates,
+            partial: cambium_engine::query::partial_of(&outcome(self.1)),
+        })
+    }
+}
+
+#[test]
+fn a_package_the_invocation_declared_deleted_is_not_a_partial_answer() {
+    // A cold build never names such a package — `//...` skips it and exits 0 —
+    // so its index is complete without it. The incremental path asks for it by
+    // name, because a file under it changed, and gets exit 3; before this the
+    // spliced index was flagged partial with *zero* error lines, and `baseline
+    // update` then refused to publish an index that was missing nothing.
+    let o = outcome(DELETED_PACKAGE_STDERR);
+    assert_eq!(o.deleted_packages, ["mobile/test/common/integration"]);
+    assert_eq!(o.load_errors.count, 0);
+    assert!(cambium_engine::query::partial_of(&o).is_none());
+}
+
+#[test]
+fn a_real_load_failure_alongside_a_deleted_package_is_still_partial() {
+    let stderr =
+        format!("{DELETED_PACKAGE_STDERR}ERROR: error loading package 'modules/planning': boom\n");
+    let e = cambium_engine::query::partial_of(&outcome(&stderr))
+        .expect("a genuine load failure is still partial");
+    assert_eq!(e.count, 1);
+    assert_eq!(e.packages, ["modules/planning".to_string()]);
+}
+
+#[test]
+fn an_unexplained_exit_three_is_still_partial() {
+    // No recognised error line and no deleted-package declaration is a stderr
+    // shape this does not know; calling it complete would under-report.
+    assert_eq!(
+        cambium_engine::query::partial_of(&outcome("ERROR: something we have never seen\n")),
+        Some(cambium_bazel::LoadErrors::default())
+    );
+}
+
+fn spliced_head(e: &Engine, stderr: &'static str) -> cambium_index::IndexData {
+    use cambium_synth::Mutation;
+
+    let before = generate(&GraphSpec {
+        packages: 20,
+        seed: 7,
+        ..Default::default()
+    });
+    let base = e
+        .full_build_with("base", &SynthQuerier::new(&before))
+        .unwrap();
+    let t = (0..before.targets.len() as u32)
+        .find(|&i| !before.targets[i as usize].srcs.is_empty())
+        .unwrap();
+    let slot = before.targets[t as usize].srcs[0];
+    let mut after = before.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+    let req = AffectedRequest {
+        materialize: true,
+        no_full_build: true,
+        ..AffectedRequest::new("base", "head")
+    };
+    e.compute(
+        base.view(),
+        &changes,
+        &StderrQuery(SynthQuerier::new(&after), stderr),
+        &req,
+    )
+    .unwrap()
+    .index
+    .expect("a spliced head index")
+}
+
+#[test]
+fn a_splice_over_a_declared_deleted_package_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
+        path: dir.path().join("store"),
+    };
+    let e = Engine::with_parts(
+        cfg,
+        cambium_diff::Repo::new(dir.path().to_path_buf()),
+        cambium_bazel::Bazel::at(dir.path().to_path_buf(), Some("/nonexistent/bazel")),
+    )
+    .with_cache_dir(dir.path().join("cache"));
+
+    let mut index = spliced_head(&e, DELETED_PACKAGE_STDERR);
+    assert!(
+        !index.view().partial,
+        "a package Bazel says is deleted leaves nothing missing"
+    );
+    index.header.config_hash = e.cfg.hash();
+    let path = dir.path().join("head.bin");
+    cambium_index::format::write_index(&path, &index).unwrap();
+    e.publish_index(&path, &index.header.lineage, "head")
+        .expect("nothing is missing, so nothing stops the publish");
+}
