@@ -167,7 +167,7 @@ fn hub_labels(index: &std::path::Path) -> Vec<String> {
 fn json_documents_carry_the_current_schema_version() {
     // The version is shared by every document, so one reader that pins it is
     // enough to catch a bump made for one document and forgotten in another.
-    const SCHEMA: u64 = 6;
+    const SCHEMA: u64 = 7;
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
     let hub = hub_labels(&index).first().expect("a hub").clone();

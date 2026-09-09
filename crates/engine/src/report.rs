@@ -49,7 +49,15 @@ use serde::{Deserialize, Serialize};
 ///   dirtied where the derived path mapping showed the edit could not be one
 ///   of the `.bzl` files loaded from the repository, so only its label
 ///   consumers were reported. Purely additive.
-pub const SCHEMA_VERSION: u32 = 6;
+/// - **7** adds the witness for a changed `.bzl` the base index's load closure
+///   has no node for: `stats.bzl_witnessed_dead` (no `load()` in the head
+///   checkout names it, so ignoring it was checked rather than assumed),
+///   `stats.bzl_witnessed_loaded` (it *is* loaded at head, so the stored
+///   closure was incomplete and its loaders were followed),
+///   `stats.bzl_witness_packages` (packages the witness dirtied) and
+///   `stats.bzl_witness_unavailable` (row sources with no checkout to witness
+///   against, where the old ignore-it behaviour stands). Purely additive.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -138,6 +146,25 @@ pub struct Stats {
     /// Packages dirtied because a changed `.bzl` is in their load closure.
     #[serde(default)]
     pub bzl_closure_hits: usize,
+    /// Changed `.bzl` files the base index's load closure had no node for,
+    /// where a scan of the head checkout confirmed that no `load()` names
+    /// them: dead files, safely ignored.
+    #[serde(default)]
+    pub bzl_witnessed_dead: usize,
+    /// Changed `.bzl` files the closure had no node for that *are* loaded at
+    /// head. The stored closure was incomplete; the witness followed the
+    /// loaders instead of dropping the file.
+    #[serde(default)]
+    pub bzl_witnessed_loaded: usize,
+    /// Packages the witness dirtied, through a BUILD loader or through the
+    /// consumers of a loading `.bzl`.
+    #[serde(default)]
+    pub bzl_witness_packages: usize,
+    /// Changed `.bzl` files unknown to the closure that could not be
+    /// witnessed, because the row source has no checkout to enumerate. The
+    /// file is still ignored, as it always was; this says so out loud.
+    #[serde(default)]
+    pub bzl_witness_unavailable: usize,
     /// Changed bazelrc files read and found irrelevant to loading: every
     /// changed flag was on the allowlist, so the edit invalidated nothing
     /// instead of invalidating everything.
