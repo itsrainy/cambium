@@ -50,56 +50,67 @@ stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
 them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
-**The first run (unpublished) is the shape of the answer, not the answer.**
-One full run of all five subjects on the benchmark machine, 2026-09-08: 5
-histories over 1 274 commits, 200 change sets, ~7.5 h wall. It is recorded
-here and not in the generated tables because it was never published --
-sourcegraph lost bazel-diff and apollo lost Tango to harness failures the
-run's own gates did not notice --- a comparison with a hole in it recorded
-`pass: true`, since fixed. The
-numbers below therefore describe a run with two holes in it; the tables in
-the sections that follow are the published ones, and where they disagree with
-this paragraph, they win.
+**The published run, 2026-09-09.** Five subjects, 5 histories over 1 274
+commits, 200 change sets, on the benchmark machine named in the tables below.
+It took three passes to get here: the first (2026-09-08) lost a comparison
+tool on two subjects to harness failures its gates did not notice; the
+second re-ran everything on the fixes; envoy was then run a third time after
+the splice defect described under issue #3 was found and fixed. The other
+four subjects' results are from the second pass: the offline replay shows the
+engine change did not alter their answers, and none of them has the path
+mapping the defect dropped. Where this paragraph and the generated tables
+disagree, the tables win.
 
-All five rebuild oracles passed: a cold index at the pin matched the
-incrementally-updated one node for node, edge for edge and rule hash for rule.
-That part is clean, and it is the suite's strongest correctness evidence.
+All five rebuild oracles passed. From this run on, the oracle compares the
+externals side tables as well as nodes, edges and rule hashes, because a
+splice that lost every repository path mapping had been passing the old
+check for two runs.
 
 | subject | change sets | min recall | history: commits / p50 / globals / cold rebuilds |
 |---|---|---|---|
-| bazel | 39/40 | 1.000 | 300 / 2 ms / 4 / 0 |
-| sourcegraph | 39/40 | 1.000 | 300 / 3 ms / 24 / 0 |
-| apollo | 38/40 | 1.000 | 74 / 216 ms / 11 / 0 |
-| envoy | 29/40 | 0.911 | 300 / 4 920 ms / 22 / 130 |
-| xla | 40/40 | 1.000 | 300 / 9 ms / 31 / 0 |
+| bazel | 40/40 | 1.000 | 300 / 2 ms / 4 / 0 |
+| sourcegraph | 40/40 | 1.000 | 300 / 4 ms / 24 / 0 |
+| apollo | 40/40 | 1.000 | 74 / 202 ms / 11 / 0 |
+| envoy | 34/40 | 0.911 | 300 / 424 ms / 22 / 45 |
+| xla | 40/40 | 1.000 | 300 / 10 ms / 31 / 0 |
 
-Warm change-set timings, p50 ms (cambium against the foils):
+Warm change-set timings, p50 ms (cambium against the foils; Tango has no
+warm path):
 
-| subject | cambium | bazel-diff | Tango (no cache, cold) |
+| subject | cambium | bazel-diff | Tango (cold) |
 |---|---|---|---|
-| bazel | 23 | 1 730 | 19 750 |
-| sourcegraph | 33 | *errored ×40* | 58 208 |
-| apollo | 23 | 8 053 | *errored ×40* |
-| envoy | 427 | 2 466 | 184 567 |
-| xla | 39 | 11 335 | 211 831 |
+| bazel | 27 | 1 827 | 19 699 |
+| sourcegraph | 42 | 2 640 | 57 342 |
+| apollo | 25 | 7 664 | 28 013 |
+| envoy | 449 | 2 208 | 31 083 |
+| xla | 39 | 11 020 | 207 472 |
 
-Envoy is the honest outlier: 427 ms warm, an order of magnitude slower than
-the rest and the only subject where bazel-diff is within reach. Deep `.bzl`
-layering and 444 k edges. It is also the subject whose graph is closest to
-the production repo this is all aimed at, so understanding that number is
-worth more than any of the fast ones.
+Envoy's six failures are all the documented `external_route` limitation: a
+dependency path that leaves `//...` and comes back through `@envoy_repo` or
+`@quiche`, which cambium stops at. They fail on purpose, with the cause
+named. Envoy's history cold rebuilds went from 130 to 45 across the three
+passes (issue #3: a label a repository rule *writes* is not a file it reads,
+and a splice now carries the path mappings a cold build wrote); its history
+p50 from 4 920 ms to 424 ms with the same affected sets. Eleven of its 40
+change sets still cold-rebuild, all at bases before envoy's bzlmod migration
+where the WORKSPACE-era `bazel/repositories.bzl` has no attributable mapping;
+that is issue #6.
 
-The no-inflation rule Rainy set holds up. Including the change sets where
-cambium answers `//...` moves the median by about a millisecond (apollo
-23 -> 24, xla 39 -> 35), because a global answer is *cheap* — cambium returns
-`//...` without querying anything. What a global costs is precision, and
-that is priced separately in `global_stats` (apollo's globals: mean 12 975
-cambium labels against bazel-diff's 5 615). The expensive fallback is the
-cold rebuild, and it **fired zero times in the change-set workload on every
-subject**, so no published change-set timing includes one. If you want the
-splice-limit overflow priced, it needs change sets chosen to exceed
-`limits.max_dirty_packages`, or the history numbers cited alongside — envoy's
-130 cold rebuilds in 300 commits are what drag its history p50 to 4 920 ms.
+Two disagreement classes are new and report rather than gate. `tool_missing`
+(bazel, 3 labels) is a cambium-side extra the `rdeps` oracle confirms.
+`tool_extra_source_directory` (apollo, 163 labels) is a Tango-side extra:
+apollo's `install_src_files` rules name the package directory itself as a
+source (`src_dir = ["."]`), Tango hashes the directory's contents, and Bazel's
+graph has no edge from a file to the directory above it, so neither the
+oracle nor bazel-diff sees the edge. Tango is describing the filesystem; the
+benchmark's definition of "affected" is Bazel's graph.
+
+The no-inflation rule holds up. Including the change sets where cambium
+answers `//...` moves the median by about a millisecond, because a global
+answer is *cheap*; what a global costs is precision, priced separately in
+`global_stats`. The expensive fallback is the cold rebuild, and it fired only
+on envoy in the change-set workload, so envoy's warm p50 is the one number
+here that includes cold rebuilds (11 of 40).
 
 **Laptop timings are not comparable and are not published.** Some subjects'
 external repositories cannot be fetched on macOS x86_64 — a GraalVM
@@ -112,7 +123,15 @@ below.
 ## Summary
 
 <!-- bench:top:begin -->
-not yet run
+| subject | pin | Bazel | targets | cold build | history p50/p90 | globals | change sets | pass/fail | min recall | precision | tool cold p50 vs cambium warm p50 |
+|---|---|---|---:|---:|---:|---|---:|---:|---:|---|---|
+| [bazel](#bazel) | `948b8c70e281` | 9.2.0 | 24,623 | 3 s | 2 ms / 165 ms | **4**<br>2× `bazel_dep(rules_java)` changed, and rules_…<br>1× .bazelrc: common --java_language_version ch…<br>1× `BUILD` matches an invalidator | 40 | 40 / 0 | 100.0% | bazel-diff-rust 96.7%<br>tango 96.4% | bazel-diff-rust 7212 ms vs 27 ms (267×)<br>tango 19.7 s vs 27 ms (730×) |
+| [envoy](#envoy) | `7ba51266cc60` | 8.7.0 | 28,578 | 7 s | 419 ms / 5815 ms | **22**<br>6× .bazelrc: common --registry changed, not on…<br>3× `MODULE.bazel.lock` matches an invalidator<br>2× api/.bazelrc: common --registry changed, no… | 40 | 34 / 6 | 91.1% | bazel-diff-rust 63.4%<br>tango 62.7% | bazel-diff-rust 4816 ms vs 449 ms (11×)<br>tango 31.1 s vs 449 ms (69×) |
+| [sourcegraph](#sourcegraph) | `c864f15af264` | 7.2.0 | 58,920 | 6 s | 4 ms / 173 ms | **24**<br>8× `go.mod` matches an invalidator<br>7× `pnpm-lock.yaml` matches an invalidator<br>6× `WORKSPACE` changed; WORKSPACE is imperativ… | 40 | 40 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 12.4 s vs 41 ms (303×)<br>tango 57.6 s vs 41 ms (1404×) |
+| [apollo](#apollo) | `d53aa3da47a0` | 7.4.1 (requested) | 16,737 | 6 s | 2 ms / 233 ms | **11**<br>2× `third_party/pcl/pcl_configure.bzl` matches…<br>2× tools/bazel.rc: build --cxxopt changed, not…<br>1× .bazelrc: `try-import %workspace%/.custom.b… | 40 | 40 / 0 | 100.0% | bazel-diff-rust 100.0%<br>tango 100.0% | bazel-diff-rust 14.1 s vs 25 ms (564×)<br>tango 28.0 s vs 25 ms (1121×) |
+| [xla](#xla) | `076fe93fad26` | 8.7.0 | 33,385 | 32 s | 9 ms / 215 ms | **31**<br>6× `third_party/stablehlo/temporary.patch` mat…<br>3× `third_party/llvm/build.patch` matches an i…<br>2× MODULE.bazel contains a statement cambium c… | 40 | 40 / 0 | 100.0% | bazel-diff-rust 88.6%<br>tango 88.4% | bazel-diff-rust 29.1 s vs 34 ms (856×)<br>tango 208.1 s vs 34 ms (6120×) |
+
+The tool-vs-cambium column is over **all** compared change sets, the ones cambium answered with `//...` included, so the ratio is not an average over the change sets cambium is fast on; each subject's section breaks it out. History p50/p90 are over **non-global** commits (the ones an updater actually walks); the per-subject sections give both distributions. `pass/fail` counts compared change sets. Precision against a tool is informational; recall against the `rdeps` oracle is the gate.
 <!-- bench:top:end -->
 
 ## Synthetic scaling
@@ -227,7 +246,16 @@ independent of how many packages are dirty.
 ### Against bazel-diff, on one synthetic graph
 
 <!-- bench:synthetic:begin -->
-not yet run
+These are *synthetic* graphs (`cambi bench sweep --stage legacy_bazel_diff`), not the real subjects above: cambium and bazel-diff on the same generated workspace, the same change, and a `bazel` shim that replays a recorded query, so what is measured is each tool's own work rather than a Bazel server. See [METHODOLOGY.md](METHODOLOGY.md#engine-stages).
+
+| targets | bazel-diff cold | bazel-diff warm | cambium | cambium p90 | vs cold | vs warm | agreed labels |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 10,039 | 7593 ms | 1678 ms | 8 ms | 8 ms | 949× | 210× | 7,526 — none missed |
+| 100,377 | 76.9 s | 37.3 s | 67 ms | 127 ms | 1147× | 557× | 66,298 — none missed |
+
+cambium's column is its warm, in-memory update against the base index — the operation bazel-diff's warm column is also doing. `agreed` is the label sets matching up to `select()`; any label bazel-diff reports and cambium does not fails the stage outright, so a row exists only because that count was zero.
+
+![bazel-diff vs cambium, log-log](bench-legacy.svg)
 <!-- bench:synthetic:end -->
 
 ## Per-subject results
@@ -235,31 +263,3249 @@ not yet run
 ### bazel
 
 <!-- bench:bazel:begin -->
-not yet run
+- pin: `948b8c70e281`
+- Bazel: 9.2.0
+- generated: 2026-09-09
+- tool: `0e06f75`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 24,623 | 80,295 | 524 | 3,996,584 | 2919 ms |
+
+#### History (300 commits, `ac3a6d70e804..948b8c70e281`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 300 | 2 ms | 171 ms | 2482 ms | 2665 ms |
+| non-global commits | 296 | 2 ms | 165 ms | 562 ms | 1566 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **66.3%**
+- largest dirty set: **377 packages** at `0859dab4a7b2`
+- `rbuildfiles` calls: 0 of 300 commits
+- commits where a changed `.bzl` dirtied packages through the static load closure: 1 of 300
+- mean affected targets: 923
+
+Global commits: **4**
+
+| reason | commits |
+|---|---:|
+| `bazel_dep(rules_java)` changed, and rules_java registers toolchains: toolchain resolution has no edge in the query graph | 2 |
+| .bazelrc: common --java_language_version changed, not on the loading-irrelevant allowlist | 1 |
+| `BUILD` matches an invalidator | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 change sets compared, 40 passed, 0 failed (0 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **100.0%**.
+
+| Bazel | tool | change sets | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 40 | 96.7% | 100.0% |
+| `n/a` | tango | 40 | 40 | 96.4% | 100.0% |
+
+#### Timings (p50 / p90)
+
+| Bazel | tool | over | change sets | cold | warm |
+|---|---|---|---:|---:|---:|
+| `n/a` | bazel-diff-rust | all change sets | 40 | 7212 ms / 9000 ms | 1827 ms / 2918 ms |
+| `n/a` | bazel-diff-rust | incremental | 40 | 7212 ms / 9000 ms | 1827 ms / 2918 ms |
+| `n/a` | tango | all change sets | 40 | 19.7 s / 21.7 s | n/a |
+| `n/a` | tango | incremental | 40 | 19.7 s / 21.7 s | n/a |
+| `n/a` | **cambium** | all change sets | 40 | 83 ms / 334 ms | 27 ms / 265 ms |
+| `n/a` | **cambium** | incremental | 40 | 83 ms / 334 ms | 27 ms / 265 ms |
+
+**Quote the `all change sets` rows.** They cover every change set compared, including the 0 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+
+#### Globals
+
+No compared change set was globally invalidated.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 180 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_external_repo` | 3,320 | no | cambium reached it from an external repository whose contents moved; the tool resolves the repository and sees its targets unchanged |
+| `cambium_extra_implicit` | 0 | no | reached only through an implicit (`$`-prefixed) attribute edge the tool does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 1,066 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 20 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 0 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the tool's runs |
+| `bazeldiff_extra_workspace_path` | 0 | no | the rule is identical at both revisions once each checkout's own absolute workspace root is normalised away |
+| `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
+| `tool_extra_source_directory` | 0 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
+| `tool_missing` | 3 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every change set and tool.
+
+#### Why cambium reported the labels the tool did not
+
+| tool | cambium's reason | labels |
+|---|---|---:|
+| bazel-diff-rust | external dependency @debian_java_deps//:netty changed | 1,147 |
+| bazel-diff-rust | bzl load closure of //third_party changed | 623 |
+| bazel-diff-rust | external dependency @openjdk_win_arm64_jlink_tool//file:file changed | 247 |
+| bazel-diff-rust | external dependency @debian_java_deps//:asm changed | 135 |
+| bazel-diff-rust | external dependency @graalvm_oracle//:native-image changed | 16 |
+| bazel-diff-rust | external dependency @debian_java_deps//:bootstrap-derived-java-jars changed | 12 |
+| bazel-diff-rust | external dependency @debian_java_deps//:core changed | 10 |
+| bazel-diff-rust | external dependency @debian_java_deps//:auto_value-jars changed | 8 |
+| bazel-diff-rust | external dependency @debian_java_deps//:blaze-agent changed | 8 |
+| bazel-diff-rust | external dependency @debian_cc_deps//:grpc++_unsecure changed | 6 |
+| bazel-diff-rust | external dependency @debian_java_deps//:netty_tcnative changed | 5 |
+| bazel-diff-rust | external dependency @bazel_tools_repo_cache//:files changed | 4 |
+| bazel-diff-rust | external dependency @debian_cc_deps//:protoc_lib changed | 4 |
+| bazel-diff-rust | external dependency @debian_java_deps//:error_prone_annotations-jar changed | 4 |
+| bazel-diff-rust | external dependency @debian_java_deps//:protobuf_java changed | 4 |
+| bazel-diff-rust | external dependency @openjdk_linux_aarch64_vanilla//file:file changed | 4 |
+| bazel-diff-rust | external dependency @debian_bin_deps//:grpc-cpp-plugin changed | 2 |
+| bazel-diff-rust | external dependency @debian_bin_deps//:protobuf-compiler changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:agent changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:agent-0.8.14 changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:blaze-agent-0.8.14 changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:core-0.8.14 changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:core-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:core-jars-0.8.14 changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:flogger-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:guava-failureaccess-jar changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:guava-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:javax_annotations-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:jcip_annotations-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:jsr305-jars changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:protobuf_java_util changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:report changed | 2 |
+| bazel-diff-rust | external dependency @debian_java_deps//:report-0.8.14 changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:any_proto changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:descriptor_proto changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:duration_proto changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:empty_proto changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:timestamp_proto changed | 2 |
+| bazel-diff-rust | external dependency @debian_proto_deps//:wrappers_proto changed | 2 |
+| tango | external dependency @debian_java_deps//:netty changed | 1,147 |
+| tango | bzl load closure of //third_party changed | 623 |
+| tango | external dependency @openjdk_win_arm64_jlink_tool//file:file changed | 247 |
+| tango | external dependency @debian_java_deps//:asm changed | 135 |
+| tango | external dependency @graalvm_oracle//:native-image changed | 16 |
+| tango | external dependency @debian_java_deps//:bootstrap-derived-java-jars changed | 12 |
+| tango | external dependency @debian_java_deps//:core changed | 10 |
+| tango | external dependency @debian_java_deps//:auto_value-jars changed | 8 |
+| tango | external dependency @debian_java_deps//:blaze-agent changed | 8 |
+| tango | external dependency @debian_cc_deps//:grpc++_unsecure changed | 6 |
+| tango | external dependency @debian_java_deps//:netty_tcnative changed | 5 |
+| tango | external dependency @bazel_tools_repo_cache//:files changed | 4 |
+| tango | external dependency @debian_cc_deps//:protoc_lib changed | 4 |
+| tango | external dependency @debian_java_deps//:error_prone_annotations-jar changed | 4 |
+| tango | external dependency @debian_java_deps//:protobuf_java changed | 4 |
+| tango | external dependency @openjdk_linux_aarch64_vanilla//file:file changed | 4 |
+| tango | source file docs/docs/user-manual.mdx changed | 3 |
+| tango | external dependency @debian_bin_deps//:grpc-cpp-plugin changed | 2 |
+| tango | external dependency @debian_bin_deps//:protobuf-compiler changed | 2 |
+| tango | external dependency @debian_java_deps//:agent changed | 2 |
+| tango | external dependency @debian_java_deps//:agent-0.8.14 changed | 2 |
+| tango | external dependency @debian_java_deps//:blaze-agent-0.8.14 changed | 2 |
+| tango | external dependency @debian_java_deps//:core-0.8.14 changed | 2 |
+| tango | external dependency @debian_java_deps//:core-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:core-jars-0.8.14 changed | 2 |
+| tango | external dependency @debian_java_deps//:flogger-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:guava-failureaccess-jar changed | 2 |
+| tango | external dependency @debian_java_deps//:guava-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:javax_annotations-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:jcip_annotations-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:jsr305-jars changed | 2 |
+| tango | external dependency @debian_java_deps//:protobuf_java_util changed | 2 |
+| tango | external dependency @debian_java_deps//:report changed | 2 |
+| tango | external dependency @debian_java_deps//:report-0.8.14 changed | 2 |
+| tango | external dependency @debian_proto_deps//:any_proto changed | 2 |
+| tango | external dependency @debian_proto_deps//:descriptor_proto changed | 2 |
+| tango | external dependency @debian_proto_deps//:duration_proto changed | 2 |
+| tango | external dependency @debian_proto_deps//:empty_proto changed | 2 |
+| tango | external dependency @debian_proto_deps//:timestamp_proto changed | 2 |
+| tango | external dependency @debian_proto_deps//:wrappers_proto changed | 2 |
+
+These are cambium's *own* explanations for the extra labels (`affected --explain`), not the classifier's: they say what made cambium reach the target, where the class table says why the disagreement is benign.
+
+- `bazel-diff-rust`: no distances reported; 81,358 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 54.0% of shared labels (40 change sets); 81,360 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 40 | 196 | 0 | 40 | 40 | 0 | 0 | 0 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+
+#### `.bzl` load-closure oracle
+
+| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 1 | 0 | 0 |
+
+cambium resolves a changed `.bzl` from the static load closure it stores in the index, with no Bazel call. This checks that answer against `rbuildfiles`, the call it replaced: cambium's dirty set must contain every main-repo package Bazel names. The last column gates the run and must be zero; a non-zero entry files those packages under `cambium_missing_bzl_closure`. A *partial* answer is a Sky Query that exited 3 — the very failure mode the static closure removes, since `rbuildfiles` loads every external subject and the closure loads none. A *repository-evaluation* answer is one where Bazel named a package whose `BUILD` file has no `load()` in it at all: `rbuildfiles` walks Skyframe's file nodes, so a change to a repository-declaring `.bzl` reaches every package through the repository mapping rather than through a load edge, and containment against a load closure is not a question that answer can settle. Those change sets are counted here and checked by the `rdeps` oracle instead.
 <!-- bench:bazel:end -->
 
 ### envoy
 
 <!-- bench:envoy:begin -->
-not yet run
+- pin: `7ba51266cc60`
+- Bazel: 8.7.0
+- generated: 2026-09-09
+- tool: `b699c63`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 28,578 | 438,352 | 1,211 | 7,208,376 | 6771 ms |
+
+#### History (300 commits, `4cf50c646cf5..7ba51266cc60`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 300 | 424 ms | 5838 ms | 15.0 s | 25.2 s |
+| non-global commits | 278 | 419 ms | 5815 ms | 6026 ms | 6067 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **30.7%**
+- largest dirty set: **1125 packages** at `5a1a3797401b`
+- `rbuildfiles` calls: 0 of 300 commits
+- commits where a changed `.bzl` dirtied packages through the static load closure: 33 of 300
+- mean affected targets: 4101
+
+Global commits: **22**
+
+| reason | commits |
+|---|---:|
+| .bazelrc: common --registry changed, not on the loading-irrelevant allowlist | 6 |
+| `MODULE.bazel.lock` matches an invalidator | 3 |
+| api/.bazelrc: common --registry changed, not on the loading-irrelevant allowlist | 2 |
+| .bazelrc: build --@envoy//bazel/foreign_cc:parallel_builds changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: build --@grpc//third_party:crypto_lib changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: build --@libsxg//:crypto_lib changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: build --@proxy-wasm-cpp-host//bazel:engine changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: build --test_tag_filters changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: common --@com_google_protobuf//bazel/flags:prefer_prebuilt_protoc changed, not on the loading-irrelevant allowlist | 1 |
+| .bazelrc: common --@envoy//bazel:crypto changed, not on the loading-irrelevant allowlist | 1 |
+| bazel/tests/external/.bazelrc: `try-import %workspace%/user.bazelrc` changed; an imported rc file can carry anything | 1 |
+| bazel/tests/external/.bazelrc: common --registry changed, not on the loading-irrelevant allowlist | 1 |
+| mobile/.bazelrc: build --@com_envoyproxy_protoc_gen_validate//bazel:template-flavor changed, not on the loading-irrelevant allowlist | 1 |
+| mobile/.bazelrc: build --@quiche//:mobile_quiche_bug_tracker_impl_lib changed, not on the loading-irrelevant allowlist | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 change sets compared, 34 passed, 6 failed (0 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **91.1%**.
+
+| Bazel | tool | change sets | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 34 | 63.4% | 91.1% |
+| `n/a` | tango | 40 | 34 | 62.7% | 91.1% |
+
+#### Timings (p50 / p90)
+
+| Bazel | tool | over | change sets | cold | warm |
+|---|---|---|---:|---:|---:|
+| `n/a` | bazel-diff-rust | all change sets | 40 | 4816 ms / 6294 ms | 2208 ms / 3532 ms |
+| `n/a` | bazel-diff-rust | incremental | 40 | 4816 ms / 6294 ms | 2208 ms / 3532 ms |
+| `n/a` | tango | all change sets | 40 | 31.1 s / 40.8 s | n/a |
+| `n/a` | tango | incremental | 40 | 31.1 s / 40.8 s | n/a |
+| `n/a` | **cambium** | all change sets | 40 | 559 ms / 6790 ms | 449 ms / 5314 ms |
+| `n/a` | **cambium** | incremental | 40 | 559 ms / 6790 ms | 449 ms / 5314 ms |
+
+**Quote the `all change sets` rows.** They cover every change set compared, including the 0 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 11 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+
+#### Globals
+
+No compared change set was globally invalidated.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 31,426 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_external_repo` | 188,722 | no | cambium reached it from an external repository whose contents moved; the tool resolves the repository and sees its targets unchanged |
+| `cambium_extra_implicit` | 1,772 | no | reached only through an implicit (`$`-prefixed) attribute edge the tool does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 11,241 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 20,728 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 1,869 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the tool's runs |
+| `bazeldiff_extra_workspace_path` | 818 | no | the rule is identical at both revisions once each checkout's own absolute workspace root is normalised away |
+| `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
+| `tool_extra_source_directory` | 0 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
+| `tool_missing` | 0 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every change set and tool.
+
+#### Why cambium reported the labels the tool did not
+
+| tool | cambium's reason | labels |
+|---|---|---:|
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/core/v3:pkg_cc_proto changed | 21,201 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/discovery/v3:pkg_cc_proto changed | 15,674 |
+| bazel-diff-rust | bzl load closure of //bazel changed | 12,968 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/cluster/v3:pkg_cc_proto changed | 6,276 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto changed | 2,511 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/data/accesslog/v3:pkg_cc_proto changed | 2,106 |
+| bazel-diff-rust | external dependency @envoy_api//bazel/cc_proto_descriptor_library:file_descriptor_generator changed | 2,074 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/type/v3:pkg_cc_proto changed | 2,000 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/admin/v3:pkg_cc_proto changed | 1,500 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto changed | 1,496 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto changed | 1,307 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/core/v3:pkg changed | 1,185 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/route/v3:pkg_cc_proto changed | 1,163 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/trace/v3:pkg_cc_proto changed | 879 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/type/matcher/v3:pkg_cc_proto changed | 809 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/overload/v3:pkg_cc_proto changed | 702 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/metrics/v3:pkg_cc_proto changed | 558 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/listener/v3:pkg_cc_proto changed | 540 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/common/dependency/v3:pkg_cc_proto changed | 466 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg_cc_proto changed | 423 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/cluster/v3:pkg changed | 400 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/v3:pkg_cc_proto changed | 360 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/sip_proxy/v3alpha:pkg_cc_proto changed | 349 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/cache_v2/v3:pkg_cc_proto changed | 348 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/cache/v3:pkg_cc_proto changed | 324 |
+| bazel-diff-rust | bzl load closure of //source/extensions/dynamic_modules/sdk/rust changed | 320 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/tracers/opentelemetry/samplers/v3:pkg_cc_proto changed | 288 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/endpoint/v3:pkg_cc_proto changed | 283 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/kafka_mesh/v3alpha:pkg_cc_proto changed | 260 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/router/v3:pkg_cc_proto changed | 258 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/ext_proc/v3:pkg_cc_proto changed | 257 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/ext_proc/v3:pkg_cc_proto changed | 256 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/redis_proxy/v3:pkg_cc_proto changed | 255 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/header_validators/envoy_default/v3:pkg_cc_proto changed | 247 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/tracers/opentelemetry/resource_detectors/v3:pkg_cc_proto changed | 246 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto changed | 244 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/common/aws/v3:pkg_cc_proto changed | 236 |
+| bazel-diff-rust | bzl load closure of //source/common/common changed | 230 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/tap/v3:pkg_cc_proto changed | 228 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/auth/v3:pkg_cc_proto changed | 227 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/rbac/v3:pkg_cc_proto changed | 215 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/rocketmq_proxy/v3:pkg_cc_proto changed | 204 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_field_extraction/v3:pkg_cc_proto changed | 202 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/wasm/v3:pkg_cc_proto changed | 199 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/accesslog/v3:pkg_cc_proto changed | 196 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/proto_message_extraction/v3:pkg_cc_proto changed | 190 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/mcp/v3:pkg_cc_proto changed | 189 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/network/socket_interface/v3:pkg_cc_proto changed | 188 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3:pkg_cc_proto changed | 187 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/original_src/v3:pkg_cc_proto changed | 185 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/gcp_authn/v3:pkg_cc_proto changed | 184 |
+| bazel-diff-rust | bzl load closure of //test/integration/filters changed | 179 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/common_inputs/network/v3:pkg_cc_proto changed | 178 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/annotations:pkg changed | 171 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/rbac/v3:pkg_cc_proto changed | 166 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/api_key_auth/v3:pkg_cc_proto changed | 163 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/golang/v3alpha:pkg_cc_proto changed | 162 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/load_balancing_policies/peak_ewma/v3alpha:pkg_cc_proto changed | 162 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/local_ratelimit/v3:pkg_cc_proto changed | 161 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/listener/v3:pkg changed | 160 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/route/v3:pkg changed | 160 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/router/v3:pkg changed | 160 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg changed | 160 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/golang/v3alpha:pkg_cc_proto changed | 159 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto changed | 154 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/admission_control/v3:pkg_cc_proto changed | 152 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/checksum/v3alpha:pkg_cc_proto changed | 147 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/grpc/v3:pkg_cc_proto changed | 146 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/server_preferred_address/v3:pkg_cc_proto changed | 144 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/common/dynamic_forward_proxy/v3:pkg_cc_proto changed | 142 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_json_transcoder/v3:pkg_cc_proto changed | 142 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/dubbo_proxy/v3:pkg_cc_proto changed | 142 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/kafka_broker/v3:pkg_cc_proto changed | 141 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/mcp_json_rest_bridge/v3:pkg_cc_proto changed | 139 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/adaptive_concurrency/v3:pkg_cc_proto changed | 138 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/ai_protocol_manager/v3:pkg_cc_proto changed | 138 |
+| bazel-diff-rust | bzl load closure of //test/integration changed | 137 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg_cc_proto changed | 137 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/bootstrap/reverse_tunnel/upstream_socket_interface/v3:pkg_cc_proto changed | 136 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/content_parsers/json/v3:pkg_cc_proto changed | 136 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/file/v3:pkg_cc_proto changed | 135 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/postgres_proxy/v3alpha:pkg_cc_proto changed | 130 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/round_robin/v3:pkg_cc_proto changed | 129 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/resource_monitors/cpu_utilization/v3:pkg_cc_proto changed | 128 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/common/async_files/v3:pkg_cc_proto changed | 124 |
+| bazel-diff-rust | external dependency @envoy_api//bazel:deps.yaml changed | 122 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/path/match/uri_template/v3:pkg_cc_proto changed | 122 |
+| bazel-diff-rust | bzl load closure of //source/exe changed | 120 |
+| bazel-diff-rust | external dependency @envoy_api//:all_protos changed | 120 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/common/mutation_rules/v3:pkg_cc_proto changed | 120 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/v3:pkg_cc_proto changed | 118 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/header_formatters/preserve_case/v3:pkg_cc_proto changed | 117 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/original_src/v3:pkg_cc_proto changed | 116 |
+| bazel-diff-rust | bzl load closure of //source/common/quic changed | 114 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/wasm/v3:pkg_cc_proto changed | 114 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/original_ip_detection/custom_header/v3:pkg_cc_proto changed | 114 |
+| bazel-diff-rust | external dependency @envoy_api//versioning:active_protos changed | 112 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/injected_credentials/oauth2/v3:pkg_cc_proto changed | 110 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/generic/v3:pkg_cc_proto changed | 107 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/least_request/v3:pkg_cc_proto changed | 105 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/random/v3:pkg_cc_proto changed | 105 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/custom_response/v3:pkg_cc_proto changed | 104 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/udp_packet_writer/v3:pkg_cc_proto changed | 104 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/geoip/v3:pkg_cc_proto changed | 102 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_http1_reverse_bridge/v3:pkg_cc_proto changed | 102 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/geoip/v3:pkg_cc_proto changed | 102 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/stat_sinks/dynamic_modules/v3:pkg_cc_proto changed | 102 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/sip_proxy/router/v3alpha:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/cryptomb/v3alpha:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/a2a/v3:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/aws_request_signing/v3:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/buffer/v3:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/compressor/v3:pkg_cc_proto changed | 100 |
+| bazel-diff-rust | bzl load closure of //source/common/http changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/dynamic_modules/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/json_to_metadata/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/transform/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/connection_id_generator/quic_lb/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/router/cluster_specifiers/matcher/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/stat_sinks/open_telemetry/v3:pkg_cc_proto changed | 98 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/mysql_proxy/v3:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/reverse_tunnel_reporters/v3alpha/clients/grpc_client:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/header_mutation/v3:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/thrift_to_metadata/v3:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/router/v3:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/tcp_bandwidth_limit/v3:pkg_cc_proto changed | 96 |
+| bazel-diff-rust | bzl load closure of //source/common/network changed | 94 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/common/ratelimit/v3:pkg_cc_proto changed | 93 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/v3:pkg_cc_proto changed | 92 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/resource_monitors/downstream_connections/v3:pkg_cc_proto changed | 92 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/resource_monitors/injected_resource/v3:pkg_cc_proto changed | 92 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/proto_api_scrubber/v3:pkg_cc_proto changed | 91 |
+| bazel-diff-rust | bzl load closure of //test/server changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/sxg/v3alpha:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/client_ssl_auth/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/basic_auth/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/body_size_limit/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/filter_chain/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_json_reverse_transcoder/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/header_to_metadata/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/geoip_providers/maxmind/v3:pkg_cc_proto changed | 90 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/router/cluster_specifier/golang/v3alpha:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/bandwidth_limit/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/kill_request/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/set_metadata/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/wasm/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/connection_limit/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/header_to_metadata/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/resource_monitors/cgroup_memory/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/resource_monitors/fixed_heap/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/raw_buffer/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/starttls/v3:pkg_cc_proto changed | 88 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/alpn/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/bootstrap/internal_listener/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/bootstrap/reverse_tunnel/downstream_socket_interface/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/file_server/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/file_system_buffer/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/stateful_session/v3:pkg_cc_proto changed | 86 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/ext_authz/v3:pkg_cc_proto changed | 85 |
+| bazel-diff-rust | bzl load closure of //envoy/http changed | 84 |
+| bazel-diff-rust | bzl load closure of //test/server/config_validation changed | 81 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/golang/v3alpha:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/filters/process_ratelimit/v3:pkg_cc_proto changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/api_key_auth/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/ext_proc/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/rbac/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/original_src/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/proxy_protocol/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/ext_authz/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/local_ratelimit/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/header_validators/envoy_default/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3:pkg changed | 80 |
+| bazel-diff-rust | external dependency @envoy_api//bazel/cc_proto_descriptor_library:create_dynamic_message changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/listener/postgres_inspector/v3alpha:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/dynamic_modules/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/config/validators/minimum_clusters/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/aws_eventstream_parser/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/decompressor/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/lua/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/sse_to_metadata/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/tap/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/ratelimit/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/dynamic_forward_proxy/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/internal_upstream/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/watchdog/backtrace_action/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/watchdog/profile_action/v3:pkg_cc_proto changed | 78 |
+| bazel-diff-rust | bzl load closure of //source/server changed | 77 |
+| bazel-diff-rust | bzl load closure of //test/common/http changed | 77 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/metadata_exchange/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_http1_bridge/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/on_demand/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/direct_response/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/dns_filter/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/tracers/fluentd/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tap/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/metrics/v3:pkg_cc_proto changed | 76 |
+| bazel-diff-rust | external dependency @envoy_api//bazel:external_proto_deps changed | 74 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/dynamic_modules/v3:pkg_cc_proto changed | 74 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/connection_debug_visitor/quic_stats/v3:pkg_cc_proto changed | 72 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/network/dns_resolver/hickory/v3:pkg_cc_proto changed | 71 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/stream/v3:pkg_cc_proto changed | 70 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/gzip/compressor/v3:pkg_cc_proto changed | 70 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/credential_injector/v3:pkg_cc_proto changed | 70 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/echo/v3:pkg_cc_proto changed | 70 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/internal_redirect/allow_listed_routes/v3:pkg_cc_proto changed | 68 |
+| bazel-diff-rust | bzl load closure of //test/extensions/bootstrap/wasm/test_data changed | 67 |
+| bazel-diff-rust | bzl load closure of //envoy/network changed | 66 |
+| bazel-diff-rust | bzl load closure of //envoy/server changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/tap_sinks/udp_sink/v3alpha:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/local_ratelimit/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/local_ratelimit/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/ratelimit/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/stateful_session/cookie/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/stateful_session/envelope/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/stateful_session/header/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/actions/transform_stat/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tcp_stats/v3:pkg_cc_proto changed | 66 |
+| bazel-diff-rust | bzl load closure of //source/common/stats changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/alternate_protocols_cache/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/cdn_loop/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/fault/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/oauth2/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/rate_limit_quota/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/original_ip_detection/xff/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/string_matcher/lua/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/watchdog/v3:pkg_cc_proto changed | 64 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/language/v3alpha:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/common/key_value/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/bootstrap/dynamic_modules/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/clusters/mcp_multicluster/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/csrf/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/ip_tagging/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/dynamic_modules/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/set_filter_state/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/zookeeper_proxy/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/file_content/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/cache/simple_http_cache/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/cache_v2/simple_http_cache/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/client_writer_factory/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/connection_debug_visitor/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/connection_id_generator/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/crypto_stream/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/quic/proof_source/v3:pkg_cc_proto changed | 62 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy changed | 61 |
+| bazel-diff-rust | bzl load closure of //envoy/common changed | 60 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/peer_metadata/v3:pkg_cc_proto changed | 60 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/reverse_tunnel_reporters/v3alpha/reporters:pkg_cc_proto changed | 60 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/zstd/compressor/v3:pkg_cc_proto changed | 60 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/wasm/test_data changed | 59 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/source changed | 58 |
+| bazel-diff-rust | bzl load closure of //envoy/stats changed | 58 |
+| bazel-diff-rust | bzl load closure of //source/common/config changed | 58 |
+| bazel-diff-rust | bzl load closure of //test/common/common changed | 58 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/regex_engines/hyperscan/v3alpha:pkg_cc_proto changed | 57 |
+| bazel-diff-rust | bzl load closure of //source/common/router changed | 56 |
+| bazel-diff-rust | bzl load closure of //source/common/upstream changed | 56 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/proxy_protocol/v3:pkg_cc_proto changed | 56 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/annotations:pkg_py_proto changed | 55 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/ratelimit/v3:pkg_cc_proto changed | 54 |
+| bazel-diff-rust | bzl load closure of //envoy/upstream changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/dynamo/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/network/connection_balance/dlb/v3alpha:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/stat_sinks/kafka/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/stat_sinks/wasm_filter/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/data/core/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/wasm/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/aws_lambda/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/connect_grpc_bridge/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/dynamic_forward_proxy/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_stats/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/ext_authz/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/http_capsule/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/generic_secret/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/health_check/event_sinks/file/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/early_header_mutation/header_mutation/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/internal_redirect/filter_state/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/internal_redirect/previous_routes/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/dynamic_modules/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/http/dynamic_modules/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/network/dns_resolver/getaddrinfo/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/network/socket_interface/sockmap/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/retry/host/omit_host_metadata/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/retry/priority/previous_priorities/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/stat_sinks/wasm/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/tracers/dynamic_modules/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/dynamic_modules/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_validator/dynamic_modules/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/reverse_tunnel/v3:pkg_cc_proto changed | 52 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/source/mesh changed | 51 |
+| bazel-diff-rust | bzl load closure of //envoy/config changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/compression/qatzip/compressor/v3alpha:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/compression/qatzstd/compressor/v3alpha:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/peak_ewma/v3alpha:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/peer_metadata/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/common/matching/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/brotli/compressor/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/brotli/decompressor/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/zstd/decompressor/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/bandwidth_share/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/grpc_web/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/set_filter_state/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/http_inspector/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/ext_proc/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/codecs/dubbo/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/codecs/http1/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/sni_cluster/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/cache/file_system_http_cache/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/cache_v2/file_system_http_cache/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/load_aware_locality/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/local_address_selectors/filter_state_override/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/common_inputs/environment_variable/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/input_matchers/consistent_hashing/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/input_matchers/ip/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/input_matchers/runtime_fraction/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/path/rewrite/uri_template/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/request_id/uuid/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/retry/host/omit_canary_hosts/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/retry/host/previous_hosts/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/alts/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/dynamic_modules/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/udp/v3:pkg_cc_proto changed | 50 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/dubbo_proxy/router/v3:pkg_cc_proto changed | 48 |
+| bazel-diff-rust | bzl load closure of //bazel/foreign_cc changed | 47 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/matching/input_matchers/hyperscan/v3alpha:pkg_cc_proto changed | 47 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/common/set_filter_state/v3:pkg_cc_proto changed | 46 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/common_inputs/ssl/v3:pkg_cc_proto changed | 46 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/redis_auth/v3:pkg_cc_proto changed | 46 |
+| bazel-diff-rust | bzl load closure of //source/server/admin changed | 44 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/cache_v2 changed | 43 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/ext_proc changed | 41 |
+| bazel-diff-rust | external dependency @envoy_api//:proto_breaking_change_detector_buf_config changed | 41 |
+| bazel-diff-rust | bzl load closure of //envoy/event changed | 40 |
+| bazel-diff-rust | bzl load closure of //test/proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/config/v3alpha:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/http/istio_stats/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/upstreams/http/tcp/golang/v3alpha:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/filters/cel/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/open_telemetry/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/stats/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/compression/gzip/decompressor/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/early_data/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/health_check/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/mcp_router/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/listener/original_dst/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/mongo_proxy/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/reverse_tunnel/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/set_filter_state/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/router/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/cel/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/dynamic_modules/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/metadata/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/formatter/req_without_query/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/custom_response/local_response_policy/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/injected_credentials/generic/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/internal_redirect/safe_cross_scheme/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/cluster_provided/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/maglev/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/override_host/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/ring_hash/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/input_matchers/dynamic_modules/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/input_matchers/metadata/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/rate_limit_descriptors/expr/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/rbac/principals/mtls_authenticated/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/stat_sinks/graphite_statsd/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/http_11_proxy/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/proxy_protocol/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/sni/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/static_name/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/http/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/http/tcp/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/upstreams/tcp/generic/v3:pkg_cc_proto changed | 40 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/common/matcher/v3:pkg_cc_proto changed | 38 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/upstream/local_address_selector/v3:pkg_cc_proto changed | 38 |
+| bazel-diff-rust | bzl load closure of //test/common/http/http2 changed | 37 |
+| bazel-diff-rust | bzl load closure of //tools/type_whisperer changed | 37 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/ratelimit/v3:pkg_cc_proto changed | 37 |
+| bazel-diff-rust | bzl load closure of //envoy/router changed | 36 |
+| bazel-diff-rust | bzl load closure of //source/common/quic/platform changed | 36 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/cache changed | 36 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/common/redis changed | 36 |
+| bazel-diff-rust | bzl load closure of //test/test_common changed | 36 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/bootstrap/v2:pkg changed | 36 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/matcher/v3:pkg_cc_proto changed | 36 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/router/cluster_specifiers/lua/v3:pkg_cc_proto changed | 36 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/type/tracing/v3:pkg_cc_proto changed | 36 |
+| bazel-diff-rust | bzl load closure of //contrib/sip_proxy/filters/network/source changed | 35 |
+| bazel-diff-rust | bzl load closure of //source/extensions/config_subscription/grpc changed | 35 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/dubbo_proxy changed | 35 |
+| bazel-diff-rust | bzl load closure of //test/common/network changed | 35 |
+| bazel-diff-rust | bzl load closure of //source/common/version changed | 34 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/network/generic_proxy/codecs/kafka/v3:pkg_cc_proto changed | 34 |
+| bazel-diff-rust | bzl load closure of //test/common/router changed | 33 |
+| bazel-diff-rust | bzl load closure of //distribution/dockerhub changed | 32 |
+| bazel-diff-rust | bzl load closure of //source/common/matcher changed | 32 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/wasm/ext changed | 32 |
+| bazel-diff-rust | bzl load closure of //test/common/protobuf changed | 32 |
+| bazel-diff-rust | bzl load closure of //test/tools/router_check changed | 32 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/generic_proxy changed | 31 |
+| bazel-diff-rust | bzl load closure of //test/common/stats changed | 31 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/wasm/test_data changed | 31 |
+| bazel-diff-rust | bzl load closure of //source/common/tls changed | 30 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/aws changed | 30 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/aws/credential_providers changed | 30 |
+| bazel-diff-rust | bzl load closure of //contrib/rocketmq_proxy/filters/network/source changed | 29 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/mongo_proxy changed | 29 |
+| bazel-diff-rust | bzl load closure of //test/mocks/upstream changed | 29 |
+| bazel-diff-rust | bzl load closure of //source/common/coroutine changed | 28 |
+| bazel-diff-rust | bzl load closure of //source/common/event changed | 28 |
+| bazel-diff-rust | bzl load closure of //source/common/protobuf changed | 28 |
+| bazel-diff-rust | bzl load closure of //source/common/stream_info changed | 28 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/vcl/v3alpha:pkg_cc_proto changed | 28 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/data/cluster/v3:pkg_cc_proto changed | 28 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ai_protocol_manager changed | 27 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/jwt_authn changed | 27 |
+| bazel-diff-rust | bzl load closure of //test/common/crypto changed | 27 |
+| bazel-diff-rust | bzl load closure of //envoy/ssl changed | 26 |
+| bazel-diff-rust | bzl load closure of //source/common/filesystem changed | 26 |
+| bazel-diff-rust | bzl load closure of //source/extensions/dynamic_modules changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/filters/common/workload_discovery/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/kae/v3alpha:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/qat/v3alpha:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/access_loggers/fluentd/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/common/jwks/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/composite/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/http/upstream_codec/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/network/rbac/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/udp/dynamic_modules/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/wrr_locality/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/matching/common_inputs/stats/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/load_stats/v3:pkg_cc_proto changed | 26 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/common/fuzz changed | 25 |
+| bazel-diff-rust | bzl load closure of //source/common/grpc changed | 24 |
+| bazel-diff-rust | bzl load closure of //source/common/listener_manager changed | 24 |
+| bazel-diff-rust | bzl load closure of //source/common/tracing changed | 24 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/udp/udp_proxy/session_filters changed | 24 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/ext_authz changed | 23 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/wasm/test_data changed | 23 |
+| bazel-diff-rust | bzl load closure of //envoy/stream_info changed | 22 |
+| bazel-diff-rust | bzl load closure of //source/common/http/http1 changed | 22 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/grpc changed | 22 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/injected_credentials/oauth2 changed | 22 |
+| bazel-diff-rust | bzl load closure of //test/common/upstream changed | 22 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ext_proc changed | 21 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy/router changed | 21 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/header_validators/envoy_default changed | 21 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/filters/http/test changed | 20 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/source/mesh/command_handlers changed | 20 |
+| bazel-diff-rust | bzl load closure of //distribution changed | 20 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/oauth2 changed | 20 |
+| bazel-diff-rust | bzl load closure of //test/mocks/server changed | 20 |
+| bazel-diff-rust | bzl load closure of //contrib/mysql_proxy/filters/network/source changed | 19 |
+| bazel-diff-rust | bzl load closure of //envoy/tracing changed | 18 |
+| bazel-diff-rust | bzl load closure of //source/common/formatter changed | 18 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_field_extraction changed | 18 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/cache/file_system_http_cache changed | 18 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/cache_v2/file_system_http_cache changed | 18 |
+| bazel-diff-rust | bzl load closure of //test/config_test changed | 18 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/proto_api_scrubber changed | 18 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/bootstrap/v3:pkg changed | 18 |
+| bazel-diff-rust | external dependency @envoy_api//versioning:frozen_protos changed | 18 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/bandwidth_share changed | 17 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/gcp_authn changed | 17 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/rate_limit_quota changed | 17 |
+| bazel-diff-rust | bzl load closure of //test/extensions/http/header_validators/envoy_default changed | 17 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/test changed | 16 |
+| bazel-diff-rust | bzl load closure of //source/common/json changed | 16 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/common changed | 16 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/dubbo changed | 16 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/proto_message_extraction changed | 16 |
+| bazel-diff-rust | bzl load closure of //test/common/json changed | 16 |
+| bazel-diff-rust | bzl load closure of //test/common/quic changed | 16 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/dynamic_forward_proxy changed | 16 |
+| bazel-diff-rust | bzl load closure of //test/fuzz changed | 16 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/annotations:pkg_cc_proto changed | 16 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/api/v2:pkg_cc_proto changed | 16 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/data/tap/v2alpha:pkg_py_proto changed | 16 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/source/broker changed | 15 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/internal_listener changed | 15 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/cdn_loop changed | 15 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/mcp_router changed | 15 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/cgroup_memory changed | 15 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/jwt_authn changed | 15 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/tls_inspector changed | 15 |
+| bazel-diff-rust | bzl load closure of //contrib/cryptomb/private_key_providers/source changed | 14 |
+| bazel-diff-rust | bzl load closure of //contrib/sip_proxy/filters/network/source/filters changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/common/http/http2 changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/downstream_socket_interface changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/dynamic_modules/builtin_extensions changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/aws_lambda changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/common changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/dubbo_proxy/router changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/stateful_session/cookie changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/common changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/server_preferred_address changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/xray changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/alts changed | 14 |
+| bazel-diff-rust | bzl load closure of //test/common/buffer changed | 14 |
+| bazel-diff-rust | bzl load closure of //test/common/formatter changed | 14 |
+| bazel-diff-rust | bzl load closure of //test/extensions/load_balancing_policies/common changed | 14 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/data/tap/v3:pkg_cc_proto changed | 14 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/wasm changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/custom_response changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/dynamic_modules changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/mcp_json_rest_bridge changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/thrift changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/cpu_utilization changed | 13 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/skywalking changed | 13 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/proxy_protocol changed | 13 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/clusters/redis/v3:pkg_cc_proto changed | 13 |
+| bazel-diff-rust | bzl load closure of //contrib changed | 12 |
+| bazel-diff-rust | bzl load closure of //envoy/init changed | 12 |
+| bazel-diff-rust | bzl load closure of //source/common/runtime changed | 12 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/async_files changed | 12 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/dynamic_forward_proxy changed | 12 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/rbac changed | 12 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/injected_credentials/common changed | 12 |
+| bazel-diff-rust | bzl load closure of //test/common/config changed | 12 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/rbac changed | 12 |
+| bazel-diff-rust | bzl load closure of //test/mocks/http changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/grpc_credential/v2alpha:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/config/transport_socket/alts/v2alpha:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/clusters/composite/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/clusters/dns/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/dynamic_modules/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/filters/common/fault/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/http/ext_proc/processing_request_modifiers/mapped_attribute_builder/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/extensions/load_balancing_policies/common/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/network_ext_proc/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/route/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | external dependency @envoy_api//envoy/service/runtime/v3:pkg_cc_proto changed | 12 |
+| bazel-diff-rust | bzl load closure of //contrib/dynamo/filters/http/source changed | 11 |
+| bazel-diff-rust | bzl load closure of //contrib/hyperscan/matching/input_matchers/source changed | 11 |
+| bazel-diff-rust | bzl load closure of //contrib/kae/private_key_providers/source changed | 11 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/compression/qatzip/compressor/source changed | 11 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/private_key_providers/source changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/dynamic_modules changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/upstream_socket_interface changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/config_subscription/grpc/xds_mux changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/file_server changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_json_reverse_transcoder changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_json_transcoder changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/original_src changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/tap changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/original_src changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/tls_inspector changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/ext_proc changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/io_socket/user_space changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/dynamic_modules changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/override_host changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/network/socket_interface/sockmap changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/dynamic_modules changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/metrics_service changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tap changed | 11 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/common/orca changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/compression/gzip changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/expr changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/api_key_auth changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/common/fuzz changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/ext_proc/unit_test_fuzz changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/original_src changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/ext_authz changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/local_ratelimit changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/load_balancing_policies/least_request changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/load_balancing_policies/random changed | 11 |
+| bazel-diff-rust | bzl load closure of //test/extensions/load_balancing_policies/round_robin changed | 11 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/upstreams/http/tcp/source changed | 10 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/common/source changed | 10 |
+| bazel-diff-rust | bzl load closure of //contrib/postgres_proxy/filters/network/test changed | 10 |
+| bazel-diff-rust | bzl load closure of //contrib/vcl/source changed | 10 |
+| bazel-diff-rust | bzl load closure of //envoy/api changed | 10 |
+| bazel-diff-rust | bzl load closure of //envoy/compression/compressor changed | 10 |
+| bazel-diff-rust | bzl load closure of //envoy/compression/decompressor changed | 10 |
+| bazel-diff-rust | bzl load closure of //envoy/content_parser changed | 10 |
+| bazel-diff-rust | bzl load closure of //envoy/grpc changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/common/buffer changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/common/memory changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/common/singleton changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/filters/process_ratelimit changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/matcher changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/tap changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/expr changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/ext_authz changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/ratelimit changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ai_protocol_manager/schema changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/connect_grpc_bridge changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/proto_api_scrubber changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/proto_message_extraction/extraction_util changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/generic_proxy/interface changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/redis_proxy changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters changed | 10 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/header_formatters/preserve_case changed | 10 |
+| bazel-diff-rust | bzl load closure of //contrib/config/test changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/filters/http/source changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/router/cluster_specifier/source changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/postgres_inspector/filters/listener/source changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/compression/qatzstd/compressor/source changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/sip_proxy/filters/network/source/router changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/stat_sinks/wasm_filter/test/test_data changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/fluentd changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/stats changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/a2a changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/composite changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/file_system_buffer changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/lua changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/mcp changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ratelimit changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/reverse_tunnel changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/internal_redirect/allow_listed_routes changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/internal_redirect/filter_state changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/internal_redirect/previous_routes changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/internal_redirect/safe_cross_scheme changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/maglev changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/common_inputs/environment_variable changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/path/uri_template_lib/proto changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/connection_id_generator/quic_lb changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/crypto_stream changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/dynamic_modules changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/common/http/sse changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/common/quic/platform changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/common/tracing changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/aws/eventstream changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/compressor changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/mcp changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/mcp_router changed | 9 |
+| bazel-diff-rust | bzl load closure of //test/extensions/tracers/xray changed | 9 |
+| bazel-diff-rust | external dependency @envoy_api//:v3_proto_set changed | 9 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/filters/http/test/test_data/destroyconfig changed | 8 |
+| bazel-diff-rust | bzl load closure of //contrib/rocketmq_proxy/filters/network/source/router changed | 8 |
+| bazel-diff-rust | bzl load closure of //envoy/filesystem changed | 8 |
+| bazel-diff-rust | bzl load closure of //envoy/secret changed | 8 |
+| bazel-diff-rust | bzl load closure of //envoy/server/overload changed | 8 |
+| bazel-diff-rust | bzl load closure of //envoy/ssl/private_key changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/common/jwt changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/common/signal changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/common/ssl changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/filters/cel changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/aws/signers changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/redis changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/ext_proc changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/lua changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/mcp changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_field_extraction/message_converter changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/dubbo_proxy/filters changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy/router changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/path/uri_template_lib changed | 8 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/open_telemetry changed | 8 |
+| bazel-diff-rust | bzl load closure of //test changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/common/tls/integration changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/custom_response changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/udp/udp_proxy/session_filters/dynamic_forward_proxy changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/extensions/load_balancing_policies/override_host changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/extensions/quic/proof_source changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/integration/load_balancers changed | 8 |
+| bazel-diff-rust | bzl load closure of //test/mocks/geoip changed | 8 |
+| bazel-diff-rust | bzl load closure of //tools/coverage changed | 8 |
+| bazel-diff-rust | external dependency @envoy_api//bazel:repository_locations changed | 8 |
+| bazel-diff-rust | bzl load closure of //contrib/checksum/filters/http/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/client_ssl_auth/filters/network/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/dlb/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/hyperscan/regex_engines/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/alpn/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/network/metadata_exchange/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/stat_sinks/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/language/filters/http/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/postgres_proxy/filters/network/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/sip_proxy/filters/network/source/tra changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/stat_sinks/wasm_filter/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/sxg/filters/http/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //contrib/tap_sinks/udp_sink/source changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/wasm changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/common changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/brotli/compressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/brotli/decompressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/gzip/compressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/gzip/decompressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/zstd/compressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/zstd/decompressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/config/validators/minimum_clusters changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/config_subscription/rest changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/content_parsers/json changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/adaptive_concurrency changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/admission_control changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/alternate_protocols_cache changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/api_key_auth changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/aws_eventstream_parser changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/aws_request_signing changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/bandwidth_limit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/basic_auth changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/body_size_limit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/buffer changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/compressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/cors changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/credential_injector changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/csrf changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/decompressor changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ext_authz changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/fault changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/filter_chain changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/geoip changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_http1_bridge changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_http1_reverse_bridge changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_stats changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/grpc_web changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/header_mutation changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/header_to_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/health_check changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ip_tagging changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/json_to_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/kill_request changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/local_ratelimit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/on_demand changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/rbac changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/set_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/sse_to_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/stateful_session changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/thrift_to_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/transform changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/upstream_rbac changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/wasm changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/http_inspector changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/local_ratelimit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/original_dst changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/proxy_protocol changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/connection_limit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/direct_response changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/echo changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/ext_authz changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/generic_proxy/router changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/geoip changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/http_connection_manager changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/local_ratelimit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/ratelimit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/rbac changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/sni_cluster changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/sni_dynamic_forward_proxy changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/tcp_bandwidth_limit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/header_to_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/ratelimit changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/wasm changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/zookeeper_proxy changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/dynamic_forward_proxy changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/ext_authz changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/http_capsule changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/cel changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/dynamic_modules changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/req_without_query changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/geoip_providers/maxmind changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/early_header_mutation/header_mutation changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/injected_credentials/generic changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/original_ip_detection/custom_header changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/original_ip_detection/xff changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/stateful_session/envelope changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/stateful_session/header changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/client_side_weighted_round_robin changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/least_request changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/load_aware_locality changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/random changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/ring_hash changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/round_robin changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/wrr_locality changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/actions/transform_stat changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/common_inputs/transport_socket changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/cel_matcher changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/consistent_hashing changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/dynamic_modules changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/ip changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/input_matchers/runtime_fraction changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/network/dns_resolver/hickory changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/path/match/uri_template changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/path/rewrite/uri_template changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/client_packet_writer changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/connection_debug_visitor/basic changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/connection_debug_visitor/quic_stats changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/connection_id_generator/deterministic changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/quic/proof_source changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/downstream_connections changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/fixed_heap changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/injected_resource changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/retry/host/omit_canary_hosts changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/retry/host/omit_host_metadata changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/retry/host/previous_hosts changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/retry/priority/previous_priorities changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/router/cluster_specifiers/lua changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/router/cluster_specifiers/matcher changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/hystrix changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/wasm changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/datadog changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/fluentd changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/dynatrace changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/environment changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/static changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/http_11_proxy changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/internal_upstream changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/proxy_protocol changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/starttls changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tcp_stats changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/http changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/tcp changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/udp changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/watchdog/backtrace_action changed | 7 |
+| bazel-diff-rust | bzl load closure of //source/extensions/watchdog/profile_action changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/common/listener_manager changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/common/secret changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/common/tls changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/access_loggers/wasm/test_data changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/dynamic_modules changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/ratelimit_config changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/credential_injector changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/lua changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/wasm changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/common/fuzz changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/http_connection_manager changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/http/header_formatters/preserve_case changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/stats_sinks/wasm/test_data changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/transport_sockets/starttls changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/extensions/upstreams/http changed | 7 |
+| bazel-diff-rust | bzl load closure of //test/integration/clusters changed | 7 |
+| bazel-diff-rust | bzl load closure of //configs changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/exe changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/common/dso changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/common/log changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/test/broker changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/postgres/protocol changed | 6 |
+| bazel-diff-rust | bzl load closure of //envoy/rds changed | 6 |
+| bazel-diff-rust | bzl load closure of //envoy/singleton changed | 6 |
+| bazel-diff-rust | bzl load closure of //envoy/tcp changed | 6 |
+| bazel-diff-rust | bzl load closure of //envoy/thread_local changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/common/http/matching changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/common/init changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/common/io changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/common/json/wuffs_json changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/common/secret changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/open_telemetry changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/common changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/redis changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/aws/eventstream changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/local_ratelimit changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/original_src changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/processing_effect changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/admission_control/evaluators changed | 6 |
+| bazel-diff-rust | bzl load closure of //source/server/config_validation changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/common/grpc changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/common/http/http1 changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/config/integration changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/config/integration/certs changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver changed | 6 |
+| bazel-diff-rust | bzl load closure of //test/tools/wee8_compile changed | 6 |
+| bazel-diff-rust | bzl load closure of //contrib/config/source changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/generic_proxy/filters/network/source/codecs/kafka changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/filters/network/source changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/istio_stats/source changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/peer_metadata/source changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/network/peer_metadata/source changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/file changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers/stream changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/api_listeners/default_api_listener changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/bootstrap/wasm changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/static changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/strict_dns changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/config_subscription/filesystem changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/early_data changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/rbac/matchers changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/rbac/principals/mtls_authenticated changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/match_delegate changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/router changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/set_filter_state changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener/set_filter_state changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/generic_proxy/codecs/dubbo changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/generic_proxy/codecs/http1 changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/match_delegate changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/reverse_tunnel/drain_aware_hcm changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/set_filter_state changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/tcp_proxy changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/file_content changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/generic_secret changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/formatter/xfcc_value changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_check/event_sinks/file changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/cache/simple_http_cache changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/cache_v2/simple_http_cache changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/custom_response/local_response_policy changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/custom_response/redirect_policy changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/ext_proc/processing_request_modifiers/mapped_attribute_builder changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/http/ext_proc/response_processors/save_processing_response changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/key_value/file_based changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/listener_managers/validation_listener_manager changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/cluster_provided changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/local_address_selectors/filter_state_override changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/actions/format_string changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/http/cel_input changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/http/dynamic_modules changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/http/metadata_input changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/network/application_protocol changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/matching/network/common changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/network/dns_resolver/apple changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/network/dns_resolver/cares changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/network/dns_resolver/getaddrinfo changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/rate_limit_descriptors/expr changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/request_id/uuid changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/dog_statsd changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/graphite_statsd changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/statsd changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/string_matcher/lua changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/raw_buffer changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/filter_state_override changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/sni changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/static_name changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_selectors/on_demand changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_validator/dynamic_modules changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/tls/cert_validator/spiffe changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/udp_packet_writer/default changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/udp_packet_writer/gso changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/generic changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/http/reverse_tunnel changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/tcp changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/upstreams/tcp/generic changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/wasm_runtime/null changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/wasm_runtime/v8 changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/wasm_runtime/wamr changed | 5 |
+| bazel-diff-rust | bzl load closure of //source/extensions/wasm_runtime/wasmtime changed | 5 |
+| bazel-diff-rust | bzl load closure of //test/mocks/config changed | 5 |
+| bazel-diff-rust | bzl load closure of //test/mocks/network changed | 5 |
+| bazel-diff-rust | bzl load closure of //test/tools/schema_validator changed | 5 |
+| bazel-diff-rust | bzl load closure of //contrib/common/sqlutils/source changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/cryptomb/private_key_providers/test changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/cryptomb/private_key_providers/test/test_data changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/common/dso/test changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/hyperscan/matching/input_matchers/test changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/kae changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/kae/private_key_providers/test/test_data changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/test/mesh changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/qat changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/private_key_providers/test/test_data changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/source/clients changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/source/clients/grpc_client changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/source/reporters changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/source/reporters/event_reporter changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/access_log changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/buffer changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/common/crypto changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/common/io changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/formatter changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/json changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/local_info changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/matcher changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/protobuf changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/runtime changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/thread changed | 4 |
+| bazel-diff-rust | bzl load closure of //envoy/udp changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/access_log changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/api changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/crypto changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/html changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/http/http3 changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/http/sse changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/network/matching changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/orca changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/profiler changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/quic/platform/mobile_impl changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/tcp_proxy changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/thread changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/tls/ocsp changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/common/watchdog changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/eds changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/fluentd changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/common/proxy_protocol changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/brotli/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/common/compressor changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/common/decompressor changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/gzip/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/compression/zstd/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/fault changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/jwks changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/mutation_rules changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/ratelimit_config changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/common/set_filter_state changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/adaptive_concurrency/controller changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/ext_proc/http_client changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/proto_api_scrubber/scrubbing_util_lib changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/network/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/geoip_providers/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/redis changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks/common/statsd changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/extensions/transport_sockets/common changed | 4 |
+| bazel-diff-rust | bzl load closure of //source/server/admin/html changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/common/coroutine changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/common/tls/cert_validator changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/cdn_loop changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/http_inspector changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/listener/original_dst changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/reverse_tunnel changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/udp/dns_filter changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/formatter/xfcc_value changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/path/uri_template_lib changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/tracers/skywalking changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/extensions/transport_sockets/tls/cert_validator/spiffe changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/integration/admin_html changed | 4 |
+| bazel-diff-rust | bzl load closure of //test/tools/router_check/test changed | 4 |
+| bazel-diff-rust | bzl load closure of //third_party/android changed | 4 |
+| bazel-diff-rust | bzl load closure of //contrib/kae/private_key_providers/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/mysql_proxy/filters/network/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/postgres_inspector/filters/listener/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/private_key_providers/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/test/clients changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/rocketmq_proxy/filters/network/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/sip_proxy/filters/network/test changed | 3 |
+| bazel-diff-rust | bzl load closure of //test/common/stream_info changed | 3 |
+| bazel-diff-rust | bzl load closure of //test/common/tls/test_data changed | 3 |
+| bazel-diff-rust | bzl load closure of //test/config changed | 3 |
+| bazel-diff-rust | bzl load closure of //test/extensions/config_subscription/grpc changed | 3 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/ratelimit changed | 3 |
+| bazel-diff-rust | bzl load closure of //contrib/checksum/filters/http/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/client_ssl_auth/filters/network/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/common/sqlutils/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/dlb/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/dynamo/filters/http/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/generic_proxy/filters/network/test/codecs/kafka changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/filters/network/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/router/cluster_specifier/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/golang/upstreams/http/tcp/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/hyperscan/regex_engines/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/common/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/alpn/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/istio_stats/test/integration changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/http/peer_metadata/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/network/metadata_exchange/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/istio/filters/network/peer_metadata/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/filters/network/test/mesh/command_handlers changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/kafka/stat_sinks/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/language/filters/http/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/peak_ewma/filters/http/source changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/peak_ewma/filters/http/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/peak_ewma/load_balancing_policies/source changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/peak_ewma/load_balancing_policies/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/compression/qatzip/compressor/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/qat/compression/qatzstd/compressor/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/reverse_tunnel_reporter/test/reporters changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/stat_sinks/wasm_filter/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/sxg/filters/http/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //contrib/tap_sinks/udp_sink/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //envoy/extensions/bootstrap/reverse_tunnel changed | 2 |
+| bazel-diff-rust | bzl load closure of //envoy/filter changed | 2 |
+| bazel-diff-rust | bzl load closure of //envoy/geoip changed | 2 |
+| bazel-diff-rust | bzl load closure of //envoy/ratelimit changed | 2 |
+| bazel-diff-rust | bzl load closure of //envoy/registry changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/compression/zstd/common changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/compression/zstd/compressor changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/filter changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/local_info changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/local_reply changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/matcher/actions changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/network/dns_resolver changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/rds changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/shared_pool changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/ssl/matching changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/tcp changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/thread_local changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/tls/cert_validator changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/tls/private_key changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/common/websocket changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/access_loggers changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/aggregate changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/composite changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/dns changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/dynamic_forward_proxy changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/dynamic_modules changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/logical_dns changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/mcp_multicluster changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/original_dst changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/clusters/reverse_connection changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/http/dynamic_forward_proxy changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/listener changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/filters/udp/dns_filter changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/grpc_credentials/example changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/grpc_credentials/file_based_metadata changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/grpc changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/http changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/health_checkers/tcp changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/internal_redirect changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/io_socket changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/load_balancing_policies/subset changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/resource_monitors changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/stat_sinks changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/always_on changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/cel changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/dynatrace changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/parent_based changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/trace_id_ratio_based changed | 2 |
+| bazel-diff-rust | bzl load closure of //source/extensions/tracers/zipkin changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/common/json/config_schemas_test_data changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/common/jwt changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/common/runtime changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/redis changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/adaptive_concurrency changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/rate_limit_quota changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/generic_proxy/mocks changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver/fbthrift changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver/generated/example changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/geoip_providers/maxmind/test_data changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/matching/input_matchers/cel_matcher changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/network/dns_resolver/common changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/extensions/network/socket_interface/sockmap changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/integration/upstreams changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/mocks/event changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/mocks/filesystem changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/mocks/io changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/mocks/protobuf changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/mocks/thread changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/tools/schema_validator/test changed | 2 |
+| bazel-diff-rust | bzl load closure of //tools/socket_passing changed | 2 |
+| bazel-diff-rust | bzl load closure of //test/benchmark changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/common/matcher changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/common/memory changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/common/tls/cert_selector changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/common/tls/ocsp/test_data changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/async_files changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/aws changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/dubbo changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/dynamic_forward_proxy changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/tap changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/common/wasm changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/compression/zstd/test_data changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/config_subscription/filesystem changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/dynamic_modules/stat_sink changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/ext_authz changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/lua changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/common/rbac changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/cache changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/cache_v2 changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/common changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/fault changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/gcp_authn changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/grpc_field_extraction/message_converter changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/ip_tagging/test_data changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/http/tap changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/common/redis changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/dubbo_proxy changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/generic_proxy changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/extensions/filters/network/thrift_proxy changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/access_log changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/api changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/buffer changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/compression/compressor changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/compression/decompressor changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/init changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/local_info changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/local_reply changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/matcher changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/ratelimit changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/reverse_tunnel_reporting_service changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/router changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/runtime changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/secret changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/ssl changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/stats changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/thread_local changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/mocks/tracing changed | 1 |
+| bazel-diff-rust | bzl load closure of //test/server/admin changed | 1 |
+| bazel-diff-rust | bzl load closure of //tools/bootstrap2pb changed | 1 |
+| tango | external dependency @envoy_api//envoy/config/core/v3:pkg_cc_proto changed | 21,540 |
+| tango | external dependency @envoy_api//envoy/service/discovery/v3:pkg_cc_proto changed | 16,017 |
+| tango | bzl load closure of //bazel changed | 13,269 |
+| tango | external dependency @envoy_api//envoy/config/cluster/v3:pkg_cc_proto changed | 6,487 |
+| tango | external dependency @envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto changed | 2,608 |
+| tango | external dependency @envoy_api//envoy/data/accesslog/v3:pkg_cc_proto changed | 2,109 |
+| tango | external dependency @envoy_api//bazel/cc_proto_descriptor_library:file_descriptor_generator changed | 2,073 |
+| tango | external dependency @envoy_api//envoy/type/v3:pkg_cc_proto changed | 2,031 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto changed | 1,554 |
+| tango | external dependency @envoy_api//envoy/admin/v3:pkg_cc_proto changed | 1,528 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto changed | 1,338 |
+| tango | external dependency @envoy_api//envoy/config/core/v3:pkg changed | 1,185 |
+| tango | external dependency @envoy_api//envoy/config/route/v3:pkg_cc_proto changed | 1,181 |
+| tango | external dependency @envoy_api//envoy/config/trace/v3:pkg_cc_proto changed | 892 |
+| tango | external dependency @envoy_api//envoy/type/matcher/v3:pkg_cc_proto changed | 824 |
+| tango | external dependency @envoy_api//envoy/config/overload/v3:pkg_cc_proto changed | 729 |
+| tango | external dependency @envoy_api//envoy/config/metrics/v3:pkg_cc_proto changed | 568 |
+| tango | external dependency @envoy_api//envoy/config/listener/v3:pkg_cc_proto changed | 553 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/common/dependency/v3:pkg_cc_proto changed | 470 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg_cc_proto changed | 433 |
+| tango | external dependency @envoy_api//envoy/config/cluster/v3:pkg changed | 400 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/v3:pkg_cc_proto changed | 374 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/cache_v2/v3:pkg_cc_proto changed | 354 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/sip_proxy/v3alpha:pkg_cc_proto changed | 353 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/cache/v3:pkg_cc_proto changed | 330 |
+| tango | bzl load closure of //source/extensions/dynamic_modules/sdk/rust changed | 322 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/kafka_mesh/v3alpha:pkg_cc_proto changed | 320 |
+| tango | external dependency @envoy_api//envoy/config/endpoint/v3:pkg_cc_proto changed | 299 |
+| tango | external dependency @envoy_api//envoy/extensions/tracers/opentelemetry/samplers/v3:pkg_cc_proto changed | 291 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/router/v3:pkg_cc_proto changed | 267 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/redis_proxy/v3:pkg_cc_proto changed | 263 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto changed | 254 |
+| tango | external dependency @envoy_api//envoy/extensions/http/header_validators/envoy_default/v3:pkg_cc_proto changed | 252 |
+| tango | external dependency @envoy_api//envoy/extensions/tracers/opentelemetry/resource_detectors/v3:pkg_cc_proto changed | 250 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/ext_proc/v3:pkg_cc_proto changed | 247 |
+| tango | external dependency @envoy_api//envoy/extensions/common/aws/v3:pkg_cc_proto changed | 241 |
+| tango | external dependency @envoy_api//envoy/service/ext_proc/v3:pkg_cc_proto changed | 241 |
+| tango | external dependency @envoy_api//envoy/config/tap/v3:pkg_cc_proto changed | 232 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/checksum/v3alpha:pkg_cc_proto changed | 227 |
+| tango | external dependency @envoy_api//envoy/service/auth/v3:pkg_cc_proto changed | 223 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/rbac/v3:pkg_cc_proto changed | 217 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/rocketmq_proxy/v3:pkg_cc_proto changed | 210 |
+| tango | external dependency @envoy_api//envoy/extensions/wasm/v3:pkg_cc_proto changed | 207 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_field_extraction/v3:pkg_cc_proto changed | 206 |
+| tango | external dependency @envoy_api//envoy/config/accesslog/v3:pkg_cc_proto changed | 202 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/mcp/v3:pkg_cc_proto changed | 193 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/proto_message_extraction/v3:pkg_cc_proto changed | 193 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/kafka_broker/v3:pkg_cc_proto changed | 192 |
+| tango | external dependency @envoy_api//envoy/extensions/network/socket_interface/v3:pkg_cc_proto changed | 192 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3:pkg_cc_proto changed | 188 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/original_src/v3:pkg_cc_proto changed | 187 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/gcp_authn/v3:pkg_cc_proto changed | 186 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/common_inputs/network/v3:pkg_cc_proto changed | 181 |
+| tango | bzl load closure of //test/integration/filters changed | 179 |
+| tango | external dependency @envoy_api//envoy/annotations:pkg changed | 177 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/load_balancing_policies/peak_ewma/v3alpha:pkg_cc_proto changed | 169 |
+| tango | external dependency @envoy_api//envoy/config/rbac/v3:pkg_cc_proto changed | 169 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/golang/v3alpha:pkg_cc_proto changed | 165 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/api_key_auth/v3:pkg_cc_proto changed | 165 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/local_ratelimit/v3:pkg_cc_proto changed | 163 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/golang/v3alpha:pkg_cc_proto changed | 160 |
+| tango | external dependency @envoy_api//envoy/config/listener/v3:pkg changed | 160 |
+| tango | external dependency @envoy_api//envoy/config/route/v3:pkg changed | 160 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/router/v3:pkg changed | 160 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg changed | 160 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto changed | 159 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/admission_control/v3:pkg_cc_proto changed | 157 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/grpc/v3:pkg_cc_proto changed | 147 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_json_transcoder/v3:pkg_cc_proto changed | 146 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/server_preferred_address/v3:pkg_cc_proto changed | 146 |
+| tango | external dependency @envoy_api//envoy/extensions/common/dynamic_forward_proxy/v3:pkg_cc_proto changed | 144 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/dubbo_proxy/v3:pkg_cc_proto changed | 144 |
+| tango | external dependency @envoy_api//envoy/extensions/content_parsers/json/v3:pkg_cc_proto changed | 142 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/adaptive_concurrency/v3:pkg_cc_proto changed | 142 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/ai_protocol_manager/v3:pkg_cc_proto changed | 142 |
+| tango | external dependency @envoy_api//envoy/extensions/bootstrap/reverse_tunnel/upstream_socket_interface/v3:pkg_cc_proto changed | 141 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/mcp_json_rest_bridge/v3:pkg_cc_proto changed | 141 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/file/v3:pkg_cc_proto changed | 139 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg_cc_proto changed | 137 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/postgres_proxy/v3alpha:pkg_cc_proto changed | 135 |
+| tango | bzl load closure of //test/integration changed | 131 |
+| tango | external dependency @envoy_api//envoy/extensions/resource_monitors/cpu_utilization/v3:pkg_cc_proto changed | 131 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/round_robin/v3:pkg_cc_proto changed | 130 |
+| tango | bzl load closure of //source/common/common changed | 128 |
+| tango | external dependency @envoy_api//envoy/extensions/common/async_files/v3:pkg_cc_proto changed | 127 |
+| tango | external dependency @envoy_api//envoy/extensions/path/match/uri_template/v3:pkg_cc_proto changed | 125 |
+| tango | external dependency @envoy_api//envoy/config/common/mutation_rules/v3:pkg_cc_proto changed | 123 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/v3:pkg_cc_proto changed | 120 |
+| tango | external dependency @envoy_api//envoy/extensions/http/header_formatters/preserve_case/v3:pkg_cc_proto changed | 120 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/original_src/v3:pkg_cc_proto changed | 118 |
+| tango | external dependency @envoy_api//envoy/extensions/http/original_ip_detection/custom_header/v3:pkg_cc_proto changed | 117 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/wasm/v3:pkg_cc_proto changed | 116 |
+| tango | bzl load closure of //source/exe changed | 114 |
+| tango | external dependency @envoy_api//envoy/extensions/http/injected_credentials/oauth2/v3:pkg_cc_proto changed | 112 |
+| tango | external dependency @envoy_api//bazel:deps.yaml changed | 109 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/generic/v3:pkg_cc_proto changed | 108 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/custom_response/v3:pkg_cc_proto changed | 106 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/least_request/v3:pkg_cc_proto changed | 106 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/random/v3:pkg_cc_proto changed | 106 |
+| tango | external dependency @envoy_api//envoy/extensions/udp_packet_writer/v3:pkg_cc_proto changed | 106 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/geoip/v3:pkg_cc_proto changed | 105 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_http1_reverse_bridge/v3:pkg_cc_proto changed | 105 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/geoip/v3:pkg_cc_proto changed | 105 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/a2a/v3:pkg_cc_proto changed | 103 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/aws_request_signing/v3:pkg_cc_proto changed | 103 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/buffer/v3:pkg_cc_proto changed | 103 |
+| tango | external dependency @envoy_api//envoy/extensions/stat_sinks/dynamic_modules/v3:pkg_cc_proto changed | 103 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/sip_proxy/router/v3alpha:pkg_cc_proto changed | 102 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/cryptomb/v3alpha:pkg_cc_proto changed | 102 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/compressor/v3:pkg_cc_proto changed | 101 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/dynamic_modules/v3:pkg_cc_proto changed | 101 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/json_to_metadata/v3:pkg_cc_proto changed | 101 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/transform/v3:pkg_cc_proto changed | 101 |
+| tango | external dependency @envoy_api//envoy/extensions/router/cluster_specifiers/matcher/v3:pkg_cc_proto changed | 101 |
+| tango | bzl load closure of //source/common/quic changed | 100 |
+| tango | external dependency @envoy_api//envoy/extensions/stat_sinks/open_telemetry/v3:pkg_cc_proto changed | 100 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/mysql_proxy/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/header_mutation/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/thrift_to_metadata/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/router/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/tcp_bandwidth_limit/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/connection_id_generator/quic_lb/v3:pkg_cc_proto changed | 99 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/reverse_tunnel_reporters/v3alpha/clients/grpc_client:pkg_cc_proto changed | 97 |
+| tango | external dependency @envoy_api//envoy/extensions/common/ratelimit/v3:pkg_cc_proto changed | 95 |
+| tango | external dependency @envoy_api//envoy/extensions/resource_monitors/downstream_connections/v3:pkg_cc_proto changed | 94 |
+| tango | external dependency @envoy_api//envoy/extensions/resource_monitors/injected_resource/v3:pkg_cc_proto changed | 94 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/sxg/v3alpha:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/client_ssl_auth/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/basic_auth/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/body_size_limit/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/filter_chain/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_json_reverse_transcoder/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/header_to_metadata/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/proto_api_scrubber/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/geoip_providers/maxmind/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/raw_buffer/v3:pkg_cc_proto changed | 92 |
+| tango | external dependency @envoy_api//envoy/extensions/bootstrap/reverse_tunnel/downstream_socket_interface/v3:pkg_cc_proto changed | 91 |
+| tango | bzl load closure of //test/server changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/bandwidth_limit/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/kill_request/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/set_metadata/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/wasm/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/connection_limit/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/header_to_metadata/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/payload_to_metadata/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/resource_monitors/cgroup_memory/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/resource_monitors/fixed_heap/v3:pkg_cc_proto changed | 90 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/starttls/v3:pkg_cc_proto changed | 90 |
+| tango | bzl load closure of //source/common/network changed | 88 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/alpn/v3:pkg_cc_proto changed | 88 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/router/cluster_specifier/golang/v3alpha:pkg_cc_proto changed | 88 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/file_server/v3:pkg_cc_proto changed | 88 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/file_system_buffer/v3:pkg_cc_proto changed | 88 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/stateful_session/v3:pkg_cc_proto changed | 88 |
+| tango | external dependency @envoy_api//envoy/extensions/bootstrap/internal_listener/v3:pkg_cc_proto changed | 87 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/ext_authz/v3:pkg_cc_proto changed | 86 |
+| tango | external dependency @envoy_api//:all_protos changed | 84 |
+| tango | bzl load closure of //test/server/config_validation changed | 81 |
+| tango | bzl load closure of //source/common/http changed | 80 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/golang/v3alpha:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/filters/process_ratelimit/v3:pkg_cc_proto changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/api_key_auth/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/rbac/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/original_src/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/proxy_protocol/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/tls_inspector/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/ext_authz/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/local_ratelimit/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/http/header_validators/envoy_default/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/client_side_weighted_round_robin/v3:pkg changed | 80 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/listener/postgres_inspector/v3alpha:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/dynamic_modules/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/config/validators/minimum_clusters/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/aws_eventstream_parser/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/decompressor/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/lua/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/sse_to_metadata/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/filters/ratelimit/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/dns_filter/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/dynamic_forward_proxy/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/internal_upstream/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/watchdog/backtrace_action/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//envoy/extensions/watchdog/profile_action/v3:pkg_cc_proto changed | 79 |
+| tango | external dependency @envoy_api//bazel/cc_proto_descriptor_library:create_dynamic_message changed | 78 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/tap/v3:pkg_cc_proto changed | 78 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/direct_response/v3:pkg_cc_proto changed | 78 |
+| tango | external dependency @envoy_api//envoy/service/metrics/v3:pkg_cc_proto changed | 78 |
+| tango | bzl load closure of //test/common/http changed | 77 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/metadata_exchange/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/stream/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_http1_bridge/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/on_demand/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/dynamic_modules/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/tracers/fluentd/v3:pkg_cc_proto changed | 77 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tap/v3:pkg_cc_proto changed | 76 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/ext_proc/v3:pkg changed | 75 |
+| tango | external dependency @envoy_api//envoy/extensions/network/dns_resolver/hickory/v3:pkg_cc_proto changed | 75 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/gzip/compressor/v3:pkg_cc_proto changed | 73 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/credential_injector/v3:pkg_cc_proto changed | 73 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/echo/v3:pkg_cc_proto changed | 73 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/connection_debug_visitor/quic_stats/v3:pkg_cc_proto changed | 73 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/local_ratelimit/v3:pkg_cc_proto changed | 69 |
+| tango | external dependency @envoy_api//envoy/extensions/internal_redirect/allow_listed_routes/v3:pkg_cc_proto changed | 68 |
+| tango | bzl load closure of //test/extensions/bootstrap/wasm/test_data changed | 66 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/tap_sinks/udp_sink/v3alpha:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/alternate_protocols_cache/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/cdn_loop/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/oauth2/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/local_ratelimit/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/ratelimit/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/http/original_ip_detection/xff/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/http/stateful_session/cookie/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/http/stateful_session/envelope/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/http/stateful_session/header/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/actions/transform_stat/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/string_matcher/lua/v3:pkg_cc_proto changed | 66 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tcp_stats/v3:pkg_cc_proto changed | 66 |
+| tango | bzl load closure of //source/server changed | 65 |
+| tango | external dependency @envoy_api//envoy/extensions/clusters/mcp_multicluster/v3:pkg_cc_proto changed | 65 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/fault/v3:pkg_cc_proto changed | 65 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/rate_limit_quota/v3:pkg_cc_proto changed | 65 |
+| tango | external dependency @envoy_api//envoy/watchdog/v3:pkg_cc_proto changed | 65 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/language/v3alpha:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/config/common/key_value/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/bootstrap/dynamic_modules/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/csrf/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/ip_tagging/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/dynamic_modules/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/set_filter_state/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/zookeeper_proxy/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/file_content/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/http/cache/simple_http_cache/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//envoy/extensions/http/cache_v2/simple_http_cache/v3:pkg_cc_proto changed | 64 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/peer_metadata/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/regex_engines/hyperscan/v3alpha:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/zstd/compressor/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/client_writer_factory/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/connection_debug_visitor/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/connection_id_generator/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/crypto_stream/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//envoy/extensions/quic/proof_source/v3:pkg_cc_proto changed | 62 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/reverse_tunnel_reporters/v3alpha/reporters:pkg_cc_proto changed | 61 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy changed | 59 |
+| tango | bzl load closure of //test/common/common changed | 58 |
+| tango | external dependency @envoy_api//bazel:external_proto_deps changed | 57 |
+| tango | bzl load closure of //envoy/http changed | 56 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/proxy_protocol/v3:pkg_cc_proto changed | 56 |
+| tango | external dependency @envoy_api//envoy/service/ratelimit/v3:pkg_cc_proto changed | 55 |
+| tango | bzl load closure of //envoy/server changed | 54 |
+| tango | bzl load closure of //source/common/router changed | 54 |
+| tango | bzl load closure of //source/common/upstream changed | 54 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/dynamo/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/network/connection_balance/dlb/v3alpha:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/stat_sinks/kafka/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/stat_sinks/wasm_filter/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/wasm/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/aws_lambda/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/connect_grpc_bridge/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/dynamic_forward_proxy/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_stats/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/ext_authz/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/udp_proxy/session/http_capsule/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/generic_secret/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/health_check/event_sinks/file/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/http/early_header_mutation/header_mutation/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/internal_redirect/filter_state/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/internal_redirect/previous_routes/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/dynamic_modules/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/http/dynamic_modules/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/network/dns_resolver/getaddrinfo/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/network/socket_interface/sockmap/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/retry/host/omit_host_metadata/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/retry/priority/previous_priorities/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/stat_sinks/wasm/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/tracers/dynamic_modules/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/dynamic_modules/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/filter_state_override/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_validator/dynamic_modules/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/reverse_tunnel/v3:pkg_cc_proto changed | 53 |
+| tango | external dependency @envoy_api//envoy/data/core/v3:pkg_cc_proto changed | 52 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/compression/qatzip/compressor/v3alpha:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/compression/qatzstd/compressor/v3alpha:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/peak_ewma/v3alpha:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/generic_proxy/codecs/kafka/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/network/peer_metadata/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/matching/input_matchers/hyperscan/v3alpha:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/common/matching/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/brotli/compressor/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/brotli/decompressor/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/zstd/decompressor/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/bandwidth_share/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/grpc_web/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/set_filter_state/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/http_inspector/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/ext_proc/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/codecs/dubbo/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/codecs/http1/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/sni_cluster/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/http/cache/file_system_http_cache/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/http/cache_v2/file_system_http_cache/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/load_aware_locality/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/local_address_selectors/filter_state_override/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/common_inputs/environment_variable/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/input_matchers/consistent_hashing/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/input_matchers/ip/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/input_matchers/runtime_fraction/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/path/rewrite/uri_template/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/request_id/uuid/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/retry/host/omit_canary_hosts/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/retry/host/previous_hosts/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/alts/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/dynamic_modules/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/udp/v3:pkg_cc_proto changed | 51 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/dubbo_proxy/router/v3:pkg_cc_proto changed | 50 |
+| tango | external dependency @envoy_api//versioning:active_protos changed | 50 |
+| tango | bzl load closure of //bazel/foreign_cc changed | 48 |
+| tango | bzl load closure of //envoy/network changed | 48 |
+| tango | bzl load closure of //source/common/config changed | 48 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/common/set_filter_state/v3:pkg_cc_proto changed | 48 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/common_inputs/ssl/v3:pkg_cc_proto changed | 48 |
+| tango | external dependency @envoy_api//envoy/service/redis_auth/v3:pkg_cc_proto changed | 48 |
+| tango | bzl load closure of //test/extensions/filters/http/wasm/test_data changed | 47 |
+| tango | bzl load closure of //source/common/stats changed | 44 |
+| tango | bzl load closure of //source/server/admin changed | 44 |
+| tango | bzl load closure of //source/extensions/filters/http/cache_v2 changed | 43 |
+| tango | bzl load closure of //contrib/kafka/filters/network/source changed | 42 |
+| tango | bzl load closure of //test/extensions/filters/http/ext_proc changed | 41 |
+| tango | bzl load closure of //test/proto changed | 41 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/config/v3alpha:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/http/istio_stats/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/upstreams/http/tcp/golang/v3alpha:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/vcl/v3alpha:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/filters/cel/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/open_telemetry/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/stats/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/compression/gzip/decompressor/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/early_data/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/health_check/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/mcp_router/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/listener/original_dst/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/mongo_proxy/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/reverse_tunnel/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/set_filter_state/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/thrift_proxy/router/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/cel/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/dynamic_modules/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/metadata/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/formatter/req_without_query/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/http/custom_response/local_response_policy/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/http/injected_credentials/generic/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/internal_redirect/safe_cross_scheme/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/cluster_provided/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/maglev/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/override_host/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/ring_hash/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/input_matchers/dynamic_modules/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/input_matchers/metadata/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/rate_limit_descriptors/expr/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/rbac/principals/mtls_authenticated/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/stat_sinks/graphite_statsd/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/http_11_proxy/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/proxy_protocol/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/sni/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_mappers/static_name/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/transport_sockets/tls/cert_selectors/on_demand_secret/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/http/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/http/tcp/v3:pkg_cc_proto changed | 40 |
+| tango | external dependency @envoy_api//envoy/extensions/upstreams/tcp/generic/v3:pkg_cc_proto changed | 40 |
+| tango | bzl load closure of //envoy/common changed | 39 |
+| tango | external dependency @envoy_api//envoy/config/common/matcher/v3:pkg_cc_proto changed | 39 |
+| tango | external dependency @envoy_api//envoy/config/upstream/local_address_selector/v3:pkg_cc_proto changed | 39 |
+| tango | bzl load closure of //contrib/kafka/filters/network/source/mesh changed | 37 |
+| tango | bzl load closure of //source/extensions/config_subscription/grpc changed | 37 |
+| tango | bzl load closure of //test/common/http/http2 changed | 37 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/ratelimit/v3:pkg_cc_proto changed | 37 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/generic_proxy/matcher/v3:pkg_cc_proto changed | 37 |
+| tango | external dependency @envoy_api//envoy/extensions/router/cluster_specifiers/lua/v3:pkg_cc_proto changed | 37 |
+| tango | external dependency @envoy_api//envoy/type/tracing/v3:pkg_cc_proto changed | 37 |
+| tango | bzl load closure of //envoy/upstream changed | 36 |
+| tango | bzl load closure of //test/common/network changed | 35 |
+| tango | bzl load closure of //source/extensions/filters/http/cache changed | 34 |
+| tango | external dependency @envoy_api//envoy/config/bootstrap/v2:pkg changed | 34 |
+| tango | bzl load closure of //source/extensions/filters/network/dubbo_proxy changed | 33 |
+| tango | bzl load closure of //source/extensions/filters/network/generic_proxy changed | 33 |
+| tango | bzl load closure of //test/common/router changed | 33 |
+| tango | bzl load closure of //envoy/config changed | 32 |
+| tango | bzl load closure of //source/extensions/common/wasm/ext changed | 32 |
+| tango | bzl load closure of //test/common/protobuf changed | 32 |
+| tango | bzl load closure of //test/tools/router_check changed | 32 |
+| tango | external dependency @envoy_api//:proto_breaking_change_detector_buf_config changed | 32 |
+| tango | bzl load closure of //test/common/stats changed | 31 |
+| tango | bzl load closure of //envoy/stats changed | 30 |
+| tango | bzl load closure of //test/extensions/common/wasm/test_data changed | 30 |
+| tango | bzl load closure of //tools/type_whisperer changed | 30 |
+| tango | bzl load closure of //contrib/sip_proxy/filters/network/source changed | 29 |
+| tango | bzl load closure of //envoy/router changed | 28 |
+| tango | bzl load closure of //source/common/event changed | 28 |
+| tango | bzl load closure of //source/common/tls changed | 28 |
+| tango | bzl load closure of //source/extensions/dynamic_modules changed | 28 |
+| tango | bzl load closure of //test/mocks/upstream changed | 28 |
+| tango | external dependency @envoy_api//envoy/data/cluster/v3:pkg_cc_proto changed | 28 |
+| tango | bzl load closure of //source/extensions/filters/http/jwt_authn changed | 27 |
+| tango | bzl load closure of //test/common/crypto changed | 27 |
+| tango | bzl load closure of //source/extensions/common/aws changed | 26 |
+| tango | bzl load closure of //source/extensions/common/aws/credential_providers changed | 26 |
+| tango | bzl load closure of //test/test_common changed | 26 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/filters/common/workload_discovery/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/kae/v3alpha:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//contrib/envoy/extensions/private_key_providers/qat/v3alpha:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/access_loggers/fluentd/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/common/jwks/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/composite/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/http/upstream_codec/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/network/rbac/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/udp/dynamic_modules/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/wrr_locality/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/extensions/matching/common_inputs/stats/v3:pkg_cc_proto changed | 26 |
+| tango | external dependency @envoy_api//envoy/service/load_stats/v3:pkg_cc_proto changed | 26 |
+| tango | bzl load closure of //contrib/rocketmq_proxy/filters/network/source changed | 25 |
+| tango | bzl load closure of //test/extensions/filters/network/common/fuzz changed | 25 |
+| tango | bzl load closure of //source/common/listener_manager changed | 24 |
+| tango | bzl load closure of //source/common/version changed | 24 |
+| tango | bzl load closure of //source/extensions/filters/network/common/redis changed | 24 |
+| tango | bzl load closure of //test/extensions/filters/udp/udp_proxy/session_filters changed | 24 |
+| tango | bzl load closure of //source/extensions/filters/http/ai_protocol_manager changed | 23 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy/router changed | 23 |
+| tango | bzl load closure of //test/extensions/filters/http/ext_authz changed | 23 |
+| tango | bzl load closure of //contrib/golang/filters/http/test changed | 22 |
+| tango | bzl load closure of //envoy/event changed | 22 |
+| tango | bzl load closure of //source/common/protobuf changed | 22 |
+| tango | bzl load closure of //source/extensions/access_loggers/grpc changed | 22 |
+| tango | bzl load closure of //source/extensions/filters/http/oauth2 changed | 22 |
+| tango | bzl load closure of //source/extensions/http/injected_credentials/oauth2 changed | 22 |
+| tango | bzl load closure of //test/common/upstream changed | 22 |
+| tango | bzl load closure of //contrib/mysql_proxy/filters/network/source changed | 21 |
+| tango | bzl load closure of //source/extensions/filters/http/ext_proc changed | 21 |
+| tango | bzl load closure of //source/extensions/filters/network/mongo_proxy changed | 21 |
+| tango | bzl load closure of //source/extensions/http/header_validators/envoy_default changed | 21 |
+| tango | bzl load closure of //distribution changed | 20 |
+| tango | bzl load closure of //source/common/matcher changed | 20 |
+| tango | bzl load closure of //source/common/quic/platform changed | 20 |
+| tango | bzl load closure of //source/extensions/access_loggers/open_telemetry changed | 19 |
+| tango | bzl load closure of //source/extensions/filters/http/rate_limit_quota changed | 19 |
+| tango | bzl load closure of //test/extensions/filters/http/proto_api_scrubber changed | 19 |
+| tango | bzl load closure of //test/extensions/filters/network/wasm/test_data changed | 19 |
+| tango | bzl load closure of //test/mocks/server changed | 19 |
+| tango | bzl load closure of //contrib/kafka/filters/network/source/mesh/command_handlers changed | 18 |
+| tango | bzl load closure of //envoy/ssl changed | 18 |
+| tango | bzl load closure of //source/common/formatter changed | 18 |
+| tango | bzl load closure of //source/common/grpc changed | 18 |
+| tango | bzl load closure of //source/common/tracing changed | 18 |
+| tango | bzl load closure of //source/extensions/http/cache/file_system_http_cache changed | 18 |
+| tango | bzl load closure of //source/extensions/http/cache_v2/file_system_http_cache changed | 18 |
+| tango | bzl load closure of //contrib/kafka/filters/network/test changed | 17 |
+| tango | bzl load closure of //source/extensions/bootstrap/internal_listener changed | 17 |
+| tango | bzl load closure of //source/extensions/filters/http/gcp_authn changed | 17 |
+| tango | bzl load closure of //test/config_test changed | 17 |
+| tango | bzl load closure of //test/extensions/http/header_validators/envoy_default changed | 17 |
+| tango | external dependency @envoy_api//envoy/config/bootstrap/v3:pkg changed | 17 |
+| tango | external dependency @envoy_api//versioning:frozen_protos changed | 17 |
+| tango | bzl load closure of //distribution/dockerhub changed | 16 |
+| tango | bzl load closure of //source/common/coroutine changed | 16 |
+| tango | bzl load closure of //source/common/filesystem changed | 16 |
+| tango | bzl load closure of //source/common/stream_info changed | 16 |
+| tango | bzl load closure of //source/extensions/access_loggers/common changed | 16 |
+| tango | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/downstream_socket_interface changed | 16 |
+| tango | bzl load closure of //source/extensions/common/dubbo changed | 16 |
+| tango | bzl load closure of //source/extensions/dynamic_modules/builtin_extensions changed | 16 |
+| tango | bzl load closure of //source/extensions/filters/http/aws_lambda changed | 16 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_field_extraction changed | 16 |
+| tango | bzl load closure of //source/extensions/filters/http/proto_message_extraction changed | 16 |
+| tango | bzl load closure of //source/extensions/filters/network/dubbo_proxy/router changed | 16 |
+| tango | bzl load closure of //source/extensions/http/stateful_session/cookie changed | 16 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/common changed | 16 |
+| tango | bzl load closure of //source/extensions/quic/server_preferred_address changed | 16 |
+| tango | bzl load closure of //source/extensions/tracers/xray changed | 16 |
+| tango | bzl load closure of //test/extensions/filters/http/dynamic_forward_proxy changed | 16 |
+| tango | external dependency @envoy_api//envoy/annotations:pkg_cc_proto changed | 16 |
+| tango | external dependency @envoy_api//envoy/api/v2:pkg_cc_proto changed | 16 |
+| tango | external dependency @envoy_api//envoy/data/tap/v2alpha:pkg_py_proto changed | 16 |
+| tango | bzl load closure of //contrib/cryptomb/private_key_providers/source changed | 15 |
+| tango | bzl load closure of //contrib/hyperscan/matching/input_matchers/source changed | 15 |
+| tango | bzl load closure of //contrib/kafka/filters/network/source/broker changed | 15 |
+| tango | bzl load closure of //contrib/vcl/source changed | 15 |
+| tango | bzl load closure of //source/extensions/filters/http/bandwidth_share changed | 15 |
+| tango | bzl load closure of //source/extensions/filters/http/custom_response changed | 15 |
+| tango | bzl load closure of //source/extensions/filters/http/dynamic_modules changed | 15 |
+| tango | bzl load closure of //source/extensions/filters/http/mcp_router changed | 15 |
+| tango | bzl load closure of //source/extensions/health_checkers/thrift changed | 15 |
+| tango | bzl load closure of //source/extensions/stat_sinks/open_telemetry changed | 15 |
+| tango | bzl load closure of //test/common/json changed | 15 |
+| tango | bzl load closure of //test/common/quic changed | 15 |
+| tango | bzl load closure of //test/fuzz changed | 15 |
+| tango | bzl load closure of //contrib changed | 14 |
+| tango | bzl load closure of //contrib/sip_proxy/filters/network/source/filters changed | 14 |
+| tango | bzl load closure of //envoy/tracing changed | 14 |
+| tango | bzl load closure of //source/common/http/http1 changed | 14 |
+| tango | bzl load closure of //source/common/json changed | 14 |
+| tango | bzl load closure of //source/extensions/common/dynamic_forward_proxy changed | 14 |
+| tango | bzl load closure of //source/extensions/filters/common/rbac changed | 14 |
+| tango | bzl load closure of //source/extensions/filters/http/common changed | 14 |
+| tango | bzl load closure of //test/common/buffer changed | 14 |
+| tango | bzl load closure of //test/common/formatter changed | 14 |
+| tango | bzl load closure of //test/extensions/load_balancing_policies/common changed | 14 |
+| tango | external dependency @envoy_api//envoy/data/tap/v3:pkg_cc_proto changed | 14 |
+| tango | bzl load closure of //contrib/dynamo/filters/http/source changed | 13 |
+| tango | bzl load closure of //source/extensions/bootstrap/dynamic_modules changed | 13 |
+| tango | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/upstream_socket_interface changed | 13 |
+| tango | bzl load closure of //source/extensions/common/wasm changed | 13 |
+| tango | bzl load closure of //source/extensions/config_subscription/grpc/xds_mux changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/http/cdn_loop changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_json_reverse_transcoder changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_json_transcoder changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/http/mcp_json_rest_bridge changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/http/tap changed | 13 |
+| tango | bzl load closure of //source/extensions/filters/network/ext_proc changed | 13 |
+| tango | bzl load closure of //source/extensions/io_socket/user_space changed | 13 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/dynamic_modules changed | 13 |
+| tango | bzl load closure of //source/extensions/network/socket_interface/sockmap changed | 13 |
+| tango | bzl load closure of //source/extensions/resource_monitors/cgroup_memory changed | 13 |
+| tango | bzl load closure of //source/extensions/resource_monitors/cpu_utilization changed | 13 |
+| tango | bzl load closure of //source/extensions/stat_sinks/dynamic_modules changed | 13 |
+| tango | bzl load closure of //source/extensions/tracers/skywalking changed | 13 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tap changed | 13 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls changed | 13 |
+| tango | bzl load closure of //test/extensions/filters/http/jwt_authn changed | 13 |
+| tango | bzl load closure of //test/extensions/filters/listener/tls_inspector changed | 13 |
+| tango | external dependency @envoy_api//envoy/config/grpc_credential/v2alpha:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/config/transport_socket/alts/v2alpha:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/clusters/composite/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/clusters/dns/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/clusters/redis/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/dynamic_modules/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/filters/common/fault/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/extensions/load_balancing_policies/common/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/service/network_ext_proc/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/service/route/v3:pkg_cc_proto changed | 13 |
+| tango | external dependency @envoy_api//envoy/service/runtime/v3:pkg_cc_proto changed | 13 |
+| tango | bzl load closure of //contrib/golang/upstreams/http/tcp/source changed | 12 |
+| tango | bzl load closure of //contrib/istio/filters/common/source changed | 12 |
+| tango | bzl load closure of //contrib/postgres_proxy/filters/network/test changed | 12 |
+| tango | bzl load closure of //envoy/stream_info changed | 12 |
+| tango | bzl load closure of //source/common/http/http2 changed | 12 |
+| tango | bzl load closure of //source/extensions/access_loggers/filters/process_ratelimit changed | 12 |
+| tango | bzl load closure of //source/extensions/common/async_files changed | 12 |
+| tango | bzl load closure of //source/extensions/common/matcher changed | 12 |
+| tango | bzl load closure of //source/extensions/common/tap changed | 12 |
+| tango | bzl load closure of //source/extensions/filters/common/ext_authz changed | 12 |
+| tango | bzl load closure of //source/extensions/filters/http/connect_grpc_bridge changed | 12 |
+| tango | bzl load closure of //source/extensions/filters/http/proto_api_scrubber changed | 12 |
+| tango | bzl load closure of //source/extensions/filters/network/redis_proxy changed | 12 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters changed | 12 |
+| tango | bzl load closure of //source/extensions/http/injected_credentials/common changed | 12 |
+| tango | bzl load closure of //test/common/config changed | 12 |
+| tango | bzl load closure of //test/extensions/filters/http/rbac changed | 12 |
+| tango | bzl load closure of //test/extensions/filters/listener/proxy_protocol changed | 12 |
+| tango | external dependency @envoy_api//envoy/extensions/http/ext_proc/processing_request_modifiers/mapped_attribute_builder/v3:pkg_cc_proto changed | 12 |
+| tango | bzl load closure of //contrib/config/test changed | 11 |
+| tango | bzl load closure of //contrib/golang/filters/http/source changed | 11 |
+| tango | bzl load closure of //contrib/golang/router/cluster_specifier/source changed | 11 |
+| tango | bzl load closure of //contrib/kae/private_key_providers/source changed | 11 |
+| tango | bzl load closure of //contrib/postgres_inspector/filters/listener/source changed | 11 |
+| tango | bzl load closure of //contrib/qat/compression/qatzip/compressor/source changed | 11 |
+| tango | bzl load closure of //contrib/qat/compression/qatzstd/compressor/source changed | 11 |
+| tango | bzl load closure of //contrib/qat/private_key_providers/source changed | 11 |
+| tango | bzl load closure of //contrib/sip_proxy/filters/network/source/router changed | 11 |
+| tango | bzl load closure of //contrib/stat_sinks/wasm_filter/test/test_data changed | 11 |
+| tango | bzl load closure of //source/extensions/access_loggers/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/access_loggers/fluentd changed | 11 |
+| tango | bzl load closure of //source/extensions/access_loggers/stats changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/a2a changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/composite changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/file_server changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/file_system_buffer changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/lua changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/mcp changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/original_src changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/http/ratelimit changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/listener/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/listener/original_src changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/listener/tls_inspector changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/network/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/network/reverse_tunnel changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/payload_to_metadata changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/udp/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy changed | 11 |
+| tango | bzl load closure of //source/extensions/health_checkers/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/maglev changed | 11 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/override_host changed | 11 |
+| tango | bzl load closure of //source/extensions/path/uri_template_lib/proto changed | 11 |
+| tango | bzl load closure of //source/extensions/quic/connection_id_generator/quic_lb changed | 11 |
+| tango | bzl load closure of //source/extensions/quic/crypto_stream changed | 11 |
+| tango | bzl load closure of //source/extensions/stat_sinks/metrics_service changed | 11 |
+| tango | bzl load closure of //source/extensions/tracers/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry changed | 11 |
+| tango | bzl load closure of //source/extensions/transport_sockets/dynamic_modules changed | 11 |
+| tango | bzl load closure of //source/extensions/upstreams/http/dynamic_modules changed | 11 |
+| tango | bzl load closure of //test/common/orca changed | 11 |
+| tango | bzl load closure of //test/extensions/compression/gzip changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/common/expr changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/http/api_key_auth changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/http/common/fuzz changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/http/ext_proc/unit_test_fuzz changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/listener/original_src changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/network/ext_authz changed | 11 |
+| tango | bzl load closure of //test/extensions/filters/network/local_ratelimit changed | 11 |
+| tango | bzl load closure of //test/extensions/load_balancing_policies/least_request changed | 11 |
+| tango | bzl load closure of //test/extensions/load_balancing_policies/random changed | 11 |
+| tango | bzl load closure of //test/extensions/load_balancing_policies/round_robin changed | 11 |
+| tango | bzl load closure of //test/mocks/http changed | 11 |
+| tango | bzl load closure of //contrib/golang/filters/http/test/test_data/destroyconfig changed | 10 |
+| tango | bzl load closure of //contrib/rocketmq_proxy/filters/network/source/router changed | 10 |
+| tango | bzl load closure of //source/extensions changed | 10 |
+| tango | bzl load closure of //source/extensions/access_loggers/filters/cel changed | 10 |
+| tango | bzl load closure of //source/extensions/common/aws/signers changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/common/expr changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/common/ext_proc changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/common/lua changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/common/ratelimit changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_field_extraction/message_converter changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/http/proto_message_extraction/extraction_util changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/network/dubbo_proxy/filters changed | 10 |
+| tango | bzl load closure of //source/extensions/filters/network/generic_proxy/interface changed | 10 |
+| tango | bzl load closure of //source/extensions/http/header_formatters/preserve_case changed | 10 |
+| tango | bzl load closure of //contrib/checksum/filters/http/source changed | 9 |
+| tango | bzl load closure of //contrib/client_ssl_auth/filters/network/source changed | 9 |
+| tango | bzl load closure of //contrib/dlb/source changed | 9 |
+| tango | bzl load closure of //contrib/hyperscan/regex_engines/source changed | 9 |
+| tango | bzl load closure of //contrib/istio/filters/http/alpn/source changed | 9 |
+| tango | bzl load closure of //contrib/istio/filters/network/metadata_exchange/source changed | 9 |
+| tango | bzl load closure of //contrib/kafka/stat_sinks/source changed | 9 |
+| tango | bzl load closure of //contrib/language/filters/http/source changed | 9 |
+| tango | bzl load closure of //contrib/postgres_proxy/filters/network/source changed | 9 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/source changed | 9 |
+| tango | bzl load closure of //contrib/sip_proxy/filters/network/source/tra changed | 9 |
+| tango | bzl load closure of //contrib/stat_sinks/wasm_filter/source changed | 9 |
+| tango | bzl load closure of //contrib/sxg/filters/http/source changed | 9 |
+| tango | bzl load closure of //contrib/tap_sinks/udp_sink/source changed | 9 |
+| tango | bzl load closure of //source/extensions/access_loggers/wasm changed | 9 |
+| tango | bzl load closure of //source/extensions/bootstrap/reverse_tunnel/common changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/brotli/compressor changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/brotli/decompressor changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/gzip/compressor changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/gzip/decompressor changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/zstd/compressor changed | 9 |
+| tango | bzl load closure of //source/extensions/compression/zstd/decompressor changed | 9 |
+| tango | bzl load closure of //source/extensions/config/validators/minimum_clusters changed | 9 |
+| tango | bzl load closure of //source/extensions/config_subscription/rest changed | 9 |
+| tango | bzl load closure of //source/extensions/content_parsers/json changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/adaptive_concurrency changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/admission_control changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/alternate_protocols_cache changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/api_key_auth changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/aws_eventstream_parser changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/aws_request_signing changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/bandwidth_limit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/basic_auth changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/body_size_limit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/buffer changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/compressor changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/cors changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/credential_injector changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/csrf changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/decompressor changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/ext_authz changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/fault changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/filter_chain changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/geoip changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_http1_bridge changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_http1_reverse_bridge changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_stats changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/grpc_web changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/header_mutation changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/header_to_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/health_check changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/ip_tagging changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/json_to_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/kill_request changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/local_ratelimit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/on_demand changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/rbac changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/set_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/sse_to_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/stateful_session changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/thrift_to_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/transform changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/upstream_rbac changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/http/wasm changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/listener/http_inspector changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/listener/local_ratelimit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/listener/original_dst changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/listener/proxy_protocol changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/connection_limit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/direct_response changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/echo changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/ext_authz changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/generic_proxy/router changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/geoip changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/http_connection_manager changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/local_ratelimit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/ratelimit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/rbac changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/sni_cluster changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/sni_dynamic_forward_proxy changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/tcp_bandwidth_limit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/header_to_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/thrift_proxy/filters/ratelimit changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/wasm changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/network/zookeeper_proxy changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/dynamic_forward_proxy changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/ext_authz changed | 9 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters/http_capsule changed | 9 |
+| tango | bzl load closure of //source/extensions/formatter/cel changed | 9 |
+| tango | bzl load closure of //source/extensions/formatter/dynamic_modules changed | 9 |
+| tango | bzl load closure of //source/extensions/formatter/metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/formatter/req_without_query changed | 9 |
+| tango | bzl load closure of //source/extensions/geoip_providers/maxmind changed | 9 |
+| tango | bzl load closure of //source/extensions/http/early_header_mutation/header_mutation changed | 9 |
+| tango | bzl load closure of //source/extensions/http/injected_credentials/generic changed | 9 |
+| tango | bzl load closure of //source/extensions/http/original_ip_detection/custom_header changed | 9 |
+| tango | bzl load closure of //source/extensions/http/original_ip_detection/xff changed | 9 |
+| tango | bzl load closure of //source/extensions/http/stateful_session/envelope changed | 9 |
+| tango | bzl load closure of //source/extensions/http/stateful_session/header changed | 9 |
+| tango | bzl load closure of //source/extensions/internal_redirect/allow_listed_routes changed | 9 |
+| tango | bzl load closure of //source/extensions/internal_redirect/filter_state changed | 9 |
+| tango | bzl load closure of //source/extensions/internal_redirect/previous_routes changed | 9 |
+| tango | bzl load closure of //source/extensions/internal_redirect/safe_cross_scheme changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/client_side_weighted_round_robin changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/least_request changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/load_aware_locality changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/random changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/ring_hash changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/round_robin changed | 9 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/wrr_locality changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/actions/transform_stat changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/common_inputs/environment_variable changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/common_inputs/transport_socket changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/cel_matcher changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/consistent_hashing changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/dynamic_modules changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/ip changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/matching/input_matchers/runtime_fraction changed | 9 |
+| tango | bzl load closure of //source/extensions/network/dns_resolver/hickory changed | 9 |
+| tango | bzl load closure of //source/extensions/path/match/uri_template changed | 9 |
+| tango | bzl load closure of //source/extensions/path/rewrite/uri_template changed | 9 |
+| tango | bzl load closure of //source/extensions/quic/client_packet_writer changed | 9 |
+| tango | bzl load closure of //source/extensions/quic/connection_debug_visitor/basic changed | 9 |
+| tango | bzl load closure of //source/extensions/quic/connection_debug_visitor/quic_stats changed | 9 |
+| tango | bzl load closure of //source/extensions/quic/connection_id_generator/deterministic changed | 9 |
+| tango | bzl load closure of //source/extensions/quic/proof_source changed | 9 |
+| tango | bzl load closure of //source/extensions/resource_monitors/downstream_connections changed | 9 |
+| tango | bzl load closure of //source/extensions/resource_monitors/fixed_heap changed | 9 |
+| tango | bzl load closure of //source/extensions/resource_monitors/injected_resource changed | 9 |
+| tango | bzl load closure of //source/extensions/retry/host/omit_canary_hosts changed | 9 |
+| tango | bzl load closure of //source/extensions/retry/host/omit_host_metadata changed | 9 |
+| tango | bzl load closure of //source/extensions/retry/host/previous_hosts changed | 9 |
+| tango | bzl load closure of //source/extensions/retry/priority/previous_priorities changed | 9 |
+| tango | bzl load closure of //source/extensions/router/cluster_specifiers/lua changed | 9 |
+| tango | bzl load closure of //source/extensions/router/cluster_specifiers/matcher changed | 9 |
+| tango | bzl load closure of //source/extensions/stat_sinks/hystrix changed | 9 |
+| tango | bzl load closure of //source/extensions/stat_sinks/wasm changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/datadog changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/fluentd changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/dynatrace changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/environment changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors/static changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/always_on changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/cel changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/dynatrace changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/parent_based changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers/trace_id_ratio_based changed | 9 |
+| tango | bzl load closure of //source/extensions/tracers/zipkin changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/alts changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/http_11_proxy changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/internal_upstream changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/proxy_protocol changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/starttls changed | 9 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tcp_stats changed | 9 |
+| tango | bzl load closure of //source/extensions/upstreams/http/http changed | 9 |
+| tango | bzl load closure of //source/extensions/upstreams/http/tcp changed | 9 |
+| tango | bzl load closure of //source/extensions/upstreams/http/udp changed | 9 |
+| tango | bzl load closure of //source/extensions/watchdog/backtrace_action changed | 9 |
+| tango | bzl load closure of //source/extensions/watchdog/profile_action changed | 9 |
+| tango | bzl load closure of //test/common/http/sse changed | 9 |
+| tango | bzl load closure of //test/common/tls changed | 9 |
+| tango | bzl load closure of //test/common/tracing changed | 9 |
+| tango | bzl load closure of //test/extensions/common/aws/eventstream changed | 9 |
+| tango | bzl load closure of //test/extensions/filters/http/compressor changed | 9 |
+| tango | bzl load closure of //test/extensions/filters/http/mcp changed | 9 |
+| tango | bzl load closure of //test/extensions/filters/http/mcp_router changed | 9 |
+| tango | bzl load closure of //test/extensions/tracers/xray changed | 9 |
+| tango | external dependency @envoy_api//bazel:repository_locations changed | 9 |
+| tango | bzl load closure of //envoy/grpc changed | 8 |
+| tango | bzl load closure of //source/common/buffer changed | 8 |
+| tango | bzl load closure of //source/common/memory changed | 8 |
+| tango | bzl load closure of //source/common/runtime changed | 8 |
+| tango | bzl load closure of //source/common/signal changed | 8 |
+| tango | bzl load closure of //source/extensions/clusters/common changed | 8 |
+| tango | bzl load closure of //source/extensions/common/redis changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/common/local_ratelimit changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/common/mcp changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/common/original_src changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/http/ai_protocol_manager/schema changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy/router changed | 8 |
+| tango | bzl load closure of //source/extensions/filters/udp/udp_proxy/session_filters changed | 8 |
+| tango | bzl load closure of //source/extensions/path/uri_template_lib changed | 8 |
+| tango | bzl load closure of //test changed | 8 |
+| tango | bzl load closure of //test/common/tls/integration changed | 8 |
+| tango | bzl load closure of //test/extensions/filters/http/custom_response changed | 8 |
+| tango | bzl load closure of //test/extensions/filters/udp/udp_proxy/session_filters/dynamic_forward_proxy changed | 8 |
+| tango | bzl load closure of //test/extensions/load_balancing_policies/override_host changed | 8 |
+| tango | bzl load closure of //test/extensions/quic/proof_source changed | 8 |
+| tango | bzl load closure of //test/integration/load_balancers changed | 8 |
+| tango | bzl load closure of //test/mocks/geoip changed | 8 |
+| tango | bzl load closure of //tools/coverage changed | 8 |
+| tango | bzl load closure of //contrib/config/source changed | 7 |
+| tango | bzl load closure of //contrib/generic_proxy/filters/network/source/codecs/kafka changed | 7 |
+| tango | bzl load closure of //contrib/golang/filters/network/source changed | 7 |
+| tango | bzl load closure of //contrib/istio/filters/http/istio_stats/source changed | 7 |
+| tango | bzl load closure of //contrib/istio/filters/http/peer_metadata/source changed | 7 |
+| tango | bzl load closure of //contrib/istio/filters/network/peer_metadata/source changed | 7 |
+| tango | bzl load closure of //source/extensions/access_loggers/file changed | 7 |
+| tango | bzl load closure of //source/extensions/access_loggers/stream changed | 7 |
+| tango | bzl load closure of //source/extensions/api_listeners/default_api_listener changed | 7 |
+| tango | bzl load closure of //source/extensions/bootstrap/wasm changed | 7 |
+| tango | bzl load closure of //source/extensions/clusters/static changed | 7 |
+| tango | bzl load closure of //source/extensions/clusters/strict_dns changed | 7 |
+| tango | bzl load closure of //source/extensions/config_subscription/filesystem changed | 7 |
+| tango | bzl load closure of //source/extensions/early_data changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/common/rbac/matchers changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/common/rbac/principals/mtls_authenticated changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/http/match_delegate changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/http/router changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/http/set_filter_state changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/listener/set_filter_state changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/generic_proxy/codecs/dubbo changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/generic_proxy/codecs/http1 changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/match_delegate changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/reverse_tunnel/drain_aware_hcm changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/set_filter_state changed | 7 |
+| tango | bzl load closure of //source/extensions/filters/network/tcp_proxy changed | 7 |
+| tango | bzl load closure of //source/extensions/formatter/file_content changed | 7 |
+| tango | bzl load closure of //source/extensions/formatter/generic_secret changed | 7 |
+| tango | bzl load closure of //source/extensions/formatter/xfcc_value changed | 7 |
+| tango | bzl load closure of //source/extensions/health_check/event_sinks/file changed | 7 |
+| tango | bzl load closure of //source/extensions/http/cache/simple_http_cache changed | 7 |
+| tango | bzl load closure of //source/extensions/http/cache_v2/simple_http_cache changed | 7 |
+| tango | bzl load closure of //source/extensions/http/custom_response/local_response_policy changed | 7 |
+| tango | bzl load closure of //source/extensions/http/custom_response/redirect_policy changed | 7 |
+| tango | bzl load closure of //source/extensions/http/ext_proc/processing_request_modifiers/mapped_attribute_builder changed | 7 |
+| tango | bzl load closure of //source/extensions/http/ext_proc/response_processors/save_processing_response changed | 7 |
+| tango | bzl load closure of //source/extensions/key_value/file_based changed | 7 |
+| tango | bzl load closure of //source/extensions/listener_managers/validation_listener_manager changed | 7 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/cluster_provided changed | 7 |
+| tango | bzl load closure of //source/extensions/local_address_selectors/filter_state_override changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/actions/format_string changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/http/cel_input changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/http/dynamic_modules changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/http/metadata_input changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/network/application_protocol changed | 7 |
+| tango | bzl load closure of //source/extensions/matching/network/common changed | 7 |
+| tango | bzl load closure of //source/extensions/network/dns_resolver/apple changed | 7 |
+| tango | bzl load closure of //source/extensions/network/dns_resolver/cares changed | 7 |
+| tango | bzl load closure of //source/extensions/network/dns_resolver/getaddrinfo changed | 7 |
+| tango | bzl load closure of //source/extensions/rate_limit_descriptors/expr changed | 7 |
+| tango | bzl load closure of //source/extensions/request_id/uuid changed | 7 |
+| tango | bzl load closure of //source/extensions/stat_sinks/dog_statsd changed | 7 |
+| tango | bzl load closure of //source/extensions/stat_sinks/graphite_statsd changed | 7 |
+| tango | bzl load closure of //source/extensions/stat_sinks/statsd changed | 7 |
+| tango | bzl load closure of //source/extensions/string_matcher/lua changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/raw_buffer changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/filter_state_override changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/sni changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_mappers/static_name changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_selectors/on_demand changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_validator/dynamic_modules changed | 7 |
+| tango | bzl load closure of //source/extensions/transport_sockets/tls/cert_validator/spiffe changed | 7 |
+| tango | bzl load closure of //source/extensions/udp_packet_writer/default changed | 7 |
+| tango | bzl load closure of //source/extensions/udp_packet_writer/gso changed | 7 |
+| tango | bzl load closure of //source/extensions/upstreams/http changed | 7 |
+| tango | bzl load closure of //source/extensions/upstreams/http/generic changed | 7 |
+| tango | bzl load closure of //source/extensions/upstreams/http/reverse_tunnel changed | 7 |
+| tango | bzl load closure of //source/extensions/upstreams/tcp changed | 7 |
+| tango | bzl load closure of //source/extensions/upstreams/tcp/generic changed | 7 |
+| tango | bzl load closure of //source/extensions/wasm_runtime/null changed | 7 |
+| tango | bzl load closure of //source/extensions/wasm_runtime/v8 changed | 7 |
+| tango | bzl load closure of //source/extensions/wasm_runtime/wamr changed | 7 |
+| tango | bzl load closure of //source/extensions/wasm_runtime/wasmtime changed | 7 |
+| tango | bzl load closure of //test/common/listener_manager changed | 7 |
+| tango | bzl load closure of //test/common/secret changed | 7 |
+| tango | bzl load closure of //test/extensions/access_loggers/wasm/test_data changed | 7 |
+| tango | bzl load closure of //test/extensions/dynamic_modules changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/common/ratelimit_config changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/http/credential_injector changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/http/lua changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/http/wasm changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/listener/common/fuzz changed | 7 |
+| tango | bzl load closure of //test/extensions/filters/network/http_connection_manager changed | 7 |
+| tango | bzl load closure of //test/extensions/http/header_formatters/preserve_case changed | 7 |
+| tango | bzl load closure of //test/extensions/stats_sinks/wasm/test_data changed | 7 |
+| tango | bzl load closure of //test/extensions/transport_sockets/starttls changed | 7 |
+| tango | bzl load closure of //test/extensions/upstreams/http changed | 7 |
+| tango | bzl load closure of //test/integration/clusters changed | 7 |
+| tango | external dependency @envoy_api//:v3_proto_set changed | 7 |
+| tango | bzl load closure of //configs changed | 6 |
+| tango | bzl load closure of //contrib/common/sqlutils/source changed | 6 |
+| tango | bzl load closure of //contrib/cryptomb/private_key_providers/test changed | 6 |
+| tango | bzl load closure of //contrib/cryptomb/private_key_providers/test/test_data changed | 6 |
+| tango | bzl load closure of //contrib/exe changed | 6 |
+| tango | bzl load closure of //contrib/golang/common/dso changed | 6 |
+| tango | bzl load closure of //contrib/golang/common/log changed | 6 |
+| tango | bzl load closure of //contrib/hyperscan/matching/input_matchers/test changed | 6 |
+| tango | bzl load closure of //contrib/kae changed | 6 |
+| tango | bzl load closure of //contrib/kae/private_key_providers/test/test_data changed | 6 |
+| tango | bzl load closure of //contrib/kafka/filters/network/test/broker changed | 6 |
+| tango | bzl load closure of //contrib/postgres/protocol changed | 6 |
+| tango | bzl load closure of //contrib/qat changed | 6 |
+| tango | bzl load closure of //contrib/qat/private_key_providers/test/test_data changed | 6 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/source/clients changed | 6 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/source/clients/grpc_client changed | 6 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/source/reporters changed | 6 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/source/reporters/event_reporter changed | 6 |
+| tango | bzl load closure of //envoy/api changed | 6 |
+| tango | bzl load closure of //envoy/compression/compressor changed | 6 |
+| tango | bzl load closure of //envoy/compression/decompressor changed | 6 |
+| tango | bzl load closure of //envoy/content_parser changed | 6 |
+| tango | bzl load closure of //envoy/init changed | 6 |
+| tango | bzl load closure of //envoy/secret changed | 6 |
+| tango | bzl load closure of //envoy/server/overload changed | 6 |
+| tango | bzl load closure of //envoy/ssl/private_key changed | 6 |
+| tango | bzl load closure of //envoy/tcp changed | 6 |
+| tango | bzl load closure of //source/common/http/matching changed | 6 |
+| tango | bzl load closure of //source/common/init changed | 6 |
+| tango | bzl load closure of //source/common/io changed | 6 |
+| tango | bzl load closure of //source/common/secret changed | 6 |
+| tango | bzl load closure of //source/common/singleton changed | 6 |
+| tango | bzl load closure of //source/common/ssl changed | 6 |
+| tango | bzl load closure of //source/extensions/clusters/eds changed | 6 |
+| tango | bzl load closure of //source/extensions/clusters/redis changed | 6 |
+| tango | bzl load closure of //source/extensions/common/aws/eventstream changed | 6 |
+| tango | bzl load closure of //source/extensions/common/fluentd changed | 6 |
+| tango | bzl load closure of //source/extensions/common/proxy_protocol changed | 6 |
+| tango | bzl load closure of //source/extensions/compression/brotli/common changed | 6 |
+| tango | bzl load closure of //source/extensions/compression/common/compressor changed | 6 |
+| tango | bzl load closure of //source/extensions/compression/common/decompressor changed | 6 |
+| tango | bzl load closure of //source/extensions/compression/gzip/common changed | 6 |
+| tango | bzl load closure of //source/extensions/compression/zstd/common changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/fault changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/jwks changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/mutation_rules changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/processing_effect changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/ratelimit_config changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/common/set_filter_state changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/http changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/http/adaptive_concurrency/controller changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/http/admission_control/evaluators changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/http/ext_proc/http_client changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/http/proto_api_scrubber/scrubbing_util_lib changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/network changed | 6 |
+| tango | bzl load closure of //source/extensions/filters/network/common changed | 6 |
+| tango | bzl load closure of //source/extensions/geoip_providers/common changed | 6 |
+| tango | bzl load closure of //source/extensions/health_checkers/common changed | 6 |
+| tango | bzl load closure of //source/extensions/health_checkers/redis changed | 6 |
+| tango | bzl load closure of //source/extensions/resource_monitors/common changed | 6 |
+| tango | bzl load closure of //source/extensions/stat_sinks/common/statsd changed | 6 |
+| tango | bzl load closure of //source/extensions/tracers/common changed | 6 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/resource_detectors changed | 6 |
+| tango | bzl load closure of //source/extensions/tracers/opentelemetry/samplers changed | 6 |
+| tango | bzl load closure of //source/extensions/transport_sockets/common changed | 6 |
+| tango | bzl load closure of //source/server/config_validation changed | 6 |
+| tango | bzl load closure of //test/common/grpc changed | 6 |
+| tango | bzl load closure of //test/common/http/http1 changed | 6 |
+| tango | bzl load closure of //test/config/integration changed | 6 |
+| tango | bzl load closure of //test/config/integration/certs changed | 6 |
+| tango | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver changed | 6 |
+| tango | bzl load closure of //contrib/golang/common/dso/test changed | 5 |
+| tango | bzl load closure of //contrib/kae/private_key_providers/test changed | 5 |
+| tango | bzl load closure of //contrib/kafka/filters/network/test/mesh changed | 5 |
+| tango | bzl load closure of //contrib/mysql_proxy/filters/network/test changed | 5 |
+| tango | bzl load closure of //contrib/postgres_inspector/filters/listener/test changed | 5 |
+| tango | bzl load closure of //contrib/qat/private_key_providers/test changed | 5 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/test/clients changed | 5 |
+| tango | bzl load closure of //contrib/rocketmq_proxy/filters/network/test changed | 5 |
+| tango | bzl load closure of //contrib/sip_proxy/filters/network/test changed | 5 |
+| tango | bzl load closure of //test/common/quic/platform changed | 5 |
+| tango | bzl load closure of //test/tools/schema_validator changed | 5 |
+| tango | bzl load closure of //contrib/checksum/filters/http/test changed | 4 |
+| tango | bzl load closure of //contrib/client_ssl_auth/filters/network/test changed | 4 |
+| tango | bzl load closure of //contrib/common/sqlutils/test changed | 4 |
+| tango | bzl load closure of //contrib/dlb/test changed | 4 |
+| tango | bzl load closure of //contrib/dynamo/filters/http/test changed | 4 |
+| tango | bzl load closure of //contrib/generic_proxy/filters/network/test/codecs/kafka changed | 4 |
+| tango | bzl load closure of //contrib/golang/filters/network/test changed | 4 |
+| tango | bzl load closure of //contrib/golang/router/cluster_specifier/test changed | 4 |
+| tango | bzl load closure of //contrib/golang/upstreams/http/tcp/test changed | 4 |
+| tango | bzl load closure of //contrib/hyperscan/regex_engines/test changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/common/test changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/http/alpn/test changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/http/istio_stats/test/integration changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/http/peer_metadata/test changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/network/metadata_exchange/test changed | 4 |
+| tango | bzl load closure of //contrib/istio/filters/network/peer_metadata/test changed | 4 |
+| tango | bzl load closure of //contrib/kafka/filters/network/test/mesh/command_handlers changed | 4 |
+| tango | bzl load closure of //contrib/kafka/stat_sinks/test changed | 4 |
+| tango | bzl load closure of //contrib/language/filters/http/test changed | 4 |
+| tango | bzl load closure of //contrib/peak_ewma/filters/http/source changed | 4 |
+| tango | bzl load closure of //contrib/peak_ewma/filters/http/test changed | 4 |
+| tango | bzl load closure of //contrib/peak_ewma/load_balancing_policies/source changed | 4 |
+| tango | bzl load closure of //contrib/peak_ewma/load_balancing_policies/test changed | 4 |
+| tango | bzl load closure of //contrib/qat/compression/qatzip/compressor/test changed | 4 |
+| tango | bzl load closure of //contrib/qat/compression/qatzstd/compressor/test changed | 4 |
+| tango | bzl load closure of //contrib/reverse_tunnel_reporter/test/reporters changed | 4 |
+| tango | bzl load closure of //contrib/stat_sinks/wasm_filter/test changed | 4 |
+| tango | bzl load closure of //contrib/sxg/filters/http/test changed | 4 |
+| tango | bzl load closure of //contrib/tap_sinks/udp_sink/test changed | 4 |
+| tango | bzl load closure of //envoy/access_log changed | 4 |
+| tango | bzl load closure of //envoy/filesystem changed | 4 |
+| tango | bzl load closure of //envoy/formatter changed | 4 |
+| tango | bzl load closure of //envoy/rds changed | 4 |
+| tango | bzl load closure of //envoy/singleton changed | 4 |
+| tango | bzl load closure of //envoy/thread_local changed | 4 |
+| tango | bzl load closure of //source/common/access_log changed | 4 |
+| tango | bzl load closure of //source/common/api changed | 4 |
+| tango | bzl load closure of //source/common/json/wuffs_json changed | 4 |
+| tango | bzl load closure of //source/common/jwt changed | 4 |
+| tango | bzl load closure of //source/common/network/matching changed | 4 |
+| tango | bzl load closure of //source/common/orca changed | 4 |
+| tango | bzl load closure of //source/common/tcp_proxy changed | 4 |
+| tango | bzl load closure of //source/common/tls/ocsp changed | 4 |
+| tango | bzl load closure of //source/common/watchdog changed | 4 |
+| tango | bzl load closure of //source/extensions/access_loggers changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/aggregate changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/composite changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/dns changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/dynamic_forward_proxy changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/dynamic_modules changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/logical_dns changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/mcp_multicluster changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/original_dst changed | 4 |
+| tango | bzl load closure of //source/extensions/clusters/reverse_connection changed | 4 |
+| tango | bzl load closure of //source/extensions/filters/http/dynamic_forward_proxy changed | 4 |
+| tango | bzl load closure of //source/extensions/filters/listener changed | 4 |
+| tango | bzl load closure of //source/extensions/filters/udp/dns_filter changed | 4 |
+| tango | bzl load closure of //source/extensions/grpc_credentials/example changed | 4 |
+| tango | bzl load closure of //source/extensions/grpc_credentials/file_based_metadata changed | 4 |
+| tango | bzl load closure of //source/extensions/health_checkers/grpc changed | 4 |
+| tango | bzl load closure of //source/extensions/health_checkers/http changed | 4 |
+| tango | bzl load closure of //source/extensions/health_checkers/tcp changed | 4 |
+| tango | bzl load closure of //source/extensions/internal_redirect changed | 4 |
+| tango | bzl load closure of //source/extensions/io_socket changed | 4 |
+| tango | bzl load closure of //source/extensions/load_balancing_policies/subset changed | 4 |
+| tango | bzl load closure of //source/extensions/resource_monitors changed | 4 |
+| tango | bzl load closure of //source/extensions/stat_sinks changed | 4 |
+| tango | bzl load closure of //source/server/admin/html changed | 4 |
+| tango | bzl load closure of //test/common/tls/cert_validator changed | 4 |
+| tango | bzl load closure of //test/common/tls/test_data changed | 4 |
+| tango | bzl load closure of //test/extensions/filters/http/cdn_loop changed | 4 |
+| tango | bzl load closure of //test/extensions/filters/listener/http_inspector changed | 4 |
+| tango | bzl load closure of //test/extensions/filters/listener/original_dst changed | 4 |
+| tango | bzl load closure of //test/extensions/filters/udp/dns_filter changed | 4 |
+| tango | bzl load closure of //test/extensions/formatter/xfcc_value changed | 4 |
+| tango | bzl load closure of //test/extensions/path/uri_template_lib changed | 4 |
+| tango | bzl load closure of //test/extensions/transport_sockets/tls/cert_validator/spiffe changed | 4 |
+| tango | bzl load closure of //test/integration/admin_html changed | 4 |
+| tango | bzl load closure of //test/mocks/config changed | 4 |
+| tango | bzl load closure of //test/mocks/network changed | 4 |
+| tango | bzl load closure of //test/tools/router_check/test changed | 4 |
+| tango | bzl load closure of //test/common/coroutine changed | 3 |
+| tango | bzl load closure of //test/extensions/config_subscription/grpc changed | 3 |
+| tango | bzl load closure of //test/tools/wee8_compile changed | 3 |
+| tango | bzl load closure of //envoy/buffer changed | 2 |
+| tango | bzl load closure of //envoy/common/crypto changed | 2 |
+| tango | bzl load closure of //envoy/common/io changed | 2 |
+| tango | bzl load closure of //envoy/extensions/bootstrap/reverse_tunnel changed | 2 |
+| tango | bzl load closure of //envoy/filter changed | 2 |
+| tango | bzl load closure of //envoy/geoip changed | 2 |
+| tango | bzl load closure of //envoy/json changed | 2 |
+| tango | bzl load closure of //envoy/local_info changed | 2 |
+| tango | bzl load closure of //envoy/matcher changed | 2 |
+| tango | bzl load closure of //envoy/protobuf changed | 2 |
+| tango | bzl load closure of //envoy/ratelimit changed | 2 |
+| tango | bzl load closure of //envoy/registry changed | 2 |
+| tango | bzl load closure of //envoy/runtime changed | 2 |
+| tango | bzl load closure of //envoy/thread changed | 2 |
+| tango | bzl load closure of //envoy/udp changed | 2 |
+| tango | bzl load closure of //source/common/compression/zstd/common changed | 2 |
+| tango | bzl load closure of //source/common/compression/zstd/compressor changed | 2 |
+| tango | bzl load closure of //source/common/crypto changed | 2 |
+| tango | bzl load closure of //source/common/filter changed | 2 |
+| tango | bzl load closure of //source/common/html changed | 2 |
+| tango | bzl load closure of //source/common/http/http3 changed | 2 |
+| tango | bzl load closure of //source/common/http/sse changed | 2 |
+| tango | bzl load closure of //source/common/local_info changed | 2 |
+| tango | bzl load closure of //source/common/local_reply changed | 2 |
+| tango | bzl load closure of //source/common/matcher/actions changed | 2 |
+| tango | bzl load closure of //source/common/network/dns_resolver changed | 2 |
+| tango | bzl load closure of //source/common/profiler changed | 2 |
+| tango | bzl load closure of //source/common/quic/platform/mobile_impl changed | 2 |
+| tango | bzl load closure of //source/common/rds changed | 2 |
+| tango | bzl load closure of //source/common/shared_pool changed | 2 |
+| tango | bzl load closure of //source/common/ssl/matching changed | 2 |
+| tango | bzl load closure of //source/common/tcp changed | 2 |
+| tango | bzl load closure of //source/common/thread changed | 2 |
+| tango | bzl load closure of //source/common/thread_local changed | 2 |
+| tango | bzl load closure of //source/common/tls/cert_validator changed | 2 |
+| tango | bzl load closure of //source/common/tls/private_key changed | 2 |
+| tango | bzl load closure of //source/common/websocket changed | 2 |
+| tango | bzl load closure of //test/common/json/config_schemas_test_data changed | 2 |
+| tango | bzl load closure of //test/common/runtime changed | 2 |
+| tango | bzl load closure of //test/common/stream_info changed | 2 |
+| tango | bzl load closure of //test/common/tls/ocsp/test_data changed | 2 |
+| tango | bzl load closure of //test/config changed | 2 |
+| tango | bzl load closure of //test/extensions/compression/zstd/test_data changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/common/ratelimit changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/http/adaptive_concurrency changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/http/ip_tagging/test_data changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/http/rate_limit_quota changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/network/generic_proxy/mocks changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/network/reverse_tunnel changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver/fbthrift changed | 2 |
+| tango | bzl load closure of //test/extensions/filters/network/thrift_proxy/driver/generated/example changed | 2 |
+| tango | bzl load closure of //test/extensions/geoip_providers/maxmind/test_data changed | 2 |
+| tango | bzl load closure of //test/extensions/matching/input_matchers/cel_matcher changed | 2 |
+| tango | bzl load closure of //test/extensions/network/socket_interface/sockmap changed | 2 |
+| tango | bzl load closure of //test/extensions/tracers/skywalking changed | 2 |
+| tango | bzl load closure of //test/integration/upstreams changed | 2 |
+| tango | bzl load closure of //test/mocks/event changed | 2 |
+| tango | bzl load closure of //test/tools/schema_validator/test changed | 2 |
+| tango | bzl load closure of //third_party/android changed | 2 |
+| tango | bzl load closure of //tools/socket_passing changed | 2 |
+| tango | bzl load closure of //test/benchmark changed | 1 |
+| tango | bzl load closure of //test/common/jwt changed | 1 |
+| tango | bzl load closure of //test/common/matcher changed | 1 |
+| tango | bzl load closure of //test/common/memory changed | 1 |
+| tango | bzl load closure of //test/common/tls/cert_selector changed | 1 |
+| tango | bzl load closure of //test/extensions/common/async_files changed | 1 |
+| tango | bzl load closure of //test/extensions/common/aws changed | 1 |
+| tango | bzl load closure of //test/extensions/common/dubbo changed | 1 |
+| tango | bzl load closure of //test/extensions/common/dynamic_forward_proxy changed | 1 |
+| tango | bzl load closure of //test/extensions/common/redis changed | 1 |
+| tango | bzl load closure of //test/extensions/common/tap changed | 1 |
+| tango | bzl load closure of //test/extensions/common/wasm changed | 1 |
+| tango | bzl load closure of //test/extensions/config_subscription/filesystem changed | 1 |
+| tango | bzl load closure of //test/extensions/dynamic_modules/stat_sink changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/common/ext_authz changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/common/lua changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/common/rbac changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/cache changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/cache_v2 changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/common changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/fault changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/gcp_authn changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/grpc_field_extraction/message_converter changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/http/tap changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/network/common/redis changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/network/dubbo_proxy changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/network/generic_proxy changed | 1 |
+| tango | bzl load closure of //test/extensions/filters/network/thrift_proxy changed | 1 |
+| tango | bzl load closure of //test/extensions/network/dns_resolver/common changed | 1 |
+| tango | bzl load closure of //test/mocks changed | 1 |
+| tango | bzl load closure of //test/mocks/access_log changed | 1 |
+| tango | bzl load closure of //test/mocks/api changed | 1 |
+| tango | bzl load closure of //test/mocks/buffer changed | 1 |
+| tango | bzl load closure of //test/mocks/compression/compressor changed | 1 |
+| tango | bzl load closure of //test/mocks/compression/decompressor changed | 1 |
+| tango | bzl load closure of //test/mocks/filesystem changed | 1 |
+| tango | bzl load closure of //test/mocks/init changed | 1 |
+| tango | bzl load closure of //test/mocks/io changed | 1 |
+| tango | bzl load closure of //test/mocks/local_info changed | 1 |
+| tango | bzl load closure of //test/mocks/local_reply changed | 1 |
+| tango | bzl load closure of //test/mocks/matcher changed | 1 |
+| tango | bzl load closure of //test/mocks/protobuf changed | 1 |
+| tango | bzl load closure of //test/mocks/ratelimit changed | 1 |
+| tango | bzl load closure of //test/mocks/reverse_tunnel_reporting_service changed | 1 |
+| tango | bzl load closure of //test/mocks/router changed | 1 |
+| tango | bzl load closure of //test/mocks/runtime changed | 1 |
+| tango | bzl load closure of //test/mocks/secret changed | 1 |
+| tango | bzl load closure of //test/mocks/ssl changed | 1 |
+| tango | bzl load closure of //test/mocks/stats changed | 1 |
+| tango | bzl load closure of //test/mocks/thread changed | 1 |
+| tango | bzl load closure of //test/mocks/thread_local changed | 1 |
+| tango | bzl load closure of //test/mocks/tracing changed | 1 |
+| tango | bzl load closure of //test/server/admin changed | 1 |
+| tango | bzl load closure of //tools/bootstrap2pb changed | 1 |
+
+These are cambium's *own* explanations for the extra labels (`affected --explain`), not the classifier's: they say what made cambium reach the target, where the class table says why the disagreement is benign.
+
+- `bazel-diff-rust`: no distances reported; 50,666 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 50.8% of shared labels (36 change sets); 46,820 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 40 | 250 | 0 | 20 | 20 | 67 | 0 | 67 | 502 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+
+#### `.bzl` load-closure oracle
+
+| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |
+|---:|---:|---:|---:|---:|
+| 8 | 29 | 0 | 5 | 0 |
+
+cambium resolves a changed `.bzl` from the static load closure it stores in the index, with no Bazel call. This checks that answer against `rbuildfiles`, the call it replaced: cambium's dirty set must contain every main-repo package Bazel names. The last column gates the run and must be zero; a non-zero entry files those packages under `cambium_missing_bzl_closure`. A *partial* answer is a Sky Query that exited 3 — the very failure mode the static closure removes, since `rbuildfiles` loads every external subject and the closure loads none. A *repository-evaluation* answer is one where Bazel named a package whose `BUILD` file has no `load()` in it at all: `rbuildfiles` walks Skyframe's file nodes, so a change to a repository-declaring `.bzl` reaches every package through the repository mapping rather than through a load edge, and containment against a load closure is not a question that answer can settle. Those change sets are counted here and checked by the `rdeps` oracle instead.
 <!-- bench:envoy:end -->
 
 ### sourcegraph
 
 <!-- bench:sourcegraph:begin -->
-not yet run
+- pin: `c864f15af264`
+- Bazel: 7.2.0
+- generated: 2026-09-09
+- tool: `0e06f75`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 58,920 | 191,709 | 1,182 | 8,959,496 | 5888 ms |
+
+#### History (300 commits, `47e9cdff3e0b..c864f15af264`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 300 | 4 ms | 462 ms | 4278 ms | 4948 ms |
+| non-global commits | 276 | 4 ms | 173 ms | 527 ms | 1169 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **56.7%**
+- largest dirty set: **57 packages** at `384959a6c844`
+- `rbuildfiles` calls: 0 of 300 commits
+- commits where a changed `.bzl` dirtied packages through the static load closure: 1 of 300
+- mean affected targets: 348
+
+Global commits: **24**
+
+| reason | commits |
+|---|---:|
+| `go.mod` matches an invalidator | 8 |
+| `pnpm-lock.yaml` matches an invalidator | 7 |
+| `WORKSPACE` changed; WORKSPACE is imperative (macro-declared repositories, order-dependent, `native.existing_rules()`), so its diff cannot be mapped to repositories | 6 |
+| `BUILD.bazel` matches an invalidator | 1 |
+| `dev/oci_deps.bzl` is loaded by MODULE.bazel/WORKSPACE (repository rules), not by any package BUILD file; it is in the workspace load closure | 1 |
+| `linter_deps.bzl` is loaded by MODULE.bazel/WORKSPACE (repository rules), not by any package BUILD file; it is in the workspace load closure | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 change sets compared, 40 passed, 0 failed (3 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **100.0%**.
+
+| Bazel | tool | change sets | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 40 | 100.0% | 100.0% |
+| `n/a` | tango | 40 | 40 | 100.0% | 100.0% |
+
+#### Timings (p50 / p90)
+
+| Bazel | tool | over | change sets | cold | warm |
+|---|---|---|---:|---:|---:|
+| `n/a` | bazel-diff-rust | all change sets | 40 | 12.4 s / 15.4 s | 2641 ms / 5440 ms |
+| `n/a` | bazel-diff-rust | incremental | 37 | 12.4 s / 13.6 s | 2640 ms / 2754 ms |
+| `n/a` | tango | all change sets | 40 | 57.6 s / 60.0 s | n/a |
+| `n/a` | tango | incremental | 37 | 57.3 s / 59.9 s | n/a |
+| `n/a` | **cambium** | all change sets | 40 | 160 ms / 718 ms | 41 ms / 557 ms |
+| `n/a` | **cambium** | incremental | 37 | 160 ms / 718 ms | 42 ms / 557 ms |
+
+**Quote the `all change sets` rows.** They cover every change set compared, including the 3 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+
+#### Globals
+
+| Bazel | change sets | cambium `//...` | tool | its precise set | tool cold p50 | cambium cold/warm p50 |
+|---|---:|---:|---|---:|---:|---:|
+| `n/a` | 3 | 25,261 | bazel-diff-rust | 226 | 15.6 s | 102 ms / 34 ms |
+| `n/a` | 3 | 25,261 | tango | 213 | 58.2 s | 102 ms / 34 ms |
+
+Means over the global change sets. *cambium `//...`* is the number of rule targets `//...` names at head — the answer cambium gave — and *its precise set* is what the tool found on the same change_set. The ratio between them is the over-approximation a global hands the user; the wall columns say what each tool charged to produce its answer. These change_sets are excluded from precision, the class counts and recall (there is nothing to be wrong about inside `//...`) and included in the `all change sets` timings above.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 0 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_external_repo` | 0 | no | cambium reached it from an external repository whose contents moved; the tool resolves the repository and sees its targets unchanged |
+| `cambium_extra_implicit` | 0 | no | reached only through an implicit (`$`-prefixed) attribute edge the tool does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 0 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 2,368 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 1,292 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the tool's runs |
+| `bazeldiff_extra_workspace_path` | 0 | no | the rule is identical at both revisions once each checkout's own absolute workspace root is normalised away |
+| `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
+| `tool_extra_source_directory` | 0 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
+| `tool_missing` | 0 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every change set and tool.
+
+- `bazel-diff-rust`: no distances reported; 57,813 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 87.2% of shared labels (32 change sets); 57,885 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 37 | 235 | 3 | 37 | 41 | 0 | 0 | 0 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+
+#### `.bzl` load-closure oracle
+
+No change set changed a `.bzl` file.
 <!-- bench:sourcegraph:end -->
 
 ### apollo
 
 <!-- bench:apollo:begin -->
-not yet run
+- pin: `d53aa3da47a0`
+- Bazel: 7.4.1 (requested)
+- generated: 2026-09-09
+- tool: `36e8903`
+
+#### Cold build
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 16,737 | 88,714 | 683 | 2,865,960 | 5532 ms |
+
+#### History (74 commits, `cd07f3fd6d4f..d53aa3da47a0`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 74 | 202 ms | 2337 ms | 2965 ms | 2965 ms |
+| non-global commits | 63 | 2 ms | 233 ms | 674 ms | 674 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **47.3%**
+- largest dirty set: **125 packages** at `075a74ba7e17`
+- `rbuildfiles` calls: 0 of 74 commits
+- commits where a changed `.bzl` dirtied packages through the static load closure: 0 of 74
+- mean affected targets: 218
+
+Global commits: **11**
+
+| reason | commits |
+|---|---:|
+| `third_party/pcl/pcl_configure.bzl` matches an invalidator | 2 |
+| tools/bazel.rc: build --cxxopt changed, not on the loading-irrelevant allowlist | 2 |
+| .bazelrc: `try-import %workspace%/.custom.bazelrc` changed; an imported rc file can carry anything | 1 |
+| `BUILD` matches an invalidator | 1 |
+| `third_party/can_card_library/3rd-can-card-library.BUILD` matches an invalidator | 1 |
+| `third_party/libtorch/cyberfile-cpu.xml` matches an invalidator | 1 |
+| `third_party/py/python_configure.bzl` matches an invalidator | 1 |
+| `tools/install/install.py.in` matches an invalidator | 1 |
+| `tools/ros/BUILD.tpl` matches an invalidator | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 change sets compared, 40 passed, 0 failed (12 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **100.0%**.
+
+| Bazel | tool | change sets | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `7.4.1` | bazel-diff-rust | 40 | 40 | 100.0% | 100.0% |
+| `7.4.1` | tango | 40 | 40 | 100.0% | 100.0% |
+
+#### Timings (p50 / p90)
+
+| Bazel | tool | over | change sets | cold | warm |
+|---|---|---|---:|---:|---:|
+| `7.4.1` | bazel-diff-rust | all change sets | 40 | 14.1 s / 15.1 s | 7664 ms / 8078 ms |
+| `7.4.1` | bazel-diff-rust | incremental | 28 | 14.0 s / 15.1 s | 7664 ms / 8679 ms |
+| `7.4.1` | tango | all change sets | 40 | 28.0 s / 33.5 s | n/a |
+| `7.4.1` | tango | incremental | 28 | 28.0 s / 33.5 s | n/a |
+| `7.4.1` | **cambium** | all change sets | 40 | 37 ms / 315 ms | 25 ms / 296 ms |
+| `7.4.1` | **cambium** | incremental | 28 | 29 ms / 315 ms | 25 ms / 296 ms |
+
+**Quote the `all change sets` rows.** They cover every change set compared, including the 12 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+
+#### Globals
+
+| Bazel | change sets | cambium `//...` | tool | its precise set | tool cold p50 | cambium cold/warm p50 |
+|---|---:|---:|---|---:|---:|---:|
+| `7.4.1` | 12 | 12,975 | bazel-diff-rust | 5,615 | 14.2 s | 61 ms / 39 ms |
+| `7.4.1` | 12 | 12,975 | tango | 7,351 | 28.3 s | 61 ms / 39 ms |
+
+Means over the global change sets. *cambium `//...`* is the number of rule targets `//...` names at head — the answer cambium gave — and *its precise set* is what the tool found on the same change_set. The ratio between them is the over-approximation a global hands the user; the wall columns say what each tool charged to produce its answer. These change_sets are excluded from precision, the class counts and recall (there is nothing to be wrong about inside `//...`) and included in the `all change sets` timings above.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 0 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_external_repo` | 0 | no | cambium reached it from an external repository whose contents moved; the tool resolves the repository and sees its targets unchanged |
+| `cambium_extra_implicit` | 0 | no | reached only through an implicit (`$`-prefixed) attribute edge the tool does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 0 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 0 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 0 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the tool's runs |
+| `bazeldiff_extra_workspace_path` | 0 | no | the rule is identical at both revisions once each checkout's own absolute workspace root is normalised away |
+| `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
+| `tool_extra_source_directory` | 163 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
+| `tool_missing` | 0 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every change set and tool.
+
+- `bazel-diff-rust`: no distances reported; 32,051 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 97.4% of shared labels (19 change sets); 45,170 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 28 | 403 | 0 | 24 | 24 | 0 | 0 | 0 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+
+#### `.bzl` load-closure oracle
+
+No change set changed a `.bzl` file.
 <!-- bench:apollo:end -->
 
 ### xla
 
 <!-- bench:xla:begin -->
-not yet run
+- pin: `076fe93fad26`
+- Bazel: 8.7.0
+- generated: 2026-09-09
+- tool: `36e8903`
+
+#### Cold build
+
+> **Loaded with 4 packages in error.** `bazel query //...` finished under `--keep_going` with load errors, so the graph below omits them; the incremental path omits the same packages, which is why the two still agree. First: `tools/toolchains/win_1803/py38`, `tools/toolchains/win_1803/py39`, `tools/toolchains/win_1803/py38`, `tools/toolchains/win_1803/py39`.
+
+| targets | edges | packages | index bytes | wall |
+|---:|---:|---:|---:|---:|
+| 33,385 | 418,621 | 449 | 7,393,536 | 31.9 s |
+
+#### History (300 commits, `5275e61c12b3..076fe93fad26`)
+
+| over | commits | p50 | p90 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| all commits | 300 | 10 ms | 1949 ms | 16.9 s | 19.8 s |
+| non-global commits | 269 | 9 ms | 215 ms | 1088 ms | 1143 ms |
+
+A *global* commit touches an invalidator, so cambium answers `//...` without walking: it is fast for the wrong reason, and including it would flatter the updater. Both rows are given so the difference is visible.
+
+- zero-dirty commits (a diff that dirtied no package): **51.3%**
+- largest dirty set: **81 packages** at `e610a804183f`
+- `rbuildfiles` calls: 0 of 300 commits
+- commits where a changed `.bzl` dirtied packages through the static load closure: 5 of 300
+- mean affected targets: 3117
+
+Global commits: **31**
+
+| reason | commits |
+|---|---:|
+| `third_party/stablehlo/temporary.patch` matches an invalidator | 6 |
+| `third_party/llvm/build.patch` matches an invalidator | 3 |
+| MODULE.bazel contains a statement cambium cannot parse: `override_repo(pip,rules_ml_toolchain_pypi="pypi",)` | 2 |
+| `third_party/cuda_tile/BUILD.bazel` matches an invalidator | 2 |
+| tensorflow.bazelrc: common --config changed, not on the loading-irrelevant allowlist | 2 |
+| .bazelrc: common --features changed, not on the loading-irrelevant allowlist | 1 |
+| `WORKSPACE` changed; WORKSPACE is imperative (macro-declared repositories, order-dependent, `native.existing_rules()`), so its diff cannot be mapped to repositories | 1 |
+| `third_party/gpus/rocm/BUILD.tpl` matches an invalidator | 1 |
+| `third_party/gpus/rocm/build_defs.bzl.tpl` matches an invalidator | 1 |
+| `third_party/llvm/generated.patch` matches an invalidator | 1 |
+| `third_party/llvm/platforms_config.patch` matches an invalidator | 1 |
+| `third_party/py/rules_cc_protobuf.patch` matches an invalidator | 1 |
+| `third_party/rules_proto.patch` matches an invalidator | 1 |
+| `third_party/triton/oss_only/build_files.patch` matches an invalidator | 1 |
+| `third_party/tsl/tsl/profiler/lib/BUILD` matches an invalidator | 1 |
+| `third_party/tsl/tsl/profiler/lib/continuous_profiler_orchestrator.h` matches an invalidator | 1 |
+| `third_party/tsl/tsl/profiler/lib/profiler_collection.cc` matches an invalidator | 1 |
+| `third_party/tsl/tsl/profiler/lib/profiler_factory_test.cc` matches an invalidator | 1 |
+| tensorflow.bazelrc: common --@rules_ml_toolchain//common:enable_xla_test_global_symbol_version changed, not on the loading-irrelevant allowlist | 1 |
+| tensorflow.bazelrc: common --dynamic_mode changed, not on the loading-irrelevant allowlist | 1 |
+| tensorflow.bazelrc: common --repo_env changed, not on the loading-irrelevant allowlist | 1 |
+
+Incremental-equals-full oracle at the pin: **pass**
+
+#### Three-way comparison
+
+40 change sets compared, 40 passed, 0 failed (10 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **100.0%**.
+
+| Bazel | tool | change sets | passed | precision | min recall |
+|---|---|---:|---:|---:|---:|
+| `n/a` | bazel-diff-rust | 40 | 40 | 88.6% | 100.0% |
+| `n/a` | tango | 40 | 40 | 88.4% | 100.0% |
+
+#### Timings (p50 / p90)
+
+| Bazel | tool | over | change sets | cold | warm |
+|---|---|---|---:|---:|---:|
+| `n/a` | bazel-diff-rust | all change sets | 40 | 29.1 s / 45.3 s | 11.0 s / 19.5 s |
+| `n/a` | bazel-diff-rust | incremental | 30 | 29.1 s / 46.5 s | 11.0 s / 19.3 s |
+| `n/a` | tango | all change sets | 40 | 208.1 s / 278.0 s | n/a |
+| `n/a` | tango | incremental | 30 | 207.5 s / 233.7 s | n/a |
+| `n/a` | **cambium** | all change sets | 40 | 106 ms / 804 ms | 34 ms / 473 ms |
+| `n/a` | **cambium** | incremental | 30 | 108 ms / 1090 ms | 39 ms / 473 ms |
+
+**Quote the `all change sets` rows.** They cover every change set compared, including the 10 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+
+#### Globals
+
+| Bazel | change sets | cambium `//...` | tool | its precise set | tool cold p50 | cambium cold/warm p50 |
+|---|---:|---:|---|---:|---:|---:|
+| `n/a` | 10 | 13,514 | bazel-diff-rust | 2,507 | 29.4 s | 100 ms / 26 ms |
+| `n/a` | 10 | 13,514 | tango | 3,765 | 239.8 s | 100 ms / 26 ms |
+
+Means over the global change sets. *cambium `//...`* is the number of rule targets `//...` names at head — the answer cambium gave — and *its precise set* is what the tool found on the same change_set. The ratio between them is the over-approximation a global hands the user; the wall columns say what each tool charged to produce its answer. These change_sets are excluded from precision, the class counts and recall (there is nothing to be wrong about inside `//...`) and included in the `all change sets` timings above.
+
+#### Disagreements by class
+
+| class | labels | fails the run | meaning |
+|---|---:|---|---|
+| `cambium_extra_select` | 9,737 | no | cambium keeps `select()` branches a configured Bazel query resolves away |
+| `cambium_extra_external_repo` | 4,194 | no | cambium reached it from an external repository whose contents moved; the tool resolves the repository and sees its targets unchanged |
+| `cambium_extra_implicit` | 19 | no | reached only through an implicit (`$`-prefixed) attribute edge the tool does not walk |
+| `cambium_extra_visibility` | 0 | no | the two rules differ only in `visibility`/`tags`, which cambium's hash ignores |
+| `cambium_extra_bzl` | 8,606 | no | the target's own rule is byte-identical, but a `.bzl` its package loads changed |
+| `cambium_extra_deleted` | 0 | no | a dependency of this target was deleted between base and head |
+| `cambium_extra_build_glob` | 0 | no | reached from a changed `BUILD` file that a `glob()`bing filegroup consumes as a source |
+| `bazeldiff_extra_content` | 0 | no | a changed path with no consumer in cambium's head index (content the graph does not name) |
+| `bazeldiff_extra_external` | 0 | no | confined to `@external//...` labels, which cambium does not index and the tools canonicalise differently |
+| `bazeldiff_extra_external_content` | 0 | no | an unchanged `//...` rule that depends on something external; how much of the external graph loads varies between the tool's runs |
+| `bazeldiff_extra_workspace_path` | 0 | no | the rule is identical at both revisions once each checkout's own absolute workspace root is normalised away |
+| `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
+| `tool_extra_source_directory` | 0 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
+| `tool_missing` | 0 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
+| `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
+
+Counts are labels, summed over every change set and tool.
+
+#### Why cambium reported the labels the tool did not
+
+| tool | cambium's reason | labels |
+|---|---|---:|
+| bazel-diff-rust | bzl load closure of //xla/pjrt/gpu changed | 3,877 |
+| bazel-diff-rust | external dependency @pypi//lit:lit changed | 2,063 |
+| bazel-diff-rust | bzl load closure of //xla/service changed | 1,900 |
+| bazel-diff-rust | bzl load closure of //xla/stream_executor/cuda changed | 215 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/triton/tests changed | 209 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/runtime changed | 189 |
+| bazel-diff-rust | bzl load closure of //xla/service/gpu changed | 185 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/transforms changed | 167 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/tests changed | 140 |
+| bazel-diff-rust | bzl load closure of //xla/service/cpu changed | 136 |
+| bazel-diff-rust | bzl load closure of //xla/pjrt/c changed | 128 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/benchmarks changed | 117 |
+| bazel-diff-rust | bzl load closure of //xla/mlir/tools/mlir_interpreter/dialects/tests changed | 115 |
+| bazel-diff-rust | bzl load closure of //xla/stream_executor/rocm changed | 98 |
+| bazel-diff-rust | bzl load closure of //xla/stream_executor/gpu changed | 96 |
+| bazel-diff-rust | bzl load closure of //xla/tools changed | 83 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/emitters/tests changed | 81 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/emitters/ir changed | 70 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/emitters/tests changed | 58 |
+| bazel-diff-rust | bzl load closure of //xla/service/gpu/model changed | 55 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/codegen/tiled/tests changed | 50 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/translate/mhlo_to_hlo/tests changed | 48 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/collectives changed | 44 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/target_config changed | 39 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/builder/lib changed | 38 |
+| bazel-diff-rust | bzl load closure of //xla/backends/profiler/gpu changed | 37 |
+| bazel-diff-rust | bzl load closure of //xla/tests changed | 37 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/translate/hlo_to_mhlo/tests changed | 33 |
+| bazel-diff-rust | bzl load closure of //xla/python/ifrt/ir/tests changed | 33 |
+| bazel-diff-rust | bzl load closure of //xla/service/memory_space_assignment changed | 33 |
+| bazel-diff-rust | bzl load closure of //xla/stream_executor/sycl changed | 32 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/triton/transforms/tests changed | 29 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/triton changed | 28 |
+| bazel-diff-rust | bzl load closure of //xla/service/spmd/shardy/test changed | 28 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/tools/tests changed | 25 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/emitters/transforms/tests changed | 23 |
+| bazel-diff-rust | external dependency @pypi//numpy:numpy changed | 20 |
+| bazel-diff-rust | bzl load closure of //xla/tools/hlo_opt changed | 18 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/autotuner changed | 17 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/libraries/cub changed | 17 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/translate/tests changed | 17 |
+| bazel-diff-rust | bzl load closure of //xla/tools/multihost_hlo_runner changed | 16 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen changed | 15 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/builder/tests changed | 15 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/tensor_ir/tests changed | 14 |
+| bazel-diff-rust | bzl load closure of //xla/service/gpu/autotuning changed | 14 |
+| bazel-diff-rust | external dependency @pypi//numpy:numpy_headers changed | 14 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/codegen/tiled/transforms/tests changed | 13 |
+| bazel-diff-rust | bzl load closure of //xla/python/ifrt/ir/tests/vifrt changed | 13 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/kernels changed | 11 |
+| bazel-diff-rust | bzl load closure of //xla/service/cpu/tests changed | 11 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/emitters/transforms/tests changed | 9 |
+| bazel-diff-rust | bzl load closure of //xla/mlir/tools/mlir_bisect/rewrites/tests changed | 8 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/transforms/tests changed | 7 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/codegen/emitters/transforms/tests changed | 6 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/transforms changed | 6 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/xtile/ir/transforms/tests changed | 6 |
+| bazel-diff-rust | bzl load closure of //xla/tests/exhaustive changed | 6 |
+| bazel-diff-rust | bzl load closure of //xla/python_api changed | 5 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/codegen/tools/tests changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/triton/ir/tests changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/libraries/native_custom_call_thunks/write_value_thunk_folded changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/emitters/ir/tests changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/pjrt/plugin/test changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/pjrt/plugin/xla_gpu changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/service/debug changed | 4 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/codegen/emitters/ir/tests changed | 3 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/ffi changed | 3 |
+| bazel-diff-rust | bzl load closure of //xla/mlir/tools/mlir_bisect/tests changed | 3 |
+| bazel-diff-rust | bzl load closure of //xla/backends/cpu/codegen/emitters/ir/tests changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/profiler changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/client/lib changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/intrinsic/accuracy changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/hlo/translate/stablehlo_to_hlo/tests changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/tests/aot_compatibility_experimental changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/tests/restricted changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/tools/ptx_opt changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/tools/tests changed | 2 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/host_offloading changed | 1 |
+| bazel-diff-rust | bzl load closure of //xla/backends/gpu/libraries/cutedsl changed | 1 |
+| bazel-diff-rust | bzl load closure of //xla/codegen/xtile/ir/tests changed | 1 |
+| bazel-diff-rust | bzl load closure of //xla/pjrt/extensions/cross_host_transfers changed | 1 |
+| tango | bzl load closure of //xla/pjrt/gpu changed | 3,907 |
+| tango | external dependency @pypi//lit:lit changed | 2,063 |
+| tango | bzl load closure of //xla/service changed | 1,916 |
+| tango | bzl load closure of //xla/backends/gpu/runtime changed | 298 |
+| tango | bzl load closure of //xla/tests changed | 257 |
+| tango | bzl load closure of //xla/service/gpu changed | 238 |
+| tango | bzl load closure of //xla/stream_executor/cuda changed | 237 |
+| tango | bzl load closure of //xla/backends/gpu/tests changed | 224 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/triton/tests changed | 213 |
+| tango | bzl load closure of //xla/backends/gpu/transforms changed | 204 |
+| tango | bzl load closure of //xla/service/cpu changed | 138 |
+| tango | bzl load closure of //xla/pjrt/c changed | 129 |
+| tango | bzl load closure of //xla/backends/cpu/benchmarks changed | 117 |
+| tango | bzl load closure of //xla/mlir/tools/mlir_interpreter/dialects/tests changed | 115 |
+| tango | bzl load closure of //xla/stream_executor/gpu changed | 107 |
+| tango | bzl load closure of //xla/stream_executor/rocm changed | 105 |
+| tango | bzl load closure of //xla/tools changed | 89 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/emitters/tests changed | 81 |
+| tango | bzl load closure of //xla/codegen/emitters/ir changed | 71 |
+| tango | bzl load closure of //xla/service/gpu/model changed | 60 |
+| tango | bzl load closure of //xla/backends/gpu/autotuner changed | 59 |
+| tango | bzl load closure of //xla/codegen/emitters/tests changed | 58 |
+| tango | bzl load closure of //xla/hlo/builder/lib changed | 54 |
+| tango | bzl load closure of //xla/backends/cpu/codegen/tiled/tests changed | 50 |
+| tango | bzl load closure of //xla/backends/gpu/collectives changed | 49 |
+| tango | bzl load closure of //xla/hlo/translate/mhlo_to_hlo/tests changed | 48 |
+| tango | bzl load closure of //xla/stream_executor/sycl changed | 42 |
+| tango | bzl load closure of //xla/backends/gpu/target_config changed | 41 |
+| tango | bzl load closure of //xla/backends/profiler/gpu changed | 41 |
+| tango | bzl load closure of //xla/service/memory_space_assignment changed | 34 |
+| tango | bzl load closure of //xla/hlo/translate/hlo_to_mhlo/tests changed | 33 |
+| tango | bzl load closure of //xla/python/ifrt/ir/tests changed | 33 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/triton changed | 31 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/triton/transforms/tests changed | 29 |
+| tango | bzl load closure of //xla/service/spmd/shardy/test changed | 28 |
+| tango | bzl load closure of //xla/tests/restricted changed | 28 |
+| tango | bzl load closure of //xla/service/gpu/autotuning changed | 27 |
+| tango | bzl load closure of //xla/hlo/tools/tests changed | 25 |
+| tango | bzl load closure of //xla/codegen/emitters/transforms/tests changed | 23 |
+| tango | bzl load closure of //xla/service/cpu/tests changed | 22 |
+| tango | external dependency @pypi//numpy:numpy changed | 20 |
+| tango | bzl load closure of //xla/python_api changed | 19 |
+| tango | bzl load closure of //xla/backends/gpu/libraries/cub changed | 18 |
+| tango | bzl load closure of //xla/tools/hlo_opt changed | 18 |
+| tango | bzl load closure of //xla/tools/multihost_hlo_runner changed | 18 |
+| tango | bzl load closure of //xla/hlo/translate/tests changed | 17 |
+| tango | bzl load closure of //xla/backends/gpu/codegen changed | 16 |
+| tango | bzl load closure of //xla/client/lib changed | 16 |
+| tango | bzl load closure of //xla/hlo/builder/tests changed | 15 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/tensor_ir/tests changed | 14 |
+| tango | bzl load closure of //xla/tests/exhaustive changed | 14 |
+| tango | external dependency @pypi//numpy:numpy_headers changed | 14 |
+| tango | bzl load closure of //xla/backends/cpu/codegen/tiled/transforms/tests changed | 13 |
+| tango | bzl load closure of //xla/python/ifrt/ir/tests/vifrt changed | 13 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/kernels changed | 12 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/emitters/transforms/tests changed | 9 |
+| tango | bzl load closure of //xla/mlir/tools/mlir_bisect/rewrites/tests changed | 8 |
+| tango | bzl load closure of //xla/backends/cpu/transforms changed | 7 |
+| tango | bzl load closure of //xla/hlo/transforms/tests changed | 7 |
+| tango | bzl load closure of //xla/backends/cpu/codegen/emitters/transforms/tests changed | 6 |
+| tango | bzl load closure of //xla/codegen/xtile/ir/transforms/tests changed | 6 |
+| tango | bzl load closure of //xla/service/debug changed | 6 |
+| tango | bzl load closure of //xla/backends/gpu/libraries/native_custom_call_thunks/write_value_thunk_folded changed | 5 |
+| tango | bzl load closure of //xla/pjrt/plugin/test changed | 5 |
+| tango | bzl load closure of //xla/pjrt/plugin/xla_gpu changed | 5 |
+| tango | bzl load closure of //xla/backends/cpu/codegen/tools/tests changed | 4 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/triton/ir/tests changed | 4 |
+| tango | bzl load closure of //xla/backends/gpu/ffi changed | 4 |
+| tango | bzl load closure of //xla/codegen/emitters/ir/tests changed | 4 |
+| tango | bzl load closure of //xla/stream_executor/sycl/restricted changed | 4 |
+| tango | bzl load closure of //xla/tests/aot_compatibility_experimental changed | 4 |
+| tango | bzl load closure of //xla/backends/gpu/codegen/emitters/ir/tests changed | 3 |
+| tango | bzl load closure of //xla/backends/gpu/profiler changed | 3 |
+| tango | bzl load closure of //xla/codegen/intrinsic/accuracy changed | 3 |
+| tango | bzl load closure of //xla/mlir/tools/mlir_bisect/tests changed | 3 |
+| tango | bzl load closure of //xla/backends/cpu/codegen/emitters/ir/tests changed | 2 |
+| tango | bzl load closure of //xla/backends/cpu/tests changed | 2 |
+| tango | bzl load closure of //xla/backends/gpu/host_offloading changed | 2 |
+| tango | bzl load closure of //xla/backends/gpu/libraries/cutedsl changed | 2 |
+| tango | bzl load closure of //xla/hlo/translate/stablehlo_to_hlo/tests changed | 2 |
+| tango | bzl load closure of //xla/pjrt/extensions/cross_host_transfers changed | 2 |
+| tango | bzl load closure of //xla/service/cpu/restricted changed | 2 |
+| tango | bzl load closure of //xla/tools/ptx_opt changed | 2 |
+| tango | bzl load closure of //xla/tools/tests changed | 2 |
+| tango | bzl load closure of //xla/codegen/xtile/ir/tests changed | 1 |
+
+These are cambium's *own* explanations for the extra labels (`affected --explain`), not the classifier's: they say what made cambium reach the target, where the class table says why the disagreement is benign.
+
+- `bazel-diff-rust`: no distances reported; 133,942 file-target rows dropped to match cambium's universe.
+- `tango`: depth agrees on 93.3% of shared labels (26 change sets); 139,911 file-target rows dropped to match cambium's universe.
+
+#### `rdeps` oracle
+
+| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 115 | 0 | 30 | 30 | 0 | 0 | 0 | 0 |
+
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+
+#### `.bzl` load-closure oracle
+
+| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |
+|---:|---:|---:|---:|---:|
+| 3 | 3 | 3 | 0 | 0 |
+
+cambium resolves a changed `.bzl` from the static load closure it stores in the index, with no Bazel call. This checks that answer against `rbuildfiles`, the call it replaced: cambium's dirty set must contain every main-repo package Bazel names. The last column gates the run and must be zero; a non-zero entry files those packages under `cambium_missing_bzl_closure`. A *partial* answer is a Sky Query that exited 3 — the very failure mode the static closure removes, since `rbuildfiles` loads every external subject and the closure loads none. A *repository-evaluation* answer is one where Bazel named a package whose `BUILD` file has no `load()` in it at all: `rbuildfiles` walks Skyframe's file nodes, so a change to a repository-declaring `.bzl` reaches every package through the repository mapping rather than through a load edge, and containment against a load closure is not a question that answer can settle. Those change sets are counted here and checked by the `rdeps` oracle instead.
 <!-- bench:xla:end -->
 
 ### tensorflow
