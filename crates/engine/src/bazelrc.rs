@@ -97,6 +97,29 @@ const ALLOWLIST: &[Allowed] = &[
         "whether cached test results are reused",
     ),
     a("runs_per_test", "how often a test is run"),
+    // Test *selection*: which of the already-built tests `bazel test` runs.
+    // No target's definition changes; cambium's answer is the set of affected
+    // tests, and a runner applies these filters to that set on top.
+    a(
+        "test_tag_filters",
+        "which tests are selected to run, by tag",
+    ),
+    a(
+        "test_size_filters",
+        "which tests are selected to run, by size",
+    ),
+    a(
+        "test_timeout_filters",
+        "which tests are selected to run, by timeout",
+    ),
+    a(
+        "test_lang_filters",
+        "which tests are selected to run, by language",
+    ),
+    a(
+        "build_tests_only",
+        "whether non-test targets are built at all",
+    ),
     a("show_progress*", "progress display"),
     a("show_loading_progress", "progress display"),
     a("show_timestamps", "progress display"),
@@ -445,6 +468,16 @@ mod tests {
         assert_eq!(
             classify(base, head, &[]),
             Verdict::Safe { changed_flags: 5 }
+        );
+    }
+
+    #[test]
+    fn test_selection_filters_are_safe() {
+        let base = "test --test_tag_filters=-flaky\n";
+        let head = "test --test_tag_filters=-flaky,-slow\ntest --test_size_filters=small\n";
+        assert_eq!(
+            classify(base, head, &[]),
+            Verdict::Safe { changed_flags: 2 }
         );
     }
 
