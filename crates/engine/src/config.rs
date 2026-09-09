@@ -341,6 +341,9 @@ impl Config {
         h.update(b"cambium-rule-hash-v");
         h.update(&cambium_proto::RULE_HASH_VERSION.to_le_bytes());
         h.update(b"\n");
+        h.update(b"cambium-index-content-v");
+        h.update(&cambium_index::CONTENT_REVISION.to_le_bytes());
+        h.update(b"\n");
         h.update(graph_relevant.to_toml().as_bytes());
         *h.finalize().as_bytes()
     }
