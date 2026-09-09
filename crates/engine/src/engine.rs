@@ -1,6 +1,6 @@
 //! The run: load a baseline, work out what is dirty, re-query it, splice, walk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cambium_bazel::Bazel;
@@ -788,6 +788,7 @@ impl Engine {
         }
         stats.repos_dirty_by_bzl = ext.by_bzl;
         let mut external_nodes: Vec<(u32, String)> = Vec::new();
+        let mut packages_by_repo: BTreeMap<String, usize> = BTreeMap::new();
         if !dirty.global && !ext.repos.is_empty() {
             let r = crate::externals::reach(base_view, &ext.repos, &ext.load_repos);
             tracing::debug!(
@@ -798,6 +799,7 @@ impl Engine {
                 "external repositories moved"
             );
             dirty.dirty.extend(r.packages);
+            packages_by_repo = r.packages_by_repo;
             external_nodes = r
                 .nodes
                 .into_iter()
@@ -839,7 +841,20 @@ impl Engine {
         let mut cold_reason = None;
         let (to_query, rows) = if cold {
             let reason = cold_rebuild_reason(dirty.dirty.len(), limit);
-            tracing::info!(%reason, "re-indexing the whole repository at head");
+            // Distinguishable from a genuine cold build, which says `running
+            // full bazel query //... (cold build)`: this one re-queries the
+            // same `//...` but keeps the lineage and splices onto the base, so
+            // the answer stays exact and only the cost changed. `reason`'s
+            // wording is load-bearing — the bench harness histograms it — so
+            // everything new goes in the fields and the lines below it.
+            tracing::info!(
+                %reason,
+                dirty_packages = dirty.dirty.len(),
+                limit,
+                "re-querying //... at head because the dirty set overflowed \
+                 (lineage kept, answer still exact)"
+            );
+            log_overflow_contributors(&ext, &packages_by_repo);
             cold_reason = Some(reason);
             let u = querier.universe()?;
             let names: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
@@ -909,6 +924,16 @@ impl Engine {
             }
         }
 
+        // Which repositories are built around a main-repo *target*, and which
+        // node each of those targets is. Resolved against the base index, whose
+        // ids the splice preserves.
+        let label_inputs = self
+            .cfg
+            .externals
+            .enabled
+            .then(|| label_inputs(base_view, ext.repos.clone()))
+            .flatten();
+
         let direct_inputs = DirectInputs {
             splice: &splice,
             deleted_by_package: &deleted_by_package,
@@ -916,6 +941,7 @@ impl Engine {
             bzl_dirty: &bzl_dirty,
             external_nodes: &external_nodes,
             flag_nodes: &flag_reach.nodes,
+            label_inputs: label_inputs.as_ref(),
         };
         let mut run = RunState {
             req,
@@ -1120,6 +1146,60 @@ struct DirectInputs<'a> {
     external_nodes: &'a [(u32, String)],
     /// Starlark build settings a `.bazelrc` edit changed, as `(id, label)`.
     flag_nodes: &'a [(u32, String)],
+    /// Main-repo rule targets that external repositories' generated targets
+    /// name, when the base index records any. `None` disables the fixpoint.
+    label_inputs: Option<&'a LabelInputs<'a>>,
+}
+
+/// The main-repo *targets* external repositories are built around.
+///
+/// The index's pattern table records these as
+/// [`cambium_index::externals::Pattern::Label`]: a repository rule wrote a
+/// BUILD file naming `@envoy//changelogs`, so `@envoy_repo`'s generated
+/// targets depend on `//changelogs:changelogs` — a `filegroup` over a glob
+/// whose members only the graph knows. Resolving the labels to node ids once
+/// per run turns "did the change reach that target?" into a lookup on the
+/// affected set.
+struct LabelInputs<'a> {
+    base: IndexRef<'a>,
+    /// Node id -> the apparent names of the repositories built around it.
+    by_node: FxHashMap<u32, Vec<String>>,
+    /// Repositories the diff already dirtied, which need no second look.
+    already: BTreeSet<String>,
+}
+
+/// Resolves the base index's label patterns to node ids, or `None` when there
+/// are none — which is every index written before this table had them, and
+/// every repository whose rules name no main-repo target.
+fn label_inputs(base: IndexRef<'_>, already: BTreeSet<String>) -> Option<LabelInputs<'_>> {
+    let rows = base.label_inputs();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut by_node: FxHashMap<u32, Vec<String>> = FxHashMap::default();
+    for (label, repos) in rows {
+        // A label naming no node in this index names nothing that can change.
+        let Some(id) = base.id_of(label) else {
+            continue;
+        };
+        let e: &mut Vec<String> = by_node.entry(id).or_default();
+        // `feeds` is not consulted: only rule (1) ever applies here. A
+        // repository rule cannot read a rule target's *output* — it runs
+        // during loading, before anything is built — so whatever moved this
+        // target cannot have moved a `.bzl` the repository exports, whether or
+        // not some other path also feeds the rule.
+        for (r, _feeds) in repos {
+            let n = base.repo_name(r).to_string();
+            if !e.contains(&n) {
+                e.push(n);
+            }
+        }
+    }
+    (!by_node.is_empty()).then_some(LabelInputs {
+        base,
+        by_node,
+        already,
+    })
 }
 
 /// What the tail of a run carries from the splice to the report.
@@ -1145,8 +1225,7 @@ impl RunState<'_> {
     ) -> AffectedReport {
         self.timings.splice = self.sw.lap();
 
-        let (direct, reasons) = derive_direct(view, inputs);
-        self.stats.direct_targets = direct.len();
+        let (mut direct, mut reasons) = derive_direct(view, inputs);
         self.timings.direct = self.sw.lap();
 
         let wopts = WalkOptions {
@@ -1154,7 +1233,18 @@ impl RunState<'_> {
             explain: self.req.explain,
             max_depth: self.req.max_depth,
         };
-        let result = walk::walk_view(view, &direct, &wopts);
+        let mut result = walk::walk_view(view, &direct, &wopts);
+        if let Some(li) = inputs.label_inputs {
+            self.stats.repos_dirty_by_target = close_over_repository_targets(
+                view,
+                li,
+                &mut direct,
+                &mut reasons,
+                &mut result,
+                &wopts,
+            );
+        }
+        self.stats.direct_targets = direct.len();
         self.stats.affected_targets = result.affected.len();
         self.timings.walk = self.sw.lap();
 
@@ -1174,6 +1264,99 @@ impl RunState<'_> {
             stats: self.stats,
             explanations: self.req.explain.then(|| explain(view, &result, &reasons)),
         }
+    }
+}
+
+/// Closes the answer over the repositories the walk itself dirtied.
+///
+/// A repository whose generated targets name a main-repo rule target moves
+/// when that target moves — envoy's `bazel/repo.bzl` writes a BUILD file whose
+/// `genrule` lists `@envoy//changelogs` in `tools`, so a new
+/// `changelogs/current/x.rst` moves `@envoy_repo`'s targets. Which files that
+/// `filegroup` globs is not knowable statically, but it is knowable from the
+/// graph: the filegroup node has edges to its sources, so the reverse walk
+/// from the changed file reaches `//changelogs:changelogs`, and this reads the
+/// answer off the affected set.
+///
+/// The repositories found that way are seeded by **rule (1) alone**: their
+/// leaf nodes go into the direct set, and the walk runs again. Rule (2) never
+/// applies. A repository rule runs during loading and cannot read a rule
+/// target's *output* — nothing is built yet — so a rule target it names can
+/// only be a dependency of what the rule *writes*, and nothing the rule wrote,
+/// no `.bzl` it exports, can have moved. That is the same argument that makes
+/// these inputs `target_only` in the index, arrived at from the other side.
+///
+/// Seeding those leaves can make more targets affected, which can reach more
+/// such labels, so this is a fixpoint. It terminates: every iteration either
+/// finds a repository not yet seen or stops, and there are finitely many
+/// repositories. Returns how many repositories it dirtied.
+fn close_over_repository_targets<V: GraphView + ?Sized>(
+    view: &V,
+    li: &LabelInputs<'_>,
+    direct: &mut Vec<u32>,
+    reasons: &mut FxHashMap<u32, DirectReason>,
+    result: &mut walk::WalkResult,
+    wopts: &WalkOptions,
+) -> usize {
+    let mut seen = li.already.clone();
+    let mut in_direct: FxHashSet<u32> = direct.iter().copied().collect();
+    let mut found = 0usize;
+    let mut scratch: Vec<u32> = Vec::new();
+    loop {
+        // Which repositories does the answer so far name, that the diff did
+        // not already dirty? `via` is the target that named each, for
+        // `--explain`.
+        let mut hit: BTreeMap<String, String> = BTreeMap::new();
+        for &id in &result.affected {
+            let Some(repos) = li.by_node.get(&id) else {
+                continue;
+            };
+            for r in repos {
+                if seen.contains(r) {
+                    continue;
+                }
+                hit.entry(r.clone())
+                    .or_insert_with(|| view.label(id).to_string());
+            }
+        }
+        if hit.is_empty() {
+            return found;
+        }
+        let mut added = false;
+        for (repo, via) in hit {
+            seen.insert(repo.clone());
+            found += 1;
+            tracing::debug!(
+                %repo, %via,
+                "an external repository is built around a target the change reached"
+            );
+            let one: BTreeSet<String> = [repo.clone()].into_iter().collect();
+            // Rule (1) only: the empty `load_repos` is what says so.
+            let r = crate::externals::reach(li.base, &one, &BTreeSet::new());
+            for id in r.nodes {
+                let consumers: Vec<u32> = view.reverse_row(id, &mut scratch).to_vec();
+                for c in consumers {
+                    if in_direct.insert(c) {
+                        direct.push(c);
+                        reasons.insert(
+                            c,
+                            DirectReason::ExternalRepoTarget {
+                                repo: repo.clone(),
+                                via: via.clone(),
+                            },
+                        );
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            // The repositories are accounted for and nothing new is direct, so
+            // walking again would return the set it just returned.
+            return found;
+        }
+        direct.sort_unstable();
+        *result = walk::walk_view(view, direct, wopts);
     }
 }
 
@@ -1422,8 +1605,59 @@ fn rescan_closure(
 }
 
 /// Why a run gave up on splicing the dirty set and re-indexed instead.
+///
+/// The wording is fixed: the benchmark harness histograms this string, so it
+/// must stay comparable across releases. Anything new about the overflow goes
+/// in the log fields beside it, or in [`log_overflow_contributors`].
 fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
     format!("dirty packages {dirty} exceed limits.max_dirty_packages = {limit}")
+}
+
+/// What actually filled the dirty set, when it overflowed.
+///
+/// The repository set alone is hundreds of names and thousands of characters
+/// and says nothing about *why*; what diagnoses the overflow is which input
+/// path dirtied which repository, and how many packages each repository's rule
+/// (2) reach then contributed. Ten lines at most, the largest contributors
+/// first, at `info` — a run that just decided to re-query the whole repository
+/// can afford them.
+fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String, usize>) {
+    const MAX_LINES: usize = 10;
+    let mut rows: Vec<(&str, usize, &[String])> = ext
+        .input_paths
+        .iter()
+        .map(|(repo, paths)| {
+            (
+                repo.as_str(),
+                packages_by_repo.get(repo).copied().unwrap_or(0),
+                paths.as_slice(),
+            )
+        })
+        .collect();
+    // A repository dirtied by `MODULE.bazel` or by a changed `.bzl` has no
+    // input paths, but can still be the one that reached the most packages.
+    for (repo, packages) in packages_by_repo {
+        if !ext.input_paths.contains_key(repo) {
+            rows.push((repo.as_str(), *packages, &[]));
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    tracing::info!(
+        repositories = rows.len(),
+        shown = rows.len().min(MAX_LINES),
+        "top contributors to the dirty set"
+    );
+    for (repo, packages, paths) in rows.iter().take(MAX_LINES) {
+        tracing::info!(
+            repo = %repo,
+            packages_from_loads = packages,
+            dirtied_by = ?paths,
+            "  contributor"
+        );
+    }
 }
 
 /// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
