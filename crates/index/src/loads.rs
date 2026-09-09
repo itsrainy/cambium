@@ -118,6 +118,21 @@ impl RepoMapping {
         Self::default()
     }
 
+    /// The mapping an index already carries, apparent name -> canonical name.
+    ///
+    /// A stored index records the mapping the run captured
+    /// (`RepoInputs::canonical`), so work that has to re-derive the externals
+    /// tables away from the machine — the offline replay's `--rederive` — can
+    /// rebuild the mapping without `bazel mod dump_repo_mapping`.
+    pub fn from_canonical<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        Self {
+            map: pairs
+                .into_iter()
+                .map(|(a, c)| (a.to_string(), c.to_string()))
+                .collect(),
+        }
+    }
+
     /// Parses the JSON object `bazel mod dump_repo_mapping ""` prints.
     ///
     /// Lenient by design: the command prints progress lines on stderr but has
