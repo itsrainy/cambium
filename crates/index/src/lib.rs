@@ -24,6 +24,7 @@ pub mod externals;
 pub mod format;
 pub mod label;
 pub mod loads;
+pub mod lockfile;
 pub mod overlay;
 pub mod space;
 pub mod strtab;
@@ -46,6 +47,7 @@ pub use format::{
     temp_suffix, IndexError, IndexFile, OwnedIndexBytes, CONTENT_REVISION, FORMAT_VERSION,
 };
 pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
+pub use lockfile::diff_lock;
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
 pub use view::{labels_sorted, GraphView};

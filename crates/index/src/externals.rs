@@ -236,10 +236,26 @@ pub struct Extension {
     pub name: String,
     /// Apparent repository names this extension is asked for, from `use_repo`.
     pub repos: BTreeSet<String>,
+    /// The renames in those `use_repo` calls: `use_repo(ext, apparent =
+    /// "internal")` records `internal -> apparent`. The extension itself, and
+    /// so `MODULE.bazel.lock`, only ever writes the internal name.
+    pub renames: BTreeMap<String, String>,
     /// Canonical rendering of each tag call, for diffing.
     pub tags: Vec<String>,
     /// Main-repo labels named in the tag calls.
     pub labels: Vec<String>,
+}
+
+impl Extension {
+    /// The name the main repository sees a repository of this extension under,
+    /// given the name the extension itself gave it. `None` when no `use_repo`
+    /// of the main module mentions it at all.
+    pub fn apparent_name(&self, internal: &str) -> Option<String> {
+        if let Some(a) = self.renames.get(internal) {
+            return Some(a.clone());
+        }
+        self.repos.contains(internal).then(|| internal.to_string())
+    }
 }
 
 /// One `use_repo_rule` plus its instantiations.
@@ -544,6 +560,9 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 for (k, v) in &args.kw {
                     e.repos.insert(k.clone());
                     e.repos.extend(v.iter().cloned());
+                    if let Some(internal) = v.first() {
+                        e.renames.insert(internal.clone(), k.clone());
+                    }
                 }
                 e.repos.extend(args.positional.iter().cloned());
             }
@@ -1011,7 +1030,9 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     ModuleChange::Repos(repos)
 }
 
-fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
+/// The apparent name the main repository sees a module under: the `repo_name`
+/// of its `bazel_dep`, when it has one.
+pub fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
     f.deps
         .values()
         .find(|d| d.module == module)
