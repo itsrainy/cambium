@@ -467,6 +467,12 @@ fn inspect_cmd(
                 println!("WARNING:         {w}");
             }
             println!("size on disk:    {}", human(f.file_size() as u64));
+            if f.is_compressed() {
+                println!(
+                    "                 zstd, {} decompressed",
+                    human(f.framed_size() as u64)
+                );
+            }
             println!("nodes:           {}", v.num_nodes());
             println!("edges:           {}", v.num_edges());
             println!("packages:        {}", v.num_packages());

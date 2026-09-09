@@ -173,7 +173,7 @@ fn emit(
         (None, Some(t)) => t.path().to_path_buf(),
         (None, None) => unreachable!("the None/false arm bailed"),
     };
-    cambium_index::format::write_index(&path, index)?;
+    cambium_index::format::write_index_with(&path, index, engine.index_compression())?;
     let c = &index.header.counts;
     eprintln!(
         "cambium: wrote {} ({} nodes, {} edges, {} packages, lineage {})",

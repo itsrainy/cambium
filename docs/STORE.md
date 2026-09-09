@@ -48,6 +48,53 @@ so an upgrade does not orphan a warm store; they are no longer written.
 `cambi baseline list` prints keys; `cambi baseline gc` deletes those older
 than `retention_days`, walking the tree.
 
+## Compression at rest
+
+Index files are written as a single zstd frame, in the store and in the local
+cache alike. Nothing else changes: the key is still
+`indexes/<lineage>/<tree>.bin`, the file is still named `index-<rev>.bin` on
+disk, and the header check, the tree keys and `FORMAT_VERSION` are all about
+the *decompressed* bytes. Compression is outside the format — turning it off,
+or changing its level, is not a format change and does not bump anything.
+
+**Old raw indexes stay readable.** The reader looks at the first four bytes:
+zstd's magic (`28 B5 2F FD`) means decompress once into memory and parse that;
+anything else goes down the path it always did, memory-mapped and parsed in
+place. A store warmed before this change keeps serving, and nothing has to be
+republished.
+
+The level is **3**, measured on the corpus indexes (this machine, release
+build, single-threaded, times are for one whole index):
+
+| subject | raw | zstd 3 | zstd 9 | zstd 19 |
+|---|---|---|---|---|
+| apollo | 4.21 MB | 1.11 MB (3.8x, 19 ms) | 1.03 MB (4.1x, 54 ms) | 0.86 MB (4.9x, 1.21 s) |
+| bazel | 4.04 MB | 0.67 MB (6.0x, 11 ms) | 0.61 MB (6.7x, 38 ms) | 0.48 MB (8.4x, 1.12 s) |
+| envoy | 7.31 MB | 1.21 MB (6.1x, 19 ms) | 1.13 MB (6.5x, 68 ms) | 0.90 MB (8.1x, 2.57 s) |
+| sourcegraph | 8.98 MB | 2.21 MB (4.1x, 45 ms) | 2.08 MB (4.3x, 112 ms) | 1.63 MB (5.5x, 3.89 s) |
+| xla | 7.78 MB | 1.41 MB (5.5x, 61 ms) | 1.31 MB (6.0x, 139 ms) | 1.03 MB (7.5x, 3.10 s) |
+
+So: **about 4-6x for tens of milliseconds**. Level 9 buys another 5-11% of the
+bytes for two to three times the time, which is still cheap and is a
+defensible change if store egress ever starts mattering; level 19 buys 20-38%
+for sixty to a hundred times the time — 1.1 to 3.9 seconds on an index a
+publish already paid minutes of Bazel for, which is real latency on every
+`baseline update` for a saving a bigger index makes worse, not better.
+Decompression costs 5-16 ms whatever the level, so a fetch pays essentially
+nothing for any of this and the level only trades write latency against bytes.
+
+The frame carries zstd's content checksum. The rkyv archive inside is cast in
+place and never validated — that is what makes loading O(1) — and in a
+compressed stream one flipped bit corrupts everything after it rather than one
+byte, so the checksum is what turns a damaged file into an error before any of
+it is parsed. A blob that will not decompress is skipped by the ancestor walk
+the same way an unreadable format version is: it is one key out of many.
+
+`baseline.compress_indexes = false` in `cambium.toml` writes the raw form
+instead. It is not part of the config hash — it says how the file is stored,
+not what the graph is — so flipping it neither retires a warm store nor mints
+a lineage.
+
 ## What makes an index incompatible
 
 Three separate things, and they are not interchangeable:
