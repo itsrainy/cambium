@@ -374,18 +374,80 @@ fn a_legacy_workspace_edit_is_global() {
     assert!(r.global_reason.unwrap().contains("imperative"));
 }
 
+/// A `MODULE.bazel.lock` around one extension, whose `gen` extension
+/// generates the repository `generated` with `spec` as its definition.
+fn lock(spec: &str, digest: &str) -> String {
+    format!(
+        "{{\"lockFileVersion\": 24, \"registryFileHashes\": {{}}, \
+         \"selectedYankedVersions\": {{}}, \"moduleExtensions\": {{\
+         \"//bazel:ext.bzl%gen\": {{\"general\": {{\
+         \"bzlTransitiveDigest\": \"{digest}\", \
+         \"generatedRepoSpecs\": {{\"generated\": {{\"url\": \"{spec}\"}}}}}}}}}}}}"
+    )
+}
+
+/// The same two revisions, with a lockfile on each side as well.
+fn texts_with_lock(base_lock: &str, head_lock: &str) -> FixedText {
+    let mut m = texts(MODULE_BASE, MODULE_BASE).0;
+    m.insert(
+        ("base".to_string(), "MODULE.bazel.lock".to_string()),
+        base_lock.to_string(),
+    );
+    m.insert(
+        ("head".to_string(), "MODULE.bazel.lock".to_string()),
+        head_lock.to_string(),
+    );
+    FixedText(m)
+}
+
+/// The envoy shape: the lockfile moves on its own because an extension was
+/// re-evaluated, and exactly one repository's definition came out different.
 #[test]
-fn a_lockfile_moving_on_its_own_is_global() {
+fn a_lockfile_moving_on_its_own_names_the_repositories_that_moved() {
     let (_e, index) = base();
     let r = run(
         &index,
         &changed(&["MODULE.bazel.lock"]),
-        &texts(MODULE_BASE, MODULE_BASE),
+        &texts_with_lock(&lock("a", "d"), &lock("b", "d")),
     );
-    // Not the stage's doing: it leaves a lone lockfile to the invalidator
-    // rules, where `MODULE.bazel.lock` is a default entry.
+    assert!(
+        !r.global,
+        "the lone lockfile used to be an invalidator: {:?}",
+        r.global_reason
+    );
+    assert_eq!(r.stats.repos_dirty_by_module, 1);
+    // `//lib:lib` names `@generated//:thing`; `//app:app` reaches it.
+    assert_eq!(r.direct, vec!["//lib:lib".to_string()]);
+}
+
+/// Only the extension's implementation digest moved: the extension was
+/// re-evaluated and produced exactly the same repositories.
+#[test]
+fn a_lockfile_whose_digests_alone_moved_dirties_nothing() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["MODULE.bazel.lock"]),
+        &texts_with_lock(&lock("a", "d1"), &lock("a", "d2")),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_module, 0);
+    assert!(r.direct.is_empty());
+}
+
+#[test]
+fn a_lockfile_cambium_cannot_read_is_global() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["MODULE.bazel.lock"]),
+        &texts_with_lock(
+            &lock("a", "d"),
+            &lock("a", "d").replace("{\"lockFileVersion\"", "{\"novel\": 1, \"lockFileVersion\""),
+        ),
+    );
     assert!(r.global);
-    assert!(r.global_reason.unwrap().contains("invalidator"));
+    assert!(r.global_reason.unwrap().contains("novel"));
 }
 
 #[test]

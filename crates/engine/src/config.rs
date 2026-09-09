@@ -183,6 +183,9 @@ impl Default for Invalidators {
         Self {
             paths: [
                 "MODULE.bazel",
+                // Both of these are diffed by the externals stage when it is
+                // enabled, which exempts them; the entries are what answers
+                // for them when it is off.
                 "MODULE.bazel.lock",
                 "WORKSPACE",
                 "WORKSPACE.bazel",

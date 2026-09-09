@@ -92,12 +92,14 @@
 //!   code, order matters, and `native.existing_rules()` makes a later
 //!   statement's meaning depend on an earlier one. A static diff of it would
 //!   be a guess.
-//! - A `MODULE.bazel.lock` that moves without `MODULE.bazel` moving. The lock
-//!   records resolved registry contents; a change with no module edit means
-//!   the *registry* moved under the same declarations, which can re-point any
-//!   repository. The stage leaves that file to the invalidator rules, where
-//!   it is a default entry, rather than escalating over the top of a
-//!   `cambium.toml` that has removed it.
+//! - A `MODULE.bazel.lock` whose JSON the lock parser does not recognise: an
+//!   unknown key that changed, a format version it was not written against, a
+//!   version that changed between the two sides, a registry-level file that
+//!   moved. Everything else in that file is diffed structurally by
+//!   [`cambium_index::lockfile`], which names the repositories a re-pinned
+//!   registry or a re-evaluated extension moved. The file stays a default
+//!   invalidator all the same, so that the blunt answer is still there when
+//!   `externals.enabled` is off; `handled` exempts it when the stage read it.
 //! - A `MODULE.bazel` statement the parser does not recognise, on either side
 //!   of the diff.
 //! - Toolchain registration, as above.
@@ -109,6 +111,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
 use cambium_index::externals::{diff_module, scan_module, ModuleChange, ModuleFacts};
+use cambium_index::lockfile::diff_lock;
 use cambium_index::IndexRef;
 
 /// Workspace files whose own diff this stage interprets, rather than letting
@@ -229,8 +232,40 @@ pub fn analyse(
             }
         }
     }
-    // A lockfile that moved *without* `MODULE.bazel` is left to the
-    // invalidator rules (it is a default invalidator, so the answer is global).
+    // A lockfile that moved *without* `MODULE.bazel` is the resolved state
+    // moving under unchanged declarations: a re-pinned registry, a
+    // re-evaluated extension, a lock a newer Bazel rewrote. Its JSON says
+    // which repositories that moved; anything unrecognised in it escalates.
+    if lock_changed && !module_changed {
+        let facts = facts_at(texts, head_rev);
+        let base_lock = texts.text_at(base_rev, MODULE_LOCK);
+        let head_lock = texts.text_at(head_rev, MODULE_LOCK);
+        let change = match (base_lock, head_lock) {
+            (Some(b), Some(h)) => diff_lock(&b, &h, &facts),
+            // One side has no lockfile at all: it was added or deleted, and
+            // every repository in it is new or gone.
+            _ => ModuleChange::Global(
+                "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
+                 is new or gone"
+                    .into(),
+            ),
+        };
+        match change {
+            ModuleChange::Global(reason) => {
+                out.global = Some(reason);
+                return out;
+            }
+            ModuleChange::Repos(repos) => {
+                out.by_module += repos.len();
+                // The repository's *contents* moved, so a `.bzl` inside it may
+                // have moved with them: rule (2) applies, as it does for a
+                // `MODULE.bazel` version bump.
+                out.load_repos.extend(repos.iter().cloned());
+                out.repos.extend(repos);
+                out.handled.push(MODULE_LOCK.to_string());
+            }
+        }
+    }
 
     // Repository-rule inputs: main-repo files an external repository is built
     // from. Keyed by repo id, because deciding whether rule (2) applies needs
