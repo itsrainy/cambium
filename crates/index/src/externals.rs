@@ -244,6 +244,16 @@ pub struct Extension {
     pub tags: Vec<String>,
     /// Main-repo labels named in the tag calls.
     pub labels: Vec<String>,
+    /// Rendered `override_repo` / `inject_repo` calls against this extension's
+    /// proxy, in source order.
+    ///
+    /// `override_repo(ext, "a", b = "c")` makes the name `a` inside the
+    /// extension resolve to the main module's `a`, and `b` to the main
+    /// module's `c`; `inject_repo(ext, "x")` makes `x` visible inside an
+    /// extension that never asked for it. Either way the extension's
+    /// repositories are built against a different set of repositories, so a
+    /// change to one of these calls moves every repository it generates.
+    pub overrides: Vec<String>,
 }
 
 impl Extension {
@@ -565,6 +575,21 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                     }
                 }
                 e.repos.extend(args.positional.iter().cloned());
+            }
+            (None, "override_repo") | (None, "inject_repo") => {
+                // The same shape as `use_repo`: the first argument is an
+                // extension proxy, which is a name rather than a literal and
+                // so never reaches `Args`.
+                let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let Some(key) = ext_vars.get(var) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let e = f.extensions.entry(key.clone()).or_default();
+                e.overrides.push(args.render(name));
             }
             (None, "bazel_dep") => {
                 let module = args.first("name").unwrap_or_default().to_string();
@@ -995,8 +1020,9 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
         repos.insert(apparent_of(head, m).unwrap_or_else(|| m.to_string()));
     }
 
-    // Extensions: a changed tag or a changed `use_repo` moves the repositories
-    // on both sides of the change.
+    // Extensions: a changed tag, a changed `use_repo`, or a changed
+    // `override_repo` / `inject_repo` moves the repositories on both sides of
+    // the change.
     let keys: BTreeSet<&String> = base
         .extensions
         .keys()
@@ -1469,6 +1495,58 @@ mod tests {
             diff_module(&f, &g),
             ModuleChange::Repos(["maven".to_string()].into_iter().collect())
         );
+    }
+
+    /// `override_repo` and `inject_repo` used to land in `unparsed`, which is
+    /// global; xla writes two of them.
+    #[test]
+    fn parses_override_repo_and_inject_repo() {
+        let f = scan_module(
+            "cc = use_extension(\"@rules_cc//cc:extensions.bzl\", \"cc_configure_extension\")\n\
+             override_repo(cc, local_config_cc = \"my_config_cc\")\n\
+             override_repo(cc, \"other_config\")\n\
+             inject_repo(cc, \"tools\")\n",
+        );
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        let e = f.extensions.values().next().expect("extension");
+        assert_eq!(e.overrides.len(), 3);
+        // They say nothing about which repositories the main module asked the
+        // extension for.
+        assert!(e.repos.is_empty());
+    }
+
+    /// The overridden name resolves to a different repository, so everything
+    /// the extension generates is built against something else.
+    #[test]
+    fn a_changed_override_repo_moves_the_extensions_repositories() {
+        let base = "cc = use_extension(\"@rules_cc//cc:extensions.bzl\", \"ext\")\n\
+             use_repo(cc, \"local_config_cc\")\n\
+             override_repo(cc, local_config_cc = \"my_config_cc\")\n";
+        for head in [
+            // Changed.
+            base.replace("my_config_cc", "other_config_cc"),
+            // Removed.
+            base.replace(
+                "override_repo(cc, local_config_cc = \"my_config_cc\")\n",
+                "",
+            ),
+            // Added, on top of the same base.
+            format!("{base}inject_repo(cc, \"extra\")\n"),
+        ] {
+            assert_eq!(
+                diff_module(&scan_module(base), &scan_module(&head)),
+                ModuleChange::Repos(["local_config_cc".to_string()].into_iter().collect()),
+                "{head}"
+            );
+        }
+    }
+
+    /// The proxy has to be one a `use_extension` bound, or the statement means
+    /// something this parser does not know.
+    #[test]
+    fn an_override_repo_on_an_unknown_proxy_is_unparsed() {
+        let f = scan_module("override_repo(mystery, \"a\")\n");
+        assert!(!f.unparsed.is_empty());
     }
 
     #[test]
