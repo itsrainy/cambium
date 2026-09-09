@@ -320,10 +320,36 @@ pub struct Extension {
     pub name: String,
     /// Apparent repository names this extension is asked for, from `use_repo`.
     pub repos: BTreeSet<String>,
+    /// The renames in those `use_repo` calls: `use_repo(ext, apparent =
+    /// "internal")` records `internal -> apparent`. The extension itself, and
+    /// so `MODULE.bazel.lock`, only ever writes the internal name.
+    pub renames: BTreeMap<String, String>,
     /// Canonical rendering of each tag call, for diffing.
     pub tags: Vec<String>,
     /// Main-repo labels named in the tag calls.
     pub labels: Vec<String>,
+    /// Rendered `override_repo` / `inject_repo` calls against this extension's
+    /// proxy, in source order.
+    ///
+    /// `override_repo(ext, "a", b = "c")` makes the name `a` inside the
+    /// extension resolve to the main module's `a`, and `b` to the main
+    /// module's `c`; `inject_repo(ext, "x")` makes `x` visible inside an
+    /// extension that never asked for it. Either way the extension's
+    /// repositories are built against a different set of repositories, so a
+    /// change to one of these calls moves every repository it generates.
+    pub overrides: Vec<String>,
+}
+
+impl Extension {
+    /// The name the main repository sees a repository of this extension under,
+    /// given the name the extension itself gave it. `None` when no `use_repo`
+    /// of the main module mentions it at all.
+    pub fn apparent_name(&self, internal: &str) -> Option<String> {
+        if let Some(a) = self.renames.get(internal) {
+            return Some(a.clone());
+        }
+        self.repos.contains(internal).then(|| internal.to_string())
+    }
 }
 
 /// One `use_repo_rule` plus its instantiations.
@@ -424,15 +450,15 @@ pub enum ModuleChange {
 
 /// A call's arguments, flattened enough for the questions asked of them.
 #[derive(Debug, Default)]
-struct Args {
-    positional: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) positional: Vec<String>,
     /// Keyword arguments in source order; the value is every string literal
     /// inside it, so a list or a dict argument yields all of its entries.
-    kw: Vec<(String, Vec<String>)>,
+    pub(crate) kw: Vec<(String, Vec<String>)>,
 }
 
 impl Args {
-    fn first(&self, key: &str) -> Option<&str> {
+    pub(crate) fn first(&self, key: &str) -> Option<&str> {
         self.kw
             .iter()
             .find(|(k, _)| k == key)
@@ -467,13 +493,19 @@ impl Args {
 }
 
 /// A top-level statement, as a token slice plus the shape the parser found.
-struct Stmt<'a, 't> {
+pub(crate) struct Stmt<'a, 't> {
     toks: &'t [Lexed<'a>],
+}
+
+impl<'a, 't> Stmt<'a, 't> {
+    pub(crate) fn toks(&self) -> &'t [Lexed<'a>] {
+        self.toks
+    }
 }
 
 /// Splits a token stream into top-level statements: every token that starts a
 /// line at bracket depth zero begins one.
-fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
+pub(crate) fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
     top_level_spans(toks)
         .into_iter()
         .map(|r| Stmt { toks: &toks[r] })
@@ -489,7 +521,7 @@ fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
 /// argument. This adds only the flattening: a list or dict argument yields
 /// every literal in it, at any nesting depth, which is what the callers ask
 /// of `Args`.
-fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
+pub(crate) fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
     let mut out = Args::default();
     for (key, span) in arg_spans(toks, open) {
         let vals = toks[span].iter().filter_map(|t| match t.tok {
@@ -612,8 +644,26 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 for (k, v) in &args.kw {
                     e.repos.insert(k.clone());
                     e.repos.extend(v.iter().cloned());
+                    if let Some(internal) = v.first() {
+                        e.renames.insert(internal.clone(), k.clone());
+                    }
                 }
                 e.repos.extend(args.positional.iter().cloned());
+            }
+            (None, "override_repo") | (None, "inject_repo") => {
+                // The same shape as `use_repo`: the first argument is an
+                // extension proxy, which is a name rather than a literal and
+                // so never reaches `Args`.
+                let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let Some(key) = ext_vars.get(var) else {
+                    f.unparsed.push(render_stmt(text, t));
+                    continue;
+                };
+                let e = f.extensions.entry(key.clone()).or_default();
+                e.overrides.push(args.render(name));
             }
             (None, "bazel_dep") => {
                 let module = args.first("name").unwrap_or_default().to_string();
@@ -735,8 +785,15 @@ fn render_limited(text: &str, t: &[Lexed<'_>], limit: usize) -> String {
     s
 }
 
-fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
+pub(crate) fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
     render_limited(text, t, 24)
+}
+
+/// The whole statement, token by token. Two statements with the same rendering
+/// are the same call with the same arguments — symbols and punctuation
+/// included, not only the string literals [`Args::render`] keeps.
+pub(crate) fn render_all(text: &str, t: &[Lexed<'_>]) -> String {
+    render_limited(text, t, usize::MAX)
 }
 
 // ------------------------------------------------------- the path mapping
@@ -1000,8 +1057,9 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
         repos.insert(apparent_of(head, m).unwrap_or_else(|| m.to_string()));
     }
 
-    // Extensions: a changed tag or a changed `use_repo` moves the repositories
-    // on both sides of the change.
+    // Extensions: a changed tag, a changed `use_repo`, or a changed
+    // `override_repo` / `inject_repo` moves the repositories on both sides of
+    // the change.
     let keys: BTreeSet<&String> = base
         .extensions
         .keys()
@@ -1035,7 +1093,9 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     ModuleChange::Repos(repos)
 }
 
-fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
+/// The apparent name the main repository sees a module under: the `repo_name`
+/// of its `bazel_dep`, when it has one.
+pub fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
     f.deps
         .values()
         .find(|d| d.module == module)
@@ -1586,6 +1646,58 @@ mod tests {
             diff_module(&f, &g),
             ModuleChange::Repos(["maven".to_string()].into_iter().collect())
         );
+    }
+
+    /// `override_repo` and `inject_repo` used to land in `unparsed`, which is
+    /// global; xla writes two of them.
+    #[test]
+    fn parses_override_repo_and_inject_repo() {
+        let f = scan_module(
+            "cc = use_extension(\"@rules_cc//cc:extensions.bzl\", \"cc_configure_extension\")\n\
+             override_repo(cc, local_config_cc = \"my_config_cc\")\n\
+             override_repo(cc, \"other_config\")\n\
+             inject_repo(cc, \"tools\")\n",
+        );
+        assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+        let e = f.extensions.values().next().expect("extension");
+        assert_eq!(e.overrides.len(), 3);
+        // They say nothing about which repositories the main module asked the
+        // extension for.
+        assert!(e.repos.is_empty());
+    }
+
+    /// The overridden name resolves to a different repository, so everything
+    /// the extension generates is built against something else.
+    #[test]
+    fn a_changed_override_repo_moves_the_extensions_repositories() {
+        let base = "cc = use_extension(\"@rules_cc//cc:extensions.bzl\", \"ext\")\n\
+             use_repo(cc, \"local_config_cc\")\n\
+             override_repo(cc, local_config_cc = \"my_config_cc\")\n";
+        for head in [
+            // Changed.
+            base.replace("my_config_cc", "other_config_cc"),
+            // Removed.
+            base.replace(
+                "override_repo(cc, local_config_cc = \"my_config_cc\")\n",
+                "",
+            ),
+            // Added, on top of the same base.
+            format!("{base}inject_repo(cc, \"extra\")\n"),
+        ] {
+            assert_eq!(
+                diff_module(&scan_module(base), &scan_module(&head)),
+                ModuleChange::Repos(["local_config_cc".to_string()].into_iter().collect()),
+                "{head}"
+            );
+        }
+    }
+
+    /// The proxy has to be one a `use_extension` bound, or the statement means
+    /// something this parser does not know.
+    #[test]
+    fn an_override_repo_on_an_unknown_proxy_is_unparsed() {
+        let f = scan_module("override_repo(mystery, \"a\")\n");
+        assert!(!f.unparsed.is_empty());
     }
 
     #[test]

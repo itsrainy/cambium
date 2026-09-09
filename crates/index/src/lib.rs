@@ -25,11 +25,13 @@ pub mod externals;
 pub mod format;
 pub mod label;
 pub mod loads;
+pub mod lockfile;
 pub mod overlay;
 pub mod space;
 pub mod strtab;
 pub mod view;
 pub mod walk;
+pub mod workspace;
 
 pub use builder::{
     new_lineage, BzlClosure, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
@@ -47,7 +49,9 @@ pub use format::{
     temp_suffix, IndexError, IndexFile, OwnedIndexBytes, CONTENT_REVISION, FORMAT_VERSION,
 };
 pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
+pub use lockfile::diff_lock;
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
 pub use view::{labels_sorted, GraphView};
 pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};
+pub use workspace::{diff_workspace, WorkspaceChange};
