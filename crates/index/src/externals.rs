@@ -1394,8 +1394,12 @@ pub fn build_repo_inputs(
     }
     att.solve(&fallbacks, &seeds_by_sym);
 
-    // A main-repo label in a workspace-closure `.bzl` is an input of the
-    // repositories the *occurrence* is attributed to.
+    // A main-repo label in a workspace-closure `.bzl`, or in a workspace file
+    // itself, is an input of the repositories the *occurrence* is attributed
+    // to. The workspace files are read too: a WORKSPACE-only repository writes
+    // `npm_translate_lock(name = "npm", pnpm_lock = "//:pnpm-lock.yaml")`
+    // straight into `WORKSPACE`, and the lock is then the one file that moves
+    // every target the repository generates.
     //
     // Which *kind* of input is tracked alongside: everything derived so far
     // (`MODULE.bazel` shapes) and every literal that is itself a label feeds
@@ -1408,13 +1412,10 @@ pub fn build_repo_inputs(
     // of the symbols it exports does. The extra repositories a *label* in it
     // feeds are folded in here.
     let mut own: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for &id in workspace {
-        let path = graph.path(id).to_string();
-        let Some(text) = src.text(&path) else {
-            continue;
-        };
+    for (path, text) in &texts {
+        let path = path.clone();
         let mut file_repos = att.file_repos(&path).repos;
-        for (tok, l) in string_literals(&text) {
+        for (tok, l) in string_literals(text) {
             let pats = main_repo_patterns(&l.text, m);
             if pats.is_empty() {
                 continue;
@@ -2025,6 +2026,28 @@ mod tests {
         // The file's own set is what answers a change to it; the loader's
         // set is kept alongside because a loader may read a constant from it.
         assert!(ri.bzl_repos["third_party/pcl/init.bzl"].contains("local_config_pcl"));
+    }
+
+    /// The lock a `WORKSPACE`-declared `npm_translate_lock` reads is written in
+    /// `WORKSPACE` itself, not in any `.bzl`. It is an input of `@npm` all the
+    /// same: a version bump in it rewrites every `node_modules` link target
+    /// the repository generates.
+    #[test]
+    fn a_label_written_in_workspace_is_a_repository_input() {
+        let files = Files(vec![(
+            "WORKSPACE",
+            "workspace(name = \"sourcegraph\")\n\
+             load(\"@aspect_rules_js//npm:repositories.bzl\", \"npm_translate_lock\")\n\
+             npm_translate_lock(\n\
+             \x20   name = \"npm\",\n\
+             \x20   npmrc = \"//:.npmrc\",\n\
+             \x20   pnpm_lock = \"//:pnpm-lock.yaml\",\n\
+             )\n",
+        )]);
+        let ri = inputs(&files, &RepoMapping::identity());
+        assert_eq!(ri.repos_for("pnpm-lock.yaml"), set(&["npm"]));
+        assert_eq!(ri.repos_for(".npmrc"), set(&["npm"]));
+        assert!(ri.target_only.is_empty(), "{:?}", ri.target_only);
     }
 
     #[test]

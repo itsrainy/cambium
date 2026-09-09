@@ -137,6 +137,7 @@ impl Synthetic {
             bazel_version: None,
             extra_query_flags: Vec::new(),
             extra_startup_flags: Vec::new(),
+            publish_partial: false,
             invalidators: Vec::new(),
             skip: false,
             notes: format!("synthetic subject from the {} preset", self.preset),

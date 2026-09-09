@@ -89,6 +89,10 @@ bazel_version = "7.4.1"
 # graph-affecting query options, so dropping it costs nothing here.
 extra_startup_flags = ["--noworkspace_rc"]
 extra_query_flags = []
+# `@local_config_cuda//cuda` cannot load without CUDA on the host, so the
+# pin's index is PARTIAL by one package on every run; the engine refuses to
+# publish such an index unless told the absence is understood.
+publish_partial = true
 # Every file these globs caught in the published run is reached by label:
 # `*_configure.bzl` and `workspace.bzl` files are in the workspace load
 # closure, `BUILD.tpl` / `*.patch` / `*.BUILD` are `Label(...)` inputs of the

@@ -58,6 +58,14 @@ pub struct RepoEntry {
     /// Entries with glob characters become globs, the rest exact paths.
     #[serde(default)]
     pub invalidators: Vec<String>,
+    /// Publish the pin's index even when `bazel query //...` could not load
+    /// every package. The engine refuses a partial index by default, since a
+    /// run spliced onto one silently under-reports for the missing packages;
+    /// a subject sets this when the failure is a known, constant absence on
+    /// the benchmark host (apollo's `@local_config_cuda`) rather than a
+    /// broken checkout. The report still says the index is partial.
+    #[serde(default)]
+    pub publish_partial: bool,
     #[serde(default)]
     pub skip: bool,
     #[serde(default)]

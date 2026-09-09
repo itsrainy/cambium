@@ -197,6 +197,7 @@ impl SubjectsDir {
         // make cheap. A quick range is a slice of the full one, so a bound
         // that covers the full range covers it too.
         cfg.baseline.max_ancestor_walk = entry.history_window.max(20);
+        cfg.baseline.publish_partial = entry.publish_partial;
         cfg
     }
 
@@ -448,6 +449,7 @@ mod tests {
             bazel_version: None,
             extra_query_flags: Vec::new(),
             extra_startup_flags: Vec::new(),
+            publish_partial: false,
             invalidators: Vec::new(),
             skip: false,
             notes: String::new(),
