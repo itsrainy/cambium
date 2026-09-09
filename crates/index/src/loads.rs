@@ -43,7 +43,18 @@
 //!    outside the index entirely, so the engine escalates that to a global
 //!    invalidation — the same answer the `rbuildfiles` path gave when it saw a
 //!    workspace-level loader.
-//! 5. A `.bzl` in neither closure is loaded by nothing and can affect nothing.
+//! 5. A `.bzl` in neither closure is loaded by nothing and can affect nothing
+//!    — *provided the closure that was stored is complete*. That is a claim
+//!    about the index-time scan, not about Starlark, and it can fail: a load
+//!    label the walk could not resolve, an `@<own module name>//...` spelling
+//!    read as external because the mapping had no main alias, a BUILD file
+//!    the index-time checkout did not have, a package tombstoned as partial.
+//!    So the engine does not take the empty answer on trust: when a *changed*
+//!    `.bzl` has no node here, it re-derives one hop of the inverse load graph
+//!    from the head checkout and follows whatever loads it (issue #7,
+//!    `crate::engine`'s witness in cambium-engine). This module's job is
+//!    unchanged; the witness is what makes point 5 checkable rather than
+//!    assumed.
 //!
 //! The one thing a static scan cannot see that `rbuildfiles` could is a BUILD
 //! file that is *generated* rather than checked in. Such a file is not in the
@@ -706,11 +717,95 @@ pub struct PackageClosure {
 /// deliberate: a relative `:other.bzl` load resolves against the *file's own*
 /// directory-as-package, and a `.bzl` in a subdirectory of a package can only
 /// be loaded by its full `//pkg:sub/file.bzl` label anyway.
-pub(crate) fn owning_dir(path: &str) -> String {
+pub fn owning_dir(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[..i].to_string(),
         None => String::new(),
     }
+}
+
+/// The name a `WORKSPACE` file gives the main repository
+/// (`workspace(name = "envoy")`).
+///
+/// In WORKSPACE mode `bazel mod dump_repo_mapping` does not exist, so the
+/// mapping is the identity and `@envoy//pkg:f.bzl` would read as a foreign
+/// repository. This is the alias that says otherwise — the WORKSPACE
+/// counterpart of `MODULE.bazel`'s `module(name = ...)` — and it is fed to
+/// [`RepoMapping::with_main_alias`] by callers that resolve load labels read
+/// out of a checkout rather than out of a stored index.
+pub fn workspace_name(text: &str) -> Option<String> {
+    scan(text, &["workspace"], true).into_iter().next()
+}
+
+/// True for a file Bazel reads as Starlark: a BUILD file, a `.bzl`, or one of
+/// the workspace files.
+pub fn is_starlark_file(name: &str) -> bool {
+    name.ends_with(".bzl")
+        || name == "BUILD"
+        || name == "BUILD.bazel"
+        || WORKSPACE_FILES.contains(&name)
+}
+
+/// Every Starlark file of a checkout, as repo-relative paths, sorted.
+///
+/// Directories listed in `.bazelignore` are skipped, as are `.git` and
+/// anything reached through a symlink: Bazel's `bazel-out` and `bazel-<repo>`
+/// convenience symlinks point into the output base, and following them would
+/// walk the whole build tree (and can loop).
+///
+/// Paths only — the caller opens each file once, if at all.
+pub fn starlark_files(root: &std::path::Path) -> Vec<String> {
+    let ignored = read_bazelignore(root);
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        let here = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&dir)
+        };
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let rel = if dir.is_empty() {
+                name.clone()
+            } else {
+                format!("{dir}/{name}")
+            };
+            if ft.is_dir() {
+                if name == ".git" || ignored.contains(&rel) {
+                    continue;
+                }
+                stack.push(rel);
+            } else if is_starlark_file(&name) {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The directory paths `.bazelignore` names, without a trailing slash. The
+/// file is a plain list of repo-relative directories, one per line; it
+/// supports no globs, and blank lines are ignored.
+fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
+    let Ok(text) = std::fs::read_to_string(root.join(".bazelignore")) else {
+        return rustc_hash::FxHashSet::default();
+    };
+    text.lines()
+        .map(|l| l.trim().trim_end_matches('/'))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect()
 }
 
 #[cfg(test)]
