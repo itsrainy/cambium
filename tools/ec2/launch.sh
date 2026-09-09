@@ -63,11 +63,17 @@ case "${1:-launch}" in
     ROOT=$(cd "$HERE/../.." && pwd)
     # No `2>/dev/null` on either side: under pipefail a tar or ssh failure
     # has to be visible, or a half-copied tree builds on the box.
-    tar -C "$ROOT" -czf - --exclude=./target --exclude='./bench-results*' \
+    # COPYFILE_DISABLE keeps macOS AppleDouble `._*` files out of the tar. The
+    # `git clean -fd` after extraction removes files the working tree no longer
+    # has: a module that became a directory once left its old `.rs` beside it,
+    # the build failed, and a run went on with the previous binary. Ignored
+    # paths (target, bench-results, the caches) are untouched by it.
+    COPYFILE_DISABLE=1 tar -C "$ROOT" -czf - --exclude=./target --exclude='./bench-results*' \
       --exclude='./corpus-results*' --exclude=./.claude --exclude=./.git/worktrees . \
-      | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium'
+      | ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST" 'mkdir -p ~/cambium && tar -xzf - -C ~/cambium && git -C ~/cambium clean -fdq'
     ssh -i "$PEM" "ubuntu@$HOST" 'cat > ~/finish-bootstrap.sh <<"EOS"
 set -euxo pipefail
+trap '"'"'echo "BOOTSTRAP FAILED"'"'"' ERR
 source ~/.cargo/env
 export PATH=/usr/local/go/bin:$PATH
 cd ~/cambium
