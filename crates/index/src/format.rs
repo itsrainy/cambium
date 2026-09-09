@@ -55,6 +55,29 @@ pub const MAGIC: [u8; 8] = *b"CAMBIDX1";
 /// bytes per package of write-only payload. Removing it moves the layout, so
 /// it has to wait for a bump that is happening anyway rather than cause one.
 pub const FORMAT_VERSION: u32 = 8;
+
+/// What a correct build *derives* into an index, as against how the bytes are
+/// laid out ([`FORMAT_VERSION`]) and what a rule hash means
+/// (`cambium_proto::RULE_HASH_VERSION`).
+///
+/// An index is trusted on the strength of its `config_hash` alone: matching
+/// hashes mean "the same cambium, configured the same way, would have written
+/// this". A bug in the derivation breaks that promise without moving either of
+/// the other two versions — the file is well-formed, its rule hashes are
+/// comparable, and a column is simply missing — so the store keeps handing
+/// every later run a base that a fixed cambium would never have written.
+/// Bumping this is how such a fix retires the indexes written before it: the
+/// engine mixes it into [`crate::config`-level](crate) hashing, an old blob
+/// fails the compatibility check, and the next run rebuilds instead of
+/// believing it.
+///
+/// 1 --- `BzlClosure::from_view` did not read `repo_map_*` back, so every
+/// splice published an index with the per-repository path mappings dropped
+/// (fixed in "externals: read the path mapping back out of the base index").
+/// A run that fetched such a base treated every repository as unmapped and
+/// re-queried ~1100 packages per change set.
+pub const CONTENT_REVISION: u32 = 1;
+
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
 /// rkyv archives must start on this boundary for `access` to be sound.

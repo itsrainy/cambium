@@ -340,6 +340,17 @@ The loop is honest about its four blind spots, and says so in its own output:
   closure does not contain. envoy's three hundred history commits straddle a
   Bzlmod migration and produce both; without these, twenty-two of its forty
   change sets diverge and the run is right about eighteen of them.
+- **It replays against a healthy index, and a run does not.** A run takes its
+  base out of the subject's store, and the store keeps whatever the previous
+  run published — including an index a since-fixed cambium derived wrongly.
+  Nothing distinguishes those bytes from a good index: the layout
+  (`FORMAT_VERSION`) and the rule hash (`RULE_HASH_VERSION`) do not move when
+  only the derivation changes. So a fix whose effect is *what a correct index
+  contains* has to bump `cambium_index::CONTENT_REVISION`, which is part of the
+  config hash and therefore of the store key; without it the precheck is clean
+  and the run keeps splicing onto the broken base for ever. This is exactly
+  what left envoy's change sets cold-rebuilding ~1100 packages after the path
+  mappings were fixed, while the same change sets replayed at 6 and 18.
 
 A clean precheck is not a substitute for the run. It is what makes the run
 worth starting.
