@@ -408,14 +408,38 @@ mod tests {
             h.update(b"cambium-rule-hash-v");
             h.update(&4u32.to_le_bytes());
             h.update(b"\n");
+            h.update(b"cambium-index-content-v");
+            h.update(&1u32.to_le_bytes());
+            h.update(b"\n");
             h.update(Config::default().to_toml().as_bytes());
             *h.finalize().as_bytes()
         };
         assert_eq!(
             Config::default().hash(),
             expected,
-            "RULE_HASH_VERSION moved: old indexes are now a different lineage, \
-             which is the point — update this test"
+            "RULE_HASH_VERSION or CONTENT_REVISION moved: old indexes are now a \
+             different lineage, which is the point — update this test"
+        );
+    }
+
+    /// A published index is trusted on the strength of its `config_hash`
+    /// alone, so a build whose *derivation* changed has to change that hash
+    /// too: nothing else distinguishes an index a fixed cambium wrote from one
+    /// a buggy cambium wrote at the same commit with the same configuration.
+    /// That was the envoy change-set step, which kept fetching pre-fix bases
+    /// out of the store and cold-rebuilding every one of them long after the
+    /// splice bug was fixed.
+    #[test]
+    fn the_index_content_revision_is_part_of_the_config_hash() {
+        let mut without = blake3::Hasher::new();
+        without.update(b"cambium-rule-hash-v");
+        without.update(&cambium_proto::RULE_HASH_VERSION.to_le_bytes());
+        without.update(b"\n");
+        without.update(Config::default().to_toml().as_bytes());
+        assert_ne!(
+            Config::default().hash(),
+            *without.finalize().as_bytes(),
+            "an index built before a derivation fix must not be spliceable"
         );
     }
 
