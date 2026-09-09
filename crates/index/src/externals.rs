@@ -150,29 +150,52 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::attribution::{arg_spans, top_level_spans, Attribution};
 use crate::loads::{lex, unescape, FileText, Lexed, LoadGraph, RepoMapping, Tok};
 
-/// A main-repo path pattern that feeds an external repository.
+/// A main-repo input of an external repository: a path pattern the repository
+/// is built from, or a *rule label* whose own inputs the graph knows.
+///
+/// # How the three kinds share one stored column
+///
+/// The table on disk is a string per pattern plus the two boolean columns
+/// `repo_input_prefix` and `repo_input_target_only`, and this enum needs no
+/// third column: a repo-relative path never begins with `//`, so a stored
+/// string that does *is* a label and nothing else can be. Both booleans keep
+/// their meaning — a label is never a prefix, and it is `target_only`
+/// exactly when the path patterns derived beside it are. So adding
+/// [`Pattern::Label`] moves what the tables *mean* without moving the layout:
+/// [`crate::FORMAT_VERSION`] stands and [`crate::CONTENT_REVISION`] is what
+/// retires the indexes written before it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pattern {
     /// Exactly this repo-relative path.
     Exact(String),
     /// This directory and everything under it. Stored with its trailing `/`.
     Prefix(String),
+    /// A main-repo *target* the repository names, in canonical `//pkg:name`
+    /// form. It matches no path; the engine resolves it to a node and asks
+    /// the graph whether the change reached it. See
+    /// [`main_repo_patterns`].
+    Label(String),
 }
 
 impl Pattern {
+    /// Whether a changed main-repo *path* hits this pattern. A label pattern
+    /// matches no path: it is answered from the graph, not from the diff.
     pub fn matches(&self, path: &str) -> bool {
         match self {
             Pattern::Exact(p) => path == p,
             Pattern::Prefix(d) => path.starts_with(d.as_str()),
+            Pattern::Label(_) => false,
         }
     }
 
-    /// The stored form: a prefix keeps its trailing `/`, which is also what
-    /// distinguishes the two kinds on disk.
+    /// The stored form: a prefix keeps its trailing `/`, which is what
+    /// distinguishes it from an exact path, and a label keeps its leading
+    /// `//`, which is what distinguishes it from either.
     pub fn as_str(&self) -> &str {
         match self {
             Pattern::Exact(p) => p,
             Pattern::Prefix(d) => d,
+            Pattern::Label(l) => l,
         }
     }
 
@@ -180,9 +203,16 @@ impl Pattern {
         matches!(self, Pattern::Prefix(_))
     }
 
-    /// Reads back a stored pattern; a trailing `/` means a prefix.
+    pub fn is_label(&self) -> bool {
+        matches!(self, Pattern::Label(_))
+    }
+
+    /// Reads back a stored pattern: a leading `//` means a label, and
+    /// otherwise the boolean says whether it is a prefix.
     pub fn from_stored(s: &str, prefix: bool) -> Self {
-        if prefix {
+        if s.starts_with("//") {
+            Pattern::Label(s.to_string())
+        } else if prefix {
             Pattern::Prefix(s.to_string())
         } else {
             Pattern::Exact(s.to_string())
@@ -316,6 +346,18 @@ impl RepoInputs {
         let mut out = BTreeSet::new();
         for (pat, repos) in &self.patterns {
             if pat.matches(path) {
+                out.extend(repos.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// The repositories a main-repo *target* is an input of; `label` is
+    /// canonical `//pkg:name`. See [`Pattern::Label`].
+    pub fn repos_for_label(&self, label: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (pat, repos) in &self.patterns {
+            if matches!(pat, Pattern::Label(l) if l == label) {
                 out.extend(repos.iter().cloned());
             }
         }
@@ -1126,13 +1168,34 @@ pub fn apparent_of(f: &ModuleFacts, module: &str) -> Option<String> {
 
 // ------------------------------------------------------ building the inputs
 
-/// True if a label string names something in the main repository, and what
-/// path patterns it points at.
+/// What a main-repo label an external repository names can be an input
+/// through; empty when the string does not name the main repository, or does
+/// not name anything at all.
 ///
-/// `//pkg:file.txt` is one file. `//pkg` (no target) is a whole package, so it
-/// is a prefix. `//pkg:name` where the name carries no extension is most
-/// likely a *rule*, whose own sources are not visible from here, so it is a
-/// prefix too — the alternative is to miss every file that rule globs.
+/// A label reaches a repository in exactly two ways, and this returns one
+/// pattern for each:
+///
+/// - **as a file.** A repository rule and a module extension run during
+///   loading and can read *source files* only: `repository_ctx.path`, `read`,
+///   `template` and `symlink`, and a repository rule's `attr.label`, all
+///   reject a rule target. So the only path a label can feed a repository
+///   from is the file it names, exactly — [`Pattern::Exact`]. `//pkg` with no
+///   target is `//pkg:pkg`, whose file reading is `pkg/pkg`.
+/// - **as a rule target.** The repository's *generated targets* may depend on
+///   it — envoy's `bazel/repo.bzl` writes a BUILD file whose `genrule` lists
+///   `@envoy//changelogs` in `tools` — so a change that moves that target
+///   moves the repository's targets with it. Which files those are is not
+///   knowable here (the target is a `filegroup` over a glob), but it is
+///   knowable from the graph, so the label is recorded as written —
+///   [`Pattern::Label`], canonical `//pkg:name` — and the engine asks the
+///   reverse walk whether the change reached that node.
+///
+/// The label kind replaces a [`Pattern::Prefix`] over the label's whole
+/// package subtree, which was the old approximation of "the files that rule
+/// is built from". Visibility specs and `config_setting` keys made that claim
+/// over hundreds of repositories at once and 91% of a large repository's
+/// packages (issue #8); the graph gives the exact answer for the one case it
+/// was covering.
 pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     let rest = match label.strip_prefix("@@") {
         Some(r) => match r.split_once("//") {
@@ -1150,40 +1213,35 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
             },
         },
     };
-    // `rest` is now `pkg:name` or `pkg`, without the leading `//`.
-    if rest.contains(|c: char| c.is_whitespace()) {
+    // `rest` is now `pkg:name` or `pkg`, without the leading `//`. A format
+    // placeholder, whitespace or any other byte a label cannot carry means
+    // this was never a label: `"//%s:foo"`, or text scraped out of a URL.
+    if !rest.bytes().all(is_label_byte) {
         return Vec::new();
     }
     let (pkg, name) = match rest.split_once(':') {
-        Some((p, n)) => (p, Some(n)),
-        None => (rest, None),
+        Some((p, n)) => (p, n),
+        // `//pkg` is `//pkg:pkg`, a rule target. Only the file it might also
+        // be — a source file called `pkg` in that directory — is an input.
+        None => (rest, rest.rsplit('/').next().unwrap_or(rest)),
     };
-    let dir = if pkg.is_empty() {
-        String::new()
-    } else {
-        format!("{pkg}/")
-    };
-    match name {
-        None => {
-            if pkg.is_empty() {
-                // `//` alone would claim the whole repository; that is what a
-                // global invalidation is for, not a pattern.
-                Vec::new()
-            } else {
-                vec![Pattern::Prefix(dir)]
-            }
-        }
-        Some("") => Vec::new(),
-        Some(n) => {
-            let path = format!("{dir}{n}");
-            let mut v = vec![Pattern::Exact(path)];
-            // A name with no extension is a rule, not a file.
-            if !n.contains('.') && !pkg.is_empty() {
-                v.push(Pattern::Prefix(dir));
-            }
-            v
-        }
+    // A visibility token names no file and can never be read by a rule.
+    if name.is_empty() || name.starts_with("__") {
+        return Vec::new();
     }
+    // The file the label names, and the target it names; see the doc comment.
+    // A source-file label is covered both ways at once, and harmlessly: its
+    // `Label` pattern resolves to the file's own node, whose reverse row is
+    // the rules that consume it.
+    let path = if pkg.is_empty() {
+        name.to_string()
+    } else {
+        format!("{pkg}/{name}")
+    };
+    vec![
+        Pattern::Exact(path),
+        Pattern::Label(format!("//{pkg}:{name}")),
+    ]
 }
 
 /// Computes the repository-input map for a checkout.
@@ -1816,25 +1874,47 @@ mod tests {
     #[test]
     fn labels_become_patterns() {
         let m = m();
+        // The file a label names, and the target it names. Never the label's
+        // package subtree, which is what issue #8 was about.
         assert_eq!(
             main_repo_patterns("@envoy//:.github/config.yml", &m),
-            vec![Pattern::Exact(".github/config.yml".into())]
+            vec![
+                Pattern::Exact(".github/config.yml".into()),
+                Pattern::Label("//:.github/config.yml".into()),
+            ]
         );
         assert_eq!(
             main_repo_patterns("@envoy//changelogs", &m),
-            vec![Pattern::Prefix("changelogs/".into())]
+            vec![
+                Pattern::Exact("changelogs/changelogs".into()),
+                Pattern::Label("//changelogs:changelogs".into()),
+            ]
         );
         assert_eq!(
             main_repo_patterns("//changelogs:summary", &m),
             vec![
                 Pattern::Exact("changelogs/summary".into()),
-                Pattern::Prefix("changelogs/".into())
+                Pattern::Label("//changelogs:summary".into()),
             ]
         );
+        // A `config_setting` key names a target and a file that is probably
+        // not there; neither claims `build/**`.
+        assert_eq!(
+            main_repo_patterns("//build:some_flag", &m),
+            vec![
+                Pattern::Exact("build/some_flag".into()),
+                Pattern::Label("//build:some_flag".into()),
+            ]
+        );
+        // A visibility token names no file and creates no edge.
+        assert!(main_repo_patterns("//some/team:__subpackages__", &m).is_empty());
+        assert!(main_repo_patterns("//some/team:__pkg__", &m).is_empty());
         // Not the main repository.
         assert!(main_repo_patterns("@envoy_api//envoy:pkg", &m).is_empty());
         assert!(main_repo_patterns("not a label", &m).is_empty());
         assert!(main_repo_patterns("//", &m).is_empty());
+        // Never a label at all: a format placeholder, or text out of a URL.
+        assert!(main_repo_patterns("//%s:foo", &m).is_empty());
     }
 
     struct Files(Vec<(&'static str, &'static str)>);
@@ -1876,8 +1956,12 @@ mod tests {
             ri.repos_for(".github/config.yml"),
             ["envoy_repo".to_string()].into_iter().collect()
         );
+        // `@envoy//changelogs` names the target `//changelogs:changelogs`, not
+        // the files under it: no path pattern covers the changelog entry, and
+        // the graph answers for it instead (issue #8).
+        assert!(ri.repos_for("changelogs/current/x.rst").is_empty());
         assert_eq!(
-            ri.repos_for("changelogs/current/x.rst"),
+            ri.repos_for_label("//changelogs:changelogs"),
             ["envoy_repo".to_string()].into_iter().collect()
         );
         assert_eq!(
@@ -1998,13 +2082,19 @@ _envoy_repo = repository_rule(
         let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
         let envoy_repo: BTreeSet<String> = ["envoy_repo".to_string()].into_iter().collect();
 
-        // Named by the generated BUILD file: the repository is still built
-        // from it, so rule (1) still has a repository to resolve...
-        assert_eq!(ri.repos_for("changelogs/current/x.rst"), envoy_repo);
-        // ...but no `.bzl` in it can have moved.
+        // Named by the generated BUILD file: the repository's targets depend
+        // on `//changelogs:changelogs`, so rule (1) still has a repository to
+        // resolve when the graph says a change reached that target...
+        assert_eq!(ri.repos_for_label("//changelogs:changelogs"), envoy_repo);
+        assert_eq!(ri.repos_for_label("//changelogs:summary"), envoy_repo);
+        // ...but the changelog entry itself is no longer a path input: which
+        // files that `filegroup` globs is the graph's answer, not a subtree
+        // prefix's (issue #8).
+        assert!(ri.repos_for("changelogs/current/x.rst").is_empty());
+        // ...and no `.bzl` in the repository can have moved either way.
         assert!(ri
             .target_only
-            .contains(&Pattern::Prefix("changelogs/".into())));
+            .contains(&Pattern::Label("//changelogs:changelogs".into())));
         assert!(ri
             .target_only
             .contains(&Pattern::Exact("changelogs/summary".into())));
@@ -2324,15 +2414,17 @@ _envoy_repo = repository_rule(
             ri.repos_for("bazel/external/cargo/remote/defs.bzl"),
             set(&["cu"])
         );
-        // The generated BUILD file's `tools` still name the repository, and
-        // still cannot have moved a `.bzl` inside it.
+        // The generated BUILD file's `tools` still name the repository — as a
+        // target, whose own files the graph knows — and still cannot have
+        // moved a `.bzl` inside it.
         assert_eq!(
-            ri.repos_for("changelogs/current/x.rst"),
+            ri.repos_for_label("//changelogs:changelogs"),
             set(&["envoy_repo"])
         );
+        assert!(ri.repos_for("changelogs/current/x.rst").is_empty());
         assert!(ri
             .target_only
-            .contains(&Pattern::Prefix("changelogs/".into())));
+            .contains(&Pattern::Label("//changelogs:changelogs".into())));
     }
 
     /// Pre-bzlmod envoy (issue #6): no `MODULE.bazel` at all, so every file

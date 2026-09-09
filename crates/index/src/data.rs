@@ -256,7 +256,11 @@ pub struct IndexData {
     // - `repo_input_*` is the map from a main-repo path pattern to the
     //   repositories built from it: an edit to `.github/config.yml` dirties
     //   `@envoy_repo` and nothing else. Patterns are sorted; a trailing `/`
-    //   (recorded in `repo_input_prefix`) means "this directory and below".
+    //   (recorded in `repo_input_prefix`) means "this directory and below",
+    //   and a *leading* `//` means the entry is a main-repo label rather than
+    //   a path — a target the repository names, whose own inputs only the
+    //   graph knows (see [`crate::externals::Pattern`]). No repo-relative
+    //   path begins with `//`, which is what lets the two share the column.
     // - `bzl_repo_*` is, for each `.bzl` in the workspace closure, the
     //   repositories it can define. That is what stops a change to
     //   `bazel/repo.bzl` from being global.
@@ -612,6 +616,11 @@ impl<'a> IndexRef<'a> {
         let mut out: std::collections::BTreeMap<u32, bool> = Default::default();
         for p in 0..self.repo_input_patterns.len() as u32 {
             let pat = self.repo_input_patterns.get(p);
+            // A label pattern is not a path and is answered from the graph
+            // instead; see [`IndexRef::repos_for_label_kinds`].
+            if pat.starts_with("//") {
+                continue;
+            }
             let hit = if self.repo_input_prefix[p as usize] {
                 path.starts_with(pat)
             } else {
@@ -626,6 +635,54 @@ impl<'a> IndexRef<'a> {
             }
         }
         out.into_iter().collect()
+    }
+
+    /// The repositories a main-repo *target* is an input of, in the same shape
+    /// as [`IndexRef::repos_for_path_kinds`].
+    ///
+    /// The counterpart to the path lookup for [`crate::externals::Pattern::Label`]:
+    /// the repository's generated targets name this label, so a change that
+    /// reaches this target in the graph moves them. `label` is canonical
+    /// `//pkg:name`.
+    pub fn repos_for_label_kinds(&self, label: &str) -> Vec<(u32, bool)> {
+        let mut out: std::collections::BTreeMap<u32, bool> = Default::default();
+        for p in 0..self.repo_input_patterns.len() as u32 {
+            if self.repo_input_patterns.get(p) != label {
+                continue;
+            }
+            let feeds = !self.repo_input_target_only[p as usize];
+            for &r in self.repo_inputs.row(p) {
+                *out.entry(r).or_default() |= feeds;
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Every stored [`crate::externals::Pattern::Label`], with the
+    /// repositories it is an input of and whether it feeds their rules.
+    ///
+    /// The engine turns this into a node-id map once per run, and only when it
+    /// is non-empty, so that the reverse walk can ask "did this change reach a
+    /// target one of the repositories names?".
+    pub fn label_inputs(&self) -> Vec<(&'a str, Vec<(u32, bool)>)> {
+        let mut out = Vec::new();
+        for p in 0..self.repo_input_patterns.len() as u32 {
+            let pat = self.repo_input_patterns.get(p);
+            if !pat.starts_with("//") {
+                continue;
+            }
+            let feeds = !self.repo_input_target_only[p as usize];
+            let repos: Vec<(u32, bool)> = self
+                .repo_inputs
+                .row(p)
+                .iter()
+                .map(|&r| (r, feeds))
+                .collect();
+            if !repos.is_empty() {
+                out.push((pat, repos));
+            }
+        }
+        out
     }
 
     /// How main-repo paths land inside a repository, when that could be

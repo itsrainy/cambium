@@ -64,7 +64,17 @@ use serde::{Deserialize, Serialize};
 ///   the ordinary reverse walk reports what reads it; `--explain` can report a
 ///   new direct reason `{"kind": "starlark_flag", "label": "//bazel:crypto"}`.
 ///   `bazelrc_flags` is omitted when empty.
-pub const SCHEMA_VERSION: u32 = 7;
+/// - **8** adds `stats.repos_dirty_by_target`: external repositories whose
+///   *generated targets* depend on a main-repo rule target the reverse walk
+///   reached — envoy's `@envoy_repo`, whose generated `genrule` lists
+///   `@envoy//changelogs` in `tools`, when a changelog entry moves. Such a
+///   repository is found after the walk rather than from the diff, so the
+///   walk runs again from its label consumers, and `--explain` can report a
+///   new direct reason `{"kind": "external_repo_target", "repo":
+///   "envoy_repo", "via": "//changelogs:changelogs"}`. Purely additive; the
+///   same edit used to be answered by a path prefix over the label's whole
+///   package subtree (issue #8).
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -106,6 +116,12 @@ pub enum DirectReason {
     /// because `MODULE.bazel` moved, or because a main-repo file the
     /// repository is built from moved.
     ExternalRepo { label: String },
+    /// It names a target in an external repository whose *generated targets*
+    /// depend on a main-repo rule target the change reached: the repository
+    /// rule wrote a BUILD file naming `via`, so whatever moves `via` moves
+    /// that repository's targets. Rule (1) only — the rule cannot read a
+    /// target's output, so nothing it wrote can have changed.
+    ExternalRepoTarget { repo: String, via: String },
 }
 
 impl DirectReason {
@@ -123,6 +139,9 @@ impl DirectReason {
             }
             DirectReason::ExternalRepo { label } => {
                 format!("external dependency {label} changed")
+            }
+            DirectReason::ExternalRepoTarget { repo, via } => {
+                format!("external repository @{repo} is built around {via}, which changed")
             }
         }
     }
@@ -202,6 +221,12 @@ pub struct Stats {
     /// changed.
     #[serde(default)]
     pub repos_dirty_by_bzl: usize,
+    /// External repositories dirtied because the reverse walk reached a
+    /// main-repo *rule target* their generated targets name — envoy's
+    /// `@envoy_repo` when a changelog entry moves. Found after the walk, not
+    /// from the diff, so the walk is run again from their label consumers.
+    #[serde(default)]
+    pub repos_dirty_by_target: usize,
     /// Of `repos_dirty_by_input`, how many were dirtied by an edit that
     /// provably cannot be one of the `.bzl` files loaded from the repository —
     /// the derived path mapping says so, or the path is named only by a target

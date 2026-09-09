@@ -139,7 +139,17 @@ pub const FORMAT_VERSION: u32 = 8;
 /// that spliced onto one would keep re-querying the packages the change was
 /// written to spare — a correct answer at the old cost, which is exactly what
 /// this counter retires.
-pub const CONTENT_REVISION: u32 = 2;
+///
+/// 3 --- a repository-rule label stopped claiming its whole package subtree as
+/// a path prefix, and the pattern table gained a third kind of entry, the
+/// label itself (issue #8; see [`crate::externals::Pattern`]). The layout is
+/// unchanged — a label is told from a path by its leading `//` — but the
+/// tables mean something new: an index written before this carries subtree
+/// prefixes that dirty ~91% of a large repository's packages on a common
+/// edit, and no label entries at all, so a run that spliced onto one would
+/// keep both the over-broad answer and the whole-repository re-indexes it
+/// causes.
+pub const CONTENT_REVISION: u32 = 3;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
