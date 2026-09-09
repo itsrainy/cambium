@@ -136,7 +136,8 @@ impl<'a> BaselineCache<'a> {
         if f.view().config_hash != self.config_hash {
             tracing::warn!(
                 key = name,
-                "skipping an index built with a different cambium.toml (or an older rule-hash version)"
+                "skipping an index built with a different cambium.toml (or an older rule-hash \
+                 version or index content revision)"
             );
             return Ok(None);
         }
