@@ -125,6 +125,8 @@ struct ScreenedDiff<'a> {
     changes: Vec<&'a Change>,
     /// Bazelrc files whose edit was classified safe.
     safe: usize,
+    /// Changed Starlark build settings, to be resolved against the index.
+    label_flags: Vec<bazelrc::LabelFlag>,
     /// Set when a bazelrc edit invalidates the whole run.
     global_reason: Option<String>,
 }
@@ -592,24 +594,29 @@ impl Engine {
     fn screen_bazelrc<'a>(&self, changes: &'a [Change], req: &AffectedRequest) -> ScreenedDiff<'a> {
         let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
         let mut safe = 0usize;
+        let mut label_flags: Vec<bazelrc::LabelFlag> = Vec::new();
         for c in changes {
             if !bazelrc::is_bazelrc_path(&c.path) {
                 kept.push(c);
                 continue;
             }
             match self.bazelrc_verdict(c, req) {
-                Ok(n) => {
+                Ok(s) => {
                     tracing::debug!(
-                        path = %c.path, changed_flags = n,
-                        "the bazelrc edit only touched flags that cannot affect loading"
+                        path = %c.path, changed_flags = s.changed_flags,
+                        label_flags = s.label_flags.len(),
+                        "the bazelrc edit only touched flags that cannot affect loading, \
+                         or Starlark build settings the index can resolve"
                     );
                     safe += 1;
+                    label_flags.extend(s.label_flags);
                 }
                 Err(reason) => {
                     tracing::info!(path = %c.path, %reason, "bazelrc edit forces a global run");
                     return ScreenedDiff {
                         changes: changes.iter().collect(),
                         safe,
+                        label_flags: Vec::new(),
                         global_reason: Some(reason),
                     };
                 }
@@ -618,17 +625,19 @@ impl Engine {
         ScreenedDiff {
             changes: kept,
             safe,
+            label_flags,
             global_reason: None,
         }
     }
 
-    /// `Ok(changed flags)` if this one bazelrc change is irrelevant to loading,
-    /// `Err(reason)` if it is not or cannot be read.
+    /// `Ok(screen)` if this one bazelrc change is irrelevant to loading except
+    /// for Starlark build settings the caller will resolve, `Err(reason)` if it
+    /// is not or cannot be read.
     fn bazelrc_verdict(
         &self,
         c: &Change,
         req: &AffectedRequest,
-    ) -> std::result::Result<usize, String> {
+    ) -> std::result::Result<bazelrc::Screen, String> {
         use cambium_diff::Status;
         let path = &c.path;
         match c.status {
@@ -647,9 +656,10 @@ impl Engine {
         };
         let base = text(&req.base)?;
         let head = text(&req.head)?;
-        match bazelrc::classify(&base, &head, &self.cfg.bazelrc.allowlist_extra) {
-            bazelrc::Verdict::Safe { changed_flags } => Ok(changed_flags),
-            bazelrc::Verdict::Unknown(why) => Err(format!("{path}: {why}")),
+        let screen = bazelrc::screen(&base, &head, &self.cfg.bazelrc.allowlist_extra);
+        match screen.unknown {
+            Some(why) => Err(format!("{path}: {why}")),
+            None => Ok(screen),
         }
     }
 
@@ -722,7 +732,15 @@ impl Engine {
         // this only ever turns a global into a smaller answer.
         let screened = self.screen_bazelrc(changes, req);
         stats.bazelrc_safe_diffs = screened.safe;
-        if let Some(reason) = screened.global_reason {
+        // A changed Starlark build setting is a changed *target*, not a
+        // changed flag: resolve it against the index and seed its node, or
+        // learn why that cannot be trusted. See `crate::flags`.
+        let mut flag_reach = crate::flags::FlagReach::default();
+        if screened.global_reason.is_none() && !screened.label_flags.is_empty() {
+            flag_reach = crate::flags::resolve(base_view, querier, &screened.label_flags);
+            stats.bazelrc_flag_nodes = flag_reach.nodes.len();
+        }
+        if let Some(reason) = screened.global_reason.or_else(|| flag_reach.global.take()) {
             timings.dirty = sw.lap();
             timings.total = timings.dirty;
             let dirty = DirtySet {
@@ -885,6 +903,7 @@ impl Engine {
             changed_file_ids: &changed_file_ids,
             bzl_dirty: &bzl_dirty,
             external_nodes: &external_nodes,
+            flag_nodes: &flag_reach.nodes,
         };
         let mut run = RunState {
             req,
@@ -892,6 +911,7 @@ impl Engine {
             timings,
             stats,
             cold_reason,
+            bazelrc_flags: flag_reach.flags,
             sw,
         };
 
@@ -1071,6 +1091,8 @@ struct DirectInputs<'a> {
     changed_file_ids: &'a [(u32, String)],
     bzl_dirty: &'a BTreeSet<String>,
     external_nodes: &'a [(u32, String)],
+    /// Starlark build settings a `.bazelrc` edit changed, as `(id, label)`.
+    flag_nodes: &'a [(u32, String)],
 }
 
 /// What the tail of a run carries from the splice to the report.
@@ -1080,6 +1102,8 @@ struct RunState<'a> {
     timings: Timings,
     stats: Stats,
     cold_reason: Option<String>,
+    /// Starlark build settings the bazelrc screen resolved, for the report.
+    bazelrc_flags: Vec<String>,
     sw: Stopwatch,
 }
 
@@ -1115,6 +1139,7 @@ impl RunState<'_> {
             global_reason: None,
             cold_rebuild_reason: self.cold_reason,
             dirty_packages: self.dirty.dirty.iter().cloned().collect(),
+            bazelrc_flags: self.bazelrc_flags.clone(),
             direct: cambium_index::view::labels_sorted(view, &direct),
             affected: affected_targets(view, &result),
             tests: cambium_index::view::labels_sorted(view, &result.tests),
@@ -1223,6 +1248,21 @@ fn derive_direct<V: GraphView + ?Sized>(
         }
     }
 
+    // A Starlark build setting's value moved. The setting itself is a target
+    // whose *definition* did not change, so it is not direct; what changed is
+    // every rule that reads it — the `config_setting`s whose `flag_values`
+    // name it and the rules whose `attr.label` defaults point at it, which is
+    // its reverse row. The `select()`s on those config_settings are edges too,
+    // so the ordinary walk carries the answer outwards from there.
+    for (id, label) in inputs.flag_nodes {
+        for &consumer in view.reverse_row(*id, &mut scratch) {
+            let reason = DirectReason::StarlarkFlag {
+                label: label.clone(),
+            };
+            add(&mut direct, &mut reasons, consumer, reason);
+        }
+    }
+
     let mut direct: Vec<u32> = direct.into_iter().collect();
     direct.sort_unstable();
     (direct, reasons)
@@ -1289,6 +1329,7 @@ fn global_report(
         global_reason: dirty.global_reason,
         cold_rebuild_reason: None,
         dirty_packages: Vec::new(),
+        bazelrc_flags: Vec::new(),
         direct: Vec::new(),
         affected: Vec::new(),
         tests: Vec::new(),
