@@ -20,6 +20,35 @@
 //! reason per entry, and it errs towards "unknown": a flag that is merely
 //! *probably* irrelevant costs one over-invalidation if it is left off, and a
 //! missed target if it is wrongly put on.
+//!
+//! # Starlark flags
+//!
+//! One family off the allowlist can still be answered exactly, because it is
+//! not a flag at all but a *target*: a Starlark build setting, written
+//! `--@envoy//bazel:crypto=boringssl` or `--//bazel:foo=bar`. [`screen`] hands
+//! those back to the engine instead of calling them unknown; the engine
+//! resolves each against the index and either seeds its node or keeps the
+//! global. The reasoning it relies on:
+//!
+//! - A `config_setting(flag_values = {"//bazel:crypto": "boringssl"})` names
+//!   the flag through a label-keyed attribute, so `bazel query` records an edge
+//!   from the config_setting to the flag, and every `select()` key is an edge
+//!   from the selecting rule to the config_setting. Seeding the flag's node
+//!   into the direct set and running the ordinary reverse walk therefore
+//!   reaches every target whose definition the value can move, exactly as the
+//!   externals stage does for a moved repository's leaf nodes. The same goes
+//!   for a rule reading the setting through `attr.label(default = ...)`: the
+//!   default is an edge.
+//! - A Starlark *transition* reading the flag (`transition(inputs = [...])`) is
+//!   not an edge. Its `inputs`/`outputs` are string literals in a `.bzl`, so
+//!   the engine looks for the label in the text of every `.bzl` in the stored
+//!   load closure; a hit means the walk cannot be trusted and the run stays
+//!   global, naming the file.
+//! - `command:config` scoping keeps its global too: a value that applies only
+//!   under `--config=foo` is a question about the invocation, and cambium does
+//!   not model invocations.
+//!
+//! `--define` and native flags are not labels and are untouched by any of this.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,6 +62,31 @@ use std::collections::{BTreeMap, BTreeSet};
 pub fn is_bazelrc_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.ends_with(".bazelrc") || base == "bazel.rc"
+}
+
+/// A changed flag whose name is a label: a Starlark build setting
+/// (`--@envoy//bazel:crypto=boringssl`, `--//bazel:foo=bar`).
+///
+/// Unlike `--define` or a native flag, this one *is* a target, and the index
+/// records every edge into it: `config_setting(flag_values = ...)` names it,
+/// and a rule's `select()` names the config_setting. So the engine can answer
+/// what a change to it reaches instead of giving up — see
+/// [`crate::engine::Engine::compute`] and the module doc's "Starlark flags".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelFlag {
+    pub key: FlagKey,
+    /// The label as written in the rc file, dashes and `no` prefix removed.
+    pub label: String,
+}
+
+/// The result of reading a `.bazelrc` diff: how many triples changed, which of
+/// them were label-valued Starlark flags (resolvable against the index), and
+/// the first thing that was neither allowlisted nor resolvable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Screen {
+    pub changed_flags: usize,
+    pub label_flags: Vec<LabelFlag>,
+    pub unknown: Option<String>,
 }
 
 /// What a `.bazelrc` diff means for the run.
@@ -327,36 +381,110 @@ pub fn changed_flags(base: &Bazelrc, head: &Bazelrc) -> Vec<FlagKey> {
         .collect()
 }
 
-/// Classifies a bazelrc edit: safe only if every changed triple is allowlisted
-/// and the imports are untouched.
-pub fn classify(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Verdict {
+/// The label a flag name denotes, if it is one.
+///
+/// `@repo//pkg:name`, `@@canonical//pkg:name` and `//pkg:name` are Starlark
+/// build settings; everything else (`define`, `jobs`, `platforms`) is a native
+/// flag and has no target behind it. A boolean setting is negated by writing
+/// `--no//pkg:name`, so a leading `no` in front of a label is stripped — and
+/// only in front of a label, so `nostamp` stays `nostamp`.
+///
+/// `name` has already had its leading dashes removed by [`parse`].
+pub fn flag_label(name: &str) -> Option<&str> {
+    let label = match name.strip_prefix("no") {
+        Some(rest) if rest.starts_with('@') || rest.starts_with("//") => rest,
+        _ => name,
+    };
+    let rest = if let Some(r) = label.strip_prefix("@@") {
+        r
+    } else if let Some(r) = label.strip_prefix('@') {
+        r
+    } else {
+        return label.starts_with("//").then_some(label);
+    };
+    // `@repo//pkg:name`: a repository name and then a main-repo-shaped label.
+    let (repo, after) = rest.split_once("//")?;
+    (!repo.is_empty() && !repo.contains(':') && !after.is_empty()).then_some(label)
+}
+
+/// Reads a bazelrc diff into the three things a run can act on: the count of
+/// changed triples, the label-valued Starlark flags among them, and the first
+/// change that is neither allowlisted nor a label.
+///
+/// A label flag is only handed back when it is set unconditionally: a value
+/// written under `command:config` applies only when that `--config` is named,
+/// and cambium does not model configs, so it cannot tell whether the run it is
+/// answering for uses it. Startup lines and imports stay unknown.
+pub fn screen(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Screen {
     let base = parse(base_text);
     let head = parse(head_text);
+    let mut out = Screen::default();
     if base.imports != head.imports {
         let mut diff: Vec<&String> = base.imports.symmetric_difference(&head.imports).collect();
         diff.sort();
         let first = diff.first().map(|s| s.as_str()).unwrap_or("import");
-        return Verdict::Unknown(format!(
+        out.unknown = Some(format!(
             "`{first}` changed; an imported rc file can carry anything"
         ));
+        return out;
     }
     let changed = changed_flags(&base, &head);
+    out.changed_flags = changed.len();
     for key in &changed {
         if key.command == "startup" {
-            return Verdict::Unknown(format!(
+            out.unknown = Some(format!(
                 "startup --{} changed, and startup options are never classified",
                 key.name
             ));
+            return out;
         }
-        if !is_allowed(&key.name, extra_allowlist) {
-            return Verdict::Unknown(format!(
-                "{} --{} changed, not on the loading-irrelevant allowlist",
-                key.command, key.name
-            ));
+        if is_allowed(&key.name, extra_allowlist) {
+            continue;
+        }
+        match flag_label(&key.name) {
+            Some(label) if key.config.is_none() => out.label_flags.push(LabelFlag {
+                key: key.clone(),
+                label: label.to_string(),
+            }),
+            Some(_) => {
+                out.unknown = Some(format!(
+                    "{}:{} --{} changed, and a flag set under a --config applies only to \
+                     the runs that name it, which cambium does not model",
+                    key.command,
+                    key.config.as_deref().unwrap_or_default(),
+                    key.name
+                ));
+                return out;
+            }
+            None => {
+                out.unknown = Some(format!(
+                    "{} --{} changed, not on the loading-irrelevant allowlist",
+                    key.command, key.name
+                ));
+                return out;
+            }
         }
     }
+    out
+}
+
+/// Classifies a bazelrc edit without an index to resolve label flags against:
+/// safe only if every changed triple is allowlisted and the imports are
+/// untouched. A Starlark flag is unknown here; [`screen`] is what the engine
+/// uses, and it can do better.
+pub fn classify(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Verdict {
+    let s = screen(base_text, head_text, extra_allowlist);
+    if let Some(why) = s.unknown {
+        return Verdict::Unknown(why);
+    }
+    if let Some(f) = s.label_flags.first() {
+        return Verdict::Unknown(format!(
+            "{} --{} changed, not on the loading-irrelevant allowlist",
+            f.key.command, f.key.name
+        ));
+    }
     Verdict::Safe {
-        changed_flags: changed.len(),
+        changed_flags: s.changed_flags,
     }
 }
 
@@ -523,6 +651,62 @@ mod tests {
     fn negated_booleans_match_their_positive_form() {
         assert!(is_allowed("nocache_test_results", &[]));
         assert!(!is_allowed("nodefine", &[]));
+    }
+
+    #[test]
+    fn label_flags_are_recognised_in_every_spelling() {
+        assert_eq!(flag_label("@repo//x:y"), Some("@repo//x:y"));
+        assert_eq!(flag_label("@@repo+//x:y"), Some("@@repo+//x:y"));
+        assert_eq!(flag_label("//x:y"), Some("//x:y"));
+        assert_eq!(flag_label("//x/y:z"), Some("//x/y:z"));
+        // A package with no target part is still a label.
+        assert_eq!(flag_label("@quiche//:ssl_lib"), Some("@quiche//:ssl_lib"));
+        // Boolean negation of a setting, and a native flag that starts `no`.
+        assert_eq!(flag_label("no//x:y"), Some("//x:y"));
+        assert_eq!(flag_label("no@repo//x:y"), Some("@repo//x:y"));
+        assert_eq!(flag_label("nostamp"), None);
+        assert_eq!(flag_label("nocache_test_results"), None);
+        for native in ["define", "jobs", "platforms", "config", "", "@", "@repo"] {
+            assert_eq!(flag_label(native), None, "{native}");
+        }
+    }
+
+    #[test]
+    fn a_label_flag_is_handed_back_rather_than_called_unknown() {
+        let s = screen(
+            "build --jobs=8\n",
+            "build --jobs=8\nbuild --@envoy//bazel:crypto=boringssl\nbuild --//bazel:foo=bar\n",
+            &[],
+        );
+        assert_eq!(s.unknown, None);
+        assert_eq!(s.changed_flags, 2);
+        let labels: Vec<&str> = s.label_flags.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels, ["//bazel:foo", "@envoy//bazel:crypto"]);
+    }
+
+    #[test]
+    fn a_label_flag_under_a_config_is_unknown() {
+        let s = screen(
+            "build --jobs=8\n",
+            "build --jobs=8\nbuild:ci --@envoy//bazel:crypto=boringssl\n",
+            &[],
+        );
+        assert!(s.label_flags.is_empty());
+        assert!(
+            s.unknown.as_deref().is_some_and(|m| m.contains("--config")),
+            "{:?}",
+            s.unknown
+        );
+    }
+
+    #[test]
+    fn an_unknown_native_flag_still_wins_over_a_label_flag() {
+        let s = screen(
+            "build --jobs=8\n",
+            "build --jobs=8\nbuild --//bazel:foo=bar\nbuild --define=x=1\n",
+            &[],
+        );
+        assert!(s.unknown.is_some(), "{s:?}");
     }
 
     #[test]

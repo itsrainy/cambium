@@ -24,7 +24,9 @@ use serde_json::Value;
 /// `stats.rbuildfiles_called` is now always false; version 5 added
 /// `stats.bazelrc_safe_diffs`, `stats.cold_rebuild` and the optional
 /// `cold_rebuild_reason`, the four `stats.repos_*` / `stats.external_direct_targets`
-/// counters and the `external_repo` direct reason. The version is shared with
+/// counters and the `external_repo` direct reason; version 6 added
+/// `stats.repos_label_only`, and version 7 `stats.bazelrc_flag_nodes`, the
+/// `bazelrc_flags` list and the `starlark_flag` direct reason. The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -65,7 +67,9 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.repos_dirty_by_input",
     "stats.repos_dirty_by_module",
     "stats.repos_label_only",
+    "stats.bazelrc_flag_nodes",
     "stats.rbuildfiles_called",
+    "bazelrc_flags[]",
     "tests[]",
     "timings_ms.dirty",
     "timings_ms.direct",
@@ -86,6 +90,7 @@ fn fixture() -> AffectedReport {
         global_reason: Some("only set when global".into()),
         cold_rebuild_reason: Some("only set when the run re-indexed at head".into()),
         dirty_packages: vec!["lib/core".into()],
+        bazelrc_flags: vec!["--@envoy//bazel:crypto".into()],
         direct: vec!["//lib/core:core".into()],
         affected: vec![
             AffectedTarget {
@@ -128,6 +133,7 @@ fn fixture() -> AffectedReport {
             repos_dirty_by_bzl: 13,
             repos_label_only: 15,
             external_direct_targets: 14,
+            bazelrc_flag_nodes: 16,
         },
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),

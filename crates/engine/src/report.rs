@@ -49,7 +49,14 @@ use serde::{Deserialize, Serialize};
 ///   dirtied where the derived path mapping showed the edit could not be one
 ///   of the `.bzl` files loaded from the repository, so only its label
 ///   consumers were reported. Purely additive.
-pub const SCHEMA_VERSION: u32 = 6;
+/// - **7** adds `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a
+///   `.bazelrc` edit that changes a Starlark build setting
+///   (`--@envoy//bazel:crypto=boringssl`) is no longer automatically global.
+///   The setting is a target, so its node is seeded into the direct set and
+///   the ordinary reverse walk reports what reads it; `--explain` can report a
+///   new direct reason `{"kind": "starlark_flag", "label": "//bazel:crypto"}`.
+///   `bazelrc_flags` is omitted when empty.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -83,6 +90,10 @@ pub enum DirectReason {
     File { path: String },
     /// A target it depended on was deleted.
     DeletedDep { label: String },
+    /// A `.bazelrc` edit changed the value of a Starlark build setting this
+    /// target's definition reads — through a `config_setting`'s `flag_values`,
+    /// a `select()` on one, or an `attr.label` default.
+    StarlarkFlag { label: String },
     /// It names a target in an external repository whose contents moved —
     /// because `MODULE.bazel` moved, or because a main-repo file the
     /// repository is built from moved.
@@ -99,6 +110,9 @@ impl DirectReason {
             }
             DirectReason::File { path } => format!("source file {path} changed"),
             DirectReason::DeletedDep { label } => format!("dependency {label} was deleted"),
+            DirectReason::StarlarkFlag { label } => {
+                format!("starlark build setting {label} changed")
+            }
             DirectReason::ExternalRepo { label } => {
                 format!("external dependency {label} changed")
             }
@@ -172,6 +186,12 @@ pub struct Stats {
     /// consumers were therefore made direct.
     #[serde(default)]
     pub external_direct_targets: usize,
+    /// Starlark build settings a `.bazelrc` edit changed that resolved to a
+    /// node in the index, and whose consumers were therefore made direct
+    /// instead of the run going global. A setting that resolved to no node is
+    /// counted in `bazelrc_flags` but not here: nothing depends on it.
+    #[serde(default)]
+    pub bazelrc_flag_nodes: usize,
 }
 
 /// One affected target, with how far from the change it sits.
@@ -203,6 +223,10 @@ pub struct AffectedReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cold_rebuild_reason: Option<String>,
     pub dirty_packages: Vec<String>,
+    /// Starlark build settings a `.bazelrc` edit changed and the index
+    /// resolved, as the rc file writes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bazelrc_flags: Vec<String>,
     pub direct: Vec<String>,
     /// `direct` plus its reverse closure, sorted by label.
     pub affected: Vec<AffectedTarget>,
@@ -224,6 +248,7 @@ impl Default for AffectedReport {
             global_reason: None,
             cold_rebuild_reason: None,
             dirty_packages: Vec::new(),
+            bazelrc_flags: Vec::new(),
             direct: Vec::new(),
             affected: Vec::new(),
             tests: Vec::new(),
