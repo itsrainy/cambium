@@ -788,6 +788,7 @@ impl Engine {
         }
         stats.repos_dirty_by_bzl = ext.by_bzl;
         let mut external_nodes: Vec<(u32, String)> = Vec::new();
+        let mut packages_by_repo: BTreeMap<String, usize> = BTreeMap::new();
         if !dirty.global && !ext.repos.is_empty() {
             let r = crate::externals::reach(base_view, &ext.repos, &ext.load_repos);
             tracing::debug!(
@@ -798,6 +799,7 @@ impl Engine {
                 "external repositories moved"
             );
             dirty.dirty.extend(r.packages);
+            packages_by_repo = r.packages_by_repo;
             external_nodes = r
                 .nodes
                 .into_iter()
@@ -839,7 +841,20 @@ impl Engine {
         let mut cold_reason = None;
         let (to_query, rows) = if cold {
             let reason = cold_rebuild_reason(dirty.dirty.len(), limit);
-            tracing::info!(%reason, "re-indexing the whole repository at head");
+            // Distinguishable from a genuine cold build, which says `running
+            // full bazel query //... (cold build)`: this one re-queries the
+            // same `//...` but keeps the lineage and splices onto the base, so
+            // the answer stays exact and only the cost changed. `reason`'s
+            // wording is load-bearing — the bench harness histograms it — so
+            // everything new goes in the fields and the lines below it.
+            tracing::info!(
+                %reason,
+                dirty_packages = dirty.dirty.len(),
+                limit,
+                "re-querying //... at head because the dirty set overflowed \
+                 (lineage kept, answer still exact)"
+            );
+            log_overflow_contributors(&ext, &packages_by_repo);
             cold_reason = Some(reason);
             let u = querier.universe()?;
             let names: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
@@ -1590,8 +1605,59 @@ fn rescan_closure(
 }
 
 /// Why a run gave up on splicing the dirty set and re-indexed instead.
+///
+/// The wording is fixed: the benchmark harness histograms this string, so it
+/// must stay comparable across releases. Anything new about the overflow goes
+/// in the log fields beside it, or in [`log_overflow_contributors`].
 fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
     format!("dirty packages {dirty} exceed limits.max_dirty_packages = {limit}")
+}
+
+/// What actually filled the dirty set, when it overflowed.
+///
+/// The repository set alone is hundreds of names and thousands of characters
+/// and says nothing about *why*; what diagnoses the overflow is which input
+/// path dirtied which repository, and how many packages each repository's rule
+/// (2) reach then contributed. Ten lines at most, the largest contributors
+/// first, at `info` — a run that just decided to re-query the whole repository
+/// can afford them.
+fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String, usize>) {
+    const MAX_LINES: usize = 10;
+    let mut rows: Vec<(&str, usize, &[String])> = ext
+        .input_paths
+        .iter()
+        .map(|(repo, paths)| {
+            (
+                repo.as_str(),
+                packages_by_repo.get(repo).copied().unwrap_or(0),
+                paths.as_slice(),
+            )
+        })
+        .collect();
+    // A repository dirtied by `MODULE.bazel` or by a changed `.bzl` has no
+    // input paths, but can still be the one that reached the most packages.
+    for (repo, packages) in packages_by_repo {
+        if !ext.input_paths.contains_key(repo) {
+            rows.push((repo.as_str(), *packages, &[]));
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    tracing::info!(
+        repositories = rows.len(),
+        shown = rows.len().min(MAX_LINES),
+        "top contributors to the dirty set"
+    );
+    for (repo, packages, paths) in rows.iter().take(MAX_LINES) {
+        tracing::info!(
+            repo = %repo,
+            packages_from_loads = packages,
+            dirtied_by = ?paths,
+            "  contributor"
+        );
+    }
 }
 
 /// The `global_reason` for a `.bzl` whose loader is not a main-repo package.
