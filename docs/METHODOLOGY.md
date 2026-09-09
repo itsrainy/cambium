@@ -352,6 +352,50 @@ The loop is honest about its four blind spots, and says so in its own output:
   what left envoy's change sets cold-rebuilding ~1100 packages after the path
   mappings were fixed, while the same change sets replayed at 6 and 18.
 
+### `--rederive`: an index-time change the stored tables cannot show
+
+The four blind spots above are about what a replay cannot compute. There is a
+fifth that is about what it *reads*. The externals stage does not derive which
+main-repo paths feed which external repositories; it looks that up in side
+tables — the input patterns, `bzl_repos`, the per-repository path maps,
+`target_only`, the repository set — that `cambium_index::build_repo_inputs`
+derived at index time from `MODULE.bazel`, `WORKSPACE` and the workspace `.bzl`
+closure. A change to *that* derivation is therefore invisible to a plain
+replay: the tables in the stored index are the old derivation's output, and the
+replay faithfully re-runs the stage over them.
+
+```console
+$ cambi bench replay envoy --all --repo ~/.cache/cambium/corpus/envoy.git --rederive
+$ REDERIVE=1 tools/bench/precheck.sh
+```
+
+With `--rederive` each change set is replayed against the stored index with
+those tables rebuilt, by this build, from the repository text at the change
+set's *own base* (`git show <base>:MODULE.bazel` and the workspace closure it
+loads). It needs `--repo`, and every outcome carries `rederived` in the JSON and a
+`REDERIVED` marker in the text. It costs a whole index rebuild per distinct
+base — about 2.5 s on envoy's 7 MB index, 0.6 s on bazel's, so a forty
+change-set subject goes from seconds to a minute or two — and holds only a few
+bases at a time, because a re-derived index is the index in memory and a
+`--history` run walks three hundred of them.
+
+What it settles: whether an index-time derivation change moves the externals
+stage's answer on the real corpus, and — with the current derivation — whether
+what the code derives at a base still matches what the run stored, which is a
+faithfulness check on the re-derivation itself.
+
+What it still cannot see: the package closures and the package set are the
+pin's. Only `bazel query` builds those, so `--rederive` rebuilds the tables
+that come out of reading text and keeps every table that came out of the query
+— package -> `.bzl` closures, targets, edges. A `.bzl` in the base's workspace
+closure that the pin's index never had stays invisible (the load-closure drift
+guard already marks those change sets indeterminate), and the answer, as ever,
+needs Bazel.
+
+Compare a re-derived run only against another re-derived run: `--baseline`
+across the two reports a `rederived` divergence naming which side was which,
+because the difference is the derivation and not the engine.
+
 A clean precheck is not a substitute for the run. It is what makes the run
 worth starting.
 
