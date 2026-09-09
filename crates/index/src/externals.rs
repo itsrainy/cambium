@@ -366,15 +366,15 @@ pub enum ModuleChange {
 
 /// A call's arguments, flattened enough for the questions asked of them.
 #[derive(Debug, Default)]
-struct Args {
-    positional: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) positional: Vec<String>,
     /// Keyword arguments in source order; the value is every string literal
     /// inside it, so a list or a dict argument yields all of its entries.
-    kw: Vec<(String, Vec<String>)>,
+    pub(crate) kw: Vec<(String, Vec<String>)>,
 }
 
 impl Args {
-    fn first(&self, key: &str) -> Option<&str> {
+    pub(crate) fn first(&self, key: &str) -> Option<&str> {
         self.kw
             .iter()
             .find(|(k, _)| k == key)
@@ -409,13 +409,19 @@ impl Args {
 }
 
 /// A top-level statement, as a token slice plus the shape the parser found.
-struct Stmt<'a, 't> {
+pub(crate) struct Stmt<'a, 't> {
     toks: &'t [Lexed<'a>],
+}
+
+impl<'a, 't> Stmt<'a, 't> {
+    pub(crate) fn toks(&self) -> &'t [Lexed<'a>] {
+        self.toks
+    }
 }
 
 /// Splits a token stream into top-level statements: every token that starts a
 /// line at bracket depth zero begins one.
-fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
+pub(crate) fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
     let mut starts = Vec::new();
     let mut depth = 0i32;
     for (i, t) in toks.iter().enumerate() {
@@ -447,7 +453,7 @@ fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
 /// argument. This adds only the flattening: a list or dict argument yields
 /// every literal in it, at any nesting depth, which is what the callers ask
 /// of `Args`.
-fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
+pub(crate) fn parse_args(text: &str, toks: &[Lexed<'_>], open: usize) -> Args {
     let mut out = Args::default();
     for (key, span) in arg_spans(toks, open) {
         let vals = toks[span].iter().filter_map(|t| match t.tok {
@@ -711,8 +717,15 @@ fn render_limited(text: &str, t: &[Lexed<'_>], limit: usize) -> String {
     s
 }
 
-fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
+pub(crate) fn render_stmt(text: &str, t: &[Lexed<'_>]) -> String {
     render_limited(text, t, 24)
+}
+
+/// The whole statement, token by token. Two statements with the same rendering
+/// are the same call with the same arguments — symbols and punctuation
+/// included, not only the string literals [`Args::render`] keeps.
+pub(crate) fn render_all(text: &str, t: &[Lexed<'_>]) -> String {
+    render_limited(text, t, usize::MAX)
 }
 
 // ------------------------------------------------------- the path mapping

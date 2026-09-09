@@ -30,6 +30,7 @@ pub mod space;
 pub mod strtab;
 pub mod view;
 pub mod walk;
+pub mod workspace;
 
 pub use builder::{
     new_lineage, BzlClosure, IndexBuilder, PackageDelta, PackageUpdate, SpliceReport, TargetRow,
@@ -52,3 +53,4 @@ pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
 pub use view::{labels_sorted, GraphView};
 pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};
+pub use workspace::{diff_workspace, WorkspaceChange};

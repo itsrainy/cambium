@@ -87,11 +87,12 @@
 //!
 //! # What stays global
 //!
-//! - Legacy `WORKSPACE` / `WORKSPACE.bazel` / `WORKSPACE.bzlmod` edits.
-//!   `WORKSPACE` is imperative: repositories are declared by arbitrary macro
-//!   code, order matters, and `native.existing_rules()` makes a later
-//!   statement's meaning depend on an earlier one. A static diff of it would
-//!   be a guess.
+//! - A legacy `WORKSPACE` edit the statement diff cannot classify. The file is
+//!   imperative — repositories are declared by arbitrary macro code, order
+//!   matters, and `native.existing_rules()` makes a later statement's meaning
+//!   depend on an earlier one — so [`cambium_index::workspace`] reads only the
+//!   shapes whose effect is confined to one declaration and escalates for
+//!   everything else, reordering included.
 //! - A `MODULE.bazel.lock` whose JSON the lock parser does not recognise: an
 //!   unknown key that changed, a format version it was not written against, a
 //!   version that changed between the two sides, a registry-level file that
@@ -112,6 +113,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use cambium_diff::Change;
 use cambium_index::externals::{diff_module, scan_module, ModuleChange, ModuleFacts};
 use cambium_index::lockfile::diff_lock;
+use cambium_index::workspace::{diff_workspace, WorkspaceChange};
 use cambium_index::IndexRef;
 
 /// Workspace files whose own diff this stage interprets, rather than letting
@@ -190,21 +192,63 @@ pub fn analyse(
 
     let mut module_changed = false;
     let mut lock_changed = false;
+    let mut workspaces: Vec<&str> = Vec::new();
     for c in changes {
         let c = c.borrow();
         if LEGACY_WORKSPACE_FILES.contains(&c.path.as_str()) {
-            out.global = Some(format!(
-                "`{}` changed; WORKSPACE is imperative (macro-declared repositories, \
-                 order-dependent, `native.existing_rules()`), so its diff cannot be mapped to \
-                 repositories",
-                c.path
-            ));
-            return out;
+            workspaces.push(c.path.as_str());
+            continue;
         }
         match c.path.as_str() {
             MODULE_FILE => module_changed = true,
             MODULE_LOCK => lock_changed = true,
             _ => {}
+        }
+    }
+
+    // A legacy `WORKSPACE`, diffed statement by statement. The file is
+    // imperative, so most of what it can say is still global; what it *can*
+    // say is which declaration moved. See [`cambium_index::workspace`].
+    for path in workspaces {
+        let (b, h) = (texts.text_at(base_rev, path), texts.text_at(head_rev, path));
+        let (Some(b), Some(h)) = (b, h) else {
+            out.global = Some(format!(
+                "`{path}` was added or removed, and every repository it declares with it"
+            ));
+            return out;
+        };
+        match diff_workspace(&b, &h) {
+            WorkspaceChange::Global(reason) => {
+                out.global = Some(format!("`{path}`: {reason}"));
+                return out;
+            }
+            WorkspaceChange::Moved { repos, bzl_paths } => {
+                for p in &bzl_paths {
+                    // The repositories a workspace-closure `.bzl` can define
+                    // are exactly what the index recorded for a changed `.bzl`
+                    // of its own; a file it cannot attribute is global there
+                    // and here.
+                    let named = base
+                        .bzl_id(p)
+                        .and_then(|id| repos_of_workspace_bzl(base, id));
+                    let Some(named) = named else {
+                        out.global = Some(format!(
+                            "`{path}` changes a call from `{p}`, and cambium cannot say which \
+                             repositories that file defines"
+                        ));
+                        return out;
+                    };
+                    out.by_bzl += named.len();
+                    out.repos.extend(named.iter().cloned());
+                    out.load_repos.extend(named);
+                }
+                out.by_module += repos.len();
+                // A declaration that moved replaces its repository wholesale,
+                // `.bzl` files included: rule (2) applies.
+                out.load_repos.extend(repos.iter().cloned());
+                out.repos.extend(repos);
+                out.handled.push(path.to_string());
+            }
         }
     }
 

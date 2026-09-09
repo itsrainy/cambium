@@ -10,8 +10,10 @@
 //! - a `MODULE.bazel` dependency bump;
 //! - a `.bzl` that defines a repository rule.
 //!
-//! and the two escalations that must survive: a toolchain-registering module,
-//! and a legacy `WORKSPACE`.
+//! plus a `MODULE.bazel.lock` and a legacy `WORKSPACE` that move on their own,
+//! and the escalations that must survive: a toolchain-registering module, a
+//! lockfile shape the parser does not know, and a `WORKSPACE` statement it
+//! cannot classify.
 
 use std::collections::BTreeMap;
 
@@ -363,15 +365,87 @@ fn a_toolchain_module_bump_is_global() {
 }
 
 #[test]
-fn a_legacy_workspace_edit_is_global() {
+fn a_legacy_workspace_edit_that_cannot_be_classified_is_global() {
+    let (_e, index) = base();
+    // An assignment at the top level: not a shape the statement diff reads.
+    let r = run(
+        &index,
+        &changed(&["WORKSPACE"]),
+        &texts_with_workspace(
+            &format!("{WORKSPACE_BASE}VERSION = \"1\"\n"),
+            &format!("{WORKSPACE_BASE}VERSION = \"2\"\n"),
+        ),
+    );
+    assert!(r.global);
+    assert!(r.global_reason.unwrap().contains("classify"));
+}
+
+/// A legacy `WORKSPACE` that declares the same repository the module file's
+/// extension does, so the graph has somewhere to send it.
+const WORKSPACE_BASE: &str = "load(\"@bazel_tools//tools/build_defs/repo:http.bzl\", \
+     \"http_archive\")\n\
+     http_archive(\n    name = \"generated\",\n    sha256 = \"aaa\",\n)\n\
+     http_archive(\n    name = \"unused\",\n    sha256 = \"bbb\",\n)\n";
+
+fn texts_with_workspace(base_ws: &str, head_ws: &str) -> FixedText {
+    let mut m = texts(MODULE_BASE, MODULE_BASE).0;
+    m.insert(
+        ("base".to_string(), "WORKSPACE".to_string()),
+        base_ws.to_string(),
+    );
+    m.insert(
+        ("head".to_string(), "WORKSPACE".to_string()),
+        head_ws.to_string(),
+    );
+    FixedText(m)
+}
+
+/// The sourcegraph shape: one `http_archive` in `WORKSPACE` moved, and only
+/// the targets that depend on that repository are affected.
+#[test]
+fn a_legacy_workspace_declaration_names_its_repository() {
     let (_e, index) = base();
     let r = run(
         &index,
         &changed(&["WORKSPACE"]),
-        &texts(MODULE_BASE, MODULE_BASE),
+        &texts_with_workspace(WORKSPACE_BASE, &WORKSPACE_BASE.replace("aaa", "zzz")),
+    );
+    assert!(
+        !r.global,
+        "a WORKSPACE edit used to be global on its own: {:?}",
+        r.global_reason
+    );
+    assert_eq!(r.direct, vec!["//lib:lib".to_string()]);
+}
+
+/// The other declaration in the same file moving reaches nothing, which is the
+/// whole point of diffing the file rather than invalidating on it.
+#[test]
+fn an_unrelated_workspace_declaration_reaches_nothing() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["WORKSPACE"]),
+        &texts_with_workspace(WORKSPACE_BASE, &WORKSPACE_BASE.replace("bbb", "zzz")),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert!(r.direct.is_empty());
+}
+
+/// Toolchain registration has no edge in the graph wherever it is written.
+#[test]
+fn a_workspace_toolchain_registration_is_global() {
+    let (_e, index) = base();
+    let r = run(
+        &index,
+        &changed(&["WORKSPACE"]),
+        &texts_with_workspace(
+            &format!("{WORKSPACE_BASE}go_register_toolchains(version = \"1\")\n"),
+            &format!("{WORKSPACE_BASE}go_register_toolchains(version = \"2\")\n"),
+        ),
     );
     assert!(r.global);
-    assert!(r.global_reason.unwrap().contains("imperative"));
+    assert!(r.global_reason.unwrap().contains("toolchain"));
 }
 
 /// A `MODULE.bazel.lock` around one extension, whose `gen` extension
