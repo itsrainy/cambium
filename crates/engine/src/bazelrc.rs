@@ -44,6 +44,9 @@
 //!   the engine looks for the label in the text of every `.bzl` in the stored
 //!   load closure; a hit means the walk cannot be trusted and the run stays
 //!   global, naming the file.
+//! - A setting in an external repository keeps its global: the index does not
+//!   cover that repository's graph, so what inside it reads the setting cannot
+//!   be seen. Only the main repository's own settings are resolved.
 //! - `command:config` scoping keeps its global too: a value that applies only
 //!   under `--config=foo` is a question about the invocation, and cambium does
 //!   not model invocations.

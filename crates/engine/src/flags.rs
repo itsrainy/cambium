@@ -20,16 +20,18 @@
 //!    every `.bzl` in the stored load closure is scanned for the label; a hit
 //!    means the answer cannot be trusted and the run stays global. So does a
 //!    closure that cannot be read at all, or an index built without one.
-//! 3. **Starlark cambium cannot see.** The load closure stops at the first
-//!    label into an external repository, so a transition inside *that*
-//!    repository's `.bzl` files is invisible. For a setting that lives in an
-//!    external repository — `@protobuf//bazel/flags:prefer_prebuilt_protoc` —
-//!    the repository's own rules are exactly the code most likely to read it,
-//!    so if the closure loads anything from that repository the run stays
-//!    global. A setting nothing in the closure loads from cannot be read by a
-//!    transition that any main-repo rule is analysed under.
-//! 4. **No node.** If the label resolves to no node in the index, nothing
-//!    depends on the setting through an edge; with (2) and (3) clean, the edit
+//! 3. **External settings.** A setting that lives in an external repository —
+//!    `@quiche//:ssl_lib`, `@protobuf//bazel/flags:prefer_prebuilt_protoc` —
+//!    is resolved by nobody: the index covers the main repository only, so the
+//!    `config_setting`s, `select()`s and transitions *inside* that repository
+//!    are not edges cambium holds, and the main-repo targets that depend on
+//!    them through ordinary rule targets would be missed. The edges into a
+//!    main-repo rule that names the setting directly are the only part of the
+//!    picture the index has, and a part is not an answer. Those stay global.
+//!    (The main repository's own name is not external: `@envoy//bazel:crypto`
+//!    inside envoy is `//bazel:crypto`, and the repository mapping says so.)
+//! 4. **No node.** If a main-repo label resolves to no node in the index,
+//!    nothing depends on the setting through an edge; with (2) clean, the edit
 //!    affects nothing at all.
 //!
 //! A flag's *value* changing does not change any rule's definition, so nothing
@@ -39,7 +41,6 @@
 use cambium_index::IndexRef;
 
 use crate::bazelrc::LabelFlag;
-use crate::externals::repo_token_matches;
 use crate::query::PackageQuerier;
 
 /// What a set of changed Starlark build settings reaches.
@@ -121,53 +122,6 @@ fn mentions(text: &str, needle: &str) -> bool {
     false
 }
 
-/// The repository part of a canonical label: `@@rules_cc+//x:y` -> `rules_cc+`.
-fn label_repo(label: &str) -> Option<&str> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (repo, _) = rest.split_once("//")?;
-    (!repo.is_empty()).then_some(repo)
-}
-
-/// Whether the closure loads any `.bzl` out of the repository the setting lives
-/// in — see the module doc's (3).
-fn closure_loads_from(base: IndexRef<'_>, apparent: &str, canonical: &str) -> Option<String> {
-    (0..base.bzl_ext_labels.len() as u32)
-        .map(|e| base.bzl_ext_labels.get(e))
-        .find(|l| label_repo(l).is_some_and(|t| repo_token_matches(t, apparent, canonical)))
-        .map(str::to_string)
-}
-
-/// The node a setting's label denotes, if the index has one.
-///
-/// The main repository's label is looked up directly — `@envoy//bazel:crypto`
-/// inside envoy is `//bazel:crypto`, which is how the index writes it. An external one is matched over the
-/// contiguous run of `@`-prefixed labels — the same binary-searched run
-/// `crate::externals::reach` walks — because the index writes repository names
-/// canonically and the rc file writes them apparently.
-fn node_of(base: IndexRef<'_>, p: &Parsed<'_>, main: bool, canonical: &str) -> Option<u32> {
-    if main {
-        return base.id_of(&format!("//{}", p.suffix));
-    }
-    let start = base
-        .label_sorted
-        .partition_point(|&id| base.label(id) < "@");
-    base.label_sorted[start..].iter().copied().find(|&id| {
-        let label = base.label(id);
-        if base.is_tombstone(id) {
-            return false;
-        }
-        match label.split_once("//") {
-            Some((head, rest)) => {
-                rest == p.suffix
-                    && repo_token_matches(head.trim_start_matches('@'), p.repo, canonical)
-            }
-            None => false,
-        }
-    })
-}
-
 /// Resolves every changed Starlark build setting, or says why the run must stay
 /// global.
 pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelFlag]) -> FlagReach {
@@ -216,27 +170,25 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
             ));
             return out;
         }
-        let canonical = if main {
-            String::new()
-        } else {
-            mapping.canonical(p.repo).to_string()
-        };
         if !main {
-            if let Some(load) = closure_loads_from(base, p.repo, &canonical) {
-                out.global = Some(reason(
-                    std::slice::from_ref(f),
-                    &format!(
-                        "and the load closure reaches `{load}`, whose repository's own \
-                              Starlark cambium cannot read for a transition on it"
-                    ),
-                ));
-                return out;
-            }
+            out.global = Some(reason(
+                std::slice::from_ref(f),
+                &format!(
+                    "and `@{}` is an external repository: the index does not cover its \
+                     graph, so what inside it reads the setting cannot be seen",
+                    p.repo
+                ),
+            ));
+            return out;
         }
         out.flags.push(f.label.clone());
-        match node_of(base, &p, main, &canonical) {
+        match base.id_of(&format!("//{}", p.suffix)) {
             Some(id) => {
-                tracing::debug!(flag = %f.label, label = %base.label(id), "starlark build setting resolved");
+                tracing::debug!(
+                    flag = %f.label,
+                    label = %base.label(id),
+                    "starlark build setting resolved"
+                );
                 out.nodes.push((id, base.label(id).to_string()));
             }
             // Nothing names it, and no `.bzl` reads it: the edit reaches
