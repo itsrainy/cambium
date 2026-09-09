@@ -103,6 +103,22 @@ pub trait PackageQuerier {
         cambium_index::RepoMapping::identity()
     }
 
+    /// Every Starlark file of the checkout these rows describe, as
+    /// repo-relative paths: BUILD, BUILD.bazel, `*.bzl`, and the workspace
+    /// files.
+    ///
+    /// Only the witness for a changed `.bzl` the stored closure has no node
+    /// for reads this, so it costs nothing on the common path. `None` means
+    /// the querier cannot enumerate its tree at all (there is none), and the
+    /// witness does not run.
+    ///
+    /// The default enumerates [`PackageQuerier::workspace`], which is the
+    /// checkout the rows came from — not the working tree, which may be on a
+    /// different revision.
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        self.workspace().map(cambium_index::loads::starlark_files)
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a

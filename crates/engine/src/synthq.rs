@@ -55,6 +55,27 @@ impl PackageQuerier for SynthQuerier<'_> {
         Some(&self.files)
     }
 
+    /// The same set of files [`SynthFiles`] can serve text for: the witness
+    /// enumerates the synthetic tree instead of a directory.
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        let g = self.graph;
+        let mut out = vec!["MODULE.bazel".to_string(), "rules/synth.bzl".to_string()];
+        out.extend(g.bzl_by_path.keys().cloned());
+        for p in &g.packages {
+            if !p.alive {
+                continue;
+            }
+            out.push(if p.path.is_empty() {
+                "BUILD.bazel".to_string()
+            } else {
+                format!("{}/BUILD.bazel", p.path)
+            });
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
     fn version(&self) -> String {
         "synth".to_string()
     }

@@ -743,7 +743,8 @@ impl Engine {
             &cambium_classify::IndexConsumers(base_view),
         );
 
-        let bzl_dirty = self.resolve_changed_bzl(base_view, &mut dirty, &mut ext, &mut stats);
+        let bzl_dirty =
+            self.resolve_changed_bzl(base_view, querier, &mut dirty, &mut ext, &mut stats);
         keep_surviving_packages(&mut dirty, querier, self.workspace());
         stats.ignored_files = dirty.ignored;
 
@@ -944,6 +945,7 @@ impl Engine {
     fn resolve_changed_bzl(
         &self,
         base_view: IndexRef<'_>,
+        querier: &dyn PackageQuerier,
         dirty: &mut DirtySet,
         ext: &mut Externals,
         stats: &mut Stats,
@@ -966,13 +968,16 @@ impl Engine {
             return bzl_dirty;
         }
         let mut workspace_level: Vec<String> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
         for path in &paths {
-            // A `.bzl` the closure does not know is loaded by nothing: a dead
-            // file, or one added by this very commit (in which case whatever
-            // BUILD file started loading it changed too, and that dirties the
-            // package on its own).
+            // A `.bzl` the closure has no node for is usually loaded by
+            // nothing: a dead file, or one added by this very commit (in which
+            // case whatever BUILD file started loading it changed too, and
+            // that dirties the package on its own). "Usually" is not good
+            // enough to act on, so it is set aside for the witness, which
+            // asks the head checkout instead of the table.
             let Some(id) = base_view.bzl_id(path) else {
-                tracing::debug!(%path, "no package or workspace file loads this .bzl");
+                unknown.push(path.clone());
                 continue;
             };
             // Reachable from MODULE.bazel/WORKSPACE: it can define repository
@@ -1008,6 +1013,17 @@ impl Engine {
                 bzl_dirty.insert(pkg.clone());
                 dirty.dirty.insert(pkg);
             }
+        }
+        if !unknown.is_empty() {
+            let mut w = Witness {
+                base_view,
+                bzl_dirty: &mut bzl_dirty,
+                dirty: &mut *dirty,
+                ext: &mut *ext,
+                stats: &mut *stats,
+                workspace_level: &mut workspace_level,
+            };
+            witness_unknown_bzl(querier, &unknown, &mut w, self.cfg.externals.enabled);
         }
         stats.bzl_closure_hits = bzl_dirty.len();
         tracing::debug!(
@@ -1362,6 +1378,199 @@ fn cold_rebuild_reason(dirty: usize, limit: usize) -> String {
 ///
 /// The wording is deliberately the one the `rbuildfiles` path used, so that the
 /// benchmark's reason histogram is comparable across the change.
+/// The parts of a run the witness may write to.
+struct Witness<'a> {
+    base_view: IndexRef<'a>,
+    bzl_dirty: &'a mut BTreeSet<String>,
+    dirty: &'a mut DirtySet,
+    ext: &'a mut Externals,
+    stats: &'a mut Stats,
+    workspace_level: &'a mut Vec<String>,
+}
+
+/// Decide, from the head checkout alone, what a changed `.bzl` the base
+/// index's load closure has no node for can affect.
+///
+/// # Why the closure is not enough
+///
+/// The "loaded by nothing" branch above argued: a loader at head is either a
+/// file that changed in this diff — and then its own change dirties its
+/// package, or it is itself a changed `.bzl` — or a file unchanged since base,
+/// which therefore loaded it at base too, so the base closure would have a
+/// node for it. The second half assumes the base closure is *complete*, and
+/// there are known ways for it not to be: a load label the index-time walk
+/// could not resolve (`resolve_label` returning `None`, or an
+/// `@<own module name>//...` spelling read as external because the mapping had
+/// no main alias), a BUILD file the index-time checkout did not have, a
+/// package tombstoned as partial. The harness's `rbuildfiles` oracle used to
+/// catch that; on `repository_evaluation` change sets it no longer does.
+///
+/// # What this does instead
+///
+/// It re-derives the *inverse* of one hop of the load graph from the head
+/// checkout: every Starlark file, scanned once, gives the main-repo `.bzl`
+/// paths it loads, and that is inverted. A file no `load()` at head names is
+/// dead for real, and ignoring it is a statement about the tree rather than
+/// about a table that may be short. Anything else is followed:
+///
+/// - a BUILD loader dirties its own package;
+/// - a `.bzl` loader the base closure *does* know is handed to exactly the
+///   logic the known branch uses — its consumers, and its repositories if it
+///   is in the workspace closure;
+/// - a `.bzl` loader the closure does not know either recurses, bounded by
+///   the set of files that exist and cycle-safe through `seen`;
+/// - a WORKSPACE / MODULE.bazel loader means the file defines repository
+///   rules, and there is no `.bzl` node to name the repositories from, so it
+///   takes the workspace-level escalation.
+///
+/// Labels are resolved with the main alias added to the repository mapping
+/// (`@envoy//pkg:f.bzl` inside envoy is a main-repo label), which is the very
+/// gap that can make the stored closure incomplete in the first place.
+fn witness_unknown_bzl(
+    querier: &dyn PackageQuerier,
+    unknown: &[String],
+    w: &mut Witness<'_>,
+    externals_enabled: bool,
+) {
+    let (Some(files), Some(src)) = (querier.starlark_files(), querier.load_source()) else {
+        // No tree to witness against: the old behaviour, and the report says
+        // the check did not run rather than that it passed.
+        w.stats.bzl_witness_unavailable += unknown.len();
+        tracing::debug!(
+            files = ?unknown,
+            "a changed .bzl is unknown to the load closure and this row source has no checkout to witness against"
+        );
+        return;
+    };
+    let mapping = main_alias_mapping(querier.repo_mapping(), src);
+    let loaders = invert_loads(&files, src, &mapping);
+
+    for root in unknown {
+        let mut found: Vec<String> = Vec::new();
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut stack: Vec<&str> = vec![root.as_str()];
+        while let Some(path) = stack.pop() {
+            if !seen.insert(path) {
+                continue;
+            }
+            let Some(list) = loaders.get(path) else {
+                continue;
+            };
+            for loader in list {
+                found.push(loader.clone());
+                let name = loader.rsplit('/').next().unwrap_or(loader.as_str());
+                if cambium_index::loads::WORKSPACE_FILES.contains(&name) {
+                    // Reachable from the workspace files: repository rules,
+                    // and no `.bzl` node to name the repositories from.
+                    w.workspace_level.push(root.clone());
+                } else if name == "BUILD" || name == "BUILD.bazel" {
+                    let pkg = cambium_index::loads::owning_dir(loader);
+                    w.bzl_dirty.insert(pkg.clone());
+                    w.dirty.dirty.insert(pkg);
+                    w.stats.bzl_witness_packages += 1;
+                } else if let Some(id) = w.base_view.bzl_id(loader) {
+                    dirty_known_bzl(id, loader, w, externals_enabled);
+                } else {
+                    stack.push(loader.as_str());
+                }
+            }
+        }
+        if found.is_empty() {
+            w.stats.bzl_witnessed_dead += 1;
+            tracing::debug!(
+                path = %root,
+                scanned = files.len(),
+                "no load() in the head checkout names this .bzl; it is loaded by nothing"
+            );
+        } else {
+            w.stats.bzl_witnessed_loaded += 1;
+            found.sort();
+            found.dedup();
+            tracing::warn!(
+                path = %root,
+                loaders = ?found,
+                "a changed .bzl is loaded at head but has no node in the base index's load closure; \
+                 the stored closure is incomplete and the witness dirtied its loaders instead"
+            );
+        }
+    }
+}
+
+/// One known `.bzl`: its consumers, and its repositories when it is in the
+/// workspace closure. The same two moves the non-witness path makes, so the
+/// two answers cannot drift.
+fn dirty_known_bzl(id: u32, path: &str, w: &mut Witness<'_>, externals_enabled: bool) {
+    if w.base_view.bzl_in_workspace(id) {
+        match externals_enabled
+            .then(|| crate::externals::repos_of_workspace_bzl(w.base_view, id))
+            .flatten()
+        {
+            Some(repos) => {
+                w.ext.by_bzl += repos.len();
+                w.ext.load_repos.extend(repos.iter().cloned());
+                w.ext.repos.extend(repos);
+            }
+            None => w.workspace_level.push(path.to_string()),
+        }
+    }
+    for &p in w.base_view.bzl_consumers(id) {
+        if w.base_view.package_tombstoned(p) {
+            continue;
+        }
+        let pkg = w.base_view.package_name(p).to_string();
+        w.bzl_dirty.insert(pkg.clone());
+        w.dirty.dirty.insert(pkg);
+        w.stats.bzl_witness_packages += 1;
+    }
+}
+
+/// The querier's mapping plus the main repository's own apparent name, taken
+/// from `module(name = ...)` and, in WORKSPACE mode, `workspace(name = ...)`.
+fn main_alias_mapping(
+    m: cambium_index::RepoMapping,
+    src: &dyn cambium_index::FileText,
+) -> cambium_index::RepoMapping {
+    let mut m = m.with_main_alias(&cambium_index::externals::read_module_facts(src).module_name);
+    for name in ["WORKSPACE", "WORKSPACE.bazel"] {
+        if let Some(n) = src
+            .text(name)
+            .as_deref()
+            .and_then(cambium_index::loads::workspace_name)
+        {
+            m = m.with_main_alias(&n);
+        }
+    }
+    m
+}
+
+/// Loaded main-repo `.bzl` path -> the files that `load()` it, from the head
+/// checkout. Each file is read and scanned once.
+fn invert_loads(
+    files: &[String],
+    src: &dyn cambium_index::FileText,
+    m: &cambium_index::RepoMapping,
+) -> FxHashMap<String, Vec<String>> {
+    let mut out: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    for f in files {
+        let Some(text) = src.text(f) else { continue };
+        let name = f.rsplit('/').next().unwrap_or(f.as_str());
+        let labels = if cambium_index::loads::WORKSPACE_FILES.contains(&name) {
+            cambium_index::loads::scan_workspace_loads(&text)
+        } else {
+            cambium_index::loads::scan_loads(&text)
+        };
+        let from_pkg = cambium_index::loads::owning_dir(f);
+        for l in labels {
+            if let Some(cambium_index::Load::Main(p)) =
+                cambium_index::loads::resolve_label(&l, &from_pkg, m)
+            {
+                out.entry(p).or_default().push(f.clone());
+            }
+        }
+    }
+    out
+}
+
 fn workspace_level_reason(paths: &[String]) -> String {
     let what = match paths {
         [one] => format!("`{one}`"),

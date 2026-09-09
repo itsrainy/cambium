@@ -219,7 +219,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_label_only`, `external_direct_targets` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable` |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with

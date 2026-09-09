@@ -24,7 +24,10 @@ use serde_json::Value;
 /// `stats.rbuildfiles_called` is now always false; version 5 added
 /// `stats.bazelrc_safe_diffs`, `stats.cold_rebuild` and the optional
 /// `cold_rebuild_reason`, the four `stats.repos_*` / `stats.external_direct_targets`
-/// counters and the `external_repo` direct reason. The version is shared with
+/// counters and the `external_repo` direct reason; version 7 added the four
+/// `stats.bzl_witness*` counters, which say what the engine did about a
+/// changed `.bzl` the base index's load closure had no node for. The version
+/// is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -52,6 +55,10 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.base_nodes",
     "stats.bazelrc_safe_diffs",
     "stats.bzl_closure_hits",
+    "stats.bzl_witness_packages",
+    "stats.bzl_witness_unavailable",
+    "stats.bzl_witnessed_dead",
+    "stats.bzl_witnessed_loaded",
     "stats.changed_files",
     "stats.cold_rebuild",
     "stats.direct_targets",
@@ -121,6 +128,10 @@ fn fixture() -> AffectedReport {
             ignored_files: 9,
             rbuildfiles_called: false,
             bzl_closure_hits: 10,
+            bzl_witnessed_dead: 16,
+            bzl_witnessed_loaded: 17,
+            bzl_witness_packages: 18,
+            bzl_witness_unavailable: 19,
             bazelrc_safe_diffs: 11,
             cold_rebuild: true,
             repos_dirty_by_input: 11,
