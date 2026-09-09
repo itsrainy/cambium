@@ -77,9 +77,14 @@
 //!    `external_http_archive(name, **kwargs)`) feeds the names its callers
 //!    pass, and any other macro feeds what it and the macros it calls
 //!    instantiate;
-//! 4. otherwise — a literal at module level — the file's old answer: the
-//!    repositories whose extension or repo-rule `.bzl` reaches this file
-//!    through `load()`, and failing that every repository in the universe.
+//! 4. otherwise — a literal at module level — the file's own set, below.
+//!
+//! A `def` that instantiates nothing and implements no rule (apollo's
+//! `_find_cuda_config(repository_ctx)`, which only reads a file) has no answer
+//! of its own; it takes the union of what its call sites are attributed to, so
+//! a helper called from a repository rule's implementation belongs to that
+//! rule's repositories. A helper nothing in the closure calls keeps the
+//! fallback.
 //!
 //! The instantiation sets are two fixpoints over the closure's call graph, so
 //! a name that reaches a repository rule through three macros still lands on
@@ -107,11 +112,28 @@
 //! second is the whole answer, which is what turns issue #6 — every
 //! `bazel/repositories.bzl` edit going global — into a named set.
 //!
-//! [`RepoInputs::bzl_repos`], the answer when a workspace `.bzl` *itself*
-//! changes, stays the union of the load-graph propagation and what the file
-//! can define. It is not narrowed below the propagation: a `.bzl` may export a
-//! constant that some other file's rule reads, and only the `load()` edge sees
-//! that.
+//! # What a change to one workspace `.bzl` moves
+//!
+//! [`RepoInputs::bzl_repos`] answers that, and the answer is *not* the seed
+//! propagated down `load()` edges. apollo's `tools/workspace.bzl` loads a
+//! hundred `third_party/*/init.bzl` files and calls each one's `init()`;
+//! propagating its answer down would make every one of those files responsible
+//! for everything apollo declares, which is a cold rebuild for every
+//! third-party bump.
+//!
+//! A `.bzl` reaches a repository in exactly two ways: through its own
+//! definitions, which the rules above already attribute, or through a symbol
+//! another file imported from it — and the effect of *that* is bounded by
+//! where the symbol is used. So a file's set is what it defines itself, plus,
+//! for every `load()` of it, the attribution of each use of the symbols
+//! imported. Calling an imported function does exactly what that function
+//! does (`pcl()` in the root's macro is answered by `init()`'s own
+//! repositories, not by everything the root declares); any other use — a
+//! constant read into an expression — is attributed like any other
+//! occurrence, and falls back to the using file's own set when the occurrence
+//! says nothing. Re-exports are covered by attributing a use to every file the
+//! symbol resolved through. The whole thing is a fixpoint, so transitivity
+//! comes free, and a file whose set comes out empty keeps the fallback.
 //!
 //! # The soundness gap, stated plainly
 //!
@@ -512,7 +534,7 @@ pub(crate) fn statements<'a, 't>(toks: &'t [Lexed<'a>]) -> Vec<Stmt<'a, 't>> {
         .collect()
 }
 
-/// Arguments of the call whose `(` is at `open`, which must be `Tok::Open`.
+/// Arguments of the call whose `(` is at `open`, which must be an open bracket.
 /// The arguments of the call whose `(` is at `open`, with each argument
 /// flattened to the string literals inside it.
 ///
@@ -574,7 +596,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
             }
             // A bare string (a docstring) or a comment-only line.
             if t.iter()
-                .any(|x| matches!(x.tok, Tok::Name(_) | Tok::Open | Tok::Close))
+                .any(|x| matches!(x.tok, Tok::Name(_) | Tok::Open(_) | Tok::Close))
             {
                 f.unparsed.push(render_stmt(text, t));
             }
@@ -588,7 +610,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
             (Some(Tok::Punct(b'.')), Some(Tok::Name(m))) => (Some(m), head + 3),
             _ => (None, head + 1),
         };
-        if !matches!(t.get(call_at).map(|x| x.tok), Some(Tok::Open)) {
+        if !matches!(t.get(call_at).map(|x| x.tok), Some(Tok::Open(b'('))) {
             if !HARMLESS.contains(&name) {
                 f.unparsed.push(render_stmt(text, t));
             }
@@ -736,7 +758,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
 fn comprehension_target(t: &[Lexed<'_>], ext_vars: &BTreeMap<String, String>) -> Option<String> {
     let mut found: Option<String> = None;
     for w in t.windows(4) {
-        let (Tok::Name(v), Tok::Punct(b'.'), Tok::Name(_), Tok::Open) =
+        let (Tok::Name(v), Tok::Punct(b'.'), Tok::Name(_), Tok::Open(b'(')) =
             (w[0].tok, w[1].tok, w[2].tok, w[3].tok)
         else {
             continue;
@@ -776,7 +798,7 @@ fn render_limited(text: &str, t: &[Lexed<'_>], limit: usize) -> String {
                 s.push_str(&text[a..b]);
                 s.push('"');
             }
-            Tok::Open => s.push('('),
+            Tok::Open(b) => s.push(b as char),
             Tok::Close => s.push(')'),
             Tok::Punct(p) => s.push(p as char),
             Tok::Other => s.push('?'),
@@ -854,7 +876,7 @@ pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
         let Tok::Name(name) = toks[i].tok else {
             continue;
         };
-        if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open)) {
+        if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(b'('))) {
             continue;
         }
         if is_local_repo_rule(name) {
@@ -916,7 +938,7 @@ fn only_literal(
                 lit = Some(unescape(&text[a..b]));
             }
             Tok::Name(n) if allowed.contains(&n) => {}
-            Tok::Open | Tok::Close => {}
+            Tok::Open(_) | Tok::Close => {}
             Tok::Punct(b'.') => {}
             _ => return None,
         }
@@ -1323,11 +1345,10 @@ pub fn build_repo_inputs(
     // A pattern is target-only when no occurrence of it was the first kind.
     let mut direct: BTreeSet<Pattern> = out.patterns.keys().cloned().collect();
     let mut embedded: BTreeSet<Pattern> = BTreeSet::new();
-    // A `.bzl` a repository rule loads is part of that rule's implementation,
-    // so a change to it moves everything the loader can define. That is what
-    // the load-graph propagation above says, and no per-occurrence reading
-    // narrows it: this file may export a constant some other file's rule
-    // reads. So the file-level answer stays the union of the two.
+    // A `.bzl`'s own answer — what a change to it can move — is
+    // [`Attribution::file_repos`]: what it defines itself, plus what every use
+    // of the symbols it exports does. The extra repositories a *label* in it
+    // feeds are folded in here.
     let mut own: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for &id in workspace {
         let path = graph.path(id).to_string();
@@ -1392,48 +1413,22 @@ pub fn build_repo_inputs(
             }
         }
     }
-    // On a WORKSPACE-only repository there are no seeds at all, so the
-    // load-graph propagation says nothing and the fallback used to be the
-    // empty set — which the engine reads as "no idea", and goes global. What
-    // a `.bzl` there can define is instead its own attributed set plus that of
-    // every file that loads it: if `bazel/repositories.bzl` changes, the
-    // repositories `envoy_dependencies()` declares move, and so do those of
-    // the helpers it loads, but the pips of `bazel/python_dependencies.bzl` do
-    // not. That holds only while the workspace files themselves are readable:
-    // a `local_repository(name = SOME_CONSTANT)` in `WORKSPACE` would define a
-    // repository no file can be held responsible for, and then every file
-    // keeps the whole set.
-    let workspace_only = *facts == ModuleFacts::default();
-    let readable = !crate::loads::WORKSPACE_FILES
-        .iter()
-        .any(|p| src.text(p).is_some() && att.module_is_dynamic(p));
-    let mut prop: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    if workspace_only && readable {
-        for &id in workspace {
-            prop.insert(id, own.get(graph.path(id)).cloned().unwrap_or_default());
-        }
-        let mut queue: Vec<u32> = workspace.to_vec();
-        while let Some(id) = queue.pop() {
-            let from = prop.get(&id).cloned().unwrap_or_default();
-            for &j in graph.loads(id) {
-                let e = prop.entry(j).or_default();
-                let before = e.len();
-                e.extend(from.iter().cloned());
-                if e.len() != before {
-                    queue.push(j);
-                }
-            }
-        }
-    }
+    // What a change to a workspace `.bzl` moves. The seed propagation down
+    // `load()` edges is *not* part of this: it says a loader's whole answer
+    // belongs to everything it loads, which on a root file that loads a
+    // hundred `init.bzl` files is the universe. Per-symbol use sites say the
+    // same thing more finely — `pcl()` in the root's macro is answered by
+    // `init()`'s own repositories — and a file whose set comes out empty
+    // keeps the fallback.
     for &id in workspace {
         let path = graph.path(id).to_string();
-        let narrow = prop.get(&id).filter(|r| !r.is_empty());
-        let mut repos = match (owner.get(&id), narrow) {
-            (Some(r), _) if !r.is_empty() => r.clone(),
-            (_, Some(r)) => r.clone(),
-            _ => out.repos.clone(),
-        };
-        repos.extend(own.remove(&path).unwrap_or_default());
+        let mut repos = own.remove(&path).unwrap_or_default();
+        if repos.is_empty() {
+            repos = match owner.get(&id) {
+                Some(r) if !r.is_empty() => r.clone(),
+                _ => out.repos.clone(),
+            };
+        }
         out.bzl_repos.insert(path, repos);
     }
     out.target_only = embedded.difference(&direct).cloned().collect();
@@ -1496,7 +1491,7 @@ fn string_literals(text: &str) -> Vec<(usize, Literal)> {
         // repositories. Read as an input it would make every `.bzl` a root
         // workspace file loads an input of everything that file can define.
         if i >= 2
-            && matches!(toks[i - 1].tok, Tok::Open)
+            && matches!(toks[i - 1].tok, Tok::Open(b'('))
             && matches!(toks[i - 2].tok, Tok::Name("load"))
         {
             continue;
@@ -2534,13 +2529,13 @@ _envoy_repo = repository_rule(
         let m = RepoMapping::identity().with_main_alias("envoy");
         let ri = inputs(&files, &m);
         println!("repos in the universe: {}", ri.repos.len());
-        for p in [
-            ".github/config.yml",
-            "source/extensions/extensions_build_config.bzl",
-            "bazel/external/cargo/remote/defs.bzl",
-            "tools/base/requirements.txt",
-            "api/envoy/config/core/v3/base.proto",
-        ] {
+        let probe = std::env::var("CAMBIUM_CORPUS_PATHS").unwrap_or_else(|_| {
+            ".github/config.yml,source/extensions/extensions_build_config.bzl,\
+             bazel/external/cargo/remote/defs.bzl,tools/base/requirements.txt,\
+             api/envoy/config/core/v3/base.proto"
+                .to_string()
+        });
+        for p in probe.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             for (pat, repos) in &ri.patterns {
                 if pat.matches(p) {
                     println!("   pattern {pat:?} -> {repos:?}");
@@ -2561,15 +2556,205 @@ _envoy_repo = repository_rule(
                     .collect::<Vec<_>>()
             );
         }
-        for b in [
-            "bazel/repo.bzl",
-            "bazel/extensions.bzl",
-            "bazel/repositories.bzl",
-            "bazel/python_dependencies.bzl",
-        ] {
-            if let Some(r) = ri.bzl_repos.get(b) {
-                println!("bzl_repos {b}: {} repo(s)", r.len());
+        for p in probe.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            if let Some(r) = ri.bzl_repos.get(p) {
+                println!(
+                    "bzl_repos {p}: {} repo(s) {:?}",
+                    r.len(),
+                    r.iter().take(8).collect::<Vec<_>>()
+                );
             }
         }
+    }
+
+    // ---- what a change to one workspace `.bzl` moves ----
+
+    /// apollo's shape: `tools/workspace.bzl` loads a hundred
+    /// `third_party/*/init.bzl` files and calls each one's `repo()`. Its own
+    /// set is therefore everything apollo declares — a change to it really
+    /// does move the world — but that must not be handed to each init file.
+    /// Calling `pcl()` does exactly what `pcl`'s `init()` does, so the init
+    /// file answers for its own repository and no other.
+    #[test]
+    fn a_loaded_file_answers_for_what_its_own_symbol_does() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"apollo\")\n\
+                 load(\"//tools:workspace.bzl\", \"apollo_repositories\")\n\
+                 apollo_repositories()\n",
+            ),
+            (
+                "tools/workspace.bzl",
+                "load(\"//third_party/pcl:init.bzl\", pcl = \"init\")\n\
+                 load(\"//third_party/absl:init.bzl\", absl = \"init\")\n\
+                 \n\
+                 def apollo_repositories():\n\
+                 \x20   pcl()\n\
+                 \x20   absl()\n",
+            ),
+            (
+                "third_party/pcl/init.bzl",
+                "load(\"//third_party/pcl:pcl_configure.bzl\", \"pcl_configure\")\n\
+                 \n\
+                 def init():\n\
+                 \x20   pcl_configure(name = \"local_config_pcl\")\n",
+            ),
+            (
+                "third_party/pcl/pcl_configure.bzl",
+                "def _impl(repository_ctx):\n\
+                 \x20   repository_ctx.template(\"BUILD\", repository_ctx.attr.tpl)\n\
+                 \n\
+                 pcl_configure = repository_rule(\n\
+                 \x20   implementation = _impl,\n\
+                 \x20   attrs = {\"tpl\": attr.label(default = \"//third_party/pcl:BUILD.tpl\")},\n\
+                 )\n",
+            ),
+            (
+                "third_party/absl/init.bzl",
+                "def init():\n\
+                 \x20   http_archive(name = \"com_google_absl\", build_file = \"//third_party/absl:absl.BUILD\")\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity());
+
+        // The root file declares everything, and says so.
+        let root = &ri.bzl_repos["tools/workspace.bzl"];
+        assert!(
+            root.contains("local_config_pcl") && root.contains("com_google_absl"),
+            "{root:?}"
+        );
+        // Each init file answers for its own repository alone.
+        assert_eq!(
+            ri.bzl_repos["third_party/pcl/init.bzl"],
+            set(&["local_config_pcl"])
+        );
+        assert_eq!(
+            ri.bzl_repos["third_party/absl/init.bzl"],
+            set(&["com_google_absl"])
+        );
+        // And so does the rule's own `.bzl`, whose `attr.label` default is an
+        // input of that repository and nothing else.
+        assert_eq!(
+            ri.bzl_repos["third_party/pcl/pcl_configure.bzl"],
+            set(&["local_config_pcl"])
+        );
+        assert_eq!(
+            ri.repos_for("third_party/pcl/BUILD.tpl"),
+            set(&["local_config_pcl"])
+        );
+        assert_eq!(
+            ri.repos_for("third_party/absl/absl.BUILD"),
+            set(&["com_google_absl"])
+        );
+    }
+
+    /// A constant read across files. `tools/platform/common.bzl` exports it,
+    /// one init file uses it inside a call that names its repository outright,
+    /// and that use site is the whole of what a change to the constant can
+    /// move.
+    #[test]
+    fn a_constant_is_answered_by_where_it_is_read() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"apollo\")\n\
+                 load(\"//third_party/pcl:init.bzl\", pcl = \"init\")\n\
+                 pcl()\n\
+                 load(\"//third_party/absl:init.bzl\", absl = \"init\")\n\
+                 absl()\n",
+            ),
+            (
+                "tools/platform/common.bzl",
+                "ARCH = \"x86_64\"\nSYSROOT = \"//tools/platform:sysroot\"\n",
+            ),
+            (
+                "third_party/pcl/init.bzl",
+                "load(\"//tools/platform:common.bzl\", \"ARCH\")\n\
+                 \n\
+                 def init():\n\
+                 \x20   http_archive(name = \"local_config_pcl\", arch = ARCH)\n",
+            ),
+            (
+                "third_party/absl/init.bzl",
+                "def init():\n\
+                 \x20   http_archive(name = \"com_google_absl\")\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity());
+        assert_eq!(
+            ri.bzl_repos["tools/platform/common.bzl"],
+            set(&["local_config_pcl"]),
+            "the file is only read where `local_config_pcl` is declared"
+        );
+        // A label written at the constant file's module level is an input of
+        // the same set, not of every repository in the universe.
+        assert_eq!(
+            ri.repos_for("tools/platform/sysroot"),
+            set(&["local_config_pcl"])
+        );
+    }
+
+    /// apollo's `_find_cuda_config(repository_ctx)`: a helper that declares
+    /// nothing, reads one main-repo file, and is called from a repository
+    /// rule's implementation. Its body belongs to the repositories that rule
+    /// creates.
+    #[test]
+    fn a_helper_that_declares_nothing_is_answered_by_its_callers() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"apollo\")\n\
+                 load(\"//third_party/gpus:cuda_configure.bzl\", \"cuda_configure\")\n\
+                 cuda_configure(name = \"local_config_cuda\")\n\
+                 load(\"//third_party/absl:init.bzl\", \"init\")\n\
+                 init()\n",
+            ),
+            (
+                "third_party/gpus/cuda_configure.bzl",
+                "def _find_cuda_config(repository_ctx):\n\
+                 \x20   return repository_ctx.read(\
+                 Label(\"//third_party/gpus:find_cuda_config.py.gz.base64\"))\n\
+                 \n\
+                 def _impl(repository_ctx):\n\
+                 \x20   _find_cuda_config(repository_ctx)\n\
+                 \n\
+                 cuda_configure = repository_rule(implementation = _impl)\n",
+            ),
+            (
+                "third_party/absl/init.bzl",
+                "def init():\n\
+                 \x20   http_archive(name = \"com_google_absl\")\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity());
+        assert_eq!(
+            ri.repos_for("third_party/gpus/find_cuda_config.py.gz.base64"),
+            set(&["local_config_cuda"])
+        );
+    }
+
+    /// A helper nothing in the closure calls says nothing about itself, and
+    /// keeps the fallback rather than being attributed to no repository.
+    #[test]
+    fn a_helper_with_no_call_site_keeps_the_fallback() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "module(name = \"demo\", version = \"1\")\n\
+                 e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
+                 use_repo(e, \"a\", \"b\")\n\
+                 load(\"//bazel:loose.bzl\", \"loose\")\n",
+            ),
+            ("bazel/ext.bzl", "E = 1\n"),
+            (
+                "bazel/loose.bzl",
+                "def loose(ctx):\n\
+                 \x20   return ctx.read(Label(\"//conf:settings.yml\"))\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump("{\"\":\"\",\"demo\":\"\"}");
+        let ri = inputs(&files, &m);
+        assert_eq!(ri.repos_for("conf/settings.yml"), set(&["a", "b"]));
     }
 }
