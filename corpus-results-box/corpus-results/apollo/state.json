@@ -1,0 +1,19 @@
+{
+  "schema": 0,
+  "id": "apollo",
+  "pin": "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa",
+  "fetched": true,
+  "built": {
+    "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa": "/home/ubuntu/cambium/corpus-results/apollo/index-d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa-7.4.1.bin"
+  },
+  "replay": {
+    "from": "cd07f3fd6d4ffb215f4a477355b41e928d3b0d7b",
+    "to": "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa",
+    "bazel_version": "7.4.1",
+    "last_completed": "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa",
+    "done": true
+  },
+  "compared": [],
+  "reported": false,
+  "engine": "f5/587bbcc1cbf6deec"
+}

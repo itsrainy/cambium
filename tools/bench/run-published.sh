@@ -31,6 +31,21 @@ export CAMBIUM_SUBJECTS_DIR=${CAMBIUM_SUBJECTS_DIR:-$HOME/.cache/cambium/corpus}
 cd "${CAMBIUM_REPO:-$HOME/cambium}"
 CAMBI=${CAMBI:-./target/release/cambi}
 
+# Preflight: the binary must be built from this tree, and the last sync's
+# build must have finished. Twice a run went on for hours with a binary that
+# was not what the log said it was (a resumed result file, then a stale build).
+BIN_SHA=$($CAMBI --version | sed -n 's/.*(\([0-9a-f]*\)).*/\1/p')
+TREE_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ -z "$BIN_SHA" ] || [ "$BIN_SHA" != "$TREE_SHA" ]; then
+  echo "REFUSING: binary is built from '${BIN_SHA:-?}' but the tree is at '$TREE_SHA'; rebuild first" >&2
+  exit 2
+fi
+if [ -f ~/finish-bootstrap.log ] && ! grep -q "BOOTSTRAP DONE" ~/finish-bootstrap.log; then
+  echo "REFUSING: ~/finish-bootstrap.log does not end in BOOTSTRAP DONE; the last sync's build did not finish" >&2
+  exit 2
+fi
+echo "=== $(date -u +%H:%M:%S) $($CAMBI --version) tree $TREE_SHA ==="
+
 SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
 STEPS=${STEPS:-"fetch build history changes report"}
 RESTART_CHANGES=${RESTART_CHANGES:-0}

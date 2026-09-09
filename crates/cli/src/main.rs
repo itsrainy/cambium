@@ -18,10 +18,20 @@ pub const EXIT_GLOBAL: u8 = 2;
 pub const EXIT_BAZEL: u8 = 3;
 pub const EXIT_NO_BASELINE: u8 = 4;
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CAMBIUM_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
 #[command(
     name = "cambi",
-    version,
+    // `cambi 0.1.0 (7f2c666)`: the commit the binary was built from, so a
+    // driver can refuse to run a tree the binary is not. The sha is stamped
+    // at build time by the bench crate's build.rs.
+    version = VERSION,
     about = "Incremental changed-target computation for large Bazel monorepos",
     long_about = "Computes the set of Bazel targets whose outputs could differ between two \
 commits, at a cost proportional to the size of the change rather than the size of the \
