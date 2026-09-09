@@ -94,6 +94,13 @@ const PURE_BUILTINS: &[&str] = &[
     "zip",
 ];
 
+/// Starlark keywords. A `(` after one of these opens an expression, not a
+/// call's arguments.
+const KEYWORDS: &[&str] = &[
+    "and", "assert", "break", "continue", "def", "del", "elif", "else", "for", "if", "in", "is",
+    "lambda", "load", "not", "or", "pass", "return", "while",
+];
+
 /// Whether a call's `name =` is the name of a repository the main repository
 /// builds.
 ///
@@ -161,6 +168,8 @@ struct Call<'c> {
 
 struct CallSite {
     file: usize,
+    /// Token index of the call's `(`.
+    open: usize,
     /// The def the call is written in, if any.
     scope: Option<usize>,
     callee: Option<Sym>,
@@ -168,6 +177,17 @@ struct CallSite {
     /// is not a pure builtin.
     opaque: bool,
     name: NameArg,
+}
+
+/// One place a file uses a symbol it imported.
+///
+/// `chain` is every file the symbol was resolved through — the defining file
+/// and any that re-export it — because a change to any of them changes what
+/// this use does.
+struct Use {
+    file: usize,
+    tok: usize,
+    chain: Vec<usize>,
 }
 
 /// One file of the workspace closure.
@@ -187,6 +207,11 @@ struct FileScan<'a> {
     /// this file's module scope to the fallback set.
     module_dynamic: bool,
     fallback: BTreeSet<String>,
+    /// Repositories `MODULE.bazel` says this file declares: the `use_repo`
+    /// names of an extension it defines, the instantiations of a repository
+    /// rule `use_repo_rule` names in it. Part of the file's own answer even
+    /// when the declaration itself could not be read out of the text.
+    seeded: BTreeSet<String>,
     /// For each token, the index of the `(` of the call or bracket it sits
     /// directly inside, or `usize::MAX`. Walking this chain is how an
     /// occurrence finds the calls that enclose it.
@@ -210,6 +235,18 @@ pub(crate) struct Attribution<'a> {
     dynamic: Vec<bool>,
     /// Call sites, kept for the fixpoints.
     calls: Vec<CallSite>,
+    /// Every place a file uses a symbol it imported from another.
+    uses: Vec<Use>,
+    /// For a helper def that instantiates nothing, what its callers do.
+    helper: Vec<BTreeSet<String>>,
+    /// Per file: everything a change to it can move. The fixpoint of
+    /// [`Attribution::refine`].
+    fileset: Vec<BTreeSet<String>>,
+    /// True while that fixpoint is running, when an empty set means "not
+    /// computed yet" rather than "nothing known". Folding the fallback in
+    /// during the fixpoint would make the universe permanent everywhere,
+    /// because the sets only grow.
+    refining: bool,
     /// Literal `name =` values seen anywhere: the universe a fallback ranges
     /// over.
     pub(crate) literal_names: BTreeSet<String>,
@@ -240,6 +277,10 @@ impl<'a> Attribution<'a> {
             defines: Vec::new(),
             dynamic: Vec::new(),
             calls: Vec::new(),
+            uses: Vec::new(),
+            helper: Vec::new(),
+            fileset: Vec::new(),
+            refining: false,
             literal_names: BTreeSet::new(),
         };
         for (i, (path, text)) in texts.iter().enumerate() {
@@ -254,6 +295,7 @@ impl<'a> Attribution<'a> {
                 decls: Vec::new(),
                 module_dynamic: false,
                 fallback: BTreeSet::new(),
+                seeded: BTreeSet::new(),
                 parent: Vec::new(),
             });
         }
@@ -280,7 +322,73 @@ impl<'a> Attribution<'a> {
                 a.call_sites(i);
             }
         }
+        for i in 0..a.files.len() {
+            a.collect_uses(i);
+        }
         a
+    }
+
+    /// Every use of an imported symbol in file `f`.
+    ///
+    /// This is what replaces propagating a loader's whole answer down its
+    /// `load()` edges. A `.bzl` can only reach a repository through code that
+    /// runs: its own definitions, or a symbol another file imported from it —
+    /// and the effect of *that* is bounded by where the symbol is used.
+    fn collect_uses(&mut self, f: usize) {
+        let mut out = Vec::new();
+        {
+            let file = &self.files[f];
+            for (i, t) in file.toks.iter().enumerate() {
+                let Tok::Name(n) = t.tok else { continue };
+                if !file.loads.contains_key(n) {
+                    continue;
+                }
+                // `x.n` is an attribute, and `n = ...` a keyword argument —
+                // which is also how the alias appears in the `load()` itself.
+                if matches!(
+                    i.checked_sub(1).map(|j| file.toks[j].tok),
+                    Some(Tok::Punct(b'.'))
+                ) {
+                    continue;
+                }
+                if matches!(file.toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
+                    && !matches!(file.toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'=')))
+                {
+                    continue;
+                }
+                let chain = self.origin_chain(f, n);
+                if !chain.is_empty() {
+                    out.push(Use {
+                        file: f,
+                        tok: i,
+                        chain,
+                    });
+                }
+            }
+        }
+        self.uses.extend(out);
+    }
+
+    /// Every file a symbol written in `f` was resolved through.
+    fn origin_chain(&self, f: usize, name: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut file = f;
+        let mut name = name.to_string();
+        for _ in 0..16 {
+            if self.files[file].syms.contains_key(&name) {
+                return out;
+            }
+            let Some((path, orig)) = self.files[file].loads.get(&name) else {
+                return out;
+            };
+            let Some(&next) = self.by_path.get(path) else {
+                return out;
+            };
+            out.push(next);
+            file = next;
+            name = orig.clone();
+        }
+        out
     }
 
     /// Top-level `def`s, `load`s and rule / extension assignments.
@@ -301,7 +409,7 @@ impl<'a> Attribution<'a> {
             match (t.first().map(|x| x.tok), t.get(1).map(|x| x.tok)) {
                 // `def name(params):`
                 (Some(Tok::Name("def")), Some(Tok::Name(name))) => {
-                    let Some(Tok::Open) = t.get(2).map(|x| x.tok) else {
+                    let Some(Tok::Open(b'(')) = t.get(2).map(|x| x.tok) else {
                         continue;
                     };
                     let params = arg_spans(t, 2)
@@ -330,7 +438,7 @@ impl<'a> Attribution<'a> {
                     let Some(Tok::Name(head)) = t.get(2).map(|x| x.tok) else {
                         continue;
                     };
-                    if !matches!(t.get(3).map(|x| x.tok), Some(Tok::Open)) {
+                    if !matches!(t.get(3).map(|x| x.tok), Some(Tok::Open(b'('))) {
                         continue;
                     }
                     match head {
@@ -356,7 +464,7 @@ impl<'a> Attribution<'a> {
                     }
                 }
                 // `load("//pkg:f.bzl", "sym", alias = "sym")`
-                (Some(Tok::Name("load")), Some(Tok::Open)) => {
+                (Some(Tok::Name("load")), Some(Tok::Open(b'('))) => {
                     let label = match t.get(2).map(|x| x.tok) {
                         Some(Tok::Str(s, e)) => unescape(&text[s..e]),
                         _ => continue,
@@ -418,7 +526,7 @@ impl<'a> Attribution<'a> {
             let file = &self.files[f];
             let toks = &file.toks;
             for i in 0..toks.len() {
-                if !matches!(toks[i].tok, Tok::Open) {
+                if !matches!(toks[i].tok, Tok::Open(b'(')) {
                     continue;
                 }
                 // A call is `Name(`, and not `x.Name(` — a method call has no
@@ -428,7 +536,21 @@ impl<'a> Attribution<'a> {
                 let Some(Tok::Name(head)) = i.checked_sub(1).map(|j| toks[j].tok) else {
                     continue;
                 };
-                if head == "def" || head == "load" {
+                // `return (a or b)`, `if (x)`, `not (y)`: a keyword before a
+                // parenthesised expression is not a call, and reading it as
+                // one — as a symbol the closure cannot resolve — made every
+                // helper that wraps a condition in brackets unattributable.
+                if KEYWORDS.contains(&head) {
+                    continue;
+                }
+                // `def f(x)` is a declaration, not a call to `f`. Read as one
+                // it would give every def a call site, which is what decides
+                // whether a helper inherits its callers' repositories or keeps
+                // the fallback.
+                if matches!(
+                    i.checked_sub(2).map(|j| toks[j].tok),
+                    Some(Tok::Name("def"))
+                ) {
                     continue;
                 }
                 let dotted = matches!(
@@ -468,6 +590,7 @@ impl<'a> Attribution<'a> {
                 }
                 found.push(CallSite {
                     file: f,
+                    open: i,
                     scope,
                     callee,
                     opaque,
@@ -609,6 +732,11 @@ impl<'a> Attribution<'a> {
         for i in 0..self.files.len() {
             let path = self.files[i].path.clone();
             self.files[i].fallback = fallbacks.get(&path).cloned().unwrap_or_default();
+            for ((p, _), repos) in seeds {
+                if *p == path {
+                    self.files[i].seeded.extend(repos.iter().cloned());
+                }
+            }
         }
         self.inst_def = vec![BTreeSet::new(); self.defs.len()];
         self.inst_rule = vec![BTreeSet::new(); self.rules.len()];
@@ -734,7 +862,15 @@ impl<'a> Attribution<'a> {
                     (d, call.name.clone(), call.callee)
                 };
                 let add: BTreeSet<String> = match (&name, callee) {
-                    (NameArg::Literal(l), _) => [l.clone()].into_iter().collect(),
+                    (NameArg::Literal(l), t) => {
+                        // Instantiating a repository rule creates the instance
+                        // *and* whatever its implementation declares by name.
+                        let mut out: BTreeSet<String> = [l.clone()].into_iter().collect();
+                        if let Some(t @ (Sym::Rule(_) | Sym::Ext(_))) = t {
+                            out.extend(self.side_effects(t));
+                        }
+                        out
+                    }
                     (NameArg::Absent, Some(t)) => self.value_of(t),
                     _ => continue,
                 };
@@ -748,6 +884,147 @@ impl<'a> Attribution<'a> {
             if !changed {
                 break;
             }
+        }
+
+        self.refine();
+    }
+
+    /// The two refinements that need each other: what a helper def inherits
+    /// from its callers, and what a file's set is once its loaders' use sites
+    /// are folded in.
+    ///
+    /// Both only ever grow, so the loop terminates; the bound is a guard
+    /// against a pathological closure, not the expected exit.
+    fn refine(&mut self) {
+        self.helper = vec![BTreeSet::new(); self.defs.len()];
+        self.fileset = vec![BTreeSet::new(); self.files.len()];
+        self.refining = true;
+        for _ in 0..self.files.len() + 2 {
+            self.round();
+            // A file the rounds above learned nothing about keeps the
+            // fallback, and its dependents inherit that on the next round.
+            let mut promoted = false;
+            for f in 0..self.files.len() {
+                if self.fileset[f].is_empty() && !self.files[f].fallback.is_empty() {
+                    self.fileset[f] = self.files[f].fallback.clone();
+                    promoted = true;
+                }
+            }
+            if !promoted {
+                break;
+            }
+        }
+        self.refining = false;
+    }
+
+    /// One fixpoint of the helper and file sets, on the sets as they stand.
+    fn round(&mut self) {
+        for _ in 0..self.files.len() + self.defs.len() + 2 {
+            let mut changed = false;
+
+            // A def that instantiates nothing is answered by its callers.
+            let mut inherited: Vec<(usize, BTreeSet<String>)> = Vec::new();
+            for d in 0..self.defs.len() {
+                if self.defs[d].role.is_some() || self.dynamic[d] {
+                    continue;
+                }
+                if !self.defines[d].is_empty() || !self.defs[d].fwd.is_empty() {
+                    continue;
+                }
+                let mut repos = BTreeSet::new();
+                for c in &self.calls {
+                    if c.callee != Some(Sym::Def(d)) {
+                        continue;
+                    }
+                    let a = self.at_tok(c.file, c.open);
+                    repos.extend(if a.exact {
+                        a.repos
+                    } else {
+                        self.set_of(c.file)
+                    });
+                }
+                inherited.push((d, repos));
+            }
+            for (d, repos) in inherited {
+                let before = self.helper[d].len();
+                self.helper[d].extend(repos);
+                changed |= self.helper[d].len() != before;
+            }
+
+            // What each file defines by itself.
+            let owns: Vec<BTreeSet<String>> =
+                (0..self.files.len()).map(|f| self.own_repos(f)).collect();
+            for (f, o) in owns.into_iter().enumerate() {
+                let before = self.fileset[f].len();
+                self.fileset[f].extend(o);
+                changed |= self.fileset[f].len() != before;
+            }
+
+            // And what every use of a symbol it exports does.
+            let mut folded: Vec<(usize, BTreeSet<String>)> = Vec::new();
+            for u in &self.uses {
+                let v = self.use_value(u);
+                if v.is_empty() {
+                    continue;
+                }
+                for &x in &u.chain {
+                    folded.push((x, v.clone()));
+                }
+            }
+            for (x, v) in folded {
+                let before = self.fileset[x].len();
+                self.fileset[x].extend(v);
+                changed |= self.fileset[x].len() != before;
+            }
+
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// What one use of an imported symbol can move.
+    ///
+    /// Calling an imported function does exactly what that function does, plus
+    /// whatever the call site names outright — `pcl()` in a root file's
+    /// `apollo_repositories()` is answered by `init()`'s own repositories, not
+    /// by everything that root file declares. Any other use — a constant read
+    /// into an expression — is attributed like any other occurrence, and falls
+    /// back to the using file's own set when nothing was learned.
+    fn use_value(&self, u: &Use) -> BTreeSet<String> {
+        let file = &self.files[u.file];
+        let name = match file.toks[u.tok].tok {
+            Tok::Name(n) => n,
+            _ => return BTreeSet::new(),
+        };
+        if matches!(
+            file.toks.get(u.tok + 1).map(|t| t.tok),
+            Some(Tok::Open(b'('))
+        ) {
+            let mut out = BTreeSet::new();
+            if let Some(sym) = self.resolve(u.file, name) {
+                out.extend(self.value_of(sym));
+            } else {
+                // A symbol the closure re-exports from elsewhere: nothing is
+                // known about what calling it does.
+                return self.set_of(u.file);
+            }
+            let open = u.tok + 1;
+            let spans = arg_spans(&file.toks, open);
+            let scope = self.scope_of(u.file, open);
+            let callee = self.resolve(u.file, name);
+            if let NameArg::Literal(l) =
+                self.name_arg(scope, callee, name, &file.toks, file.text, &spans)
+            {
+                out.insert(l);
+            }
+            return out;
+        }
+        let a = self.at_tok(u.file, u.tok);
+        if a.exact {
+            a.repos
+        } else {
+            self.set_of(u.file)
         }
     }
 
@@ -778,17 +1055,45 @@ impl<'a> Attribution<'a> {
     fn value_of(&self, s: Sym) -> BTreeSet<String> {
         match s {
             Sym::Def(d) => self.raw_def_repos(d),
+            Sym::Rule(r) => self.rule_repos(Sym::Rule(r)),
+            Sym::Ext(e) => self.rule_repos(Sym::Ext(e)),
+        }
+    }
+
+    /// Everything instantiating a rule or running an extension creates: the
+    /// instances themselves, and whatever its implementation declares by name
+    /// — the `cuda-include` and `cuda-lib` repositories apollo's
+    /// `cuda_configure` writes alongside `local_config_cuda`.
+    fn rule_repos(&self, s: Sym) -> BTreeSet<String> {
+        let mut out = match s {
             Sym::Rule(r) => self.inst_rule[r].clone(),
             Sym::Ext(e) => self.repos_ext[e].clone(),
+            Sym::Def(_) => BTreeSet::new(),
+        };
+        out.extend(self.side_effects(s));
+        out
+    }
+
+    /// What a rule's or extension's implementation declares by name, over and
+    /// above the instance itself.
+    fn side_effects(&self, s: Sym) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for d in 0..self.defs.len() {
+            if self.defs[d].role == Some(s) {
+                if self.dynamic[d] {
+                    out.extend(self.files[self.defs[d].file].fallback.iter().cloned());
+                } else {
+                    out.extend(self.defines[d].iter().cloned());
+                }
+            }
         }
+        out
     }
 
     /// The repositories a def can instantiate or define, with no fallback.
     fn raw_def_repos(&self, d: usize) -> BTreeSet<String> {
-        match self.defs[d].role {
-            Some(Sym::Rule(r)) => return self.inst_rule[r].clone(),
-            Some(Sym::Ext(e)) => return self.repos_ext[e].clone(),
-            _ => {}
+        if let Some(role) = self.defs[d].role {
+            return self.rule_repos(role);
         }
         if self.dynamic[d] {
             return self.files[self.defs[d].file].fallback.clone();
@@ -796,6 +1101,15 @@ impl<'a> Attribution<'a> {
         let mut repos = self.defines[d].clone();
         if !self.defs[d].fwd.is_empty() {
             repos.extend(self.inst_def[d].iter().cloned());
+        }
+        if repos.is_empty() {
+            // A helper that instantiates nothing — apollo's
+            // `_find_cuda_config(repository_ctx)`, which only reads a file —
+            // is answered by where it is called from. Empty until
+            // [`Attribution::refine`] has run.
+            if let Some(h) = self.helper.get(d) {
+                repos.extend(h.iter().cloned());
+            }
         }
         repos
     }
@@ -827,9 +1141,17 @@ impl<'a> Attribution<'a> {
                 exact: false,
             };
         };
+        self.at_tok(f, tok)
+    }
+
+    /// [`Attribution::at`], by file index.
+    fn at_tok(&self, f: usize, tok: usize) -> Attributed {
         let file = &self.files[f];
         // The innermost enclosing call that names a repository outright.
         for open in self.enclosing_calls(f, tok) {
+            if !matches!(file.toks[open].tok, Tok::Open(b'(')) {
+                continue;
+            }
             let spans = arg_spans(&file.toks, open);
             let scope = self.scope_of(f, open);
             let head = match open.checked_sub(1).map(|j| file.toks[j].tok) {
@@ -856,11 +1178,7 @@ impl<'a> Attribution<'a> {
             if !span.contains(&tok) {
                 continue;
             }
-            let repos = match sym {
-                Sym::Rule(r) => self.inst_rule[*r].clone(),
-                Sym::Ext(e) => self.repos_ext[*e].clone(),
-                Sym::Def(_) => BTreeSet::new(),
-            };
+            let repos = self.rule_repos(*sym);
             return if repos.is_empty() {
                 Attributed {
                     repos: file.fallback.clone(),
@@ -872,15 +1190,31 @@ impl<'a> Attribution<'a> {
         }
         match self.scope_of(f, tok) {
             Some(d) => self.def_repos(d),
+            // Module level. A constant, a docstring, an `attr.label` outside
+            // any declaration: it reaches a repository only through this
+            // file's own definitions or through a symbol another file imports
+            // from it, and both are what the file's set is. `exact` stays
+            // false — nothing about the occurrence itself was read, and a
+            // mapping must not be derived from a set this wide.
             None => Attributed {
-                repos: file.fallback.clone(),
+                repos: self.set_of(f),
                 exact: false,
             },
         }
     }
 
-    /// Everything a file can instantiate or define: the union over its defs,
-    /// plus the module level's own answer when it has one.
+    /// Everything a change to file `f` can move, with the universe as the
+    /// last resort.
+    fn set_of(&self, f: usize) -> BTreeSet<String> {
+        match self.fileset.get(f) {
+            Some(r) if !r.is_empty() => r.clone(),
+            _ if self.refining => BTreeSet::new(),
+            _ => self.files[f].fallback.clone(),
+        }
+    }
+
+    /// Everything a change to a file can move: what it defines itself, plus
+    /// what every use of the symbols it exports does.
     pub(crate) fn file_repos(&self, path: &str) -> Attributed {
         let Some(&f) = self.by_path.get(path) else {
             return Attributed {
@@ -888,19 +1222,22 @@ impl<'a> Attribution<'a> {
                 exact: false,
             };
         };
+        Attributed {
+            repos: self.set_of(f),
+            exact: !self.files[f].module_dynamic,
+        }
+    }
+
+    /// What a file defines by itself, before its loaders' use sites are
+    /// folded in.
+    fn own_repos(&self, f: usize) -> BTreeSet<String> {
         let file = &self.files[f];
-        let mut repos = BTreeSet::new();
-        let mut exact = true;
+        let mut repos = file.seeded.clone();
         for &d in &file.defs {
             repos.extend(self.raw_def_repos(d));
-            exact &= !self.dynamic[d];
         }
         for (_, sym) in &file.decls {
-            match sym {
-                Sym::Rule(r) => repos.extend(self.inst_rule[*r].iter().cloned()),
-                Sym::Ext(e) => repos.extend(self.repos_ext[*e].iter().cloned()),
-                Sym::Def(_) => {}
-            }
+            repos.extend(self.rule_repos(*sym));
         }
         // Module-level calls with a literal name, and anything module-level
         // this analysis could not read.
@@ -923,18 +1260,8 @@ impl<'a> Attribution<'a> {
         }
         if file.module_dynamic {
             repos.extend(file.fallback.iter().cloned());
-            exact = false;
         }
-        Attributed { repos, exact }
-    }
-
-    /// True when the module level of a file is unattributable, which is the
-    /// old whole-file answer.
-    pub(crate) fn module_is_dynamic(&self, path: &str) -> bool {
-        self.by_path
-            .get(path)
-            .map(|f| self.files[*f].module_dynamic)
-            .unwrap_or(true)
+        repos
     }
 
     /// The token indices of the brackets enclosing a token, innermost first.
@@ -961,7 +1288,7 @@ fn parents(toks: &[Lexed<'_>]) -> Vec<usize> {
     let mut stack: Vec<usize> = Vec::new();
     for (i, t) in toks.iter().enumerate() {
         match t.tok {
-            Tok::Open => {
+            Tok::Open(_) => {
                 out[i] = stack.last().copied().unwrap_or(usize::MAX);
                 stack.push(i);
             }
@@ -986,7 +1313,7 @@ pub(crate) fn top_level_spans(toks: &[Lexed<'_>]) -> Vec<Range<usize>> {
             starts.push(i);
         }
         match t.tok {
-            Tok::Open => depth += 1,
+            Tok::Open(_) => depth += 1,
             Tok::Close => depth -= 1,
             _ => {}
         }
@@ -1012,7 +1339,7 @@ pub(crate) fn arg_spans(
     let mut i = open;
     while i < toks.len() {
         match toks[i].tok {
-            Tok::Open => depth += 1,
+            Tok::Open(_) => depth += 1,
             Tok::Close => {
                 depth -= 1;
                 if depth == 0 {

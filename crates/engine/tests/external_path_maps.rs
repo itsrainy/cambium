@@ -29,7 +29,8 @@ const MODULE_BASE: &str = "module(name = \"demo\", version = \"1\")\n\
      bazel_dep(name = \"mod\", version = \"1.0\")\n\
      local_path_override(module_name = \"mod\", path = \"api\")\n\
      gen = use_extension(\"//bazel:ext.bzl\", \"gen\")\n\
-     use_repo(gen, \"opaque\")\n";
+     use_repo(gen, \"opaque\")\n\
+     load(\"//bazel:vendored.bzl\", \"vendored\")\n";
 
 struct Files(BTreeMap<String, String>);
 
@@ -47,8 +48,11 @@ fn files() -> Files {
         "bazel/ext.bzl",
         "CONF = attr.label(default = \"@demo//conf:settings.yml\")\n\
          BUILD = '''filegroup(name = \"thing\", srcs = [\"@demo//notes\"])'''\n\
-         \n\
-         def _vendored():\n\
+",
+    );
+    put(
+        "bazel/vendored.bzl",
+        "def vendored():\n\
          \x20   new_local_repository(\n\
          \x20       name = \"vend\",\n\
          \x20       path = \"vendored\",\n\
