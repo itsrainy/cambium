@@ -193,9 +193,18 @@ impl Default for Invalidators {
                 "WORKSPACE.bzlmod.lock",
                 ".bazelrc",
                 ".bazelversion",
-                // The root BUILD file can carry repo-wide package() settings.
-                "BUILD",
-                "BUILD.bazel",
+                // `repo()` here sets defaults — visibility, package metadata,
+                // features — for every package in the repository, and nothing
+                // in the graph carries an edge to it.
+                //
+                // The root `BUILD` file is deliberately *not* on this list. A
+                // `package()` call applies to its own package and no other;
+                // repository-wide defaults live in `REPO.bazel`. Everything
+                // else a root BUILD file does — `exports_files`, visibility,
+                // a `package_group` — is an ordinary target in the root
+                // package, which a change to that file dirties like any other
+                // BUILD file, and whose consumers the graph already knows.
+                "REPO.bazel",
             ]
             .into_iter()
             .map(String::from)
