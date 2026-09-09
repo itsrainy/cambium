@@ -253,6 +253,14 @@ fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
         _ => unreachable!(),
     };
     let blob = dir.join(&names[0]);
+    // Published blobs are zstd frames, so rewrite this one raw before
+    // reaching into the header: what is under test is the version check, and
+    // a raw blob in the store is itself a case worth covering.
+    let idx = cambium_index::IndexFile::open(&blob)
+        .unwrap()
+        .deserialize()
+        .unwrap();
+    cambium_index::format::write_index_with(&blob, &idx, cambium_index::Compression::None).unwrap();
     let mut bytes = std::fs::read(&blob).unwrap();
     // Magic is the first 8 bytes; the version follows it.
     bytes[8] ^= 0xff;
@@ -261,5 +269,26 @@ fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
     assert!(
         f.engine.fetch_baseline(&a).unwrap().is_none(),
         "an unreadable blob is not a baseline, and is not an error"
+    );
+}
+
+/// Nor is a blob that will not decompress — a half-finished upload, a file
+/// some other tool truncated. The walk steps past that too.
+#[test]
+fn a_blob_that_will_not_decompress_is_skipped_not_fatal() {
+    let f = fixture();
+    let a = commit(&f.root, "one");
+    let names = f.publish(&a);
+    let dir = match &f.engine.cfg.baseline.store {
+        cambium_engine::config::StoreConfig::Dir { path } => path.clone(),
+        _ => unreachable!(),
+    };
+    let blob = dir.join(&names[0]);
+    let bytes = std::fs::read(&blob).unwrap();
+    assert!(cambium_index::is_zstd(&bytes), "published blobs are frames");
+    std::fs::write(&blob, &bytes[..bytes.len() / 2]).unwrap();
+    assert!(
+        f.engine.fetch_baseline(&a).unwrap().is_none(),
+        "a frame that will not decompress is not a baseline, and is not an error"
     );
 }

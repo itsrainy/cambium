@@ -119,6 +119,18 @@ pub struct Baseline {
     /// of the config hash, for the same reason as `cache_dir`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub publish_partial: bool,
+    /// Write published and cached indexes as a zstd frame. On by default: an
+    /// index compresses about 4-6x at level 3 for a few tens of milliseconds,
+    /// and a reader takes either form, so this only exists for a store that
+    /// wants the bytes verbatim. Not part of the config hash, for the same
+    /// reason as `cache_dir`: it says how the file is stored, not what the
+    /// graph is.
+    #[serde(default = "yes")]
+    pub compress_indexes: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -253,6 +265,7 @@ impl Default for Baseline {
             retention_days: 30,
             cache_dir: None,
             publish_partial: false,
+            compress_indexes: true,
         }
     }
 }

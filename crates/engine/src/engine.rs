@@ -467,6 +467,17 @@ impl Engine {
         ))
     }
 
+    /// How this run writes indexes it publishes or caches: a zstd frame
+    /// unless `baseline.compress_indexes` is off. The key and the header are
+    /// the same either way, and a reader takes both forms.
+    pub fn index_compression(&self) -> cambium_index::format::Compression {
+        if self.cfg.baseline.compress_indexes {
+            cambium_index::format::Compression::default()
+        } else {
+            cambium_index::format::Compression::None
+        }
+    }
+
     /// Publishes a base index this run had to compute, under the base commit.
     ///
     /// Only ever the base. The head-side index of an `affected` run is not
@@ -487,7 +498,7 @@ impl Engine {
         let dir = self.cache_dir.join("publish");
         std::fs::create_dir_all(&dir).map_err(EngineError::io_at(&dir))?;
         let path = dir.join(format!("{commit}.bin"));
-        cambium_index::format::write_index(&path, index)?;
+        cambium_index::format::write_index_with(&path, index, self.index_compression())?;
         let names = self.publish_index_allowing_partial(
             &path,
             &index.header.lineage,
