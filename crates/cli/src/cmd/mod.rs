@@ -15,6 +15,10 @@ pub struct Context {
     pub config: Option<PathBuf>,
     pub bazel_binary: Option<String>,
     pub cache_dir: Option<PathBuf>,
+    /// The global `--format`.
+    pub format: crate::Format,
+    /// Where diagnostics go, and in what shape.
+    pub render: crate::diag::Renderer,
 }
 
 impl Context {
@@ -44,9 +48,45 @@ impl Context {
 
 pub fn config_show(ctx: &Context) -> Result<u8> {
     let cfg = ctx.config()?;
-    print!("{}", cfg.to_toml());
-    println!("\n# config_hash = {}", hex(&cfg.hash()));
+    let Some(fmt) = ctx.format.data("cambi config")? else {
+        return Ok(crate::EXIT_OK);
+    };
+    match fmt {
+        crate::DataFormat::Text => {
+            print!("{}", cfg.to_toml());
+            println!("\n# config_hash = {}", hex(&cfg.hash()));
+        }
+        // The config has no JSON document of its own yet (`config show` is a
+        // later step), so the JSON forms print the TOML as one string field
+        // beside the hash every index carries.
+        crate::DataFormat::Json | crate::DataFormat::Jsonl => {
+            let doc = serde_json::json!({
+                "schema": cambium_engine::report::SCHEMA_VERSION,
+                "config_hash": hex(&cfg.hash()),
+                "toml": cfg.to_toml(),
+            });
+            if fmt == crate::DataFormat::Jsonl {
+                println!("{}", result_event(&doc)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+            }
+        }
+    }
     Ok(crate::EXIT_OK)
+}
+
+/// One `jsonl` result line: the document, with `"event": "result"` in front of
+/// its own fields.
+pub fn result_event<T: serde::Serialize>(value: &T) -> Result<String> {
+    let mut doc = serde_json::json!({"event": "result"});
+    let map = doc.as_object_mut().expect("an object");
+    match serde_json::to_value(value)? {
+        serde_json::Value::Object(fields) => map.extend(fields),
+        other => {
+            map.insert("result".into(), other);
+        }
+    }
+    Ok(serde_json::to_string(&doc)?)
 }
 
 pub fn hex(bytes: &[u8]) -> String {

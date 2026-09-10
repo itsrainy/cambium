@@ -19,10 +19,17 @@ use std::process::Command;
 const CAMBI: &str = env!("CARGO_BIN_EXE_cambi");
 
 fn run(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(CAMBI)
-        .args(args)
-        .output()
-        .expect("the binary should be runnable");
+    run_with_env(args, &[])
+}
+
+/// As [`run`], with environment variables set for the child alone.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(CAMBI);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("the binary should be runnable");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -150,7 +157,7 @@ fn hub_labels(index: &std::path::Path) -> Vec<String> {
         "index",
         "stats",
         index.to_str().unwrap(),
-        "--output",
+        "--format",
         "json",
     ]);
     assert_eq!(code, 0, "index stats failed: {stderr}");
@@ -183,7 +190,7 @@ fn json_documents_carry_the_current_schema_version() {
             "index",
             "stats",
             index.to_str().unwrap(),
-            "--output",
+            "--format",
             "json",
         ],
         vec![
@@ -191,7 +198,7 @@ fn json_documents_carry_the_current_schema_version() {
             "targets",
             index.to_str().unwrap(),
             &package,
-            "--output",
+            "--format",
             "json",
         ],
         vec![
@@ -199,7 +206,7 @@ fn json_documents_carry_the_current_schema_version() {
             "rdeps",
             index.to_str().unwrap(),
             &hub,
-            "--output",
+            "--format",
             "json",
         ],
     ] {
@@ -240,5 +247,124 @@ fn index_path_exits_nonzero_when_there_is_no_path() {
     assert!(
         stderr.contains("no dependency path"),
         "the caller should be told why:\n{stderr}"
+    );
+}
+
+/// `--format` is the flag the surface documents; `--output` is what every
+/// existing script types, and it has to keep working for a release. So does
+/// `text` for the value `human`, which is what `text` always meant.
+#[test]
+fn the_old_output_spelling_still_works() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let file = index.to_str().unwrap();
+
+    let (code, by_format, _) = run(&["index", "stats", file, "--format", "json"]);
+    assert_eq!(code, 0, "--format json should be accepted");
+    let (code, by_output, _) = run(&["index", "stats", file, "--output", "json"]);
+    assert_eq!(code, 0, "--output stays as an alias of --format");
+    assert_eq!(by_format, by_output, "the alias must not change the answer");
+
+    let (code, human, _) = run(&["index", "stats", file, "--format", "human"]);
+    assert_eq!(code, 0);
+    let (code, text, _) = run(&["index", "stats", file, "--format", "text"]);
+    assert_eq!(code, 0, "`text` stays as an alias of `human`");
+    assert_eq!(human, text);
+    // And the default is still what it was, which is `human`.
+    let (_, default, _) = run(&["index", "stats", file]);
+    assert_eq!(default, human, "human is the default, TTY or not");
+}
+
+/// There is no Bazel expression for a byte count, and a silent fallback to
+/// text would leave a pipeline building the wrong thing.
+#[test]
+fn asking_a_data_query_for_the_query_format_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let (code, stdout, stderr) = run(&[
+        "index",
+        "stats",
+        index.to_str().unwrap(),
+        "--format",
+        "query",
+    ]);
+    assert_eq!(code, 1, "a usage error is exit 1");
+    assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
+    assert!(
+        stderr.contains("error[CAMBI-E"),
+        "the caller needs a code to branch on:\n{stderr}"
+    );
+}
+
+#[test]
+fn the_null_format_answers_with_the_exit_code_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let (code, stdout, _) = run(&[
+        "index",
+        "stats",
+        index.to_str().unwrap(),
+        "--format",
+        "null",
+    ]);
+    assert_eq!(code, 0, "the query still runs and still answers");
+    assert!(
+        stdout.is_empty(),
+        "--format null prints nothing: {stdout:?}"
+    );
+
+    // And the exit code is still the answer where it carries one.
+    let missing = dir.path().join("nope.cmbx");
+    let (code, stdout, _) = run(&[
+        "index",
+        "stats",
+        missing.to_str().unwrap(),
+        "--format",
+        "null",
+    ]);
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "{stdout:?}");
+}
+
+/// An error is a diagnostic like any other: a code a script can match, not a
+/// prose line that changes with the wording.
+#[test]
+fn an_error_carries_a_code_on_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.cmbx");
+    let (code, _, stderr) = run(&["index", "stats", missing.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("error[CAMBI-E"),
+        "an unreadable index should be a coded diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn no_color_means_no_escape_codes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.cmbx");
+    let (_, stdout, stderr) = run_with_env(
+        &["index", "stats", missing.to_str().unwrap()],
+        &[("NO_COLOR", "1")],
+    );
+    assert!(
+        !stderr.contains('\x1b') && !stdout.contains('\x1b'),
+        "NO_COLOR=1 must leave the output plain:\n{stderr}"
+    );
+    // --color always is an explicit request and outranks a bare NO_COLOR.
+    let (_, _, coloured) = run_with_env(
+        &[
+            "index",
+            "stats",
+            missing.to_str().unwrap(),
+            "--color",
+            "always",
+        ],
+        &[("NO_COLOR", "1")],
+    );
+    assert!(
+        coloured.contains('\x1b'),
+        "--color always should colour anyway:\n{coloured}"
     );
 }

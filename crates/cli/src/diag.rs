@@ -1,0 +1,214 @@
+//! Rendering diagnostics, in the `rustc` shape `docs/CLI.md` settles on.
+//!
+//! ```text
+//! warning[CAMBI-W004]: .bazelrc changed and the run went global
+//!   --> .bazelrc:14
+//!   = help: add it to [bazelrc].allowlist_extra if it cannot affect analysis
+//! ```
+//!
+//! No source excerpt with carets: the header, the location and the help line
+//! are what a caller acts on, and the excerpt would mean reading the file back
+//! at the revision the diagnostic is about.
+//!
+//! Diagnostics are stderr's business. Results go to stdout, always, so a
+//! pipeline that reads stdout is never handed a warning it has to filter out.
+
+use cambium_engine::{Code, Diagnostic, Level};
+
+use crate::Format;
+
+/// How this invocation renders diagnostics.
+#[derive(Copy, Clone, Debug)]
+pub struct Renderer {
+    pub format: Format,
+    /// `--quiet`: nothing on stderr on success. An error still speaks, because
+    /// an exit code with no message is not a diagnosis.
+    pub quiet: bool,
+    /// Resolved from `--color`, `$NO_COLOR` and whether stderr is a TTY.
+    pub color: bool,
+}
+
+impl Renderer {
+    /// One warning, on stderr, in whatever form this invocation asked for.
+    ///
+    /// Under `--format json` the diagnostics of `cambi affected` live in the
+    /// document instead and never come through here; a command whose document
+    /// has no `diagnostics` field prints them here as JSON objects, so a
+    /// machine reader sees the same fields either way.
+    pub fn warn(&self, d: &Diagnostic) {
+        if self.quiet {
+            return;
+        }
+        eprintln!("{}", self.format_one(d));
+    }
+
+    /// An error, on stderr. Not suppressed by `--quiet`.
+    pub fn error(&self, d: &Diagnostic) {
+        eprintln!("{}", self.format_one(d));
+    }
+
+    fn format_one(&self, d: &Diagnostic) -> String {
+        match self.format {
+            Format::Json | Format::Jsonl => serde_json::to_string(d)
+                .unwrap_or_else(|e| format!(r#"{{"code":"CAMBI-E001","message":"{e}"}}"#)),
+            _ => render_human(d, self.color),
+        }
+    }
+}
+
+/// ANSI, when colour is on: bold yellow for a `warning[CODE]` header, bold red
+/// for an `error[CODE]` one, and the message in bold. The location and the help
+/// line stay plain — a diagnostic is read, not decorated.
+fn render_human(d: &Diagnostic, color: bool) -> String {
+    let (bold, reset, tint) = if color {
+        (
+            "\x1b[1m",
+            "\x1b[0m",
+            match d.level {
+                Level::Warning => "\x1b[1;33m",
+                Level::Error => "\x1b[1;31m",
+            },
+        )
+    } else {
+        ("", "", "")
+    };
+
+    let mut out = format!(
+        "{tint}{}[{}]{reset}{bold}: {}{reset}",
+        d.level, d.code, d.message
+    );
+    if let Some(l) = &d.location {
+        match l.line {
+            Some(n) => out.push_str(&format!("\n  --> {}:{n}", l.path)),
+            None => out.push_str(&format!("\n  --> {}", l.path)),
+        }
+    }
+    if let Some(h) = &d.help {
+        out.push_str(&format!("\n  = help: {h}"));
+    }
+    out
+}
+
+/// A usage error: the command line does not make sense. Its own type so the
+/// top level can give it `CAMBI-E013` rather than the generic code.
+#[derive(Debug)]
+pub struct UsageError(pub String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+impl UsageError {
+    /// A usage error ready to `?`: it only ever travels as an `anyhow::Error`,
+    /// because nothing branches on the type beyond the code it is given.
+    pub fn raised(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(UsageError(message.into()))
+    }
+}
+
+/// Whatever went wrong, as a diagnostic.
+///
+/// An `EngineError` knows its own code; a usage error is `CAMBI-E013`; and
+/// anything else — an index that will not open, a serde failure — is the
+/// generic internal code, whose message is the error chain a caller would
+/// otherwise have read off `cambium: {e:#}`.
+pub fn of_error(e: &anyhow::Error) -> Diagnostic {
+    if let Some(engine) = e.downcast_ref::<cambium_engine::EngineError>() {
+        return engine.diagnostic();
+    }
+    if let Some(usage) = e.downcast_ref::<UsageError>() {
+        return Diagnostic::error(Code::E013Usage, usage.0.clone());
+    }
+    Diagnostic::error(Code::E001Internal, format!("{e:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cambium_engine::Diagnostic;
+
+    fn full() -> Diagnostic {
+        Diagnostic::warning(
+            Code::W004BazelrcGlobal,
+            ".bazelrc changed and the run went global",
+        )
+        .at(".bazelrc", Some(14))
+        .with_help("add it to [bazelrc].allowlist_extra if it cannot affect analysis")
+    }
+
+    #[test]
+    fn the_human_form_is_the_rustc_one() {
+        assert_eq!(
+            render_human(&full(), false),
+            "warning[CAMBI-W004]: .bazelrc changed and the run went global\n  \
+             --> .bazelrc:14\n  \
+             = help: add it to [bazelrc].allowlist_extra if it cannot affect analysis"
+        );
+    }
+
+    #[test]
+    fn a_location_without_a_line_prints_the_path_alone() {
+        let d = Diagnostic::warning(Code::W009WorkspaceLevelBzl, "loaded outside any package")
+            .at("tools/defs.bzl", None);
+        assert_eq!(
+            render_human(&d, false),
+            "warning[CAMBI-W009]: loaded outside any package\n  --> tools/defs.bzl"
+        );
+    }
+
+    #[test]
+    fn a_bare_diagnostic_is_one_line() {
+        let d = Diagnostic::error(Code::E008NoStore, "no baseline store is configured");
+        assert_eq!(
+            render_human(&d, false),
+            "error[CAMBI-E008]: no baseline store is configured"
+        );
+    }
+
+    #[test]
+    fn colour_is_only_ever_on_when_asked_for() {
+        assert!(!render_human(&full(), false).contains('\x1b'));
+        assert!(render_human(&full(), true).contains("\x1b[1;33m"));
+    }
+
+    #[test]
+    fn under_json_a_diagnostic_is_an_object_not_a_banner() {
+        let r = Renderer {
+            format: Format::Json,
+            quiet: false,
+            color: false,
+        };
+        let s = r.format_one(&full());
+        let v: serde_json::Value = serde_json::from_str(&s).expect("one JSON object per line");
+        assert_eq!(v["code"], "CAMBI-W004");
+        assert_eq!(v["location"]["line"], 14);
+    }
+
+    #[test]
+    fn an_engine_error_keeps_its_own_code() {
+        let e = anyhow::Error::new(cambium_engine::EngineError::NoStore);
+        let d = of_error(&e);
+        assert_eq!(d.code, Code::E008NoStore);
+        assert_eq!(d.level, Level::Error);
+        assert!(d.help.is_some(), "NoStore names the key to set");
+    }
+
+    #[test]
+    fn anything_else_is_the_generic_error_code_with_the_whole_chain() {
+        let e = anyhow::Error::msg("inner").context("outer");
+        let d = of_error(&e);
+        assert_eq!(d.code, Code::E001Internal);
+        assert!(d.message.contains("outer"), "{}", d.message);
+        assert!(d.message.contains("inner"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_usage_error_is_its_own_code() {
+        let d = of_error(&UsageError::raised("--format query is only for affected"));
+        assert_eq!(d.code, Code::E013Usage);
+    }
+}

@@ -21,8 +21,6 @@ use crate::DataFormat;
 pub struct Common {
     /// Index file to query.
     pub file: PathBuf,
-    #[arg(long, value_enum, default_value_t = DataFormat::Text)]
-    pub output: DataFormat,
 }
 
 /// Options the reachability queries share.
@@ -65,8 +63,6 @@ pub struct Verify {
     /// Seed for the sample, so a failure can be reproduced.
     #[arg(long, default_value_t = 0)]
     seed: u64,
-    #[arg(long, value_enum, default_value_t = DataFormat::Text)]
-    output: DataFormat,
 }
 
 #[derive(Subcommand)]
@@ -180,9 +176,8 @@ pub fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     let engine = ctx.engine()?;
     let f = IndexFile::open(&args.file)?;
     let result = inspect::verify(&engine.bazel, f.view(), args.sample, args.seed)?;
-    match args.output {
-        DataFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
-        DataFormat::Text => print_verify(&result),
+    if let Some(fmt) = ctx.format.data("cambi index verify")? {
+        emit(&result, fmt, print_verify)?;
     }
     Ok(if result.is_sound() {
         crate::EXIT_OK
@@ -217,7 +212,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     let common = args.common().clone();
     let f = IndexFile::open(&common.file)?;
     let q = IndexQuery::new(f.view());
-    let fmt = common.output;
+    // `--format query` has no meaning for a byte count or a path, and a silent
+    // fallback to text would be worse than saying so.
+    let Some(fmt) = ctx.format.data("cambi index")? else {
+        return run_quietly(&f, &q, args);
+    };
 
     match args {
         Args::Inspect { label, package, .. } => {
@@ -263,9 +262,55 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 fn emit<T: Serialize>(value: &T, fmt: DataFormat, text: fn(&T)) -> Result<()> {
     match fmt {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
+        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(value)?),
         DataFormat::Text => text(value),
     }
     Ok(())
+}
+
+/// `--format null`: run the query for its exit code and print nothing.
+///
+/// The query still runs, because the exit code is an answer — `path` says
+/// whether there is a path, and an unknown label is still an error.
+fn run_quietly(f: &IndexFile, q: &IndexQuery<'_>, args: Args) -> Result<u8> {
+    match args {
+        Args::Inspect { label, package, .. } => {
+            if let Some(l) = label {
+                q.detail(&l)?;
+            } else if let Some(p) = package {
+                q.targets(&p, None)?;
+            }
+        }
+        Args::Rdeps { label, reach, .. } => {
+            q.rdeps(&label, &(&reach).into())?;
+        }
+        Args::Deps { label, reach, .. } => {
+            q.deps(&label, &(&reach).into())?;
+        }
+        Args::Path { from, to, .. } => {
+            return Ok(if q.path(&from, &to)?.found {
+                crate::EXIT_OK
+            } else {
+                crate::EXIT_ERROR
+            });
+        }
+        Args::Consumers { paths, reach, .. } => {
+            q.consumers(&paths, &(&reach).into())?;
+        }
+        Args::Owner { paths, .. } => {
+            q.owner(&paths)?;
+        }
+        Args::Targets { package, kind, .. } => {
+            let kind = kind.as_deref().map(inspect::parse_kind).transpose()?;
+            q.targets(&package, kind)?;
+        }
+        Args::Stats { .. } => {
+            q.stats(f.file_size() as u64);
+        }
+        Args::Externals { .. } => {}
+        Args::Verify(_) => unreachable!("handled above"),
+    }
+    Ok(crate::EXIT_OK)
 }
 
 fn print_targets(r: &inspect::TargetsResult) {
@@ -471,6 +516,7 @@ fn inspect_cmd(
     let stats = q.stats(f.file_size() as u64);
     match fmt {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
+        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(&stats)?),
         DataFormat::Text => {
             let v = q.view();
             println!("file:            {}", f.path().display());

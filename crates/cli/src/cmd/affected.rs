@@ -4,8 +4,9 @@ use anyhow::Result;
 use cambium_engine::AffectedRequest;
 use clap::Args as ClapArgs;
 
+use crate::cmd::result_event;
 use crate::cmd::Context;
-use crate::OutputFormat;
+use crate::Format;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -37,8 +38,6 @@ pub struct Args {
     /// change (0 = the direct set).
     #[arg(long)]
     pub max_depth: Option<u32>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub output: OutputFormat,
     /// Write the head index produced by this run to this file. (The report
     /// itself goes to stdout; `--write-index` is the old spelling.)
     #[arg(long = "out", alias = "write-index", value_name = "FILE")]
@@ -63,34 +62,53 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     };
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
+    // Under --format json the diagnostics are already in the document; every
+    // other form puts them on stderr, where they cannot be mistaken for the
+    // answer. `jsonl` streams them first, as events, so a watcher sees them as
+    // the run raises them rather than only at the end.
+    if !matches!(ctx.format, Format::Json) {
+        for d in &report.diagnostics {
+            match ctx.format {
+                Format::Jsonl => {
+                    if !ctx.render.quiet {
+                        println!("{}", diagnostic_event(d)?);
+                    }
+                }
+                _ => ctx.render.warn(d),
+            }
+        }
+    }
 
     if let (Some(path), Some(index)) = (&args.out, &outcome.index) {
         cambium_index::format::write_index(path, index)?;
     }
 
-    match args.output {
-        OutputFormat::Json => {
+    match ctx.format {
+        Format::Null => {}
+        Format::Json | Format::Jsonl => {
             if args.tests_only && !report.global {
                 // `--tests-only` restricts `affected` to test targets; every
                 // other field (including `direct`, which can name non-test
                 // labels the change touched directly) is unchanged.
                 let mut projected = report.clone();
                 projected.affected.retain(|t| t.test);
-                println!("{}", serde_json::to_string_pretty(&projected)?);
+                print_document(ctx, &projected)?;
             } else {
-                println!("{}", serde_json::to_string_pretty(report)?);
+                print_document(ctx, report)?;
             }
         }
-        OutputFormat::Query => {
+        Format::Query => {
             println!("{}", report.as_query_expression(args.tests_only));
         }
-        OutputFormat::Text => {
+        Format::Human => {
             if report.global {
                 // Exit code 2 says "global"; stdout still carries a usable
                 // pattern so a pipeline can just run it.
                 println!("//...");
                 if let Some(r) = &report.global_reason {
-                    eprintln!("cambium: everything is affected: {r}");
+                    if !ctx.render.quiet {
+                        eprintln!("cambium: everything is affected: {r}");
+                    }
                 }
             } else {
                 let items: Vec<&str> = if args.tests_only {
@@ -113,6 +131,25 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     } else {
         crate::EXIT_OK
     })
+}
+
+/// The report, as the one document or as the single `result` event.
+fn print_document(ctx: &Context, report: &cambium_engine::AffectedReport) -> Result<()> {
+    match ctx.format {
+        Format::Jsonl => println!("{}", result_event(report)?),
+        _ => println!("{}", serde_json::to_string_pretty(report)?),
+    }
+    Ok(())
+}
+
+/// One streamed diagnostic line.
+fn diagnostic_event(d: &cambium_engine::Diagnostic) -> Result<String> {
+    let mut doc = serde_json::json!({"event": "diagnostic"});
+    let map = doc.as_object_mut().expect("an object");
+    if let serde_json::Value::Object(fields) = serde_json::to_value(d)? {
+        map.extend(fields);
+    }
+    Ok(serde_json::to_string(&doc)?)
 }
 
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {

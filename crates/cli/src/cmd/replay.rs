@@ -115,8 +115,6 @@ pub struct Args {
     /// How many dirty packages and repositories to list per change set.
     #[arg(long, default_value_t = 20)]
     pub max_listed: usize,
-    #[arg(long, value_enum, default_value_t = DataFormat::Text)]
-    pub output: DataFormat,
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
@@ -140,7 +138,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
     let results = args.results_dir.join(&entry.id);
     if args.head_check {
-        return head_check(&args, &entry.id, &entry.pin, &results);
+        return head_check(ctx, &args, &entry.id, &entry.pin, &results);
     }
     let index_path = match &args.index {
         Some(p) => p.clone(),
@@ -326,8 +324,15 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
     };
 
-    match args.output {
-        DataFormat::Json => {
+    let Some(output) = ctx.format.data("cambi bench replay")? else {
+        return Ok(if divergences.is_empty() {
+            crate::EXIT_OK
+        } else {
+            crate::EXIT_ERROR
+        });
+    };
+    match output {
+        DataFormat::Json | DataFormat::Jsonl => {
             let doc = serde_json::json!({
                 "schema": replay::REPLAY_SCHEMA,
                 "subject": run.subject,
@@ -379,7 +384,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 /// summary line counts externals mismatches and mentions the rest only when
 /// there are any (there should never be, and a count here is a bug in the
 /// re-derivation rather than in the derivation under test).
-fn head_check(args: &Args, subject: &str, pin: &str, results: &Path) -> Result<u8> {
+fn head_check(ctx: &Context, args: &Args, subject: &str, pin: &str, results: &Path) -> Result<u8> {
     let Some(path) = replay::archived_head(results, pin) else {
         // Quiet by design: precheck.sh runs this for every subject, and a run
         // published before the history archived its head index has none.
@@ -396,8 +401,11 @@ fn head_check(args: &Args, subject: &str, pin: &str, results: &Path) -> Result<u
     let diff = replay::head_check(file.view(), pin, &texts, args.max_listed)
         .with_context(|| format!("re-deriving the externals tables at {pin}"))?;
 
-    match args.output {
-        DataFormat::Json => {
+    let Some(output) = ctx.format.data("cambi bench replay")? else {
+        return Ok(crate::EXIT_OK);
+    };
+    match output {
+        DataFormat::Json | DataFormat::Jsonl => {
             let doc = serde_json::json!({
                 "schema": replay::REPLAY_SCHEMA,
                 "subject": subject,
