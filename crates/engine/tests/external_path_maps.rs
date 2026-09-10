@@ -548,3 +548,66 @@ fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
     assert_eq!(r.packages, ["app".to_string()].into_iter().collect());
     assert_eq!(r.packages_by_repo["mod"], 1);
 }
+
+/// A dirty package that comes back empty — it failed to load under
+/// `--keep_going` — keeps no load closure: a full build at the same commit
+/// never scans its BUILD file, and the rebuild oracle compares the two.
+#[test]
+fn a_package_bazel_could_not_load_keeps_no_load_closure() {
+    /// `Scanning`, except that `app` never loads.
+    struct AppFails(Scanning);
+    impl PackageQuerier for AppFails {
+        fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
+            let mut rows = self.0.query(packages)?;
+            for u in &mut rows.updates {
+                if u.package == "app" {
+                    u.targets.clear();
+                }
+            }
+            Ok(rows)
+        }
+        fn universe(&self) -> Result<Rows, EngineError> {
+            let mut rows = self.0.universe()?;
+            rows.updates.retain(|u| u.package != "app");
+            Ok(rows)
+        }
+        fn load_source(&self) -> Option<&dyn FileText> {
+            self.0.load_source()
+        }
+        fn repo_mapping(&self) -> cambium_index::RepoMapping {
+            self.0.repo_mapping()
+        }
+    }
+    let consumers_of_defs = |v: cambium_index::IndexRef<'_>| -> Vec<String> {
+        // No node at all when nothing loads it: the same as no consumers.
+        let Some(id) = v.bzl_id("bazel/defs.bzl") else {
+            return Vec::new();
+        };
+        v.bzl_consumers(id)
+            .iter()
+            .map(|&p| v.package_name(p).to_string())
+            .collect()
+    };
+    let base = base();
+    assert_eq!(consumers_of_defs(base.view()), vec!["app".to_string()]);
+
+    let e = engine();
+    let q = AppFails(Scanning(files()));
+    let req = AffectedRequest {
+        materialize: true,
+        ..req()
+    };
+    let changes = vec![Change::new(Status::Modified, "app/BUILD")];
+    let head = e
+        .compute_with_texts(base.view(), &changes, &q, &req, &texts(MODULE_BASE, MODULE_BASE))
+        .unwrap()
+        .index
+        .expect("a spliced head index");
+    let rebuilt = e.full_build_with("head", &q).unwrap();
+    assert!(consumers_of_defs(rebuilt.view()).is_empty());
+    assert_eq!(
+        consumers_of_defs(head.view()),
+        consumers_of_defs(rebuilt.view()),
+        "the spliced index must agree with a full build about a package Bazel could not load"
+    );
+}
