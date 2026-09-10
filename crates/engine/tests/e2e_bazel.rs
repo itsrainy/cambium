@@ -1245,3 +1245,524 @@ fn a_build_files_direct_external_load_reaches_its_package() {
         assert!(!d.contains("//app:unrelated"), "{version}: {d:?}");
     }
 }
+
+// ---------------------------------------- shapes the published run found
+
+/// The Bazel this workspace actually resolves to, as a major version.
+///
+/// `.bazelversion` is what these tests write, but `USE_BAZEL_VERSION` outranks
+/// it in bazelisk and the version matrix sets exactly that, so the WORKSPACE
+/// cases have to ask rather than assume: Bazel 9 removed `WORKSPACE` support
+/// altogether and those cases are skipped there, not failed.
+fn resolved_bazel_major(root: &Path) -> u32 {
+    let out = Command::new(bazel_binary().unwrap_or_else(|| "bazel".to_string()))
+        .current_dir(root)
+        .args(["--version"])
+        .output()
+        .expect("bazel --version");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.split_whitespace()
+        .find_map(|w| w.split('.').next().and_then(|n| n.parse::<u32>().ok()))
+        .unwrap_or_else(|| panic!("no version in `bazel --version`: {text}"))
+}
+
+fn init_git(root: &Path) {
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+}
+
+fn affected_request(base: &str, head: &str, allow_partial: bool) -> AffectedRequest {
+    AffectedRequest {
+        base: base.to_string(),
+        head: head.to_string(),
+        include_manual: true,
+        explain: true,
+        no_full_build: true,
+        materialize: true,
+        publish_base: false,
+        max_depth: None,
+        allow_partial,
+    }
+}
+
+/// The externals side of "an applied index equals a fresh cold build".
+///
+/// [`assert_same_edges`] compares the graph; this compares the repository
+/// tables beside it — the repositories and their path maps, the input
+/// patterns and what they feed, each workspace `.bzl`'s answer, and every
+/// package's external loads. `crates/bench/src/oracles/rebuild.rs` compares
+/// the same tables for the benchmark's rebuild oracle; this is deliberately a
+/// local re-expression, because the engine crate does not depend on bench.
+fn assert_same_externals(spliced: &IndexData, fresh: &IndexData, what: &str) {
+    let (a, b) = (spliced.view(), fresh.view());
+    let mut bad: Vec<String> = Vec::new();
+    assert_eq!(
+        a.bzl_closure, b.bzl_closure,
+        "{what}: bzl closure present: applied {}, rebuilt {}",
+        a.bzl_closure, b.bzl_closure
+    );
+    if !a.bzl_closure {
+        return;
+    }
+
+    let repos = |v: IndexRef<'_>| -> BTreeMap<String, (String, Vec<String>)> {
+        (0..v.num_repos())
+            .map(|r| {
+                let maps = v
+                    .repo_path_maps(r)
+                    .into_iter()
+                    .map(|m| format!("{} -> {}", m.from, m.to))
+                    .collect();
+                (
+                    v.repo_name(r).to_string(),
+                    (v.repo_canonical.get(r).to_string(), maps),
+                )
+            })
+            .collect()
+    };
+    let patterns = |v: IndexRef<'_>| -> BTreeMap<String, (bool, Vec<String>)> {
+        (0..v.repo_input_patterns.len())
+            .map(|i| {
+                let p = i as u32;
+                let key = format!(
+                    "{}{}",
+                    v.repo_input_patterns.get(p),
+                    if v.repo_input_prefix[i] { "**" } else { "" }
+                );
+                let feeds = v
+                    .repo_inputs
+                    .row(p)
+                    .iter()
+                    .map(|&r| v.repo_name(r).to_string())
+                    .collect();
+                (key, (v.repo_input_target_only[i], feeds))
+            })
+            .collect()
+    };
+    let bzl_rows = |v: IndexRef<'_>| -> BTreeMap<String, (Vec<String>, Vec<String>)> {
+        (0..v.num_bzl())
+            .map(|id| {
+                let defines = v
+                    .bzl_repos_of(id)
+                    .iter()
+                    .map(|&r| v.repo_name(r).to_string())
+                    .collect();
+                let loads = v.bzl_external(id).into_iter().map(str::to_string).collect();
+                (v.bzl_path(id).to_string(), (defines, loads))
+            })
+            .collect()
+    };
+    let pkg_ext = |v: IndexRef<'_>| -> BTreeMap<String, Vec<String>> {
+        (0..v.num_packages())
+            .map(|p| {
+                (
+                    v.package_name(p).to_string(),
+                    v.package_external(p)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<String>>(),
+                )
+            })
+            .filter(|(_, e)| !e.is_empty())
+            .collect()
+    };
+
+    let mut compare = |table: &str, a: BTreeMap<String, String>, b: BTreeMap<String, String>| {
+        for (k, va) in &a {
+            match b.get(k) {
+                None => bad.push(format!("{table} `{k}` only in the applied index")),
+                Some(vb) if vb != va => {
+                    bad.push(format!("{table} `{k}`: applied {va}, rebuilt {vb}"))
+                }
+                Some(_) => {}
+            }
+        }
+        for k in b.keys() {
+            if !a.contains_key(k) {
+                bad.push(format!("{table} `{k}` only in the cold rebuild"));
+            }
+        }
+    };
+    fn dbg<V: std::fmt::Debug>(m: BTreeMap<String, V>) -> BTreeMap<String, String> {
+        m.into_iter().map(|(k, v)| (k, format!("{v:?}"))).collect()
+    }
+    compare("repository", dbg(repos(a)), dbg(repos(b)));
+    compare("input pattern", dbg(patterns(a)), dbg(patterns(b)));
+    compare("workspace .bzl", dbg(bzl_rows(a)), dbg(bzl_rows(b)));
+    compare("external loads of", dbg(pkg_ext(a)), dbg(pkg_ext(b)));
+    assert!(bad.is_empty(), "{what}: {bad:#?}");
+}
+
+/// Shape A, from `apollo` and `xla`: a package Bazel can never load.
+///
+/// Both subjects carry packages that fail to load at every revision — a BUILD
+/// file loading a `.bzl` from a repository that does not exist on the box
+/// (apollo's `@local_config_cuda//cuda:build_defs.bzl`). `bazel query //...`
+/// exits 3 under `--keep_going`, the index is flagged partial, and the
+/// packages Bazel refused come back with no rows.
+///
+/// What broke: the incremental splice scanned every *dirty* package's BUILD
+/// file for its load closure whether or not Bazel had returned rows for it,
+/// while a cold build only ever sees the packages `//...` loads. The applied
+/// index therefore carried external-load rows for a package neither index has
+/// a single target for, and disagreed with a fresh cold build on the externals
+/// tables — invisible to `assert_same_edges`, and caught only by apollo's
+/// history walk eight hours into the published 2026-09-10 run.
+#[test]
+fn a_permanently_unloadable_package_keeps_no_load_closure() {
+    skip_unless_e2e!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let store = root.join("_store");
+    std::fs::create_dir_all(&store).unwrap();
+
+    write(
+        &root,
+        "MODULE.bazel",
+        "module(name = \"root\", version = \"0.0.1\")\n",
+    );
+    write(&root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n");
+    write(
+        &root,
+        "app/BUILD.bazel",
+        "genrule(\n    name = \"app\",\n    srcs = [\"in.txt\"],\n\
+        \x20   outs = [\"out.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n",
+    );
+    write(&root, "app/in.txt", "v1\n");
+    // The package Bazel can never load: it loads a `.bzl` from a repository
+    // nothing declares. Its BUILD file is real enough to have a load closure,
+    // which is exactly what must not survive into the applied index.
+    write(
+        &root,
+        "broken/BUILD.bazel",
+        "load(\"@no_such_repo//cuda:build_defs.bzl\", \"cuda_library\")\n\n\
+         cuda_library(name = \"broken\")\n",
+    );
+    write(
+        &root,
+        "cambium.toml",
+        &format!(
+            "[baseline]\nstore = {{ kind = \"dir\", path = \"{}\" }}\n",
+            store.display()
+        ),
+    );
+    init_git(&root);
+    let base = commit_all(&root, "base");
+
+    let config = root.join("cambium.toml");
+    let engine = engine_for(&root, &config);
+    let base_index = engine.full_build(&base).expect("cold build at base");
+    assert!(
+        base_index.view().partial,
+        "the base index must record the package Bazel refused"
+    );
+    assert_eq!(base_index.view().error_packages, vec!["broken".to_string()]);
+
+    // An edit elsewhere, and a touch of the unloadable package's own BUILD
+    // file, in one commit: the second is what puts `broken` in the dirty set,
+    // where the splice used to read its closure back in.
+    write(&root, "app/in.txt", "v2\n");
+    let broken = std::fs::read_to_string(root.join("broken/BUILD.bazel")).unwrap();
+    write(
+        &root,
+        "broken/BUILD.bazel",
+        &format!("{broken}# still unloadable\n"),
+    );
+    let head = commit_all(&root, "edit elsewhere, touch the broken package");
+
+    let engine = engine_for(&root, &config);
+    let out = engine
+        .compute(
+            base_index.view(),
+            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.bazel_querier(&head).expect("querier for head"),
+            &affected_request(&base, &head, true),
+        )
+        .expect("incremental run over a partial base");
+    assert!(
+        !out.report.global,
+        "an edit beside an unloadable package is not global: {:?}",
+        out.report.global_reason
+    );
+    let applied = out.index.expect("a non-global run produces an index");
+    assert!(
+        applied.view().partial,
+        "a splice on a partial base is partial"
+    );
+
+    let fresh = engine.full_build(&head).expect("cold build at head");
+    assert_same_edges(&applied, &fresh, 0);
+    assert_same_externals(&applied, &fresh, "permanently unloadable package");
+}
+
+/// A WORKSPACE-mode tree that also carries an inert `MODULE.bazel`, the shape
+/// `envoy` had at `8424aa0d`.
+///
+/// `.bazelrc` turns bzlmod off, `WORKSPACE` declares `@gen` from a repository
+/// rule reading a main-repo file by label, and `MODULE.bazel` sits there
+/// naming the same repository without Bazel ever reading a line of it.
+fn write_workspace_mode_workspace(root: &Path, store: &Path, major: u32) {
+    // `--enable_workspace` exists from Bazel 8; on 7 WORKSPACE is still the
+    // fallback and the flag is not a flag.
+    let rc = if major >= 8 {
+        "common --noenable_bzlmod\ncommon --enable_workspace\n"
+    } else {
+        "common --noenable_bzlmod\n"
+    };
+    write(root, ".bazelrc", rc);
+    write(root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n");
+    write(
+        root,
+        "WORKSPACE",
+        "workspace(name = \"root\")\n\
+         load(\"//tools:gen.bzl\", \"gen_repo\")\n\n\
+         gen_repo(\n    name = \"gen\",\n    config = \"//:config.txt\",\n)\n",
+    );
+    // Never read by Bazel here, and it names `gen` the way envoy's module file
+    // names `envoy_build_config`: a repository WORKSPACE builds for real.
+    write(
+        root,
+        "MODULE.bazel",
+        "module(name = \"root\", version = \"0.0.1\")\n\
+         bazel_dep(name = \"gen\", version = \"0.0.1\")\n\
+         local_path_override(\n    module_name = \"gen\",\n    path = \"gen_module\",\n)\n",
+    );
+    write(root, "config.txt", "v1\n");
+    write(root, "BUILD.bazel", "exports_files([\"config.txt\"])\n");
+    write(root, "tools/BUILD.bazel", "exports_files([\"gen.bzl\"])\n");
+    write(
+        root,
+        "tools/gen.bzl",
+        "def _impl(rctx):\n\
+        \x20   value = rctx.read(rctx.path(rctx.attr.config))\n\
+        \x20   rctx.file(\"value.txt\", value)\n\
+        \x20   rctx.file(\n\
+        \x20       \"BUILD\",\n\
+        \x20       'filegroup(name = \"value\", srcs = [\"value.txt\"], visibility = [\"//visibility:public\"])\\n',\n\
+        \x20   )\n\n\
+         gen_repo = repository_rule(\n\
+        \x20   implementation = _impl,\n\
+        \x20   attrs = {\"config\": attr.label(mandatory = True)},\n\
+         )\n",
+    );
+    write(
+        root,
+        "app/BUILD.bazel",
+        "genrule(\n    name = \"uses_gen\",\n    srcs = [\"@gen//:value\"],\n\
+        \x20   outs = [\"g.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"downstream\",\n    srcs = [\":g.txt\"],\n\
+        \x20   outs = [\"d.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+         genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
+    );
+    write(
+        root,
+        "cambium.toml",
+        &format!(
+            "[baseline]\nstore = {{ kind = \"dir\", path = \"{}\" }}\n",
+            store.display()
+        ),
+    );
+}
+
+/// Shape B, from `envoy`: a `MODULE.bazel` Bazel never reads.
+///
+/// envoy at `8424aa0d` runs WORKSPACE mode by `.bazelrc` and still carries a
+/// module file. The externals stage read that file regardless, so an edit to
+/// it (or to its lock) dirtied every repository it mentions, overflowed
+/// `max_dirty_packages` and forced a cold rebuild — 8 packages dirtied where
+/// `rbuildfiles` names 1097, on a run that took hours to reach the commit.
+/// Bazel does not read the file, so the honest answer is nothing at all.
+#[test]
+fn an_inert_module_file_in_workspace_mode_moves_nothing() {
+    skip_unless_e2e!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let store = root.join("_store");
+    std::fs::create_dir_all(&store).unwrap();
+    let major = resolved_bazel_major(&root);
+    if major >= 9 {
+        eprintln!("skipping: Bazel {major} has no WORKSPACE support");
+        return;
+    }
+    write_workspace_mode_workspace(&root, &store, major);
+    init_git(&root);
+    let base = commit_all(&root, "base");
+
+    let config = root.join("cambium.toml");
+    let engine = engine_for(&root, &config);
+    let base_index = engine.full_build(&base).expect("cold build at base");
+
+    for (name, path, contents) in [
+        (
+            "edit MODULE.bazel",
+            "MODULE.bazel",
+            "module(name = \"root\", version = \"0.0.2\")\n\
+             bazel_dep(name = \"gen\", version = \"0.0.2\")\n\
+             local_path_override(\n    module_name = \"gen\",\n    path = \"gen_module\",\n)\n",
+        ),
+        (
+            "edit MODULE.bazel.lock",
+            "MODULE.bazel.lock",
+            "{\"lockFileVersion\": 11, \"registryFileHashes\": {}}\n",
+        ),
+    ] {
+        write(&root, path, contents);
+        let head = commit_all(&root, name);
+        let engine = engine_for(&root, &config);
+        let out = engine
+            .compute(
+                base_index.view(),
+                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.bazel_querier(&head).expect("querier for head"),
+                &affected_request(&base, &head, false),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let r = &out.report;
+        assert!(
+            !r.global,
+            "{name}: a file Bazel does not read cannot force a cold rebuild: {:?}",
+            r.global_reason
+        );
+        assert!(
+            r.affected.is_empty(),
+            "{name}: nothing is affected: {:?}",
+            r.affected
+        );
+        assert!(
+            r.dirty_packages.is_empty(),
+            "{name}: no package is re-queried: {:?}",
+            r.dirty_packages
+        );
+        git(&root, &["reset", "-q", "--hard", &base]);
+        git(&root, &["clean", "-qfd"]);
+    }
+}
+
+/// The other half of shape B: `common:workspace --noenable_bzlmod` is a line
+/// about a `--config=workspace` that nobody passed, and says nothing about the
+/// mode. Read as the mode it would make a live `MODULE.bazel` inert, which is
+/// the opposite mistake and loses real answers.
+#[test]
+fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
+    skip_unless_e2e!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let store = root.join("_store");
+    std::fs::create_dir_all(&store).unwrap();
+    write_external_workspace(&root, &store, "7.4.1");
+    write(
+        &root,
+        ".bazelrc",
+        "common:workspace --noenable_bzlmod --enable_workspace\n",
+    );
+    write(&root, "config2.txt", "w1\n");
+    write(
+        &root,
+        "BUILD.bazel",
+        "exports_files([\"config.txt\", \"config2.txt\"])\n",
+    );
+    init_git(&root);
+    let base = commit_all(&root, "base");
+
+    let config = root.join("cambium.toml");
+    let engine = engine_for(&root, &config);
+    let base_index = engine.full_build(&base).expect("cold build at base");
+
+    // The module file is live, so pointing `@gen` at another file moves the
+    // repository and everything that consumes it.
+    let module = std::fs::read_to_string(root.join("MODULE.bazel")).unwrap();
+    write(
+        &root,
+        "MODULE.bazel",
+        &module.replace("@root//:config.txt", "@root//:config2.txt"),
+    );
+    let head = commit_all(&root, "point @gen at another file");
+    let engine = engine_for(&root, &config);
+    let out = engine
+        .compute(
+            base_index.view(),
+            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.bazel_querier(&head).expect("querier"),
+            &affected_request(&base, &head, false),
+        )
+        .expect("incremental run");
+    let r = &out.report;
+    let affected: BTreeSet<String> = r.affected_labels().into_iter().collect();
+    assert!(
+        r.global || affected.contains("//app:uses_gen"),
+        "a live MODULE.bazel edit must have a consequence: global {:?}, affected {affected:?}",
+        r.global_reason
+    );
+}
+
+/// Shape C, from `sourcegraph`: a repository rule instantiated in `WORKSPACE`
+/// itself, with a label literal pointing at a main-repo file.
+///
+/// sourcegraph writes `npm_translate_lock(name = "npm", pnpm_lock =
+/// "//:pnpm-lock.yaml")` straight into `WORKSPACE`. The label harvest only
+/// ever read the workspace closure's `.bzl` files, so the lock fed no
+/// repository: an edit to it reached nothing, and the published run labelled
+/// six targets `cambium_missing` on two change sets. The harvest reads the
+/// workspace files too now.
+#[test]
+fn a_label_written_in_workspace_itself_reaches_its_repositorys_consumers() {
+    skip_unless_e2e!();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let store = root.join("_store");
+    std::fs::create_dir_all(&store).unwrap();
+    let major = resolved_bazel_major(&root);
+    if major >= 9 {
+        eprintln!("skipping: Bazel {major} has no WORKSPACE support");
+        return;
+    }
+    write_workspace_mode_workspace(&root, &store, major);
+    init_git(&root);
+    let base = commit_all(&root, "base");
+
+    let config = root.join("cambium.toml");
+    let engine = engine_for(&root, &config);
+    let base_index = engine.full_build(&base).expect("cold build at base");
+
+    // The derivation says so before any diff runs: the label written in
+    // `WORKSPACE` is an input of the repository declared beside it.
+    let v = base_index.view();
+    assert_eq!(
+        v.repos_for_path("config.txt")
+            .into_iter()
+            .map(|r| v.repo_name(r).to_string())
+            .collect::<BTreeSet<_>>(),
+        ["gen".to_string()].into_iter().collect::<BTreeSet<_>>(),
+        "a label literal in WORKSPACE is a repository input"
+    );
+
+    write(&root, "config.txt", "v2\n");
+    let head = commit_all(&root, "edit the file WORKSPACE names");
+    let engine = engine_for(&root, &config);
+    let out = engine
+        .compute(
+            base_index.view(),
+            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.bazel_querier(&head).expect("querier"),
+            &affected_request(&base, &head, false),
+        )
+        .expect("incremental run");
+    let r = &out.report;
+    assert!(!r.global, "went global: {:?}", r.global_reason);
+    let ours: BTreeSet<String> = r.affected_labels().into_iter().collect();
+    assert!(
+        ours.contains("//app:uses_gen") && ours.contains("//app:downstream"),
+        "the repository's consumers are affected: {ours:?}"
+    );
+    assert!(!ours.contains("//app:unrelated"), "{ours:?}");
+    assert_eq!(
+        ours,
+        rdeps_oracle(&engine, "@gen//:value"),
+        "cambium and `rdeps(//..., @gen//:value)` disagree"
+    );
+}
