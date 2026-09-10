@@ -1,6 +1,6 @@
 # Handoff: cambium benchmark suite
 
-Written 2026-09-09 for the next orchestrator; updated the same day after the fallback work. Read this, then
+Written 2026-09-10 for the next orchestrator. Read this, then
 `docs/METHODOLOGY.md`.
 
 This file is session state and nothing else: what is in flight, what to do
@@ -11,107 +11,102 @@ Findings paragraph are in [docs/RESULTS.md](docs/RESULTS.md).
 
 ## Where things stand
 
-Task 18, the published run, is **done and published** (`docs/RESULTS.md`).
-The box is **stopped**. Since then, on 2026-09-09, the engine was reworked so
-that a global invalidation or a whole-repository re-query is the exception,
-all validated offline (no Bazel here) with `bench replay --rederive`:
+The confirmation run for the fallback work is **done and published**
+(`docs/RESULTS.md`, commit `85cf417`): all five subjects on a wiped store,
+recall 100% everywhere but envoy's three documented `external_route` sets,
+rebuild and load oracles holding, no `unclassified` or `cambium_missing`
+label anywhere. Issues #5, #6, #7 and #8 are closed with the numbers. The box
+is **stopped**; its mirrors and store are intact under
+`~/.cache/cambium/corpus` (the store was wiped before the run and now holds
+this run's lineage).
 
-- **Attribution is per occurrence, not per file** (`crates/index/src/attribution.rs`):
-  a main-repo label in a workspace `.bzl` is an input of the repository the
-  enclosing call names, or of what the enclosing def / rule / extension can
-  instantiate; loader propagation is per imported symbol; helpers inherit
-  their call sites. `local_path_override` / `local_repository` mappings are
-  *exhaustive*, so a path outside them cannot be a `.bzl` inside (issue #6).
-- **A changed `.bzl` the closure does not know is witnessed** against every
-  `load()` in the head tree instead of ignored (issue #7); the report carries
-  `bzl_witness*` stats.
-- **`MODULE.bazel.lock` alone, `WORKSPACE`, `override_repo` / `inject_repo`**
-  are diffed structurally (`crates/index/src/lockfile.rs`, `workspace.rs`).
-- **Starlark build settings in a bazelrc** seed the setting's node instead of
-  going global, unless a `.bzl` names it, it is `--config`-scoped, or it lives
-  in an external repository (`crates/engine/src/flags.rs`).
-- **Defaults**: root `BUILD` and `third_party/**/*.bzl` are no longer
-  invalidators (`REPO.bazel` is); test-selection flags are allowlisted;
-  `[baseline]` and `[limits]` are out of the config hash; indexes are
-  zstd-compressed at rest (raw ones still read).
-- **Subject invalidators** for apollo, sourcegraph and xla are `[]`: every
-  file they caught is reached by label or not read by Bazel. **Unconfirmed on
-  the box** — the recall oracle is the gate for this, and for everything
-  above that changes what a run answers.
-- `cambi bench replay --rederive` (with `--repo`) recomputes the externals
-  tables from the text at each change set's base, so index-time derivation
-  changes are checkable offline. `REDERIVE=1 tools/bench/precheck.sh`.
+It took four passes on 2026-09-10, and every earlier pass failed on something
+the pin-based replay could not see. The Findings paragraph lists what was
+found and fixed (commits `72bc80b` .. `8d7524a`); each has a unit test and
+was confirmed with `bench replay --rederive` before the next pass, envoy's
+with `--index` pointed at the base index the run itself loaded. The local
+tree is 12 commits ahead of `origin/main`; nothing has been pushed.
 
-Offline replay, change sets against the pin indexes, before → after:
-envoy 9 → 3 cold rebuilds (the 3 are `api/bazel/api_build_system.bzl`
-edits, loaded by every package: exact); apollo 12 globals → 1 global
-(`.bazelrc`, unreadable offline) + 6 cold (3 are a configure `.bzl` whose
-generated repository every package loads; 3 a WORKSPACE diff moving 39
-repositories); sourcegraph 2 → 0 global; bazel unchanged. Envoy history (340
-commits): 35 → 20 cold, 16 → 13 global.
+Provenance: bazel, sourcegraph, apollo and envoy are from the pass under
+`bfa4624`; xla from a pass under `8d7524a` alone, on its own wiped store.
+The replay of the other four under `8d7524a` with `--rederive` changes no
+change-set answer (apollo's one moved set is a cold rebuild either way) and
+moves history commits only by pin-versus-base drift. If a clean single-binary
+run is ever wanted, `tools/bench/run-published.sh` on a wiped store does all
+five in about eight hours.
+
+## Workflow work, in flight
+
+The feedback loop was the lesson of the day: unit tests and the pin replay
+run in minutes, but three of the five regressions were only visible on the
+box, hours in. What has landed:
+
+- `SMOKE=1 tools/bench/run-published.sh`: every subject's fetch and build,
+  three history commits and one change set with every tool and oracle, into
+  `bench-results-smoke/`, in about fifteen minutes. **Run it after every
+  sync, before the real driver.**
+- `bench replay --rederive` is trustworthy on WORKSPACE-mode subjects now
+  (`fee13a7`: an unrecorded canonical name was read as a main-repository
+  alias, and sourcegraph's `deps.bzl` replayed as six cold rebuilds the run
+  never made). `CAMBIUM_REDERIVE_DUMP=<dir>` keeps each re-derived index for
+  `cambi index externals`, which dumps an index's repository tables and is
+  how the envoy mode bug was found (diff the pin's tables against the run's
+  base index's).
+- The corpus attribution test (`cargo test -p cambium-index corpus_attribution
+  -- --ignored --nocapture`, with `CAMBIUM_CORPUS_DIR`, `_PATHS`, `_ALIAS`,
+  `_INDEX`) answers "what does the derivation say about this file in this
+  tree" in twenty seconds, with a stored index's mapping when given one.
+
+Two more were being built by subagents in worktrees when this was written;
+check `git worktree list` and `git log --all --oneline | head` for their
+commits, and cherry-pick them onto `main` if they are not there:
+
+1. **Archive each change set's base index** into
+   `<results>/<subject>/bases/<base>.bin`, have `bench replay` use it for that
+   change set instead of the pin, and have `precheck.sh` pull the directory.
+   This is the change that would have caught the envoy mode bug offline.
+2. **Persist every tool's full label set** and the per-label classification
+   per change set, with `cambi bench labels` to read them back. Yesterday's
+   990-label and 165-label disagreements could only be examined from 20
+   examples.
+
+Still proposals: recording the head universe rows so the rebuild oracle's
+index comparison can run offline, and synthetic CI subjects for the shapes
+that bit (a constant partial package; a tree carrying both WORKSPACE and an
+inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
 
 ## What to do next
 
-1. Start the box, `launch.sh sync`, run `tools/bench/run-published.sh` for
-   all five subjects (about eight hours). Compare each subject's summary line
-   with `docs/RESULTS.md` before letting the run continue. The recall oracle
-   must stay at 100% on the four subjects that had it; envoy's known 6
-   `external_route` failures are by design.
-2. Regenerate `docs/RESULTS.md`, rewrite the Findings paragraph, close #6, #7
-   and #8 with the box numbers on the issue threads.
-3. If a subject's recall drops, the invalidator trims in `subject_repos.toml`
-   are the first suspect, then `crates/index/src/attribution.rs` (the
-   `PURE_BUILTINS` list decides when an unresolved call keeps the wide
-   answer).
-
-## Before merging an engine change
-
-Run `tools/bench/precheck.sh` and paste what it said. It replays the engine's
-static stages against every recorded change set of the real subjects,
-offline, from the stored indexes, in minutes and with no Bazel, and exits 1
-on divergence. `docs/METHODOLOGY.md`, "Validating an engine change before a
-run", lists what it cannot see. Two of today's bugs were only visible with
-`--index` pointed at the base index a run actually used, not the pin: the
-replay reads a healthy index, a run reads whatever the store kept.
-
-Then, on the box: `launch.sh sync` must exit 0 before anything runs, and the
-driver's first log line must name the same sha as `git rev-parse --short
-HEAD` there. Compare the first subject's summary line against the previous
-run before letting the rest proceed.
-
-## Provenance of the published numbers
-
-envoy's tables are from the third pass (2026-09-09, engine id
-`f8/1de01276093d1698`); the other four subjects' are from the second pass,
-under their own engine ids. The offline replay shows the engine changes
-between the passes did not alter their answers, and none of them has the
-path mapping the splice defect dropped, so they were not re-run. If a clean
-single-lineage run is ever wanted, `tools/bench/run-published.sh` with no
-overrides does all five in about eight hours and every subject starts over.
+1. Land the two subagent commits, run `cargo test --release` once, push.
+2. Next engine change: `tools/bench/precheck.sh` with `REDERIVE=1`, then
+   `SMOKE=1` on the box, then the full driver. Compare each subject's summary
+   line against `docs/RESULTS.md` before letting the run continue.
+3. The precision question from the 50-pair measurement against the internal
+   tool (a whole-graph answer where it returned 288k of 900k targets): the
+   next lever is symbol-level attribution of a changed `.bzl` to packages
+   and targets, the same idea as #6 applied on the package side. Ask that
+   agent for `--explain` on the pair and the direct-reason histogram first.
 
 ## Open issues
 
 - #1 live TUI for the benchmark matrix (`bench watch`).
 - #2 CLI surface: intent-first verbs, diagnostics with codes, one output
   contract.
-- #5 sourcegraph's `go.mod` / `pnpm-lock.yaml`: superseded by the
-  invalidator trim (go.mod is not read by Bazel; pnpm-lock is derived from
-  WORKSPACE). Close with the box numbers.
-- #6, #7: fixed offline (above); close with the box numbers.
-- #8 rule-label harvesting over-claims subtrees: fixed on `main` (a label
-  feeds a repository only through the exact file it names; a rule target
-  reached by the reverse walk moves the repository's targets, found at walk
-  time). Close with the box numbers.
 - Remaining fallbacks by design: `WORKSPACE` statements the diff cannot
   classify, toolchain modules and `register_toolchains`, `--config`-scoped
   and external-repository Starlark settings, `--registry` / `--repo_env` /
-  compilation flags, `.bazelversion`, `try-import`.
+  compilation flags, `.bazelversion`, `try-import`; and the `max_dirty_packages`
+  overflow, which keeps the lineage and re-queries `//...` (envoy: 7 change
+  sets, 37 history commits; apollo: 3 and 4).
 
 ## Known noise
 
-- envoy's history p50 moved between passes with the same dirty-package
-  counts (118 ms on one pass, 424 ms on the published one); the difference is
-  entirely `query_ms`, the one Bazel query per commit, so it is the box's
-  Bazel server, not the engine. Report it as such if asked.
-- envoy fails 6 change sets on recall by design: `external_route`, the
-  documented round trip through `@envoy_repo` and `@quiche`.
+- envoy fails 3 change sets on recall by design: `external_route`, the
+  documented round trip through `@quiche`. Set 37 lists 25 of its 36 missing
+  labels as probed; the other 11 are the same quic targets past the
+  25-probe diagnosis cap (`MAX_ROUTE_PROBES`).
+- History replays of envoy and sourcegraph differ from the recorded run by
+  a few packages on a handful of commits; that is the pin-versus-base drift
+  the replay names, not an engine change. Change-set replays are exact.
+- The box's `bazel --version` probe returned nothing for this run (fixed in
+  `85cf417`); the report reads the pin's `.bazelversion` instead.
