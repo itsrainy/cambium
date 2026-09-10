@@ -128,6 +128,60 @@ fn a_history_runs_and_the_rebuild_oracle_holds() {
     assert!(st.history.as_ref().unwrap().done);
 }
 
+/// The rebuild oracle's fresh Bazel-built index is the only artefact that
+/// says what the graph and the externals tables are at the pin, and it used
+/// to be dropped on the floor. Archived, `cambi bench replay --head-check`
+/// can hold a later engine's derivation against it with no Bazel.
+#[test]
+fn the_rebuild_oracles_head_index_is_archived_and_reads_back() {
+    let f = fixture(5, "typical-pr");
+    let commits = f.driver.commits.clone();
+    let o = opts(&f, false);
+    let r = history(&f.engine, &f.driver, &commits, &o).unwrap();
+    assert!(r.oracle.as_ref().unwrap().ok);
+
+    let at = r.head_index.as_ref().expect("the head index was archived");
+    assert_eq!(
+        *at,
+        cambium_bench::replay::archived_head_path(&f.results, &o.pin)
+    );
+    let opened = cambium_index::IndexFile::open(at).unwrap();
+    assert_eq!(opened.view().commit, o.pin);
+    assert_eq!(
+        opened.view().num_packages(),
+        r.rebuild.as_ref().unwrap().packages,
+        "the archive is the index the oracle built"
+    );
+
+    // It travels in the results file, and an existing archive is left alone
+    // rather than rewritten.
+    let on_disk = HistoryResult::read(&HistoryResult::path_versioned(
+        &f.results,
+        &o.pin,
+        Some("synth"),
+    ))
+    .unwrap();
+    assert_eq!(on_disk.head_index.as_ref(), Some(at));
+    let again = history(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
+    assert!(again.head_index.is_none(), "an archived head was rewritten");
+    assert!(at.exists());
+}
+
+/// A result written before the field existed still reads.
+#[test]
+fn a_history_written_before_the_head_archive_existed_still_reads() {
+    let f = fixture(4, "typical-pr");
+    let commits = f.driver.commits.clone();
+    let o = opts(&f, false);
+    history(&f.engine, &f.driver, &commits, &o).unwrap();
+    let path = HistoryResult::path_versioned(&f.results, &o.pin, Some("synth"));
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc.as_object_mut().unwrap().remove("head_index");
+    let back: HistoryResult = serde_json::from_value(doc).expect("pre-field record parses");
+    assert!(back.head_index.is_none());
+}
+
 #[test]
 fn a_history_resumes_from_its_last_published_index() {
     let f = fixture(6, "typical-pr");

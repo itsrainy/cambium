@@ -271,6 +271,93 @@ pub fn archived_base(subject_results: &std::path::Path, base: &str) -> Option<st
     p.exists().then_some(p)
 }
 
+/// `<results>/<subject>/heads/<pin sha>.bin`, where the history's rebuild
+/// oracle archives the index Bazel cold-built at the pin.
+///
+/// That index is the oracle's truth half: the graph and the externals tables
+/// as a real `bazel query` at the pin established them. Keeping it is what
+/// makes the externals half of the oracle checkable offline — re-derive the
+/// tables from the head tree's own text with today's engine and compare
+/// against it, with no Bazel and no box. See [`head_check`].
+pub fn archived_head_path(subject_results: &std::path::Path, pin: &str) -> std::path::PathBuf {
+    subject_results.join("heads").join(format!("{pin}.bin"))
+}
+
+/// The archived head index at `pin`, when a rebuild oracle left one behind.
+pub fn archived_head(subject_results: &std::path::Path, pin: &str) -> Option<std::path::PathBuf> {
+    let p = archived_head_path(subject_results, pin);
+    p.exists().then_some(p)
+}
+
+/// Where an index being archived comes from: in memory, or already a file.
+///
+/// A mapped file is copied byte for byte — it is already in whichever form
+/// the store wrote it, and re-encoding it would cost a deserialise for
+/// nothing — while an index that exists only in memory is written out in the
+/// run's own compression, so an archive is the same on-disk form as the
+/// `index-<pin>.bin` beside it.
+pub enum ArchiveSource<'a> {
+    Data(&'a cambium_index::IndexData),
+    File(&'a std::path::Path),
+}
+
+/// Puts one index at `dest`, unless something is already there.
+///
+/// The shared half of [`crate::compare::driver::archive_base_index`] and the
+/// history's head archive: both leave an index beside the results for a later
+/// offline replay to open, and both must leave an existing file alone (an
+/// archive is megabytes, and the same base or pin recurs).
+pub fn archive_index(
+    dest: &std::path::Path,
+    src: ArchiveSource<'_>,
+    compression: cambium_index::format::Compression,
+) -> Result<Option<std::path::PathBuf>> {
+    if dest.exists() {
+        return Ok(None);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match src {
+        ArchiveSource::File(from) => {
+            std::fs::copy(from, dest)
+                .with_context(|| format!("copying {} to {}", from.display(), dest.display()))?;
+        }
+        ArchiveSource::Data(data) => {
+            cambium_index::format::write_index_with(dest, data, compression)
+                .with_context(|| format!("writing {}", dest.display()))?;
+        }
+    }
+    Ok(Some(dest.to_path_buf()))
+}
+
+/// The rebuild oracle's externals half, offline.
+///
+/// `archived` is the index Bazel cold-built at `rev` and the history archived
+/// (see [`archived_head_path`]); this rebuilds its externals side tables from
+/// the repository text at `rev` with *this* build's derivation and compares
+/// the two by label. The nodes, the edges and the rule hashes are the
+/// archived index's on both sides by construction — [`rederive_externals`]
+/// keeps everything the query established — so an empty node/edge diff is not
+/// evidence and the externals section is the whole signal.
+///
+/// What this cannot do is what no replay can: it says whether today's
+/// derivation still agrees with Bazel's truth at one pin, not what a run over
+/// three hundred commits would answer.
+pub fn head_check(
+    archived: IndexRef<'_>,
+    rev: &str,
+    texts: &dyn WorkspaceText,
+    cap: usize,
+) -> Result<crate::oracles::rebuild::GraphDiff> {
+    let rederived = rederive_externals(archived, rev, texts)?;
+    Ok(crate::oracles::rebuild::compare_by_label(
+        archived,
+        rederived.view(),
+        cap,
+    ))
+}
+
 /// What replaying the static stages concluded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReplayOutcome {
@@ -1395,6 +1482,122 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(cache.len(), 2);
         assert!(cache.get("a").is_none(), "the oldest slot was not evicted");
         assert!(cache.get("b").is_some() && cache.get("c").is_some());
+    }
+
+    /// The externals tables the head tree's text derives, as a Bazel-built
+    /// index at the pin would carry them: this is the archived head the head
+    /// check opens.
+    fn head_index_from(texts: &dyn WorkspaceText, rev: &str) -> cambium_index::IndexData {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[cambium_index::PackageUpdate {
+            package: "lib".into(),
+            targets: vec![cambium_index::TargetRow::rule(
+                "//lib:core",
+                "cc_library",
+                vec![],
+            )],
+            ..Default::default()
+        }]);
+        b.set_bzl_closure(cambium_index::BzlClosure::default());
+        let empty = b.finish(rev);
+        rederive_externals(empty.view(), rev, texts).unwrap()
+    }
+
+    fn head_texts() -> cambium_engine::externals::FixedText {
+        files_at(
+            "pin",
+            &[
+                (externals::MODULE_FILE, REDERIVE_MODULE),
+                (
+                    "bazel/extensions.bzl",
+                    "load(\"//bazel:repo.bzl\", \"envoy_repo\")\n",
+                ),
+                (
+                    "bazel/repo.bzl",
+                    "X = attr.label(default = \"@envoy//:.github/config.yml\")\n",
+                ),
+            ],
+        )
+    }
+
+    /// The head check on an index whose tables this build's derivation
+    /// reproduces exactly: nothing to report, and the graph half is empty by
+    /// construction.
+    #[test]
+    fn a_head_check_of_an_untouched_index_is_clean() {
+        let texts = head_texts();
+        let head = head_index_from(&texts, "pin");
+        assert!(
+            !head.view().repo_input_patterns.is_empty(),
+            "the fixture derived no externals tables to check"
+        );
+        let d = head_check(head.view(), "pin", &texts, 10).unwrap();
+        assert!(d.is_empty(), "{:?}", d);
+    }
+
+    /// The shape the oracle's externals half exists for, now offline: an
+    /// index that agrees with the rebuilt one on every node, edge and rule
+    /// hash and lost a repository's path mapping. On the box this was
+    /// `a_dropped_path_mapping_is_reported_though_the_graph_is_identical`;
+    /// here the same loss is found against the archived head with no Bazel.
+    #[test]
+    fn a_head_check_reports_a_dropped_path_mapping() {
+        let texts = head_texts();
+        let derived = head_index_from(&texts, "pin");
+
+        // Perturb the archived head the way a derivation that lost a mapping
+        // would have built it, then check it against today's derivation.
+        let mut builder = cambium_index::IndexBuilder::from_view(derived.view());
+        let mut closure = builder.take_bzl_closure().unwrap();
+        assert!(!closure.inputs.patterns.is_empty());
+        closure.inputs.patterns.clear();
+        builder.set_bzl_closure(closure);
+        let perturbed = builder.finish("pin");
+
+        let d = head_check(perturbed.view(), "pin", &texts, 10).unwrap();
+        assert_eq!(d.counts.nodes_only_in_applied, 0);
+        assert_eq!(d.counts.rule_hash_mismatch, 0);
+        assert_eq!(d.counts.edges_only_in_applied, 0);
+        assert!(
+            d.counts.externals_mismatch > 0,
+            "a dropped input pattern went unreported: {d:?}"
+        );
+        assert!(
+            d.externals_mismatch
+                .iter()
+                .any(|m| m.contains("only in rebuilt")),
+            "{:?}",
+            d.externals_mismatch
+        );
+        assert!(!d.is_empty());
+    }
+
+    /// A head archive lands where the replay looks for it, and an existing
+    /// one is left alone.
+    #[test]
+    fn a_head_index_is_archived_where_the_head_check_looks_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("envoy");
+        let index = stored_index();
+        let compression = cambium_index::format::Compression::default();
+
+        assert!(archived_head(&results, "pin").is_none());
+        let at = archive_index(
+            &archived_head_path(&results, "pin"),
+            ArchiveSource::Data(&index),
+            compression,
+        )
+        .unwrap()
+        .expect("nothing was archived");
+        assert_eq!(at, archived_head_path(&results, "pin"));
+        assert_eq!(archived_head(&results, "pin").as_ref(), Some(&at));
+        assert_eq!(
+            cambium_index::IndexFile::open(&at).unwrap().view().commit,
+            "pin"
+        );
+        assert!(archive_index(&at, ArchiveSource::Data(&index), compression)
+            .unwrap()
+            .is_none());
     }
 
     /// A re-derivation with nothing to read is an error rather than a silently

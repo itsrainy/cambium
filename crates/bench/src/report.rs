@@ -1522,6 +1522,7 @@ mod tests {
             commits,
             rebuild: None,
             oracle: None,
+            head_index: None,
             summary: Summary::default(),
             done: true,
         };

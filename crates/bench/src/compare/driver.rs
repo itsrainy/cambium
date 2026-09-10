@@ -600,9 +600,9 @@ fn base_index_for_oracle(engine: &Engine, base: &str) -> Option<cambium_index::I
 ///
 /// `compression` is the run's own (`baseline.compress_indexes`), so an
 /// archived base is the same on-disk form as the `index-<pin>.bin` beside it
-/// and `precheck.sh` pulls files of the size it expects. A mapped base is
-/// copied byte for byte: it is already in whichever form the store wrote it,
-/// and re-encoding it would cost a deserialise for nothing.
+/// and `precheck.sh` pulls files of the size it expects. The copying itself
+/// is [`crate::replay::archive_index`], shared with the history's head
+/// archive.
 pub fn archive_base_index(
     subject_results: &Path,
     base: &str,
@@ -610,20 +610,13 @@ pub fn archive_base_index(
     compression: cambium_index::format::Compression,
 ) -> Result<Option<std::path::PathBuf>> {
     let dest = crate::replay::archived_base_path(subject_results, base);
-    if dest.exists() {
+    let src = match used {
+        cambium_engine::BaseIndex::Mapped(p) => crate::replay::ArchiveSource::File(p),
+        cambium_engine::BaseIndex::Owned(data) => crate::replay::ArchiveSource::Data(data),
+    };
+    let Some(dest) = crate::replay::archive_index(&dest, src, compression)? else {
         return Ok(None);
-    }
-    std::fs::create_dir_all(dest.parent().unwrap_or(subject_results))?;
-    match used {
-        cambium_engine::BaseIndex::Mapped(src) => {
-            std::fs::copy(src, &dest)
-                .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
-        }
-        cambium_engine::BaseIndex::Owned(data) => {
-            cambium_index::format::write_index_with(&dest, data, compression)
-                .with_context(|| format!("writing {}", dest.display()))?;
-        }
-    }
+    };
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     tracing::info!(%base, path = %dest.display(), bytes, "archived the base index this change set ran against");
     Ok(Some(dest))
