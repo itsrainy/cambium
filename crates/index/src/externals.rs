@@ -1394,12 +1394,18 @@ pub fn build_repo_inputs(
     // WORKSPACE-only repository the first is empty and the second is the whole
     // answer, which is what turns "no idea, invalidate everything" into a set.
     out.repos.extend(att.literal_names.iter().cloned());
+    // A file under a seeded subtree falls back to that subtree's few
+    // repositories; any other falls back to the universe, and is told so.
+    let mut wide: BTreeSet<String> = BTreeSet::new();
     let fallbacks: BTreeMap<String, BTreeSet<String>> = texts
         .iter()
         .map(|(p, _)| {
             let repos = match graph.id_of(p).and_then(|id| owner.get(&id)) {
                 Some(r) if !r.is_empty() => r.clone(),
-                _ => out.repos.clone(),
+                _ => {
+                    wide.insert(p.clone());
+                    out.repos.clone()
+                }
             };
             (p.clone(), repos)
         })
@@ -1421,7 +1427,7 @@ pub fn build_repo_inputs(
                 .extend(r.repos.iter().cloned());
         }
     }
-    att.solve(&fallbacks, &seeds_by_sym);
+    att.solve(&fallbacks, &seeds_by_sym, &wide);
 
     // A main-repo label in a workspace-closure `.bzl`, or in a workspace file
     // itself, is an input of the repositories the *occurrence* is attributed
@@ -1451,6 +1457,15 @@ pub fn build_repo_inputs(
             }
             let a = att.at(&path, tok);
             if a.repos.is_empty() {
+                continue;
+            }
+            // A prefix is a claim over a whole directory. Made on the
+            // fallback it says every edit beneath that directory moves every
+            // repository in the universe, which is the shape issue #8 removed
+            // and issue #9 found back: three such rows over a build-config
+            // tree, each at 3,817 repositories. Unattributed, the format
+            // string is no input at all, as before.
+            if !a.exact && pats.iter().any(Pattern::is_prefix) {
                 continue;
             }
             file_repos.extend(a.repos.iter().cloned());
@@ -1511,7 +1526,9 @@ pub fn build_repo_inputs(
     for &id in workspace {
         let path = graph.path(id).to_string();
         let mut repos = own.remove(&path).unwrap_or_default();
-        if repos.is_empty() {
+        // Empty is the answer for a file read in full whose only fallback
+        // would be everything (issue #9); the wide answer is for the rest.
+        if repos.is_empty() && !att.read_in_full(&path) {
             repos = match owner.get(&id) {
                 Some(r) if !r.is_empty() => r.clone(),
                 _ => out.repos.clone(),
@@ -2562,6 +2579,11 @@ _envoy_repo = repository_rule(
 
     #[test]
     fn an_unattributable_workspace_bzl_falls_back_to_every_repository() {
+        // `setup` comes from a repository this closure cannot read into, so
+        // the module-level call to it is opaque and the file keeps the wide
+        // answer. Without that call the same file would be read in full and
+        // its constant would be an input of nothing; see
+        // [`a_readable_file_that_defines_nothing_is_not_the_universe`].
         let files = Files(vec![
             (
                 "MODULE.bazel",
@@ -2569,7 +2591,12 @@ _envoy_repo = repository_rule(
                  load(\"//bazel:loose.bzl\", \"x\")\n",
             ),
             ("bazel/ext.bzl", ""),
-            ("bazel/loose.bzl", "P = \"//data:thing.txt\"\n"),
+            (
+                "bazel/loose.bzl",
+                "load(\"@rules_x//x:defs.bzl\", \"setup\")\n\
+                 P = \"//data:thing.txt\"\n\
+                 x = setup(P)\n",
+            ),
         ]);
         let m = RepoMapping::identity();
         let mut g = LoadGraph::new();
@@ -3247,5 +3274,95 @@ _envoy_repo = repository_rule(
         );
         assert!(!ri.repos.contains("sqlgen_files"), "{:?}", ri.repos);
         assert_eq!(ri.repos, set(&["io_bazel_rules_go", "boost"]));
+    }
+
+    /// Issue #9: the macro's loader has nothing the workspace runs — a
+    /// constant and a def nothing calls — and nothing about it is unreadable.
+    /// The rounds learn nothing about such a file, and it used to be handed
+    /// the fallback for that alone; every file it imported a symbol from then
+    /// inherited the universe. A file read in full and found to define nothing
+    /// defines nothing.
+    #[test]
+    fn a_readable_file_that_defines_nothing_is_not_the_universe() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"av\")\n\
+                 load(\"//tools:tools_workspace.bzl\", \"tools_workspace\")\n\
+                 tools_workspace()\n",
+            ),
+            (
+                "tools/tools_workspace.bzl",
+                "load(\"//tools/rules:go.bzl\", \"GO_VERSION\")\n\
+                 def tools_workspace():\n\
+                 \x20   http_archive(name = \"io_bazel_rules_go\", urls = [GO_VERSION])\n\
+                 \x20   http_archive(name = \"boost\")\n",
+            ),
+            (
+                "tools/rules/go.bzl",
+                "load(\"//tools/rules:sqlgen.bzl\", \"go_sql_gen\")\n\
+                 GO_VERSION = \"1.22\"\n\
+                 def go_binary_wrapper(name):\n\
+                 \x20   go_sql_gen(name = name, srcs = [\"//cloud/common/dbfx:schema.sql\"])\n",
+            ),
+            (
+                "tools/rules/sqlgen.bzl",
+                "def go_sql_gen(name, srcs):\n\
+                 \x20   go_library(\n\
+                 \x20       name = name + \"_lib\",\n\
+                 \x20       srcs = srcs,\n\
+                 \x20       deps = [\"//cloud/common/dbfx:go_default_library\"],\n\
+                 \x20   )\n",
+            ),
+        ]);
+        let m = RepoMapping::identity().with_main_alias("av");
+        let ri = inputs(&files, &m);
+        assert!(
+            ri.repos_for("cloud/common/dbfx/go_default_library").is_empty(),
+            "{:?}",
+            ri.patterns
+        );
+        assert!(
+            ri.repos_for("cloud/common/dbfx/schema.sql").is_empty(),
+            "{:?}",
+            ri.patterns
+        );
+        // A change to the constant's file moves the one instantiation that
+        // reads it; the macro file moves nothing.
+        assert_eq!(ri.bzl_repos["tools/rules/go.bzl"], set(&["io_bazel_rules_go"]), "{:?}", ri.bzl_repos);
+        assert!(ri.bzl_repos.get("tools/rules/sqlgen.bzl").map_or(true, BTreeSet::is_empty), "{:?}", ri.bzl_repos);
+    }
+
+    /// Issue #9's other half: a format-string label whose occurrence is on the
+    /// fallback — here inside a def that calls something the closure cannot
+    /// resolve — must not become a prefix over its directory for the whole
+    /// universe. It is no input at all, as before the prefix existed.
+    #[test]
+    fn a_format_string_label_on_the_fallback_is_no_prefix() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"av\")\n\
+                 load(\"//build:cfg.bzl\", \"configure\")\n\
+                 configure()\n",
+            ),
+            (
+                "build/cfg.bzl",
+                "load(\"@rules_x//x:defs.bzl\", \"x_register\")\n\
+                 def configure():\n\
+                 \x20   http_archive(name = \"a\")\n\
+                 \x20   http_archive(name = \"b\")\n\
+                 \x20   x_register(version = \"1\")\n\
+                 \x20   tpl = Label(\"//build/config/%s.tpl\" % \"x\")\n",
+            ),
+        ]);
+        let m = RepoMapping::identity().with_main_alias("av");
+        let ri = inputs(&files, &m);
+        assert!(
+            !ri.patterns.keys().any(Pattern::is_prefix),
+            "{:?}",
+            ri.patterns
+        );
+        assert!(ri.repos_for("build/config/x.tpl").is_empty());
     }
 }
