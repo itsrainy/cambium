@@ -349,6 +349,13 @@ fn compare_one(
                 "rbuildfiles named packages whose BUILD file loads nothing; \
                  this answer came through repository evaluation, not load edges"
             );
+        } else if o.answered_by_repository_evaluation() && !o.missing_packages.is_empty() {
+            tracing::info!(
+                workspace_only = ?o.workspace_only,
+                named = o.bazel_packages.len(),
+                "rbuildfiles named packages for a .bzl no BUILD file loads; \
+                 this answer came through repository evaluation, not load edges"
+            );
         } else if !o.ok() {
             tracing::error!(
                 missing = ?o.missing_packages,

@@ -1214,8 +1214,28 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
         },
     };
     // `rest` is now `pkg:name` or `pkg`, without the leading `//`. A format
-    // placeholder, whitespace or any other byte a label cannot carry means
-    // this was never a label: `"//%s:foo"`, or text scraped out of a URL.
+    // placeholder cuts the label short: `Label("//third_party/gpus/%s.tpl" %
+    // name)` is how a configure rule reaches every template it writes into
+    // its repository, and the directory before the placeholder is what can be
+    // said about it. That directory is the input, as a prefix — wider than
+    // the files the rule reads, never narrower. xla's
+    // `rocm/build_defs.bzl.tpl` went through exactly this and was an input of
+    // nothing. Whitespace or any other byte a label cannot carry means this
+    // was never a label: text scraped out of a URL.
+    if let Some(cut) = rest.find(['%', '{']) {
+        let head = &rest[..cut];
+        if head.is_empty() || !head.bytes().all(is_label_byte) {
+            return Vec::new();
+        }
+        let dir = match head.rsplit_once(['/', ':']) {
+            Some((d, _)) => d,
+            None => return Vec::new(),
+        };
+        if dir.is_empty() || dir.starts_with("__") {
+            return Vec::new();
+        }
+        return vec![Pattern::Prefix(format!("{dir}/"))];
+    }
     if !rest.bytes().all(is_label_byte) {
         return Vec::new();
     }
@@ -1666,7 +1686,18 @@ pub fn bazelrc_bzlmod(text: &str) -> Option<bool> {
         if line.starts_with('#') {
             continue;
         }
-        for tok in line.split_whitespace() {
+        // Only an unconditional command line counts. `common:workspace
+        // --noenable_bzlmod` applies under `--config=workspace` and nowhere
+        // else; xla's bazelrc has exactly that after its `common
+        // --enable_bzlmod`, and reading it turned the pin into WORKSPACE mode
+        // with no module facts at all. An `import` line is not a command.
+        let Some(command) = line.split_whitespace().next() else {
+            continue;
+        };
+        if command.contains(':') || command == "import" || command == "try-import" {
+            continue;
+        }
+        for tok in line.split_whitespace().skip(1) {
             match tok {
                 "--enable_bzlmod" | "--enable_bzlmod=true" | "--enable_bzlmod=yes" => {
                     out = Some(true)
@@ -1736,6 +1767,12 @@ mod tests {
         assert!(bzlmod_live(&with_rc(None), &bzlmod));
         assert!(bzlmod_live(&Files(vec![("MODULE.bazel", "")]), &identity));
         assert_eq!(bazelrc_bzlmod("# --enable_bzlmod\ncommon --noenable_bzlmod\nbuild --enable_bzlmod\n"), Some(true));
+        // xla: the config-scoped line after the real one does not apply.
+        assert_eq!(
+            bazelrc_bzlmod("common --enable_bzlmod --noenable_workspace\ncommon:workspace --noenable_bzlmod --enable_workspace\n"),
+            Some(true)
+        );
+        assert_eq!(bazelrc_bzlmod("build:ci --noenable_bzlmod\n"), None);
 
         let files = with_rc(Some("common --noenable_bzlmod\n"));
         let facts = read_live_module_facts(&files, &bzlmod);
@@ -2148,6 +2185,94 @@ mod tests {
         assert_eq!(ri.repos_for("pnpm-lock.yaml"), set(&["npm"]));
         assert_eq!(ri.repos_for(".npmrc"), set(&["npm"]));
         assert!(ri.target_only.is_empty(), "{:?}", ri.target_only);
+    }
+
+    /// `Label("//third_party/gpus/%s.tpl" % name)` inside a repository rule's
+    /// implementation: the directory before the placeholder is an input of
+    /// every repository the rule instantiates, as a prefix.
+    #[test]
+    fn a_format_string_label_is_a_prefix_input() {
+        assert_eq!(
+            main_repo_patterns("//third_party/gpus/%s.tpl", &RepoMapping::identity()),
+            vec![Pattern::Prefix("third_party/gpus/".into())]
+        );
+        assert_eq!(
+            main_repo_patterns("//third_party/gpus:{}.tpl", &RepoMapping::identity()),
+            vec![Pattern::Prefix("third_party/gpus/".into())]
+        );
+        assert!(main_repo_patterns("//%s:foo", &RepoMapping::identity()).is_empty());
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "rocm = use_extension(\"//third_party/extensions:rocm.bzl\", \"rocm_ext\")\n\
+                 use_repo(rocm, \"local_config_rocm\")\n",
+            ),
+            (
+                "third_party/extensions/rocm.bzl",
+                "load(\"//third_party/gpus:rocm_configure.bzl\", \"rocm_configure\")\n\
+                 def _impl(ctx):\n\
+                 \x20   rocm_configure(name = \"local_config_rocm\")\n\
+                 rocm_ext = module_extension(implementation = _impl)\n",
+            ),
+            (
+                "third_party/gpus/rocm_configure.bzl",
+                "def _tpl_path(repository_ctx, labelname):\n\
+                 \x20   return repository_ctx.path(Label(\"//third_party/gpus/%s.tpl\" % labelname))\n\
+                 def _impl(repository_ctx):\n\
+                 \x20   repository_ctx.template(\"rocm/build_defs.bzl\", _tpl_path(repository_ctx, \"rocm:build_defs.bzl\"), {})\n\
+                 rocm_configure = repository_rule(implementation = _impl)\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump(
+            "{\"\":\"\",\"local_config_rocm\":\"+rocm_ext+local_config_rocm\"}",
+        );
+        let ri = inputs(&files, &m);
+        assert_eq!(
+            ri.repos_for("third_party/gpus/rocm/build_defs.bzl.tpl"),
+            set(&["local_config_rocm"]),
+            "{:?}",
+            ri.patterns
+        );
+    }
+
+    /// A def that implements a rule nothing instantiates, and is also the
+    /// helper an instantiated rule's implementation calls: its labels belong
+    /// to the caller's repositories, not to the universe.
+    #[test]
+    fn an_implementation_of_an_uninstantiated_rule_is_still_a_helper() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "rocm = use_extension(\"//third_party/extensions:rocm.bzl\", \"rocm_ext\")\n\
+                 use_repo(rocm, \"local_config_rocm\")\n",
+            ),
+            (
+                "third_party/extensions/rocm.bzl",
+                "load(\"//third_party/gpus:rocm_configure.bzl\", \"rocm_configure\")\n\
+                 def _impl(ctx):\n\
+                 \x20   rocm_configure(name = \"local_config_rocm\")\n\
+                 rocm_ext = module_extension(implementation = _impl)\n",
+            ),
+            (
+                "third_party/gpus/rocm_configure.bzl",
+                "def _create_local(repository_ctx):\n\
+                 \x20   repository_ctx.template(\"rocm/build_defs.bzl\", Label(\"//third_party/gpus/rocm:build_defs.bzl.tpl\"), {})\n\
+                 def _autoconf_impl(repository_ctx):\n\
+                 \x20   _create_local(repository_ctx)\n\
+                 remote_rocm_configure = repository_rule(implementation = _create_local)\n\
+                 rocm_configure = repository_rule(implementation = _autoconf_impl)\n",
+            ),
+        ]);
+        let m = RepoMapping::from_dump(
+            "{\"\":\"\",\"local_config_rocm\":\"+rocm_ext+local_config_rocm\"}",
+        );
+        let ri = inputs(&files, &m);
+        assert_eq!(
+            ri.repos_for("third_party/gpus/rocm/build_defs.bzl.tpl"),
+            set(&["local_config_rocm"]),
+            "{:?}",
+            ri.patterns
+        );
     }
 
     #[test]
@@ -2744,6 +2869,13 @@ _envoy_repo = repository_rule(
         let m = RepoMapping::identity().with_main_alias("envoy");
         let ri = inputs(&files, &m);
         println!("repos in the universe: {}", ri.repos.len());
+        let facts = read_live_module_facts(&files, &m);
+        println!("module facts: {} deps, {} extensions, unparsed {:?}", facts.deps.len(), facts.extensions.len(), facts.unparsed);
+        for (k, e) in &facts.extensions {
+            if e.bzl.contains("rocm") || e.bzl.contains("third_party.bzl") {
+                println!("   extension {k}: {} {} -> {:?}", e.bzl, e.name, e.repos);
+            }
+        }
         let probe = std::env::var("CAMBIUM_CORPUS_PATHS").unwrap_or_else(|_| {
             ".github/config.yml,source/extensions/extensions_build_config.bzl,\
              bazel/external/cargo/remote/defs.bzl,tools/base/requirements.txt,\
