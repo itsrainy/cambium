@@ -139,6 +139,19 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
+    /// The externals tables: every repository the main repository defines,
+    /// its canonical name, path mappings and input patterns; every workspace
+    /// `.bzl` and the repositories it answers for; every external label a
+    /// load walk stopped at. What decides whether an input edit re-queries
+    /// a repository's loaders, and the first thing to diff when a run and a
+    /// replay disagree.
+    Externals {
+        #[command(flatten)]
+        common: Common,
+        /// Only this repository (apparent name).
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
 
 impl Args {
@@ -151,7 +164,8 @@ impl Args {
             | Args::Consumers { common, .. }
             | Args::Owner { common, .. }
             | Args::Targets { common, .. }
-            | Args::Stats { common } => common,
+            | Args::Stats { common }
+            | Args::Externals { common, .. } => common,
             Args::Verify(_) => unreachable!("index::run intercepts Verify before common()"),
         }
     }
@@ -237,6 +251,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             emit(&q.targets(&package, kind)?, fmt, print_package_targets)
         }
         Args::Stats { .. } => emit(&q.stats(f.file_size() as u64), fmt, print_stats),
+        Args::Externals { repo, .. } => emit(&externals(f.view(), repo.as_deref()), fmt, print_externals),
         Args::Verify(_) => unreachable!("handled above"),
     }?;
     Ok(crate::EXIT_OK)
@@ -501,5 +516,84 @@ fn print_detail(d: &inspect::TargetDetail) {
     println!("  rdeps ({}):", d.rdeps.len());
     for x in &d.rdeps {
         println!("    {x}");
+    }
+}
+
+#[derive(Serialize)]
+struct ExternalsRepo {
+    name: String,
+    canonical: String,
+    path_maps: Vec<String>,
+    /// `(pattern, feeds the rule)`.
+    inputs: Vec<(String, bool)>,
+}
+
+#[derive(Serialize)]
+struct ExternalsBzl {
+    path: String,
+    repos: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ExternalsDump {
+    bzl_closure: bool,
+    repos: Vec<ExternalsRepo>,
+    workspace_bzl: Vec<ExternalsBzl>,
+    ext_labels: Vec<String>,
+}
+
+fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDump {
+    let mut inputs: std::collections::BTreeMap<u32, Vec<(String, bool)>> = Default::default();
+    for p in 0..v.repo_input_patterns.len() as u32 {
+        let pat = v.repo_input_patterns.get(p).to_string();
+        let feeds = !v.repo_input_target_only[p as usize];
+        for &r in v.repo_inputs.row(p) {
+            inputs.entry(r).or_default().push((pat.clone(), feeds));
+        }
+    }
+    let repos = (0..v.num_repos())
+        .filter(|&r| only.is_none_or(|o| o == v.repo_name(r)))
+        .map(|r| ExternalsRepo {
+            name: v.repo_name(r).to_string(),
+            canonical: v.repo_canonical_name(r).to_string(),
+            path_maps: v
+                .repo_path_maps(r)
+                .iter()
+                .map(|m| format!("{} -> {}{}", m.from, m.to, if m.exhaustive { " (exhaustive)" } else { "" }))
+                .collect(),
+            inputs: inputs.remove(&r).unwrap_or_default(),
+        })
+        .collect();
+    let workspace_bzl = (0..v.num_bzl())
+        .filter(|&id| v.bzl_in_workspace(id))
+        .map(|id| ExternalsBzl {
+            path: v.bzl_path(id).to_string(),
+            repos: v.bzl_repos_of(id).iter().map(|&r| v.repo_name(r).to_string()).collect(),
+        })
+        .filter(|b| only.is_none_or(|o| b.repos.iter().any(|r| r == o)))
+        .collect();
+    let ext_labels = (0..v.bzl_ext_labels.len() as u32)
+        .map(|e| v.bzl_ext_labels.get(e).to_string())
+        .filter(|l| only.is_none_or(|o| l.contains(o)))
+        .collect();
+    ExternalsDump { bzl_closure: v.bzl_closure, repos, workspace_bzl, ext_labels }
+}
+
+fn print_externals(d: &ExternalsDump) {
+    println!("bzl_closure: {}", d.bzl_closure);
+    for r in &d.repos {
+        println!("repo {}\tcanonical {:?}", r.name, r.canonical);
+        for m in &r.path_maps {
+            println!("  map     {m}");
+        }
+        for (p, feeds) in &r.inputs {
+            println!("  input   {p}{}", if *feeds { "" } else { "\t(target only)" });
+        }
+    }
+    for b in &d.workspace_bzl {
+        println!("bzl {}\t{}", b.path, b.repos.join(" "));
+    }
+    for l in &d.ext_labels {
+        println!("ext {l}");
     }
 }

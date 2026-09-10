@@ -255,6 +255,24 @@ pub fn analyse(
             _ => {}
         }
     }
+    // A tree Bazel reads in WORKSPACE mode has an inert `MODULE.bazel`: an
+    // edit to it, or to its lock, moves nothing. A flip of the mode itself
+    // is a bazelrc change, which the flags stage makes global.
+    if (module_changed || lock_changed) && !bzlmod_live_at(base, texts, base_rev) {
+        tracing::info!(
+            "MODULE.bazel changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
+        );
+        if module_changed {
+            out.handled.push(MODULE_FILE.to_string());
+        }
+        if lock_changed {
+            out.handled.push(MODULE_LOCK.to_string());
+        }
+        module_changed = false;
+        lock_changed = false;
+    }
+    {
+    }
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*
@@ -482,6 +500,21 @@ fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<St
     } else {
         format!("{pkg}/{name}")
     })
+}
+
+/// [`cambium_index::bzlmod_live`] for the base side of the diff: the tree
+/// as `texts` reads it at `base_rev`, and the mapping the base index carries.
+fn bzlmod_live_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> bool {
+    struct At<'a>(&'a dyn WorkspaceText, &'a str);
+    impl cambium_index::FileText for At<'_> {
+        fn text(&self, path: &str) -> Option<String> {
+            self.0.text_at(self.1, path)
+        }
+    }
+    let m = cambium_index::RepoMapping::from_canonical(
+        (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
+    );
+    cambium_index::bzlmod_live(&At(texts, rev), &m)
 }
 
 fn facts_at(texts: &dyn WorkspaceText, rev: &str) -> ModuleFacts {
