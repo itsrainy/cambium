@@ -206,6 +206,7 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

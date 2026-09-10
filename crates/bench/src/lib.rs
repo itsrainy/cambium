@@ -23,6 +23,11 @@
 //!   [`report`] renders `docs/RESULTS.md`, and [`state`] is what makes a
 //!   killed run resumable.
 //!
+//! Beside the workloads sits [`labels`], which is not part of a run's
+//! result: it is the label sets a change-set comparison compared, written
+//! whole beside `changes-<pin>.json` so a disagreement can be examined after
+//! the fact rather than through the twenty examples the JSON has room for.
+//!
 //! Beside them sits [`replay`], which is not a workload: it drives the
 //! engine's static stages from a stored index and a list of changed paths, so
 //! that an engine change can be checked against a published run's own answers
@@ -40,6 +45,7 @@ pub mod classify;
 pub mod compare;
 pub mod harness;
 pub mod history;
+pub mod labels;
 pub mod legacy;
 pub mod manifest;
 pub mod oracles;

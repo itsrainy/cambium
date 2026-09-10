@@ -187,6 +187,34 @@ pub enum Args {
     /// before the benchmark machine is started. See
     /// `docs/METHODOLOGY.md`, "Validating an engine change before a run".
     Replay(Box<crate::cmd::replay::Args>),
+    /// Print the label sets a change-set comparison stored.
+    ///
+    /// `changes-<pin>.json` keeps per-class counts and at most a handful of
+    /// example labels; the sets themselves are written whole beside it. This
+    /// reads them back — offline, no Bazel, no checkout.
+    Labels {
+        /// A name from subject_repos.toml, or synth:<preset>.
+        subject: String,
+        /// Which change set, as base..head. Abbreviated revisions are fine.
+        #[arg(long = "change-set")]
+        change_set: String,
+        /// One stored set (a tool's name, `cambium` or `oracle`), or the tool
+        /// a disagreement was with when --class or --side narrows one.
+        #[arg(long)]
+        tool: Option<String>,
+        /// Only disagreements filed in this class.
+        #[arg(long = "class")]
+        class: Option<String>,
+        /// Only disagreements on this side: tool or cambium.
+        #[arg(long)]
+        side: Option<String>,
+        /// Print how each tool's set stands against cambium's instead of the
+        /// labels: only-tool, only-cambium, both.
+        #[arg(long)]
+        diff: bool,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Regenerate docs/RESULTS.md from bench-results/.
     Report {
         /// Rewrite only this subject's section. Every subject that has results
@@ -466,6 +494,116 @@ fn preset_of(subject: &str, what: &str) -> Result<String> {
         })
 }
 
+/// `cambi bench labels`: the stored sets of one change set, filtered.
+///
+/// Deliberately does not go through [`Run::open`]: nothing here runs a Bazel
+/// or opens a checkout, and refusing to show a stored file because no bazel
+/// binary is installed would defeat the point of having written it — these
+/// are read on a laptop, from results tarred off the benchmark machine.
+#[allow(clippy::too_many_arguments)]
+fn do_labels(
+    ctx: &Context,
+    subject: &str,
+    change_set: &str,
+    common: &Common,
+    tool: Option<String>,
+    class: Option<String>,
+    side: Option<String>,
+    diff: bool,
+) -> Result<u8> {
+    use cambium_bench::labels;
+
+    let (_, manifest) = match &common.manifest {
+        Some(p) => (p.clone(), Manifest::load(p)?),
+        None => Manifest::discover(&ctx.root)?,
+    };
+    let subjects = match &common.subjects_dir {
+        Some(p) => SubjectsDir::new(p.clone()),
+        None => SubjectsDir::from_env(),
+    };
+    let entry = Subject::parse(subject, &manifest)?.entry(&subjects)?;
+    let changes = common.results_dir.join(&entry.id).join("changes");
+    let dir = labels::resolve(&changes, change_set)?;
+
+    if diff {
+        for d in labels::diff(&dir)? {
+            println!(
+                "{}\tonly-tool {}\tonly-cambium {}\tboth {}",
+                d.tool, d.only_tool, d.only_cambium, d.both
+            );
+        }
+        return Ok(crate::EXIT_OK);
+    }
+
+    let filter = labels::Filter {
+        tool: tool.clone(),
+        class: class
+            .as_deref()
+            .map(|c| {
+                labels::parse_class(c)
+                    .ok_or_else(|| anyhow::anyhow!("no disagreement class named {c}"))
+            })
+            .transpose()?,
+        side: side
+            .as_deref()
+            .map(|s| {
+                labels::parse_side(s).ok_or_else(|| anyhow::anyhow!("--side is tool or cambium"))
+            })
+            .transpose()?,
+    };
+
+    // A class or a side is a question about the classification; a bare --tool,
+    // or nothing at all, is a question about what a tool reported.
+    if filter.class.is_some() || filter.side.is_some() {
+        let path = labels::classes_path(&dir).with_context(|| {
+            format!(
+                "{} holds no classification; a globally invalidated change set has none",
+                dir.display()
+            )
+        })?;
+        for row in filter.apply(&labels::read_classes(&path)?) {
+            println!(
+                "{}\t{}\t{}\t{}",
+                row.tool,
+                labels::side_name(row.side),
+                row.class.name(),
+                row.label
+            );
+        }
+        return Ok(crate::EXIT_OK);
+    }
+
+    let sets = labels::stored_sets(&dir)?;
+    let wanted: Vec<_> = match &tool {
+        Some(name) => {
+            let hit = sets.iter().find(|(n, _)| n == name).with_context(|| {
+                format!(
+                    "{} has no set named {name}; it has {}",
+                    dir.display(),
+                    sets.iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            vec![hit.clone()]
+        }
+        None => sets,
+    };
+    // Named only when there is more than one of them: a `--tool` answer is
+    // meant to be pipeable into `comm` or `grep -f`.
+    let header = wanted.len() > 1;
+    for (name, path) in wanted {
+        if header {
+            println!("# {name}");
+        }
+        for label in labels::read_set(&path)? {
+            println!("{label}");
+        }
+    }
+    Ok(crate::EXIT_OK)
+}
+
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match args {
         Args::Subjects { what } => do_subjects(ctx, what),
@@ -518,6 +656,15 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 },
             )
         }
+        Args::Labels {
+            subject,
+            change_set,
+            tool,
+            class,
+            side,
+            diff,
+            common,
+        } => do_labels(ctx, &subject, &change_set, &common, tool, class, side, diff),
         Args::Stages {
             subject,
             stages,

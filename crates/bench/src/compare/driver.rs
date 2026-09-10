@@ -22,7 +22,7 @@ use super::model::{
     absolute, CambiumRun, ChangeSetResult, ChangesOptions, ChangesResult, ChangesSummary,
     ToolComparison,
 };
-use super::summary::{classify_difference, precision};
+use super::summary::{classify_all, examples_of, precision};
 
 /// A Bazel rooted at another worktree, carrying this run's startup flags and
 /// environment.
@@ -174,6 +174,15 @@ fn compare_one(
         return compare_global(engine, checkout, change_set, tools, opts, report, cambium);
     };
 
+    // The sets themselves, beside the JSON that keeps only their counts. Not
+    // behind a flag and not best-effort: they are tens of kilobytes, and the
+    // change set a run wants to explain afterwards is never the one somebody
+    // thought to ask for them on. See [`crate::labels`].
+    let labels_dir =
+        crate::labels::change_set_dir(&opts.results_dir, &change_set.base, &change_set.head);
+    std::fs::create_dir_all(&labels_dir)?;
+    crate::labels::write_set(&labels_dir, crate::labels::CAMBIUM, &cambium_set)?;
+
     // ---- the facts a classification needs ----
     let base_wt = BaseWorktree::create(&checkout.dir, &change_set.base, &opts.scratch)?;
     let changed = BazelFacts::changed_paths(&checkout.dir, &change_set.base, &change_set.head)?;
@@ -245,6 +254,11 @@ fn compare_one(
         false => None,
     };
     let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
+    // Only when it ran: no file at all says "the oracle was off", which a
+    // file holding an empty set would not.
+    if let Some(o) = &oracle {
+        crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
+    }
 
     let facts = BazelFacts::new(
         &engine.bazel,
@@ -269,6 +283,7 @@ fn compare_one(
     // ---- the tools ----
     let ctx = run_context(engine, &opts.scratch, base_wt.path());
     let mut results = Vec::new();
+    let mut rows: Vec<crate::labels::ClassRow> = Vec::new();
     for p in tools {
         let cmp = match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
             Ok(mut run) => {
@@ -285,8 +300,19 @@ fn compare_one(
                     cambium_set.symmetric_difference(&run.labels),
                     report.explanations.as_deref().unwrap_or_default(),
                 ));
-                let (counts, examples) =
-                    classify_difference(&cambium_set, &run.labels, &facts, opts.examples);
+                // Restricted to rules first, so the stored set is the same
+                // vocabulary the classification ran over: a file whose rows
+                // the JSON's counts cannot be reconciled with is worse than
+                // no file.
+                crate::labels::write_set(&labels_dir, p.name(), &run.labels)?;
+                let (counts, found) = classify_all(&cambium_set, &run.labels, &facts);
+                rows.extend(found.iter().map(|d| crate::labels::ClassRow {
+                    tool: p.name().to_string(),
+                    side: d.side,
+                    class: d.class,
+                    label: d.label.clone(),
+                }));
+                let examples = examples_of(found, opts.examples);
                 let failures: usize = counts
                     .iter()
                     .filter(|(class, _)| class.is_failure())
@@ -325,6 +351,10 @@ fn compare_one(
         };
         results.push(cmp);
     }
+    // Written once, with every tool's rows in it: which tool a label
+    // disagreed with is a column, because the same label routinely disagrees
+    // with one tool and not another.
+    crate::labels::write_classes(&labels_dir, &rows)?;
 
     // ---- the `.bzl` load-closure oracle ----
     //
