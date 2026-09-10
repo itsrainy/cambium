@@ -148,6 +148,24 @@ fn compare_one(
     let (cold_wall_ms, warm_wall_ms) = (run.cold.as_millis() as u64, run.warm.as_millis() as u64);
     let out = run.out;
 
+    // Keep the base this run actually spliced onto. `state_dir` is
+    // `bench-results/<subject>/`, so the archive sits beside `state.json` and
+    // the cold indexes every workload shares; `cambi bench replay` looks for
+    // it there. Without it the only base a later replay has is the index at
+    // the pin, which is a different graph -- see `crate::replay`.
+    if let Some(base) = out.base_index.as_ref() {
+        if let Err(e) = archive_base_index(
+            &opts.state_dir,
+            &change_set.base,
+            base,
+            engine.index_compression(),
+        ) {
+            // A comparison that produced the right answer should not fail
+            // because a diagnostic copy could not be written.
+            tracing::warn!(base = %change_set.base, error = format!("{e:#}"), "could not archive the base index");
+        }
+    }
+
     let report = &out.report;
     let cambium_set: BTreeSet<String> = report.affected_labels().into_iter().collect();
     let cambium_depths: BTreeMap<String, u32> = report
@@ -573,6 +591,44 @@ fn base_index_for_oracle(engine: &Engine, base: &str) -> Option<cambium_index::I
     }
 }
 
+/// Copies the base index a run used to
+/// `<results>/<subject>/bases/<base sha>.bin`, and says where it landed.
+///
+/// Two change sets in a row frequently share a base, and a base is megabytes,
+/// so an existing file is left alone rather than rewritten: the store serves
+/// one index per commit and it does not change under us within a run.
+///
+/// `compression` is the run's own (`baseline.compress_indexes`), so an
+/// archived base is the same on-disk form as the `index-<pin>.bin` beside it
+/// and `precheck.sh` pulls files of the size it expects. A mapped base is
+/// copied byte for byte: it is already in whichever form the store wrote it,
+/// and re-encoding it would cost a deserialise for nothing.
+pub fn archive_base_index(
+    subject_results: &Path,
+    base: &str,
+    used: &cambium_engine::BaseIndex,
+    compression: cambium_index::format::Compression,
+) -> Result<Option<std::path::PathBuf>> {
+    let dest = crate::replay::archived_base_path(subject_results, base);
+    if dest.exists() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dest.parent().unwrap_or(subject_results))?;
+    match used {
+        cambium_engine::BaseIndex::Mapped(src) => {
+            std::fs::copy(src, &dest)
+                .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+        }
+        cambium_engine::BaseIndex::Owned(data) => {
+            cambium_index::format::write_index_with(&dest, data, compression)
+                .with_context(|| format!("writing {}", dest.display()))?;
+        }
+    }
+    let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    tracing::info!(%base, path = %dest.display(), bytes, "archived the base index this change set ran against");
+    Ok(Some(dest))
+}
+
 /// A previous file continues this run only when the same cambium wrote it:
 /// the engine id names the index format and the engine configuration, and a
 /// change set answered under another one is a different experiment.
@@ -676,4 +732,82 @@ pub fn compare_change_sets(
     result.summarise();
     result.write(&path)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn an_index(commit: &str) -> cambium_index::IndexData {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[cambium_index::PackageUpdate {
+            package: "lib".into(),
+            targets: vec![cambium_index::TargetRow::rule(
+                "//lib:core",
+                "cc_library",
+                vec![],
+            )],
+            ..Default::default()
+        }]);
+        b.finish(commit)
+    }
+
+    /// A base the run computed exists only in memory, so it is written out;
+    /// one the store served is copied. Either way what lands is an index a
+    /// replay can open at the change set's own base.
+    #[test]
+    fn a_base_index_is_archived_under_its_own_sha_in_either_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("envoy");
+        let compression = cambium_index::format::Compression::default();
+
+        let owned = an_index("base-a");
+        let at = archive_base_index(
+            &results,
+            "base-a",
+            &cambium_engine::BaseIndex::Owned(Box::new(owned)),
+            compression,
+        )
+        .unwrap()
+        .expect("nothing was archived");
+        assert_eq!(at, crate::replay::archived_base_path(&results, "base-a"));
+        assert_eq!(
+            cambium_index::IndexFile::open(&at).unwrap().view().commit,
+            "base-a"
+        );
+
+        let served = dir.path().join("store-copy.bin");
+        cambium_index::format::write_index(&served, &an_index("base-b")).unwrap();
+        let at = archive_base_index(
+            &results,
+            "base-b",
+            &cambium_engine::BaseIndex::Mapped(served),
+            compression,
+        )
+        .unwrap()
+        .expect("nothing was archived");
+        assert_eq!(
+            cambium_index::IndexFile::open(&at).unwrap().view().commit,
+            "base-b"
+        );
+    }
+
+    /// Consecutive change sets share a base and a base is megabytes, so the
+    /// second one leaves the first's file alone rather than rewriting it.
+    #[test]
+    fn an_already_archived_base_is_not_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("envoy");
+        let owned = cambium_engine::BaseIndex::Owned(Box::new(an_index("base-a")));
+        let compression = cambium_index::format::Compression::default();
+        let at = archive_base_index(&results, "base-a", &owned, compression)
+            .unwrap()
+            .unwrap();
+        let written = std::fs::metadata(&at).unwrap().modified().unwrap();
+
+        assert!(archive_base_index(&results, "base-a", &owned, compression)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::metadata(&at).unwrap().modified().unwrap(), written);
+    }
 }

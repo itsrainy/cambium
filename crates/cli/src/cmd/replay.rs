@@ -50,7 +50,10 @@ pub struct Args {
     #[arg(long)]
     pub history: bool,
 
-    /// The index to replay against. Default:
+    /// The index to replay against, overriding everything: neither the
+    /// archived base of a change set nor the index at the pin is consulted.
+    /// Default: the change set's own base index when the run archived one at
+    /// <results-dir>/<subject>/bases/<base>.bin, else
     /// <results-dir>/<subject>/index-<pin>.bin.
     #[arg(long)]
     pub index: Option<PathBuf>,
@@ -189,6 +192,17 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     };
 
     let explicit = !args.paths.is_empty();
+    // What every change set without an archived base falls back to. `--index`
+    // is named rather than discovered, so a replay against it cannot claim to
+    // be at any particular revision and is read as the pin's case.
+    let pin_kind = if args.index.is_some() {
+        replay::BaseKind::Explicit
+    } else {
+        replay::BaseKind::Pin
+    };
+    let archived = ArchivedBases {
+        results: results.clone(),
+    };
     let mut rederived = replay::RederiveCache::new();
     let mut outcomes: Vec<ReplayOutcome> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -216,15 +230,37 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Some(r) => Box::new(GitTextOwned(r.clone())),
             None => Box::new(replay::NoText),
         };
-        // With --rederive the index the stages see is the stored one with its
+        // The base the run itself spliced onto, when the change-set driver
+        // archived one: that is the graph the run walked, where the index at
+        // the pin is the graph as of some later commit. `--index` is the one
+        // thing that outranks it, because it is an explicit instruction.
+        let opened = if args.index.is_some() {
+            None
+        } else {
+            match archived.open(&want.base) {
+                Ok(f) => f,
+                Err(e) => {
+                    skipped.push(format!("{}: {e:#}", want.key()));
+                    continue;
+                }
+            }
+        };
+        let base_kind = if opened.is_some() {
+            replay::BaseKind::RunsOwn
+        } else {
+            pin_kind
+        };
+        let base_view = opened.as_ref().map(|f| f.view()).unwrap_or(view);
+
+        // With --rederive the index the stages see is that one with its
         // externals tables rebuilt from the base's own text; without it, the
-        // stored index exactly as the run left it.
+        // index exactly as the run left it.
         let mut cost = None;
         let replay_view = if args.rederive {
-            match rederived.ensure(view, &want.base, texts.as_ref()) {
+            match rederived.ensure(base_view, &want.base, texts.as_ref()) {
                 Ok(ms) => {
                     cost = ms;
-                    rederived.get(&want.base).unwrap_or(view)
+                    rederived.get(&want.base).unwrap_or(base_view)
                 }
                 Err(e) => {
                     skipped.push(format!("{}: cannot re-derive: {e:#}", want.key()));
@@ -232,15 +268,16 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 }
             }
         } else {
-            view
+            base_view
         };
-        let mut o = replay::replay(
+        let mut o = replay::replay_with(
             replay_view,
             &cfg,
             &want.base,
             &want.head,
             &changes,
             texts.as_ref(),
+            base_kind,
         );
         o.rederived = args.rederive;
         o.rederive_ms = cost;
@@ -281,6 +318,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 "subject": run.subject,
                 "pin": run.pin,
                 "index": index_path.display().to_string(),
+                "archived_bases": run
+                    .outcomes
+                    .iter()
+                    .filter(|o| o.base_kind.exact_at_base())
+                    .count(),
                 "compared_against": against,
                 "rederived": args.rederive,
                 "replays": run.outcomes,
@@ -308,6 +350,27 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     } else {
         crate::EXIT_ERROR
     })
+}
+
+/// The base indexes a run archived under `<results>/<subject>/bases/`.
+///
+/// A change set replayed against one of these is replayed against the graph
+/// the run itself spliced onto, which is what makes it exact; see
+/// [`cambium_bench::replay::BaseKind`].
+struct ArchivedBases {
+    results: PathBuf,
+}
+
+impl ArchivedBases {
+    /// The archived base at `base`, or `None` when the run left none.
+    fn open(&self, base: &str) -> Result<Option<IndexFile>> {
+        let Some(path) = replay::archived_base(&self.results, base) else {
+            return Ok(None);
+        };
+        let f = IndexFile::open(&path)
+            .with_context(|| format!("opening the archived base index {}", path.display()))?;
+        Ok(Some(f))
+    }
 }
 
 /// A [`cambium_diff::Repo`] that owns itself, so it can outlive a borrow.
@@ -386,6 +449,14 @@ fn load_recorded(
 fn render_one(o: &ReplayOutcome, recorded: Option<&RecordedAnswer>, max: usize) {
     println!("{} .. {}", o.base, o.head);
     println!("  changed files:   {}", o.changed_files);
+    println!(
+        "  base index:      {}",
+        match o.base_kind {
+            replay::BaseKind::RunsOwn => format!("the run's own (bases/{}.bin)", o.base),
+            replay::BaseKind::Pin => "pin".to_string(),
+            replay::BaseKind::Explicit => "--index".to_string(),
+        }
+    );
     if o.rederived {
         println!(
             "  REDERIVED:       the externals tables were rebuilt from the repository text at \
@@ -471,11 +542,18 @@ fn render_one(o: &ReplayOutcome, recorded: Option<&RecordedAnswer>, max: usize) 
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "-".into())
         );
-        println!(
-            "  note: the stored index is at the pin, not at {}, so a difference here can be \
-             graph drift rather than an engine change. --baseline compares replay to replay.",
-            r.base
-        );
+        if o.base_kind.exact_at_base() {
+            println!(
+                "  note: this replayed against the base index the run itself used, so a \
+                 difference here is the engine rather than graph drift."
+            );
+        } else {
+            println!(
+                "  note: the stored index is at the pin, not at {}, so a difference here can be \
+                 graph drift rather than an engine change. --baseline compares replay to replay.",
+                r.base
+            );
+        }
     }
 }
 
@@ -508,6 +586,18 @@ fn render_all(
         run.pin
     );
     println!("  global: {globals}   cold rebuild: {colds}   indeterminate (not gated): {indet}");
+    let own = run
+        .outcomes
+        .iter()
+        .filter(|o| o.base_kind.exact_at_base())
+        .count();
+    if own > 0 {
+        println!(
+            "  base index: {own} of {} replayed against the base index the run itself spliced \
+             onto (bases/<sha>.bin); the rest against the index at the pin",
+            run.outcomes.len()
+        );
+    }
     let rederived = run.outcomes.iter().filter(|o| o.rederived).count();
     if rederived > 0 {
         let costs: Vec<u64> = run.outcomes.iter().filter_map(|o| o.rederive_ms).collect();
