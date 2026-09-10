@@ -430,11 +430,16 @@ impl Bazel {
     /// `bazel --version`, e.g. `bazel 7.4.1`. Empty string if it cannot be
     /// determined; the version is recorded in the index header, not acted on.
     pub fn version(&self) -> String {
-        let out = self
-            .command("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
+        // Not [`command`](Self::command): Bazel refuses `--version` after a
+        // startup option (`bazel --output_base=… --version` exits 2), and the
+        // benchmark always passes one, which is how a whole run recorded no
+        // Bazel version at all. The workspace and the environment stay, so
+        // bazelisk reads `.bazelversion` and `USE_BAZEL_VERSION` as it would.
+        let mut cmd = Command::new(&self.binary);
+        cmd.current_dir(&self.workspace)
+            .arg("--version")
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output();
         match out {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             Err(_) => String::new(),
