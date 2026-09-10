@@ -38,7 +38,7 @@ pub use model::{
     absolute, CambiumRun, ChangeSetResult, ChangesOptions, ChangesResult, ChangesSummary,
     Disagreement, GlobalStats, ToolComparison, WallStats, DEFAULT_EXAMPLES,
 };
-pub use summary::{classify_difference, precision, summarise, wall_stats};
+pub use summary::{classify_all, classify_difference, examples_of, precision, summarise, wall_stats};
 
 #[cfg(test)]
 mod tests {

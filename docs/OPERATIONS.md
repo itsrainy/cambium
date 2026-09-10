@@ -54,6 +54,19 @@ size, which do not fit on a laptop.
 
 ## Gotchas
 
+- `changes-<pin>.json` keeps per-class counts and at most 20 example labels
+  per tool, which is not enough to explain a change set where a tool named 990
+  targets cambium lacked. The sets themselves are written whole beside it, one
+  directory per change set:
+  `bench-results/<subject>/changes/labels/<base>..<head>/` holds
+  `cambium.txt.zst`, one `<tool>.txt.zst` each, `oracle.txt.zst` when the rdeps
+  oracle ran, and `classes.tsv.zst` — `tool`, `side`, `class`, `label` for
+  *every* disagreement, not just the examples. Read them with `cambi bench
+  labels <subject> --change-set <base>..<head>` (abbreviated revisions are
+  fine), narrowed with `--tool`, `--class` and `--side`, or `--diff` for the
+  only-tool/only-cambium/both counts per tool. It needs no Bazel and no
+  checkout, so it works on results tarred off the box. Globally invalidated
+  change sets store nothing: cambium answered `//...` and nothing was compared.
 - The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
   driver scripts and logs under the repo (ignored) or on the box. Note the
   engine's own index cache sits in `/tmp/cambium-cache/` on the box, which is

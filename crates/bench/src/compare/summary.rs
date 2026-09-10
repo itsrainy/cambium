@@ -213,6 +213,22 @@ pub fn classify_difference(
     facts: &dyn Facts,
     examples: usize,
 ) -> (BTreeMap<Class, usize>, Vec<Disagreement>) {
+    let (counts, found) = classify_all(cambium, tool, facts);
+    (counts, examples_of(found, examples))
+}
+
+/// Every classification, uncapped.
+///
+/// Split out of [`classify_difference`] because the cap belongs to the result
+/// JSON and not to the classification: the driver writes the whole list beside
+/// it ([`crate::labels`]) so that the change set can be studied offline, and
+/// classifying twice to get both would double the Bazel queries the classifier
+/// makes.
+pub fn classify_all(
+    cambium: &BTreeSet<String>,
+    tool: &BTreeSet<String>,
+    facts: &dyn Facts,
+) -> (BTreeMap<Class, usize>, Vec<Disagreement>) {
     let mut counts: BTreeMap<Class, usize> = BTreeMap::new();
     let mut found: Vec<Disagreement> = Vec::new();
     let mut push = |label: &str, side: Side| {
@@ -233,8 +249,13 @@ pub fn classify_difference(
     // Failures first: the examples that survive the cap are the ones a human
     // has to look at.
     found.sort_by_key(|d| (!d.class.is_failure(), d.class, d.label.clone()));
-    found.truncate(examples);
     (counts, found)
+}
+
+/// The first `examples` of an already-ordered classification.
+pub fn examples_of(mut found: Vec<Disagreement>, examples: usize) -> Vec<Disagreement> {
+    found.truncate(examples);
+    found
 }
 
 // ----------------------------------------------------------------- the driver
