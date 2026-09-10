@@ -75,3 +75,20 @@ size, which do not fit on a laptop.
   loading-phase `bazel query` never pays. Its 4 `PARTIAL` packages are the
   Windows `tools/toolchains/win_1803/py3{8,9}` toolchains failing on Linux.
 - zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
+- A subject whose pin is partial on the box for a constant reason (apollo's
+  `@local_config_cuda`, xla's Windows toolchains) needs `publish_partial =
+  true` in `subject_repos.toml`, or `bench subjects build` refuses to publish
+  the index and every later step of that subject fails.
+- The pin index is not the index a change set ran against. envoy's pin is past
+  its bzlmod migration; the bases the run spliced onto were WORKSPACE-mode
+  trees with an inert `MODULE.bazel`, and a replay against the pin cannot see
+  what the derivation did there. When a change set's `dirty_packages` looks
+  wrong, copy the index the run loaded (`loaded baseline index ... path=` in
+  the log, under `/tmp/cambium-cache/`) and replay with `--index` pointed at
+  it; `cambi index externals <file> --repo <name>` diffs the repository
+  tables of the two.
+- `launch.sh sync` once reported `BUILD FAILED` on a healthy build: `set -x`
+  echoes the `trap 'echo "BOOTSTRAP FAILED"'` line into the log. The greps are
+  anchored now; if it recurs, read the log's last line.
+- Two `cargo test` runs at once share `$TMPDIR/cambium-tests` and the
+  store-layout test fails on the race. Run one at a time.
