@@ -97,6 +97,18 @@ impl Baseline {
             Baseline::Owned(d) => Ok(*d),
         }
     }
+
+    /// What this baseline is, as the thing a caller can archive: a path when
+    /// the store served the bytes, the index itself when the run computed it.
+    ///
+    /// Consumes the baseline, because an `Owned` one is a few hundred
+    /// megabytes and the alternative is copying it.
+    pub fn into_base_index(self) -> BaseIndex {
+        match self {
+            Baseline::Mapped(f) => BaseIndex::Mapped(f.path().to_path_buf()),
+            Baseline::Owned(d) => BaseIndex::Owned(d),
+        }
+    }
 }
 
 impl std::fmt::Debug for Baseline {
@@ -131,12 +143,47 @@ struct ScreenedDiff<'a> {
     global_reason: Option<String>,
 }
 
+/// Which base index a run actually spliced onto.
+///
+/// A replay away from the machine that ran it has only the index at the pin to
+/// work with, and that is not what the run read: the store serves whatever the
+/// walk left behind at the change set's own base, and a bug can be visible
+/// against one and invisible against the other. An inert `MODULE.bazel` read in
+/// WORKSPACE mode was exactly that. So the run says which base it used, and the
+/// benchmark driver archives it beside the results.
+pub enum BaseIndex {
+    /// The store served this file and the run mmapped it; the bytes are still
+    /// there to be copied.
+    Mapped(PathBuf),
+    /// The run computed the base itself — an ancestor brought forward, or a
+    /// cold build — so the only copy is this one, in memory.
+    Owned(Box<IndexData>),
+}
+
+impl std::fmt::Debug for BaseIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BaseIndex::Mapped(p) => f.debug_tuple("Mapped").field(&p.display()).finish(),
+            BaseIndex::Owned(d) => f
+                .debug_struct("Owned")
+                .field("commit", &d.view().commit)
+                .finish(),
+        }
+    }
+}
+
 /// A completed run: the answer, plus the head index it produced.
 pub struct RunOutcome {
     pub report: AffectedReport,
     /// Index at head. Present unless the run was globally invalidated before a
     /// splice happened.
     pub index: Option<IndexData>,
+    /// The base this run spliced onto. Only [`Engine::affected`] knows it —
+    /// the pipeline below is handed a view and never learns where it came
+    /// from — so every other entry point leaves it `None`. It is deliberately
+    /// not in [`AffectedReport`]: that JSON is a contract, and this is a local
+    /// fact about one machine's cache.
+    pub base_index: Option<BaseIndex>,
 }
 
 pub struct Engine {
@@ -577,6 +624,10 @@ impl Engine {
         let mut out = self.run_incremental(base_index.view(), &req)?;
         out.report.timings_ms.load += load_ms;
         out.report.timings_ms.total = total.elapsed_ms();
+        // The view is dead by here, so the baseline can be given away whole:
+        // the caller gets the path the store served or the index this run
+        // computed, and nothing is copied either way.
+        out.base_index = Some(base_index.into_base_index());
         Ok(out)
     }
 
@@ -762,6 +813,7 @@ impl Engine {
             return Ok(RunOutcome {
                 report: global_report(req, dirty, timings, stats),
                 index: None,
+                base_index: None,
             });
         }
 
@@ -814,6 +866,7 @@ impl Engine {
             return Ok(RunOutcome {
                 report: global_report(req, dirty, timings, stats),
                 index: None,
+                base_index: None,
             });
         }
 
@@ -988,6 +1041,7 @@ impl Engine {
             Ok(RunOutcome {
                 report,
                 index: Some(head_index),
+                base_index: None,
             })
         } else {
             let overlay = builder.finish_overlay();
@@ -1003,6 +1057,7 @@ impl Engine {
             Ok(RunOutcome {
                 report,
                 index: None,
+                base_index: None,
             })
         }
     }

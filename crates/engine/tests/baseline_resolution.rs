@@ -97,6 +97,38 @@ fn a_published_baseline_is_used_as_is() {
     assert_eq!(origin, BaselineOrigin::Fetched);
 }
 
+/// A run has to be able to say which base it read, or an offline replay has
+/// only the index at the pin — a different graph — to work with. A fetched
+/// baseline names the file the store served; a computed one is the index
+/// itself, because that is the only copy there is.
+#[test]
+fn a_baseline_says_which_index_it_is_so_a_run_can_archive_it() {
+    let f = fixture(3);
+    f.publish_at(0);
+    let req = f.request(&f.commits[0], &f.commits[1]);
+    let (fetched, _) = f
+        .engine
+        .resolve_baseline_with(&f.commits[0], &req, &SynthQuerier::new(&f.graphs[0]))
+        .unwrap();
+    match fetched.into_base_index() {
+        cambium_engine::BaseIndex::Mapped(p) => {
+            assert_eq!(IndexFile::open(&p).unwrap().view().commit, f.commits[0]);
+        }
+        other => panic!("a fetched baseline is a file: {other:?}"),
+    }
+
+    let base = f.commits[2].clone();
+    let req = f.request(&base, &base);
+    let (replayed, _) = f
+        .engine
+        .resolve_baseline_with(&base, &req, &SynthQuerier::new(&f.graphs[2]))
+        .unwrap();
+    match replayed.into_base_index() {
+        cambium_engine::BaseIndex::Owned(d) => assert_eq!(d.view().commit, base),
+        other => panic!("a computed baseline is the index itself: {other:?}"),
+    }
+}
+
 #[test]
 fn a_missing_baseline_is_replayed_forward_from_an_ancestor() {
     let f = fixture(3);
