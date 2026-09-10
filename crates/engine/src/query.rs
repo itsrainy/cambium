@@ -142,6 +142,9 @@ pub struct BazelQuerier {
     pub bazel: Bazel,
     pub opts: ConvertOptions,
     pub files: FileSource,
+    /// Where a tombstoned package or a partial `//...` is reported. Empty by
+    /// default, so a test that builds one by hand need not care.
+    pub diags: crate::diag::Diagnostics,
 }
 
 impl PackageQuerier for BazelQuerier {
@@ -169,6 +172,22 @@ impl PackageQuerier for BazelQuerier {
                     declared_deleted = ?q.outcome.deleted_packages,
                     stderr = %q.outcome.stderr_tail,
                     "some dirty packages did not load under --keep_going; tombstoning them, as a cold build would"
+                );
+                self.diags.emit(
+                    crate::diag::Diagnostic::warning(
+                        crate::diag::Code::W005PackagesTombstoned,
+                        format!(
+                            "{} of {} dirty packages did not load under --keep_going and were \
+                             tombstoned, as a cold build would drop them; their consumers are \
+                             reported as affected",
+                            packages.len() - q.packages_seen,
+                            packages.len()
+                        ),
+                    )
+                    .with_help(
+                        "if those packages should load, fix the load error bazel reported; \
+                         run with --log warn to see its stderr",
+                    ),
                 );
             }
             return Ok(Rows {
@@ -212,6 +231,21 @@ impl PackageQuerier for BazelQuerier {
                 loaded = q.updates.len(),
                 first = ?e.packages,
                 "bazel query //... finished with errors under --keep_going; the index will be PARTIAL"
+            );
+            self.diags.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W006PartialQuery,
+                    format!(
+                        "`bazel query //...` finished with errors under --keep_going \
+                         ({} package error lines), so the index is partial and every run \
+                         spliced onto it is short of those packages",
+                        e.count
+                    ),
+                )
+                .with_help(
+                    "fix the load errors, or publish the partial index deliberately with \
+                     --allow-partial (or baseline.publish_partial = true)",
+                ),
             );
         });
         Ok(Rows {

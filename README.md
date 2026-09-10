@@ -89,7 +89,7 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 
 ```console
 $ cambi affected --base <sha> [--head <sha>] [--tests-only] [--include-manual]
-                   [--output text|json|query] [--explain] [--max-depth n]
+                   [--format human|json|jsonl|query|null] [--explain] [--max-depth n]
                    [--no-full-build] [--publish-base] [--out <index file>]
 $ cambi baseline build  [--commit <sha>] [--publish] [--out <file>]
 $ cambi baseline update --from <sha> [--to <sha>] [--publish] [--out <file>]
@@ -103,7 +103,7 @@ $ cambi index consumers <file> <path>...  [--transitive] [--include-manual] [--t
 $ cambi index owner     <file> <path>...
 $ cambi index targets   <file> <package> [--kind rule]
 $ cambi index stats     <file>
-$ cambi index verify    <file> [--sample n] [--seed n] [--output text|json]
+$ cambi index verify    <file> [--sample n] [--seed n]
 $ cambi bench subjects list|fetch|build [<subject>]
 $ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
 $ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
@@ -127,13 +127,23 @@ is routinely gigabytes, so there is no default path.
 Every subcommand also accepts these global options, declared once on `cambi`
 itself: `-C, --workspace <dir>` (defaults to the current directory),
 `--config <cambium.toml>`, `--bazel-binary <binary>` (overrides config and
-`$BAZEL_REAL`), and `--log <level>` (`error`, `warn`, `info`, `debug`,
-`trace`; also settable via `$CAMBIUM_LOG`, with an explicit `--log` winning).
+`$BAZEL_REAL`), `--log <level>` (`error`, `warn`, `info`, `debug`, `trace`;
+also settable via `$CAMBIUM_LOG`, with an explicit `--log` winning),
+`--format <human|json|jsonl|query|null>`, `--quiet` (nothing on stderr on
+success) and `--color <auto|always|never>` (never under `$NO_COLOR`, and only
+on a TTY under `auto`).
 
-`--output query` emits a `set(...)` expression you can hand straight to Bazel:
+`--format` replaces the per-command `--output`, which stays as a hidden alias,
+as does `text` for the value `human`, so existing invocations keep working.
+`human` is the default. `jsonl` streams one `{"event": ...}` line at a time —
+a diagnostic event per diagnostic, then the result — so a watcher can follow a
+long run. `null` prints nothing and only sets the exit code. `query` is
+`affected` only; asking any other verb for it is a usage error.
+
+`--format query` emits a `set(...)` expression you can hand straight to Bazel:
 
 ```console
-$ bazel test $(cambi affected --base origin/main --tests-only --output query)
+$ bazel test $(cambi affected --base origin/main --tests-only --format query)
 ```
 
 `--explain` prints, for each affected target, the shortest path back to the
@@ -143,7 +153,7 @@ test running?".
 ### Querying an index
 
 The `index` subcommands answer the same questions against an index that
-already exists, in text or JSON (`--output json`, carrying `schema`):
+already exists, in text or JSON (`--format json`, carrying `schema`):
 
 ```console
 $ cambi index consumers idx.bin lib/core/parser.cc --transitive
@@ -186,7 +196,7 @@ versioned contract. Every JSON document carries the version it was written
 against:
 
 ```json
-{ "schema": 7, "base": "...", "head": "...", ... }
+{ "schema": 9, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -204,8 +214,19 @@ affected report's shape and fails with instructions if it moves without a bump;
 | 2 | global invalidation — everything is affected; stdout is `//...` |
 | 3 | Bazel failed |
 | 4 | no baseline available and `--no-full-build` was given |
+| 5 | the store could not be reached (as against holding no index, which is 4): a CI job can retry this one |
 
-### `cambi affected --output json`
+### Diagnostics
+
+Every warning and error `cambi` reports carries a stable code — `CAMBI-W004`,
+`CAMBI-E009` — a message, sometimes a location, and a `help:` line naming the
+flag, file or key to change. The human form follows `rustc` and goes to
+stderr; under `--format json` the objects are in the document's `diagnostics`
+array, and under `--format jsonl` each is its own event. The numbers are
+assigned once and never reused. Every code, when it fires and what to do about
+it is in [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
+
+### `cambi affected --format json`
 
 | field | type | meaning |
 |---|---|---|
@@ -221,6 +242,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
 | `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
+| `diagnostics` | \[object], optional | the actionable warnings this run raised, each `{code, level, message, location?, help?}`; omitted when empty. See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
 | `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
@@ -231,14 +253,14 @@ affected report's shape and fails with instructions if it moves without a bump;
 Optional fields are omitted rather than null, so absence is meaningful. A
 document with no `schema` key predates the field and is version 1.
 
-`--tests-only` applies to `--output json` too: `affected` is restricted to the
+`--tests-only` applies to `--format json` too: `affected` is restricted to the
 entries with `test: true` (`direct` and every other field are unchanged, so a
 label a change touched directly but that is not itself a test can still
 appear there). This does not change the document's shape, so it is not a
 `SCHEMA_VERSION` bump — a consumer that already reads `affected` sees a
 subset of what it would otherwise.
 
-`cambi index ... --output json` and `cambi bench` results carry `schema`
+`cambi index ... --format json` and `cambi bench` results carry `schema`
 on the same terms.
 
 ### Contract versions
@@ -253,6 +275,8 @@ on the same terms.
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from — those repositories contribute their label consumers to the direct set, and their loading packages are not re-queried |
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
+
+| 9 | `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did

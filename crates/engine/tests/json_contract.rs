@@ -31,7 +31,8 @@ use serde_json::Value;
 /// `starlark_flag` direct reason; version 8 added
 /// `stats.repos_dirty_by_target` and the `external_repo_target` direct
 /// reason, for a repository whose generated targets name a main-repo rule
-/// target the walk reached. The version is shared with
+/// target the walk reached; version 9 added `diagnostics`, the actionable
+/// warnings a run raised, each with a stable `CAMBI-W` code. The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -40,6 +41,12 @@ use serde_json::Value;
 /// populates every one of them.
 const AFFECTED_SCHEMA: &[&str] = &[
     "affected[].depth",
+    "diagnostics[].code",
+    "diagnostics[].level",
+    "diagnostics[].message",
+    "diagnostics[].location.path",
+    "diagnostics[].location.line",
+    "diagnostics[].help",
     "affected[].label",
     "affected[].test",
     "base",
@@ -150,6 +157,12 @@ fn fixture() -> AffectedReport {
             external_direct_targets: 14,
             bazelrc_flag_nodes: 16,
         },
+        diagnostics: vec![cambium_engine::Diagnostic::warning(
+            cambium_engine::Code::W004BazelrcGlobal,
+            ".bazelrc changed and the run went global",
+        )
+        .at(".bazelrc", Some(14))
+        .with_help("add it to [bazelrc].allowlist_extra if it cannot affect analysis")],
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
             path: vec!["//app:main".into(), "//lib/core:core".into()],
@@ -292,6 +305,30 @@ fn exit_codes_are_pinned() {
         .exit_code(),
         3,
         "no workspace is discovered via Bazel, so it maps like any other Bazel failure"
+    );
+    assert_eq!(
+        EngineError::Store(cambium_engine::store::StoreError::Backend {
+            op: "fetch",
+            name: "indexes/x".into(),
+            detail: "exit Some(1)".into(),
+        })
+        .exit_code(),
+        5,
+        "5 means: the store could not be reached, which a CI job can retry"
+    );
+    assert_eq!(
+        EngineError::Store(cambium_engine::store::StoreError::Io {
+            path: PathBuf::from("/nowhere"),
+            source: std::io::Error::other("nope"),
+        })
+        .exit_code(),
+        5,
+        "an io error against the store is the store being unreachable too"
+    );
+    assert_eq!(
+        EngineError::Store(cambium_engine::store::StoreError::NotConfigured).exit_code(),
+        1,
+        "a store that is not configured is a configuration error, not an unreachable store"
     );
     // 0 (success) and 2 (global invalidation) are produced by the CLI rather
     // than by an error, and are pinned in crates/cli/src/main.rs.

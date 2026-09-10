@@ -366,7 +366,10 @@ impl<'a> Attribution<'a> {
             if self.defs[d].role.is_some() || self.files[self.defs[d].file].module_dynamic {
                 roots.push(d);
             }
-            by_name.entry(self.defs[d].name.as_str()).or_default().push(d);
+            by_name
+                .entry(self.defs[d].name.as_str())
+                .or_default()
+                .push(d);
         }
         for c in &self.calls {
             match c.callee {
@@ -379,7 +382,11 @@ impl<'a> Attribution<'a> {
                 // that name is live wherever the call is. Losing an edge is
                 // the one direction this must not err in.
                 None if c.opaque => {
-                    for &d in by_name.get(c.head.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
+                    for &d in by_name
+                        .get(c.head.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                    {
                         {
                             match c.scope {
                                 Some(s) => edges[s].push(d),
@@ -414,12 +421,20 @@ impl<'a> Attribution<'a> {
             for i in 0..toks.len() {
                 let Tok::Name(h) = toks[i].tok else { continue };
                 if matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(b'(')))
-                    || matches!(i.checked_sub(1).map(|j| toks[j].tok), Some(Tok::Name("def")))
-                    || matches!(i.checked_sub(1).map(|j| toks[j].tok), Some(Tok::Punct(b'.')))
+                    || matches!(
+                        i.checked_sub(1).map(|j| toks[j].tok),
+                        Some(Tok::Name("def"))
+                    )
+                    || matches!(
+                        i.checked_sub(1).map(|j| toks[j].tok),
+                        Some(Tok::Punct(b'.'))
+                    )
                 {
                     continue;
                 }
-                let Some(Sym::Def(c)) = self.resolve(f, h) else { continue };
+                let Some(Sym::Def(c)) = self.resolve(f, h) else {
+                    continue;
+                };
                 match owner[i] {
                     Some(d) if d != c => edges[d].push(c),
                     Some(_) => {}
@@ -1423,7 +1438,9 @@ impl<'a> Attribution<'a> {
     /// unreadable and its fallback would have been the whole universe. See
     /// [`Attribution::keeps_fallback`].
     pub(crate) fn read_in_full(&self, path: &str) -> bool {
-        self.by_path.get(path).is_some_and(|&f| !self.keeps_fallback(f))
+        self.by_path
+            .get(path)
+            .is_some_and(|&f| !self.keeps_fallback(f))
     }
 
     /// Everything a change to a file can move: what it defines itself, plus

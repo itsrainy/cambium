@@ -600,7 +600,13 @@ fn a_package_bazel_could_not_load_keeps_no_load_closure() {
     };
     let changes = vec![Change::new(Status::Modified, "app/BUILD")];
     let head = e
-        .compute_with_texts(base.view(), &changes, &q, &req, &texts(MODULE_BASE, MODULE_BASE))
+        .compute_with_texts(
+            base.view(),
+            &changes,
+            &q,
+            &req,
+            &texts(MODULE_BASE, MODULE_BASE),
+        )
         .unwrap()
         .index
         .expect("a spliced head index");

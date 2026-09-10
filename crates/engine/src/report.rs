@@ -74,7 +74,11 @@ use serde::{Deserialize, Serialize};
 ///   "envoy_repo", "via": "//changelogs:changelogs"}`. Purely additive; the
 ///   same edit used to be answered by a path prefix over the label's whole
 ///   package subtree (issue #8).
-pub const SCHEMA_VERSION: u32 = 8;
+/// - **9** adds `diagnostics`: the actionable warnings a run raised, each
+///   `{code, level, message, location?, help?}` with a stable `CAMBI-W`
+///   code. Omitted when empty, so a run with nothing to say is byte-identical
+///   to a version 8 document. See `docs/DIAGNOSTICS.md`.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -288,6 +292,11 @@ pub struct AffectedReport {
     pub stats: Stats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanations: Option<Vec<Explanation>>,
+    /// Everything the run wants someone to act on: an invalidator that fired,
+    /// a store that did not answer, a closure that was incomplete. Drained
+    /// from the engine's sink at the end of the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::diag::Diagnostic>,
 }
 
 impl Default for AffectedReport {
@@ -307,6 +316,7 @@ impl Default for AffectedReport {
             timings_ms: Timings::default(),
             stats: Stats::default(),
             explanations: None,
+            diagnostics: Vec::new(),
         }
     }
 }

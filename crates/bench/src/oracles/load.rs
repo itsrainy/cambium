@@ -332,11 +332,23 @@ mod tests {
             std::fs::write(path, t).unwrap();
         };
         w("MODULE.bazel", "module(name = \"xla\")\nthird_party = use_extension(\"//third_party/extensions:third_party.bzl\", \"third_party_ext\")\n");
-        w("third_party/extensions/third_party.bzl", "load(\"//third_party/stablehlo:workspace.bzl\", stablehlo = \"repo\")\n");
-        w("third_party/stablehlo/workspace.bzl", "def repo():\n    pass\n");
-        w("xla/tsl/tsl.bzl", "load(\"@xla//xla/tsl:helpers.bzl\", \"h\")\n");
+        w(
+            "third_party/extensions/third_party.bzl",
+            "load(\"//third_party/stablehlo:workspace.bzl\", stablehlo = \"repo\")\n",
+        );
+        w(
+            "third_party/stablehlo/workspace.bzl",
+            "def repo():\n    pass\n",
+        );
+        w(
+            "xla/tsl/tsl.bzl",
+            "load(\"@xla//xla/tsl:helpers.bzl\", \"h\")\n",
+        );
         w("xla/tsl/helpers.bzl", "h = 1\n");
-        w("xla/mlir_hlo/BUILD", "load(\"//xla/tsl:tsl.bzl\", \"internal_visibility\")\n");
+        w(
+            "xla/mlir_hlo/BUILD",
+            "load(\"//xla/tsl:tsl.bzl\", \"internal_visibility\")\n",
+        );
         let checked = vec![
             "third_party/stablehlo/workspace.bzl".to_string(),
             "xla/tsl/helpers.bzl".to_string(),
@@ -344,7 +356,10 @@ mod tests {
         ];
         assert_eq!(
             loaded_by_no_build_file(dir.path(), &checked),
-            vec!["third_party/stablehlo/workspace.bzl".to_string(), "third_party/dead.bzl".to_string()]
+            vec![
+                "third_party/stablehlo/workspace.bzl".to_string(),
+                "third_party/dead.bzl".to_string()
+            ]
         );
         let r = LoadOracleResult {
             checked: vec!["third_party/stablehlo/workspace.bzl".into()],
@@ -353,7 +368,10 @@ mod tests {
             workspace_only: vec!["third_party/stablehlo/workspace.bzl".into()],
             ..Default::default()
         };
-        assert!(r.ok(), "a repository-evaluation answer is recorded, not failed");
+        assert!(
+            r.ok(),
+            "a repository-evaluation answer is recorded, not failed"
+        );
         let mut s = LoadOracleSummary::default();
         s.add(&r);
         assert_eq!((s.missing_packages, s.repository_evaluation), (0, 1));

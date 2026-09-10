@@ -271,8 +271,7 @@ pub fn analyse(
         module_changed = false;
         lock_changed = false;
     }
-    {
-    }
+    {}
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*

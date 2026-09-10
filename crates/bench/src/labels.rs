@@ -100,8 +100,12 @@ pub fn write_classes(dir: &Path, rows: &[ClassRow]) -> Result<PathBuf> {
     // between two runs of the same change set cannot be diffed.
     let mut sorted: Vec<&ClassRow> = rows.iter().collect();
     sorted.sort_by(|a, b| {
-        (&a.tool, a.class, side_name(a.side), &a.label)
-            .cmp(&(&b.tool, b.class, side_name(b.side), &b.label))
+        (&a.tool, a.class, side_name(a.side), &a.label).cmp(&(
+            &b.tool,
+            b.class,
+            side_name(b.side),
+            &b.label,
+        ))
     });
     let mut body = String::new();
     for r in sorted {
@@ -151,8 +155,7 @@ pub fn read_classes(path: &Path) -> Result<Vec<ClassRow>> {
 /// `oracle`, each tool), sorted.
 pub fn stored_sets(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for e in entries {
         let path = e?.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -325,8 +328,7 @@ fn write_compressed(path: &Path, raw: &[u8]) -> Result<()> {
 }
 
 fn read_compressed(path: &Path) -> Result<String> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let raw = zstd::decode_all(&bytes[..])
         .with_context(|| format!("{} will not decompress", path.display()))?;
     String::from_utf8(raw).with_context(|| format!("{} is not text", path.display()))
