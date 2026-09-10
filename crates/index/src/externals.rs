@@ -640,7 +640,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
             if t.iter()
                 .any(|x| matches!(x.tok, Tok::Name(_) | Tok::Open(_) | Tok::Close))
             {
-                f.unparsed.push(render_stmt(text, t));
+                f.unparsed.push(render_all(text, t));
             }
             continue;
         };
@@ -654,7 +654,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
         };
         if !matches!(t.get(call_at).map(|x| x.tok), Some(Tok::Open(b'('))) {
             if !HARMLESS.contains(&name) {
-                f.unparsed.push(render_stmt(text, t));
+                f.unparsed.push(render_all(text, t));
             }
             continue;
         }
@@ -663,7 +663,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
         if let Some(method) = dotted {
             // A tag call on an extension proxy.
             let Some(key) = ext_vars.get(name) else {
-                f.unparsed.push(render_stmt(text, t));
+                f.unparsed.push(render_all(text, t));
                 continue;
             };
             let e = f.extensions.entry(key.clone()).or_default();
@@ -697,11 +697,11 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 // names; the keyword is the apparent name the main repository
                 // sees, and both are worth recording.
                 let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
-                    f.unparsed.push(render_stmt(text, t));
+                    f.unparsed.push(render_all(text, t));
                     continue;
                 };
                 let Some(key) = ext_vars.get(var) else {
-                    f.unparsed.push(render_stmt(text, t));
+                    f.unparsed.push(render_all(text, t));
                     continue;
                 };
                 let e = f.extensions.entry(key.clone()).or_default();
@@ -719,11 +719,11 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 // extension proxy, which is a name rather than a literal and
                 // so never reaches `Args`.
                 let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
-                    f.unparsed.push(render_stmt(text, t));
+                    f.unparsed.push(render_all(text, t));
                     continue;
                 };
                 let Some(key) = ext_vars.get(var) else {
-                    f.unparsed.push(render_stmt(text, t));
+                    f.unparsed.push(render_all(text, t));
                     continue;
                 };
                 let e = f.extensions.entry(key.clone()).or_default();
@@ -789,7 +789,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 }
                 r.labels.extend(args.strings().cloned());
             }
-            _ => f.unparsed.push(render_stmt(text, t)),
+            _ => f.unparsed.push(render_all(text, t)),
         }
     }
     f
@@ -1065,8 +1065,17 @@ fn main_repo_target(label: &str, m: &RepoMapping) -> Option<(String, String)> {
 /// main-repo graph find the targets this change moves? If it can, the change
 /// names repositories; if it cannot, it is global and says why.
 pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
-    if !base.unparsed.is_empty() || !head.unparsed.is_empty() {
-        let what = head.unparsed.first().or(base.unparsed.first()).unwrap();
+    // A statement the parser does not know is global only when it is what
+    // changed. One that reads the same at both revisions (a call to a macro
+    // the file loaded, say) moves nothing on its own; the `.bzl` behind it
+    // has its own route.
+    if base.unparsed != head.unparsed {
+        let what = head
+            .unparsed
+            .iter()
+            .find(|s| !base.unparsed.contains(s))
+            .or_else(|| base.unparsed.iter().find(|s| !head.unparsed.contains(s)))
+            .unwrap();
         return ModuleChange::Global(format!(
             "MODULE.bazel contains a statement cambium cannot parse: `{what}`"
         ));
@@ -1934,6 +1943,27 @@ mod tests {
         let base = scan_module("register_toolchains(\"//a:b\")\n");
         let head = scan_module("register_toolchains(\"//a:c\")\n");
         assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
+    }
+
+    /// The unparsed statement is global when it is the edit, and inert when
+    /// it merely sits beside one.
+    #[test]
+    fn an_unparsed_statement_is_global_only_when_it_changed() {
+        let t = |v: &str| {
+            format!(
+                "load(\"//bazel:vendored.bzl\", \"vendored\")\nvendored()\n\
+                 bazel_dep(name = \"fmt\", version = \"{v}\")\n"
+            )
+        };
+        assert_eq!(
+            diff_module(&scan_module(&t("1.0")), &scan_module(&t("2.0"))),
+            ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
+        );
+        let edited = t("1.0").replace("vendored()", "vendored(x = 1)");
+        assert!(matches!(
+            diff_module(&scan_module(&t("1.0")), &scan_module(&edited)),
+            ModuleChange::Global(m) if m.contains("vendored") && m.contains("x")
+        ));
     }
 
     #[test]

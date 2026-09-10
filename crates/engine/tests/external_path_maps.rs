@@ -30,7 +30,8 @@ const MODULE_BASE: &str = "module(name = \"demo\", version = \"1\")\n\
      local_path_override(module_name = \"mod\", path = \"api\")\n\
      gen = use_extension(\"//bazel:ext.bzl\", \"gen\")\n\
      use_repo(gen, \"opaque\")\n\
-     load(\"//bazel:vendored.bzl\", \"vendored\")\n";
+     load(\"//bazel:vendored.bzl\", \"vendored\")\n\
+     vendored()\n";
 
 struct Files(BTreeMap<String, String>);
 
