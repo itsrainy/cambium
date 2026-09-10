@@ -137,6 +137,7 @@ enum NameArg {
 
 struct DefInfo {
     file: usize,
+    name: String,
     params: Vec<String>,
     /// Token range of the whole `def` statement, header included.
     span: Range<usize>,
@@ -176,6 +177,9 @@ struct CallSite {
     /// Set when the callee is a name this analysis could not resolve and that
     /// is not a pure builtin.
     opaque: bool,
+    /// The callee as written, for the name-based fallback of
+    /// [`Attribution::liveness`] when it could not be resolved.
+    head: String,
     name: NameArg,
 }
 
@@ -247,6 +251,20 @@ pub(crate) struct Attribution<'a> {
     /// during the fixpoint would make the universe permanent everywhere,
     /// because the sets only grow.
     refining: bool,
+    /// Whether a def can run while Bazel evaluates the workspace: a rule or
+    /// extension implementation, a def called at module level of a closure
+    /// file, a def a live def calls or names, or any def in a file with a
+    /// module-level call this analysis cannot read. A def that is none of
+    /// those is a BUILD-file macro that a load chain dragged into the
+    /// closure — `go_sql_gen` in a `tools/rules/sqlgen.bzl` that
+    /// `tools/rules/go.bzl` happens to load — and its labels are rule
+    /// attributes the graph already carries, not repository inputs. Read as
+    /// inputs with the file's fallback they fed every repository in the
+    /// universe, and one such label seeded 3,819 repositories at once.
+    live: Vec<bool>,
+    /// Every literal `name =` with the def it was written in, before
+    /// liveness decides which of them the universe keeps.
+    named: Vec<(Option<usize>, String)>,
     /// Literal `name =` values seen anywhere: the universe a fallback ranges
     /// over.
     pub(crate) literal_names: BTreeSet<String>,
@@ -282,6 +300,8 @@ impl<'a> Attribution<'a> {
             fileset: Vec::new(),
             refining: false,
             literal_names: BTreeSet::new(),
+            live: Vec::new(),
+            named: Vec::new(),
         };
         for (i, (path, text)) in texts.iter().enumerate() {
             a.by_path.insert(path.clone(), i);
@@ -315,6 +335,7 @@ impl<'a> Attribution<'a> {
         for _ in 0..2 {
             a.calls.clear();
             a.literal_names.clear();
+            a.named.clear();
             for f in &mut a.files {
                 f.module_dynamic = false;
             }
@@ -325,7 +346,105 @@ impl<'a> Attribution<'a> {
         for i in 0..a.files.len() {
             a.collect_uses(i);
         }
+        a.liveness();
         a
+    }
+
+    /// Computes [`Attribution::live`] and rebuilds the universe of literal
+    /// names from the live defs and module level only.
+    fn liveness(&mut self) {
+        let n = self.defs.len();
+        let mut live = vec![false; n];
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut roots: Vec<usize> = Vec::new();
+        let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for d in 0..n {
+            if self.defs[d].role.is_some() || self.files[self.defs[d].file].module_dynamic {
+                roots.push(d);
+            }
+            by_name.entry(self.defs[d].name.as_str()).or_default().push(d);
+        }
+        for c in &self.calls {
+            match c.callee {
+                Some(Sym::Def(callee)) => match c.scope {
+                    Some(d) => edges[d].push(callee),
+                    None => roots.push(callee),
+                },
+                // A call this analysis could not resolve may still be one of
+                // our defs under an alias the resolver missed: every def of
+                // that name is live wherever the call is. Losing an edge is
+                // the one direction this must not err in.
+                None if c.opaque => {
+                    for &d in by_name.get(c.head.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
+                        {
+                            match c.scope {
+                                Some(s) => edges[s].push(d),
+                                None => roots.push(d),
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A def named as a value — `_maybe(_go_repo, ...)`, `implementation
+        // = _f` on a declaration the scanner did not read — runs wherever the
+        // value is used, so it is live wherever it is named. The owning def
+        // of every token is computed once per file: asking `scope_of` per
+        // name token is tokens times defs, which on envoy's closure took the
+        // replay from a minute to many.
+        for f in 0..self.files.len() {
+            let toks = &self.files[f].toks;
+            let mut owner: Vec<Option<usize>> = vec![None; toks.len()];
+            for &d in &self.files[f].defs {
+                let span = &self.defs[d].span;
+                // Innermost wins: a nested def's span is shorter and is
+                // written after its parent in `defs`, so it overwrites.
+                for slot in &mut owner[span.start.min(toks.len())..span.end.min(toks.len())] {
+                    *slot = Some(d);
+                }
+                if span.start < toks.len() {
+                    owner[span.start] = None;
+                }
+            }
+            for i in 0..toks.len() {
+                let Tok::Name(h) = toks[i].tok else { continue };
+                if matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(b'(')))
+                    || matches!(i.checked_sub(1).map(|j| toks[j].tok), Some(Tok::Name("def")))
+                    || matches!(i.checked_sub(1).map(|j| toks[j].tok), Some(Tok::Punct(b'.')))
+                {
+                    continue;
+                }
+                let Some(Sym::Def(c)) = self.resolve(f, h) else { continue };
+                match owner[i] {
+                    Some(d) if d != c => edges[d].push(c),
+                    Some(_) => {}
+                    None => roots.push(c),
+                }
+            }
+        }
+        let mut stack = roots;
+        while let Some(d) = stack.pop() {
+            if live[d] {
+                continue;
+            }
+            live[d] = true;
+            stack.extend(edges[d].iter().copied());
+        }
+        self.live = live;
+        self.literal_names = self
+            .named
+            .iter()
+            .filter(|(scope, _)| scope.map_or(true, |d| self.live[d]))
+            .map(|(_, l)| l.clone())
+            .collect();
+    }
+
+    /// Whether def `d` can run during workspace evaluation; see
+    /// [`Attribution::live`]. Before [`Attribution::liveness`] ran, every def
+    /// is.
+    fn is_live(&self, d: usize) -> bool {
+        self.live.get(d).copied().unwrap_or(true)
     }
 
     /// Every use of an imported symbol in file `f`.
@@ -427,6 +546,7 @@ impl<'a> Attribution<'a> {
                     defs.push(id);
                     new_defs.push(DefInfo {
                         file: f,
+                        name: name.to_string(),
                         params,
                         span: span.clone(),
                         fwd: BTreeSet::new(),
@@ -519,7 +639,7 @@ impl<'a> Attribution<'a> {
     /// the repository it may create.
     fn call_sites(&mut self, f: usize) {
         let mut found: Vec<CallSite> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<(Option<usize>, String)> = Vec::new();
         let mut fwd: Vec<(usize, String)> = Vec::new();
         let mut module_dynamic = false;
         {
@@ -572,7 +692,7 @@ impl<'a> Attribution<'a> {
                 };
                 if let NameArg::Literal(l) = &name {
                     if names_a_repository(head) {
-                        names.push(l.clone());
+                        names.push((scope, l.clone()));
                     }
                 }
                 if let (NameArg::Forward, Some(d)) = (&name, scope) {
@@ -599,6 +719,7 @@ impl<'a> Attribution<'a> {
                     scope,
                     callee,
                     opaque,
+                    head: head.to_string(),
                     name,
                 });
             }
@@ -606,7 +727,9 @@ impl<'a> Attribution<'a> {
         for (d, p) in fwd {
             self.defs[d].fwd.insert(p);
         }
-        self.literal_names.extend(names);
+        self.literal_names
+            .extend(names.iter().map(|(_, l)| l.clone()));
+        self.named.extend(names);
         self.files[f].module_dynamic |= module_dynamic;
         self.calls.extend(found);
     }
@@ -1136,6 +1259,12 @@ impl<'a> Attribution<'a> {
     /// occurrence keeps the old whole-file answer rather than being attributed
     /// to no repository at all, which would lose an edge.
     fn def_repos(&self, d: usize) -> Attributed {
+        if !self.is_live(d) {
+            return Attributed {
+                repos: BTreeSet::new(),
+                exact: true,
+            };
+        }
         let repos = self.raw_def_repos(d);
         let exact = !repos.is_empty() && !self.dynamic[d];
         if repos.is_empty() {
@@ -1162,6 +1291,17 @@ impl<'a> Attribution<'a> {
     /// [`Attribution::at`], by file index.
     fn at_tok(&self, f: usize, tok: usize) -> Attributed {
         let file = &self.files[f];
+        // Inside a def nothing in the workspace runs: a BUILD-file macro's
+        // rule call names a target, not a repository, and its labels are
+        // that target's attributes.
+        if let Some(d) = self.scope_of(f, tok) {
+            if !self.is_live(d) {
+                return Attributed {
+                    repos: BTreeSet::new(),
+                    exact: true,
+                };
+            }
+        }
         // The innermost enclosing call that names a repository outright.
         for open in self.enclosing_calls(f, tok) {
             if !matches!(file.toks[open].tok, Tok::Open(b'(')) {
@@ -1249,7 +1389,9 @@ impl<'a> Attribution<'a> {
         let file = &self.files[f];
         let mut repos = file.seeded.clone();
         for &d in &file.defs {
-            repos.extend(self.raw_def_repos(d));
+            if self.is_live(d) {
+                repos.extend(self.raw_def_repos(d));
+            }
         }
         for (_, sym) in &file.decls {
             repos.extend(self.rule_repos(*sym));

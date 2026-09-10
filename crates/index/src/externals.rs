@@ -2775,7 +2775,9 @@ _envoy_repo = repository_rule(
     }
 
     /// A name built by string arithmetic cannot be evaluated, so the enclosing
-    /// scope keeps the whole-file answer rather than a guess.
+    /// scope keeps the whole-file answer rather than a guess. The def is
+    /// called from `WORKSPACE`, so it is live; see
+    /// [`a_def_nothing_calls_reads_nothing_and_a_called_one_keeps_the_fallback`].
     #[test]
     fn a_dynamic_name_falls_back_to_the_file_set() {
         let files = Files(vec![
@@ -2783,9 +2785,10 @@ _envoy_repo = repository_rule(
                 "MODULE.bazel",
                 "module(name = \"demo\", version = \"1\")\n\
                  e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
-                 use_repo(e, \"a\", \"b\")\n\
-                 load(\"//bazel:loose.bzl\", \"loose\")\n",
+                 use_repo(e, \"a\", \"b\")\n",
             ),
+            (".bazelrc", "common --enable_bzlmod\n"),
+            ("WORKSPACE", "load(\"//bazel:loose.bzl\", \"loose\")\nloose()\n"),
             ("bazel/ext.bzl", "E = 1\n"),
             (
                 "bazel/loose.bzl",
@@ -3129,25 +3132,90 @@ _envoy_repo = repository_rule(
 
     /// A helper nothing in the closure calls says nothing about itself, and
     /// keeps the fallback rather than being attributed to no repository.
+    /// A def nothing in the workspace runs reads nothing: `loose` is imported
+    /// into `MODULE.bazel` and never called, so its label is a rule attribute
+    /// at most, not a repository input. The same def called from `WORKSPACE`
+    /// at module level is live, instantiates nothing itself, and keeps the
+    /// fallback — the conservative answer for a helper whose caller this
+    /// analysis cannot place.
     #[test]
-    fn a_helper_with_no_call_site_keeps_the_fallback() {
-        let files = Files(vec![
-            (
-                "MODULE.bazel",
-                "module(name = \"demo\", version = \"1\")\n\
-                 e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
-                 use_repo(e, \"a\", \"b\")\n\
-                 load(\"//bazel:loose.bzl\", \"loose\")\n",
-            ),
-            ("bazel/ext.bzl", "E = 1\n"),
-            (
-                "bazel/loose.bzl",
-                "def loose(ctx):\n\
-                 \x20   return ctx.read(Label(\"//conf:settings.yml\"))\n",
-            ),
-        ]);
+    fn a_def_nothing_calls_reads_nothing_and_a_called_one_keeps_the_fallback() {
+        let module = "module(name = \"demo\", version = \"1\")\n\
+                      e = use_extension(\"//bazel:ext.bzl\", \"e\")\n\
+                      use_repo(e, \"a\", \"b\")\n\
+                      load(\"//bazel:loose.bzl\", \"loose\")\n";
+        let loose = "def loose(ctx):\n\
+                     \x20   return ctx.read(Label(\"//conf:settings.yml\"))\n";
         let m = RepoMapping::from_dump("{\"\":\"\",\"demo\":\"\"}");
+        let files = Files(vec![
+            ("MODULE.bazel", module),
+            ("bazel/ext.bzl", "E = 1\n"),
+            ("bazel/loose.bzl", loose),
+        ]);
+        let ri = inputs(&files, &m);
+        assert!(ri.repos_for("conf/settings.yml").is_empty(), "{:?}", ri.patterns);
+
+        // Both worlds live, as Bazel 7 reads them: the bazelrc says so, or the
+        // WORKSPACE alone would make the module file inert.
+        let files = Files(vec![
+            ("MODULE.bazel", module),
+            (".bazelrc", "common --enable_bzlmod\n"),
+            ("WORKSPACE", "load(\"//bazel:loose.bzl\", \"loose\")\nloose(None)\n"),
+            ("bazel/ext.bzl", "E = 1\n"),
+            ("bazel/loose.bzl", loose),
+        ]);
         let ri = inputs(&files, &m);
         assert_eq!(ri.repos_for("conf/settings.yml"), set(&["a", "b"]));
+    }
+
+    /// A BUILD-file macro that a load chain dragged into the workspace
+    /// closure: `tools/rules/go.bzl` is loaded from a workspace `.bzl` and
+    /// itself loads `sqlgen.bzl`, whose `go_sql_gen` macro names
+    /// `//cloud/common/dbfx:go_default_library` in a `deps` list. Nothing in
+    /// the workspace calls the macro, so the label is not a repository input
+    /// and its `name =` literals are not repositories. Read with the file's
+    /// fallback, that one label fed every repository in a 3,831-repository
+    /// universe, and the walk-time closure over it took a 900k-target graph.
+    #[test]
+    fn a_macro_only_build_files_call_feeds_no_repository() {
+        let files = Files(vec![
+            (
+                "WORKSPACE",
+                "workspace(name = \"av\")\n\
+                 load(\"//tools:tools_workspace.bzl\", \"tools_workspace\")\n\
+                 tools_workspace()\n",
+            ),
+            (
+                "tools/tools_workspace.bzl",
+                "load(\"//tools/rules:go.bzl\", \"go_versions\")\n\
+                 def tools_workspace():\n\
+                 \x20   http_archive(name = \"io_bazel_rules_go\", urls = go_versions())\n\
+                 \x20   http_archive(name = \"boost\")\n",
+            ),
+            (
+                "tools/rules/go.bzl",
+                "load(\"//tools/rules:sqlgen.bzl\", \"go_sql_gen\")\n\
+                 def go_versions():\n\
+                 \x20   return [\"https://example/go.zip\"]\n",
+            ),
+            (
+                "tools/rules/sqlgen.bzl",
+                "def go_sql_gen(name, srcs):\n\
+                 \x20   go_library(\n\
+                 \x20       name = name + \"_lib\",\n\
+                 \x20       srcs = srcs,\n\
+                 \x20       deps = [\"//cloud/common/dbfx:go_default_library\"],\n\
+                 \x20   )\n\
+                 \x20   native.filegroup(name = \"sqlgen_files\")\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity().with_main_alias("av"));
+        assert!(
+            ri.repos_for("cloud/common/dbfx/go_default_library").is_empty(),
+            "{:?}",
+            ri.patterns
+        );
+        assert!(!ri.repos.contains("sqlgen_files"), "{:?}", ri.repos);
+        assert_eq!(ri.repos, set(&["io_bazel_rules_go", "boost"]));
     }
 }
