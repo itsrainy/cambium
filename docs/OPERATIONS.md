@@ -63,6 +63,13 @@ size, which do not fit on a laptop.
 
 ## Gotchas
 
+- The externals tables live *in the index*. Measuring an attribution change
+  against a store that already holds an index at the same config hash reads
+  the old tables back and looks like a post-fix measurement — issue #9's
+  first run did exactly that. `[baseline]` is outside `Config::hash()`, so
+  redirect `store.path` and `--cache-dir` to force a cold build without
+  changing the hash, or check `cambi index externals` against the change you
+  expect before trusting the number.
 - `changes-<pin>.json` keeps per-class counts and at most 20 example labels
   per tool, which is not enough to explain a change set where a tool named 990
   targets cambium lacked. The sets themselves are written whole beside it, one

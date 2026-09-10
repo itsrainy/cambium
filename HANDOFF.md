@@ -35,7 +35,20 @@ moves history commits only by pin-versus-base drift. If a clean single-binary
 run is ever wanted, `tools/bench/run-published.sh` on a wiped store does all
 five in about eight hours.
 
-## Workflow work, in flight
+## Workflow work, landed 2026-09-10 (evening)
+
+All five proposals are in: `SMOKE=1`, `cambi index externals`,
+`CAMBIUM_REDERIVE_DUMP`, base-index archive (`bases/`) and label sets
+(`bench labels`), the head-index archive with `--head-check`, and the e2e
+tests for the permanently-unloadable package, the inert `MODULE.bazel` in
+WORKSPACE mode (both `.bazelrc` forms) and the repository rule declared in
+WORKSPACE itself. Two pre-existing `e2e_bazel` failures on this laptop
+(`a_bzl_edit_reaches_every_package_that_loads_it`,
+`an_external_repository_edit_reaches_only_its_consumers`) predate all of it
+and reproduce on unmodified HEAD; unverified whether it is the local bazelisk
+or a regression — CI's `e2e` job is the arbiter.
+
+## Workflow work, as proposed
 
 The feedback loop was the lesson of the day: unit tests and the pin replay
 run in minutes, but three of the five regressions were only visible on the
@@ -81,11 +94,19 @@ inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
 1. Next engine change: `tools/bench/precheck.sh` with `REDERIVE=1`, then
    `SMOKE=1` on the box, then the full driver. Compare each subject's summary
    line against `docs/RESULTS.md` before letting the run continue.
-2. The 814k-target answer on the 900k-target repository is fixed by
-   `0e92cc8` (a BUILD-file macro dragged into the workspace closure fed a
-   label to every repository). Ask that agent to re-measure the pair: the
-   expected answer is 288k affected and 148 direct, and the new `info` line
-   about one target seeding many repositories should be silent.
+2. The 814k-target answer on the 900k-target repository: `0e92cc8` did not
+   move it (issue #9, measured cold: bit-identical, plus three new
+   universe-wide `Prefix` rows). `a723a4c` is the second attempt — a file the
+   fixpoint learns nothing about no longer takes the universe as its fallback
+   unless something in it is unreadable, dead scopes contribute nothing, and
+   a format-string label on the fallback makes no prefix. The issue comment
+   lists the four re-measurements asked for; if the tools-directory
+   workspace `.bzl` is still at universe, the new `debug` line names the
+   def and the callee that made it so.
+3. The offline rebuild oracle (`bench replay --head-check`, `dd7dc28`) has
+   no archive to check yet: `heads/<pin>.bin` appears on the next history
+   run. The three box-only shapes now have real-Bazel e2e tests
+   (`77fbb32`), run by CI's `e2e` and `bazel-version-matrix` jobs.
 
 ## Open issues
 
