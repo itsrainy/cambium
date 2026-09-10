@@ -135,10 +135,21 @@ impl RepoMapping {
     /// (`RepoInputs::canonical`), so work that has to re-derive the externals
     /// tables away from the machine — the offline replay's `--rederive` — can
     /// rebuild the mapping without `bazel mod dump_repo_mapping`.
+    ///
+    /// An empty canonical name is "not recorded": the index of a WORKSPACE-mode
+    /// run, where no `bazel mod dump_repo_mapping` ever ran, stores `""` for
+    /// every repository. Those are left out, so they resolve to themselves
+    /// like any unmapped name. Read in as entries they would each become a
+    /// main-repository alias — the empty canonical name is how the dump
+    /// spells the root module — and `load("@bazel_gazelle//:deps.bzl")` would
+    /// resolve to the loading file itself, which is how a replay's
+    /// `--rederive` once attributed sourcegraph's `deps.bzl` to every
+    /// repository in the universe.
     pub fn from_canonical<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         Self {
             map: pairs
                 .into_iter()
+                .filter(|(a, c)| !c.is_empty() || a.is_empty())
                 .map(|(a, c)| (a.to_string(), c.to_string()))
                 .collect(),
         }
@@ -174,9 +185,11 @@ impl RepoMapping {
     /// Whether every apparent name is its own canonical name: the mapping
     /// [`identity`](Self::identity) gives, or one read back from an index a
     /// WORKSPACE-mode run wrote. A bzlmod mapping renames at least its
-    /// `bazel_dep`s (`rules_cc` -> `rules_cc+`).
+    /// `bazel_dep`s (`rules_cc` -> `rules_cc+`). Main-repository aliases —
+    /// entries with the empty canonical name — say nothing about where the
+    /// mapping came from and are not counted.
     pub fn is_identity(&self) -> bool {
-        self.map.iter().all(|(k, v)| k == v)
+        self.map.iter().all(|(k, v)| k == v || v.is_empty())
     }
 
     /// Adds an apparent name that means the main repository.
@@ -837,6 +850,23 @@ fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WORKSPACE-mode index stores no canonical names; reading them back
+    /// must not turn every repository into the main one.
+    #[test]
+    fn an_unrecorded_canonical_name_is_not_a_main_alias() {
+        let m = RepoMapping::from_canonical([("bazel_gazelle", ""), ("rules_cc", "rules_cc+")]);
+        assert!(!m.is_main("bazel_gazelle"));
+        assert_eq!(m.canonical("bazel_gazelle"), "bazel_gazelle");
+        assert_eq!(m.canonical("rules_cc"), "rules_cc+");
+        assert!(RepoMapping::from_canonical([("a", ""), ("b", "")]).is_identity());
+        assert!(RepoMapping::identity().with_main_alias("envoy").is_identity());
+        assert!(!m.is_identity());
+        assert_eq!(
+            resolve_label("@bazel_gazelle//:deps.bzl", "", &RepoMapping::from_canonical([("bazel_gazelle", "")])),
+            Some(Load::External("@@bazel_gazelle//:deps.bzl".into()))
+        );
+    }
 
     fn labels(text: &str) -> Vec<String> {
         scan_loads(text)
