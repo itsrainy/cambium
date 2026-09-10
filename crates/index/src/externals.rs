@@ -1778,7 +1778,7 @@ mod tests {
         let facts = read_live_module_facts(&files, &bzlmod);
         assert!(facts.local_paths.is_empty() && facts.deps.is_empty());
         let ri = inputs(&files, &bzlmod);
-        assert!(ri.path_maps.get("envoy_build_config").is_none(), "{:?}", ri.path_maps);
+        assert!(!ri.path_maps.contains_key("envoy_build_config"), "{:?}", ri.path_maps);
     }
 
     #[test]
