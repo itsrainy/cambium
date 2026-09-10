@@ -194,7 +194,18 @@ fn compare_one(
         .map(|e| (e.target.clone(), e.path.clone()))
         .collect();
     let deleted_dep = reasoned(|r| matches!(r, DirectReason::DeletedDep { .. }));
-    let external_repo = reasoned(|r| matches!(r, DirectReason::ExternalRepo { .. }));
+    // Both ways a repository moves: because a main-repo file it is built from
+    // (or `MODULE.bazel`) changed, and because a main-repo rule target its
+    // generated targets depend on was reached by the walk. The second was
+    // left out when the walk-time closure landed, and every target it added
+    // came out `unclassified` — 165 on an envoy change set that only added a
+    // changelog entry.
+    let external_repo = reasoned(|r| {
+        matches!(
+            r,
+            DirectReason::ExternalRepo { .. } | DirectReason::ExternalRepoTarget { .. }
+        )
+    });
     let from_build_file = reasoned(|r| match r {
         DirectReason::File { path } => cambium_classify::is_build_file(path),
         _ => false,
