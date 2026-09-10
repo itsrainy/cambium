@@ -471,6 +471,14 @@ impl RederiveCache {
         }
         let t = std::time::Instant::now();
         let data = rederive_externals(base, rev, texts)?;
+        // `CAMBIUM_REDERIVE_DUMP=<dir>` keeps each re-derived index on disk,
+        // for `cambi index externals` when a replay's tables need reading.
+        if let Ok(dir) = std::env::var("CAMBIUM_REDERIVE_DUMP") {
+            let path = std::path::Path::new(&dir).join(format!("rederived-{rev}.bin"));
+            if let Err(e) = cambium_index::format::write_index(&path, &data) {
+                tracing::warn!(error = %e, path = %path.display(), "could not dump the re-derived index");
+            }
+        }
         let ms = t.elapsed().as_millis() as u64;
         self.built.insert(rev.to_string(), data);
         self.order.push(rev.to_string());

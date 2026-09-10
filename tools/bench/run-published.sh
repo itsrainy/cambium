@@ -12,6 +12,14 @@
 #   SUBJECTS="envoy" tools/bench/run-published.sh
 #   SUBJECTS="apollo" STEPS="changes report" tools/bench/run-published.sh
 #   SUBJECTS="sourcegraph" STEPS=changes RESTART_CHANGES=1 tools/bench/run-published.sh
+#   SMOKE=1 tools/bench/run-published.sh
+#
+# SMOKE=1 is the fifteen-minute pass to run before the eight-hour one: every
+# subject's fetch and build, a three-commit history walk with the rebuild
+# oracle, and one change set with every tool and both oracles, into
+# bench-results-smoke/ so the real run neither resumes nor overwrites it.
+# Two of the confirmation runs of 2026-09-10 lost hours to a refusal
+# (a partial pin index) that this would have shown in the first minutes.
 #
 # RESTART_CHANGES=1 passes `--restart` to `bench changes`, which compares every
 # change set again instead of resuming the ones state.json says are finished.
@@ -50,6 +58,12 @@ SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
 STEPS=${STEPS:-"fetch build history changes report"}
 RESTART_CHANGES=${RESTART_CHANGES:-0}
 RESTART_HISTORY=${RESTART_HISTORY:-0}
+SMOKE=${SMOKE:-0}
+results=()
+if [ "$SMOKE" = 1 ]; then
+  results=(--results-dir "$PWD/bench-results-smoke")
+  echo "=== SMOKE: results in bench-results-smoke/, 3 history commits, 1 change set per subject ==="
+fi
 
 step() { echo "=== $(date -u +%H:%M:%S) $* ==="; }
 wants() { case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
@@ -57,30 +71,32 @@ wants() { case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
 for S in $SUBJECTS; do
   if wants fetch; then
     step "$S fetch"
-    $CAMBI --log info bench subjects fetch "$S"   || { echo "FAILED $S fetch"; continue; }
+    $CAMBI --log info bench subjects fetch "$S" "${results[@]}"   || { echo "FAILED $S fetch"; continue; }
   fi
   if wants build; then
     step "$S build"
-    $CAMBI --log info bench subjects build "$S"   || { echo "FAILED $S build"; continue; }
+    $CAMBI --log info bench subjects build "$S" "${results[@]}"   || { echo "FAILED $S build"; continue; }
   fi
   if wants history; then
     step "$S history"
-    history_args=(--oracle rebuild)
+    history_args=(--oracle rebuild "${results[@]}")
     [ "$RESTART_HISTORY" = 1 ] && history_args+=(--restart)
+    [ "$SMOKE" = 1 ] && history_args+=(--commits 3 --restart)
     $CAMBI --log info bench history "$S" "${history_args[@]}" || echo "FAILED $S history"
   fi
   if wants changes; then
     step "$S changes"
-    changes_args=(--tools cambium,bazel-diff,tango --oracle rdeps,load)
+    changes_args=(--tools cambium,bazel-diff,tango --oracle rdeps,load "${results[@]}")
     [ "$RESTART_CHANGES" = 1 ] && changes_args+=(--restart)
+    [ "$SMOKE" = 1 ] && changes_args+=(--change-sets 1 --restart)
     $CAMBI --log info bench changes "$S" "${changes_args[@]}" || echo "FAILED $S changes"
   fi
   if wants report; then
     step "$S report"
-    $CAMBI bench report "$S" || echo "FAILED $S report"
+    $CAMBI bench report "$S" "${results[@]}" || echo "FAILED $S report"
   fi
 done
 
 step "final report"
-$CAMBI bench report
-echo "PUBLISHED RUN DONE"
+$CAMBI bench report "${results[@]}"
+if [ "$SMOKE" = 1 ]; then echo "SMOKE RUN DONE"; else echo "PUBLISHED RUN DONE"; fi

@@ -2722,7 +2722,30 @@ _envoy_repo = repository_rule(
                  \x20   )\n",
             ),
         ]);
-        let m = RepoMapping::identity().with_main_alias("envoy");
+        let alias = std::env::var("CAMBIUM_CORPUS_ALIAS").unwrap_or_else(|_| "envoy".into());
+        // `CAMBIUM_CORPUS_INDEX=<file>`: the mapping a replay's `--rederive`
+        // builds, from the stored index's canonical column, instead of the
+        // bare identity.
+        let m = match std::env::var("CAMBIUM_CORPUS_INDEX") {
+            Ok(f) => {
+                let file = crate::IndexFile::open(std::path::Path::new(&f)).expect("index file");
+                let v = file.view();
+                let limit: usize = std::env::var("CAMBIUM_CORPUS_MAP_LIMIT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(usize::MAX);
+                let pick = std::env::var("CAMBIUM_CORPUS_MAP_PICK").unwrap_or_default();
+                RepoMapping::from_canonical(
+                    (0..v.num_repos())
+                        .filter(|&r| pick.is_empty() || v.repo_name(r).contains(pick.as_str()))
+                        .take(limit)
+                        .map(|r| (v.repo_name(r), v.repo_canonical.get(r))),
+                )
+            }
+            Err(_) => RepoMapping::identity(),
+        }
+        .with_main_alias(&alias);
+        println!("mapping: empty {}, identity {}", m.is_empty(), m.is_identity());
         let ri = inputs(&files, &m);
 
         assert_eq!(
@@ -2866,7 +2889,30 @@ _envoy_repo = repository_rule(
     fn corpus_attribution() {
         let dir = std::env::var("CAMBIUM_CORPUS_DIR").expect("set CAMBIUM_CORPUS_DIR");
         let files = Dir(dir.into());
-        let m = RepoMapping::identity().with_main_alias("envoy");
+        let alias = std::env::var("CAMBIUM_CORPUS_ALIAS").unwrap_or_else(|_| "envoy".into());
+        // `CAMBIUM_CORPUS_INDEX=<file>`: the mapping a replay's `--rederive`
+        // builds, from the stored index's canonical column, instead of the
+        // bare identity.
+        let m = match std::env::var("CAMBIUM_CORPUS_INDEX") {
+            Ok(f) => {
+                let file = crate::IndexFile::open(std::path::Path::new(&f)).expect("index file");
+                let v = file.view();
+                let limit: usize = std::env::var("CAMBIUM_CORPUS_MAP_LIMIT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(usize::MAX);
+                let pick = std::env::var("CAMBIUM_CORPUS_MAP_PICK").unwrap_or_default();
+                RepoMapping::from_canonical(
+                    (0..v.num_repos())
+                        .filter(|&r| pick.is_empty() || v.repo_name(r).contains(pick.as_str()))
+                        .take(limit)
+                        .map(|r| (v.repo_name(r), v.repo_canonical.get(r))),
+                )
+            }
+            Err(_) => RepoMapping::identity(),
+        }
+        .with_main_alias(&alias);
+        println!("mapping: empty {}, identity {}", m.is_empty(), m.is_identity());
         let ri = inputs(&files, &m);
         println!("repos in the universe: {}", ri.repos.len());
         let facts = read_live_module_facts(&files, &m);

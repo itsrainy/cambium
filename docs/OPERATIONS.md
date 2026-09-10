@@ -32,6 +32,12 @@ size, which do not fit on a laptop.
   moving the tree costs a full re-fetch and re-analysis. Set
   `CAMBIUM_SUBJECTS_DIR=$HOME/.cache/cambium/corpus` instead — the driver
   does.
+- **Smoke first.** `SMOKE=1 tools/bench/run-published.sh` does every
+  subject's fetch and build, a three-commit history walk and one change set
+  with every tool and both oracles, into `bench-results-smoke/`, in about
+  fifteen minutes. Run it after every sync, before the real driver: two of
+  the 2026-09-10 confirmation runs lost hours to a refusal it would have
+  shown in the first minutes.
 - The driver from the last run is at `~/run-published.sh` on the box: one
   subject at a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla),
   `fetch` / `build` / `history --oracle rebuild` / `changes --tools
