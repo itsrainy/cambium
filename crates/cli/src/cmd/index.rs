@@ -552,7 +552,7 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
         }
     }
     let repos = (0..v.num_repos())
-        .filter(|&r| only.is_none_or(|o| o == v.repo_name(r)))
+        .filter(|&r| only.map_or(true, |o| o == v.repo_name(r)))
         .map(|r| ExternalsRepo {
             name: v.repo_name(r).to_string(),
             canonical: v.repo_canonical_name(r).to_string(),
@@ -570,11 +570,11 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
             path: v.bzl_path(id).to_string(),
             repos: v.bzl_repos_of(id).iter().map(|&r| v.repo_name(r).to_string()).collect(),
         })
-        .filter(|b| only.is_none_or(|o| b.repos.iter().any(|r| r == o)))
+        .filter(|b| only.map_or(true, |o| b.repos.iter().any(|r| r == o)))
         .collect();
     let ext_labels = (0..v.bzl_ext_labels.len() as u32)
         .map(|e| v.bzl_ext_labels.get(e).to_string())
-        .filter(|l| only.is_none_or(|o| l.contains(o)))
+        .filter(|l| only.map_or(true, |o| l.contains(o)))
         .collect();
     ExternalsDump { bzl_closure: v.bzl_closure, repos, workspace_bzl, ext_labels }
 }
