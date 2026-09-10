@@ -1627,8 +1627,73 @@ fn labels_in(s: &str) -> Vec<String> {
     out
 }
 
+/// Whether Bazel reads `MODULE.bazel` in this tree.
+///
+/// A repository mid-migration carries both worlds, and only the startup
+/// flags say which one is live. envoy at `8424aa0d` had `common
+/// --noenable_bzlmod` and `--enable_workspace` in `.bazelrc`, a
+/// `MODULE.bazel` whose `local_path_override` put `envoy_build_config` at
+/// `mobile/envoy_build_config`, and a WORKSPACE that built the repository of
+/// the same name from a repository rule reading
+/// `source/extensions/extensions_build_config.bzl`. Reading the module file
+/// there minted an exhaustive path map for a repository Bazel never built
+/// that way, and the map then said the real input could not be a `.bzl` the
+/// repository exports: 1097 packages missed, 8 dirtied.
+///
+/// The bazelrc's own word wins. Without one, a tree with no WORKSPACE is
+/// bzlmod, and a tree with one is bzlmod only when the repository mapping
+/// was produced by `bazel mod dump_repo_mapping`, a command WORKSPACE mode
+/// cannot run. Only the workspace `.bazelrc` is read: a `try-import` or a
+/// `--bazelrc` startup flag can set the same flag, and a run under
+/// `--noworkspace_rc` ignores the file altogether; those fall back to the
+/// mapping.
+pub fn bzlmod_live(src: &dyn FileText, m: &RepoMapping) -> bool {
+    if let Some(explicit) = src.text(".bazelrc").as_deref().and_then(bazelrc_bzlmod) {
+        return explicit;
+    }
+    let has_workspace = ["WORKSPACE", "WORKSPACE.bazel"]
+        .iter()
+        .any(|f| src.text(f).is_some());
+    !has_workspace || !m.is_identity()
+}
+
+/// The last `--enable_bzlmod` / `--noenable_bzlmod` a bazelrc states, on
+/// any command line of it; `None` when it says nothing.
+pub fn bazelrc_bzlmod(text: &str) -> Option<bool> {
+    let mut out = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        for tok in line.split_whitespace() {
+            match tok {
+                "--enable_bzlmod" | "--enable_bzlmod=true" | "--enable_bzlmod=yes" => {
+                    out = Some(true)
+                }
+                "--noenable_bzlmod" | "--enable_bzlmod=false" | "--enable_bzlmod=no" => {
+                    out = Some(false)
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// [`read_module_facts`], or empty facts when [`bzlmod_live`] says Bazel does
+/// not read the file: what the externals tables must be derived from.
+pub fn read_live_module_facts(src: &dyn FileText, m: &RepoMapping) -> ModuleFacts {
+    if bzlmod_live(src, m) {
+        read_module_facts(src)
+    } else {
+        ModuleFacts::default()
+    }
+}
+
 /// Reads `MODULE.bazel` out of a checkout. Absent (a WORKSPACE-only
-/// repository) yields empty facts, which diff to no change.
+/// repository) yields empty facts, which diff to no change. Reads the file
+/// whether or not Bazel does; the tables want [`read_live_module_facts`].
 pub fn read_module_facts(src: &dyn FileText) -> ModuleFacts {
     match src.text("MODULE.bazel") {
         Some(t) => scan_module(&t),
@@ -1642,6 +1707,41 @@ mod tests {
 
     fn m() -> RepoMapping {
         RepoMapping::from_dump("{\"\":\"\",\"envoy\":\"\",\"envoy_api\":\"envoy_api+\"}")
+    }
+
+    /// Both files present, and the bazelrc says WORKSPACE: the module file's
+    /// override is inert, and the repository is whatever the WORKSPACE
+    /// closure builds.
+    #[test]
+    fn a_module_file_bazel_does_not_read_derives_nothing() {
+        fn with_rc(rc: Option<&'static str>) -> Files {
+            let mut v = vec![
+                (
+                    "MODULE.bazel",
+                    "bazel_dep(name = \"envoy_build_config\", version = \"1.0\")\n\
+                     local_path_override(module_name = \"envoy_build_config\", path = \"mobile/envoy_build_config\")\n",
+                ),
+                ("WORKSPACE", "workspace(name = \"envoy\")\n"),
+            ];
+            if let Some(rc) = rc {
+                v.push((".bazelrc", rc));
+            }
+            Files(v)
+        }
+        let identity = RepoMapping::identity();
+        let bzlmod = RepoMapping::from_dump("{\"\":\"\",\"envoy_build_config\":\"envoy_build_config+\"}");
+        assert!(!bzlmod_live(&with_rc(Some("common --noenable_bzlmod\ncommon --enable_workspace\n")), &bzlmod));
+        assert!(bzlmod_live(&with_rc(Some("build --enable_bzlmod\n")), &identity));
+        assert!(!bzlmod_live(&with_rc(None), &identity));
+        assert!(bzlmod_live(&with_rc(None), &bzlmod));
+        assert!(bzlmod_live(&Files(vec![("MODULE.bazel", "")]), &identity));
+        assert_eq!(bazelrc_bzlmod("# --enable_bzlmod\ncommon --noenable_bzlmod\nbuild --enable_bzlmod\n"), Some(true));
+
+        let files = with_rc(Some("common --noenable_bzlmod\n"));
+        let facts = read_live_module_facts(&files, &bzlmod);
+        assert!(facts.local_paths.is_empty() && facts.deps.is_empty());
+        let ri = inputs(&files, &bzlmod);
+        assert!(ri.path_maps.get("envoy_build_config").is_none(), "{:?}", ri.path_maps);
     }
 
     #[test]
@@ -2341,7 +2441,7 @@ _envoy_repo = repository_rule(
     fn inputs(files: &dyn FileText, m: &RepoMapping) -> RepoInputs {
         let mut g = LoadGraph::new();
         let ws = g.workspace_closure(files, m);
-        let facts = read_module_facts(files);
+        let facts = read_live_module_facts(files, m);
         build_repo_inputs(files, m, &g, &ws, &facts)
     }
 

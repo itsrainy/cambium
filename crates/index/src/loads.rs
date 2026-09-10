@@ -171,6 +171,14 @@ impl RepoMapping {
         self.map.is_empty()
     }
 
+    /// Whether every apparent name is its own canonical name: the mapping
+    /// [`identity`](Self::identity) gives, or one read back from an index a
+    /// WORKSPACE-mode run wrote. A bzlmod mapping renames at least its
+    /// `bazel_dep`s (`rules_cc` -> `rules_cc+`).
+    pub fn is_identity(&self) -> bool {
+        self.map.iter().all(|(k, v)| k == v)
+    }
+
     /// Adds an apparent name that means the main repository.
     ///
     /// The root module's own name always does — `@envoy//:VERSION.txt` inside

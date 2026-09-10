@@ -1579,7 +1579,9 @@ fn rescan_closure(
         return prior;
     }
     let src = querier.load_source()?;
-    let mapping = querier.repo_mapping();
+    // With the main repository's own apparent names: `@envoy//...` in a
+    // repository rule's `.bzl` is a main-repo input under either name source.
+    let mapping = main_alias_mapping(querier.repo_mapping(), src);
     let mut c = prior.unwrap_or_default();
     for p in changed_bzl {
         c.graph.invalidate(p);
@@ -1600,7 +1602,7 @@ fn rescan_closure(
     c.workspace = c.graph.workspace_closure(src, &mapping);
     // The workspace closure just moved, so what the main repository feeds its
     // external repositories may have moved with it.
-    let facts = cambium_index::read_module_facts(src);
+    let facts = cambium_index::read_live_module_facts(src, &mapping);
     c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
     Some(c)
 }
@@ -1816,7 +1818,7 @@ fn dirty_known_bzl(id: u32, path: &str, w: &mut Witness<'_>, externals_enabled: 
 
 /// The querier's mapping plus the main repository's own apparent name, taken
 /// from `module(name = ...)` and, in WORKSPACE mode, `workspace(name = ...)`.
-fn main_alias_mapping(
+pub fn main_alias_mapping(
     m: cambium_index::RepoMapping,
     src: &dyn cambium_index::FileText,
 ) -> cambium_index::RepoMapping {

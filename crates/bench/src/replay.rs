@@ -385,11 +385,16 @@ pub fn rederive_externals(
         "no MODULE.bazel and no WORKSPACE at {rev}: nothing to re-derive the externals tables from"
     );
 
-    let facts = cambium_index::read_module_facts(&src);
-    let mapping = cambium_index::RepoMapping::from_canonical(
-        (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
-    )
-    .with_main_alias(&facts.module_name);
+    // The same alias rule the engine's rescan applies: `module(name = ...)`
+    // and, in WORKSPACE mode, `workspace(name = ...)` both name the main
+    // repository, whichever of the two files Bazel is reading.
+    let mapping = cambium_engine::engine::main_alias_mapping(
+        cambium_index::RepoMapping::from_canonical(
+            (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
+        ),
+        &src,
+    );
+    let facts = cambium_index::read_live_module_facts(&src, &mapping);
 
     let mut graph = cambium_index::LoadGraph::new();
     let workspace = graph.workspace_closure(&src, &mapping);
