@@ -587,6 +587,11 @@ impl<'a> Attribution<'a> {
                     && !spans.is_empty();
                 if opaque && scope.is_none() {
                     module_dynamic = true;
+                    tracing::debug!(
+                        file = %file.path,
+                        call = head,
+                        "a module-level call this analysis cannot read; the file keeps the wide answer"
+                    );
                 }
                 found.push(CallSite {
                     file: f,
@@ -1093,7 +1098,17 @@ impl<'a> Attribution<'a> {
     /// The repositories a def can instantiate or define, with no fallback.
     fn raw_def_repos(&self, d: usize) -> BTreeSet<String> {
         if let Some(role) = self.defs[d].role {
-            return self.rule_repos(role);
+            let repos = self.rule_repos(role);
+            // The implementation of a rule nothing instantiates is still a
+            // def, and may be called as a helper by one that is: xla's
+            // `_create_local_rocm_repository` implements `remote_rocm_configure`,
+            // never declared, and is what `rocm_configure`'s implementation
+            // calls to write the repository. An empty role answer must not
+            // hide the call sites, or every template that helper reads falls
+            // to the universe.
+            if !repos.is_empty() {
+                return repos;
+            }
         }
         if self.dynamic[d] {
             return self.files[self.defs[d].file].fallback.clone();

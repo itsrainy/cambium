@@ -107,7 +107,7 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
         s.min_recall = s.min_recall.min(p.recall);
         if let Some(o) = &p.load_oracle {
             s.load_oracle.add(o);
-            if !o.missing_packages.is_empty() && o.repository_evaluation.is_empty() {
+            if !o.ok() {
                 *s.by_class
                     .entry(Class::CambiumMissingBzlClosure)
                     .or_default() += o.missing_packages.len();

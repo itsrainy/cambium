@@ -44,6 +44,19 @@
 //! failed. Without a witness — every named package does load something — the
 //! containment check stands exactly as before.
 //!
+//! A second witness reads the head tree rather than the named packages: if no
+//! `BUILD` file reaches the changed `.bzl` through main-repository `load()`
+//! edges at all — the file is loaded only from `MODULE.bazel`, `WORKSPACE`,
+//! or the `.bzl` files those load — then no load closure could contain it, and
+//! every package Bazel named came through repository evaluation by
+//! construction. xla's `third_party/stablehlo/workspace.bzl` is the case: a
+//! module extension's input, loaded by nothing a package loads, and yet
+//! `rbuildfiles` names the seventeen MLIR packages whose `load()` of
+//! `@llvm-project//mlir:tblgen.bzl` depends on the repository that extension
+//! chain generates. Their `BUILD` files load plenty, so the first witness is
+//! silent; the second is the one that applies
+//! ([`LoadOracleResult::workspace_only`]).
+//!
 //! Exit 3 (Sky Query finished with errors under `--keep_going`) is accepted as
 //! a partial answer and recorded, exactly as the `rdeps` oracle accepts a
 //! partial batch: a shorter Bazel answer can only weaken the containment
@@ -84,11 +97,26 @@ pub struct LoadOracleResult {
     /// containment check does not apply; see the module docs.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub repository_evaluation: BTreeSet<String>,
+    /// The checked `.bzl` files no `BUILD` file in the head tree reaches
+    /// through main-repository `load()` edges. A package cannot have such a
+    /// file in its load closure, so an answer naming packages for it came
+    /// through repository evaluation; see the module docs. Recorded, not
+    /// compared, when it covers every checked file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_only: Vec<String>,
 }
 
 impl LoadOracleResult {
     pub fn ok(&self) -> bool {
-        self.missing_packages.is_empty() || !self.repository_evaluation.is_empty()
+        self.missing_packages.is_empty()
+            || !self.repository_evaluation.is_empty()
+            || self.answered_by_repository_evaluation()
+    }
+
+    /// Whether the answer as a whole is a repository-evaluation answer rather
+    /// than a load closure: every checked file is loaded by no `BUILD` file.
+    pub fn answered_by_repository_evaluation(&self) -> bool {
+        !self.checked.is_empty() && self.workspace_only.len() == self.checked.len()
     }
 }
 
@@ -109,6 +137,76 @@ pub fn build_file_loads_nothing(workspace: &Path, package: &str) -> bool {
         return false;
     };
     !text.lines().any(|l| l.trim_start().starts_with("load("))
+}
+
+/// The checked `.bzl` paths no `BUILD` file in `workspace` reaches through
+/// main-repository `load()` edges.
+///
+/// One scan of the tree's Starlark files, inverted; then a walk up the
+/// loaders of each checked file. A loader that is a workspace file is not
+/// followed — that is the repository-evaluation route, the one this witness
+/// exists to name — and a `BUILD` file anywhere on the way disqualifies the
+/// file. Read from the tree and not from the index, like
+/// [`build_file_loads_nothing`], because the index's load data is what is
+/// under test. A file no `load()` names at all is vacuously in the answer: no
+/// closure contains it either.
+pub fn loaded_by_no_build_file(workspace: &Path, checked: &[String]) -> Vec<String> {
+    use cambium_index::loads::{
+        owning_dir, resolve_label, scan_loads, starlark_files, workspace_name, Load,
+        WORKSPACE_FILES,
+    };
+    let read = |p: &str| std::fs::read_to_string(workspace.join(p)).ok();
+    let mut m = cambium_index::RepoMapping::identity()
+        .with_main_alias(&cambium_index::read_module_facts(&read).module_name);
+    for name in ["WORKSPACE", "WORKSPACE.bazel"] {
+        if let Some(n) = read(name).as_deref().and_then(workspace_name) {
+            m = m.with_main_alias(&n);
+        }
+    }
+    // loaded path -> the files that load it
+    let mut loaders: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for file in starlark_files(workspace) {
+        let base = file.rsplit('/').next().unwrap_or(&file);
+        if WORKSPACE_FILES.contains(&base) {
+            continue;
+        }
+        let Some(text) = read(&file) else { continue };
+        let from_pkg = owning_dir(&file);
+        for label in scan_loads(&text) {
+            if let Some(Load::Main(p)) = resolve_label(&label, &from_pkg, &m) {
+                loaders.entry(p).or_default().push(file.clone());
+            }
+        }
+    }
+    let is_build = |f: &str| {
+        let b = f.rsplit('/').next().unwrap_or(f);
+        b == "BUILD" || b == "BUILD.bazel"
+    };
+    let mut out = Vec::new();
+    for root in checked {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack: Vec<&str> = vec![root.as_str()];
+        let mut reached_build = false;
+        while let Some(p) = stack.pop() {
+            if !seen.insert(p) {
+                continue;
+            }
+            for l in loaders.get(p).map(Vec::as_slice).unwrap_or(&[]) {
+                if is_build(l) {
+                    reached_build = true;
+                    break;
+                }
+                stack.push(l.as_str());
+            }
+            if reached_build {
+                break;
+            }
+        }
+        if !reached_build {
+            out.push(root.clone());
+        }
+    }
+    out
 }
 
 /// The `.bzl` paths in a change set, in the form `rbuildfiles` wants
@@ -149,6 +247,12 @@ pub fn run<'a>(
         .filter(|p| build_file_loads_nothing(bazel.workspace(), p))
         .cloned()
         .collect();
+    // Only worth a tree scan when there is something to excuse.
+    let workspace_only = if missing_packages.is_empty() {
+        Vec::new()
+    } else {
+        loaded_by_no_build_file(bazel.workspace(), &paths)
+    };
     Ok(Some(LoadOracleResult {
         checked: paths,
         partial,
@@ -156,6 +260,7 @@ pub fn run<'a>(
         workspace_level: r.workspace_level,
         missing_packages,
         repository_evaluation,
+        workspace_only,
     }))
 }
 
@@ -183,7 +288,7 @@ impl LoadOracleSummary {
         self.change_sets += 1;
         self.checked += r.checked.len();
         self.partial += usize::from(r.partial);
-        if r.repository_evaluation.is_empty() {
+        if r.repository_evaluation.is_empty() && !r.answered_by_repository_evaluation() {
             self.missing_packages += r.missing_packages.len();
         } else {
             self.repository_evaluation += 1;
@@ -213,6 +318,45 @@ mod tests {
         ];
         assert_eq!(changed_bzl(&changed), vec!["bazel/defs.bzl"]);
         assert!(changed_bzl(&["a/BUILD".to_string()]).is_empty());
+    }
+
+    /// A `.bzl` loaded only from `MODULE.bazel` and the `.bzl` it loads is a
+    /// workspace-only file; one a `BUILD` file reaches, even through another
+    /// `.bzl`, is not.
+    #[test]
+    fn a_bzl_no_build_file_reaches_is_workspace_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = |p: &str, t: &str| {
+            let path = dir.path().join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, t).unwrap();
+        };
+        w("MODULE.bazel", "module(name = \"xla\")\nthird_party = use_extension(\"//third_party/extensions:third_party.bzl\", \"third_party_ext\")\n");
+        w("third_party/extensions/third_party.bzl", "load(\"//third_party/stablehlo:workspace.bzl\", stablehlo = \"repo\")\n");
+        w("third_party/stablehlo/workspace.bzl", "def repo():\n    pass\n");
+        w("xla/tsl/tsl.bzl", "load(\"@xla//xla/tsl:helpers.bzl\", \"h\")\n");
+        w("xla/tsl/helpers.bzl", "h = 1\n");
+        w("xla/mlir_hlo/BUILD", "load(\"//xla/tsl:tsl.bzl\", \"internal_visibility\")\n");
+        let checked = vec![
+            "third_party/stablehlo/workspace.bzl".to_string(),
+            "xla/tsl/helpers.bzl".to_string(),
+            "third_party/dead.bzl".to_string(),
+        ];
+        assert_eq!(
+            loaded_by_no_build_file(dir.path(), &checked),
+            vec!["third_party/stablehlo/workspace.bzl".to_string(), "third_party/dead.bzl".to_string()]
+        );
+        let r = LoadOracleResult {
+            checked: vec!["third_party/stablehlo/workspace.bzl".into()],
+            bazel_packages: set(&["xla/mlir_hlo"]),
+            missing_packages: set(&["xla/mlir_hlo"]),
+            workspace_only: vec!["third_party/stablehlo/workspace.bzl".into()],
+            ..Default::default()
+        };
+        assert!(r.ok(), "a repository-evaluation answer is recorded, not failed");
+        let mut s = LoadOracleSummary::default();
+        s.add(&r);
+        assert_eq!((s.missing_packages, s.repository_evaluation), (0, 1));
     }
 
     #[test]

@@ -1291,12 +1291,15 @@ fn render_compare(r: &SubjectResults) -> String {
              closure removes, since `rbuildfiles` loads every external \
              subject and the closure loads none. A *repository-evaluation* \
              answer is one where Bazel named a package whose `BUILD` file has \
-             no `load()` in it at all: `rbuildfiles` walks Skyframe's file \
-             nodes, so a change to a repository-declaring `.bzl` reaches every \
-             package through the repository mapping rather than through a load \
-             edge, and containment against a load closure is not a question \
-             that answer can settle. Those change sets are counted here and \
-             checked by the `rdeps` oracle instead.\n\n",
+             no `load()` in it at all, or where the changed `.bzl` is loaded \
+             by no `BUILD` file in the head tree, only from the workspace \
+             files and the `.bzl` files they load: `rbuildfiles` walks \
+             Skyframe's file nodes, so a change to a repository-declaring \
+             `.bzl` reaches every package through the repository mapping \
+             rather than through a load edge, and containment against a load \
+             closure is not a question that answer can settle. Those change \
+             sets are counted here and checked by the `rdeps` oracle \
+             instead.\n\n",
         );
     }
 
