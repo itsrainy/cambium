@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod cmd;
+mod diag;
 
 /// Exit codes (spec 10).
 ///
@@ -17,6 +18,9 @@ pub const EXIT_ERROR: u8 = 1;
 pub const EXIT_GLOBAL: u8 = 2;
 pub const EXIT_BAZEL: u8 = 3;
 pub const EXIT_NO_BASELINE: u8 = 4;
+/// The store could not be reached — as against holding no index for this
+/// commit, which is [`EXIT_NO_BASELINE`]. A CI job can retry this one.
+pub const EXIT_STORE: u8 = 5;
 
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -59,6 +63,26 @@ struct Cli {
     #[arg(long, global = true, default_value = "warn", env = "CAMBIUM_LOG")]
     log: String,
 
+    /// How to print the answer. `--output` is the old spelling and still
+    /// works; so does `text` for `human`.
+    #[arg(
+        long,
+        value_enum,
+        global = true,
+        default_value_t = Format::Human,
+        alias = "output",
+        value_name = "FORMAT"
+    )]
+    format: Format,
+
+    /// Say nothing on stderr when the run succeeds.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+
+    /// Colour on stderr. `auto` means: a TTY, and `$NO_COLOR` unset.
+    #[arg(long, value_enum, global = true, default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -83,24 +107,87 @@ enum Command {
     Config,
 }
 
-/// Output format for the data-returning queries, which have no Bazel
-/// expression form.
+/// The one output flag, declared on `cambi` itself (`docs/CLI.md`, "The
+/// output contract").
+///
+/// `human` is the default whether or not stdout is a TTY: it is what `text`
+/// was, and a script that never passed `--output` must keep getting what it
+/// got. `--output` stays as a hidden alias of `--format`, and `text` as a
+/// hidden alias of `human`, so every existing invocation and every script in
+/// `tools/` keeps working unchanged.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// Lines for a person. The old `text`, which is still accepted.
+    #[value(alias = "text")]
+    Human,
+    /// One JSON document carrying `schema`.
+    Json,
+    /// One JSON event per line, so a watcher can follow a long run.
+    Jsonl,
+    /// A `set(...)` expression for `bazel build` / `bazel test`. `affected`
+    /// only; anywhere else it is a usage error.
+    Query,
+    /// Nothing on stdout; the exit code is the whole answer.
+    Null,
+}
+
+/// What the data-returning queries distinguish internally, once `--format` has
+/// been resolved for them. `Null` is the absence of this, not a variant.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DataFormat {
     /// Human-readable lines.
     Text,
     /// A JSON document carrying the schema version.
     Json,
+    /// That document as one line, tagged as a result event.
+    Jsonl,
 }
 
+impl Format {
+    /// This format for a command that answers with a document rather than with
+    /// a set of targets.
+    ///
+    /// `None` is `--format null`: the command runs and sets the exit code and
+    /// prints nothing. `query` has no meaning here — there is no Bazel
+    /// expression for a byte count — so it is a usage error rather than a
+    /// silent fallback to something else.
+    pub fn data(self, verb: &str) -> anyhow::Result<Option<DataFormat>> {
+        match self {
+            Format::Human => Ok(Some(DataFormat::Text)),
+            Format::Json => Ok(Some(DataFormat::Json)),
+            Format::Jsonl => Ok(Some(DataFormat::Jsonl)),
+            Format::Null => Ok(None),
+            Format::Query => Err(diag::UsageError::raised(format!(
+                "--format query is only meaningful for `cambi affected`; {verb} has no Bazel \
+                 expression form"
+            ))),
+        }
+    }
+}
+
+/// `--color`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    /// One label per line.
-    Text,
-    /// The full report, including timings and stats.
-    Json,
-    /// A `set(...)` expression for `bazel build` / `bazel test`.
-    Query,
+pub enum ColorChoice {
+    /// Colour when stderr is a TTY and `$NO_COLOR` is unset.
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    /// Whether to colour stderr. `$NO_COLOR` wins over `auto` and loses to an
+    /// explicit `--color always`, which is what a caller asking for colour in
+    /// a pipe means.
+    fn resolve(self) -> bool {
+        use std::io::IsTerminal;
+        match self {
+            ColorChoice::Always => true,
+            ColorChoice::Never => false,
+            ColorChoice::Auto => {
+                std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+            }
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -117,11 +204,18 @@ fn main() -> ExitCode {
             }
         },
     };
+    let render = diag::Renderer {
+        format: cli.format,
+        quiet: cli.quiet,
+        color: cli.color.resolve(),
+    };
     let ctx = cmd::Context {
         root,
         config: cli.config.clone(),
         bazel_binary: cli.bazel_binary.clone(),
         cache_dir: cli.cache_dir.clone(),
+        format: cli.format,
+        render,
     };
 
     let code = match cli.command {
@@ -136,7 +230,9 @@ fn main() -> ExitCode {
     match code {
         Ok(c) => ExitCode::from(c),
         Err(e) => {
-            eprintln!("cambium: {e:#}");
+            // The same shape a warning gets: `error[CAMBI-E006]: ...` with a
+            // `help:` line, or one JSON object under --format json/jsonl.
+            render.error(&diag::of_error(&e));
             let code = e
                 .downcast_ref::<cambium_engine::EngineError>()
                 .map(|e| e.exit_code() as u8)
@@ -173,6 +269,7 @@ mod tests {
         assert_eq!(EXIT_GLOBAL, 2);
         assert_eq!(EXIT_BAZEL, 3);
         assert_eq!(EXIT_NO_BASELINE, 4);
+        assert_eq!(EXIT_STORE, 5);
     }
 
     #[test]
@@ -181,6 +278,24 @@ mod tests {
         assert_eq!(
             map(cambium_engine::EngineError::BaselineUnavailable { base: "x".into() }),
             EXIT_NO_BASELINE
+        );
+        assert_eq!(
+            map(cambium_engine::EngineError::Store(
+                cambium_engine::store::StoreError::Backend {
+                    op: "fetch",
+                    name: "indexes/x".into(),
+                    detail: "exit Some(1)".into(),
+                }
+            )),
+            EXIT_STORE,
+            "a store that cannot be reached is retryable and has its own code"
+        );
+        assert_eq!(
+            map(cambium_engine::EngineError::Store(
+                cambium_engine::store::StoreError::NotConfigured
+            )),
+            EXIT_ERROR,
+            "a store that is not configured is a configuration error"
         );
         assert_eq!(
             map(cambium_engine::EngineError::BazelQuery {

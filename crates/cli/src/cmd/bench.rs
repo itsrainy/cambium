@@ -119,8 +119,6 @@ pub enum Args {
         /// Print the selected change sets and stop.
         #[arg(long)]
         select_only: bool,
-        #[arg(long, value_enum, default_value_t = DataFormat::Text)]
-        output: DataFormat,
         /// Compare every change set again rather than resuming.
         #[arg(long)]
         restart: bool,
@@ -630,7 +628,6 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             change_set_file,
             stress_cap,
             select_only,
-            output,
             restart,
             common,
         } => {
@@ -639,7 +636,13 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 .or(run.quick.then_some(cambium_bench::QUICK_CHANGE_SETS))
                 .unwrap_or(cambium_bench::DEFAULT_CHANGE_SETS);
             if select_only {
-                do_change_sets(&run, &kinds, cap, stress_cap, output)?;
+                do_change_sets(
+                    &run,
+                    &kinds,
+                    cap,
+                    stress_cap,
+                    ctx.format.data("cambi bench")?,
+                )?;
                 return Ok(crate::EXIT_OK);
             }
             do_compare(
@@ -994,12 +997,16 @@ fn do_change_sets(
     kinds: &[String],
     cap: usize,
     stress_cap: usize,
-    output: DataFormat,
+    output: Option<DataFormat>,
 ) -> Result<()> {
     let (path, set) = select_change_sets(run, kinds, cap, stress_cap)?;
     tracing::info!(change_sets = set.change_sets.len(), path = %path.display(), "selected the change sets");
+    let Some(output) = output else {
+        return Ok(());
+    };
     match output {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(&set)?),
+        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(&set)?),
         DataFormat::Text => {
             for p in &set.change_sets {
                 println!(
