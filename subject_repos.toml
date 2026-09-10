@@ -114,6 +114,11 @@ extra_query_flags = []
 # ordinary packages. Unverified offline (no local mirror); the box's recall
 # oracle is the gate.
 invalidators = []
+# The four `tools/toolchains/win_1803/py3{8,9}` packages are Windows
+# toolchains that cannot load on Linux, so the pin's index is PARTIAL by
+# exactly those on every run (docs/OPERATIONS.md); the engine refuses to
+# publish a partial index unless told the absence is understood.
+publish_partial = true
 notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loading, large fetch"
 
 [[repo]]
