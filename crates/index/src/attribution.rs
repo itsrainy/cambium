@@ -211,6 +211,9 @@ struct FileScan<'a> {
     /// this file's module scope to the fallback set.
     module_dynamic: bool,
     fallback: BTreeSet<String>,
+    /// Whether [`FileInfo::fallback`] is the whole universe rather than the
+    /// repositories of a seeded subtree the file sits under.
+    wide: bool,
     /// Repositories `MODULE.bazel` says this file declares: the `use_repo`
     /// names of an extension it defines, the instantiations of a repository
     /// rule `use_repo_rule` names in it. Part of the file's own answer even
@@ -315,6 +318,7 @@ impl<'a> Attribution<'a> {
                 decls: Vec::new(),
                 module_dynamic: false,
                 fallback: BTreeSet::new(),
+                wide: false,
                 seeded: BTreeSet::new(),
                 parent: Vec::new(),
             });
@@ -445,6 +449,26 @@ impl<'a> Attribution<'a> {
     /// is.
     fn is_live(&self, d: usize) -> bool {
         self.live.get(d).copied().unwrap_or(true)
+    }
+
+    /// Whether file `f` keeps its fallback when the rounds learn nothing
+    /// about it. It does when something in it could not be read — a
+    /// module-level call the closure cannot resolve, or a def the workspace
+    /// runs whose body names a repository this analysis cannot evaluate — or
+    /// when the fallback is a seeded subtree's few repositories rather than
+    /// the universe (envoy's `repo.bzl`, whose module-level constants are the
+    /// extension's inputs). A file read in full, found to define nothing, and
+    /// whose only fallback is everything defines nothing: a `.bzl` of
+    /// BUILD-file macros that a load chain dragged into the workspace closure
+    /// is not the universe, and handing it the universe handed it to every
+    /// file that imported a symbol from it (issue #9).
+    fn keeps_fallback(&self, f: usize) -> bool {
+        !self.files[f].wide
+            || self.files[f].module_dynamic
+            || self.files[f]
+                .defs
+                .iter()
+                .any(|&d| self.is_live(d) && self.dynamic.get(d).copied().unwrap_or(false))
     }
 
     /// Every use of an imported symbol in file `f`.
@@ -851,15 +875,19 @@ impl<'a> Attribution<'a> {
     }
 
     /// Runs the two fixpoints. `fallbacks` is the per-file answer for anything
-    /// unattributable; `seed_rules` and `seed_exts` come from `MODULE.bazel`.
+    /// unattributable, and `wide` names the files whose fallback is the whole
+    /// universe rather than a seeded subtree's; `seeds` come from
+    /// `MODULE.bazel`.
     pub(crate) fn solve(
         &mut self,
         fallbacks: &BTreeMap<String, BTreeSet<String>>,
         seeds: &BTreeMap<(String, String), BTreeSet<String>>,
+        wide: &BTreeSet<String>,
     ) {
         for i in 0..self.files.len() {
             let path = self.files[i].path.clone();
             self.files[i].fallback = fallbacks.get(&path).cloned().unwrap_or_default();
+            self.files[i].wide = wide.contains(&path);
             for ((p, _), repos) in seeds {
                 if *p == path {
                     self.files[i].seeded.extend(repos.iter().cloned());
@@ -911,15 +939,29 @@ impl<'a> Attribution<'a> {
 
         // A call site's scope is dynamic when it names a repository this
         // analysis cannot evaluate, or calls something it cannot resolve.
-        let dynamics: Vec<(usize, Option<usize>)> = self
+        let dynamics: Vec<(usize, Option<usize>, String, bool)> = self
             .calls
             .iter()
             .filter(|c| matches!(c.name, NameArg::Dynamic) || c.opaque)
-            .map(|c| (c.file, c.scope))
+            // A dynamic name in a def the workspace never runs — a BUILD
+            // macro's `name = name + "_lib"` — makes nothing unreadable.
+            .filter(|c| c.scope.map_or(true, |d| self.is_live(d)))
+            .map(|c| (c.file, c.scope, c.head.clone(), c.opaque))
             .collect();
-        for (file, scope) in dynamics {
+        for (file, scope, head, opaque) in dynamics {
             match scope {
-                Some(d) => self.dynamic[d] = true,
+                Some(d) => {
+                    if !self.dynamic[d] {
+                        tracing::debug!(
+                            file = %self.files[file].path,
+                            def = %self.defs[d].name,
+                            call = %head,
+                            why = if opaque { "unresolved callee" } else { "dynamic name" },
+                            "a call this analysis cannot read; the def keeps the wide answer"
+                        );
+                    }
+                    self.dynamic[d] = true
+                }
                 None => self.files[file].module_dynamic = true,
             }
         }
@@ -933,6 +975,9 @@ impl<'a> Attribution<'a> {
                 let (target, name, scope, file) = {
                     let call = &self.calls[c];
                     let Some(target) = call.callee else { continue };
+                    if call.scope.is_some_and(|d| !self.is_live(d)) {
+                        continue;
+                    }
                     (target, call.name.clone(), call.scope, call.file)
                 };
                 let call = Call {
@@ -1033,7 +1078,10 @@ impl<'a> Attribution<'a> {
             // fallback, and its dependents inherit that on the next round.
             let mut promoted = false;
             for f in 0..self.files.len() {
-                if self.fileset[f].is_empty() && !self.files[f].fallback.is_empty() {
+                if self.fileset[f].is_empty()
+                    && !self.files[f].fallback.is_empty()
+                    && self.keeps_fallback(f)
+                {
                     self.fileset[f] = self.files[f].fallback.clone();
                     promoted = true;
                 }
@@ -1182,6 +1230,9 @@ impl<'a> Attribution<'a> {
     /// which is why this is not [`Attribution::def_repos`].
     fn value_of(&self, s: Sym) -> BTreeSet<String> {
         match s {
+            // A def nothing in the workspace runs creates nothing, however
+            // its body reads; the use of it that asked was in dead code too.
+            Sym::Def(d) if !self.is_live(d) => BTreeSet::new(),
             Sym::Def(d) => self.raw_def_repos(d),
             Sym::Rule(r) => self.rule_repos(Sym::Rule(r)),
             Sym::Ext(e) => self.rule_repos(Sym::Ext(e)),
@@ -1363,9 +1414,16 @@ impl<'a> Attribution<'a> {
     fn set_of(&self, f: usize) -> BTreeSet<String> {
         match self.fileset.get(f) {
             Some(r) if !r.is_empty() => r.clone(),
-            _ if self.refining => BTreeSet::new(),
+            _ if self.refining || !self.keeps_fallback(f) => BTreeSet::new(),
             _ => self.files[f].fallback.clone(),
         }
+    }
+
+    /// Whether a file's empty answer is a real one: nothing in it was
+    /// unreadable and its fallback would have been the whole universe. See
+    /// [`Attribution::keeps_fallback`].
+    pub(crate) fn read_in_full(&self, path: &str) -> bool {
+        self.by_path.get(path).is_some_and(|&f| !self.keeps_fallback(f))
     }
 
     /// Everything a change to a file can move: what it defines itself, plus
