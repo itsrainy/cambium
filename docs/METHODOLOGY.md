@@ -322,6 +322,22 @@ drift left to guard against. `--index` still overrides everything. The recorded
 history commits still replay against the pin: their bases are the indexes each
 previous commit left behind, and nothing archives those.
 
+The same argument applies at the other end of the history. The rebuild oracle
+cold-builds a fresh index at the pin with real Bazel and compares it to the
+incrementally applied one, and that fresh index is the only artefact anywhere
+that says what Bazel's graph and externals side tables *are* at the pin —
+which the run then threw away. It is archived now, at
+`bench-results/<subject>/heads/<pin>.bin`, and `cambi bench replay <subject>
+--head-check --repo <git dir>` re-derives its externals tables from the head
+tree's own text with the current engine and runs the same `compare_by_label`
+the oracle runs. The node, edge and rule-hash halves are empty by construction
+— a re-derivation keeps everything the query established — so the externals
+section is the whole signal, and it is the one an engine change to the
+externals tables moves. Where `--rederive` can only hold today's derivation
+against the tables an earlier engine recorded, this holds it against Bazel's
+truth, on a laptop, in seconds; `precheck.sh` runs it for every subject that
+has a head archive when `REDERIVE=1`.
+
 It prints the repositories dirtied and by which rule (input path, target-only,
 module diff, load) and whether each drags its loaders with it; the packages
 dirtied and by which route, separating rule (a) reached through a `.bzl` row
