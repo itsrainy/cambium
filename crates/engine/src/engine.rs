@@ -886,12 +886,32 @@ impl Engine {
         // Only the materialised path: an overlay is never published, and the
         // run that produced it read the closure it needed out of the base.
         if req.materialize {
+            // Only the packages Bazel loaded keep a closure. A dirty package
+            // that came back empty — it failed to load under `--keep_going`,
+            // or it has no targets — is tombstoned above, and a full build at
+            // the same commit never sees it in `//...` and so never scans its
+            // BUILD file; the rebuild oracle compared the two and found the
+            // closure of a package neither index has any target for (apollo's
+            // packages that load `@local_config_cuda`). Its BUILD is read
+            // again the moment it loads, since that re-queries it.
+            let loaded: BTreeSet<&str> = rows
+                .updates
+                .iter()
+                .filter(|u| !u.targets.is_empty())
+                .map(|u| u.package.as_str())
+                .collect();
+            let (scanned, unloaded): (Vec<String>, Vec<String>) = to_query
+                .iter()
+                .cloned()
+                .partition(|p| loaded.contains(p.as_str()));
+            let mut gone = dirty.deleted_packages.clone();
+            gone.extend(unloaded);
             if let Some(c) = rescan_closure(
                 querier,
                 builder.take_bzl_closure(),
-                &to_query,
+                &scanned,
                 &dirty.changed_bzl,
-                &dirty.deleted_packages,
+                &gone,
             ) {
                 builder.set_bzl_closure(c);
             }
