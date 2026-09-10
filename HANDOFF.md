@@ -24,8 +24,8 @@ It took four passes on 2026-09-10, and every earlier pass failed on something
 the pin-based replay could not see. The Findings paragraph lists what was
 found and fixed (commits `72bc80b` .. `8d7524a`); each has a unit test and
 was confirmed with `bench replay --rederive` before the next pass, envoy's
-with `--index` pointed at the base index the run itself loaded. The local
-tree is 12 commits ahead of `origin/main`; nothing has been pushed.
+with `--index` pointed at the base index the run itself loaded. Everything
+is pushed; keep it that way, commit and push after every green test run.
 
 Provenance: bazel, sourcegraph, apollo and envoy are from the pass under
 `bfa4624`; xla from a pass under `8d7524a` alone, on its own wiped store.
@@ -78,15 +78,14 @@ inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
 
 ## What to do next
 
-1. Push.
-2. Next engine change: `tools/bench/precheck.sh` with `REDERIVE=1`, then
+1. Next engine change: `tools/bench/precheck.sh` with `REDERIVE=1`, then
    `SMOKE=1` on the box, then the full driver. Compare each subject's summary
    line against `docs/RESULTS.md` before letting the run continue.
-3. The precision question from the 50-pair measurement against the internal
-   tool (a whole-graph answer where it returned 288k of 900k targets): the
-   next lever is symbol-level attribution of a changed `.bzl` to packages
-   and targets, the same idea as #6 applied on the package side. Ask that
-   agent for `--explain` on the pair and the direct-reason histogram first.
+2. The 814k-target answer on the 900k-target repository is fixed by
+   `0e92cc8` (a BUILD-file macro dragged into the workspace closure fed a
+   label to every repository). Ask that agent to re-measure the pair: the
+   expected answer is 288k affected and 148 direct, and the new `info` line
+   about one target seeding many repositories should be silent.
 
 ## Open issues
 
