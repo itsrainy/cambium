@@ -297,15 +297,30 @@ $ tools/bench/precheck.sh                       # every cached subject
 $ SUBJECTS="envoy apollo" tools/bench/precheck.sh
 ```
 
-`precheck.sh` pulls each subject's stored index and recorded results off the
-benchmark box into `bench-precheck/` (git-ignored, and skipped once cached),
-builds `cambi` in release, and runs the check. Underneath it is one command:
+`precheck.sh` pulls each subject's stored index, the base indexes its change
+sets ran against, and the recorded results off the benchmark box into
+`bench-precheck/` (git-ignored, and skipped once cached), builds `cambi` in
+release, and runs the check. Underneath it is one command:
 
 ```console
 $ cambi bench replay envoy --change-set b352846f..a6871fc6   # one change set
 $ cambi bench replay envoy --paths 'M\tbazel/repo.bzl'       # a hypothetical
 $ cambi bench replay envoy --all                             # exit 1 on divergence
 ```
+
+Where it can, the replay does better than the pin. A run never splices onto the
+index at the pin: it asks the store for the change set's own base and gets back
+whatever the history walk left there, which is a different graph, and a bug can
+live entirely in that difference — an inert `MODULE.bazel` read in WORKSPACE
+mode was invisible against the pin and reproduced immediately against the base
+the run itself used. So the change-set driver archives each base it ran
+against at `bench-results/<subject>/bases/<base>.bin`, `precheck.sh` pulls those
+alongside the index, and `bench replay` uses a change set's own base whenever
+one is there — saying which it used per change set and how many in the `--all`
+summary, and dropping the drift guards below for those, because there is no
+drift left to guard against. `--index` still overrides everything. The recorded
+history commits still replay against the pin: their bases are the indexes each
+previous commit left behind, and nothing archives those.
 
 It prints the repositories dirtied and by which rule (input path, target-only,
 module diff, load) and whether each drags its loaders with it; the packages

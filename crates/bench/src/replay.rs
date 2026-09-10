@@ -28,9 +28,15 @@
 //! - **A cold rebuild's answer.** Past the limit the engine re-queries
 //!   `//...`. The replay reports *that the fallback would fire*, which is the
 //!   decision under test; what it would then answer needs Bazel.
-//! - **The base index.** The only stored index is the one at the pin, and a
-//!   change set's base is an ancestor of it. Package and repository sets
-//!   therefore reflect the graph at the pin, not the graph the run walked.
+//! - **The base index**, when the run did not leave its own behind. A run
+//!   splices onto whatever the store served for the change set's base, and the
+//!   change-set driver archives that index at
+//!   `bench-results/<subject>/bases/<base>.bin`; a replay that finds one there
+//!   walks the graph the run walked, and the drift below does not apply to it
+//!   ([`BaseKind::RunsOwn`]). Without one the only stored index is the one at
+//!   the pin, and a change set's base is an ancestor of it. Package and
+//!   repository sets then reflect the graph at the pin, not the graph the run
+//!   walked.
 //!   That is why a divergence from a recorded answer is a *lead*, not a
 //!   verdict, and why the tight loop compares one replay against another
 //!   ([`ReplayRun::divergences_against`]) rather than against the run.
@@ -207,6 +213,64 @@ pub struct PackageDirty {
     pub rule: PackageRule,
 }
 
+// ------------------------------------------------------------ the base index
+//
+// A run does not splice onto the index at the pin. It asks the store for the
+// change set's own base and gets back whatever the history walk left there, and
+// the two are not the same graph: the pin is ahead of every base by as many
+// commits as the window is long. Most of what a replay computes survives that,
+// which is why replaying against the pin is worth anything at all -- but not
+// all of it did. An inert `MODULE.bazel` read in WORKSPACE mode was invisible
+// against the pin and reproduced immediately against the base the run itself
+// used. So the driver archives that base beside the results, and a replay
+// prefers it when it is there.
+
+/// Which index a change set was replayed against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseKind {
+    /// The stored index at the subject's pin: an ancestor's graph seen from
+    /// the far end, and the reason for every drift guard in [`replay_with`].
+    #[default]
+    Pin,
+    /// The base index the run itself spliced onto, archived by the change-set
+    /// driver at `<results>/<subject>/bases/<base>.bin`. At the base by
+    /// construction, so the drift guards have nothing to guard against.
+    RunsOwn,
+    /// Whatever `--index` named. The replay is told to use it and cannot know
+    /// which revision it is at, so it is treated as the pin's case.
+    Explicit,
+}
+
+impl BaseKind {
+    /// Whether the index is the graph at the change set's own base rather than
+    /// a later one. Only then is a difference from the run wholly the
+    /// engine's.
+    pub fn exact_at_base(self) -> bool {
+        matches!(self, BaseKind::RunsOwn)
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            BaseKind::Pin => "pin",
+            BaseKind::RunsOwn => "the run's own",
+            BaseKind::Explicit => "--index",
+        }
+    }
+}
+
+/// `<results>/<subject>/bases/<base sha>.bin`, where the change-set driver
+/// archives the base index each change set actually ran against.
+pub fn archived_base_path(subject_results: &std::path::Path, base: &str) -> std::path::PathBuf {
+    subject_results.join("bases").join(format!("{base}.bin"))
+}
+
+/// The archived base for `base`, when the driver left one behind.
+pub fn archived_base(subject_results: &std::path::Path, base: &str) -> Option<std::path::PathBuf> {
+    let p = archived_base_path(subject_results, base);
+    p.exists().then_some(p)
+}
+
 /// What replaying the static stages concluded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReplayOutcome {
@@ -228,6 +292,12 @@ pub struct ReplayOutcome {
     /// What the reverse walk reaches from the changed files and external nodes
     /// the base index knows. A lower bound on `affected`; see the module docs.
     pub affected_lower_bound: usize,
+    /// Which index this change set was replayed against. A replay on the
+    /// run's own archived base is exact where a replay on the pin is a lead,
+    /// so it travels with the outcome rather than being recovered from the
+    /// file system by whoever reads it later.
+    #[serde(default)]
+    pub base_kind: BaseKind,
     /// The replay could not decide something the run decided, so its verdict
     /// must not be compared. The strings say what and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -504,7 +574,7 @@ impl RederiveCache {
     }
 }
 
-/// Runs the static stages over one diff.
+/// Runs the static stages over one diff, against the index at the pin.
 pub fn replay(
     base: IndexRef<'_>,
     cfg: &Config,
@@ -513,13 +583,35 @@ pub fn replay(
     changes: &[Change],
     texts: &dyn WorkspaceText,
 ) -> ReplayOutcome {
+    replay_with(base, cfg, base_rev, head_rev, changes, texts, BaseKind::Pin)
+}
+
+/// As [`replay`], saying what `base` is.
+///
+/// The three drift guards below say the same thing in three different ways --
+/// the index is at the pin and the change set is not -- so with
+/// [`BaseKind::RunsOwn`] they are silent: that index *is* the graph the run
+/// spliced onto, and what the replay then answers is the engine's answer, not
+/// a lead.
+#[allow(clippy::too_many_arguments)]
+pub fn replay_with(
+    base: IndexRef<'_>,
+    cfg: &Config,
+    base_rev: &str,
+    head_rev: &str,
+    changes: &[Change],
+    texts: &dyn WorkspaceText,
+    base_kind: BaseKind,
+) -> ReplayOutcome {
     let mut out = ReplayOutcome {
         base: base_rev.to_string(),
         head: head_rev.to_string(),
         changed_files: changes.len(),
         max_dirty_packages: cfg.limits.max_dirty_packages,
+        base_kind,
         ..Default::default()
     };
+    let drifts = !base_kind.exact_at_base();
 
     // A `MODULE.bazel` this replay cannot read is the one case where the
     // stage's own answer ("unparseable, so global") is an artefact of the
@@ -553,7 +645,7 @@ pub fn replay(
     // so the owner of every path under it differs from what the run saw. The
     // engine also asks the head worktree whether a deleted `BUILD` really
     // deleted its package, and there is no worktree here.
-    if let Some(c) = changes.iter().find(|c| {
+    if let Some(c) = changes.iter().filter(|_| drifts).find(|c| {
         c.status != Status::Modified
             && matches!(
                 c.path.rsplit('/').next(),
@@ -581,7 +673,7 @@ pub fn replay(
     // dependency file, in the closure at every change set's base and absent
     // from the pin's fifty-five `.bzl` files, because by then envoy is on
     // Bzlmod.
-    if base.bzl_closure {
+    if base.bzl_closure && drifts {
         let unknown: Vec<&str> = changes
             .iter()
             .filter(|c| {
@@ -601,7 +693,7 @@ pub fn replay(
         }
     }
 
-    if let Some(declared) = repos_declared_at(base_rev, texts) {
+    if let Some(declared) = repos_declared_at(base_rev, texts).filter(|_| drifts) {
         let undeclared: Vec<&str> = ext
             .repos
             .iter()
@@ -1091,6 +1183,20 @@ impl ReplayRun {
                 },
                 new,
             ));
+            if old.base_kind != new.base_kind {
+                // Two replays of the same change set against different indexes
+                // are not the same experiment, and every value below is being
+                // read across that. It has one cause in practice: an archived
+                // base arrived, or was deleted, between the two runs -- which
+                // is worth saying out loud rather than absorbing into a
+                // dirty_packages line.
+                out.push(Divergence {
+                    key: key.clone(),
+                    field: "base_index".into(),
+                    recorded: old.base_kind.describe().into(),
+                    replayed: new.base_kind.describe().into(),
+                });
+            }
             if old.affected_lower_bound != new.affected_lower_bound {
                 out.push(Divergence {
                     key: key.clone(),
@@ -1347,6 +1453,94 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
             "{:?}",
             o.indeterminate
         );
+    }
+
+    /// The archived base is found by sha and, being the graph at the base, is
+    /// replayed exactly: the three guards that exist only because the index is
+    /// at the pin stay quiet.
+    #[test]
+    fn an_archived_base_is_picked_up_and_replayed_as_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("envoy");
+        let base = "aaaaaaaabbbbccccddddeeeeffff000011112222";
+        assert!(archived_base(&results, base).is_none());
+
+        let index = stored_index();
+        cambium_index::format::write_index(&archived_base_path(&results, base), &index).unwrap();
+        let found = archived_base(&results, base).expect("the archive was not found");
+        assert_eq!(found, archived_base_path(&results, base));
+
+        let file = cambium_index::IndexFile::open(&found).unwrap();
+        let cfg = Config::default();
+        let texts = module_at(base, "module(name = \"demo\", version = \"1\")\n");
+        // A `.bzl` the closure has never heard of, and a BUILD file added:
+        // both are pin drift and neither can be, once the index is the base's.
+        let changes = [
+            Change::new(Status::Modified, "bazel/gone.bzl"),
+            Change::new(Status::Added, "app/BUILD"),
+        ];
+
+        let pin = replay(file.view(), &cfg, base, "head", &changes, &texts);
+        assert_eq!(pin.base_kind, BaseKind::Pin);
+        assert_eq!(pin.indeterminate.len(), 2, "{:?}", pin.indeterminate);
+
+        let own = replay_with(
+            file.view(),
+            &cfg,
+            base,
+            "head",
+            &changes,
+            &texts,
+            BaseKind::RunsOwn,
+        );
+        assert_eq!(own.base_kind, BaseKind::RunsOwn);
+        assert!(own.base_kind.exact_at_base());
+        assert!(own.indeterminate.is_empty(), "{:?}", own.indeterminate);
+        // Only the drift guards are silenced. The dirty set is the same one.
+        assert_eq!(own.dirty_packages, pin.dirty_packages);
+    }
+
+    /// A `MODULE.bazel` the replay cannot read is not drift — it is a file
+    /// this process has no copy of — so the archived base does not excuse it.
+    #[test]
+    fn an_archived_base_does_not_silence_the_guards_that_are_not_drift() {
+        let index = stored_index();
+        let cfg = Config::default();
+        let o = replay_with(
+            index.view(),
+            &cfg,
+            "base",
+            "head",
+            &[Change::new(Status::Modified, externals::MODULE_FILE)],
+            &NoText,
+            BaseKind::RunsOwn,
+        );
+        assert_eq!(o.indeterminate.len(), 1, "{:?}", o.indeterminate);
+        assert!(o.indeterminate[0].contains("--repo"));
+    }
+
+    /// Which index a change set ran against is part of the experiment, so two
+    /// replays that disagree about it say so instead of reporting the numbers
+    /// underneath as an engine difference.
+    #[test]
+    fn changing_the_base_index_between_two_replays_is_itself_a_divergence() {
+        let mut old = outcome("a", "b", false, 3, false);
+        let mut new = outcome("a", "b", false, 3, false);
+        new.base_kind = BaseKind::RunsOwn;
+        let run = |o: &ReplayOutcome| ReplayRun {
+            schema: REPLAY_SCHEMA,
+            subject: "envoy".into(),
+            pin: "pin".into(),
+            outcomes: vec![o.clone()],
+        };
+        let d = run(&new).divergences_against(&run(&old));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].field, "base_index");
+        assert_eq!(d[0].recorded, "pin");
+        assert_eq!(d[0].replayed, "the run's own");
+
+        old.base_kind = BaseKind::RunsOwn;
+        assert!(run(&new).divergences_against(&run(&old)).is_empty());
     }
 
     #[test]

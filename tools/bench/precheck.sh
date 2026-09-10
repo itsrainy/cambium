@@ -13,9 +13,10 @@
 # replay reads the tables the run's cambium already wrote, so such a change is
 # invisible. Compare a re-derived run only against another re-derived run.
 #
-# It pulls, per subject, the stored index at the pin and the recorded results
-# from the benchmark box into `bench-precheck/` (git-ignored), builds cambi in
-# release, and runs `cambi bench replay --all`, which exits 1 on divergence.
+# It pulls, per subject, the stored index at the pin, the base index each change
+# set actually ran against, and the recorded results from the benchmark box into
+# `bench-precheck/` (git-ignored), builds cambi in release, and runs
+# `cambi bench replay --all`, which exits 1 on divergence.
 #
 # What it does on the box: `scp` of result files, and — only with
 # PATHS_FROM_BOX=1, which is the default because the change sets do not record
@@ -73,6 +74,14 @@ pull() {  # subject
   scp -q -i "$PEM" "ubuntu@$h:$BOX_REPO/bench-results/$s/changes/*.json" "$dir/changes/" \
     || { rm -rf "$dir"; return 1; }
   scp -q -i "$PEM" "ubuntu@$h:$BOX_REPO/bench-results/$s/history/*.json" "$dir/history/" 2>/dev/null
+  # The base index each change set actually spliced onto, when the run archived
+  # one. This is the only thing offline that shows what the run's own base did,
+  # and the pin cannot: 1-9 MB a file and at most forty a subject, so it is a
+  # few hundred megabytes at worst. A run published before the driver archived
+  # them has no such directory, and scp failing on that must not fail the pull.
+  mkdir -p "$dir/bases"
+  scp -q -i "$PEM" "ubuntu@$h:$BOX_REPO/bench-results/$s/bases/*.bin" "$dir/bases/" 2>/dev/null \
+    || echo "  no archived base indexes for $s; replaying against the pin"
   [ "$PATHS_FROM_BOX" = 1 ] && paths_from_box "$s" "$h" "$dir"
   return 0
 }
