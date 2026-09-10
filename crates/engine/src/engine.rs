@@ -1398,6 +1398,29 @@ fn close_over_repository_targets<V: GraphView + ?Sized>(
         if hit.is_empty() {
             return found;
         }
+        // One target naming a large share of every repository is the
+        // signature of a label the index attributed to the fallback universe
+        // rather than to the repositories that read it: on a 900k-target
+        // repository, `//cloud/common/dbfx:go_default_library` seeded 3,819
+        // repositories at once and the walk took the graph. The answer is
+        // still sound, and this is where it should be visible.
+        {
+            let mut by_via: BTreeMap<&str, usize> = BTreeMap::new();
+            for via in hit.values() {
+                *by_via.entry(via.as_str()).or_default() += 1;
+            }
+            for (via, n) in by_via {
+                if n >= 8 {
+                    tracing::info!(
+                        via,
+                        repositories = n,
+                        "one target names many external repositories; if the label was \
+                         attributed to the fallback universe, every consumer of every \
+                         repository goes direct (cambi index externals shows the row)"
+                    );
+                }
+            }
+        }
         let mut added = false;
         for (repo, via) in hit {
             seen.insert(repo.clone());

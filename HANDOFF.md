@@ -57,18 +57,19 @@ box, hours in. What has landed:
   `_INDEX`) answers "what does the derivation say about this file in this
   tree" in twenty seconds, with a stored index's mapping when given one.
 
-Two more were being built by subagents in worktrees when this was written;
-check `git worktree list` and `git log --all --oneline | head` for their
-commits, and cherry-pick them onto `main` if they are not there:
+Two more landed the same day, from subagents, and are on `main`:
 
-1. **Archive each change set's base index** into
-   `<results>/<subject>/bases/<base>.bin`, have `bench replay` use it for that
-   change set instead of the pin, and have `precheck.sh` pull the directory.
-   This is the change that would have caught the envoy mode bug offline.
-2. **Persist every tool's full label set** and the per-label classification
-   per change set, with `cambi bench labels` to read them back. Yesterday's
-   990-label and 165-label disagreements could only be examined from 20
-   examples.
+1. **Each change set's base index is archived** in
+   `<results>/<subject>/bases/<base>.bin` (`7b5c535`, `3a188ca`); `bench
+   replay` uses it for that change set instead of the pin, says so per change
+   set and in the `--all` summary, and the pin-drift guards go silent for it;
+   `precheck.sh` pulls the directory. This is the change that would have
+   caught the envoy mode bug offline. The first run to produce them is the
+   next one.
+2. **Every tool's full label set and the per-label classification** are kept
+   per change set under `<results>/<subject>/changes/labels/`, with `cambi
+   bench labels <subject> --change-set base..head [--tool] [--class]
+   [--side] [--diff]` to read them back (`1564850`).
 
 Still proposals: recording the head universe rows so the rebuild oracle's
 index comparison can run offline, and synthetic CI subjects for the shapes
@@ -77,7 +78,7 @@ inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
 
 ## What to do next
 
-1. Land the two subagent commits, run `cargo test --release` once, push.
+1. Push.
 2. Next engine change: `tools/bench/precheck.sh` with `REDERIVE=1`, then
    `SMOKE=1` on the box, then the full driver. Compare each subject's summary
    line against `docs/RESULTS.md` before letting the run continue.
