@@ -1786,13 +1786,25 @@ mod tests {
             Files(v)
         }
         let identity = RepoMapping::identity();
-        let bzlmod = RepoMapping::from_dump("{\"\":\"\",\"envoy_build_config\":\"envoy_build_config+\"}");
-        assert!(!bzlmod_live(&with_rc(Some("common --noenable_bzlmod\ncommon --enable_workspace\n")), &bzlmod));
-        assert!(bzlmod_live(&with_rc(Some("build --enable_bzlmod\n")), &identity));
+        let bzlmod =
+            RepoMapping::from_dump("{\"\":\"\",\"envoy_build_config\":\"envoy_build_config+\"}");
+        assert!(!bzlmod_live(
+            &with_rc(Some(
+                "common --noenable_bzlmod\ncommon --enable_workspace\n"
+            )),
+            &bzlmod
+        ));
+        assert!(bzlmod_live(
+            &with_rc(Some("build --enable_bzlmod\n")),
+            &identity
+        ));
         assert!(!bzlmod_live(&with_rc(None), &identity));
         assert!(bzlmod_live(&with_rc(None), &bzlmod));
         assert!(bzlmod_live(&Files(vec![("MODULE.bazel", "")]), &identity));
-        assert_eq!(bazelrc_bzlmod("# --enable_bzlmod\ncommon --noenable_bzlmod\nbuild --enable_bzlmod\n"), Some(true));
+        assert_eq!(
+            bazelrc_bzlmod("# --enable_bzlmod\ncommon --noenable_bzlmod\nbuild --enable_bzlmod\n"),
+            Some(true)
+        );
         // xla: the config-scoped line after the real one does not apply.
         assert_eq!(
             bazelrc_bzlmod("common --enable_bzlmod --noenable_workspace\ncommon:workspace --noenable_bzlmod --enable_workspace\n"),
@@ -1804,7 +1816,11 @@ mod tests {
         let facts = read_live_module_facts(&files, &bzlmod);
         assert!(facts.local_paths.is_empty() && facts.deps.is_empty());
         let ri = inputs(&files, &bzlmod);
-        assert!(!ri.path_maps.contains_key("envoy_build_config"), "{:?}", ri.path_maps);
+        assert!(
+            !ri.path_maps.contains_key("envoy_build_config"),
+            "{:?}",
+            ri.path_maps
+        );
     }
 
     #[test]
@@ -2802,7 +2818,11 @@ _envoy_repo = repository_rule(
             Err(_) => RepoMapping::identity(),
         }
         .with_main_alias(&alias);
-        println!("mapping: empty {}, identity {}", m.is_empty(), m.is_identity());
+        println!(
+            "mapping: empty {}, identity {}",
+            m.is_empty(),
+            m.is_identity()
+        );
         let ri = inputs(&files, &m);
 
         assert_eq!(
@@ -2845,7 +2865,10 @@ _envoy_repo = repository_rule(
                  use_repo(e, \"a\", \"b\")\n",
             ),
             (".bazelrc", "common --enable_bzlmod\n"),
-            ("WORKSPACE", "load(\"//bazel:loose.bzl\", \"loose\")\nloose()\n"),
+            (
+                "WORKSPACE",
+                "load(\"//bazel:loose.bzl\", \"loose\")\nloose()\n",
+            ),
             ("bazel/ext.bzl", "E = 1\n"),
             (
                 "bazel/loose.bzl",
@@ -2972,11 +2995,20 @@ _envoy_repo = repository_rule(
             Err(_) => RepoMapping::identity(),
         }
         .with_main_alias(&alias);
-        println!("mapping: empty {}, identity {}", m.is_empty(), m.is_identity());
+        println!(
+            "mapping: empty {}, identity {}",
+            m.is_empty(),
+            m.is_identity()
+        );
         let ri = inputs(&files, &m);
         println!("repos in the universe: {}", ri.repos.len());
         let facts = read_live_module_facts(&files, &m);
-        println!("module facts: {} deps, {} extensions, unparsed {:?}", facts.deps.len(), facts.extensions.len(), facts.unparsed);
+        println!(
+            "module facts: {} deps, {} extensions, unparsed {:?}",
+            facts.deps.len(),
+            facts.extensions.len(),
+            facts.unparsed
+        );
         for (k, e) in &facts.extensions {
             if e.bzl.contains("rocm") || e.bzl.contains("third_party.bzl") {
                 println!("   extension {k}: {} {} -> {:?}", e.bzl, e.name, e.repos);
@@ -3210,14 +3242,21 @@ _envoy_repo = repository_rule(
             ("bazel/loose.bzl", loose),
         ]);
         let ri = inputs(&files, &m);
-        assert!(ri.repos_for("conf/settings.yml").is_empty(), "{:?}", ri.patterns);
+        assert!(
+            ri.repos_for("conf/settings.yml").is_empty(),
+            "{:?}",
+            ri.patterns
+        );
 
         // Both worlds live, as Bazel 7 reads them: the bazelrc says so, or the
         // WORKSPACE alone would make the module file inert.
         let files = Files(vec![
             ("MODULE.bazel", module),
             (".bazelrc", "common --enable_bzlmod\n"),
-            ("WORKSPACE", "load(\"//bazel:loose.bzl\", \"loose\")\nloose(None)\n"),
+            (
+                "WORKSPACE",
+                "load(\"//bazel:loose.bzl\", \"loose\")\nloose(None)\n",
+            ),
             ("bazel/ext.bzl", "E = 1\n"),
             ("bazel/loose.bzl", loose),
         ]);
@@ -3268,7 +3307,8 @@ _envoy_repo = repository_rule(
         ]);
         let ri = inputs(&files, &RepoMapping::identity().with_main_alias("av"));
         assert!(
-            ri.repos_for("cloud/common/dbfx/go_default_library").is_empty(),
+            ri.repos_for("cloud/common/dbfx/go_default_library")
+                .is_empty(),
             "{:?}",
             ri.patterns
         );
@@ -3318,7 +3358,8 @@ _envoy_repo = repository_rule(
         let m = RepoMapping::identity().with_main_alias("av");
         let ri = inputs(&files, &m);
         assert!(
-            ri.repos_for("cloud/common/dbfx/go_default_library").is_empty(),
+            ri.repos_for("cloud/common/dbfx/go_default_library")
+                .is_empty(),
             "{:?}",
             ri.patterns
         );
@@ -3329,8 +3370,19 @@ _envoy_repo = repository_rule(
         );
         // A change to the constant's file moves the one instantiation that
         // reads it; the macro file moves nothing.
-        assert_eq!(ri.bzl_repos["tools/rules/go.bzl"], set(&["io_bazel_rules_go"]), "{:?}", ri.bzl_repos);
-        assert!(ri.bzl_repos.get("tools/rules/sqlgen.bzl").map_or(true, BTreeSet::is_empty), "{:?}", ri.bzl_repos);
+        assert_eq!(
+            ri.bzl_repos["tools/rules/go.bzl"],
+            set(&["io_bazel_rules_go"]),
+            "{:?}",
+            ri.bzl_repos
+        );
+        assert!(
+            ri.bzl_repos
+                .get("tools/rules/sqlgen.bzl")
+                .map_or(true, BTreeSet::is_empty),
+            "{:?}",
+            ri.bzl_repos
+        );
     }
 
     /// Issue #9's other half: a format-string label whose occurrence is on the

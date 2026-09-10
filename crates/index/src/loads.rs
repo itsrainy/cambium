@@ -860,10 +860,16 @@ mod tests {
         assert_eq!(m.canonical("bazel_gazelle"), "bazel_gazelle");
         assert_eq!(m.canonical("rules_cc"), "rules_cc+");
         assert!(RepoMapping::from_canonical([("a", ""), ("b", "")]).is_identity());
-        assert!(RepoMapping::identity().with_main_alias("envoy").is_identity());
+        assert!(RepoMapping::identity()
+            .with_main_alias("envoy")
+            .is_identity());
         assert!(!m.is_identity());
         assert_eq!(
-            resolve_label("@bazel_gazelle//:deps.bzl", "", &RepoMapping::from_canonical([("bazel_gazelle", "")])),
+            resolve_label(
+                "@bazel_gazelle//:deps.bzl",
+                "",
+                &RepoMapping::from_canonical([("bazel_gazelle", "")])
+            ),
             Some(Load::External("@@bazel_gazelle//:deps.bzl".into()))
         );
     }

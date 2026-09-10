@@ -22,6 +22,7 @@ pub struct BaselineCache<'a> {
     /// Only an index built with this configuration is a baseline; anything
     /// else in the store is a leftover from another lineage.
     config_hash: [u8; 32],
+    diags: crate::diag::Diagnostics,
 }
 
 impl<'a> BaselineCache<'a> {
@@ -30,7 +31,14 @@ impl<'a> BaselineCache<'a> {
             store,
             cache_dir,
             config_hash,
+            diags: crate::diag::Diagnostics::new(),
         }
+    }
+
+    /// Reports into the engine's sink rather than into a buffer nobody reads.
+    pub fn with_diagnostics(mut self, diags: crate::diag::Diagnostics) -> Self {
+        self.diags = diags;
+        self
     }
 
     /// Finds an index for `commit`, whose tree is `tree`, in the store.
@@ -143,6 +151,20 @@ impl<'a> BaselineCache<'a> {
                 key = name,
                 "skipping an index built with a different cambium.toml (or an older rule-hash \
                  version or index content revision)"
+            );
+            self.diags.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W003IndexConfigMismatch,
+                    format!(
+                        "skipping the stored index `{name}`: it was built with a different \
+                         cambium.toml, an older rule-hash version or an older index content \
+                         revision, so splicing onto it could disagree with a full build"
+                    ),
+                )
+                .with_help(
+                    "expected right after a cambium.toml edit; mint a new lineage with \
+                     `cambi baseline build --publish`",
+                ),
             );
             return Ok(None);
         }

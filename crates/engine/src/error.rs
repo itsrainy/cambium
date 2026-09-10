@@ -62,11 +62,95 @@ impl EngineError {
     }
 
     /// Exit code for this failure (spec 10).
+    ///
+    /// 0 through 4 are what callers have always branched on and never change
+    /// meaning. 5 is "the store could not be reached", which is worth telling
+    /// apart from "the store has no index for this commit": a CI job can retry
+    /// the first and build for the second. `NotConfigured` is not that — it is
+    /// a configuration error, and stays 1.
     pub fn exit_code(&self) -> i32 {
         match self {
             EngineError::Bazel(_) | EngineError::BazelQuery { .. } => 3,
             EngineError::BaselineUnavailable { .. } => 4,
+            EngineError::Store(
+                crate::store::StoreError::Backend { .. } | crate::store::StoreError::Io { .. },
+            ) => 5,
             _ => 1,
+        }
+    }
+
+    /// This failure as a diagnostic, so an error renders and serialises like
+    /// every warning does.
+    ///
+    /// The message is the error's own `Display`; the code is what a caller
+    /// branches on, and the `help:` line is there whenever there is an action
+    /// to name.
+    pub fn diagnostic(&self) -> crate::diag::Diagnostic {
+        use crate::diag::{Code, Diagnostic};
+        use crate::store::StoreError;
+
+        let (code, help): (Code, Option<&str>) = match self {
+            EngineError::Config(_) => (
+                Code::E002Config,
+                Some("fix the file the message names, or point --config at another one"),
+            ),
+            EngineError::Git(_) => (
+                Code::E003Git,
+                Some("check that the revisions passed to --base and --head exist here"),
+            ),
+            EngineError::Bazel(_) => (
+                Code::E004Bazel,
+                Some("run from inside the Bazel workspace or pass -C, and check --bazel-binary"),
+            ),
+            EngineError::BazelQuery { .. } => (Code::E005BazelQuery, None),
+            EngineError::BaselineUnavailable { .. } => (
+                Code::E006BaselineUnavailable,
+                Some("run `cambi baseline build --publish`, or drop --no-full-build"),
+            ),
+            EngineError::ConfigHashMismatch { .. } => (
+                Code::E007ConfigHashMismatch,
+                Some("mint a new lineage: `cambi baseline build --publish`"),
+            ),
+            EngineError::NoStore => (
+                Code::E008NoStore,
+                Some("set [baseline].store in cambium.toml"),
+            ),
+            EngineError::PartialIndex { .. } => (
+                Code::E009PartialIndex,
+                Some(
+                    "fix the load errors, or pass --allow-partial (or set \
+                     baseline.publish_partial = true) to publish it anyway",
+                ),
+            ),
+            EngineError::Store(StoreError::NotConfigured) => (
+                Code::E008NoStore,
+                Some("set [baseline].store in cambium.toml"),
+            ),
+            EngineError::Store(StoreError::Backend { .. }) => (
+                Code::E010StoreBackend,
+                Some("check that [baseline].store is reachable and its credentials are current"),
+            ),
+            EngineError::Store(StoreError::Io { .. }) => (
+                Code::E011StoreIo,
+                Some("check the path and the permissions on [baseline].store"),
+            ),
+            EngineError::Store(StoreError::Unsupported(_)) => (
+                Code::E012StoreUnsupported,
+                Some("use a store backend that supports it, or skip the operation"),
+            ),
+            // The transparent wrappers: io, protobuf, the index format, the
+            // classifier. One code, because there is no action to name that
+            // the message does not already carry.
+            EngineError::Index(_)
+            | EngineError::Classify(_)
+            | EngineError::Proto(_)
+            | EngineError::Io(_)
+            | EngineError::IoAt { .. } => (Code::E001Internal, None),
+        };
+        let d = Diagnostic::error(code, self.to_string());
+        match help {
+            Some(h) => d.with_help(h),
+            None => d,
         }
     }
 }

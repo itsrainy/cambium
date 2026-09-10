@@ -251,7 +251,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             emit(&q.targets(&package, kind)?, fmt, print_package_targets)
         }
         Args::Stats { .. } => emit(&q.stats(f.file_size() as u64), fmt, print_stats),
-        Args::Externals { repo, .. } => emit(&externals(f.view(), repo.as_deref()), fmt, print_externals),
+        Args::Externals { repo, .. } => {
+            emit(&externals(f.view(), repo.as_deref()), fmt, print_externals)
+        }
         Args::Verify(_) => unreachable!("handled above"),
     }?;
     Ok(crate::EXIT_OK)
@@ -559,7 +561,14 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
             path_maps: v
                 .repo_path_maps(r)
                 .iter()
-                .map(|m| format!("{} -> {}{}", m.from, m.to, if m.exhaustive { " (exhaustive)" } else { "" }))
+                .map(|m| {
+                    format!(
+                        "{} -> {}{}",
+                        m.from,
+                        m.to,
+                        if m.exhaustive { " (exhaustive)" } else { "" }
+                    )
+                })
                 .collect(),
             inputs: inputs.remove(&r).unwrap_or_default(),
         })
@@ -568,7 +577,11 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
         .filter(|&id| v.bzl_in_workspace(id))
         .map(|id| ExternalsBzl {
             path: v.bzl_path(id).to_string(),
-            repos: v.bzl_repos_of(id).iter().map(|&r| v.repo_name(r).to_string()).collect(),
+            repos: v
+                .bzl_repos_of(id)
+                .iter()
+                .map(|&r| v.repo_name(r).to_string())
+                .collect(),
         })
         .filter(|b| only.map_or(true, |o| b.repos.iter().any(|r| r == o)))
         .collect();
@@ -576,7 +589,12 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
         .map(|e| v.bzl_ext_labels.get(e).to_string())
         .filter(|l| only.map_or(true, |o| l.contains(o)))
         .collect();
-    ExternalsDump { bzl_closure: v.bzl_closure, repos, workspace_bzl, ext_labels }
+    ExternalsDump {
+        bzl_closure: v.bzl_closure,
+        repos,
+        workspace_bzl,
+        ext_labels,
+    }
 }
 
 fn print_externals(d: &ExternalsDump) {
@@ -587,7 +605,10 @@ fn print_externals(d: &ExternalsDump) {
             println!("  map     {m}");
         }
         for (p, feeds) in &r.inputs {
-            println!("  input   {p}{}", if *feeds { "" } else { "\t(target only)" });
+            println!(
+                "  input   {p}{}",
+                if *feeds { "" } else { "\t(target only)" }
+            );
         }
     }
     for b in &d.workspace_bzl {

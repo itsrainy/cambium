@@ -344,6 +344,32 @@ impl Config {
         }
     }
 
+    /// The same findings as [`Config::warn_about_removed_keys`], as
+    /// diagnostics.
+    ///
+    /// The warning is emitted while the file is being read, before there is an
+    /// engine to report into, so the actionable half is recomputed from the
+    /// config once the sink exists. The two must say the same thing.
+    pub fn removed_key_diagnostics(&self) -> Vec<crate::diag::Diagnostic> {
+        let mut out = Vec::new();
+        if let Some(n) = self.limits.max_changed_files {
+            out.push(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W002RemovedConfigKey,
+                    format!(
+                        "limits.max_changed_files = {n} was removed and is ignored: the limit \
+                         is now limits.max_dirty_packages, which bounds the re-query rather \
+                         than the diff"
+                    ),
+                )
+                .with_help(
+                    "delete limits.max_changed_files, and set limits.max_dirty_packages instead",
+                ),
+            );
+        }
+        out
+    }
+
     /// Canonical serialisation, used for hashing and for `config show`.
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).expect("config is serialisable")

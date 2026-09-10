@@ -67,7 +67,10 @@ pub trait ArtifactStore: Send + Sync {
     fn describe(&self) -> String;
 }
 
-pub fn from_config(cfg: &StoreConfig) -> Option<Box<dyn ArtifactStore>> {
+pub fn from_config(
+    cfg: &StoreConfig,
+    diags: &crate::diag::Diagnostics,
+) -> Option<Box<dyn ArtifactStore>> {
     match cfg {
         StoreConfig::None => None,
         StoreConfig::Dir { path } => Some(Box::new(DirStore::new(path.clone()))),
@@ -84,6 +87,7 @@ pub fn from_config(cfg: &StoreConfig) -> Option<Box<dyn ArtifactStore>> {
             push_cmd: push_cmd.clone(),
             list_cmd: list_cmd.clone(),
             not_found_exit: *not_found_exit,
+            diags: diags.clone(),
         })),
     }
 }
@@ -373,6 +377,10 @@ pub struct CommandStore {
     list_cmd: Vec<String>,
     /// See [`StoreConfig::Command::not_found_exit`].
     not_found_exit: Option<i32>,
+    /// A fetch that failed with something on stderr is read as a miss, which
+    /// turns into a cold build; that is worth a diagnostic and not only a log
+    /// line, so the store carries the engine's sink.
+    diags: crate::diag::Diagnostics,
 }
 
 impl CommandStore {
@@ -433,6 +441,20 @@ impl ArtifactStore for CommandStore {
                         status = ?code,
                         %stderr,
                         "fetch command failed; treating the artifact as absent"
+                    );
+                    self.diags.emit(
+                        crate::diag::Diagnostic::warning(
+                            crate::diag::Code::W007StoreFetchFailed,
+                            format!(
+                                "the store's fetch command failed for `{name}` (exit \
+                                 {code:?}) and said: {stderr}. Treating the artifact as \
+                                 absent, which means a cold build rather than a splice"
+                            ),
+                        )
+                        .with_help(
+                            "check the credentials and the location in [baseline].store; a \
+                             real miss is silent",
+                        ),
                     );
                 }
                 Ok(false)
@@ -556,6 +578,7 @@ mod tests {
             push_cmd: vec!["true".into()],
             list_cmd: vec!["ls".into(), dir.path().display().to_string()],
             not_found_exit: None,
+            diags: crate::diag::Diagnostics::new(),
         };
         let dest = dir.path().join("out.bin");
         assert!(store.fetch("cambium-index-x-1.bin", &dest).unwrap());
@@ -605,6 +628,7 @@ mod tests {
             push_cmd: vec![],
             list_cmd: vec![],
             not_found_exit: Some(1),
+            diags: crate::diag::Diagnostics::new(),
         };
         assert!(store.fetch("x", &dir.path().join("x")).is_err());
         let store = CommandStore {
@@ -612,6 +636,7 @@ mod tests {
             push_cmd: vec![],
             list_cmd: vec![],
             not_found_exit: Some(1),
+            diags: crate::diag::Diagnostics::new(),
         };
         assert!(!store.fetch("x", &dir.path().join("x")).unwrap());
     }

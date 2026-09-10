@@ -191,6 +191,10 @@ pub struct Engine {
     pub repo: Repo,
     pub bazel: Bazel,
     pub store: Option<Box<dyn ArtifactStore>>,
+    /// Where every actionable warning this run raises lands. Drained into the
+    /// report at the end of [`Engine::affected`]; a caller that drives
+    /// `compute` itself drains it itself.
+    pub diagnostics: crate::diag::Diagnostics,
     cache_dir: PathBuf,
 }
 
@@ -225,7 +229,11 @@ impl Engine {
 
     /// Engine over an already-known workspace.
     pub fn with_parts(cfg: Config, repo: Repo, bazel: Bazel) -> Self {
-        let store = store::from_config(&cfg.baseline.store);
+        let diagnostics = crate::diag::Diagnostics::new();
+        for d in cfg.removed_key_diagnostics() {
+            diagnostics.emit(d);
+        }
+        let store = store::from_config(&cfg.baseline.store, &diagnostics);
         let cache_dir = cfg
             .baseline
             .cache_dir
@@ -236,6 +244,7 @@ impl Engine {
             repo,
             bazel,
             store,
+            diagnostics,
             cache_dir,
         }
     }
@@ -301,6 +310,7 @@ impl Engine {
                     bazel: self.bazel.clone(),
                     opts: self.cfg.convert_options(),
                     files: self.file_source(self.workspace(), rev),
+                    diags: self.diagnostics.clone(),
                 },
                 None,
             ));
@@ -314,6 +324,7 @@ impl Engine {
                 bazel,
                 opts: self.cfg.convert_options(),
                 files,
+                diags: self.diagnostics.clone(),
             },
             Some(ws),
         ))
@@ -353,9 +364,10 @@ impl Engine {
 
     /// The store, with the cache directory and config hash a fetch needs.
     fn baselines(&self) -> Option<BaselineCache<'_>> {
-        self.store
-            .as_deref()
-            .map(|s| BaselineCache::new(s, &self.cache_dir, self.cfg.hash()))
+        self.store.as_deref().map(|s| {
+            BaselineCache::new(s, &self.cache_dir, self.cfg.hash())
+                .with_diagnostics(self.diagnostics.clone())
+        })
     }
 
     /// Finds an index for `commit` in the artifact store and caches it
@@ -615,7 +627,22 @@ impl Engine {
                     // A run that produced the right answer should not fail
                     // because the store was unwritable; the next run will
                     // simply have to compute the base again.
-                    Err(e) => tracing::warn!(%base, error = %e, "could not publish the base index"),
+                    Err(e) => {
+                        tracing::warn!(%base, error = %e, "could not publish the base index");
+                        self.diagnostics.emit(
+                            crate::diag::Diagnostic::warning(
+                                crate::diag::Code::W011PublishFailed,
+                                format!(
+                                    "the base index for {base} was computed but could not be \
+                                     published: {e}"
+                                ),
+                            )
+                            .with_help(
+                                "the answer is unaffected; check that [baseline].store is \
+                                 writable, or the next run recomputes the base",
+                            ),
+                        );
+                    }
                 },
             }
         }
@@ -628,6 +655,9 @@ impl Engine {
         // the caller gets the path the store served or the index this run
         // computed, and nothing is copied either way.
         out.base_index = Some(base_index.into_base_index());
+        // The sink is the run's, so this is everything every stage raised,
+        // including the ones that happened before the report existed.
+        out.report.diagnostics = self.diagnostics.drain();
         Ok(out)
     }
 
@@ -675,6 +705,19 @@ impl Engine {
                 }
                 Err(reason) => {
                     tracing::info!(path = %c.path, %reason, "bazelrc edit forces a global run");
+                    self.diagnostics.emit(
+                        crate::diag::Diagnostic::warning(
+                            crate::diag::Code::W004BazelrcGlobal,
+                            format!("{} changed and the run went global: {reason}", c.path),
+                        )
+                        // The screen works on flag triples rather than on
+                        // lines, so it knows the file but not where in it.
+                        .at(c.path.clone(), None)
+                        .with_help(
+                            "add the flag to [bazelrc].allowlist_extra if it cannot affect \
+                             loading or analysis",
+                        ),
+                    );
                     return ScreenedDiff {
                         changes: changes.iter().collect(),
                         safe,
@@ -802,7 +845,28 @@ impl Engine {
             flag_reach = crate::flags::resolve(base_view, querier, &screened.label_flags);
             stats.bazelrc_flag_nodes = flag_reach.nodes.len();
         }
-        if let Some(reason) = screened.global_reason.or_else(|| flag_reach.global.take()) {
+        let mut global_reason = screened.global_reason;
+        if global_reason.is_none() {
+            // W004 has already been emitted for the bazelrc half; this is the
+            // other cause, and it names a setting rather than a flag.
+            if let Some(reason) = flag_reach.global.take() {
+                self.diagnostics.emit(
+                    crate::diag::Diagnostic::warning(
+                        crate::diag::Code::W015FlagUnresolved,
+                        format!(
+                            "a Starlark build setting a .bazelrc edit changed could not be \
+                             resolved against the index, so everything is affected: {reason}"
+                        ),
+                    )
+                    .with_help(
+                        "move the setting into the main repository, or add the flag to \
+                         [bazelrc].allowlist_extra if it cannot affect analysis",
+                    ),
+                );
+                global_reason = Some(reason);
+            }
+        }
+        if let Some(reason) = global_reason {
             timings.dirty = sw.lap();
             timings.total = timings.dirty;
             let dirty = DirtySet {
@@ -824,6 +888,27 @@ impl Engine {
             &cambium_classify::IndexConsumers(base_view),
         );
 
+        if dirty.global {
+            // The only thing that makes the classifier's own dirty set global
+            // is an invalidator path or glob matching a changed file.
+            self.diagnostics.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W013InvalidatorMatched,
+                    format!(
+                        "a changed path matches an invalidator, so everything is affected: {}",
+                        dirty
+                            .global_reason
+                            .as_deref()
+                            .unwrap_or("no reason recorded")
+                    ),
+                )
+                .with_help(
+                    "if the path cannot move the build graph, take it out of \
+                     [invalidators].paths / globs, or add it to [ignore].globs",
+                ),
+            );
+        }
+
         let bzl_dirty =
             self.resolve_changed_bzl(base_view, querier, &mut dirty, &mut ext, &mut stats);
         keep_surviving_packages(&mut dirty, querier, self.workspace());
@@ -835,6 +920,19 @@ impl Engine {
         // say "everything", but only one of them says why in terms of the
         // module system.
         if let Some(reason) = ext.global.take() {
+            self.diagnostics.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W014ExternalsGlobal,
+                    format!(
+                        "the external-repository stage could not account for a change, so \
+                         everything is affected: {reason}"
+                    ),
+                )
+                .with_help(
+                    "the message names the file; [externals].enabled = false turns the stage \
+                     off if its precision is not wanted here",
+                ),
+            );
             dirty.global = true;
             dirty.global_reason = Some(reason);
         }
@@ -894,6 +992,16 @@ impl Engine {
         let mut cold_reason = None;
         let (to_query, rows) = if cold {
             let reason = cold_rebuild_reason(dirty.dirty.len(), limit);
+            self.diagnostics.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W012ColdRebuild,
+                    format!(
+                        "the run re-indexed the whole repository at head rather than splicing: \
+                         {reason}. The answer is still exact"
+                    ),
+                )
+                .with_help("raise limits.max_dirty_packages, or set it to 0 to never cold-rebuild"),
+            );
             // Distinguishable from a genuine cold build, which says `running
             // full bazel query //... (cold build)`: this one re-queries the
             // same `//...` but keeps the lineage and splices onto the base, so
@@ -1095,6 +1203,20 @@ impl Engine {
                 count = paths.len(),
                 "the base index carries no static .bzl load closure; treating the change as global"
             );
+            self.diagnostics.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W008NoLoadClosure,
+                    format!(
+                        "the base index carries no static .bzl load closure, so the {} changed \
+                         .bzl file(s) could not be resolved and everything is affected",
+                        paths.len()
+                    ),
+                )
+                .with_help(
+                    "rebuild the lineage with `cambi baseline build` from a checkout the row \
+                     source can read",
+                ),
+            );
             dirty.global = true;
             dirty.global_reason = Some(no_closure_reason(&paths));
             return bzl_dirty;
@@ -1155,6 +1277,7 @@ impl Engine {
                 ext: &mut *ext,
                 stats: &mut *stats,
                 workspace_level: &mut workspace_level,
+                diags: &self.diagnostics,
             };
             witness_unknown_bzl(querier, &unknown, &mut w, self.cfg.externals.enabled);
         }
@@ -1168,6 +1291,21 @@ impl Engine {
             tracing::warn!(
                 files = ?workspace_level,
                 "a changed .bzl is loaded outside any package; treating the change as global"
+            );
+            self.diagnostics.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W009WorkspaceLevelBzl,
+                    format!(
+                        "a changed .bzl is loaded outside any package, so everything is \
+                         affected: {}",
+                        workspace_level.join(", ")
+                    ),
+                )
+                .at(workspace_level[0].clone(), None)
+                .with_help(
+                    "expected for a workspace-level .bzl; if the file is not really in the \
+                     workspace closure, rebuild the index so its closure is current",
+                ),
             );
             dirty.global = true;
             dirty.global_reason = Some(workspace_level_reason(&workspace_level));
@@ -1339,6 +1477,9 @@ impl RunState<'_> {
             timings_ms: self.timings,
             stats: self.stats,
             explanations: self.req.explain.then(|| explain(view, &result, &reasons)),
+            // Filled by `Engine::affected` from the sink; a caller that drives
+            // `compute` directly fills it from `engine.diagnostics` itself.
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -1645,6 +1786,7 @@ fn global_report(
         timings_ms: timings,
         stats,
         explanations: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -1775,6 +1917,7 @@ struct Witness<'a> {
     ext: &'a mut Externals,
     stats: &'a mut Stats,
     workspace_level: &'a mut Vec<String>,
+    diags: &'a crate::diag::Diagnostics,
 }
 
 /// Decide, from the head checkout alone, what a changed `.bzl` the base
@@ -1880,6 +2023,22 @@ fn witness_unknown_bzl(
                 loaders = ?found,
                 "a changed .bzl is loaded at head but has no node in the base index's load closure; \
                  the stored closure is incomplete and the witness dirtied its loaders instead"
+            );
+            w.diags.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W010IncompleteClosure,
+                    format!(
+                        "`{root}` is loaded at head but has no node in the base index's load \
+                         closure, so the stored closure is incomplete; the witness followed \
+                         its {} loader(s) instead",
+                        found.len()
+                    ),
+                )
+                .at(root.to_string(), None)
+                .with_help(
+                    "the answer is safe; rebuild the lineage with `cambi baseline build` to \
+                     make it cheap again",
+                ),
             );
         }
     }
