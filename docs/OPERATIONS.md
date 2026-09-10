@@ -32,6 +32,15 @@ size, which do not fit on a laptop.
   moving the tree costs a full re-fetch and re-analysis. Set
   `CAMBIUM_SUBJECTS_DIR=$HOME/.cache/cambium/corpus` instead — the driver
   does.
+- **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` pulls
+  each subject's `bases/*.bin` and `heads/*.bin` alongside the index and the
+  results, replays every change set, and — with `REDERIVE=1` and a local
+  mirror — also runs `cambi bench replay <subject> --head-check`, which
+  re-derives the externals tables from the head tree's text and compares them
+  against the index the rebuild oracle cold-built at the pin. That is the
+  rebuild oracle's externals half, offline: an engine change to the externals
+  tables is checkable without Bazel or the box. A subject whose published run
+  predates the head archive has none and is silently skipped.
 - **Smoke first.** `SMOKE=1 tools/bench/run-published.sh` does every
   subject's fetch and build, a three-commit history walk and one change set
   with every tool and both oracles, into `bench-results-smoke/`, in about

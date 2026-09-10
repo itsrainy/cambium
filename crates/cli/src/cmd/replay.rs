@@ -91,6 +91,18 @@ pub struct Args {
     #[arg(long)]
     pub rederive: bool,
 
+    /// Check the *rebuild oracle's* externals half offline, instead of
+    /// replaying change sets: open the index Bazel cold-built at the pin
+    /// (`<results-dir>/<subject>/heads/<pin>.bin`, archived by the history's
+    /// rebuild oracle), re-derive its externals side tables from the head
+    /// tree's own text with this build, and compare the two by label. Where
+    /// --rederive can only hold this build's derivation against what an
+    /// earlier one recorded, this holds it against Bazel's truth. Requires
+    /// --repo, and is silent about a subject whose run archived no head
+    /// index.
+    #[arg(long = "head-check")]
+    pub head_check: bool,
+
     /// Compare against a previous `--all --save-baseline` file rather than
     /// against what the run recorded. This is the tight loop: both sides ran
     /// on the same stored index, so every difference is the engine's.
@@ -127,6 +139,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     let cfg = subjects.config_for(&entry, version.as_deref());
 
     let results = args.results_dir.join(&entry.id);
+    if args.head_check {
+        return head_check(&args, &entry.id, &entry.pin, &results);
+    }
     let index_path = match &args.index {
         Some(p) => p.clone(),
         None => results.join(cambium_bench::util::versioned_name(
@@ -346,6 +361,77 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     }
 
     Ok(if divergences.is_empty() {
+        crate::EXIT_OK
+    } else {
+        crate::EXIT_ERROR
+    })
+}
+
+/// `--head-check`: the rebuild oracle's externals half, offline.
+///
+/// The oracle on the box compares the incrementally applied index against a
+/// fresh Bazel build at the pin, and that fresh build is the only artefact
+/// that says what the externals tables *are* there. The history archives it;
+/// this opens it, re-derives its tables from the head tree's own text with
+/// this build, and compares. The nodes and the edges are the archived
+/// index's on both sides by construction, so an empty graph diff proves
+/// nothing and the externals section is the whole signal — which is why the
+/// summary line counts externals mismatches and mentions the rest only when
+/// there are any (there should never be, and a count here is a bug in the
+/// re-derivation rather than in the derivation under test).
+fn head_check(args: &Args, subject: &str, pin: &str, results: &Path) -> Result<u8> {
+    let Some(path) = replay::archived_head(results, pin) else {
+        // Quiet by design: precheck.sh runs this for every subject, and a run
+        // published before the history archived its head index has none.
+        tracing::info!(%subject, %pin, "no archived head index; nothing to check");
+        return Ok(crate::EXIT_OK);
+    };
+    let repo = args.repo.clone().context(
+        "--head-check re-derives the externals tables from MODULE.bazel, WORKSPACE and the \
+         workspace .bzl closure at the pin, so it needs --repo <git dir>",
+    )?;
+    let texts = GitTextOwned(cambium_diff::Repo::new(repo));
+    let file = IndexFile::open(&path)
+        .with_context(|| format!("opening the archived head {}", path.display()))?;
+    let diff = replay::head_check(file.view(), pin, &texts, args.max_listed)
+        .with_context(|| format!("re-deriving the externals tables at {pin}"))?;
+
+    match args.output {
+        DataFormat::Json => {
+            let doc = serde_json::json!({
+                "schema": replay::REPLAY_SCHEMA,
+                "subject": subject,
+                "pin": pin,
+                "head_index": path.display().to_string(),
+                "head_check": diff,
+            });
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        }
+        DataFormat::Text => {
+            println!(
+                "{subject}: head check at {pin}: {} externals mismatches",
+                diff.counts.externals_mismatch
+            );
+            for line in &diff.externals_mismatch {
+                println!("    {line}");
+            }
+            if diff.counts.externals_mismatch > diff.externals_mismatch.len() {
+                println!(
+                    "    ... {} more",
+                    diff.counts.externals_mismatch - diff.externals_mismatch.len()
+                );
+            }
+            let mut d = diff.clone();
+            d.counts.externals_mismatch = 0;
+            if !d.is_empty() {
+                println!(
+                    "    the graph itself differs, which a re-derivation cannot cause: {}",
+                    d.summary()
+                );
+            }
+        }
+    }
+    Ok(if diff.is_empty() {
         crate::EXIT_OK
     } else {
         crate::EXIT_ERROR

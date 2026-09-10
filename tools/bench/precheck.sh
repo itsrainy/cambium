@@ -6,12 +6,19 @@
 #   SAVE_BASELINE=1 tools/bench/precheck.sh      # record today's answers
 #   BASELINE=1 tools/bench/precheck.sh           # gate against that record
 #   REDERIVE=1 tools/bench/precheck.sh           # also re-derive the externals
-#                                                # tables at each base
+#                                                # tables at each base, and run
+#                                                # the head check at each pin
 #
 # REDERIVE=1 is for a change to how the *index* derives its externals side
 # tables (`cambium_index::build_repo_inputs` and what feeds it). Without it a
 # replay reads the tables the run's cambium already wrote, so such a change is
 # invisible. Compare a re-derived run only against another re-derived run.
+#
+# REDERIVE=1 also runs `bench replay --head-check` per subject: the index the
+# rebuild oracle cold-built at the pin with real Bazel, against this build's
+# derivation of the same externals tables from the head tree's text. That is
+# the one check here that compares against Bazel's truth rather than against
+# what an earlier engine recorded.
 #
 # It pulls, per subject, the stored index at the pin, the base index each change
 # set actually ran against, and the recorded results from the benchmark box into
@@ -82,6 +89,14 @@ pull() {  # subject
   mkdir -p "$dir/bases"
   scp -q -i "$PEM" "ubuntu@$h:$BOX_REPO/bench-results/$s/bases/*.bin" "$dir/bases/" 2>/dev/null \
     || echo "  no archived base indexes for $s; replaying against the pin"
+  # And the index the rebuild oracle cold-built at the pin with real Bazel:
+  # that is Bazel's truth about the graph and the externals tables there, and
+  # `--head-check` re-derives those tables from the head tree's text and holds
+  # them against it. One file a subject. A run published before the history
+  # archived it has none, and scp failing on that must not fail the pull.
+  mkdir -p "$dir/heads"
+  scp -q -i "$PEM" "ubuntu@$h:$BOX_REPO/bench-results/$s/heads/*.bin" "$dir/heads/" 2>/dev/null \
+    || echo "  no archived head index for $s; the head check will be skipped"
   [ "$PATHS_FROM_BOX" = 1 ] && paths_from_box "$s" "$h" "$dir"
   return 0
 }
@@ -145,6 +160,15 @@ for s in $SUBJECTS; do
   [ "${BASELINE:-0}" = 1 ] && args+=(--baseline "$CACHE/$s/baseline.json")
   [ "${SAVE_BASELINE:-0}" = 1 ] && args+=(--save-baseline "$CACHE/$s/baseline.json")
   "$CAMBI" bench replay "${args[@]}" || fail=1
+
+  # The rebuild oracle's externals half, offline: the index Bazel cold-built
+  # at the pin, against this build's derivation of the same tables from the
+  # head tree's own text. It needs the mirror for that text, and it is silent
+  # about a subject whose run archived no head index.
+  if [ "${REDERIVE:-0}" = 1 ] && [ -d "$mirror" ] && \
+     ls "$CACHE/$s"/heads/*.bin >/dev/null 2>&1; then
+    "$CAMBI" bench replay "$s" --results-dir "$CACHE" --repo "$mirror" --head-check || fail=1
+  fi
 done
 
 if [ "$fail" = 0 ]; then echo "=== PRECHECK CLEAN ==="; else echo "=== PRECHECK FOUND DIVERGENCE ==="; fi

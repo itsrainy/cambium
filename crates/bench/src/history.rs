@@ -193,6 +193,15 @@ pub struct HistoryResult {
     pub rebuild: Option<ColdBuild>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<OracleOutcome>,
+    /// Where the index the rebuild oracle cold-built at the pin was archived,
+    /// `<results>/<subject>/heads/<pin sha>.bin`. That index is Bazel's truth
+    /// at the pin, and keeping it is what lets `cambi bench replay
+    /// --head-check` re-derive the externals tables from the head tree's text
+    /// with a later engine and compare them against it, offline. `None` when
+    /// the oracle did not run, when the archive already existed, or in every
+    /// result written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_index: Option<PathBuf>,
     pub summary: Summary,
     pub done: bool,
 }
@@ -488,6 +497,13 @@ pub fn history(
         let (fresh, rebuild) = cold_build(engine, driver, &to)?;
         let diff = compare_by_label(index.view(), fresh.view(), opts.diff_cap);
         let ok = diff.is_empty();
+        // Keep the index Bazel just built. Comparing it against the applied
+        // one answers today's question and then throws away the only artefact
+        // that says what Bazel's graph and externals tables *are* at the pin;
+        // archived, a later engine's derivation can be checked against it on a
+        // laptop (`cambi bench replay --head-check`). `state_dir` is
+        // `bench-results/<subject>/`, beside the change-set driver's `bases/`.
+        result.head_index = archive_head_index(engine, &opts.state_dir, &to, &fresh);
         result.rebuild = Some(rebuild);
         result.oracle = Some(OracleOutcome { ok, diff });
     } else {
@@ -501,6 +517,38 @@ pub fn history(
     }
     state.save(&opts.state_dir)?;
     Ok(result)
+}
+
+/// Archives the oracle's freshly built head index, best effort.
+///
+/// A history that answered correctly must not fail because a diagnostic copy
+/// could not be written, so a failure is a warning and a `None`.
+fn archive_head_index(
+    engine: &Engine,
+    state_dir: &Path,
+    pin: &str,
+    fresh: &IndexData,
+) -> Option<PathBuf> {
+    let dest = crate::replay::archived_head_path(state_dir, pin);
+    match crate::replay::archive_index(
+        &dest,
+        crate::replay::ArchiveSource::Data(fresh),
+        engine.index_compression(),
+    ) {
+        Ok(Some(at)) => {
+            let bytes = std::fs::metadata(&at).map(|m| m.len()).unwrap_or(0);
+            tracing::info!(%pin, path = %at.display(), bytes, "archived the head index the rebuild oracle built");
+            Some(at)
+        }
+        Ok(None) => {
+            tracing::info!(%pin, path = %dest.display(), "the head index was already archived");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(%pin, error = format!("{e:#}"), "could not archive the head index");
+            None
+        }
+    }
 }
 
 fn start(
@@ -529,6 +577,7 @@ fn start(
         commits: Vec::new(),
         rebuild: None,
         oracle: None,
+        head_index: None,
         summary: Summary::default(),
         done: false,
     };
