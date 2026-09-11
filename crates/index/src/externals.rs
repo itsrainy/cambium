@@ -1595,9 +1595,17 @@ fn string_literals(text: &str) -> Vec<(usize, Literal)> {
         // closure, and a change to it is answered by that file's own
         // repositories. Read as an input it would make every `.bzl` a root
         // workspace file loads an input of everything that file can define.
+        // `use_repo_rule("//tools:gen.bzl", "gen_repo")` and
+        // `use_extension("//bazel:ext.bzl", "ext")` in `MODULE.bazel` are the
+        // same edge: written at module level, where nothing attributes them
+        // more finely than the whole universe, so as inputs they would feed
+        // every repository the module declares.
         if i >= 2
             && matches!(toks[i - 1].tok, Tok::Open(b'('))
-            && matches!(toks[i - 2].tok, Tok::Name("load"))
+            && matches!(
+                toks[i - 2].tok,
+                Tok::Name("load") | Tok::Name("use_repo_rule") | Tok::Name("use_extension")
+            )
         {
             continue;
         }
@@ -2179,6 +2187,42 @@ mod tests {
         );
         // A label the rule resolves feeds it; neither of these is target-only.
         assert!(ri.target_only.is_empty(), "{:?}", ri.target_only);
+    }
+
+    /// The golden end-to-end fixture's `MODULE.bazel`: `use_repo_rule` names
+    /// the `.bzl` that defines `gen_repo`, and `bazel_dep` + `local_path_override`
+    /// declare a second repository. The `.bzl` label is a load edge, so it is
+    /// no path input of either; a change to the file is answered by its own
+    /// row, which names only the repository its rule instantiates.
+    #[test]
+    fn a_use_repo_rule_label_is_not_a_repository_input() {
+        let files = Files(vec![
+            (
+                "MODULE.bazel",
+                "module(name = \"root\", version = \"0.0.1\")\n\
+                 bazel_dep(name = \"mod_a\", version = \"0.0.1\")\n\
+                 local_path_override(\n    module_name = \"mod_a\",\n    path = \"mod_a\",\n)\n\
+                 gen_repo = use_repo_rule(\"//tools:gen.bzl\", \"gen_repo\")\n\
+                 gen_repo(\n    name = \"gen\",\n    config = \"@root//:config.txt\",\n)\n",
+            ),
+            (
+                "tools/gen.bzl",
+                "def _impl(rctx):\n\
+                 \x20   rctx.file(\"value.txt\", rctx.read(rctx.path(rctx.attr.config)))\n\n\
+                 gen_repo = repository_rule(\n\
+                 \x20   implementation = _impl,\n\
+                 \x20   attrs = {\"config\": attr.label(mandatory = True)},\n\
+                 )\n",
+            ),
+        ]);
+        let ri = inputs(&files, &RepoMapping::identity());
+        assert!(
+            ri.repos_for("tools/gen.bzl").is_empty(),
+            "{:?}",
+            ri.repos_for("tools/gen.bzl")
+        );
+        assert_eq!(ri.repos_for("config.txt"), set(&["gen"]));
+        assert_eq!(ri.bzl_repos["tools/gen.bzl"], set(&["gen"]));
     }
 
     /// `tools/workspace.bzl` loads every `third_party/*/init.bzl` and calls
