@@ -277,18 +277,12 @@ mod tests {
     /// A `cambi` that answers `--version` and records its argv.
     fn fake(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("cambi");
-        std::fs::write(
+        cambium_testkit::executable_script(
             &p,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'cambi 0.1.0 (abc1234)'; exit 0; fi\n{body}\n"
+            &format!(
+                "if [ \"$1\" = --version ]; then echo 'cambi 0.1.0 (abc1234)'; exit 0; fi\n{body}"
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         p
     }
 
