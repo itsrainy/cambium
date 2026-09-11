@@ -54,7 +54,7 @@ shows in short form.
 
 Everything else `affected` takes today stays: `--tests-only`,
 `--include-manual`, `--max-depth`, `--no-full-build`, `--publish-base`,
-`--write-head-index`. `--explain` on `affected` is kept for a release and
+`--out`. `--explain` on `affected` is kept for a release and
 then goes: the verb below is its replacement.
 
 ### `explain`
@@ -157,10 +157,14 @@ every index it produces, and an index whose hash differs cannot be spliced
 onto.
 
 Beside it, gitignored, `cambium.local.toml` holds what is about this machine
-and not about the graph: `cache_dir`, `bazel.binary`, `bazel.startup_flags`.
-Only keys already excluded from the config hash may appear there; anything
-else is a diagnostic. `--cache-dir`, `--bazel`, `CAMBIUM_CACHE_DIR` and
-`--config` keep their precedence over both files.
+and not about the graph. Five keys may appear there, and only those five:
+`bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
+`baseline.compress_indexes` and `baseline.publish_partial`. Each is already
+excluded from the config hash, so a machine-local override can never make two
+checkouts of one commit publish indexes that claim to be interchangeable and
+are not; any other key is `CAMBI-E014` naming the key and the file it belongs
+in. `--cache-dir`, `--bazel-binary`, `CAMBIUM_CACHE_DIR` and `--config` keep
+their precedence over both files.
 
 ## The output contract
 

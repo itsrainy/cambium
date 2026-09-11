@@ -67,7 +67,7 @@ interchangeable:
 - **`affected` takes the overlay.** It answers a question and throws the graph
   away; nobody reads the index it would have built. A fetched baseline is not
   even deserialised — the run walks the mmap.
-- **`baseline update` materialises.** Its output *is* the published artifact,
+- **`cambi index update` materialises.** Its output *is* the published artifact,
   and it is where "a spliced index equals a full rebuild" gets exercised, which
   two of the four correctness oracles check. Making the shared path lazy to
   speed up `affected` would take the published artifact with it, along with the
@@ -137,7 +137,7 @@ they are still whole strings.
 The saving is worth stating, because it is the thing not being taken. Every
 label is `//package:name`, and the node columns already carry each node's
 package id, so the `//package:` prefix is stored twice and dropping it from the
-label table would cost nothing extra. `index stats` reports the projection:
+label table would cost nothing extra. `cambi inspect stats` reports the projection:
 
 ```
 labels:            85.3 MiB   33.0% of the file (table + sort index)
@@ -165,7 +165,7 @@ The extrapolation is arithmetic — a byte added to a package path lands once in
 each of its nodes' labels and once in the package name table, and nowhere else
 — and `label_share_grows_with_package_path_length_as_predicted` in
 `crates/engine/tests/index_queries.rs` checks that the file actually behaves
-that way rather than taking the arithmetic on trust. So: run `index stats` on
+that way rather than taking the arithmetic on trust. So: run `cambi inspect stats` on
 an index of your own repository. If the label line is over 40% there, the
 projection tells you what packing would give back before anyone writes it.
 
