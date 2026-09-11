@@ -79,7 +79,7 @@ bytes for two to three times the time, which is still cheap and is a
 defensible change if store egress ever starts mattering; level 19 buys 20-38%
 for sixty to a hundred times the time — 1.1 to 3.9 seconds on an index a
 publish already paid minutes of Bazel for, which is real latency on every
-`baseline update` for a saving a bigger index makes worse, not better.
+`index update` for a saving a bigger index makes worse, not better.
 Decompression costs 5-16 ms whatever the level, so a fetch pays essentially
 nothing for any of this and the level only trades write latency against bytes.
 
@@ -100,7 +100,7 @@ a lineage.
 Three separate things, and they are not interchangeable:
 
 - **`FORMAT_VERSION`** (`crates/index/src/format.rs`) versions the *file
-  layout*. A bump makes older files unreadable — `index inspect` can still name
+  layout*. A bump makes older files unreadable — `index show` can still name
   their version, nothing else can touch them. Bump it only when the bytes move.
   It went to **4** when the payload gained the static `.bzl` load closure — a
   `.bzl` path table plus three flat sections over it (direct loads, the

@@ -67,7 +67,7 @@ interchangeable:
 - **`affected` takes the overlay.** It answers a question and throws the graph
   away; nobody reads the index it would have built. A fetched baseline is not
   even deserialised — the run walks the mmap.
-- **`baseline update` materialises.** Its output *is* the published artifact,
+- **`index update` materialises.** Its output *is* the published artifact,
   and it is where "a spliced index equals a full rebuild" gets exercised, which
   two of the four correctness oracles check. Making the shared path lazy to
   speed up `affected` would take the published artifact with it, along with the
@@ -76,7 +76,7 @@ interchangeable:
 The two must answer identically, and that is enforced rather than assumed:
 every scenario in the property tests and every revision of the soundness sweep
 computes the answer both ways and requires the affected, direct and test sets —
-and the `--explain` paths — to match.
+and the `explain` paths — to match.
 
 Costs elsewhere, for honesty:
 

@@ -63,7 +63,7 @@ it owes at the end:
   corrections they imply, and reads through to the mmapped baseline for
   everything else — so the step is proportional to the change rather than to
   the repository. This is the default, not a flag.
-- **`baseline update` materialises.** Its output is the thing that gets
+- **`index update` materialises.** Its output is the thing that gets
   published, so it has to be a complete index.
 
 Both paths run the same direct-set derivation and the same walk over a
@@ -131,7 +131,7 @@ $ cambium-bench synth presets
 $ cambi config show|explain|hash
 ```
 
-`baseline build` and `baseline update` need `--out <file>` to say where the
+`index build` and `index update` need `--out <file>` to say where the
 index goes; only a run that also `--publish`es may omit it, and that run
 writes through a temporary file it deletes once the upload is done. An index
 is routinely gigabytes, so there is no default path.
