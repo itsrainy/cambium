@@ -9,12 +9,13 @@
 //! against fixture result files. This module is only the terminal: the poll
 //! loop, the keys, and `--once`, which prints the very same lines.
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use cambium_bench::watch::{render, render_change_sets, snapshot, Snapshot};
+use cambium_bench::watch::{render, render_change_sets, snapshot_with, Snapshot};
 use clap::Args as ClapArgs;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
@@ -102,7 +103,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         if !args.once && !ctx.quiet {
             eprintln!("cambium-bench watch: stdout is not a terminal; printing one snapshot");
         }
-        let snap = snapshot(&results_dir, &args.subjects);
+        let snap = snapshot_with(&results_dir, &args.subjects, &engine_ids(ctx));
         print_once(ctx, &snap)?;
         return Ok(crate::EXIT_OK);
     }
@@ -112,6 +113,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             results_dir,
             subjects: args.subjects,
             interval: Duration::from_secs_f64(args.interval),
+            engines: engine_ids(ctx),
         },
         &mut observer,
     )?;
@@ -135,11 +137,34 @@ pub fn print_once(ctx: &Context, snap: &Snapshot) -> Result<()> {
     Ok(())
 }
 
+/// The engine id this build records for each manifest subject, by id: what
+/// tells a finished row this build wrote from a stale one. Empty when there
+/// is no manifest to work them out from, and then no row is called stale.
+pub fn engine_ids(ctx: &Context) -> BTreeMap<String, String> {
+    let Ok(session) = ctx.session(&crate::bench::Common::default()) else {
+        return BTreeMap::new();
+    };
+    session
+        .manifest
+        .repos
+        .iter()
+        .filter_map(|e| {
+            let run = session.subject(&e.id).ok()?;
+            Some((
+                e.id.clone(),
+                cambium_bench::state::State::engine_id(&run.config().hash()),
+            ))
+        })
+        .collect()
+}
+
 /// What the screen watches.
 pub struct Screen {
     pub results_dir: PathBuf,
     pub subjects: Vec<String>,
     pub interval: Duration,
+    /// [`engine_ids`], worked out once.
+    pub engines: BTreeMap<String, String>,
 }
 
 /// Which view is up.
@@ -163,7 +188,7 @@ pub fn screen(what: &Screen, sup: &mut dyn Supervisor) -> Result<()> {
     let mut view = View::Matrix;
     let mut selected = 0usize;
     let mut scroll = 0u16;
-    let mut snap = snapshot(&what.results_dir, &what.subjects);
+    let mut snap = snapshot_with(&what.results_dir, &what.subjects, &what.engines);
     let mut last = Instant::now();
     loop {
         sup.tick();
@@ -206,7 +231,7 @@ pub fn screen(what: &Screen, sup: &mut dyn Supervisor) -> Result<()> {
             }
         }
         if last.elapsed() >= what.interval {
-            snap = snapshot(&what.results_dir, &what.subjects);
+            snap = snapshot_with(&what.results_dir, &what.subjects, &what.engines);
             selected = selected.min(snap.subjects.len().saturating_sub(1));
             last = Instant::now();
         }

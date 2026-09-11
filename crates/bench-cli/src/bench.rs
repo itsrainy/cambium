@@ -80,7 +80,11 @@ pub enum Args {
         /// build is what will not finish.
         #[arg(long = "oracle", value_delimiter = ',', default_value = "rebuild")]
         oracles: Vec<String>,
-        /// Start over rather than resuming the recorded history.
+        /// Continue the history already recorded for this pin. A recorded
+        /// history is otherwise refused: pass this or --restart.
+        #[arg(long, conflicts_with = "restart")]
+        resume: bool,
+        /// Discard the history already recorded for this pin and walk again.
         #[arg(long)]
         restart: bool,
         #[command(flatten)]
@@ -120,7 +124,12 @@ pub enum Args {
         /// Print the selected change sets and stop.
         #[arg(long)]
         select_only: bool,
-        /// Compare every change set again rather than resuming.
+        /// Continue the comparison already recorded for this pin. A recorded
+        /// comparison is otherwise refused: pass this or --restart.
+        #[arg(long, conflicts_with = "restart")]
+        resume: bool,
+        /// Discard the comparison already recorded for this pin and compare
+        /// every change set again.
         #[arg(long)]
         restart: bool,
         #[command(flatten)]
@@ -198,8 +207,8 @@ pub enum Args {
     /// the index at the pin, the recorded results, the archived base and head
     /// indexes, and the diff of every recorded change set.
     ///
-    /// Read-only on the box. A subject already under --cache is not pulled
-    /// again; delete its directory to refresh it.
+    /// Read-only on the box. A subject already under --cache is pulled again
+    /// only when the box's result files differ from the cached ones.
     PullResults(PullArgs),
     /// Print the label sets a change-set comparison stored.
     ///
@@ -304,14 +313,14 @@ pub struct RunArgs {
     /// The foils `changes` compares against. Default: bazel-diff and tango.
     #[arg(long = "tools", value_delimiter = ',')]
     pub tools: Vec<String>,
-    /// `--restart` on `history`: redo the walk rather than resume it.
+    /// Continue the results already in the results directory. Without this
+    /// or --fresh, a results directory that holds results is refused.
+    #[arg(long, conflicts_with = "fresh")]
+    pub resume: bool,
+    /// Move the results directory aside to `<dir>-<UTC timestamp>` and start
+    /// with nothing in it.
     #[arg(long)]
-    pub restart_history: bool,
-    /// `--restart` on `changes`: compare every change set again, which a
-    /// fix to a tool driver needs (a resumed change set keeps the old
-    /// tool's answer).
-    #[arg(long)]
-    pub restart_changes: bool,
+    pub fresh: bool,
     /// Where results go. Default: bench-results/, or bench-results-smoke/
     /// for a smoke run.
     #[arg(long)]
@@ -374,6 +383,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             subject,
             commits,
             oracles,
+            resume,
             restart,
             common,
         } => {
@@ -384,7 +394,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 &HistoryRequest {
                     commits,
                     oracles,
-                    resume: !restart,
+                    on_existing: verbs::OnExisting::from_flags(resume, restart),
                 },
             )?;
             println!("{}", path.display());
@@ -405,6 +415,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             change_set_file,
             stress_cap,
             select_only,
+            resume,
             restart,
             common,
         } => {
@@ -428,7 +439,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                     oracle_sample,
                     oracles,
                     tools,
-                    restart,
+                    on_existing: verbs::OnExisting::from_flags(resume, restart),
                 },
                 &ctx.tools,
             )?;
@@ -694,8 +705,7 @@ pub fn plan_of(ctx: &Context, args: &RunArgs) -> Result<Plan> {
     let mut plan = Plan::published(subjects);
     plan.size = size;
     plan.steps = steps;
-    plan.restart_history = args.restart_history;
-    plan.restart_changes = args.restart_changes;
+    plan.resume = args.resume;
     plan.results_dir = args.results_dir.clone();
     if !args.tools.is_empty() {
         plan.tools = args.tools.clone();
@@ -721,6 +731,13 @@ fn do_run(ctx: &Context, args: &RunArgs) -> Result<u8> {
             session.cambi()?.version(),
             crate::VERSION
         );
+    }
+    if args.fresh {
+        if let Some(to) = plan.move_results_aside()? {
+            println!("=== moved the previous results to {} ===", to.display());
+        }
+    } else {
+        plan.refuse_existing()?;
     }
     if plan.size == Size::Small {
         println!(
@@ -769,6 +786,9 @@ fn do_pull(ctx: &Context, args: &PullArgs) -> Result<u8> {
             Ok(p) if p.cached => println!("{s}: cached: {}", args.cache.join(s).display()),
             Ok(p) => {
                 println!("{s}: pulled into {}", args.cache.join(s).display());
+                if p.refreshed {
+                    println!("  the box's results changed since the cached pull; pulled again");
+                }
                 if !p.bases {
                     println!("  no archived base indexes for {s}; replaying against the pin");
                 }
@@ -820,8 +840,8 @@ mod tests {
             size: "large".into(),
             smoke: false,
             tools: vec![],
-            restart_history: false,
-            restart_changes: false,
+            resume: false,
+            fresh: false,
             results_dir: None,
             require_sha: None,
             dry_run: true,
@@ -851,7 +871,7 @@ mod tests {
                 subjects: vec!["envoy".into()],
                 steps: vec!["changes".into(), "report".into()],
                 smoke: true,
-                restart_changes: true,
+                resume: true,
                 ..args()
             },
         )
@@ -859,7 +879,7 @@ mod tests {
         assert_eq!(plan.subjects, ["envoy"]);
         assert_eq!(plan.size, Size::Small);
         assert_eq!(plan.steps, [StepKind::Changes, StepKind::Report]);
-        assert!(plan.restart_changes && !plan.restart_history);
+        assert!(plan.resume);
         let lines: Vec<String> = plan.steps().iter().map(|s| s.command_line()).collect();
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(

@@ -215,10 +215,17 @@ fn a_history_resumes_from_its_last_published_index() {
     let partial = history(&f.engine, &f.engine_driver(), half, &o).unwrap();
     assert!(partial.done);
 
-    // Now a full-range run resumes: its results file says the range ended at
-    // `half.last()`, which differs, so it must start over — that is the
-    // conservative reading, and it must still be correct.
-    let full = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, true)).unwrap();
+    // A resume over a different range is refused rather than started over:
+    // the recorded walk ended at `half.last()`, and continuing it as the full
+    // range would mix two experiments. Starting over is asked for explicitly.
+    let err = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, true))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("cannot resume") && err.contains("--restart"),
+        "{err}"
+    );
+    let full = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, false)).unwrap();
     assert_eq!(full.commits.len(), commits.len() - 1);
     assert!(full.oracle.unwrap().ok);
 

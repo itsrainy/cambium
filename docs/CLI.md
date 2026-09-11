@@ -285,7 +285,8 @@ the commit or change set in hand and the tool on it, elapsed, an ETA from the
 p50 of what is already done, globals so far, the worst recall so far, the pass
 count — with the last error per subject and the diagnostics the last `cambi`
 document carried underneath. `enter` expands a row into its change sets,
-`q` quits. It is a pure reader: the workloads write
+`q` quits. A finished or idle row whose state file another engine build
+wrote reads `stale` rather than `done`. It is a pure reader: the workloads write
 `bench-results/<subject>/progress.json` atomically on every step and the
 watcher polls it (`--interval`, default a second), so the same screen follows
 a run in progress, a finished run, and a `bench-results/` copied off the
@@ -305,10 +306,18 @@ changes ...` invocations — one after another as child processes, and switches
 to the watch screen with the running child's stderr tail in the footer; `q`
 asks before killing a child. It reimplements no workload. `cambium-bench run`
 is the same plan from flags (`--subject`, `--steps`, `--smoke`,
-`--restart-changes`, `--restart-history`, `--require-sha`), which is what
+`--resume`, `--fresh`, `--require-sha`), which is what
 `tools/bench/run-published.sh` calls; the plan has one definition,
 `crates/bench/src/plan.rs`. In a pipe, no verb is the usage error it has
 always been.
+
+Recorded results are never continued or discarded without being asked. Over
+a results directory that already holds results, `run` refuses unless given
+`--resume` or `--fresh` (move the directory aside to `<dir>-<timestamp>`),
+and the launcher's review asks the same question with `r` and `f`. `history`
+and `changes` on their own refuse a result recorded for the pin unless given
+`--resume` or `--restart`, and a `--resume` that cannot continue (another
+build's result, another range) fails instead of starting over.
 
 `cambium-bench pull-results` copies a subject's results off the benchmark
 box for an offline replay — the index at the pin, the recorded results, the

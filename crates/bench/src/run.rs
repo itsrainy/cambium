@@ -128,6 +128,51 @@ pub struct Built {
     pub warning: Option<String>,
 }
 
+/// What a workload does with a result already recorded for its pin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OnExisting {
+    /// Refuse to start. A recorded result is never continued or thrown away
+    /// without being asked: continuing one silently is how a crashed run's
+    /// numbers once passed for a fresh run's.
+    #[default]
+    Refuse,
+    /// `--resume`: continue it, and fail if it cannot be continued (another
+    /// build's, another range's) rather than start over.
+    Resume,
+    /// `--restart`: discard it and start again.
+    Restart,
+}
+
+impl OnExisting {
+    pub fn from_flags(resume: bool, restart: bool) -> Self {
+        match (resume, restart) {
+            (true, _) => OnExisting::Resume,
+            (_, true) => OnExisting::Restart,
+            _ => OnExisting::Refuse,
+        }
+    }
+}
+
+/// Refuses when `path` holds a recorded result and nobody said what to do
+/// with it. `recorded` counts what is in it, for the message.
+fn refuse_existing(
+    path: &Path,
+    what: &str,
+    on: OnExisting,
+    recorded: impl FnOnce() -> Option<usize>,
+) -> Result<()> {
+    if on != OnExisting::Refuse || !path.exists() {
+        return Ok(());
+    }
+    let n = recorded()
+        .map(|n| format!(" ({n} recorded)"))
+        .unwrap_or_default();
+    anyhow::bail!(
+        "{} already holds a {what}{n}; pass --resume to continue it or --restart to discard it",
+        path.display()
+    )
+}
+
 // ----------------------------------------------------------------- history
 
 /// What `history` was asked to do.
@@ -137,7 +182,7 @@ pub struct HistoryRequest {
     pub commits: Option<usize>,
     /// `--oracle`: `rebuild`, or `none`.
     pub oracles: Vec<String>,
-    pub resume: bool,
+    pub on_existing: OnExisting,
 }
 
 /// The history workload. Answers with the result and where it was written;
@@ -148,10 +193,19 @@ pub fn run_history(run: &SubjectRun<'_>, req: &HistoryRequest) -> Result<(PathBu
     let commits = req
         .commits
         .or(run.session.quick.then_some(crate::QUICK_COMMITS));
+    let results = run.workload("history")?;
+    let path = HistoryResult::path_versioned(&results, &run.entry.pin, run.version());
+    refuse_existing(&path, "history", req.on_existing, || {
+        HistoryResult::read(&path).ok().map(|h| h.commits.len())
+    })?;
     let checkout = run.checkout()?;
     let engine = checkout.engine(&run.entry, run.version())?;
+    let _servers = crate::servers::StopOnDrop::subject(
+        &checkout.dir,
+        &run.results.join("scratch"),
+        engine.bazel().startup_flags(),
+    );
     let cambi = run.cambi(&checkout)?;
-    let results = run.workload("history")?;
     let range = commits.unwrap_or(run.entry.history_window);
     let commits = changes::range_commits(&checkout.repo, &run.entry.pin, range)?;
     tracing::info!(
@@ -167,7 +221,7 @@ pub fn run_history(run: &SubjectRun<'_>, req: &HistoryRequest) -> Result<(PathBu
         results_dir: results.clone(),
         state_dir: run.results.clone(),
         publish: true,
-        resume: req.resume,
+        resume: req.on_existing == OnExisting::Resume,
         bazel_version: run.version().unwrap_or_default().to_string(),
         diff_cap: 50,
         rebuild_oracle,
@@ -179,7 +233,6 @@ pub fn run_history(run: &SubjectRun<'_>, req: &HistoryRequest) -> Result<(PathBu
         cambi: &cambi,
     };
     let result = history::history(&engine, &driver, &commits, &opts)?;
-    let path = HistoryResult::path_versioned(&results, &run.entry.pin, run.version());
     tracing::info!(
         commits = result.summary.commits,
         p50_ms = result.summary.p50_total_ms,
@@ -313,7 +366,7 @@ pub struct CompareRequest {
     pub oracles: Vec<String>,
     /// `--tools`, as typed.
     pub tools: Vec<String>,
-    pub restart: bool,
+    pub on_existing: OnExisting,
 }
 
 /// What a comparison answered with.
@@ -356,6 +409,11 @@ pub fn compare(
     anyhow::ensure!(!change_sets.is_empty(), "no change sets to compare");
 
     let engine = checkout.engine(&run.entry, run.version())?;
+    let _servers = crate::servers::StopOnDrop::subject(
+        &checkout.dir,
+        &run.results.join("scratch"),
+        engine.bazel().startup_flags(),
+    );
     let (rdeps, load) = parse_change_oracles(&req.oracles)?;
     let results = run.workload("changes")?;
     let cambi = run.cambi(&checkout)?;
@@ -367,12 +425,18 @@ pub fn compare(
         oracle_k: req.oracle_sample,
         load_oracle: load,
         seed: run.session.seed,
-        resume: !req.restart,
+        resume: req.on_existing == OnExisting::Resume,
         scratch: run.results.join("scratch"),
         state_dir: run.results.clone(),
         tango_change_sets: run.session.quick.then_some(crate::QUICK_TANGO_CHANGE_SETS),
         ..crate::compare::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
     };
+    let output = opts.output_path();
+    refuse_existing(&output, "comparison", req.on_existing, || {
+        ChangesResult::read(&output)
+            .ok()
+            .map(|c| c.change_sets.len())
+    })?;
     tracing::info!(
         change_sets = change_sets.len(),
         tools = tool_refs.len(),
