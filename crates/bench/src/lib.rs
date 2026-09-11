@@ -33,6 +33,10 @@
 //! which commit or change set, which tool, since when — and what
 //! `cambium-bench watch` polls. The harness is its only writer.
 //!
+//! [`watch`] is its reader: it turns the progress, state and result files into
+//! one snapshot and renders the matrix, in two pure halves so the table is
+//! checked against fixture files with no terminal anywhere.
+//!
 //! Beside them sits [`replay`], which is not a workload: it drives the
 //! engine's static stages from a stored index and a list of changed paths, so
 //! that an engine change can be checked against a published run's own answers
@@ -63,6 +67,7 @@ pub mod state;
 pub mod subject;
 pub mod tools;
 pub mod util;
+pub mod watch;
 
 // No root re-exports. Every one of these types is named by the module it
 // belongs to -- `compare::ChangesResult`, `classify::Class`,

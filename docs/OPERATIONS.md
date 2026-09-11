@@ -52,9 +52,21 @@ size, which do not fit on a laptop.
   `fetch` / `build` / `history --oracle rebuild` / `changes --tools
   cambium,bazel-diff,tango --oracle rdeps,load` / `report`, then a final
   `cambium-bench report`. A failing subject does not stop the rest. Run it under
-  `nohup` with a log and watch it with a Monitor; grep the log for
-  `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`, `unclassified`,
-  `cambium_missing`, `No space left`.
+  `nohup` with a log; follow it with `cambium-bench watch` (below) and grep the
+  log for `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`,
+  `unclassified`, `cambium_missing`, `No space left`.
+- **Following it: `cambium-bench watch`.** One row per subject, polled off
+  `bench-results/<subject>/progress.json` once a second — the step, progress,
+  the commit or change set in hand and the tool running on it, elapsed, an ETA
+  from the p50 of what is done, and the globals, worst recall and pass count so
+  far — with each subject's last error and the diagnostics its last `cambi`
+  document carried in the footer. `enter` opens the selected subject's change
+  sets, `q` quits. It reads files and nothing else, so it follows a run over
+  ssh on the box, a finished run, and an `rsync`ed copy on a laptop.
+  `cambium-bench watch --once` prints the same table for a log or a cron mail;
+  `--once --format json` is the snapshot document for a script. Run
+  `cambium-bench` with no arguments on a terminal for the launcher, which
+  composes a run and then shows this screen.
 - Timings from the last run, for planning: bazel ~23 min, sourcegraph ~57 min,
   apollo ~32 min, envoy ~2 h 34 m (Tango is ~3 min per change set there),
   xla ~3 h. Fetches and cold builds are ~free now that the caches exist.

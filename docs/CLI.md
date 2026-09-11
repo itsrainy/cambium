@@ -242,6 +242,20 @@ user. `replay` and the stage micro-benchmarks (`stages`, `sweep`, `regress`)
 are the exception and keep linking the engine directly, because they are
 white-box by nature: one replays the engine's static stages against a stored
 index with no product run to measure, and the others time a single in-memory
-stage. The live matrix view proposed in issue #1 is that binary's front door,
-not a `cambi` verb. It follows the output rules here because they are good
-rules, not because it is part of the contract.
+stage. The live matrix view of issue #1 is that binary's front door, not a `cambi`
+verb. It follows the output rules here because they are good rules, not
+because it is part of the contract.
+
+`cambium-bench watch` is that view: one row per subject — step, progress,
+the commit or change set in hand and the tool on it, elapsed, an ETA from the
+p50 of what is already done, globals so far, the worst recall so far, the pass
+count — with the last error per subject and the diagnostics the last `cambi`
+document carried underneath. `enter` expands a row into its change sets,
+`q` quits. It is a pure reader: the workloads write
+`bench-results/<subject>/progress.json` atomically on every step and the
+watcher polls it (`--interval`, default a second), so the same screen follows
+a run in progress, a finished run, and a `bench-results/` copied off the
+benchmark box. `--once` prints the same table as text and exits, and
+`--once --format json` answers with the snapshot document (`{schema,
+results_dir, at, subjects}`) for a tool that wants the matrix without
+learning the result files.
