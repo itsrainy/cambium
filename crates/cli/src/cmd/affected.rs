@@ -10,12 +10,18 @@ use crate::Format;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Revision to compare from (typically the merge base).
+    /// The range, spelled as `git diff` spells it: `BASE..HEAD`, or a single
+    /// revision for `<rev>..HEAD`. With no range, the merge base of
+    /// `[git].default_branch` with HEAD.
+    #[arg(value_name = "BASE..HEAD")]
+    pub range: Option<String>,
+    /// Revision to compare from (typically the merge base). The old spelling
+    /// of the range's left half; it stays as an alias.
     #[arg(long)]
-    pub base: String,
+    pub base: Option<String>,
     /// Revision to compare to. Defaults to HEAD.
-    #[arg(long, default_value = "HEAD")]
-    pub head: String,
+    #[arg(long)]
+    pub head: Option<String>,
     /// Report only test targets.
     #[arg(long)]
     pub tests_only: bool,
@@ -45,10 +51,16 @@ pub struct Args {
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
+    // A contradictory command line is the caller's error wherever it is run,
+    // so it is answered before the workspace is opened: `cambi affected
+    // a..b --base c` outside a Bazel tree must say what is wrong with it
+    // rather than that there is no workspace.
+    check_usage(&args)?;
     let engine = ctx.engine()?;
+    let (base, head) = resolve_range(&engine, &args)?;
     let req = AffectedRequest {
-        base: args.base.clone(),
-        head: args.head.clone(),
+        base,
+        head,
         include_manual: args.include_manual,
         explain: args.explain,
         // Only materialise a head index when the caller asked for the file;
@@ -133,6 +145,61 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     })
 }
 
+/// What is wrong with the command line itself.
+///
+/// `--base` and `--head` are the old spelling of the range's two halves and
+/// stay for the scripts that use them, but giving both a range and a flag is
+/// not a deprecation to warn about: there is no reading of `cambi affected
+/// a..b --base c` that is what someone meant.
+fn check_usage(args: &Args) -> Result<()> {
+    let Some(range) = &args.range else {
+        return Ok(());
+    };
+    if let Some(flag) = args
+        .base
+        .as_ref()
+        .map(|_| "--base")
+        .or(args.head.as_ref().map(|_| "--head"))
+    {
+        return Err(crate::diag::UsageError::raised(format!(
+            "`cambi affected {range}` already says which revisions to compare; drop {flag}"
+        )));
+    }
+    if range.contains("...") {
+        return Err(crate::diag::UsageError::raised(format!(
+            "`{range}`: cambi takes a two-dot range (BASE..HEAD); a bare revision already \
+             means <rev>..HEAD"
+        )));
+    }
+    Ok(())
+}
+
+/// The two revisions this run compares: the range, the old flags, or — with
+/// neither — the merge base of the default branch with HEAD.
+fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(String, String)> {
+    if let Some(range) = &args.range {
+        return Ok(match range.split_once("..") {
+            Some((base, "")) => (base.to_string(), "HEAD".to_string()),
+            Some((base, head)) => (base.to_string(), head.to_string()),
+            None => (range.clone(), "HEAD".to_string()),
+        });
+    }
+    let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
+    if let Some(base) = &args.base {
+        return Ok((base.clone(), head));
+    }
+    // No range at all: what someone on a feature branch means by "what did I
+    // change" — the merge base of the default branch with where they are.
+    let branch = &engine.cfg.git.default_branch;
+    let base = engine.repo.merge_base(branch, &head).map_err(|e| {
+        crate::diag::UsageError::raised(format!(
+            "no merge base between {branch} and {head} ({e}); pass a range, or set \
+             [git].default_branch in cambium.toml"
+        ))
+    })?;
+    Ok((base, head))
+}
+
 /// The report, as the one document or as the single `result` event.
 fn print_document(ctx: &Context, report: &cambium_engine::AffectedReport) -> Result<()> {
     match ctx.format {
@@ -172,5 +239,36 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
             e.path.join(" <- "),
             e.reason.describe()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    /// Parses `cambi affected <args>` the way `main` would.
+    fn parse(args: &[&str]) -> super::Args {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: super::Args,
+        }
+        Wrapper::parse_from(std::iter::once("affected").chain(args.iter().copied())).args
+    }
+
+    #[test]
+    fn a_range_and_the_old_flags_together_are_a_usage_error() {
+        let err = super::check_usage(&parse(&["a..b", "--base", "c"])).expect_err("a usage error");
+        assert!(err.to_string().contains("drop --base"), "{err}");
+        let err = super::check_usage(&parse(&["a..b", "--head", "c"])).expect_err("a usage error");
+        assert!(err.to_string().contains("drop --head"), "{err}");
+        assert!(super::check_usage(&parse(&["a..b"])).is_ok());
+        assert!(super::check_usage(&parse(&["--base", "a"])).is_ok());
+    }
+
+    #[test]
+    fn a_three_dot_range_says_what_to_type_instead() {
+        let err = super::check_usage(&parse(&["a...b"])).expect_err("a usage error");
+        assert!(err.to_string().contains("two-dot range"), "{err}");
     }
 }
