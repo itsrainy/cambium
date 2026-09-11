@@ -37,7 +37,7 @@ fn walks_a_real_git_history() {
 
     for i in 1..repo.commits.len() {
         let (base, head) = (&repo.commits[i - 1], &repo.commits[i]);
-        let changes = engine.repo.diff(base, head).unwrap();
+        let changes = engine.repo().diff(base, head).unwrap();
         assert!(!changes.is_empty(), "commit {i} changed nothing");
 
         let req = AffectedRequest {

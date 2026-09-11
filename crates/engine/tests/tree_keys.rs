@@ -55,7 +55,7 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn publish(&self, sha: &str) -> Vec<String> {
-        let idx = index_for(sha, self.engine.cfg.hash());
+        let idx = index_for(sha, self.engine.config().hash());
         self.publish_idx(sha, idx)
     }
 
@@ -70,7 +70,7 @@ impl Fixture {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.engine.store.as_ref().unwrap().list().unwrap()
+        self.engine.store().unwrap().list().unwrap()
     }
 }
 
@@ -78,7 +78,7 @@ impl Fixture {
 fn keys_are_lineage_then_tree_with_a_commit_pointer() {
     let f = fixture();
     let a = commit_all(&f.root, "one");
-    let tree = f.engine.repo.tree_of(&a).unwrap();
+    let tree = f.engine.repo().tree_of(&a).unwrap();
     assert_ne!(tree, a);
 
     let names = f.publish(&a);
@@ -112,8 +112,8 @@ fn commits_with_identical_trees_share_one_index() {
     let b = commit_all(&f.root, "one, again");
     assert_ne!(a, b);
     assert_eq!(
-        f.engine.repo.tree_of(&a).unwrap(),
-        f.engine.repo.tree_of(&b).unwrap()
+        f.engine.repo().tree_of(&a).unwrap(),
+        f.engine.repo().tree_of(&b).unwrap()
     );
 
     let found = f
@@ -135,8 +135,8 @@ fn commits_with_identical_trees_share_one_index() {
     std::fs::write(f.root.join("lib/a.cc"), "one").unwrap();
     let d = commit_all(&f.root, "same content, different history");
     assert_eq!(
-        f.engine.repo.tree_of(&d).unwrap(),
-        f.engine.repo.tree_of(&a).unwrap()
+        f.engine.repo().tree_of(&d).unwrap(),
+        f.engine.repo().tree_of(&a).unwrap()
     );
     assert!(f.engine.fetch_baseline(&d).unwrap().is_some());
 
@@ -168,8 +168,8 @@ fn a_squash_merge_hits_the_pre_merge_tree() {
     let squashed = commit_all(&f.root, "squash: pr");
     assert_ne!(squashed, tip);
     assert_eq!(
-        f.engine.repo.tree_of(&squashed).unwrap(),
-        f.engine.repo.tree_of(&tip).unwrap()
+        f.engine.repo().tree_of(&squashed).unwrap(),
+        f.engine.repo().tree_of(&tip).unwrap()
     );
 
     let found = f
@@ -195,7 +195,7 @@ fn a_sha_git_cannot_resolve_follows_the_pointer() {
     // all it has.
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::default();
-    cfg.baseline.store = f.engine.cfg.baseline.store.clone();
+    cfg.baseline.store = f.engine.config().baseline.store.clone();
     let blind = synthetic_engine(dir.path(), cfg);
     let found = blind
         .fetch_baseline(&a)
@@ -216,7 +216,7 @@ fn a_sha_git_cannot_resolve_follows_the_pointer() {
 fn a_stale_lineage_never_wins_over_a_compatible_one() {
     let f = fixture();
     let a = commit_all(&f.root, "one");
-    let good = f.engine.cfg.hash();
+    let good = f.engine.config().hash();
     let mut stale = good;
     stale[0] ^= 0xff;
 
@@ -245,8 +245,8 @@ fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
     let f = fixture();
     let a = commit_all(&f.root, "one");
     let names = f.publish(&a);
-    let store = f.engine.store.as_ref().unwrap();
-    let dir = match &f.engine.cfg.baseline.store {
+    let store = f.engine.store().unwrap();
+    let dir = match &f.engine.config().baseline.store {
         cambium_engine::config::StoreConfig::Dir { path } => path.clone(),
         _ => unreachable!(),
     };
@@ -277,7 +277,7 @@ fn a_blob_that_will_not_decompress_is_skipped_not_fatal() {
     let f = fixture();
     let a = commit_all(&f.root, "one");
     let names = f.publish(&a);
-    let dir = match &f.engine.cfg.baseline.store {
+    let dir = match &f.engine.config().baseline.store {
         cambium_engine::config::StoreConfig::Dir { path } => path.clone(),
         _ => unreachable!(),
     };

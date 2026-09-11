@@ -169,8 +169,8 @@ pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(St
     }
     // No range at all: what someone on a feature branch means by "what did I
     // change" — the merge base of the default branch with where they are.
-    let branch = &engine.cfg.git.default_branch;
-    let base = engine.repo.merge_base(branch, &head).map_err(|e| {
+    let branch = &engine.config().git.default_branch;
+    let base = engine.repo().merge_base(branch, &head).map_err(|e| {
         crate::diag::UsageError::raised(format!(
             "no merge base between {branch} and {head} ({e}); pass a range, or set \
              [git].default_branch in cambium.toml"

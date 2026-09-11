@@ -121,7 +121,7 @@ pub struct EngineDriver<'a> {
 
 impl EngineDriver<'_> {
     fn publish_file(&self, path: &Path) -> Result<()> {
-        if self.engine.store.is_none() {
+        if self.engine.store().is_none() {
             return Ok(());
         }
         let index = IndexFile::open(path)?.deserialize()?;
@@ -158,7 +158,7 @@ impl Driver for EngineDriver<'_> {
             .fetch_baseline(base)?
             .with_context(|| format!("no published index for {base}"))?;
         let base_index = IndexFile::open(&base_path)?;
-        let changes = self.engine.repo.diff(base, head)?;
+        let changes = self.engine.repo().diff(base, head)?;
         let q = self.rows.querier(head)?;
         let req = AffectedRequest {
             base: base.to_string(),
@@ -449,7 +449,7 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
 /// actually answered rather than which one was asked for. Best effort: an
 /// unavailable binary yields an empty string rather than failing the history.
 fn bazel_version_used(engine: &Engine) -> String {
-    let v = engine.bazel.version();
+    let v = engine.bazel().version();
     v.lines().next().unwrap_or("").trim().to_string()
 }
 
@@ -494,7 +494,7 @@ pub fn history(
     anyhow::ensure!(commits.len() >= 2, "a history needs at least two commits");
     let from = commits[0].clone();
     let to = commits[commits.len() - 1].clone();
-    let engine_id = State::engine_id(&engine.cfg.hash());
+    let engine_id = State::engine_id(&engine.config().hash());
     let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
     // Where each step's index lands. One file, rewritten every commit: the
     // walk's own continuity is the store, which is where the next step's base
@@ -822,7 +822,7 @@ fn start(
         bazel_version_used: bazel_version_used(engine),
         tool_sha: crate::util::tool_sha().to_string(),
         cambi_version: opts.cambi_version.clone(),
-        engine: State::engine_id(&engine.cfg.hash()),
+        engine: State::engine_id(&engine.config().hash()),
         started_unix: now_unix(),
         cold,
         commits: Vec::new(),

@@ -86,7 +86,7 @@ fn run(f: &Fixture, head: &str) -> RunOutcome {
     );
     drop(bq);
 
-    let changes = f.engine.repo.diff(&f.base, head).unwrap();
+    let changes = f.engine.repo().diff(&f.base, head).unwrap();
     f.engine
         .compute(
             base_index.view(),
