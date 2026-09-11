@@ -74,19 +74,18 @@ pub enum Args {
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    // `show` reads a file and nothing else: it must work outside a workspace,
-    // so it is answered before the engine is opened.
-    if let Args::Show { file } = &args {
-        return crate::cmd::inspect::show(ctx, file);
-    }
-    let engine = ctx.engine()?;
+    // `show` reads a file and nothing else, so it must work outside a
+    // workspace: it is the one verb that opens no engine. The others open
+    // theirs as their first step.
     match args {
+        Args::Show { file } => crate::cmd::inspect::show(ctx, &file),
         Args::Build {
             commit,
             publish,
             out,
             allow_partial,
         } => {
+            let engine = ctx.engine()?;
             let sha = engine.repo().rev_parse(&commit).with_context(|| {
                 format!("--commit {commit} is not a revision in this repository")
             })?;
@@ -107,6 +106,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             no_rebuild_on_global,
             allow_partial,
         } => {
+            let engine = ctx.engine()?;
             let to_sha = engine
                 .repo()
                 .rev_parse(&to)
@@ -145,6 +145,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
         Args::Gc { keep } => {
+            let engine = ctx.engine()?;
             let store = engine.store().context("no baseline store is configured")?;
             let removed = store.gc(
                 engine.config().baseline.retention_days,
@@ -153,8 +154,8 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             println!("removed {removed} index files");
             Ok(crate::EXIT_OK)
         }
-        Args::Show { .. } => unreachable!("answered before the engine is opened"),
         Args::Publish { file } => {
+            let engine = ctx.engine()?;
             let f = cambium_index::IndexFile::open(&file)?;
             let v = f.view();
             let (lineage, commit) = (v.lineage, v.commit.to_string());
@@ -165,6 +166,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
         Args::List => {
+            let engine = ctx.engine()?;
             let store = engine.store().context("no baseline store is configured")?;
             for n in store.list()? {
                 println!("{n}");
@@ -185,17 +187,17 @@ fn emit(
     // content-addressed name and walking away leaves it there for good, so
     // the only run allowed to skip `--out` is one that publishes, and that
     // one writes through a `NamedTempFile` that is deleted on the way out.
-    let scratch = match (out, publish) {
+    // The scratch file lives as long as this function does, which is as long
+    // as the publish needs it.
+    let (path, _scratch) = match (out, publish) {
         (None, None) => anyhow::bail!(
             "pass --out <file> to say where the index goes, or --publish to upload it"
         ),
-        (None, Some(_)) => Some(tempfile::NamedTempFile::new()?),
-        (Some(_), _) => None,
-    };
-    let path = match (out, &scratch) {
-        (Some(p), _) => p.to_path_buf(),
-        (None, Some(t)) => t.path().to_path_buf(),
-        (None, None) => unreachable!("the None/false arm bailed"),
+        (None, Some(_)) => {
+            let scratch = tempfile::NamedTempFile::new()?;
+            (scratch.path().to_path_buf(), Some(scratch))
+        }
+        (Some(p), _) => (p.to_path_buf(), None),
     };
     cambium_index::format::write_index_with(&path, index, engine.index_compression())?;
     let c = &index.header.counts;
