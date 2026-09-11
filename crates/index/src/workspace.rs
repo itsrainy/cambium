@@ -64,6 +64,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::label::{Label, Repo};
 use crate::loads::{lex, Lexed, Tok};
 use crate::starlark::{parse_args, render_all, render_stmt, statements};
+use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
 
 /// What a `WORKSPACE` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,34 +78,6 @@ pub enum WorkspaceChange {
         repos: BTreeSet<String>,
         bzl_paths: BTreeSet<String>,
     },
-}
-
-/// Statements that declare a repository under a name but whose effect is not
-/// confined to it.
-///
-/// `bind` rewrites `//external:` labels, which is a whole-workspace aliasing
-/// table. `workspace()` renames the main repository itself.
-const NOT_JUST_A_REPOSITORY: &[&str] = &["bind", "workspace"];
-
-/// Whether a callee registers toolchains.
-///
-/// Toolchain resolution has no edge in the query graph — the same reason
-/// `register_toolchains` in a `MODULE.bazel` is global. In WORKSPACE the
-/// registration is usually wrapped in a rules-provided macro, and the naming
-/// convention is universal enough to match on: `go_register_toolchains`,
-/// `oci_register_toolchains`, `python_register_toolchains`. A macro that
-/// registers toolchains under some *other* name is the documented gap.
-fn registers_toolchains(callee: &str) -> bool {
-    callee == "register_toolchains"
-        || callee == "register_execution_platforms"
-        || callee.ends_with("_register_toolchains")
-        || callee.ends_with("_register_execution_platforms")
-}
-
-/// Repository rules whose `path` attribute maps a main-repo directory into the
-/// repository: if it moves, so does every file the repository is made of.
-fn is_local_repo_rule(callee: &str) -> bool {
-    matches!(callee, "local_repository" | "new_local_repository")
 }
 
 /// How a statement is matched against the other side.

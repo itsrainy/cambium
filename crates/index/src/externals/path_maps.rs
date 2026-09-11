@@ -8,14 +8,9 @@
 use crate::label::Label;
 use crate::loads::{lex, unescape, Lexed, RepoMapping, Tok};
 use crate::starlark::{arg_spans, parse_args};
+use crate::vocabulary::{is_local_repo_rule, PATHY_NAMES};
 
 use super::pattern::PathMap;
-
-/// Repository rules whose `path` attribute is a main-repo directory that
-/// becomes the repository's root.
-pub(crate) fn is_local_repo_rule(rule: &str) -> bool {
-    matches!(rule, "local_repository" | "new_local_repository")
-}
 
 /// A `path =` attribute as a main-repo directory prefix, when it is one.
 ///
@@ -40,24 +35,6 @@ pub struct BzlPathMaps {
     /// `(` comes back alongside so the caller can ask for that attribution.
     pub symlinks: Vec<(usize, PathMap)>,
 }
-
-/// Names a `symlink` source argument may contain and still be a literal.
-///
-/// `ctx.symlink(ctx.path(Label("//api:BUILD")), "BUILD")` is a path this
-/// parser can follow. `ctx.symlink(ctx.path(ctx.attr.root).dirname.get_child(d), d)`
-/// — the shape envoy's `bazel/api_binding.bzl` used before it moved to
-/// `local_path_override` — is not, and is deliberately left unmapped: a
-/// mapping this module guesses wrong would *hide* a `.bzl` edit, where no
-/// mapping at all merely keeps the old, wider answer.
-const PATHY_NAMES: &[&str] = &[
-    "Label",
-    "ctx",
-    "path",
-    "rctx",
-    "repo_ctx",
-    "repository_ctx",
-    "repository_context",
-];
 
 /// Reads the path mappings out of one workspace-closure `.bzl`.
 pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {

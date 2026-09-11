@@ -9,14 +9,11 @@ use std::collections::BTreeMap;
 
 use crate::loads::{lex, unescape, Lexed, Tok};
 use crate::starlark::{parse_args, render_all, render_limited, statements};
+use crate::vocabulary::{is_local_repo_rule, HARMLESS};
 
 use super::module_facts::{Dep, ModuleFacts};
-use super::path_maps::{is_local_repo_rule, local_dir};
+use super::path_maps::local_dir;
 use super::pattern::SEP;
-
-/// Statements a `MODULE.bazel` may contain that this parser deliberately
-/// ignores rather than treating as unrecognised.
-const HARMLESS: &[&str] = &["load", "print", "fail", "module", "include"];
 
 /// Reads a `MODULE.bazel`'s structure.
 ///
