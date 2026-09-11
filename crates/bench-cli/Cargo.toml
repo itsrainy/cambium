@@ -19,6 +19,8 @@ cambium-index.workspace = true
 cambium-synth.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tracing.workspace = true

@@ -216,6 +216,12 @@ pub enum Args {
     /// Generated Bazel graphs and workspaces.
     #[command(subcommand)]
     Synth(crate::synth::Args),
+    /// Follow a run: one row per subject, polled off bench-results/.
+    ///
+    /// A pure reader. It holds nothing open on the run, so it works on a run
+    /// in progress, on a finished one, and on results copied off the
+    /// benchmark box. `--once` prints the same table and exits.
+    Watch(crate::watch::Args),
     /// Regenerate docs/RESULTS.md from bench-results/.
     Report {
         /// Rewrite only this subject's section. Every subject that has results
@@ -648,6 +654,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         Args::Subjects { what } => do_subjects(ctx, what),
         Args::Synth(args) => crate::synth::run(ctx, args),
         Args::Replay(args) => crate::replay::run(ctx, *args),
+        Args::Watch(args) => crate::watch::run(ctx, args),
         Args::History {
             subject,
             commits,

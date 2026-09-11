@@ -91,6 +91,27 @@ impl State {
         }
     }
 
+    /// The state file as it stands, whatever subject or pin it is for, or
+    /// `None` when there is none.
+    ///
+    /// For a *reader* — `cambium-bench watch` — which wants the file's own id,
+    /// pin and step stamps and has no pin to check them against. [`load`] is
+    /// for a run, and starting over on a pin mismatch (loudly) is the whole
+    /// point of it there.
+    ///
+    /// [`load`]: State::load
+    pub fn peek(dir: &Path) -> Option<Self> {
+        let path = Self::path(dir);
+        let text = std::fs::read_to_string(&path).ok()?;
+        match serde_json::from_str(&text) {
+            Ok(st) => Some(st),
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "unreadable state file");
+                None
+            }
+        }
+    }
+
     pub fn fresh(id: &str, pin: &str) -> Self {
         Self {
             schema: crate::RESULT_SCHEMA,

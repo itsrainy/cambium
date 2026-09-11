@@ -15,6 +15,7 @@ use clap::{Parser, ValueEnum};
 mod bench;
 mod replay;
 mod synth;
+mod watch;
 
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_ERROR: u8 = 1;
