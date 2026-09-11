@@ -230,7 +230,7 @@ cambium-bench report              regenerate RESULTS.md from bench-results/
 `<subject>` is a name from `subject_repos.toml` or `synth:<preset>`. Every
 workload takes `--tools`, `--oracle`, `--kind` and a size (`--commits`,
 `--change-sets`) so a run can be exactly as large as the question needs.
-CI's per-pull-request job is `cambium-bench changes synth:small --tools
+The nightly workflow's job is `cambium-bench changes synth:small --tools
 cambium,bazel-diff`, the same command a person runs. Tango is left out of it
 only because it costs 30-500 s a change set; the weekly job on the real
 subjects runs all three.

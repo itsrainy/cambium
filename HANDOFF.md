@@ -69,7 +69,7 @@ WORKSPACE itself. Two pre-existing `e2e_bazel` failures on this laptop
 (`a_bzl_edit_reaches_every_package_that_loads_it`,
 `an_external_repository_edit_reaches_only_its_consumers`) predate all of it
 and reproduce on unmodified HEAD; unverified whether it is the local bazelisk
-or a regression — CI's `e2e` job is the arbiter.
+or a regression — the nightly workflow's `e2e` job is the arbiter (`gh workflow run nightly` runs it on demand).
 
 ## Workflow work, as proposed
 
@@ -129,7 +129,7 @@ inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
 3. The offline rebuild oracle (`cambium-bench replay --head-check`, `dd7dc28`) has
    no archive to check yet: `heads/<pin>.bin` appears on the next history
    run. The three box-only shapes now have real-Bazel e2e tests
-   (`77fbb32`), run by CI's `e2e` and `bazel-version-matrix` jobs.
+   (`77fbb32`), run by the nightly workflow's `e2e` and `bazel-version-matrix` jobs.
 
 ## Open issues
 
