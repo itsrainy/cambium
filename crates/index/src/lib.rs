@@ -33,6 +33,7 @@ pub mod strtab;
 #[cfg(test)]
 mod testutil;
 pub mod view;
+mod vocabulary;
 pub mod walk;
 pub mod workspace;
 

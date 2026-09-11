@@ -148,8 +148,7 @@
 //!
 //! - `pattern` — [`Pattern`], [`PathMap`], [`RepoInputs`]: the tables, in the
 //!   mutable form the builder flattens and the reader restores.
-//! - `module_facts` — [`ModuleFacts`] and its parts, [`ModuleChange`], and the
-//!   toolchain-module list.
+//! - `module_facts` — [`ModuleFacts`] and its parts, and [`ModuleChange`].
 //! - `module_parser` — [`scan_module`], the `MODULE.bazel` statement reader,
 //!   on top of [`crate::starlark`].
 //! - `module_diff` — [`diff_module`].
@@ -168,13 +167,11 @@ mod module_parser;
 mod path_maps;
 mod pattern;
 
+pub use crate::vocabulary::{is_toolchain_module, TOOLCHAIN_MODULES};
 pub use bazelrc::{bazelrc_bzlmod, bzlmod_live};
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;
-pub use module_facts::{
-    apparent_of, is_toolchain_module, Dep, Extension, ModuleChange, ModuleFacts, RepoRule,
-    TOOLCHAIN_MODULES,
-};
+pub use module_facts::{apparent_of, Dep, Extension, ModuleChange, ModuleFacts, RepoRule};
 pub use module_parser::scan_module;
 pub use path_maps::{scan_bzl_path_maps, BzlPathMaps};
 pub use pattern::{PathMap, Pattern, RepoInputs};

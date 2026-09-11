@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use super::module_facts::{apparent_of, is_toolchain_module, ModuleChange, ModuleFacts};
+use crate::vocabulary::is_toolchain_module;
+
+use super::module_facts::{apparent_of, ModuleChange, ModuleFacts};
 
 /// What changed between two revisions of a `MODULE.bazel`.
 ///

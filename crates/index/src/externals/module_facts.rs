@@ -98,44 +98,6 @@ pub struct ModuleFacts {
     pub unparsed: Vec<String>,
 }
 
-/// Modules whose version decides how *every* configured target is built, not
-/// what any particular target depends on.
-///
-/// A toolchain is resolved, not depended on: `bazel query` shows no edge from
-/// a `cc_library` to the C++ toolchain that will compile it, so no reverse
-/// walk can find the targets a toolchain change moves. A version bump of one
-/// of these therefore has to invalidate everything, and the list is explicit
-/// rather than heuristic so that each entry can carry its reason.
-///
-/// - `rules_cc`, `rules_java`, `rules_python`, `rules_go`, `rules_rust`,
-///   `rules_shell`, `rules_nodejs` — each registers the toolchains for its
-///   language from its own `MODULE.bazel`.
-/// - `platforms`, `bazel_tools` — the constraint values and the host
-///   toolchains every resolution is expressed in.
-/// - `toolchains_llvm`, `apple_support`, `rules_apple`, `rules_foreign_cc` —
-///   C++ toolchains and execution platforms.
-/// - `bazel_skylib` is deliberately *not* here: it registers no toolchains,
-///   it is a macro library, and its consumers are visible through `load()`.
-pub const TOOLCHAIN_MODULES: &[&str] = &[
-    "apple_support",
-    "bazel_tools",
-    "platforms",
-    "rules_apple",
-    "rules_cc",
-    "rules_foreign_cc",
-    "rules_go",
-    "rules_java",
-    "rules_nodejs",
-    "rules_python",
-    "rules_rust",
-    "rules_shell",
-    "toolchains_llvm",
-];
-
-pub fn is_toolchain_module(name: &str) -> bool {
-    TOOLCHAIN_MODULES.contains(&name)
-}
-
 /// What a `MODULE.bazel` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleChange {
