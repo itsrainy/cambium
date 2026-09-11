@@ -1,11 +1,9 @@
-//! The small things every module needed a copy of.
+//! The small things every module needs, spelled once.
 //!
-//! Nothing here is benchmark logic. It is the handful of one-liners that were
-//! written out three and four times over — a percentile, the clock, the cache
+//! Nothing here is benchmark logic: a percentile, the clock, the cache
 //! directory a fetch script installs into, the filename a Bazel version is
-//! stamped into — and drifted apart each time they were: two of the three
-//! version-suffix builders escaped `/` and space, the third escaped `:` as
-//! well.
+//! stamped into. Each has exactly one definition so that two result files
+//! cannot disagree about how a version is escaped or a timestamp is written.
 
 use std::path::{Path, PathBuf};
 
@@ -128,10 +126,7 @@ pub fn duration(secs: u64) -> String {
 ///
 /// Stamped in at build time by `build.rs`, and *not* asked of `git` at run
 /// time: a workload's working directory is a **subject's** checkout, so
-/// `git rev-parse HEAD` there answers with envoy's HEAD, not ours. The two
-/// call sites used to disagree about exactly that -- one ran `git` in the
-/// process's cwd, the other in `CARGO_MANIFEST_DIR` -- so a history and a
-/// stage report from the same binary could name two different cambiums.
+/// `git rev-parse HEAD` there answers with envoy's HEAD, not ours.
 pub fn tool_sha() -> &'static str {
     match option_env!("CAMBIUM_GIT_SHA") {
         Some(s) if !s.is_empty() => s,

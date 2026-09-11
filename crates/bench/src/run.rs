@@ -223,9 +223,8 @@ pub struct Selection {
 
 /// Selects the change sets and records them under `<subject>/changes/`.
 ///
-/// The one selector for both `--select-only` and a comparison: two copies is
-/// how only one of them came to pass the hub packages, and a `--kind stress`
-/// comparison silently stressed nothing.
+/// The one selector for both `--select-only` and a comparison, so both draw
+/// the stress change sets from the same hub list.
 pub fn select_change_sets(
     run: &SubjectRun<'_>,
     sel: &Selection,
