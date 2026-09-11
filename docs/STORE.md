@@ -45,7 +45,7 @@ else keys off the canonical path. Keys from the earlier sha-addressed layout
 (`indexes/<lineage>/<sha>.bin`, `indexes/by-commit/<sha>.bin`) are still read
 so an upgrade does not orphan a warm store; they are no longer written.
 
-`cambi baseline list` prints keys; `cambi baseline gc` deletes those older
+`cambi index list` prints keys; `cambi index gc` deletes those older
 than `retention_days`, walking the tree.
 
 ## Compression at rest
@@ -305,5 +305,5 @@ Why it is a clean change:
 
 The reason to wait is that it adds a round trip to every fetch and a
 reachability problem to every delete, and neither is worth paying before the
-duplication is measured. `cambi baseline list` plus the payload hashes will
+duplication is measured. `cambi index list` plus the payload hashes will
 say how much is actually duplicated in a given repository; do that first.

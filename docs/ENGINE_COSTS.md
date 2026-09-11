@@ -3,7 +3,7 @@
 Where an `affected` run spends its time, and where an index spends its bytes.
 
 Both are engine numbers, not benchmark results: they come from
-`cambi bench stages` and `cambi index stats` over *generated* graphs, with no
+`cambi bench stages` and `cambi inspect stats` over *generated* graphs, with no
 Bazel and no repository, and they exist to explain the design rather than to
 score it. What the tools actually do on real repositories is
 [RESULTS.md](RESULTS.md), and the words are [METHODOLOGY.md](METHODOLOGY.md).
@@ -107,12 +107,12 @@ once something needs the last 20%.
 
 ## What an index spends its bytes on
 
-`cambi index stats` accounts for every byte in the file. Two indexes built
+`cambi inspect stats` accounts for every byte in the file. Two indexes built
 straight from the generators — no Bazel needed:
 
 ```console
 $ cambi synth build-index --spec large --out large.bin
-$ cambi index stats large.bin
+$ cambi inspect stats large.bin
 ```
 
 | component | `large` (258.6 MiB) | `xl` (1.03 GiB) |

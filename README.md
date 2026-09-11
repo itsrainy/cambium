@@ -9,7 +9,7 @@ the change and the size of the answer, not the size of the repository.
 The project is cambium; the binary it installs is `cambi`.
 
 ```console
-$ cambi affected --base origin/main --head HEAD --tests-only
+$ cambi affected origin/main..HEAD --tests-only
 //app:main_test
 //lib/core:core_test
 ```
@@ -88,22 +88,25 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ## Usage
 
 ```console
-$ cambi affected --base <sha> [--head <sha>] [--tests-only] [--include-manual]
+$ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
                    [--format human|json|jsonl|query|null] [--explain] [--max-depth n]
                    [--no-full-build] [--publish-base] [--out <index file>]
-$ cambi baseline build  [--commit <sha>] [--publish] [--out <file>]
-$ cambi baseline update --from <sha> [--to <sha>] [--publish] [--out <file>]
+$ cambi index build  [--commit <sha>] [--publish] [--out <file>]
+$ cambi index update --from <sha> [--to <sha>] [--publish] [--out <file>]
                    [--no-rebuild-on-global]
-$ cambi baseline gc [--keep <artifact>] | list
-$ cambi index inspect   <file> [--label //x:y] [--package p]
-$ cambi index rdeps     <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi index deps      <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi index path      <file> //from:a //to:b
-$ cambi index consumers <file> <path>...  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi index owner     <file> <path>...
-$ cambi index targets   <file> <package> [--kind rule]
-$ cambi index stats     <file>
-$ cambi index verify    <file> [--sample n] [--seed n]
+$ cambi index publish <file>
+$ cambi index show    <file>
+$ cambi index gc [--keep <artifact>] | list
+$ cambi inspect target    <file> //x:y
+$ cambi inspect package   <file> <package>
+$ cambi inspect rdeps     <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
+$ cambi inspect deps      <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
+$ cambi inspect path      <file> //from:a //to:b
+$ cambi inspect consumers <file> <path>...  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
+$ cambi inspect owner     <file> <path>...
+$ cambi inspect targets   <file> <package> [--kind rule]
+$ cambi inspect stats     <file>
+$ cambi inspect verify    <file> [--sample n] [--seed n]
 $ cambi bench subjects list|fetch|build [<subject>]
 $ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
 $ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
@@ -143,7 +146,7 @@ long run. `null` prints nothing and only sets the exit code. `query` is
 `--format query` emits a `set(...)` expression you can hand straight to Bazel:
 
 ```console
-$ bazel test $(cambi affected --base origin/main --tests-only --format query)
+$ bazel test $(cambi affected origin/main --tests-only --format query)
 ```
 
 `--explain` prints, for each affected target, the shortest path back to the
@@ -152,16 +155,16 @@ test running?".
 
 ### Querying an index
 
-The `index` subcommands answer the same questions against an index that
+The `inspect` subcommands answer the same questions against an index that
 already exists, in text or JSON (`--format json`, carrying `schema`):
 
 ```console
-$ cambi index consumers idx.bin lib/core/parser.cc --transitive
+$ cambi inspect consumers idx.bin lib/core/parser.cc --transitive
 lib/core/parser.cc	//lib/core:core
 lib/core/parser.cc	//app:main
 lib/core/parser.cc	//app:main_test
 
-$ cambi index path idx.bin //app:main_test //lib/core:core
+$ cambi inspect path idx.bin //app:main_test //lib/core:core
 //app:main_test
   -> //app:main
   -> //lib/core:core
@@ -182,11 +185,11 @@ To get an index to point it at without going near Bazel:
 
 ```console
 $ cambi synth build-index --spec large --out large.bin
-$ cambi index stats large.bin
+$ cambi inspect stats large.bin
 ```
 
 They share the engine's walk and the same package-ownership lookup the dirty
-set uses, so an `index` answer and an `affected` answer cannot disagree.
+set uses, so an `inspect` answer and an `affected` answer cannot disagree.
 
 ## The JSON contract
 
@@ -260,7 +263,7 @@ appear there). This does not change the document's shape, so it is not a
 `SCHEMA_VERSION` bump — a consumer that already reads `affected` sees a
 subset of what it would otherwise.
 
-`cambi index ... --format json` and `cambi bench` results carry `schema`
+`cambi inspect ... --format json` and `cambi bench` results carry `schema`
 on the same terms.
 
 ### Contract versions
@@ -293,6 +296,12 @@ below are what you get with no file at all.
 [bazel]
 binary = ""                  # else $BAZEL_REAL, $BAZEL, bazelisk, bazel
 extra_query_flags = []
+
+[git]
+default_branch = "main"      # `cambi affected` with no range compares the
+                             # merge base of this branch with HEAD. Not part
+                             # of the config hash: it says which revisions a
+                             # run compares, not what the graph is.
 
 [invalidators]               # any change here means "everything is affected"
 paths = ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel",
@@ -345,7 +354,7 @@ gone; a config that still sets it loads with a warning and the key ignored.)
 
 The config is hashed into every index it produces. An index built under a
 different config cannot be spliced onto, because the invalidator rules that
-produced it may no longer hold — `cambi baseline build` mints a fresh
+produced it may no longer hold — `cambi index build` mints a fresh
 lineage instead.
 
 Store backends: `dir` (a local directory), `http` (GET/PUT against a base
@@ -364,7 +373,7 @@ A post-merge job on the main branch keeps the store populated, so pull-request
 runs almost always find their merge base directly:
 
 ```console
-$ cambi baseline update --from <parent-sha> --to <merge-sha> --publish
+$ cambi index update --from <parent-sha> --to <merge-sha> --publish
 ```
 
 When a run does not find one, it walks back up to `max_ancestor_walk`
@@ -383,7 +392,7 @@ Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop the
 accumulated tombstones:
 
 ```console
-$ cambi baseline build --publish && cambi baseline gc
+$ cambi index build --publish && cambi index gc
 ```
 
 ## Benchmarks
@@ -452,7 +461,7 @@ much they cost to run:
    `exports_files` across packages, a `select` branch change, a package split,
    a global invalidator, an ignored path. Each is also checked against a full
    rebuild, so the expectations cannot drift.
-4. **`cambi index verify`** — for a sample of targets, our
+4. **`cambi inspect verify`** — for a sample of targets, our
    reverse closure must contain everything `bazel query rdeps(//..., target)`
    reports. This is the soundness oracle, and it runs against production
    indexes too, reporting precision as a percentage.
