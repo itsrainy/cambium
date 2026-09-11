@@ -120,8 +120,15 @@ $ cambium-bench subjects list|fetch|build [<subject>]
 $ cambium-bench history  <subject> [--commits n] [--oracle rebuild|none]
 $ cambium-bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
                    [--tools cambium,bazel-diff,tango] [--oracle rdeps,load]
+$ cambium-bench run [--subject <s>]... [--steps fetch,build,history,changes,report]
+                   [--smoke] [--restart-changes] [--restart-history] [--require-sha <sha>]
 $ cambium-bench stages|sweep <subject>
 $ cambium-bench regress <a.json> <b.json>
+$ cambium-bench replay  <subject> (--all | --change-set <a>..<b> | --paths <p>)
+                   [--repo <git dir>] [--rederive] [--head-check] [--write-paths [<file>]]
+$ cambium-bench pull-results [<subject>]... [--cache <dir>] [--host <h>] [--key <pem>]
+$ cambium-bench labels  <subject> --change-set <a>..<b> [--tool t] [--class c] [--side s] [--diff]
+$ cambium-bench watch   [--results-dir <dir>] [--once]
 $ cambium-bench report  [<subject>]
 $ cambium-bench synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
                    [--revisions n] [--seed n] [--force]
