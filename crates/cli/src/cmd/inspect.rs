@@ -68,9 +68,6 @@ pub struct Verify {
 
 #[derive(Subcommand)]
 pub enum Args {
-    /// Check an index against Bazel (spec 12.3): sample rule targets and
-    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
-    Verify(Verify),
     /// One target's row: kind, package, hash, deps and rdeps.
     Target {
         #[command(flatten)]
@@ -150,6 +147,9 @@ pub enum Args {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Check an index against Bazel (spec 12.3): sample rule targets and
+    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
+    Verify(Verify),
 }
 
 impl Args {
