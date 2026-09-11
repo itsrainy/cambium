@@ -756,15 +756,20 @@ fn init_writes_the_config_and_nothing_else() {
     );
 }
 
-/// The Position line, end to end: a real git history, a real directory store,
-/// and an index published for an ancestor. The rows come from the synthetic
-/// source, so Bazel never runs.
-///
-/// This is the line `status` exists for, and it is worth pinning as text: a
-/// caller reads it, and "3 commits back" is the difference between waiting and
-/// not.
-#[test]
-fn status_names_the_nearest_index_and_how_far_back_it_is() {
+/// A synthetic workspace with a real git history, a directory store, and an
+/// index published for the commit `at` — the fixture every test that needs a
+/// warm-ish position shares. The rows come from the synthetic source, so Bazel
+/// never runs.
+struct PublishedFixture {
+    _dir: tempfile::TempDir,
+    ws: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    commits: Vec<String>,
+    /// The published index's lineage, as hex.
+    lineage: String,
+}
+
+fn published_fixture(at: usize) -> PublishedFixture {
     use cambium_engine::{Config, Engine, SynthQuerier};
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -785,14 +790,12 @@ fn status_names_the_nearest_index_and_how_far_back_it_is() {
     };
     std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
 
-    // Publish the index for the second commit, leaving HEAD cold.
     let engine = Engine::with_parts(
         cfg.clone(),
         cambium_diff::Repo::new(ws.clone()),
         cambium_bazel::Bazel::at(ws.clone(), Some("/nonexistent/bazel")),
     )
     .with_cache_dir(cache.clone());
-    let at = 1;
     let index = engine
         .full_build_with(
             &emitted.commits[at],
@@ -812,14 +815,35 @@ fn status_names_the_nearest_index_and_how_far_back_it_is() {
     .publish(&file, &index.header.lineage, &emitted.commits[at], &tree)
     .expect("publishing");
 
+    PublishedFixture {
+        _dir: dir,
+        ws,
+        cache,
+        commits: emitted.commits,
+        lineage: cambium_engine::probe::hex(&index.header.lineage),
+    }
+}
+
+/// The Position line, end to end: a real git history, a real directory store,
+/// and an index published for an ancestor.
+///
+/// This is the line `status` exists for, and it is worth pinning as text: a
+/// caller reads it, and "3 commits back" is the difference between waiting and
+/// not.
+#[test]
+fn status_names_the_nearest_index_and_how_far_back_it_is() {
+    let at = 1;
+    let f = published_fixture(at);
+    let (ws, emitted_commits, lineage) = (&f.ws, &f.commits, &f.lineage);
+
     let (code, stdout, stderr) = run(&["-C", ws.to_str().unwrap(), "status"]);
     assert_eq!(code, 0, "{stderr}");
-    let back = emitted.commits.len() - 1 - at;
-    let head = &emitted.commits[emitted.commits.len() - 1][..7];
-    let near = &emitted.commits[at][..7];
+    let back = emitted_commits.len() - 1 - at;
+    let head = &emitted_commits[emitted_commits.len() - 1][..7];
+    let near = &emitted_commits[at][..7];
     let expected = format!(
         "HEAD {head} has no index; nearest is {near}, {back} commits back (lineage {}, splice)",
-        &cambium_engine::probe::hex(&index.header.lineage)[..6]
+        &lineage[..6]
     );
     assert!(
         stdout.lines().any(|l| l.trim() == expected),
@@ -869,5 +893,88 @@ fn the_explain_flag_on_affected_still_works_and_says_what_replaced_it() {
     assert!(
         !help.contains("--explain"),
         "a deprecated flag should be hidden from help:\n{help}"
+    );
+}
+
+/// `--dry-run` runs no Bazel, but it is still a run's plan: outside a workspace
+/// the answer is the workspace error with its own code, not a usage error. A
+/// caller branching on exit 1 versus 3 must not see the two swap places.
+#[test]
+fn a_dry_run_outside_a_workspace_is_the_workspace_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "affected",
+        "--dry-run",
+        "a..b",
+    ]);
+    assert!(
+        stderr.contains("CAMBI-E004"),
+        "the workspace probe owns this failure:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("CAMBI-E013"),
+        "a missing workspace is not a usage error:\n{stderr}"
+    );
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+}
+
+/// The plan, end to end, with no Bazel anywhere: a real git history, a real
+/// directory store, an index published for an ancestor, and a diff classified
+/// against it.
+#[test]
+fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
+    let f = published_fixture(1);
+    let range = format!("{}..{}", f.commits[1], f.commits[f.commits.len() - 1]);
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--dry-run",
+        &range,
+    ]);
+    assert_eq!(code, 0, "a plan is not a verdict: {stderr}{stdout}");
+    let line = |prefix: &str| -> String {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}` line in\n{stdout}"))
+            .trim()
+            .to_string()
+    };
+    assert!(
+        line("index").contains(&f.commits[1][..7]) && line("index").contains(&f.lineage[..6]),
+        "the index line names the revision and the lineage a run would splice onto:\n{stdout}"
+    );
+    assert!(
+        line("diff").contains("changed file"),
+        "the diff line counts what moved:\n{stdout}"
+    );
+    assert_eq!(line("mode"), "mode   splice", "{stdout}");
+
+    // The same plan as one document, for a CI job that branches on it.
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "--format",
+        "json",
+        "affected",
+        "--dry-run",
+        &range,
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("one document");
+    assert_eq!(doc["schema"], 9);
+    assert_eq!(doc["plan"]["mode"], "splice");
+    assert_eq!(doc["plan"]["index"]["revision"], f.commits[1]);
+    assert!(
+        doc["plan"]["dirty_packages"].is_u64(),
+        "the diff was classified without Bazel:\n{stdout}"
     );
 }

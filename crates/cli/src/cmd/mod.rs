@@ -5,6 +5,7 @@ pub mod explain;
 pub mod index;
 pub mod init;
 pub mod inspect;
+pub mod plan;
 pub mod replay;
 pub mod status;
 pub mod synth;

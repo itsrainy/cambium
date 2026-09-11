@@ -59,6 +59,15 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     let fmt = ctx.format.data("cambi explain")?;
 
     let engine = ctx.engine()?;
+    // `--dry-run` is one of the flags `explain` shares with `affected`, and it
+    // means the same thing here: say what a run would do and stop.
+    if args.affected.dry_run {
+        return crate::cmd::plan::run(
+            ctx,
+            &engine,
+            &crate::cmd::affected::request(&engine, &args.affected, false, false)?,
+        );
+    }
     // A label has to be looked up in the head graph — to answer "not affected"
     // rather than "no such target" — and only a materialised run has one.
     let req = crate::cmd::affected::request(&engine, &args.affected, true, args.label.is_some())?;

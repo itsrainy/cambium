@@ -250,14 +250,19 @@ fn unix_time(unix: u64) -> String {
     if unix == 0 {
         return "at an unrecorded time".into();
     }
-    let age = now.saturating_sub(unix);
-    let (n, unit) = match age {
-        0..=119 => (age, "second"),
-        120..=3599 => (age / 60, "minute"),
-        3600..=86_399 => (age / 3600, "hour"),
-        _ => (age / 86_400, "day"),
+    format!("{} ago", duration(now.saturating_sub(unix)))
+}
+
+/// A span of seconds in the unit someone would say it in: `3 days`, `1 hour`.
+/// `--dry-run` says how old the index it would load is with the same words.
+pub fn duration(secs: u64) -> String {
+    let (n, unit) = match secs {
+        0..=119 => (secs, "second"),
+        120..=3599 => (secs / 60, "minute"),
+        3600..=86_399 => (secs / 3600, "hour"),
+        _ => (secs / 86_400, "day"),
     };
-    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 #[cfg(test)]
