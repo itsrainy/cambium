@@ -77,7 +77,8 @@ pub const REPLAY_SCHEMA: u32 = 1;
 // The recorded change sets carry `(base, head)` and nothing else: the diff was
 // taken from the subject's git mirror at run time and never written down. A
 // replay away from the box therefore needs the paths cached alongside the
-// results, which is what `tools/bench/precheck.sh` fills in.
+// results, which `cambium-bench replay --write-paths` produces on the box and
+// `cambium-bench pull-results` brings over.
 
 /// One `(base, head)` pair's diff, as `git diff --name-status` gave it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,7 +90,9 @@ pub struct PathEntry {
     pub changes: Vec<String>,
 }
 
-/// `bench-precheck/<subject>/paths-<pin>.json`.
+/// `bench-precheck/<subject>/paths-<pin>.json`, written by `cambium-bench
+/// replay --write-paths` ([`crate::precheck::write_paths_cache`]) and read by
+/// a replay with no repository at hand.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathsCache {
     pub schema: u32,
@@ -126,8 +129,19 @@ impl PathsCache {
 ///
 /// The results file and the paths cache are both written from full shas, but a
 /// person passing `--change-set` types a short one.
-fn revs_match(a: &str, b: &str) -> bool {
+pub fn revs_match(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// The recorded answer for `base..head`, by either revision spelling.
+pub fn find_recorded<'a>(
+    recorded: &'a [RecordedAnswer],
+    base: &str,
+    head: &str,
+) -> Option<&'a RecordedAnswer> {
+    recorded
+        .iter()
+        .find(|r| revs_match(&r.base, base) && revs_match(&r.head, head))
 }
 
 /// `["M\tsrc/a.cc", "D\tsrc/b.h"]` -> changes. A line the parser does not
@@ -590,6 +604,9 @@ pub struct RederiveCache {
     /// Insertion order, for eviction.
     order: Vec<String>,
     cap: usize,
+    /// Where to keep each re-derived index on disk, for `cambi inspect
+    /// externals` when a replay's tables need reading. `--rederive-dump`.
+    dump: Option<std::path::PathBuf>,
 }
 
 /// How many re-derived indexes to hold at once.
@@ -612,7 +629,14 @@ impl RederiveCache {
             built: BTreeMap::new(),
             order: Vec::new(),
             cap: cap.max(1),
+            dump: None,
         }
+    }
+
+    /// Keeps each re-derived index at `<dir>/rederived-<rev>.bin`.
+    pub fn with_dump(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.dump = dir;
+        self
     }
 
     /// Re-derives at `rev` unless it is already built. `Some(ms)` is what this
@@ -628,10 +652,8 @@ impl RederiveCache {
         }
         let t = std::time::Instant::now();
         let data = rederive_externals(base, rev, texts)?;
-        // `CAMBIUM_REDERIVE_DUMP=<dir>` keeps each re-derived index on disk,
-        // for `cambi index externals` when a replay's tables need reading.
-        if let Ok(dir) = std::env::var("CAMBIUM_REDERIVE_DUMP") {
-            let path = std::path::Path::new(&dir).join(format!("rederived-{rev}.bin"));
+        if let Some(dir) = &self.dump {
+            let path = dir.join(format!("rederived-{rev}.bin"));
             if let Err(e) = cambium_index::format::write_index(&path, &data) {
                 tracing::warn!(error = %e, path = %path.display(), "could not dump the re-derived index");
             }

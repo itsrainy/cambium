@@ -21,8 +21,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::tools::{run_capture, run_capture_accepting};
 use anyhow::{Context as _, Result};
 use cambium_engine::report::AffectedReport;
 
@@ -164,15 +165,10 @@ impl Cambi {
     }
 
     /// An invocation rooted at `ws`, with this run's environment and no stdin
-    /// to prompt on.
+    /// to prompt on — built exactly as a foil tool's is.
     pub fn command(&self, ws: &Path) -> Command {
-        let mut cmd = Command::new(&self.path);
+        let mut cmd = crate::tools::noninteractive_command(&self.path, &self.env);
         cmd.arg("-C").arg(ws);
-        cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        cmd.stdin(std::process::Stdio::null());
-        if !self.env.iter().any(|(k, _)| k == "CI") {
-            cmd.env("CI", "1");
-        }
         cmd
     }
 
@@ -198,29 +194,19 @@ impl Cambi {
             cmd.arg("--out").arg(out);
         }
         let what = format!("cambi affected {}..{}", args.base, args.head);
-        let t = Instant::now();
-        let out = cmd
-            .output()
-            .with_context(|| format!("spawning {what}: {cmd:?}"))?;
-        let wall = t.elapsed();
-        let code = out.status.code().unwrap_or(-1);
-        anyhow::ensure!(
-            out.status.success() || code == EXIT_GLOBAL,
-            "{what} exited with {}\n--- stderr tail ---\n{}",
-            out.status,
-            crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 40)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let report: AffectedReport = serde_json::from_str(&stdout).with_context(|| {
+        let out = run_capture_accepting(&mut cmd, &what, |s| {
+            s.success() || s.code() == Some(EXIT_GLOBAL)
+        })?;
+        let report: AffectedReport = serde_json::from_str(&out.stdout).with_context(|| {
             format!(
                 "{what}: reading the JSON document it printed\n--- stdout head ---\n{}",
-                stdout.chars().take(400).collect::<String>()
+                out.stdout.chars().take(400).collect::<String>()
             )
         })?;
         let index = args.out.clone().filter(|p| p.exists() && !report.global);
         Ok(AffectedRun {
             report,
-            wall,
+            wall: out.wall,
             index,
         })
     }
@@ -274,18 +260,7 @@ impl Cambi {
 
     /// Runs one invocation that is expected to succeed, and times it.
     fn run(&self, cmd: &mut Command, what: &str) -> Result<Duration> {
-        let t = Instant::now();
-        let out = cmd
-            .output()
-            .with_context(|| format!("spawning {what}: {cmd:?}"))?;
-        let wall = t.elapsed();
-        anyhow::ensure!(
-            out.status.success(),
-            "{what} exited with {}\n--- stderr tail ---\n{}",
-            out.status,
-            crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 40)
-        );
-        Ok(wall)
+        Ok(run_capture(cmd, what)?.wall)
     }
 }
 
