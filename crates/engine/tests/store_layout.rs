@@ -169,10 +169,19 @@ fn publishing_the_same_commit_twice_is_idempotent() {
     // Two workers that computed the same index publish it independently. The
     // payload is deterministic, so they are writing the same bytes; what must
     // not happen is a partial file or a duplicate key.
+    //
+    // One `IndexData` written twice, because the *trailer* is not deterministic:
+    // it carries the build clock, so two builds that straddle a second boundary
+    // differ in bytes even though their graphs are identical. That the payload
+    // is content-addressable regardless is
+    // `identical_graphs_at_different_commits_have_identical_payloads`; what is
+    // under test here is the publish, and two writers of the same bytes is what
+    // the publish path promises to survive.
+    let index = index_at("aaaa", false);
     let first = dir.path().join("a.bin");
     let second = dir.path().join("b.bin");
-    format::write_index(&first, &index_at("aaaa", false)).unwrap();
-    format::write_index(&second, &index_at("aaaa", false)).unwrap();
+    format::write_index(&first, &index).unwrap();
+    format::write_index(&second, &index).unwrap();
 
     store.publish(&key, &first).unwrap();
     store.publish(&key, &second).unwrap();
