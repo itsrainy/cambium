@@ -22,7 +22,8 @@
 //! returns them too, while cambium's walk emits rules only.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use cambium_testkit::{git, write};
 
 /// The `cambi` the comparison measures: the one cargo built beside this test,
 /// else whatever `--cambi`/`$CAMBI`/`PATH` names. The harness runs the product
@@ -57,25 +58,6 @@ fn skip(why: &str) {
         panic!("CAMBIUM_REQUIRE_TOOLS is set: {why}");
     }
     eprintln!("{why}; skipping");
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn write(root: &Path, rel: &str, body: &str) {
-    let path = root.join(rel);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
 }
 
 /// A three-package genrule workspace with a macro, a `select`, and a file
@@ -205,12 +187,7 @@ cat_rule(
 }
 
 fn head(root: &Path) -> String {
-    let out = Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    git(root, &["rev-parse", "HEAD"])
 }
 
 /// `USE_BAZEL_VERSION`, if set: bazelisk reads it itself once it is in the
