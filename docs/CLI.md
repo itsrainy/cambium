@@ -229,10 +229,12 @@ from clap.
 
 ## The benchmark tools
 
-The harness (`bench`, `replay`, `labels`, `report`, the subject manifest,
-the synthetic generator) is its own binary, `cambium-bench`
-(`crates/bench-cli`), built from the `bench` and `synth` crates, and it drives
-`cambi` by shelling out to it: `cambi index build` for a cold index, `cambi
+The harness — the `subjects`, `history`, `changes` and `run` verbs, the
+offline `replay` and the `pull-results` that feeds it, `labels`, `watch`,
+`report`, the stage micro-benchmarks, the subject manifest and the `synth`
+generator — is its own binary, `cambium-bench` (`crates/bench-cli`), built
+from the `bench` and `synth` crates, and it drives `cambi` by shelling out to
+it: `cambi index build` for a cold index, `cambi
 index update` to bring one forward, `cambi index publish` to upload one, and
 `cambi affected --format json` for the answer, read back with the engine's own
 report types. That is the honest arrangement: the harness measures the binary
@@ -273,3 +275,13 @@ is the same plan from flags (`--subject`, `--steps`, `--smoke`,
 `tools/bench/run-published.sh` calls; the plan has one definition,
 `crates/bench/src/plan.rs`. In a pipe, no verb is the usage error it has
 always been.
+
+`cambium-bench pull-results` copies a subject's results off the benchmark
+box for an offline replay — the index at the pin, the recorded results, the
+archived base and head indexes, and the diff of every recorded change set —
+and `cambium-bench replay` reruns the engine's static stages over them with
+no Bazel and no checkout, milliseconds a change set, against the answers the
+run recorded. The diffs it reads are written on the box by `cambium-bench
+replay --write-paths` from the subject's git mirror, so a replay elsewhere
+has every change set without the repository. `tools/bench/precheck.sh` is
+that sequence, and `docs/OPERATIONS.md` says when to run it.
