@@ -255,8 +255,8 @@ impl StderrFacts {
     }
 }
 
-/// Every fact in a stderr buffer. Used on a tail in tests, and on the live
-/// stream by [`drain_stderr`].
+/// Every fact in a stderr buffer. Used on a tail in tests; a live query folds
+/// each line in as it arrives through [`StderrFacts::push_line`].
 pub fn parse_stderr_facts(stderr: &str) -> StderrFacts {
     let mut f = StderrFacts::default();
     for line in stderr.lines() {
@@ -295,8 +295,8 @@ pub fn query_word(pattern: &str) -> String {
     format!("\"{pattern}\"")
 }
 
-/// Every load error in a stderr buffer. Used on a tail in tests, and on the
-/// live stream by [`drain_stderr`].
+/// Every load error in a stderr buffer. Used on a tail in tests; a live query
+/// counts them line by line through [`StderrFacts::push_line`].
 pub fn parse_load_errors(stderr: &str) -> LoadErrors {
     let mut e = LoadErrors::default();
     for line in stderr.lines() {
