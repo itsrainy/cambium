@@ -63,7 +63,7 @@ it owes at the end:
   corrections they imply, and reads through to the mmapped baseline for
   everything else — so the step is proportional to the change rather than to
   the repository. This is the default, not a flag.
-- **`baseline update` materialises.** Its output is the thing that gets
+- **`cambi index update` materialises.** Its output is the thing that gets
   published, so it has to be a complete index.
 
 Both paths run the same direct-set derivation and the same walk over a
@@ -105,7 +105,8 @@ $ cambi index update --from <sha> [--to <sha>] [--publish] [--out <file>]
                    [--no-rebuild-on-global]
 $ cambi index publish <file>
 $ cambi index show    <file>
-$ cambi index gc [--keep <artifact>] | list
+$ cambi index list
+$ cambi index gc      [--keep <file>]
 $ cambi inspect target    <file> //x:y
 $ cambi inspect package   <file> <package>
 $ cambi inspect rdeps     <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
@@ -115,6 +116,7 @@ $ cambi inspect consumers <file> <path>...  [--transitive] [--include-manual] [-
 $ cambi inspect owner     <file> <path>...
 $ cambi inspect targets   <file> <package> [--kind rule]
 $ cambi inspect stats     <file>
+$ cambi inspect externals <file> [--repo <name>]
 $ cambi inspect verify    <file> [--sample n] [--seed n]
 $ cambium-bench subjects list|fetch|build [<subject>]
 $ cambium-bench history  <subject> [--commits n] [--oracle rebuild|none]
@@ -131,7 +133,7 @@ $ cambium-bench synth presets
 $ cambi config show|explain|hash
 ```
 
-`baseline build` and `baseline update` need `--out <file>` to say where the
+`cambi index build` and `cambi index update` need `--out <file>` to say where the
 index goes; only a run that also `--publish`es may omit it, and that run
 writes through a temporary file it deletes once the upload is done. An index
 is routinely gigabytes, so there is no default path.
@@ -411,19 +413,18 @@ tell the answer is `//...`, which is also exit code 2.
 | version | change |
 |---:|---|
 | 1 | the first published contract |
-| 2 | `index stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
-| 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `index stats` gained `in_degree.top` (the hub list) |
-| 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `index stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
+| 2 | `inspect stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
+| 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `inspect stats` gained `in_degree.top` (the hub list) |
+| 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false` — a changed `.bzl` is resolved from the index's static load closure instead of from Bazel. `inspect stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
 | 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head — still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}` — the target names something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from — those repositories contribute their label consumers to the direct set, and their loading packages are not re-queried |
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
-
 | 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same holds for `explain`, below. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. Also at 9: `cambi explain --format json` and `cambi affected --dry-run --format json`, two more new documents on the same terms. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did
-at 3, and `--max-depth n` (on `affected` and `index rdeps --transitive`)
+at 3, and `--max-depth n` (on `affected` and `inspect rdeps --transitive`)
 truncates the walk at `n` hops, which is what the per-target `depth` makes
 meaningful.
 
@@ -535,7 +536,7 @@ have a sha. Writes are idempotent, and concurrent publishers are safe — see
 [docs/STORE.md](docs/STORE.md), which also has the exact S3 and GCS templates
 and the design note for content-addressed blobs.
 
-### Keeping baselines warm
+### Keeping indexes warm
 
 A post-merge job on the main branch keeps the store populated, so pull-request
 runs almost always find their merge base directly:
