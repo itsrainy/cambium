@@ -141,10 +141,13 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
-use cambium_index::externals::{diff_module, scan_module, ModuleChange, ModuleFacts};
+use cambium_index::externals::{diff_module, scan_module, Mode, ModuleChange, ModuleFacts};
+use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
 use cambium_index::IndexRef;
+
+use crate::reason::ExternalsCause;
 
 /// Workspace files whose own diff this stage interprets, rather than letting
 /// them fire an invalidator rule.
@@ -183,8 +186,15 @@ impl WorkspaceText for FixedText {
 /// What the stage concluded.
 #[derive(Clone, Debug, Default)]
 pub struct Externals {
-    /// Invalidate everything, for this reason.
-    pub global: Option<String>,
+    /// Invalidate everything, for this reason. Its `Display` is the wording
+    /// the run reports.
+    pub cause: Option<ExternalsCause>,
+    /// Which world Bazel reads the base tree in, when the stage had to
+    /// decide. Only a diff that touches `MODULE.bazel` or its lock asks —
+    /// an edit to either is inert under WORKSPACE mode — and deciding reads
+    /// three files of the base tree, so a diff that touches neither never
+    /// pays for it.
+    pub mode: Option<Mode>,
     /// Apparent names of the repositories that moved.
     pub repos: BTreeSet<String>,
     /// The subset of [`Externals::repos`] whose *contents* may have moved in a
@@ -216,6 +226,16 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// Gives up on localising the diff: everything is affected, for `cause`.
+    pub fn escalate(&mut self, cause: ExternalsCause) {
+        self.cause = Some(cause);
+    }
+
+    /// Takes the escalation, if there was one, leaving the stage clear.
+    pub fn take_cause(&mut self) -> Option<ExternalsCause> {
+        self.cause.take()
+    }
+
     /// Record that `file` moved every repository in `repos`.
     pub fn name<'a>(&mut self, file: &str, repos: impl IntoIterator<Item = &'a String>) {
         for r in repos {
@@ -230,13 +250,16 @@ impl Externals {
 /// Runs the stage over a diff.
 ///
 /// `base` is the base index, which carries the input map; `texts` reads
-/// `MODULE.bazel` at either revision.
+/// `MODULE.bazel` at either revision. `mode` decides which world Bazel reads
+/// the base tree in — [`mode_at`] for a real run — and is asked at most
+/// once, and only when the diff touches `MODULE.bazel` or its lock.
 pub fn analyse(
     base: IndexRef<'_>,
     changes: &[impl Borrow<Change>],
     base_rev: &str,
     head_rev: &str,
     texts: &dyn WorkspaceText,
+    mode: impl FnOnce() -> Mode,
 ) -> Externals {
     let mut out = Externals::default();
 
@@ -258,20 +281,22 @@ pub fn analyse(
     // A tree Bazel reads in WORKSPACE mode has an inert `MODULE.bazel`: an
     // edit to it, or to its lock, moves nothing. A flip of the mode itself
     // is a bazelrc change, which the flags stage makes global.
-    if (module_changed || lock_changed) && !bzlmod_live_at(base, texts, base_rev) {
-        tracing::info!(
-            "MODULE.bazel changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
-        );
-        if module_changed {
-            out.handled.push(MODULE_FILE.to_string());
+    if module_changed || lock_changed {
+        let mode = *out.mode.insert(mode());
+        if !mode.bzlmod_live() {
+            tracing::info!(
+                "MODULE.bazel changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
+            );
+            if module_changed {
+                out.handled.push(MODULE_FILE.to_string());
+            }
+            if lock_changed {
+                out.handled.push(MODULE_LOCK.to_string());
+            }
+            module_changed = false;
+            lock_changed = false;
         }
-        if lock_changed {
-            out.handled.push(MODULE_LOCK.to_string());
-        }
-        module_changed = false;
-        lock_changed = false;
     }
-    {}
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*
@@ -279,14 +304,17 @@ pub fn analyse(
     for path in workspaces {
         let (b, h) = (texts.text_at(base_rev, path), texts.text_at(head_rev, path));
         let (Some(b), Some(h)) = (b, h) else {
-            out.global = Some(format!(
-                "`{path}` was added or removed, and every repository it declares with it"
-            ));
+            out.escalate(ExternalsCause::WorkspaceAddedOrRemoved {
+                path: path.to_string(),
+            });
             return out;
         };
         match diff_workspace(&b, &h) {
-            WorkspaceChange::Global(reason) => {
-                out.global = Some(format!("`{path}`: {reason}"));
+            WorkspaceChange::Global(why) => {
+                out.escalate(ExternalsCause::Workspace {
+                    path: path.to_string(),
+                    why,
+                });
                 return out;
             }
             WorkspaceChange::Moved { repos, bzl_paths } => {
@@ -299,10 +327,10 @@ pub fn analyse(
                         .bzl_id(p)
                         .and_then(|id| repos_of_workspace_bzl(base, id));
                     let Some(named) = named else {
-                        out.global = Some(format!(
-                            "`{path}` changes a call from `{p}`, and cambium cannot say which \
-                             repositories that file defines"
-                        ));
+                        out.escalate(ExternalsCause::WorkspaceBzlUnattributed {
+                            path: path.to_string(),
+                            bzl: p.clone(),
+                        });
                         return out;
                     };
                     out.by_bzl += named.len();
@@ -325,8 +353,8 @@ pub fn analyse(
         let base_facts = facts_at(texts, base_rev);
         let head_facts = facts_at(texts, head_rev);
         match diff_module(&base_facts, &head_facts) {
-            ModuleChange::Global(reason) => {
-                out.global = Some(reason);
+            ModuleChange::Global(why) => {
+                out.escalate(ExternalsCause::Module { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -358,15 +386,14 @@ pub fn analyse(
             (Some(b), Some(h)) => diff_lock(&b, &h, &facts),
             // One side has no lockfile at all: it was added or deleted, and
             // every repository in it is new or gone.
-            _ => ModuleChange::Global(
-                "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
-                 is new or gone"
-                    .into(),
-            ),
+            _ => {
+                out.escalate(ExternalsCause::LockAddedOrRemoved);
+                return out;
+            }
         };
         match change {
-            ModuleChange::Global(reason) => {
-                out.global = Some(reason);
+            ModuleChange::Global(why) => {
+                out.escalate(ExternalsCause::Lock { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -484,26 +511,28 @@ fn input_can_be_a_loaded_bzl(base: IndexRef<'_>, repo: u32, paths: &[&str]) -> b
 /// `@@envoy_api+//bazel:api_build_system.bzl` -> `bazel/api_build_system.bzl`,
 /// but only for labels in the repository named.
 fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<String> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (token, rest) = rest.split_once("//")?;
+    let l = Label::parse(label)?;
+    // The repository is matched by the shape of its token against the two
+    // names the index recorded, not resolved through a mapping: these labels
+    // are the ones Bazel wrote into query output, and which spelling of a
+    // repository they carry depends on the Bazel that ran. See
+    // [`repo_token_matches`].
+    let token = match l.repo() {
+        Repo::Main => return None,
+        Repo::Apparent(t) | Repo::Canonical(t) => t,
+    };
     if !repo_token_matches(token, apparent, canonical) {
         return None;
     }
     // `pkg:sub/file.bzl` is `pkg/sub/file.bzl`, and the root package's
-    // `:file.bzl` is just `file.bzl`.
-    let (pkg, name) = rest.split_once(':')?;
-    Some(if pkg.is_empty() {
-        name.to_string()
-    } else {
-        format!("{pkg}/{name}")
-    })
+    // `:file.bzl` is just `file.bzl`. A label with no `:` names no file.
+    Some(join_path(l.package(), l.explicit_name()?))
 }
 
-/// [`cambium_index::bzlmod_live`] for the base side of the diff: the tree
-/// as `texts` reads it at `base_rev`, and the mapping the base index carries.
-fn bzlmod_live_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> bool {
+/// [`Mode::detect`] for the base side of the diff: the tree as `texts` reads
+/// it at `rev`, and the mapping the base index carries. What a run hands
+/// [`analyse`], to be decided once and only if the diff asks.
+pub fn mode_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> Mode {
     struct At<'a>(&'a dyn WorkspaceText, &'a str);
     impl cambium_index::FileText for At<'_> {
         fn text(&self, path: &str) -> Option<String> {
@@ -513,7 +542,7 @@ fn bzlmod_live_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> b
     let m = cambium_index::RepoMapping::from_canonical(
         (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
     );
-    cambium_index::bzlmod_live(&At(texts, rev), &m)
+    Mode::detect(&At(texts, rev), &m)
 }
 
 fn facts_at(texts: &dyn WorkspaceText, rev: &str) -> ModuleFacts {
@@ -542,13 +571,15 @@ pub fn repos_of_workspace_bzl(base: IndexRef<'_>, bzl_id: u32) -> Option<Vec<Str
 
 // ------------------------------------------------- repositories to targets
 
-/// The repository part of a label: `@@rules_cc+//x:y` -> `rules_cc+`.
+/// The repository part of a label, as written: `@@rules_cc+//x:y` ->
+/// `rules_cc+`. `None` for the main repository however it is spelled, since
+/// the callers match the token by shape ([`repo_token_matches`]) rather than
+/// resolving it.
 fn label_repo(label: &str) -> Option<&str> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (repo, _) = rest.split_once("//")?;
-    (!repo.is_empty()).then_some(repo)
+    match Label::parse(label)?.repo() {
+        Repo::Apparent(r) | Repo::Canonical(r) if !r.is_empty() => Some(r),
+        _ => None,
+    }
 }
 
 /// Whether a repository token from a label denotes the repository whose

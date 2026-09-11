@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use cambium_bazel::{convert, ConvertOptions, ParsedTarget};
 use cambium_bazel::{Bazel, BazelError, QueryOutcome};
 use cambium_index::PackageUpdate;
-use cambium_proto::blaze_query::Target;
-use prost::Message;
 use rayon::prelude::*;
 
 /// Reads BUILD files so packages can record a content hash.
@@ -306,6 +304,7 @@ pub fn partial_of(outcome: &QueryOutcome) -> Option<cambium_bazel::LoadErrors> {
 
 /// A query's answer: every package Bazel could load, and — when it could not
 /// load them all — what it said about the ones it dropped.
+#[derive(Debug)]
 pub struct Rows {
     pub updates: Vec<PackageUpdate>,
     /// `Some` when the query exited 3 under `--keep_going`.
@@ -344,13 +343,22 @@ pub fn query_packages(
     for p in requested {
         grouped.entry(p.clone()).or_default();
     }
-    let outcome = bazel.query_packages(requested, |slab, ranges| {
+    let outcome = bazel.query_packages(requested, group_into(&mut grouped, opts))?;
+    Ok(finish(grouped, outcome, files, Some(requested)))
+}
+
+/// The batch callback every stream reader uses: decode the batch, file each
+/// target under its package.
+fn group_into<'a>(
+    grouped: &'a mut BTreeMap<String, Vec<ParsedTarget>>,
+    opts: &'a ConvertOptions,
+) -> impl FnMut(&[u8], &[(usize, usize)]) -> Result<(), cambium_proto::ReadError> + 'a {
+    move |slab, ranges| {
         for t in decode_batch(slab, ranges, opts)? {
             grouped.entry(t.package.clone()).or_default().push(t);
         }
         Ok(())
-    })?;
-    Ok(finish(grouped, outcome, files, Some(requested)))
+    }
 }
 
 /// Queries the whole repository for a cold build (spec 6.9).
@@ -360,12 +368,7 @@ pub fn query_universe(
     files: &FileSource,
 ) -> Result<QueryResult, BazelError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    let outcome = bazel.query_universe(|slab, ranges| {
-        for t in decode_batch(slab, ranges, opts)? {
-            grouped.entry(t.package.clone()).or_default().push(t);
-        }
-        Ok(())
-    })?;
+    let outcome = bazel.query_universe(group_into(&mut grouped, opts))?;
     Ok(finish(grouped, outcome, files, None))
 }
 
@@ -387,10 +390,7 @@ fn decode_batch(
 ) -> Result<Vec<ParsedTarget>, cambium_proto::ReadError> {
     let decoded: Result<Vec<Option<ParsedTarget>>, cambium_proto::ReadError> = ranges
         .par_iter()
-        .map(|&(s, e)| {
-            let t = Target::decode(&slab[s..e])?;
-            Ok(convert(&t, opts))
-        })
+        .map(|&range| Ok(convert(&cambium_proto::decode_frame(slab, range)?, opts)))
         .collect();
     Ok(decoded?.into_iter().flatten().collect())
 }
@@ -446,12 +446,11 @@ pub fn parse_stream(
     files: &FileSource,
 ) -> Result<Vec<PackageUpdate>, cambium_proto::ReadError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    cambium_proto::read_frames(bytes, cambium_proto::DEFAULT_BATCH, |slab, ranges| {
-        for t in decode_batch(slab, ranges, opts)? {
-            grouped.entry(t.package.clone()).or_default().push(t);
-        }
-        Ok(())
-    })?;
+    cambium_proto::read_frames(
+        bytes,
+        cambium_proto::DEFAULT_BATCH,
+        group_into(&mut grouped, opts),
+    )?;
     let outcome = QueryOutcome {
         exit_code: Some(0),
         success: true,
@@ -466,4 +465,139 @@ pub fn parse_stream(
 /// Empty `FileSource` for callers that do not care about BUILD hashes.
 pub fn no_files() -> FileSource {
     FileSource::worktree(Path::new("/nonexistent"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cambium_bazel::{Bazel, CannedRunner};
+    use cambium_proto::blaze_query::{target::Discriminator, Rule, Target};
+
+    use super::*;
+    use crate::diag::Code;
+    use crate::error::EngineError;
+
+    fn rule(name: &str) -> Target {
+        Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: name.to_string(),
+                rule_class: "cc_library".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A querier over a Bazel that answers every query with these bytes,
+    /// this stderr and this exit code.
+    fn querier(code: i32, targets: &[Target], stderr: &str) -> BazelQuerier {
+        let bazel =
+            Bazel::at(std::env::temp_dir(), Some("bazel")).with_runner(Arc::new(CannedRunner {
+                code,
+                stdout: cambium_proto::encode_stream(targets),
+                stderr: stderr.to_string(),
+            }));
+        BazelQuerier {
+            bazel,
+            opts: ConvertOptions {
+                test_rule_suffixes: vec!["_test".into()],
+                exclude_tags: vec!["manual".into()],
+            },
+            files: no_files(),
+            diags: crate::diag::Diagnostics::new(),
+        }
+    }
+
+    fn codes(q: &BazelQuerier) -> Vec<Code> {
+        q.diags.drain().into_iter().map(|d| d.code).collect()
+    }
+
+    const LOAD_ERROR: &str = "ERROR: error loading package 'b': no such file\n";
+    const DECLARED_DELETED: &str = "ERROR: Skipping '//b:*': no such package 'b': Package is \
+                                    considered deleted due to --deleted_packages\n";
+
+    /// Exit 3 under `--keep_going`: the packages that loaded come back, the
+    /// one that did not is an empty update, and the answer says it is partial.
+    #[test]
+    fn a_package_that_failed_to_load_is_tombstoned_and_reported() {
+        let q = querier(3, &[rule("//a:x")], LOAD_ERROR);
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        let by_package: Vec<(&str, usize)> = rows
+            .updates
+            .iter()
+            .map(|u| (u.package.as_str(), u.targets.len()))
+            .collect();
+        assert_eq!(by_package, vec![("a", 1), ("b", 0)]);
+        let partial = rows.partial.expect("a load error makes the answer partial");
+        assert_eq!(partial.count, 1);
+        assert_eq!(partial.packages, vec!["b".to_string()]);
+        assert_eq!(codes(&q), vec![Code::W005PackagesTombstoned]);
+    }
+
+    /// Exit 3 whose only complaint is a package the invocation declared
+    /// deleted: tombstoned like a load failure, but the answer is complete.
+    #[test]
+    fn a_declared_deleted_package_is_tombstoned_but_not_partial() {
+        let q = querier(3, &[rule("//a:x")], DECLARED_DELETED);
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(rows.updates.len(), 2);
+        assert!(
+            rows.partial.is_none(),
+            "declared deleted is not a load failure"
+        );
+        assert_eq!(
+            codes(&q),
+            vec![Code::W005PackagesTombstoned],
+            "its consumers are still reported as affected, and that is said"
+        );
+    }
+
+    /// Exit 3 with every requested package loaded — the errors were about
+    /// something else — is a complete answer with nothing to warn about.
+    #[test]
+    fn exit_3_with_every_package_loaded_warns_about_nothing() {
+        let q = querier(3, &[rule("//a:x"), rule("//b:y")], LOAD_ERROR);
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        assert!(
+            rows.partial.is_some(),
+            "the load error still travels with the rows"
+        );
+        assert!(codes(&q).is_empty());
+    }
+
+    /// Any other failure while a requested package is missing is not a
+    /// partial answer: the run must not guess.
+    #[test]
+    fn a_hard_failure_is_an_error_with_bazels_exit_code() {
+        let q = querier(1, &[], "ERROR: something else entirely\n");
+        let err = q.query(&["a".into()]).unwrap_err();
+        assert!(
+            matches!(err, EngineError::BazelQuery { code: Some(1), ref stderr, .. }
+                if stderr.contains("something else")),
+            "{err}"
+        );
+        assert!(codes(&q).is_empty());
+    }
+
+    #[test]
+    fn a_universe_that_exits_3_is_a_partial_index_and_says_so() {
+        let q = querier(3, &[rule("//a:x")], LOAD_ERROR);
+        let rows = q.universe().unwrap();
+        assert_eq!(rows.updates.len(), 1);
+        assert_eq!(rows.partial.as_ref().map(|e| e.count), Some(1));
+        assert_eq!(codes(&q), vec![Code::W006PartialQuery]);
+
+        let q = querier(0, &[rule("//a:x")], "");
+        let rows = q.universe().unwrap();
+        assert!(rows.partial.is_none());
+        assert!(codes(&q).is_empty());
+
+        let q = querier(1, &[], "ERROR: bazel did not finish\n");
+        assert!(matches!(
+            q.universe().unwrap_err(),
+            EngineError::BazelQuery { code: Some(1), .. }
+        ));
+    }
 }

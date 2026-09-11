@@ -283,8 +283,10 @@ impl Consumed for IndexConsumers<'_> {
 pub struct DirtySet {
     /// Everything is affected; the other fields are meaningless.
     pub global: bool,
-    /// Why, when `global` is set.
-    pub global_reason: Option<String>,
+    /// The changed path that matched an invalidator, when `global` is set.
+    /// The only way this classifier's own answer goes global, so the reason,
+    /// as data; the engine puts it into words.
+    pub invalidator: Option<String>,
     /// Packages that must be re-queried.
     pub dirty: BTreeSet<String>,
     /// Packages that no longer have a BUILD file.
@@ -299,10 +301,11 @@ pub struct DirtySet {
 }
 
 impl DirtySet {
-    fn global(reason: impl Into<String>) -> Self {
+    /// Everything is affected because `path` matched an invalidator.
+    fn invalidated_by(path: &str) -> Self {
         Self {
             global: true,
-            global_reason: Some(reason.into()),
+            invalidator: Some(path.to_string()),
             ..Default::default()
         }
     }
@@ -325,7 +328,7 @@ pub fn dirty_set(
     for c in changes {
         let c = c.borrow();
         if m.is_invalidator(&c.path) {
-            return DirtySet::global(format!("{} matches an invalidator", c.path));
+            return DirtySet::invalidated_by(&c.path);
         }
         if !is_build_file(&c.path) {
             continue;
@@ -385,9 +388,7 @@ pub fn dirty_set(
             continue;
         }
         match classify(&c.path, packages, m) {
-            Classification::Invalidator => {
-                return DirtySet::global(format!("{} matches an invalidator", c.path))
-            }
+            Classification::Invalidator => return DirtySet::invalidated_by(&c.path),
             Classification::Build(_) => unreachable!("handled in pass one"),
             Classification::Bzl(p) => {
                 out.changed_bzl.insert(p);
@@ -734,7 +735,7 @@ mod tests {
             Change::new(Status::Modified, "MODULE.bazel"),
         ]);
         assert!(d.global);
-        assert!(d.global_reason.unwrap().contains("MODULE.bazel"));
+        assert_eq!(d.invalidator.as_deref(), Some("MODULE.bazel"));
     }
 
     /// A diff of any size is classified on its merits. The old

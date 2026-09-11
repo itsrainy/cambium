@@ -76,7 +76,7 @@ interchangeable:
 The two must answer identically, and that is enforced rather than assumed:
 every scenario in the property tests and every revision of the soundness sweep
 computes the answer both ways and requires the affected, direct and test sets —
-and the `--explain` paths — to match.
+and the `explain` paths — to match.
 
 Costs elsewhere, for honesty:
 

@@ -21,8 +21,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::tools::{run_capture, run_capture_accepting};
 use anyhow::{Context as _, Result};
 use cambium_engine::report::AffectedReport;
 
@@ -104,11 +105,17 @@ impl Cambi {
     /// path that is not a runnable `cambi` fails here rather than an hour into
     /// a run.
     pub fn locate(explicit: Option<&Path>) -> Result<Self> {
+        Self::locate_from(explicit, std::env::var_os("CAMBI").map(PathBuf::from))
+    }
+
+    /// [`Cambi::locate`] with `$CAMBI` already looked up. The process
+    /// environment is shared by every test in a binary, so a test of the
+    /// environment arm hands the value in rather than setting the variable.
+    pub fn locate_from(explicit: Option<&Path>, from_env: Option<PathBuf>) -> Result<Self> {
         if let Some(p) = explicit {
             return Self::at(p).with_context(|| format!("--cambi {}", p.display()));
         }
-        if let Some(p) = std::env::var_os("CAMBI") {
-            let p = PathBuf::from(p);
+        if let Some(p) = from_env {
             return Self::at(&p).with_context(|| format!("$CAMBI={}", p.display()));
         }
         Self::at(Path::new("cambi")).context(
@@ -164,15 +171,10 @@ impl Cambi {
     }
 
     /// An invocation rooted at `ws`, with this run's environment and no stdin
-    /// to prompt on.
+    /// to prompt on — built exactly as a foil tool's is.
     pub fn command(&self, ws: &Path) -> Command {
-        let mut cmd = Command::new(&self.path);
+        let mut cmd = crate::tools::noninteractive_command(&self.path, &self.env);
         cmd.arg("-C").arg(ws);
-        cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        cmd.stdin(std::process::Stdio::null());
-        if !self.env.iter().any(|(k, _)| k == "CI") {
-            cmd.env("CI", "1");
-        }
         cmd
     }
 
@@ -198,29 +200,19 @@ impl Cambi {
             cmd.arg("--out").arg(out);
         }
         let what = format!("cambi affected {}..{}", args.base, args.head);
-        let t = Instant::now();
-        let out = cmd
-            .output()
-            .with_context(|| format!("spawning {what}: {cmd:?}"))?;
-        let wall = t.elapsed();
-        let code = out.status.code().unwrap_or(-1);
-        anyhow::ensure!(
-            out.status.success() || code == EXIT_GLOBAL,
-            "{what} exited with {}\n--- stderr tail ---\n{}",
-            out.status,
-            crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 40)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let report: AffectedReport = serde_json::from_str(&stdout).with_context(|| {
+        let out = run_capture_accepting(&mut cmd, &what, |s| {
+            s.success() || s.code() == Some(EXIT_GLOBAL)
+        })?;
+        let report: AffectedReport = serde_json::from_str(&out.stdout).with_context(|| {
             format!(
                 "{what}: reading the JSON document it printed\n--- stdout head ---\n{}",
-                stdout.chars().take(400).collect::<String>()
+                out.stdout.chars().take(400).collect::<String>()
             )
         })?;
         let index = args.out.clone().filter(|p| p.exists() && !report.global);
         Ok(AffectedRun {
             report,
-            wall,
+            wall: out.wall,
             index,
         })
     }
@@ -266,18 +258,7 @@ impl Cambi {
 
     /// Runs one invocation that is expected to succeed, and times it.
     fn run(&self, cmd: &mut Command, what: &str) -> Result<Duration> {
-        let t = Instant::now();
-        let out = cmd
-            .output()
-            .with_context(|| format!("spawning {what}: {cmd:?}"))?;
-        let wall = t.elapsed();
-        anyhow::ensure!(
-            out.status.success(),
-            "{what} exited with {}\n--- stderr tail ---\n{}",
-            out.status,
-            crate::tools::tail(&String::from_utf8_lossy(&out.stderr), 40)
-        );
-        Ok(wall)
+        Ok(run_capture(cmd, what)?.wall)
     }
 }
 
@@ -288,18 +269,12 @@ mod tests {
     /// A `cambi` that answers `--version` and records its argv.
     fn fake(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("cambi");
-        std::fs::write(
+        cambium_testkit::executable_script(
             &p,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'cambi 0.1.0 (abc1234)'; exit 0; fi\n{body}\n"
+            &format!(
+                "if [ \"$1\" = --version ]; then echo 'cambi 0.1.0 (abc1234)'; exit 0; fi\n{body}"
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         p
     }
 
@@ -322,10 +297,19 @@ mod tests {
     fn the_environment_names_the_binary_when_no_flag_does() {
         let dir = tempfile::tempdir().unwrap();
         let p = fake(dir.path(), "exit 0");
-        // Not a parallel-safe variable to set, so the lookup is exercised
-        // through the same code path with an explicit path instead, and the
-        // env arm is checked for preferring the flag.
-        let c = Cambi::locate(Some(&p)).unwrap();
+        // The variable itself is never set: the process environment is
+        // shared with every other test in this binary, so the lookup's
+        // result is handed in.
+        let c = Cambi::locate_from(None, Some(p.clone())).unwrap();
+        assert_eq!(c.path(), p);
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(dir.path(), "exit 0");
+        let env = Some(PathBuf::from("/nonexistent/cambi"));
+        let c = Cambi::locate_from(Some(&p), env).unwrap();
         assert_eq!(c.path(), p);
     }
 

@@ -1,0 +1,18 @@
+[package]
+name = "cambium-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fixtures shared by cambium's integration tests: git repositories, scratch engines, canned queriers"
+publish = false
+
+[dependencies]
+cambium-bazel.workspace = true
+cambium-diff.workspace = true
+cambium-engine.workspace = true
+cambium-index.workspace = true
+cambium-synth.workspace = true
+blake3.workspace = true
+tempfile.workspace = true

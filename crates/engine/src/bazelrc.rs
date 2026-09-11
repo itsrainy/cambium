@@ -55,6 +55,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cambium_index::label::{Label, Repo};
+
 /// Whether a repository path is a bazelrc, and so gets read rather than merely
 /// matched against the invalidator list.
 ///
@@ -89,10 +91,68 @@ pub struct LabelFlag {
 pub struct Screen {
     pub changed_flags: usize,
     pub label_flags: Vec<LabelFlag>,
-    pub unknown: Option<String>,
+    pub unknown: Option<Unknown>,
 }
 
-/// What a `.bazelrc` diff means for the run.
+/// The first thing in a `.bazelrc` diff the screen could not clear.
+///
+/// Its `Display` is the tail of the run's `global_reason`, and is pinned by
+/// the tests in [`crate::reason`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unknown {
+    /// An `import` / `try-import` line moved; the file it names can carry
+    /// anything.
+    ImportChanged { import: String },
+    /// A `startup` option changed; those are never classified.
+    StartupFlag { name: String },
+    /// A Starlark flag set under `command:config`, which applies only to the
+    /// runs that name the config, and cambium does not model configs.
+    ConfigScoped {
+        command: String,
+        config: String,
+        name: String,
+    },
+    /// A native flag that is not on the loading-irrelevant allowlist.
+    NotAllowlisted { command: String, name: String },
+}
+
+impl std::fmt::Display for Unknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unknown::ImportChanged { import } => {
+                write!(
+                    f,
+                    "`{import}` changed; an imported rc file can carry anything"
+                )
+            }
+            Unknown::StartupFlag { name } => write!(
+                f,
+                "startup --{name} changed, and startup options are never classified"
+            ),
+            Unknown::ConfigScoped {
+                command,
+                config,
+                name,
+            } => write!(
+                f,
+                "{command}:{config} --{name} changed, and a flag set under a --config applies \
+                 only to the runs that name it, which cambium does not model"
+            ),
+            Unknown::NotAllowlisted { command, name } => write!(
+                f,
+                "{command} --{name} changed, not on the loading-irrelevant allowlist"
+            ),
+        }
+    }
+}
+
+/// What a `.bazelrc` diff means for the run, without an index to resolve
+/// label flags against.
+///
+/// Kept for the opt-in evidence test that classifies a subject checkout's
+/// every `.bazelrc` edit; the engine itself uses [`screen`], which can do
+/// better with a label flag than call it unknown.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Every changed flag is on the loading-irrelevant allowlist. The number of
@@ -421,16 +481,17 @@ pub fn flag_label(name: &str) -> Option<&str> {
         Some(rest) if rest.starts_with('@') || rest.starts_with("//") => rest,
         _ => name,
     };
-    let rest = if let Some(r) = label.strip_prefix("@@") {
-        r
-    } else if let Some(r) = label.strip_prefix('@') {
-        r
-    } else {
-        return label.starts_with("//").then_some(label);
-    };
-    // `@repo//pkg:name`: a repository name and then a main-repo-shaped label.
-    let (repo, after) = rest.split_once("//")?;
-    (!repo.is_empty() && !repo.contains(':') && !after.is_empty()).then_some(label)
+    // Syntactic only: whether the name has the shape of a label, not where
+    // it points. The repository is not resolved here — [`crate::flags`] does
+    // that, with the mapping — so `@repo//pkg:name` is a label whatever
+    // `repo` is, as long as it is a name and something follows the `//`.
+    let l = Label::parse(label)?;
+    match l.repo() {
+        Repo::Main => (!l.is_relative()).then_some(label),
+        Repo::Apparent(repo) | Repo::Canonical(repo) => {
+            (!repo.is_empty() && !repo.contains(':') && !l.rest().is_empty()).then_some(label)
+        }
+    }
 }
 
 /// Reads a bazelrc diff into the three things a run can act on: the count of
@@ -449,19 +510,18 @@ pub fn screen(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> S
         let mut diff: Vec<&String> = base.imports.symmetric_difference(&head.imports).collect();
         diff.sort();
         let first = diff.first().map(|s| s.as_str()).unwrap_or("import");
-        out.unknown = Some(format!(
-            "`{first}` changed; an imported rc file can carry anything"
-        ));
+        out.unknown = Some(Unknown::ImportChanged {
+            import: first.to_string(),
+        });
         return out;
     }
     let changed = changed_flags(&base, &head);
     out.changed_flags = changed.len();
     for key in &changed {
         if key.command == "startup" {
-            out.unknown = Some(format!(
-                "startup --{} changed, and startup options are never classified",
-                key.name
-            ));
+            out.unknown = Some(Unknown::StartupFlag {
+                name: key.name.clone(),
+            });
             return out;
         }
         if is_allowed(&key.name, extra_allowlist) {
@@ -473,20 +533,18 @@ pub fn screen(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> S
                 label: label.to_string(),
             }),
             Some(_) => {
-                out.unknown = Some(format!(
-                    "{}:{} --{} changed, and a flag set under a --config applies only to \
-                     the runs that name it, which cambium does not model",
-                    key.command,
-                    key.config.as_deref().unwrap_or_default(),
-                    key.name
-                ));
+                out.unknown = Some(Unknown::ConfigScoped {
+                    command: key.command.clone(),
+                    config: key.config.clone().unwrap_or_default(),
+                    name: key.name.clone(),
+                });
                 return out;
             }
             None => {
-                out.unknown = Some(format!(
-                    "{} --{} changed, not on the loading-irrelevant allowlist",
-                    key.command, key.name
-                ));
+                out.unknown = Some(Unknown::NotAllowlisted {
+                    command: key.command.clone(),
+                    name: key.name.clone(),
+                });
                 return out;
             }
         }
@@ -498,16 +556,22 @@ pub fn screen(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> S
 /// safe only if every changed triple is allowlisted and the imports are
 /// untouched. A Starlark flag is unknown here; [`screen`] is what the engine
 /// uses, and it can do better.
+///
+/// See [`Verdict`] for why this survives.
+#[doc(hidden)]
 pub fn classify(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Verdict {
     let s = screen(base_text, head_text, extra_allowlist);
     if let Some(why) = s.unknown {
-        return Verdict::Unknown(why);
+        return Verdict::Unknown(why.to_string());
     }
     if let Some(f) = s.label_flags.first() {
-        return Verdict::Unknown(format!(
-            "{} --{} changed, not on the loading-irrelevant allowlist",
-            f.key.command, f.key.name
-        ));
+        return Verdict::Unknown(
+            Unknown::NotAllowlisted {
+                command: f.key.command.clone(),
+                name: f.key.name.clone(),
+            }
+            .to_string(),
+        );
     }
     Verdict::Safe {
         changed_flags: s.changed_flags,
@@ -729,7 +793,7 @@ mod tests {
         );
         assert!(s.label_flags.is_empty());
         assert!(
-            s.unknown.as_deref().is_some_and(|m| m.contains("--config")),
+            matches!(s.unknown, Some(Unknown::ConfigScoped { ref config, .. }) if config == "ci"),
             "{:?}",
             s.unknown
         );

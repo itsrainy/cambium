@@ -22,9 +22,13 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tempfile.workspace = true
-toml_edit.workspace = true
+# `serde`: `cambi init` writes the store section by serialising the engine's
+# own `StoreConfig`, so the spelling it writes is the spelling the engine
+# parses, by construction.
+toml_edit = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 cambium-bazel.workspace = true
 cambium-synth.workspace = true
+cambium-testkit.workspace = true

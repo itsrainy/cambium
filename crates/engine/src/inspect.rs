@@ -35,7 +35,10 @@ pub enum QueryError {
     Io(#[from] std::io::Error),
 }
 
-type Result<T> = std::result::Result<T, QueryError>;
+/// Every query fails as an [`EngineError`](crate::error::EngineError), so a
+/// mistyped label reaches the command line with its own code rather than as
+/// an internal error.
+type Result<T> = crate::error::Result<T>;
 
 use crate::report::schema_version_of_a_document_without_one as schema_version;
 
@@ -345,7 +348,7 @@ impl<'a> IndexQuery<'a> {
             .build_map()
             .get(label)
             .copied()
-            .ok_or_else(|| QueryError::UnknownLabel(label.to_string()))
+            .ok_or_else(|| QueryError::UnknownLabel(label.to_string()).into())
     }
 
     fn walk_opts(&self, o: &QueryOptions) -> WalkOptions {
@@ -540,7 +543,8 @@ impl<'a> IndexQuery<'a> {
     pub fn targets(&self, package: &str, kind: Option<NodeKind>) -> Result<PackageTargets> {
         let pkg = (0..self.view.num_packages())
             .find(|&i| self.view.package_name(i) == package)
-            .ok_or_else(|| QueryError::UnknownPackage(package.to_string()))?;
+            .ok_or_else(|| QueryError::UnknownPackage(package.to_string()))
+            .map_err(crate::error::EngineError::from)?;
         let mut targets: Vec<PackageTarget> = self
             .view
             .package_nodes(pkg)
@@ -806,10 +810,12 @@ pub fn parse_kind(s: &str) -> Result<NodeKind> {
         "environment_group" => NodeKind::EnvironmentGroup,
         "unknown" => NodeKind::Unknown,
         "tombstone" => NodeKind::Tombstone,
-        other => return Err(QueryError::UnknownKind(other.to_string())),
+        other => return Err(QueryError::UnknownKind(other.to_string()).into()),
     })
 }
 
+/// Lower-case hex, the spelling every lineage, config hash and rule hash is
+/// printed in. The one definition; `probe::hex` and the CLI re-export it.
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -853,21 +859,26 @@ pub struct VerifyFailure {
 
 /// Runs the sampled cross-check described by [`VerifyResult`] against a live
 /// `bazel query` for a random sample of rule targets in `view`.
+///
+/// A sampled target whose query Bazel refuses is skipped and reported into
+/// `diags` (`CAMBI-W021`), so the verdict is over the targets that were
+/// actually compared and the caller can say which were not.
 pub fn verify(
     bazel: &cambium_bazel::Bazel,
     view: IndexRef<'_>,
     sample: usize,
     seed: u64,
+    diags: &crate::diag::Diagnostics,
 ) -> Result<VerifyResult> {
     if sample == 0 {
-        return Err(QueryError::ZeroSample);
+        return Err(QueryError::ZeroSample.into());
     }
 
     let rules: Vec<u32> = (0..view.num_nodes())
         .filter(|&i| view.kind_of(i) == NodeKind::Rule && !view.is_tombstone(i))
         .collect();
     if rules.is_empty() {
-        return Err(QueryError::NoRuleTargets);
+        return Err(QueryError::NoRuleTargets.into());
     }
 
     // Deterministic sample: stride through the rule ids from a seeded offset.
@@ -884,21 +895,35 @@ pub fn verify(
 
     for id in picked {
         let label = view.label(id);
-        let out = bazel
-            .command("query")
-            .args([
-                &format!("rdeps(//..., {label})"),
-                "--output=label",
-                // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
-                // implicit edges, so the cross-check must too.
-                "--order_output=no",
-                "--keep_going",
-                "--noshow_progress",
-                "--ui_event_filters=-info",
-            ])
-            .output()?;
-        if !out.status.success() {
-            eprintln!("cambium: skipping {label}: bazel query failed");
+        let mut cmd = bazel.command("query");
+        cmd.args([
+            &format!("rdeps(//..., {label})"),
+            "--output=label",
+            // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
+            // implicit edges, so the cross-check must too.
+            "--order_output=no",
+            "--keep_going",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ]);
+        // Through the same seam every other query uses, so a test can hand
+        // the check a canned Bazel.
+        let out = bazel.runner().output(&mut cmd)?;
+        if !out.exit.success {
+            diags.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W021VerifyQueryFailed,
+                    format!(
+                        "`bazel query rdeps(//..., {label})` failed ({}), so {label} was not \
+                         compared",
+                        out.exit
+                    ),
+                )
+                .with_help(
+                    "run the query by hand to see why Bazel refused it; the verdict over the \
+                     other samples stands",
+                ),
+            );
             continue;
         }
         let theirs: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)

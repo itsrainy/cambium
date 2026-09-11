@@ -201,6 +201,50 @@ impl RdepsResult {
     }
 }
 
+/// Roll-up over a run's change sets, for the report table: the counts the
+/// `rdeps` section prints, summed over every change set that ran the oracle.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RdepsOracleSummary {
+    /// Change sets that ran the oracle.
+    pub change_sets: usize,
+    /// Source labels queried.
+    pub roots: usize,
+    /// Labels whose batch failed even after bisection.
+    pub skipped_roots: usize,
+    /// Change sets with at least one partial batch.
+    pub partial_change_sets: usize,
+    pub partial_batches: usize,
+    /// Rules Bazel reached that cambium's answer did not contain. Must be
+    /// zero; it is the count that gates the run.
+    pub missing: usize,
+    /// Of those, unsatisfied consumers of a deleted file.
+    pub deleted_missing: usize,
+    /// Of those, reached only by leaving `//...` and coming back.
+    pub external_route: usize,
+    /// The `@repo//...` half of the difference, which recall ignores.
+    pub missing_external: usize,
+}
+
+impl RdepsOracleSummary {
+    pub fn add(&mut self, o: &RdepsResult) {
+        self.change_sets += 1;
+        self.roots += o.roots.len();
+        self.skipped_roots += o.skipped_roots.len();
+        self.missing += o.missing.len();
+        self.missing_external += o.missing_external.len();
+        self.deleted_missing += o.deleted_missing.len();
+        self.external_route += o.external_route.len();
+        if o.partial {
+            self.partial_change_sets += 1;
+            self.partial_batches += o.partial_batches;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.change_sets == 0
+    }
+}
+
 /// `|ours ∩ theirs| / |theirs|`, and 1.0 when there is nothing to recall — an
 /// empty oracle is not evidence of unsoundness.
 pub fn recall(ours: &BTreeSet<String>, theirs: &BTreeSet<String>) -> f64 {
@@ -730,10 +774,8 @@ mod tests {
     // scored, not Bazel.
     #[cfg(unix)]
     fn stub_bazel(dir: &Path, answer: &str) -> Bazel {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("stub-bazel");
-        std::fs::write(&bin, format!("#!/bin/sh\ncat <<'EOF'\n{answer}\nEOF\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cambium_testkit::executable_script(&bin, &format!("cat <<'EOF'\n{answer}\nEOF"));
         Bazel::at(dir.to_path_buf(), Some(bin.to_str().unwrap()))
     }
 

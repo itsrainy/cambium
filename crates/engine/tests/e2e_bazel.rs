@@ -5,12 +5,18 @@
 //! `rbuildfiles` mean what we think they mean, and that our reverse closure
 //! agrees with `bazel query rdeps`.
 //!
-//! They need Bazel, so they are opt-in:
+//! They need Bazel, so every test here is `#[ignore]`d and opted into by
+//! hand — `cargo test` reports them as ignored rather than as passes that
+//! ran nothing:
 //!
 //! ```sh
-//! CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel
-//! CAMBIUM_E2E=1 CAMBIUM_BAZEL=/path/to/bazelisk cargo test ...
+//! CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel -- --ignored
+//! CAMBIUM_E2E=1 CAMBIUM_BAZEL=/path/to/bazelisk cargo test ... -- --ignored
 //! ```
+//!
+//! Run with `--ignored` but without `CAMBIUM_E2E` or a Bazel to run against,
+//! each test fails with a message saying so, the way
+//! `crates/bench/tests/smoke_real_bazel.rs` does under `CAMBIUM_REQUIRE_TOOLS`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -18,6 +24,7 @@ use std::process::Command;
 
 use cambium_engine::{AffectedRequest, Engine};
 use cambium_index::{IndexData, IndexRef, NodeKind};
+use cambium_testkit::{commit_all, git, init_repo, write};
 
 fn enabled() -> bool {
     std::env::var("CAMBIUM_E2E").is_ok()
@@ -27,41 +34,31 @@ fn bazel_binary() -> Option<String> {
     std::env::var("CAMBIUM_BAZEL").ok()
 }
 
-macro_rules! skip_unless_e2e {
-    () => {
-        if !enabled() {
-            eprintln!("skipping: set CAMBIUM_E2E=1 (and CAMBIUM_BAZEL if bazel is not on PATH)");
-            return;
-        }
+/// Whether a Bazel is reachable: `CAMBIUM_BAZEL` names a file, or `bazel` or
+/// `bazelisk` is on `PATH`, which is where `Engine::open` looks without it.
+fn bazel_reachable() -> bool {
+    if let Some(b) = bazel_binary() {
+        return Path::new(&b).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
     };
+    std::env::split_paths(&path)
+        .any(|dir| dir.join("bazel").is_file() || dir.join("bazelisk").is_file())
 }
 
-// --------------------------------------------------------------- git helpers
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+/// The second guard behind `#[ignore]`: a test that was asked to run, with
+/// `--ignored`, on a machine that cannot run it fails and says why, rather
+/// than passing quietly.
+fn require_bazel() {
     assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        enabled(),
+        "this test drives a real Bazel: set CAMBIUM_E2E=1 (and CAMBIUM_BAZEL if bazel is not on PATH) and run with --ignored"
     );
-    String::from_utf8_lossy(&out.stdout).to_string()
-}
-
-fn commit_all(dir: &Path, msg: &str) -> String {
-    git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "--allow-empty", "-m", msg]);
-    git(dir, &["rev-parse", "HEAD"]).trim().to_string()
-}
-
-fn write(root: &Path, rel: &str, contents: &str) {
-    let p = root.join(rel);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, contents).unwrap();
+    assert!(
+        bazel_reachable(),
+        "CAMBIUM_E2E is set but no Bazel is reachable: put bazel or bazelisk on PATH, or point CAMBIUM_BAZEL at one"
+    );
 }
 
 fn engine_for(root: &Path, config: &Path) -> Engine {
@@ -194,9 +191,7 @@ impl Golden {
         let store = root.join("_store");
         std::fs::create_dir_all(&store).unwrap();
         write_golden_workspace(&root, &store);
-        git(&root, &["init", "-q", "-b", "main"]);
-        git(&root, &["config", "user.email", "t@example.com"]);
-        git(&root, &["config", "user.name", "t"]);
+        init_repo(&root);
         let base = commit_all(&root, "base");
 
         let config = root.join("cambium.toml");
@@ -232,7 +227,7 @@ impl Golden {
         let out = engine
             .compute(
                 self.base_index.view(),
-                &engine.repo.diff(&self.base, &head).expect("git diff"),
+                &engine.repo().diff(&self.base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier for head"),
                 &req,
             )
@@ -402,8 +397,9 @@ fn downstream() -> BTreeSet<&'static str> {
 
 /// Editing a source file reaches its consumers, and nothing else.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_modified_source_reaches_its_consumers() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("modify source", |root| {
         write(root, "lib/a.cc", "// a v2\n");
@@ -418,8 +414,9 @@ fn a_modified_source_reaches_its_consumers() {
 
 /// A file added under an existing glob changes the target's inputs.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_file_added_under_a_glob_changes_the_targets_inputs() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("add globbed source", |root| {
         write(root, "lib/b.cc", "// b\n");
@@ -430,8 +427,9 @@ fn a_file_added_under_a_glob_changes_the_targets_inputs() {
 
 /// ...and deleting one does too.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_deleted_globbed_source_does_too() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("delete source", |root| {
         std::fs::remove_file(root.join("lib/nested/deep.cc")).unwrap();
@@ -441,8 +439,9 @@ fn a_deleted_globbed_source_does_too() {
 
 /// Renaming a file is a delete plus an add.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_renamed_source_is_a_delete_plus_an_add() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("rename source", |root| {
         std::fs::rename(root.join("lib/a.cc"), root.join("lib/renamed.cc")).unwrap();
@@ -452,8 +451,9 @@ fn a_renamed_source_is_a_delete_plus_an_add() {
 
 /// An attribute-only BUILD edit moves that target's hash and nothing below it.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn an_attribute_only_build_edit_moves_one_targets_hash() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("edit build attribute", |root| {
         let p = root.join("app/BUILD.bazel");
@@ -478,8 +478,9 @@ fn an_attribute_only_build_edit_moves_one_targets_hash() {
 
 /// A new target in a package affects only itself.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_new_target_affects_only_itself() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("add target", |root| {
         let p = root.join("app/BUILD.bazel");
@@ -498,8 +499,9 @@ fn a_new_target_affects_only_itself() {
 
 /// Deleting a target makes its consumers direct.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_deleted_target_makes_its_consumers_direct() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("delete target", |root| {
         let p = root.join("app/BUILD.bazel");
@@ -535,8 +537,9 @@ fn a_deleted_target_makes_its_consumers_direct() {
 /// instead, that assertion fails and says so, rather than the coverage
 /// quietly evaporating.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_bzl_edit_reaches_every_package_that_loads_it() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("edit bzl", |root| {
         let p = root.join("lib/defs.bzl");
@@ -579,8 +582,9 @@ fn a_bzl_edit_reaches_every_package_that_loads_it() {
 
 /// A file exported by one package and consumed by another.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_file_exported_by_one_package_and_consumed_by_another() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("modify exported file", |root| {
         write(root, "tools/data.txt", "data v2\n");
@@ -595,8 +599,9 @@ fn a_file_exported_by_one_package_and_consumed_by_another() {
 /// A select branch changing is a change to the target's inputs, because
 /// --proto:flatten_selects reports the union of the branches.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_changed_select_branch_changes_the_targets_inputs() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("change select branch", |root| {
         let p = root.join("app/BUILD.bazel");
@@ -619,8 +624,9 @@ fn a_changed_select_branch_changes_the_targets_inputs() {
 
 /// Splitting a package: the parent's glob shrinks, so it changes too.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn splitting_a_package_dirties_the_parent_too() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("add sub package", |root| {
         write(
@@ -650,8 +656,9 @@ fn splitting_a_package_dirties_the_parent_too() {
 
 /// A global invalidator short-circuits everything.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_global_invalidator_short_circuits_everything() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("edit MODULE.bazel", |root| {
         write(
@@ -666,8 +673,9 @@ fn a_global_invalidator_short_circuits_everything() {
 
 /// An ignored path changes nothing.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn an_ignored_path_changes_nothing() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = golden();
     let r = g.scenario("edit ignored path", |root| {
         write(root, "lib/README.md", "docs\n");
@@ -679,8 +687,9 @@ fn an_ignored_path_changes_nothing() {
 /// Spec 12.3: our reverse closure must contain everything `bazel query rdeps`
 /// reports. Extra targets are the accepted over-approximation.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn differential_check_against_bazel_rdeps() {
-    skip_unless_e2e!();
+    require_bazel();
     let g = Golden::setup();
     let engine = engine_for(&g.root, &g.config);
     let v = g.base_index.view();
@@ -691,7 +700,7 @@ fn differential_check_against_bazel_rdeps() {
             continue;
         }
         let label = v.label(id);
-        let out = Command::new(engine.bazel.binary())
+        let out = Command::new(engine.bazel().binary())
             .current_dir(engine.workspace())
             .args([
                 "query",
@@ -740,8 +749,9 @@ fn differential_check_against_bazel_rdeps() {
 
 /// A synthetic workspace, driven through real Bazel over a generated history.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn synthetic_workspace_through_real_bazel() {
-    skip_unless_e2e!();
+    require_bazel();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let graph = cambium_synth::generate(&cambium_synth::GraphSpec::preset("tiny").unwrap());
@@ -945,7 +955,7 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
 
 /// Main-repo targets `bazel query rdeps(//..., <pattern>)` reports.
 fn rdeps_oracle(engine: &Engine, pattern: &str) -> BTreeSet<String> {
-    let out = Command::new(engine.bazel.binary())
+    let out = Command::new(engine.bazel().binary())
         .current_dir(engine.workspace())
         .args([
             "query",
@@ -973,8 +983,9 @@ fn rdeps_oracle(engine: &Engine, pattern: &str) -> BTreeSet<String> {
 }
 
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn an_external_repository_edit_reaches_only_its_consumers() {
-    skip_unless_e2e!();
+    require_bazel();
     // The two majors the benchmark and CI care about. Selected through
     // `.bazelversion` rather than `USE_BAZEL_VERSION` so that parallel tests
     // do not fight over one process-wide environment variable.
@@ -984,9 +995,7 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
         let store = root.join("_store");
         std::fs::create_dir_all(&store).unwrap();
         write_external_workspace(&root, &store, version);
-        git(&root, &["init", "-q", "-b", "main"]);
-        git(&root, &["config", "user.email", "t@example.com"]);
-        git(&root, &["config", "user.name", "t"]);
+        init_repo(&root);
         let base = commit_all(&root, "base");
 
         let config = root.join("cambium.toml");
@@ -1049,7 +1058,7 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             let out = engine
                 .compute(
                     base_index.view(),
-                    &engine.repo.diff(&base, &head).expect("git diff"),
+                    &engine.repo().diff(&base, &head).expect("git diff"),
                     &engine.bazel_querier(&head).expect("querier"),
                     &req,
                 )
@@ -1196,8 +1205,9 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
 /// file's loads was not, so a package in this shape — envoy's `bazel/coverage`,
 /// `bazel/external` and the root package — was invisible to rule (a).
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_build_files_direct_external_load_reaches_its_package() {
-    skip_unless_e2e!();
+    require_bazel();
     for version in ["7.4.1", "9.2.0"] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -1211,9 +1221,7 @@ fn a_build_files_direct_external_load_reaches_its_package() {
              via_macro(name = \"direct\")\n\n\
              genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
         );
-        git(&root, &["init", "-q", "-b", "main"]);
-        git(&root, &["config", "user.email", "t@example.com"]);
-        git(&root, &["config", "user.name", "t"]);
+        init_repo(&root);
         let base = commit_all(&root, "base");
 
         let config = root.join("cambium.toml");
@@ -1244,7 +1252,7 @@ fn a_build_files_direct_external_load_reaches_its_package() {
         let out = engine
             .compute(
                 base_index.view(),
-                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.repo().diff(&base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier"),
                 &req,
             )
@@ -1288,12 +1296,6 @@ fn resolved_bazel_major(root: &Path) -> u32 {
     text.split_whitespace()
         .find_map(|w| w.split('.').next().and_then(|n| n.parse::<u32>().ok()))
         .unwrap_or_else(|| panic!("no version in `bazel --version`: {text}"))
-}
-
-fn init_git(root: &Path) {
-    git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["config", "user.email", "t@example.com"]);
-    git(root, &["config", "user.name", "t"]);
 }
 
 fn affected_request(base: &str, head: &str, allow_partial: bool) -> AffectedRequest {
@@ -1434,8 +1436,9 @@ fn assert_same_externals(spliced: &IndexData, fresh: &IndexData, what: &str) {
 /// tables — invisible to `assert_same_edges`, and caught only by apollo's
 /// history walk eight hours into the published 2026-09-10 run.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_permanently_unloadable_package_keeps_no_load_closure() {
-    skip_unless_e2e!();
+    require_bazel();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let store = root.join("_store");
@@ -1471,7 +1474,7 @@ fn a_permanently_unloadable_package_keeps_no_load_closure() {
             store.display()
         ),
     );
-    init_git(&root);
+    init_repo(&root);
     let base = commit_all(&root, "base");
 
     let config = root.join("cambium.toml");
@@ -1499,7 +1502,7 @@ fn a_permanently_unloadable_package_keeps_no_load_closure() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier for head"),
             &affected_request(&base, &head, true),
         )
@@ -1598,8 +1601,9 @@ fn write_workspace_mode_workspace(root: &Path, store: &Path, major: u32) {
 /// `rbuildfiles` names 1097, on a run that took hours to reach the commit.
 /// Bazel does not read the file, so the honest answer is nothing at all.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn an_inert_module_file_in_workspace_mode_moves_nothing() {
-    skip_unless_e2e!();
+    require_bazel();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let store = root.join("_store");
@@ -1610,7 +1614,7 @@ fn an_inert_module_file_in_workspace_mode_moves_nothing() {
         return;
     }
     write_workspace_mode_workspace(&root, &store, major);
-    init_git(&root);
+    init_repo(&root);
     let base = commit_all(&root, "base");
 
     let config = root.join("cambium.toml");
@@ -1637,7 +1641,7 @@ fn an_inert_module_file_in_workspace_mode_moves_nothing() {
         let out = engine
             .compute(
                 base_index.view(),
-                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.repo().diff(&base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier for head"),
                 &affected_request(&base, &head, false),
             )
@@ -1668,8 +1672,9 @@ fn an_inert_module_file_in_workspace_mode_moves_nothing() {
 /// mode. Read as the mode it would make a live `MODULE.bazel` inert, which is
 /// the opposite mistake and loses real answers.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
-    skip_unless_e2e!();
+    require_bazel();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let store = root.join("_store");
@@ -1686,7 +1691,7 @@ fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
         "BUILD.bazel",
         "exports_files([\"config.txt\", \"config2.txt\"])\n",
     );
-    init_git(&root);
+    init_repo(&root);
     let base = commit_all(&root, "base");
 
     let config = root.join("cambium.toml");
@@ -1706,7 +1711,7 @@ fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier"),
             &affected_request(&base, &head, false),
         )
@@ -1730,8 +1735,9 @@ fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
 /// six targets `cambium_missing` on two change sets. The harvest reads the
 /// workspace files too now.
 #[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
 fn a_label_written_in_workspace_itself_reaches_its_repositorys_consumers() {
-    skip_unless_e2e!();
+    require_bazel();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let store = root.join("_store");
@@ -1742,7 +1748,7 @@ fn a_label_written_in_workspace_itself_reaches_its_repositorys_consumers() {
         return;
     }
     write_workspace_mode_workspace(&root, &store, major);
-    init_git(&root);
+    init_repo(&root);
     let base = commit_all(&root, "base");
 
     let config = root.join("cambium.toml");
@@ -1767,7 +1773,7 @@ fn a_label_written_in_workspace_itself_reaches_its_repositorys_consumers() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier"),
             &affected_request(&base, &head, false),
         )

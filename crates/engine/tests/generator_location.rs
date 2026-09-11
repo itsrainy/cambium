@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
 use cambium_engine::query::{no_files, parse_stream, Rows};
-use cambium_engine::{AffectedRequest, Config, Engine, PackageQuerier};
+use cambium_engine::{AffectedRequest, PackageQuerier};
 use cambium_index::PackageUpdate;
 use cambium_synth::{generate, GraphSpec};
+use cambium_testkit::engine;
 
 /// Serves precomputed package rows, so the test can hand the engine protos it
 /// built itself rather than a `SynthGraph` (whose rows never go through
@@ -56,16 +57,6 @@ impl PackageQuerier for Canned {
     fn version(&self) -> String {
         "canned".to_string()
     }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
 }
 
 #[test]

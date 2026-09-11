@@ -19,13 +19,11 @@
 //! including the `BUILD` over `BUILD.bazel` preference, so what these tests
 //! assert about the rows is what Bazel would have supplied.
 
-mod common;
-
 use std::path::PathBuf;
 
 use cambium_engine::{AffectedRequest, Config, Engine, RunOutcome};
 use cambium_index::IndexRef;
-use common::{commit, git, git_repo, synthetic_engine, write, DirQuerier};
+use cambium_testkit::{commit_all, git, init_repo, synthetic_engine, write, DirQuerier};
 
 /// Whether the index still has `label` as a live target. Splicing never
 /// removes a node — a deleted target is tombstoned so the walk can still hop
@@ -48,12 +46,12 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    git_repo(&root);
+    init_repo(&root);
     write(&root, "MODULE.bazel", "");
     write(&root, "lib/BUILD", "a\n");
     write(&root, "lib/BUILD.bazel", "z\n");
     write(&root, "app/BUILD", "app //lib:a\n");
-    let base = commit(&root, "base");
+    let base = commit_all(&root, "base");
 
     let engine = synthetic_engine(&root, Config::default());
     Fixture {
@@ -88,7 +86,7 @@ fn run(f: &Fixture, head: &str) -> RunOutcome {
     );
     drop(bq);
 
-    let changes = f.engine.repo.diff(&f.base, head).unwrap();
+    let changes = f.engine.repo().diff(&f.base, head).unwrap();
     f.engine
         .compute(
             base_index.view(),
@@ -103,7 +101,7 @@ fn run(f: &Fixture, head: &str) -> RunOutcome {
 fn deleting_one_of_two_build_files_leaves_the_package_alive() {
     let f = fixture();
     git(&f.root, &["rm", "-q", "lib/BUILD"]);
-    let head = commit(&f.root, "lib/BUILD goes away; lib/BUILD.bazel stays");
+    let head = commit_all(&f.root, "lib/BUILD goes away; lib/BUILD.bazel stays");
 
     let out = run(&f, &head);
     let index = out.index.expect("the run must not be globally invalidated");
@@ -136,7 +134,7 @@ fn deleting_one_of_two_build_files_leaves_the_package_alive() {
 fn deleting_every_build_file_really_does_delete_the_package() {
     let f = fixture();
     git(&f.root, &["rm", "-q", "lib/BUILD", "lib/BUILD.bazel"]);
-    let head = commit(&f.root, "lib goes away");
+    let head = commit_all(&f.root, "lib goes away");
 
     let out = run(&f, &head);
     let v_owned = out.index.expect("not globally invalidated");
@@ -157,7 +155,7 @@ fn a_rename_between_the_two_names_is_not_a_deletion_either() {
     let f = fixture();
     git(&f.root, &["rm", "-q", "lib/BUILD.bazel"]);
     write(&f.root, "lib/BUILD", "a\nz\n");
-    let head = commit(&f.root, "fold BUILD.bazel into BUILD");
+    let head = commit_all(&f.root, "fold BUILD.bazel into BUILD");
 
     let out = run(&f, &head);
     let index = out.index.expect("not globally invalidated");

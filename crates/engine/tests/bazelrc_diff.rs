@@ -5,22 +5,20 @@
 //! synthetic graph, no Bazel. `.bazelrc` is a default invalidator, so the first
 //! test is also the check that the screen runs *before* the generic rule.
 
-mod common;
-
 use cambium_engine::{AffectedRequest, Config, Engine, RunOutcome, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, SynthGraph};
-use common::{commit, git, git_repo, synthetic_engine};
+use cambium_testkit::{commit_all, git, init_repo, synthetic_engine, write};
 
 /// A repository with `.bazelrc` at `base` and then at `head`, and the engine
 /// over it. Returns the two shas.
 fn repo_with(base_rc: &str, head_rc: &str) -> (tempfile::TempDir, Engine, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    git_repo(&root);
-    common::write(&root, ".bazelrc", base_rc);
-    let base = commit(&root, "base");
-    common::write(&root, ".bazelrc", head_rc);
-    let head = commit(&root, "head");
+    init_repo(&root);
+    write(&root, ".bazelrc", base_rc);
+    let base = commit_all(&root, "base");
+    write(&root, ".bazelrc", head_rc);
+    let head = commit_all(&root, "head");
     let engine = synthetic_engine(&root, Config::default());
     (dir, engine, base, head)
 }

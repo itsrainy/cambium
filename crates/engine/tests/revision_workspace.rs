@@ -11,12 +11,10 @@
 //! run, and a BUILD-file-reading stand-in is pointed at that same directory —
 //! which is exactly the substitution the bug was about.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 
 use cambium_engine::{Config, Engine};
-use common::{commit, git_repo, synthetic_engine, write, DirQuerier};
+use cambium_testkit::{commit_all, init_repo, synthetic_engine, write, DirQuerier};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -31,14 +29,14 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    git_repo(&root);
+    init_repo(&root);
     write(&root, "MODULE.bazel", "");
 
     write(&root, "lib/BUILD", "a\n");
-    let base = commit(&root, "base");
+    let base = commit_all(&root, "base");
 
     write(&root, "lib/BUILD", "a\nb a\n");
-    let head = commit(&root, "head adds b");
+    let head = commit_all(&root, "head adds b");
 
     let engine = synthetic_engine(&root, Config::default());
     Fixture {

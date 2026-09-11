@@ -4,8 +4,7 @@ use anyhow::Result;
 use cambium_engine::AffectedRequest;
 use clap::Args as ClapArgs;
 
-use crate::cmd::result_event;
-use crate::cmd::Context;
+use crate::cmd::{emit_json, Context};
 use crate::Format;
 
 #[derive(ClapArgs)]
@@ -62,28 +61,13 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     // rather than that there is no workspace.
     check_usage(&args)?;
     let engine = ctx.engine()?;
-    let req = request(&engine, &args, args.explain, args.out.is_some())?;
+    let req = request(&engine, &args, Shape::affected(&args))?;
     if args.dry_run {
         return crate::cmd::plan::run(ctx, &engine, &req);
     }
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
-    // Under --format json the diagnostics are already in the document; every
-    // other form puts them on stderr, where they cannot be mistaken for the
-    // answer. `jsonl` streams them first, as events, so a watcher sees them as
-    // the run raises them rather than only at the end.
-    if !matches!(ctx.format, Format::Json) {
-        for d in &report.diagnostics {
-            match ctx.format {
-                Format::Jsonl => {
-                    if !ctx.render.quiet {
-                        println!("{}", diagnostic_event(d)?);
-                    }
-                }
-                _ => ctx.render.warn(d),
-            }
-        }
-    }
+    ctx.render.report(&report.diagnostics)?;
 
     if let (Some(path), Some(index)) = (&args.out, &outcome.index) {
         cambium_index::format::write_index(path, index)?;
@@ -92,15 +76,16 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match ctx.format {
         Format::Null => {}
         Format::Json | Format::Jsonl => {
+            let fmt = ctx.format.data("cambi affected")?.expect("json or jsonl");
             if args.tests_only && !report.global {
                 // `--tests-only` restricts `affected` to test targets; every
                 // other field (including `direct`, which can name non-test
                 // labels the change touched directly) is unchanged.
                 let mut projected = report.clone();
                 projected.affected.retain(|t| t.test);
-                print_document(ctx, &projected)?;
+                emit_json(&projected, fmt)?;
             } else {
-                print_document(ctx, report)?;
+                emit_json(report, fmt)?;
             }
         }
         Format::Query => {
@@ -184,14 +169,51 @@ pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(St
     }
     // No range at all: what someone on a feature branch means by "what did I
     // change" — the merge base of the default branch with where they are.
-    let branch = &engine.cfg.git.default_branch;
-    let base = engine.repo.merge_base(branch, &head).map_err(|e| {
+    let branch = &engine.config().git.default_branch;
+    let base = engine.repo().merge_base(branch, &head).map_err(|e| {
         crate::diag::UsageError::raised(format!(
             "no merge base between {branch} and {head} ({e}); pass a range, or set \
              [git].default_branch in cambium.toml"
         ))
     })?;
     Ok((base, head))
+}
+
+/// What a run is for, beyond what its flags say: whether it explains itself,
+/// and whether it builds a head index. Only a run that someone will read a
+/// graph out of materialises one — it is the most expensive step there is —
+/// and only a run that will print explanations computes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    pub explain: bool,
+    pub materialize: bool,
+}
+
+impl Shape {
+    /// `--dry-run`: the plan reads neither.
+    pub const PLAN: Self = Self {
+        explain: false,
+        materialize: false,
+    };
+
+    /// `cambi affected`: explanations only under the deprecated `--explain`;
+    /// an index only when `--out` asked for the file.
+    pub fn affected(args: &Args) -> Self {
+        Self {
+            explain: args.explain,
+            materialize: args.out.is_some(),
+        }
+    }
+
+    /// `cambi explain`: explanations always; an index when there is a label
+    /// to look up in the head graph, to answer "not affected" rather than
+    /// "no such target".
+    pub fn explain(label: Option<&str>) -> Self {
+        Self {
+            explain: true,
+            materialize: label.is_some(),
+        }
+    }
 }
 
 /// The request both `affected` and `explain` run.
@@ -202,44 +224,21 @@ pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(St
 pub fn request(
     engine: &cambium_engine::Engine,
     args: &Args,
-    explain: bool,
-    materialize: bool,
+    shape: Shape,
 ) -> Result<AffectedRequest> {
     let (base, head) = resolve_range(engine, args)?;
     Ok(AffectedRequest {
         base,
         head,
         include_manual: args.include_manual,
-        explain,
-        // Only materialise a head index when someone needs one: the caller
-        // asked for the file, or `explain` has a label to look up. Otherwise
-        // the run walks a delta overlay and never builds one.
-        materialize,
+        explain: shape.explain,
+        materialize: shape.materialize,
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
         // `--publish-base` follows the config's `baseline.publish_partial`.
         allow_partial: false,
         max_depth: args.max_depth,
     })
-}
-
-/// The report, as the one document or as the single `result` event.
-fn print_document(ctx: &Context, report: &cambium_engine::AffectedReport) -> Result<()> {
-    match ctx.format {
-        Format::Jsonl => println!("{}", result_event(report)?),
-        _ => println!("{}", serde_json::to_string_pretty(report)?),
-    }
-    Ok(())
-}
-
-/// One streamed diagnostic line.
-fn diagnostic_event(d: &cambium_engine::Diagnostic) -> Result<String> {
-    let mut doc = serde_json::json!({"event": "diagnostic"});
-    let map = doc.as_object_mut().expect("an object");
-    if let serde_json::Value::Object(fields) = serde_json::to_value(d)? {
-        map.extend(fields);
-    }
-    Ok(serde_json::to_string(&doc)?)
 }
 
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {

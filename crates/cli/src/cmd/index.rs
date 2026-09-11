@@ -6,7 +6,7 @@
 //! spelling of these verbs.
 
 use anyhow::{Context as _, Result};
-use cambium_engine::AffectedRequest;
+use cambium_engine::{AffectedRequest, OnGlobal, PublishPolicy, PublishSource};
 use clap::Subcommand;
 
 use crate::cmd::{hex, Context};
@@ -84,21 +84,11 @@ pub enum Args {
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    // `show` reads a file and nothing else: it must work outside a workspace,
-    // so it is answered before the engine is opened.
-    if let Args::Show { file } = &args {
-        return crate::cmd::inspect::show(ctx, file);
-    }
-    // A missing range is the caller's mistake, whatever the workspace's state,
-    // so it is reported before the workspace is opened.
-    if let Args::Update {
-        range, from, to, ..
-    } = &args
-    {
-        update_range(range.clone(), from.clone(), to.clone())?;
-    }
-    let mut engine = ctx.engine()?;
+    // `show` reads a file and nothing else, so it must work outside a
+    // workspace: it is the one verb that opens no engine. The others open
+    // theirs as their first step.
     match args {
+        Args::Show { file } => crate::cmd::inspect::show(ctx, &file),
         Args::Build {
             rev,
             commit,
@@ -106,14 +96,19 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             out,
             allow_partial,
         } => {
-            engine.cfg.baseline.publish_partial |= allow_partial;
             let rev = rev.or(commit).unwrap_or_else(|| "HEAD".to_string());
+            let engine = ctx.engine()?;
             let sha = engine
-                .repo
+                .repo()
                 .rev_parse(&rev)
                 .with_context(|| format!("{rev} is not a revision in this repository"))?;
             let index = engine.full_build(&sha)?;
-            emit(&engine, &index, out.as_deref(), publish)?;
+            emit(
+                &engine,
+                &index,
+                out.as_deref(),
+                publish.then_some(PublishPolicy { allow_partial }),
+            )?;
             Ok(crate::EXIT_OK)
         }
         Args::Update {
@@ -125,15 +120,17 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             no_rebuild_on_global,
             allow_partial,
         } => {
-            engine.cfg.baseline.publish_partial |= allow_partial;
+            // A missing range is the caller's mistake, whatever the workspace's
+            // state, so it is reported before the workspace is opened.
             let (from, to) = update_range(range, from, to)?;
+            let engine = ctx.engine()?;
             let to_sha = engine
-                .repo
+                .repo()
                 .rev_parse(&to)
                 .with_context(|| format!("{to} is not a revision in this repository"))?;
             let req = AffectedRequest {
                 base: from,
-                head: to_sha.clone(),
+                head: to_sha,
                 include_manual: false,
                 explain: false,
                 // `baseline update` publishes its output, so it needs one.
@@ -145,48 +142,37 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 allow_partial,
                 max_depth: None,
             };
-            let outcome = engine.affected(&req)?;
-            let index = match outcome.index {
-                Some(i) => i,
-                None => {
-                    if no_rebuild_on_global {
-                        anyhow::bail!(
-                            "the range invalidates everything ({}); drop --no-rebuild-on-global \
-                             to mint a fresh lineage instead",
-                            outcome
-                                .report
-                                .global_reason
-                                .unwrap_or_else(|| "global".into())
-                        );
-                    }
-                    eprintln!(
-                        "cambium: range invalidates everything ({}); rebuilding a fresh lineage",
-                        outcome
-                            .report
-                            .global_reason
-                            .clone()
-                            .unwrap_or_else(|| "global".into())
-                    );
-                    engine.full_build(&to_sha)?
-                }
+            let on_global = if no_rebuild_on_global {
+                OnGlobal::Fail
+            } else {
+                OnGlobal::Rebuild
             };
-            emit(&engine, &index, out.as_deref(), publish)?;
+            let updated = engine.update_index(&req, on_global)?;
+            if let Some(reason) = &updated.rebuilt_because {
+                eprintln!(
+                    "cambium: range invalidates everything ({reason}); rebuilt a fresh lineage"
+                );
+            }
+            emit(
+                &engine,
+                &updated.index,
+                out.as_deref(),
+                publish.then_some(PublishPolicy { allow_partial }),
+            )?;
             Ok(crate::EXIT_OK)
         }
         Args::Gc { keep } => {
-            let store = engine
-                .store
-                .as_ref()
-                .context("no baseline store is configured")?;
+            let engine = ctx.engine()?;
+            let store = engine.store().context("no baseline store is configured")?;
             let removed = store.gc(
-                engine.cfg.baseline.retention_days,
+                engine.config().baseline.retention_days,
                 keep.as_deref().unwrap_or(""),
             )?;
             println!("removed {removed} index files");
             Ok(crate::EXIT_OK)
         }
-        Args::Show { .. } => unreachable!("answered before the engine is opened"),
         Args::Publish { file } => {
+            let engine = ctx.engine()?;
             let f = cambium_index::IndexFile::open(&file)?;
             let v = f.view();
             let (lineage, commit) = (v.lineage, v.commit.to_string());
@@ -197,10 +183,8 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
         Args::List => {
-            let store = engine
-                .store
-                .as_ref()
-                .context("no baseline store is configured")?;
+            let engine = ctx.engine()?;
+            let store = engine.store().context("no baseline store is configured")?;
             for n in store.list()? {
                 println!("{n}");
             }
@@ -209,27 +193,28 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     }
 }
 
+/// Writes the index to `out`, and publishes it when `publish` says how.
 fn emit(
     engine: &cambium_engine::Engine,
     index: &cambium_index::IndexData,
     out: Option<&std::path::Path>,
-    publish: bool,
+    publish: Option<PublishPolicy>,
 ) -> Result<()> {
     // An index is routinely gigabytes. Writing one into `temp_dir()` under a
     // content-addressed name and walking away leaves it there for good, so
     // the only run allowed to skip `--out` is one that publishes, and that
     // one writes through a `NamedTempFile` that is deleted on the way out.
-    let scratch = match (out, publish) {
-        (None, false) => anyhow::bail!(
+    // The scratch file lives as long as this function does, which is as long
+    // as the publish needs it.
+    let (path, _scratch) = match (out, publish) {
+        (None, None) => anyhow::bail!(
             "pass --out <file> to say where the index goes, or --publish to upload it"
         ),
-        (None, true) => Some(tempfile::NamedTempFile::new()?),
-        (Some(_), _) => None,
-    };
-    let path = match (out, &scratch) {
-        (Some(p), _) => p.to_path_buf(),
-        (None, Some(t)) => t.path().to_path_buf(),
-        (None, None) => unreachable!("the None/false arm bailed"),
+        (None, Some(_)) => {
+            let scratch = tempfile::NamedTempFile::new()?;
+            (scratch.path().to_path_buf(), Some(scratch))
+        }
+        (Some(p), _) => (p.to_path_buf(), None),
     };
     cambium_index::format::write_index_with(&path, index, engine.index_compression())?;
     let c = &index.header.counts;
@@ -247,8 +232,15 @@ fn emit(
     if let Some(w) = cambium_engine::inspect::PartialLoad::from(index.view()).warning() {
         eprintln!("cambium: WARNING: {w}");
     }
-    if publish {
-        let names = engine.publish_index(&path, &index.header.lineage, &index.provenance.commit)?;
+    if let Some(policy) = publish {
+        let names = engine.publish(
+            PublishSource::File {
+                path: &path,
+                lineage: &index.header.lineage,
+                commit: &index.provenance.commit,
+            },
+            policy,
+        )?;
         for n in names {
             eprintln!("cambium: published {n}");
         }

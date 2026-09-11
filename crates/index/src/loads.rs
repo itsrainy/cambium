@@ -89,6 +89,9 @@
 use rustc_hash::FxHashMap;
 
 use crate::data::IndexRef;
+use crate::label::{join_path, Label};
+pub(crate) use crate::starlark::lexer::unescape;
+use crate::starlark::lexer::{is_string_prefix, lex_string};
 
 /// Files whose loads make up the workspace closure, most-preferred first.
 /// All that exist are scanned: a repository can carry both.
@@ -242,63 +245,27 @@ pub enum Load {
 /// `@repo//pkg:file.bzl`, `@@canonical//pkg:file.bzl`, and `@//pkg:file.bzl`
 /// (the main repository, spelled explicitly).
 pub fn resolve_label(label: &str, from_pkg: &str, m: &RepoMapping) -> Option<Load> {
-    let (repo, rest) = match label.strip_prefix("@@") {
-        // A doubled `@` means the name is already canonical.
-        Some(rest) => match rest.split_once("//") {
-            Some((r, rest)) => (Some(r.to_string()), format!("//{rest}")),
-            None => return None,
-        },
-        None => match label.strip_prefix('@') {
-            Some(rest) => match rest.split_once("//") {
-                Some((r, rest)) => (Some(m.canonical(r).to_string()), format!("//{rest}")),
-                // `@repo` on its own is not a file label.
-                None => return None,
-            },
-            None => (None, label.to_string()),
-        },
-    };
-
+    // `@repo` on its own, and a bare `file.bzl` with no leading colon, are
+    // not file labels in any supported Bazel.
+    let l = Label::parse(label)?;
+    // `//pkg/file.bzl` is not valid, and `//pkg` with an implicit target name
+    // never names a `.bzl`: a file label always writes its `:`.
+    let name = l.explicit_name()?;
     // An external repository: name it canonically and stop.
-    if let Some(repo) = &repo {
-        if !repo.is_empty() {
-            let (pkg, name) = split_target(&rest)?;
-            return Some(Load::External(format!("@@{repo}//{pkg}:{name}")));
-        }
+    let repo = l.canonical_repo(m);
+    if !repo.is_empty() {
+        return Some(Load::External(format!("@@{repo}//{}:{name}", l.package())));
     }
-
-    let (pkg, name) = match rest.strip_prefix("//") {
-        Some(rest) => {
-            let (pkg, name) = split_target_body(rest)?;
-            (pkg.to_string(), name.to_string())
-        }
-        // Relative to the loading file's own package. A bare `file.bzl` with
-        // no leading colon is not a legal load label in any supported Bazel.
-        None => (from_pkg.to_string(), rest.strip_prefix(':')?.to_string()),
-    };
     if name.is_empty() {
         return None;
     }
-    Some(Load::Main(if pkg.is_empty() {
-        name
+    // A relative label resolves against the loading file's own package.
+    let pkg = if l.is_relative() {
+        from_pkg
     } else {
-        format!("{pkg}/{name}")
-    }))
-}
-
-/// `//pkg:name` -> `(pkg, name)`, for a label already known to start `//`.
-fn split_target(label: &str) -> Option<(String, String)> {
-    let rest = label.strip_prefix("//")?;
-    let (pkg, name) = split_target_body(rest)?;
-    Some((pkg.to_string(), name.to_string()))
-}
-
-fn split_target_body(rest: &str) -> Option<(&str, &str)> {
-    match rest.split_once(':') {
-        Some((pkg, name)) => Some((pkg, name)),
-        // `//pkg/file.bzl` is not valid, but `//pkg` with an implicit target
-        // name never names a `.bzl`; treat it as unresolvable.
-        None => None,
-    }
+        l.package()
+    };
+    Some(Load::Main(join_path(pkg, name)))
 }
 
 // ------------------------------------------------------------------ the lexer
@@ -328,7 +295,9 @@ pub(crate) struct Lexed<'a> {
 /// Tokenises far enough to find `load()` calls and nothing further: names,
 /// string literals, and bracket nesting. Comments and string contents are
 /// consumed as units, which is the whole point — a `load(` inside a comment or
-/// inside a docstring is not a load.
+/// inside a docstring is not a load. The string scanner is shared with
+/// [`crate::starlark::lexer`], the full lexer the parser reads, so the two
+/// agree about where a literal ends.
 pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -411,64 +380,6 @@ pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
                 });
                 i += 1;
             }
-        }
-    }
-    out
-}
-
-fn is_string_prefix(s: &[u8]) -> bool {
-    s.len() <= 2 && s.iter().all(|c| matches!(c, b'r' | b'R' | b'b' | b'B'))
-}
-
-/// Consumes a string literal starting at `i` (a quote). Returns the span of
-/// the *contents* and the index just past the literal.
-fn lex_string(b: &[u8], i: usize, raw: bool) -> (Option<(usize, usize)>, usize) {
-    let q = b[i];
-    let triple = b.len() >= i + 3 && b[i + 1] == q && b[i + 2] == q;
-    let open = if triple { 3 } else { 1 };
-    let mut j = i + open;
-    let start = j;
-    while j < b.len() {
-        if b[j] == b'\\' && !raw {
-            j += 2;
-            continue;
-        }
-        if b[j] == q {
-            if !triple {
-                return (Some((start, j)), j + 1);
-            }
-            if b.len() >= j + 3 && b[j + 1] == q && b[j + 2] == q {
-                return (Some((start, j)), j + 3);
-            }
-        }
-        // An unterminated single-quoted string ends at the newline, as in
-        // Starlark; a triple-quoted one does not.
-        if b[j] == b'\n' && !triple {
-            return (None, j);
-        }
-        j += 1;
-    }
-    (None, b.len())
-}
-
-/// Decodes the handful of escapes a label could plausibly contain. Anything
-/// else is left alone: this is a label, not arbitrary text.
-pub(crate) fn unescape(s: &str) -> String {
-    if !s.contains('\\') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some(other) => out.push(other),
-            None => break,
         }
     }
     out
@@ -705,11 +616,7 @@ impl LoadGraph {
         let mut roots = Vec::new();
         let mut external = Vec::new();
         for name in ["BUILD.bazel", "BUILD"] {
-            let path = if pkg.is_empty() {
-                name.to_string()
-            } else {
-                format!("{pkg}/{name}")
-            };
+            let path = join_path(pkg, name);
             let Some(text) = src.text(&path) else {
                 continue;
             };
@@ -850,6 +757,7 @@ fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::Files;
 
     /// A WORKSPACE-mode index stores no canonical names; reading them back
     /// must not turn every repository into the main one.
@@ -979,18 +887,6 @@ mod tests {
             got,
             vec!["//bazel:ext.bzl", "//bazel:repo.bzl", "//bazel:w.bzl"]
         );
-    }
-
-    /// A tiny in-memory checkout.
-    struct Files(Vec<(&'static str, &'static str)>);
-
-    impl FileText for Files {
-        fn text(&self, path: &str) -> Option<String> {
-            self.0
-                .iter()
-                .find(|(p, _)| *p == path)
-                .map(|(_, t)| t.to_string())
-        }
     }
 
     fn closure_paths(g: &LoadGraph, ids: &[u32]) -> Vec<String> {

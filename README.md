@@ -391,6 +391,16 @@ named `synth:<preset>` emitted as a real workspace with a real history. It is
 its own binary and drives `cambi` the way a user does, by running it, so the
 benchmark measures the binary that ships.
 
+`cambium-bench run` is the whole thing from flags — per subject the fetch,
+the cold build, both workloads and the report — as `tools/bench/run-published.sh`
+runs it on the benchmark box; with no verb, on a terminal, `cambium-bench`
+composes the same plan on a screen. Before that box is started,
+`cambium-bench pull-results` copies a finished run's results off it and
+`cambium-bench replay` reruns the engine's static stages over every recorded
+change set offline, in milliseconds each, against the answers the run
+recorded; the diffs it reads are written on the box by `cambium-bench replay
+--write-paths`.
+
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
 measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
 numbers; [docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run the five real
@@ -410,6 +420,7 @@ crates/
   bench/           the benchmark: subjects, tools, oracles, workloads, report
   cli/             the `cambi` binary
   bench-cli/       the `cambium-bench` binary, which drives `cambi`
+  testkit/         the fixtures the crates' tests share; never shipped
 ```
 
 `index` and `synth` do not depend on `bazel`. `engine` is the only crate that
@@ -419,11 +430,25 @@ the harness's front door, and the harness measures `cambi` by running it.
 ## Testing
 
 ```console
-$ cargo test --workspace                     # unit, integration, oracles
-$ CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel   # needs Bazel
+$ cargo test --workspace                     # unit, integration, oracles; no Bazel
+$ CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel -- --ignored   # needs Bazel
+$ cargo test -p cambium-bench --test smoke_real_bazel -- --ignored            # needs bazelisk
 $ CAMBIUM_SOUNDNESS_SIZE=medium CAMBIUM_SOUNDNESS_SEEDS=50 \
     cargo test --release -p cambium-engine --test soundness      # nightly
 ```
+
+`cargo test --workspace` runs nothing that needs Bazel: every engine a test
+opens points at a Bazel binary that does not exist, and the rows come from
+the synthetic source or from a scanner over a temporary tree. Those fixtures
+— a scratch directory, a git repository, an engine over one, a package
+querier that also serves `.bzl` text, a synthetic history with an index
+already published — live in `crates/testkit` (`cambium-testkit`), a
+dev-dependency of every crate with tests and nothing else. The tests that
+need a real Bazel, a network fetch, or a corpus checkout are `#[ignore]`d, so
+a plain run reports them as ignored rather than as passes that ran nothing;
+each is opted into with `-- --ignored` and says what it is missing when run
+without it (`CAMBIUM_REQUIRE_TOOLS=1` turns a missing tool from a skip into
+a failure, which is what the nightly job sets).
 
 The correctness argument rests on four oracles, in increasing order of how
 much they cost to run:

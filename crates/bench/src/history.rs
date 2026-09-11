@@ -121,7 +121,7 @@ pub struct EngineDriver<'a> {
 
 impl EngineDriver<'_> {
     fn publish_file(&self, path: &Path) -> Result<()> {
-        if self.engine.store.is_none() {
+        if self.engine.store().is_none() {
             return Ok(());
         }
         let index = IndexFile::open(path)?.deserialize()?;
@@ -158,7 +158,7 @@ impl Driver for EngineDriver<'_> {
             .fetch_baseline(base)?
             .with_context(|| format!("no published index for {base}"))?;
         let base_index = IndexFile::open(&base_path)?;
-        let changes = self.engine.repo.diff(base, head)?;
+        let changes = self.engine.repo().diff(base, head)?;
         let q = self.rows.querier(head)?;
         let req = AffectedRequest {
             base: base.to_string(),
@@ -449,7 +449,7 @@ pub fn summarise(commits: &[CommitRecord]) -> Summary {
 /// actually answered rather than which one was asked for. Best effort: an
 /// unavailable binary yields an empty string rather than failing the history.
 fn bazel_version_used(engine: &Engine) -> String {
-    let v = engine.bazel.version();
+    let v = engine.bazel().version();
     v.lines().next().unwrap_or("").trim().to_string()
 }
 
@@ -481,6 +481,10 @@ pub fn cold_build(driver: &dyn Driver, rev: &str, out: &Path, publish: bool) -> 
 
 /// The history proper. `commits` is the first-parent range, oldest first, with
 /// the pin last; the cold build happens at `commits[0]`.
+///
+/// Three phases: resume the recorded history or cold-build the start of the
+/// range; walk forward one commit at a time, writing the result after each;
+/// then the rebuild oracle at the pin.
 pub fn history(
     engine: &Engine,
     driver: &dyn Driver,
@@ -490,17 +494,8 @@ pub fn history(
     anyhow::ensure!(commits.len() >= 2, "a history needs at least two commits");
     let from = commits[0].clone();
     let to = commits[commits.len() - 1].clone();
-    let path = HistoryResult::path_versioned(
-        &opts.results_dir,
-        &opts.pin,
-        Some(opts.bazel_version.as_str()),
-    );
-    let mut state = State::load_for(
-        &opts.state_dir,
-        &opts.repo_id,
-        &opts.pin,
-        &State::engine_id(&engine.cfg.hash()),
-    )?;
+    let engine_id = State::engine_id(&engine.config().hash());
+    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
     // Where each step's index lands. One file, rewritten every commit: the
     // walk's own continuity is the store, which is where the next step's base
     // comes from, and this is only what the record's counts and the oracle's
@@ -512,78 +507,151 @@ pub fn history(
         "bin",
     ));
 
-    // ---- resume, or start ----
-    let (mut result, start_at) = match (opts.resume, HistoryResult::read(&path)) {
-        (true, Ok(prev))
-            if prev.from == from
-                && prev.to == to
-                && !prev.done
-                && prev.engine == State::engine_id(&engine.cfg.hash()) =>
-        {
-            let last = prev
-                .commits
-                .last()
-                .map(|c| c.commit.clone())
-                .unwrap_or_else(|| from.clone());
-            // The index to carry forward is whichever one the store holds for
-            // `last`; the next `update` asks the store for it by name, so
-            // there is nothing to load here — only to check that it is there.
-            match engine.fetch_baseline(&last)? {
-                Some(_) => {
-                    let pos = commits.iter().position(|c| *c == last).unwrap_or(0);
-                    tracing::info!(%last, done = prev.commits.len(), "resuming history");
-                    (prev, pos + 1)
-                }
-                None => {
-                    tracing::warn!(%last, "no published index to resume from; starting over");
-                    start(engine, driver, &from, &to, &index_path, opts)?
-                }
-            }
-        }
-        (true, Ok(prev))
-            if prev.done
-                && prev.from == from
-                && prev.to == to
-                && prev.engine == State::engine_id(&engine.cfg.hash()) =>
-        {
-            tracing::info!("history already complete");
-            return Ok(prev);
-        }
-        _ => start(engine, driver, &from, &to, &index_path, opts)?,
+    let (result, start_at) = match resume(engine, commits, opts, &engine_id)? {
+        Resume::Done(prev) => return Ok(prev),
+        Resume::From(prev, at) => (prev, at),
+        Resume::Fresh => start(engine, driver, &from, &to, &index_path, opts)?,
     };
-    let progress = opts.progress.as_deref();
-    if let Some(p) = progress {
-        p.step(crate::progress::Step::History);
-        p.total(commits.len().saturating_sub(1));
-        if let Some(last) = result.commits.last() {
-            p.item(result.commits.len(), &last.commit);
+    let mut walk = Walk {
+        engine,
+        driver,
+        opts,
+        path: result_path(opts),
+        index_path,
+        result,
+        state,
+    };
+    walk.begin(commits.len(), &from, &to)?;
+    for i in start_at..commits.len() {
+        walk.step(i, commits.len() - 1, &commits[i - 1], &commits[i])?;
+    }
+    if opts.rebuild_oracle {
+        walk.rebuild_oracle(commits.len() - 1, &to)?;
+    } else {
+        tracing::warn!("the rebuild oracle was skipped: this history proves nothing");
+    }
+    walk.finish()
+}
+
+/// `history-<pin>[-<version>].json`.
+fn result_path(opts: &HistoryOptions) -> PathBuf {
+    HistoryResult::path_versioned(
+        &opts.results_dir,
+        &opts.pin,
+        Some(opts.bazel_version.as_str()),
+    )
+}
+
+/// What a previous result file allows.
+enum Resume {
+    /// The same range, the same cambium, finished: nothing to do.
+    Done(HistoryResult),
+    /// The same range and cambium, part way: continue at this position.
+    From(HistoryResult, usize),
+    /// No usable previous result.
+    Fresh,
+}
+
+/// Whether the recorded history can be picked up: same range, same cambium,
+/// and the store still holds the index the last completed commit left.
+fn resume(
+    engine: &Engine,
+    commits: &[String],
+    opts: &HistoryOptions,
+    engine_id: &str,
+) -> Result<Resume> {
+    if !opts.resume {
+        return Ok(Resume::Fresh);
+    }
+    let Ok(prev) = HistoryResult::read(&result_path(opts)) else {
+        return Ok(Resume::Fresh);
+    };
+    let from = &commits[0];
+    let to = &commits[commits.len() - 1];
+    if prev.from != *from || prev.to != *to || prev.engine != engine_id {
+        return Ok(Resume::Fresh);
+    }
+    if prev.done {
+        tracing::info!("history already complete");
+        return Ok(Resume::Done(prev));
+    }
+    let last = prev
+        .commits
+        .last()
+        .map(|c| c.commit.clone())
+        .unwrap_or_else(|| from.clone());
+    // The index to carry forward is whichever one the store holds for
+    // `last`; the next `update` asks the store for it by name, so there is
+    // nothing to load here — only to check that it is there.
+    match engine.fetch_baseline(&last)? {
+        Some(_) => {
+            let pos = commits.iter().position(|c| *c == last).unwrap_or(0);
+            tracing::info!(%last, done = prev.commits.len(), "resuming history");
+            Ok(Resume::From(prev, pos + 1))
+        }
+        None => {
+            tracing::warn!(%last, "no published index to resume from; starting over");
+            Ok(Resume::Fresh)
         }
     }
-    state.stamp_start("history");
-    state.history = Some(HistoryState {
-        from: from.clone(),
-        to: to.clone(),
-        bazel_version: opts.bazel_version.clone(),
-        last_completed: result.commits.last().map(|c| c.commit.clone()),
-        done: false,
-    });
-    state.save(&opts.state_dir)?;
+}
 
-    // ---- walk forward ----
-    for i in start_at..commits.len() {
-        let (parent, commit) = (&commits[i - 1], &commits[i]);
-        if let Some(p) = progress {
+/// A history in progress: the result and state files it rewrites after every
+/// commit, and the index file each step lands in.
+struct Walk<'a> {
+    engine: &'a Engine,
+    driver: &'a dyn Driver,
+    opts: &'a HistoryOptions,
+    path: PathBuf,
+    index_path: PathBuf,
+    result: HistoryResult,
+    state: State,
+}
+
+impl Walk<'_> {
+    fn progress(&self) -> Option<&crate::progress::Reporter> {
+        self.opts.progress.as_deref()
+    }
+
+    /// Records that the walk is under way: the progress file and the state
+    /// file's history entry.
+    fn begin(&mut self, commits: usize, from: &str, to: &str) -> Result<()> {
+        if let Some(p) = self.progress() {
+            p.step(crate::progress::Step::History);
+            p.total(commits.saturating_sub(1));
+            if let Some(last) = self.result.commits.last() {
+                p.item(self.result.commits.len(), &last.commit);
+            }
+        }
+        self.state.stamp_start("history");
+        self.state.history = Some(HistoryState {
+            from: from.to_string(),
+            to: to.to_string(),
+            bazel_version: self.opts.bazel_version.clone(),
+            last_completed: self.result.commits.last().map(|c| c.commit.clone()),
+            done: false,
+        });
+        self.state.save(&self.opts.state_dir)
+    }
+
+    /// One commit forward: the update, a cold rebuild where it invalidated
+    /// everything, and the record written before the next.
+    fn step(&mut self, i: usize, of: usize, parent: &str, commit: &str) -> Result<()> {
+        if let Some(p) = self.progress() {
             p.item(i, commit);
             p.tool(Some(crate::tools::cambi::NAME));
         }
-        driver.checkout(commit)?;
-        let step = match driver.update(parent, commit, &index_path, opts.publish) {
+        self.driver.checkout(commit)?;
+        let step = match self
+            .driver
+            .update(parent, commit, &self.index_path, self.opts.publish)
+        {
             Ok(s) => s,
             Err(e) => {
                 // The walk stops either way; the progress file is what says
                 // so to whoever is watching, since the error itself goes to
                 // this process's stderr and nowhere a reader can see it.
-                if let Some(p) = progress {
+                if let Some(p) = self.progress() {
                     p.failed(&format!("{e:#}"));
                 }
                 return Err(e);
@@ -596,8 +664,8 @@ pub fn history(
         let mut total_ms = step.wall.as_millis() as u64;
         let r = &step.report;
         let mut rec = CommitRecord {
-            commit: commit.clone(),
-            parent: parent.clone(),
+            commit: commit.to_string(),
+            parent: parent.to_string(),
             changed_files: r.stats.changed_files,
             ignored_files: r.stats.ignored_files,
             dirty_packages: r.stats.dirty_packages,
@@ -625,51 +693,53 @@ pub fn history(
             // Everything was invalidated: the only sound continuation is a
             // fresh lineage at this commit.
             tracing::info!(%commit, reason = ?r.global_reason, "global invalidation; cold rebuild");
-            let cold = cold_build(driver, commit, &index_path, opts.publish)?;
+            let cold = cold_build(self.driver, commit, &self.index_path, self.opts.publish)?;
             total_ms += cold.wall_ms;
             rec.total_ms = total_ms;
             rec.cold_rebuild = true;
         }
         {
-            let f = IndexFile::open(&index_path)?;
+            let f = IndexFile::open(&self.index_path)?;
             rec.index_nodes = f.view().counts().nodes;
             rec.index_edges = f.view().counts().edges;
         }
-        if let Some(p) = progress {
+        if let Some(p) = self.progress() {
             p.diagnostics(&step.report.diagnostics);
             p.tool(None);
         }
-        result.commits.push(rec);
-        result.summarise();
-        result.write(&path)?;
-        if let Some(rs) = state.history.as_mut() {
-            rs.last_completed = Some(commit.clone());
+        self.result.commits.push(rec);
+        self.result.summarise();
+        self.result.write(&self.path)?;
+        if let Some(rs) = self.state.history.as_mut() {
+            rs.last_completed = Some(commit.to_string());
         }
-        state.stamp("history", "updated");
-        state.save(&opts.state_dir)?;
+        self.state.stamp("history", "updated");
+        self.state.save(&self.opts.state_dir)?;
         tracing::info!(
             step = i,
-            of = commits.len() - 1,
+            of,
             %commit,
-            dirty = result.commits.last().map(|c| c.dirty_packages).unwrap_or(0),
+            dirty = self.result.commits.last().map(|c| c.dirty_packages).unwrap_or(0),
             ms = total_ms,
             "applied"
         );
+        Ok(())
     }
 
-    // ---- the rebuild oracle: applied == rebuilt ----
-    if opts.rebuild_oracle {
-        if let Some(p) = progress {
-            p.item(commits.len().saturating_sub(1), "rebuild oracle");
+    /// The rebuild oracle: applied == rebuilt. A fresh cold build at the pin
+    /// is compared against the index the walk produced, and kept.
+    fn rebuild_oracle(&mut self, at: usize, to: &str) -> Result<()> {
+        if let Some(p) = self.progress() {
+            p.item(at, "rebuild oracle");
         }
-        let fresh_path = index_path.with_extension("rebuild.bin");
+        let fresh_path = self.index_path.with_extension("rebuild.bin");
         // The oracle's own cold build is never published: it would overwrite
         // the index the walk just proved, with an index the walk did not
         // produce.
-        let rebuild = cold_build(driver, &to, &fresh_path, false)?;
-        let applied = IndexFile::open(&index_path)?;
+        let rebuild = cold_build(self.driver, to, &fresh_path, false)?;
+        let applied = IndexFile::open(&self.index_path)?;
         let fresh = IndexFile::open(&fresh_path)?;
-        let diff = compare_by_label(applied.view(), fresh.view(), opts.diff_cap);
+        let diff = compare_by_label(applied.view(), fresh.view(), self.opts.diff_cap);
         let ok = diff.is_empty();
         // Keep the index Bazel just built. Comparing it against the applied
         // one answers today's question and then throws away the only artefact
@@ -677,24 +747,28 @@ pub fn history(
         // archived, a later engine's derivation can be checked against it on a
         // laptop (`cambium-bench replay --head-check`). `state_dir` is
         // `bench-results/<subject>/`, beside the change-set driver's `bases/`.
-        result.head_index = archive_head_index(engine, &opts.state_dir, &to, &fresh_path);
-        result.rebuild = Some(rebuild);
-        result.oracle = Some(OracleOutcome { ok, diff });
-    } else {
-        tracing::warn!("the rebuild oracle was skipped: this history proves nothing");
+        self.result.head_index =
+            archive_head_index(self.engine, &self.opts.state_dir, to, &fresh_path);
+        self.result.rebuild = Some(rebuild);
+        self.result.oracle = Some(OracleOutcome { ok, diff });
+        Ok(())
     }
-    result.done = true;
-    result.summarise();
-    result.write(&path)?;
-    if let Some(rs) = state.history.as_mut() {
-        rs.done = true;
+
+    /// Marks the history done in both files and hands the result back.
+    fn finish(mut self) -> Result<HistoryResult> {
+        self.result.done = true;
+        self.result.summarise();
+        self.result.write(&self.path)?;
+        if let Some(rs) = self.state.history.as_mut() {
+            rs.done = true;
+        }
+        self.state.stamp("history", "done");
+        self.state.save(&self.opts.state_dir)?;
+        if let Some(p) = self.progress() {
+            p.done();
+        }
+        Ok(self.result)
     }
-    state.stamp("history", "done");
-    state.save(&opts.state_dir)?;
-    if let Some(p) = progress {
-        p.done();
-    }
-    Ok(result)
 }
 
 /// Archives the oracle's freshly built head index, best effort.
@@ -748,7 +822,7 @@ fn start(
         bazel_version_used: bazel_version_used(engine),
         tool_sha: crate::util::tool_sha().to_string(),
         cambi_version: opts.cambi_version.clone(),
-        engine: State::engine_id(&engine.cfg.hash()),
+        engine: State::engine_id(&engine.config().hash()),
         started_unix: now_unix(),
         cold,
         commits: Vec::new(),

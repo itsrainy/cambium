@@ -172,12 +172,15 @@ pub struct Stats {
     pub affected_targets: usize,
     pub changed_files: usize,
     pub ignored_files: usize,
-    /// A `.bzl` file changed, so Bazel was asked which packages load it.
+    /// Whether Bazel was asked which packages load a changed `.bzl`.
     ///
-    /// Always false since the static load closure replaced the `rbuildfiles`
-    /// call; kept in the contract because consumers (and the benchmark's own
-    /// history) read it, and because the method behind it still exists for the
-    /// comparison suite's oracle.
+    /// **Permanently `false`, retained for schema stability.** Contract
+    /// version 3 added it when the engine ran `rbuildfiles`; version 4
+    /// replaced that call with the index's static load closure and nothing
+    /// in the engine sets it since. It stays in the document because
+    /// consumers and the benchmark's own history read the field by name, and
+    /// removing it would be a contract break for no gain; the `rbuildfiles`
+    /// call itself survives only as the comparison suite's oracle.
     #[serde(default)]
     pub rbuildfiles_called: bool,
     /// Packages dirtied because a changed `.bzl` is in their load closure.
@@ -348,6 +351,25 @@ impl AffectedReport {
     /// Affected labels no deeper than `max_depth` hops from the change.
     pub fn affected_within(&self, max_depth: u32) -> impl Iterator<Item = &AffectedTarget> {
         self.affected.iter().filter(move |t| t.depth <= max_depth)
+    }
+
+    /// The diagnostic that says why this run answered `//...`: the one
+    /// [`crate::reason::GlobalReason`] raised, whose message carries
+    /// `global_reason` verbatim and whose `help` names the fix. Absent on a
+    /// run that was not global, and on a document replayed from before the
+    /// codes existed.
+    pub fn global_cause(&self) -> Option<&crate::diag::Diagnostic> {
+        self.diagnostics
+            .iter()
+            .find(|d| crate::reason::GlobalReason::is_cause(d.code))
+    }
+
+    /// The diagnostic that says why this run re-indexed the whole repository
+    /// at head, when `stats.cold_rebuild`.
+    pub fn cold_rebuild_cause(&self) -> Option<&crate::diag::Diagnostic> {
+        self.diagnostics
+            .iter()
+            .find(|d| d.code == crate::diag::Code::W012ColdRebuild)
     }
 }
 

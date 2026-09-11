@@ -1,0 +1,54 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+# Run `cargo deny check` with cargo-deny installed; CI does not run it yet.
+
+[graph]
+# The lock is resolved for the platforms the suite actually runs on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+
+[licenses]
+version = 2
+# Everything the tree carries today, and nothing it does not: adding a crate
+# under a licence not listed here is a deliberate decision, not a drive-by.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    # webpki-roots, through ureq (the store's HTTP backend).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are a warning, not a failure: the ones the tree holds
+# are transitive (hashbrown 0.15 through lru/ratatui; itertools 0.10 through
+# criterion and 0.13 through ratatui; thiserror 1 through protox) and only
+# their upstreams can retire them. See the notes in Cargo.toml for what is
+# pinned on purpose (rkyv, ratatui/crossterm).
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

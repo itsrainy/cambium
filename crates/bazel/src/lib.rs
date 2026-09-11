@@ -6,10 +6,11 @@
 //! unflattened selects, implicit deps left in — and are the only Bazel surface
 //! cambium depends on.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 
 pub mod convert;
 
@@ -254,8 +255,8 @@ impl StderrFacts {
     }
 }
 
-/// Every fact in a stderr buffer. Used on a tail in tests, and on the live
-/// stream by [`drain_stderr`].
+/// Every fact in a stderr buffer. Used on a tail in tests; a live query folds
+/// each line in as it arrives through [`StderrFacts::push_line`].
 pub fn parse_stderr_facts(stderr: &str) -> StderrFacts {
     let mut f = StderrFacts::default();
     for line in stderr.lines() {
@@ -294,8 +295,8 @@ pub fn query_word(pattern: &str) -> String {
     format!("\"{pattern}\"")
 }
 
-/// Every load error in a stderr buffer. Used on a tail in tests, and on the
-/// live stream by [`drain_stderr`].
+/// Every load error in a stderr buffer. Used on a tail in tests; a live query
+/// counts them line by line through [`StderrFacts::push_line`].
 pub fn parse_load_errors(stderr: &str) -> LoadErrors {
     let mut e = LoadErrors::default();
     for line in stderr.lines() {
@@ -326,6 +327,186 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// How one Bazel process ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exit {
+    /// The exit code, or `None` when a signal ended it.
+    pub code: Option<i32>,
+    pub success: bool,
+}
+
+impl Exit {
+    fn of(status: ExitStatus) -> Self {
+        Self {
+            code: status.code(),
+            success: status.success(),
+        }
+    }
+}
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            Some(c) => write!(f, "exit status: {c}"),
+            None => f.write_str("terminated by a signal"),
+        }
+    }
+}
+
+/// A process run to completion with its output captured.
+#[derive(Clone, Debug)]
+pub struct Captured {
+    pub exit: Exit,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// The process boundary: how a `Command` this crate built is actually run.
+///
+/// Everything above this trait — the frame reader, the stderr scrape, the
+/// exit-3 rules, the partial verdicts the engine draws — is logic about what
+/// Bazel *said*, and none of it needs a Bazel to be tested. [`ProcessRunner`]
+/// spawns the binary; [`CannedRunner`] answers with bytes and an exit code
+/// it was built with, so a unit test can hand `Bazel` a canned answer and
+/// watch what the layers above make of it.
+pub trait BazelRunner: std::fmt::Debug + Send + Sync {
+    /// Runs `cmd` with both pipes attached: `on_stdout` is handed the live
+    /// stdout stream while the process runs, every stderr line reaches
+    /// `on_stderr` as it arrives, and the exit comes back once the process
+    /// is done. A spawn failure is [`BazelError::Spawn`].
+    fn stream(
+        &self,
+        cmd: &mut Command,
+        on_stdout: &mut dyn FnMut(&mut dyn Read),
+        on_stderr: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Captured>;
+
+    /// Runs `cmd` to completion with stdout and stderr captured.
+    fn output(&self, cmd: &mut Command) -> std::io::Result<Captured>;
+}
+
+/// The real thing: spawns the binary the command names.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessRunner;
+
+impl BazelRunner for ProcessRunner {
+    fn stream(
+        &self,
+        cmd: &mut Command,
+        on_stdout: &mut dyn FnMut(&mut dyn Read),
+        on_stderr: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Captured> {
+        let binary = cmd.get_program().to_string_lossy().into_owned();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|source| BazelError::Spawn { binary, source })?;
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        // stderr is drained on its own thread: a chatty Bazel can fill the
+        // pipe and deadlock the reader of stdout otherwise. The scope joins
+        // it before the wait, so every line has been handed over by then.
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                    on_stderr(&line);
+                }
+            });
+            on_stdout(&mut stdout);
+        });
+        let status = child.wait()?;
+        Ok(Captured {
+            exit: Exit::of(status),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn output(&self, cmd: &mut Command) -> std::io::Result<Captured> {
+        let out = cmd.stdin(Stdio::null()).output()?;
+        Ok(Captured {
+            exit: Exit::of(out.status),
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+}
+
+/// A runner that never spawns anything: the exit code, stdout bytes and
+/// stderr text it was built with are what every command "produces". For the
+/// unit tests of everything above the process boundary.
+#[derive(Clone, Debug, Default)]
+pub struct CannedRunner {
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+impl CannedRunner {
+    fn exit(&self) -> Exit {
+        Exit {
+            code: Some(self.code),
+            success: self.code == 0,
+        }
+    }
+}
+
+impl BazelRunner for CannedRunner {
+    fn stream(
+        &self,
+        _cmd: &mut Command,
+        on_stdout: &mut dyn FnMut(&mut dyn Read),
+        on_stderr: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Captured> {
+        for line in self.stderr.lines() {
+            on_stderr(line);
+        }
+        on_stdout(&mut &self.stdout[..]);
+        Ok(Captured {
+            exit: self.exit(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn output(&self, _cmd: &mut Command) -> std::io::Result<Captured> {
+        Ok(Captured {
+            exit: self.exit(),
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone().into_bytes(),
+        })
+    }
+}
+
+/// The last [`STDERR_TAIL_LINES`] lines of a stderr stream, and the facts read
+/// off every line of it — counted over the whole stream rather than the tail,
+/// because a repository whose external deps do not resolve produces hundreds
+/// of error lines and the tail keeps forty.
+#[derive(Default)]
+struct StderrTail {
+    tail: VecDeque<String>,
+    facts: StderrFacts,
+}
+
+impl StderrTail {
+    fn push(&mut self, line: &str) {
+        self.facts.push_line(line);
+        if self.tail.len() == STDERR_TAIL_LINES {
+            self.tail.pop_front();
+        }
+        self.tail.push_back(line.to_string());
+    }
+
+    fn finish(self) -> (String, StderrFacts) {
+        (
+            self.tail.into_iter().collect::<Vec<_>>().join("\n"),
+            self.facts,
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Bazel {
     binary: PathBuf,
@@ -339,6 +520,8 @@ pub struct Bazel {
     env: Vec<(String, String)>,
     /// Directory for `--query_file` scratch files.
     scratch: PathBuf,
+    /// What runs the commands this handle builds.
+    runner: Arc<dyn BazelRunner>,
 }
 
 impl Bazel {
@@ -371,7 +554,22 @@ impl Bazel {
             startup_flags: Vec::new(),
             env: Vec::new(),
             scratch,
+            runner: Arc::new(ProcessRunner),
         }
+    }
+
+    /// Runs every command this handle builds through `runner` instead of
+    /// spawning the binary.
+    pub fn with_runner(mut self, runner: Arc<dyn BazelRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// What runs the commands this handle builds. A caller with a query shape
+    /// this crate does not offer builds it on [`Bazel::command`] and runs it
+    /// here, so it goes through the same seam as everything else.
+    pub fn runner(&self) -> &dyn BazelRunner {
+        &*self.runner
     }
 
     pub fn with_extra_query_flags(mut self, flags: Vec<String>) -> Self {
@@ -439,8 +637,7 @@ impl Bazel {
         cmd.current_dir(&self.workspace)
             .arg("--version")
             .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output();
-        match out {
+        match self.runner.output(&mut cmd) {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             Err(_) => String::new(),
         }
@@ -529,31 +726,28 @@ impl Bazel {
             "running bazel query"
         );
 
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|source| BazelError::Spawn {
-            binary: self.binary.display().to_string(),
-            source,
-        })?;
-
-        let stderr_rx = drain_stderr(&mut child);
-        let stdout = child.stdout.take().expect("stdout piped");
-        let targets_read = read_frames(
-            BufReader::with_capacity(1 << 20, stdout),
-            cambium_proto::reader::DEFAULT_BATCH,
-            on_batch,
-        );
-
-        let status = child.wait()?;
-        let (stderr_tail, facts) = stderr_rx.recv().unwrap_or_default();
+        let mut on_batch = on_batch;
+        let mut targets_read: std::result::Result<usize, ReadError> = Ok(0);
+        let mut stderr = StderrTail::default();
+        let done = self.runner.stream(
+            &mut cmd,
+            &mut |stdout| {
+                targets_read = read_frames(
+                    BufReader::with_capacity(1 << 20, stdout),
+                    cambium_proto::reader::DEFAULT_BATCH,
+                    &mut on_batch,
+                );
+            },
+            &mut |line| stderr.push(line),
+        )?;
+        let (stderr_tail, facts) = stderr.finish();
 
         // A read error usually means bazel died mid-stream; the stderr tail is
         // the useful part of that story, so report it rather than the truncation.
         let targets_read = match targets_read {
             Ok(n) => n,
             Err(e) => {
-                if status.success() {
+                if done.exit.success {
                     return Err(e.into());
                 }
                 tracing::debug!(error = %e, "bazel stream ended early");
@@ -562,8 +756,8 @@ impl Bazel {
         };
 
         Ok(QueryOutcome {
-            exit_code: status.code(),
-            success: status.success(),
+            exit_code: done.exit.code,
+            success: done.exit.success,
             stderr_tail,
             targets_read,
             load_errors: facts.load_errors,
@@ -597,32 +791,26 @@ impl Bazel {
         for f in HYGIENE {
             cmd.arg(f);
         }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|source| BazelError::Spawn {
-            binary: self.binary.display().to_string(),
-            source,
-        })?;
-        let stderr_rx = drain_stderr(&mut child);
         let mut out = String::new();
-        child
-            .stdout
-            .take()
-            .expect("stdout piped")
-            .read_to_string(&mut out)?;
-        let status = child.wait()?;
-        let (stderr_tail, _) = stderr_rx.recv().unwrap_or_default();
+        let mut read: std::io::Result<usize> = Ok(0);
+        let mut stderr = StderrTail::default();
+        let done = self.runner.stream(
+            &mut cmd,
+            &mut |stdout| read = stdout.read_to_string(&mut out),
+            &mut |line| stderr.push(line),
+        )?;
+        read?;
+        let (stderr_tail, _) = stderr.finish();
         // Exit 3 is "finished with errors" under --keep_going: the answer is
         // whatever loaded. Whether that is usable is the caller's call.
-        if status.code() == Some(3) {
+        if done.exit.code == Some(3) {
             return Ok((parse_buildfile_labels(&out), true));
         }
-        if !status.success() {
+        if !done.exit.success {
             return Err(BazelError::Failed {
                 args: truncate(&expr, 200),
-                status: status.to_string(),
+                status: done.exit.to_string(),
                 stderr: stderr_tail,
             });
         }
@@ -641,16 +829,10 @@ impl Bazel {
     /// loads; nothing walks into them, so a wrong name costs nothing but a
     /// less precise record.
     pub fn repo_mapping_dump(&self) -> Option<String> {
-        let out = self
-            .command("mod")
-            .arg("dump_repo_mapping")
-            .arg("")
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .stdout(Stdio::piped())
-            .output();
-        match out {
-            Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        let mut cmd = self.command("mod");
+        cmd.arg("dump_repo_mapping").arg("");
+        match self.runner.output(&mut cmd) {
+            Ok(o) if o.exit.success => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
             Ok(o) => {
                 // Once per process: a replay asks for the mapping on every
                 // step, and a WORKSPACE repository answers the same way each
@@ -658,7 +840,7 @@ impl Bazel {
                 static WARNED: std::sync::Once = std::sync::Once::new();
                 WARNED.call_once(|| {
                     tracing::warn!(
-                        status = %o.status,
+                        status = %o.exit,
                         "bazel mod dump_repo_mapping failed (WORKSPACE mode, or bazel < 7.1); \
                          falling back to the identity repository mapping"
                     )
@@ -799,33 +981,6 @@ impl Drop for ScratchFile {
     }
 }
 
-/// Drains the child's stderr on a thread (otherwise a chatty Bazel can fill the
-/// pipe and deadlock us), keeping only the tail.
-fn drain_stderr(child: &mut Child) -> mpsc::Receiver<(String, StderrFacts)> {
-    let (tx, rx) = mpsc::channel();
-    let Some(stderr) = child.stderr.take() else {
-        let _ = tx.send((String::new(), StderrFacts::default()));
-        return rx;
-    };
-    std::thread::spawn(move || {
-        let mut tail: std::collections::VecDeque<String> =
-            std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
-        // Counted here rather than from `tail`: a repository whose external
-        // deps do not resolve produces hundreds of these, and the tail keeps
-        // forty lines.
-        let mut facts = StderrFacts::default();
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            facts.push_line(&line);
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
-        }
-        let _ = tx.send((tail.into_iter().collect::<Vec<_>>().join("\n"), facts));
-    });
-    rx
-}
-
 fn which(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
@@ -862,6 +1017,112 @@ mod tests {
         "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0mpackage contains errors: third_party/bazel: name 'py_library' is not defined (did you mean 'cc_library'?)\n",
         "\u{1b}[35mWARNING: \u{1b}[0m--keep_going specified, ignoring errors. Results may be inaccurate\n",
     );
+
+    fn rule(name: &str) -> cambium_proto::blaze_query::Target {
+        use cambium_proto::blaze_query::{target::Discriminator, Rule, Target};
+        Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: name.to_string(),
+                rule_class: "cc_library".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn canned(code: i32, stdout: Vec<u8>, stderr: &str) -> Bazel {
+        Bazel::at(std::env::temp_dir(), Some("bazel")).with_runner(Arc::new(CannedRunner {
+            code,
+            stdout,
+            stderr: stderr.to_string(),
+        }))
+    }
+
+    /// Everything a query reads off a process — the frames, the exit, the
+    /// tail, the facts scraped from every stderr line — through a runner
+    /// that never spawned one.
+    #[test]
+    fn a_query_through_a_canned_runner_reads_frames_and_scrapes_stderr() {
+        let bytes = cambium_proto::encode_stream(&[rule("//a:x"), rule("//a:y")]);
+        let bazel = canned(3, bytes, APOLLO_STDERR);
+        let mut frames = 0;
+        let out = bazel
+            .query_packages(&["a".into()], |_, ranges| {
+                frames += ranges.len();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(frames, 2);
+        assert_eq!(out.targets_read, 2);
+        assert_eq!(out.exit_code, Some(3));
+        assert!(!out.success);
+        assert_eq!(out.load_errors.count, 3);
+        assert!(
+            out.stderr_tail.contains("py_library"),
+            "{}",
+            out.stderr_tail
+        );
+    }
+
+    #[test]
+    fn a_universe_that_exits_zero_is_a_success_with_no_facts() {
+        let bazel = canned(0, cambium_proto::encode_stream(&[rule("//a:x")]), "");
+        let out = bazel.query_universe(|_, _| Ok(())).unwrap();
+        assert!(out.success);
+        assert_eq!(out.exit_code, Some(0));
+        assert!(out.load_errors.is_empty());
+        assert!(out.deleted_packages.is_empty());
+    }
+
+    /// A stream that ends mid-frame under a successful exit is a read error;
+    /// under a failed exit it is reported as the failure it came with.
+    #[test]
+    fn a_truncated_stream_is_an_error_only_when_bazel_claimed_success() {
+        let mut bytes = cambium_proto::encode_stream(&[rule("//a:x")]);
+        bytes.truncate(bytes.len() - 2);
+        assert!(matches!(
+            canned(0, bytes.clone(), "").query_universe(|_, _| Ok(())),
+            Err(BazelError::Read(_))
+        ));
+        let out = canned(1, bytes, "ERROR: boom")
+            .query_universe(|_, _| Ok(()))
+            .unwrap();
+        assert_eq!(out.exit_code, Some(1));
+        assert_eq!(out.targets_read, 0);
+        assert_eq!(out.stderr_tail, "ERROR: boom");
+    }
+
+    #[test]
+    fn rbuildfiles_through_a_canned_runner_splits_loaders_and_reports_exit_3() {
+        let bazel = canned(3, b"//lib:BUILD\n@x//:BUILD\n".to_vec(), "");
+        let (r, partial) = bazel.rbuildfiles(&["a.bzl".into()]).unwrap();
+        assert!(partial);
+        assert_eq!(r.packages, vec!["lib".to_string()]);
+        assert_eq!(r.workspace_level, vec!["@x//:BUILD".to_string()]);
+        let err = canned(1, Vec::new(), "ERROR: nope")
+            .rbuildfiles(&["a.bzl".into()])
+            .unwrap_err();
+        assert!(matches!(err, BazelError::Failed { ref stderr, .. } if stderr == "ERROR: nope"));
+    }
+
+    #[test]
+    fn the_version_and_the_mapping_dump_come_off_the_runner_too() {
+        let bazel = canned(0, b"bazel 7.4.1\n".to_vec(), "");
+        assert_eq!(bazel.version(), "bazel 7.4.1");
+        assert_eq!(bazel.repo_mapping_dump().as_deref(), Some("bazel 7.4.1\n"));
+        assert_eq!(canned(2, Vec::new(), "").repo_mapping_dump(), None);
+    }
+
+    #[test]
+    fn a_binary_that_cannot_be_spawned_is_named() {
+        let bazel = Bazel::at(std::env::temp_dir(), Some("/nonexistent/cambium-bazel"));
+        let err = bazel.query_universe(|_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(err, BazelError::Spawn { ref binary, .. } if binary.contains("cambium-bazel")),
+            "{err}"
+        );
+    }
 
     #[test]
     fn a_label_the_query_lexer_would_split_is_quoted() {
