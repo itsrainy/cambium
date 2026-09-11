@@ -8,7 +8,10 @@ name: bench-weekly
 # Machine requirement: same as bench-nightly.yml — at least 16 cores, 64 GB
 # RAM and 500 GB disk, several times over for xla/tensorflow's external
 # fetches. Point the BENCH_RUNNER Actions variable at hardware that meets
-# this; ubuntu-latest is a placeholder that will not have the disk for it.
+# this. Until it is set the scheduled runs are skipped rather than failed:
+# ubuntu-latest does not have the disk for them, and a cron that fails every
+# week is noise nobody reads. A dispatch with `force` runs on ubuntu-latest
+# anyway, for checking the workflow itself.
 
 on:
   schedule:
@@ -22,6 +25,11 @@ on:
         type: choice
         options: [all-weekly, sourcegraph, apollo, xla, tensorflow]
         default: all-weekly
+      force:
+        description: "Run even when BENCH_RUNNER is unset (falls back to ubuntu-latest)"
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +41,9 @@ jobs:
     # `matrix.*` is not available in a job-level `if`; GitHub refused to parse
     # the file and recorded a zero-job failure on every push. The dispatch
     # input selects the matrix instead.
-    if: (github.event_name == 'workflow_dispatch' && inputs.subject != 'tensorflow') || github.event.schedule == '0 6 * * 0'
+    if: |
+      (vars.BENCH_RUNNER != '' || inputs.force) &&
+      ((github.event_name == 'workflow_dispatch' && inputs.subject != 'tensorflow') || github.event.schedule == '0 6 * * 0')
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -88,8 +98,9 @@ jobs:
   monthly:
     name: bench tensorflow
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0 8 1 * *') ||
-      (github.event_name == 'workflow_dispatch' && inputs.subject == 'tensorflow')
+      (vars.BENCH_RUNNER != '' || inputs.force) &&
+      ((github.event_name == 'schedule' && github.event.schedule == '0 8 1 * *') ||
+       (github.event_name == 'workflow_dispatch' && inputs.subject == 'tensorflow'))
     runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-latest' }}
     env:
       CAMBIUM_SUBJECTS_DIR: ${{ github.workspace }}/.cache/cambium/subjects
