@@ -31,7 +31,8 @@ cambi doctor                # can a run work here; what is wrong and how to fix 
 cambi affected [BASE..HEAD] # the product
 cambi explain [LABEL]       # why is this target affected; or, why did the run go global
 cambi index {build, update, publish, list, show, gc}     # the stored indexes
-cambi inspect {deps, rdeps, path, owner, consumers, targets, stats, externals, verify}
+cambi inspect {target, package, deps, rdeps, path, owner, consumers, targets,
+                stats, externals, verify}
 cambi config {show, explain, hash}
 ```
 
@@ -70,12 +71,15 @@ own output shape and its own audience.
 ### `index`
 
 The stored artifact is an index and the chain of them is a lineage; those
-are the only two nouns. `build [REV]` is the cold build that mints a lineage.
-`update A..B` brings an index forward. `publish` uploads one. `list` shows
-what the store holds, `show` one index's header and counts, `gc` applies the
-retention policy. These were the `baseline` verbs, now under the noun they
-were always about; `baseline` survives for one release as an alias with a
-deprecation diagnostic.
+are the only two nouns. `build [--commit <sha>]` is the cold build that mints
+a lineage; `update --from <sha> [--to <sha>]` brings an index forward. Both
+need `--out <file>` to say where the index goes, and only a run that also
+`--publish`es may omit it — an index is routinely gigabytes, so there is no
+default path. `publish` uploads one, `list` shows what the store holds, `show`
+prints one index's header and counts, and `gc` applies the retention policy.
+These were the `baseline` verbs, now under the noun they were always about;
+`baseline` survives for one release as an alias with a deprecation
+diagnostic.
 
 ### `inspect`
 
