@@ -762,3 +762,44 @@ fn a_format_string_label_on_the_fallback_is_no_prefix() {
     );
     assert!(ri.repos_for("build/config/x.tpl").is_empty());
 }
+
+/// apollo's `cuda_configure`: its implementation declares `cuda-lib` by
+/// name beside the `local_config_cuda` it was instantiated as. Instantiating
+/// the rule creates both, so the file that calls it — and the constant it
+/// reads — answer for both, and a template the implementation resolves is
+/// an input of both.
+#[test]
+fn a_rules_implementation_declares_its_side_effects() {
+    let files = support::Files(vec![
+        (
+            "WORKSPACE",
+            "workspace(name = \"apollo\")\n\
+             load(\"//third_party/gpus:init.bzl\", \"init\")\n\
+             init()\n",
+        ),
+        (
+            "third_party/gpus/init.bzl",
+            "load(\"//third_party/gpus:cuda_configure.bzl\", \"cuda_configure\")\n\
+             \n\
+             def init():\n\
+             \x20   cuda_configure(name = \"local_config_cuda\")\n",
+        ),
+        (
+            "third_party/gpus/cuda_configure.bzl",
+            "def _impl(repository_ctx):\n\
+             \x20   repository_ctx.template(\"BUILD\", Label(\"//third_party/gpus:cuda.BUILD.tpl\"))\n\
+             \x20   http_archive(name = \"cuda-lib\")\n\
+             \n\
+             cuda_configure = repository_rule(implementation = _impl)\n",
+        ),
+    ]);
+    let ri = support::inputs(&files, &RepoMapping::identity());
+    assert_eq!(
+        ri.bzl_repos["third_party/gpus/init.bzl"],
+        support::set(&["local_config_cuda", "cuda-lib"])
+    );
+    assert_eq!(
+        ri.repos_for("third_party/gpus/cuda.BUILD.tpl"),
+        support::set(&["local_config_cuda", "cuda-lib"])
+    );
+}

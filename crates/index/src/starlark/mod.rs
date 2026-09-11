@@ -55,7 +55,7 @@ pub(crate) mod lexer;
 mod parser;
 
 pub(crate) use ast::{
-    stmt_exprs, walk_stmts, Arg, ArgKind, Clause, Expr, ExprKind, ParamKind, Stmt,
+    stmt_exprs, walk_stmts, Arg, ArgKind, Assign, Clause, Expr, ExprKind, ParamKind, Stmt,
 };
 pub(crate) use lexer::{unescape, Span};
 

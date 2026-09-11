@@ -216,18 +216,24 @@ pub fn build_repo_inputs(
     // answer, which is what turns "no idea, invalidate everything" into a set.
     out.repos.extend(att.literal_names.iter().cloned());
     // A file under a seeded subtree falls back to that subtree's few
-    // repositories; any other falls back to the universe, and is told so.
+    // repositories; any other falls back to the universe. This is the one
+    // place that decides what a file's fallback is; the attribution pass
+    // decides when a file gets it.
+    let universe = out.repos.clone();
+    let fallback_of = |p: &str| -> (BTreeSet<String>, bool) {
+        match graph.id_of(p).and_then(|id| owner.get(&id)) {
+            Some(r) if !r.is_empty() => (r.clone(), false),
+            _ => (universe.clone(), true),
+        }
+    };
     let mut wide: BTreeSet<String> = BTreeSet::new();
     let fallbacks: BTreeMap<String, BTreeSet<String>> = texts
         .iter()
         .map(|(p, _)| {
-            let repos = match graph.id_of(p).and_then(|id| owner.get(&id)) {
-                Some(r) if !r.is_empty() => r.clone(),
-                _ => {
-                    wide.insert(p.clone());
-                    out.repos.clone()
-                }
-            };
+            let (repos, is_wide) = fallback_of(p);
+            if is_wide {
+                wide.insert(p.clone());
+            }
             (p.clone(), repos)
         })
         .collect();
@@ -349,13 +355,14 @@ pub fn build_repo_inputs(
     for &id in workspace {
         let path = graph.path(id).to_string();
         let mut repos = own.remove(&path).unwrap_or_default();
-        // Empty is the answer for a file read in full whose only fallback
-        // would be everything (issue #9); the wide answer is for the rest.
-        if repos.is_empty() && !att.read_in_full(&path) {
-            repos = match owner.get(&id) {
-                Some(r) if !r.is_empty() => r.clone(),
-                _ => out.repos.clone(),
-            };
+        if repos.is_empty() {
+            // Empty is the answer for a file read in full whose only
+            // fallback would be everything (issue #9); the wide answer is
+            // for the rest, and for a file of the closure this checkout
+            // does not have, which nothing read at all.
+            repos = att
+                .fallback_for(&path)
+                .unwrap_or_else(|| fallback_of(&path).0);
         }
         out.bzl_repos.insert(path, repos);
     }
