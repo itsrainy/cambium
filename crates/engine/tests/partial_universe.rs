@@ -15,6 +15,7 @@ use cambium_engine::query::Rows;
 use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier, SynthQuerier};
 use cambium_index::IndexBuilder;
 use cambium_synth::{generate, GraphSpec};
+use cambium_testkit::engine;
 
 /// A querier whose universe query "exited 3": the same rows, plus the load
 /// errors Bazel printed for the packages it could not load.
@@ -30,16 +31,6 @@ impl PackageQuerier for PartialUniverse<'_> {
             partial: Some(self.1.clone()),
         })
     }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
 }
 
 fn load_errors() -> LoadErrors {

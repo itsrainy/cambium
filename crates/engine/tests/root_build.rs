@@ -12,9 +12,8 @@
 //! only what depends on the root package's targets.
 
 use cambium_diff::{Change, Status};
-use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
 use cambium_index::{IndexData, PackageUpdate, TargetRow};
+use cambium_testkit::{base, engine, req, Scanning};
 
 /// ```text
 /// //:LICENSE, //:root_group     (the root package)
@@ -50,44 +49,8 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["", "app", "lib", "far"];
 
-struct Synth;
-
-impl PackageQuerier for Synth {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
-
-fn req() -> AffectedRequest {
-    AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
-        materialize: false,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
-    }
-}
-
-fn base() -> IndexData {
-    engine().full_build_with("c0", &Synth).unwrap()
+fn synth() -> Scanning {
+    Scanning::new(PACKAGES, rows)
 }
 
 fn run(index: &IndexData, path: &str) -> cambium_engine::AffectedReport {
@@ -95,7 +58,7 @@ fn run(index: &IndexData, path: &str) -> cambium_engine::AffectedReport {
         .compute(
             index.view(),
             &[Change::new(Status::Modified, path)],
-            &Synth,
+            &synth(),
             &req(),
         )
         .unwrap()
@@ -104,7 +67,7 @@ fn run(index: &IndexData, path: &str) -> cambium_engine::AffectedReport {
 
 #[test]
 fn a_root_build_edit_dirties_the_root_package_only() {
-    let index = base();
+    let (_e, index) = base(&synth());
     let r = run(&index, "BUILD");
     assert!(
         !r.global,
@@ -123,7 +86,7 @@ fn a_root_build_edit_dirties_the_root_package_only() {
 
 #[test]
 fn the_same_holds_for_a_root_build_bazel() {
-    let index = base();
+    let (_e, index) = base(&synth());
     let r = run(&index, "BUILD.bazel");
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.dirty_packages, vec![String::new()]);
@@ -133,7 +96,7 @@ fn the_same_holds_for_a_root_build_bazel() {
 /// `REPO.bazel`, which really does set defaults for every package.
 #[test]
 fn repo_bazel_is_still_an_invalidator() {
-    let index = base();
+    let (_e, index) = base(&synth());
     let r = run(&index, "REPO.bazel");
     assert!(r.global);
 }

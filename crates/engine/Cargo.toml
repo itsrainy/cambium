@@ -29,4 +29,5 @@ ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 [dev-dependencies]
 tempfile.workspace = true
 cambium-diff.workspace = true
+cambium-testkit.workspace = true
 blake3.workspace = true
