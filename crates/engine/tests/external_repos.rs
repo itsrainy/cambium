@@ -19,9 +19,9 @@ use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{FixedText, WorkspaceText};
-use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
-use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
+use cambium_engine::{AffectedRequest, Config};
+use cambium_index::{IndexData, PackageUpdate, TargetRow};
+use cambium_testkit::{base, engine, engine_with, req, Files, Scanning};
 
 /// The base `MODULE.bazel`.
 ///
@@ -33,14 +33,6 @@ const MODULE_BASE: &str = "module(name = \"demo\", version = \"1\")\n\
      bazel_dep(name = \"rules_python\", version = \"1.0\")\n\
      gen = use_extension(\"//bazel:ext.bzl\", \"gen\")\n\
      use_repo(gen, \"generated\")\n";
-
-struct Files(BTreeMap<String, String>);
-
-impl FileText for Files {
-    fn text(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
-    }
-}
 
 fn files() -> Files {
     let mut m = BTreeMap::new();
@@ -156,60 +148,16 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["app", "lib", "bazel", "direct", "changelogs"];
 
-struct Scanning(Files);
+/// What `bazel mod dump_repo_mapping ""` prints for this workspace: the
+/// root module's own name maps to the empty canonical name (so `@demo//`
+/// is the main repository), and `fmt` carries the `+` suffix Bazel 8 and 9
+/// give a canonical name.
+const REPO_MAPPING: &str = "{\"\":\"\",\"demo\":\"\",\"fmt\":\"fmt+\",\"generated\":\"generated+\"}";
 
-impl PackageQuerier for Scanning {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn load_source(&self) -> Option<&dyn FileText> {
-        Some(&self.0)
-    }
-
-    /// What `bazel mod dump_repo_mapping ""` prints for this workspace: the
-    /// root module's own name maps to the empty canonical name (so `@demo//`
-    /// is the main repository), and `fmt` carries the `+` suffix Bazel 8 and 9
-    /// give a canonical name.
-    fn repo_mapping(&self) -> cambium_index::RepoMapping {
-        cambium_index::RepoMapping::from_dump(
-            "{\"\":\"\",\"demo\":\"\",\"fmt\":\"fmt+\",\"generated\":\"generated+\"}",
-        )
-    }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
-
-fn req() -> AffectedRequest {
-    AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
-        materialize: false,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
-    }
-}
-
-fn base() -> (Engine, IndexData) {
-    let e = engine();
-    let index = e.full_build_with("c0", &Scanning(files())).unwrap();
-    (e, index)
+fn scanning() -> Scanning {
+    Scanning::new(PACKAGES, rows)
+        .with_files(files())
+        .with_repo_mapping(REPO_MAPPING)
 }
 
 /// `MODULE.bazel` unchanged between the two revisions unless a test says so.
@@ -232,7 +180,7 @@ fn run(
     texts: &dyn WorkspaceText,
 ) -> cambium_engine::AffectedReport {
     let e = engine();
-    e.compute_with_texts(index.view(), changes, &Scanning(files()), &req(), texts)
+    e.compute_with_texts(index.view(), changes, &scanning(), &req(), texts)
         .unwrap()
         .report
 }
@@ -250,7 +198,7 @@ fn affected(r: &cambium_engine::AffectedReport) -> Vec<String> {
 
 #[test]
 fn the_index_stores_what_feeds_each_repository() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let v = index.view();
     let repos: Vec<&str> = (0..v.num_repos()).map(|r| v.repo_name(r)).collect();
     assert_eq!(repos, ["generated"]);
@@ -304,7 +252,7 @@ fn the_index_stores_what_feeds_each_repository() {
 
 #[test]
 fn a_repository_rule_input_reaches_only_the_repositorys_consumers() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["config.yml"]),
@@ -327,7 +275,7 @@ fn a_repository_rule_input_reaches_only_the_repositorys_consumers() {
 /// re-queried. Narrowing attribution must not lose that edge.
 #[test]
 fn a_bzl_named_inside_a_repository_rules_call_dirties_its_loaders() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let v = index.view();
     assert_eq!(
         v.repos_for_path("tpl/helper.bzl")
@@ -358,7 +306,7 @@ fn a_bzl_named_inside_a_repository_rules_call_dirties_its_loaders() {
 /// that directory is not that file, and claiming `data/**` for it is issue #8.
 #[test]
 fn a_package_label_is_the_file_it_names_and_not_its_directory() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["data/thing.txt"]),
@@ -380,7 +328,7 @@ fn a_package_label_is_the_file_it_names_and_not_its_directory() {
 
 #[test]
 fn an_unrelated_file_reaches_no_repository() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["notes.txt"]),
@@ -393,7 +341,7 @@ fn an_unrelated_file_reaches_no_repository() {
 
 #[test]
 fn a_bazel_dep_bump_reaches_only_that_dependencys_consumers() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"fmt\", version = \"1.0\")",
         "bazel_dep(name = \"fmt\", version = \"2.0\")",
@@ -419,7 +367,7 @@ fn a_build_files_direct_external_load_is_seen_by_rule_a() {
     // Issue #4. `//direct` loads `@fmt//:defs.bzl` from its BUILD file, so a
     // `fmt` bump must re-query it: the macro it loads can now emit different
     // rules. `//app` and `//lib` load only main-repo `.bzl` files and stay put.
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"fmt\", version = \"1.0\")",
         "bazel_dep(name = \"fmt\", version = \"2.0\")",
@@ -443,7 +391,7 @@ fn a_build_files_direct_external_load_is_seen_by_rule_a() {
 #[test]
 fn a_canonical_name_matches_the_apparent_one() {
     // `@@fmt+//:fmt` is how Bazel 8 and 9 spell it; the module names `fmt`.
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"fmt\", version = \"1.0\")",
         "bazel_dep(name = \"fmt\", version = \"9.9\")",
@@ -459,7 +407,7 @@ fn a_canonical_name_matches_the_apparent_one() {
 
 #[test]
 fn a_toolchain_module_bump_is_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"rules_python\", version = \"1.0\")",
         "bazel_dep(name = \"rules_python\", version = \"2.0\")",
@@ -479,7 +427,7 @@ fn a_toolchain_module_bump_is_global() {
 
 #[test]
 fn a_legacy_workspace_edit_that_cannot_be_classified_is_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     // An assignment at the top level: not a shape the statement diff reads.
     let r = run(
         &index,
@@ -517,7 +465,7 @@ fn texts_with_workspace(base_ws: &str, head_ws: &str) -> FixedText {
 /// the targets that depend on that repository are affected.
 #[test]
 fn a_legacy_workspace_declaration_names_its_repository() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["WORKSPACE"]),
@@ -535,7 +483,7 @@ fn a_legacy_workspace_declaration_names_its_repository() {
 /// whole point of diffing the file rather than invalidating on it.
 #[test]
 fn an_unrelated_workspace_declaration_reaches_nothing() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["WORKSPACE"]),
@@ -548,7 +496,7 @@ fn an_unrelated_workspace_declaration_reaches_nothing() {
 /// Toolchain registration has no edge in the graph wherever it is written.
 #[test]
 fn a_workspace_toolchain_registration_is_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["WORKSPACE"]),
@@ -591,7 +539,7 @@ fn texts_with_lock(base_lock: &str, head_lock: &str) -> FixedText {
 /// re-evaluated, and exactly one repository's definition came out different.
 #[test]
 fn a_lockfile_moving_on_its_own_names_the_repositories_that_moved() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["MODULE.bazel.lock"]),
@@ -611,7 +559,7 @@ fn a_lockfile_moving_on_its_own_names_the_repositories_that_moved() {
 /// re-evaluated and produced exactly the same repositories.
 #[test]
 fn a_lockfile_whose_digests_alone_moved_dirties_nothing() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["MODULE.bazel.lock"]),
@@ -624,7 +572,7 @@ fn a_lockfile_whose_digests_alone_moved_dirties_nothing() {
 
 #[test]
 fn a_lockfile_cambium_cannot_read_is_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["MODULE.bazel.lock"]),
@@ -639,7 +587,7 @@ fn a_lockfile_cambium_cannot_read_is_global() {
 
 #[test]
 fn a_lockfile_moving_with_the_module_file_adds_nothing() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"fmt\", version = \"1.0\")",
         "bazel_dep(name = \"fmt\", version = \"9.9\")",
@@ -655,7 +603,7 @@ fn a_lockfile_moving_with_the_module_file_adds_nothing() {
 
 #[test]
 fn a_repository_rules_bzl_names_its_repository_instead_of_going_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["bazel/repo.bzl"]),
@@ -685,7 +633,7 @@ fn a_repository_rules_bzl_names_its_repository_instead_of_going_global() {
 /// the edit went global, which hid the miss rather than fixing it.
 #[test]
 fn a_workspace_closure_bzl_still_reaches_the_filegroups_that_list_it() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["bazel/repo.bzl"]),
@@ -718,7 +666,7 @@ fn a_workspace_closure_bzl_still_reaches_the_filegroups_that_list_it() {
 /// `@generated`'s targets moved and `//lib:lib`, which names one, is direct.
 #[test]
 fn a_changed_file_reaching_a_repositorys_rule_label_moves_that_repository() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["changelogs/current/x.rst"]),
@@ -752,7 +700,7 @@ fn a_changed_file_reaching_a_repositorys_rule_label_moves_that_repository() {
 /// between the prefix and the label.
 #[test]
 fn a_file_the_glob_does_not_match_moves_nothing() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &changed(&["changelogs/notes.txt"]),
@@ -767,13 +715,13 @@ fn a_file_the_glob_does_not_match_moves_nothing() {
 /// `--explain` names the repository and the target that carried it.
 #[test]
 fn the_direct_reason_names_the_repository_and_the_label() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let e = engine();
     let r = e
         .compute_with_texts(
             index.view(),
             &changed(&["changelogs/current/x.rst"]),
-            &Scanning(files()),
+            &scanning(),
             &AffectedRequest {
                 explain: true,
                 ..req()
@@ -798,7 +746,7 @@ fn the_direct_reason_names_the_repository_and_the_label() {
 
 #[test]
 fn an_unparseable_module_file_is_global() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning());
     let head = format!("{MODULE_BASE}if x:\n    bazel_dep(name = \"q\")\n");
     let r = run(
         &index,
@@ -812,20 +760,15 @@ fn an_unparseable_module_file_is_global() {
 #[test]
 fn turning_the_stage_off_restores_whole_world_invalidation() {
     let e = engine();
-    let index = e.full_build_with("c0", &Scanning(files())).unwrap();
+    let index = e.full_build_with("c0", &scanning()).unwrap();
     let mut cfg = Config::default();
     cfg.externals.enabled = false;
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let e = Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    );
+    let e = engine_with(cfg);
     let out = e
         .compute_with_texts(
             index.view(),
             &changed(&["MODULE.bazel"]),
-            &Scanning(files()),
+            &scanning(),
             &req(),
             &texts(MODULE_BASE, MODULE_BASE),
         )
