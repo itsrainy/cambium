@@ -68,7 +68,8 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     // binary in a later step. `baseline` is deliberately absent: it still
     // works, and a deprecated spelling is not advertised.
     for sub in [
-        "init", "status", "doctor", "affected", "index", "inspect", "config", "bench", "synth",
+        "init", "status", "doctor", "affected", "explain", "index", "inspect", "config", "bench",
+        "synth",
     ] {
         assert!(
             stdout.contains(sub),
@@ -828,5 +829,45 @@ fn status_names_the_nearest_index_and_how_far_back_it_is() {
     assert!(
         stdout.contains("packages") && stdout.contains("format     version"),
         "the Index section should describe the index a run would load:\n{stdout}"
+    );
+}
+
+/// `explain` answers with a document, and there is no Bazel expression for
+/// "why": asking for one is a usage error with a code, not a silent fallback.
+#[test]
+fn explain_has_no_query_form() {
+    let (code, stdout, stderr) = run(&["explain", "//a:b", "--format", "query"]);
+    assert_eq!(code, 1, "a usage error is exit 1: {stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(
+        stderr.contains("CAMBI-E013"),
+        "the usage code should name itself:\n{stderr}"
+    );
+}
+
+/// `--explain` on `affected` keeps working for one release and says what to
+/// type instead. The warning is the contract here: it is how a script learns
+/// to move before the flag goes.
+#[test]
+fn the_explain_flag_on_affected_still_works_and_says_what_replaced_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_, _, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "affected",
+        "--explain",
+        "a..b",
+    ]);
+    assert!(
+        stderr.contains("CAMBI-W001")
+            && stderr.contains("--explain on affected is now cambi explain"),
+        "the deprecated flag should name the verb:\n{stderr}"
+    );
+    // And it is not advertised: a flag kept for a release is not a flag to
+    // start using.
+    let (_, help, _) = run(&["affected", "--help"]);
+    assert!(
+        !help.contains("--explain"),
+        "a deprecated flag should be hidden from help:\n{help}"
     );
 }

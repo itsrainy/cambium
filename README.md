@@ -95,8 +95,9 @@ $ cambi init      [--store-dir PATH | --store-s3 BUCKET/PREFIX |
 $ cambi status    [--format human|json]
 $ cambi doctor    [--format human|json]
 $ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
-                   [--format human|json|jsonl|query|null] [--explain] [--max-depth n]
-                   [--no-full-build] [--publish-base] [--out <index file>]
+                   [--format human|json|jsonl|query|null] [--max-depth n]
+                   [--no-full-build] [--publish-base] [--out <index file>] [--dry-run]
+$ cambi explain [<label>] [<base>..<head>]   # the same flags as affected
 $ cambi index build  [--commit <sha>] [--publish] [--out <file>]
 $ cambi index update --from <sha> [--to <sha>] [--publish] [--out <file>]
                    [--no-rebuild-on-global]
@@ -155,9 +156,21 @@ long run. `null` prints nothing and only sets the exit code. `query` is
 $ bazel test $(cambi affected origin/main --tests-only --format query)
 ```
 
-`--explain` prints, for each affected target, the shortest path back to the
-change and why that starting point was direct — the answer to "why is this
-test running?".
+`cambi explain` answers "why is this test running?". With a label it prints
+the shortest path from that target back to the change and the direct reason at
+the end of it; with no label it tells the run's own story — the cause that made
+it global or cold, with the `help:` line that names the fix, or the numbers
+that say why the answer was the size it was. It runs the same computation
+`affected` does and takes the same range and the same flags. `--explain` on
+`affected` is the old spelling: it still works for a release and says so
+(`CAMBI-W001`).
+
+`cambi affected --dry-run` prints the plan and exits before any Bazel query:
+which index would be loaded (revision, lineage, age, distance), how the diff
+classifies (changed files, dirty packages, whether an invalidator, externals or
+`.bazelrc` cause makes it global), and what the run would therefore do —
+`splice`, `cold rebuild`, `global` or `cold build`. Exit 0, or 2 when the plan
+already knows the answer is `//...`.
 
 ### Querying an index
 
@@ -252,7 +265,7 @@ it is in [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
 | `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
 | `diagnostics` | \[object], optional | the actionable warnings this run raised, each `{code, level, message, location?, help?}`; omitted when empty. See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
-| `explanations` | \[object], optional | with `--explain`: `target`, `path` (target → direct member), `direct`, `reason` |
+| `explanations` | \[object], optional | with the deprecated `--explain` (and within `cambi explain`): `target`, `path` (target → direct member), `direct`, `reason` |
 
 `reason` is tagged by `kind`: `new`, `rule_hash`, `bzl_closure` (with
 `package`), `file` (with `path`), `deleted_dep` (with `label`), `external_repo` (with
@@ -334,6 +347,63 @@ round trip is the check that matters before `--publish`, because a store that
 answers a read and refuses a write looks healthy until a run tries to use it.
 The probe object is left behind: no backend here can delete a key.
 
+### `cambi explain --format json`
+
+One document for both scopes: the run's fields always, and the label's only
+when a label was asked about.
+
+```json
+{
+  "schema": 9,
+  "base": "e5ac543...", "head": "ca7fa29...",
+  "global": false,
+  "diagnostics": [],
+  "summary": { "changed_files": 3, "dirty_packages": 2, "direct_targets": 4,
+               "affected_targets": 9, "base_nodes": 120394, "cold_rebuild": false },
+  "label": "//foo:bar",
+  "affected": true,
+  "path": ["//foo:bar", "//lib:core", "//lib:base"],
+  "reason": { "kind": "file", "path": "lib/base.cc" }
+}
+```
+
+| field | type | meaning |
+|---|---|---|
+| `schema` | int | contract version |
+| `base`, `head` | string | resolved revisions |
+| `global` | bool | the run was globally invalidated, so every target is affected |
+| `global_reason` | string, optional | why, when `global` |
+| `cold_rebuild_reason` | string, optional | why the run re-indexed the whole repository, when `summary.cold_rebuild` |
+| `diagnostics` | \[object] | the warnings the run raised, the same shape `affected` carries; the cause of a global or cold run is one of these, and the human form prints it with its `help:` line |
+| `label` | string, optional | the label asked about, when one was |
+| `affected` | bool, optional | whether it is affected, with a label |
+| `path` | \[string], optional | shortest path from the label back to the direct-set member, inclusive |
+| `reason` | object, optional | why that member was direct — the same `kind`-tagged shapes `affected`'s `explanations` use |
+| `why_not` | string, optional | with a label that is not affected: the one line the human form prints under it |
+| `summary` | object | `changed_files`, `dirty_packages`, `direct_targets`, `affected_targets`, `base_nodes`, `cold_rebuild` |
+
+A label that exists in neither index is a usage error (`CAMBI-E013`), not an
+answer. A label that exists and is not affected is an answer, and exits 0.
+
+### `cambi affected --dry-run --format json`
+
+```json
+{
+  "schema": 9,
+  "plan": { "base": "e5ac543...", "head": "ca7fa29...",
+            "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
+                       "age_seconds": 7200, "packages": 4120, "targets": 38211 },
+            "changed_files": 12, "dirty_packages": 4,
+            "mode": "splice", "diagnostics": [] }
+}
+```
+
+`mode` is `splice`, `cold_rebuild`, `global` or `cold_build`. `index` is absent
+when nothing in the store is usable here (a cold build), and `dirty_packages`
+is absent when there is no index to classify the diff against — "unknown until
+queried", never guessed. `global_reason` is present when the plan can already
+tell the answer is `//...`, which is also exit code 2.
+
 ### Contract versions
 
 | version | change |
@@ -347,7 +417,7 @@ The probe object is left behind: no backend here can delete a key.
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 
-| 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same will hold for `explain`. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
+| 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same holds for `explain`, below. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. Also at 9: `cambi explain --format json` and `cambi affected --dry-run --format json`, two more new documents on the same terms. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did
