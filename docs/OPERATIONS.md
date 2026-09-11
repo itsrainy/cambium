@@ -2,8 +2,8 @@
 
 How to actually run the expensive subjects, and the things that have bitten
 somebody already. The *words* are [METHODOLOGY.md](METHODOLOGY.md), the
-numbers are [RESULTS.md](RESULTS.md), and what is left to do in the current
-session is [HANDOFF.md](../HANDOFF.md).
+numbers are [RESULTS.md](RESULTS.md), and what is in flight or left to do
+lives in the issue tracker, not in a file here.
 
 Nothing here is needed to run the suite on a laptop. `cambium-bench changes
 synth:small` emits its own subject and needs no setup at all; a real subject
@@ -32,6 +32,12 @@ size, which do not fit on a laptop.
   moving the tree costs a full re-fetch and re-analysis. Set
   `CAMBIUM_SUBJECTS_DIR=$HOME/.cache/cambium/corpus` instead — the driver
   does.
+- **Build both binaries.** The harness is `cambium-bench` and it measures
+  cambium by running `cambi`, so a run needs both: `cargo build --release -p
+  cambium-cli -p cambium-bench-cli`. `tools/bench/run-published.sh` and
+  `precheck.sh` do it and export `CAMBI` for the harness; a hand-run
+  `cambium-bench` needs `--cambi <path>`, `$CAMBI`, or a `cambi` on `PATH`,
+  and says so at once rather than an hour in.
 - **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` pulls
   each subject's `bases/*.bin` and `heads/*.bin` alongside the index and the
   results, replays every change set, and — with `REDERIVE=1` and a local
@@ -54,7 +60,10 @@ size, which do not fit on a laptop.
   `cambium-bench report`. A failing subject does not stop the rest. Run it under
   `nohup` with a log; follow it with `cambium-bench watch` (below) and grep the
   log for `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`,
-  `unclassified`, `cambium_missing`, `No space left`.
+  `unclassified`, `cambium_missing`, `No space left`. Compare each subject's
+  summary line against `docs/RESULTS.md` as it lands, before letting the run
+  continue to the next: the cheap subjects finish first, and a regression
+  they show is hours cheaper to stop there than after xla.
 - **Following it: `cambium-bench watch`.** One row per subject, polled off
   `bench-results/<subject>/progress.json` once a second — the step, progress,
   the commit or change set in hand and the tool running on it, elapsed, an ETA
@@ -133,9 +142,32 @@ size, which do not fit on a laptop.
   wrong, copy the index the run loaded (`loaded baseline index ... path=` in
   the log, under `/tmp/cambium-cache/`) and replay with `--index` pointed at
   it; `cambi inspect externals <file> --repo <name>` diffs the repository
-  tables of the two.
+  tables of the two. `CAMBIUM_REDERIVE_DUMP=<dir>` on a `--rederive` replay
+  keeps each re-derived index on disk for the same comparison, and the corpus
+  attribution test (`cargo test -p cambium-index corpus_attribution --
+  --ignored --nocapture`, with `CAMBIUM_CORPUS_DIR`, `_PATHS`, `_ALIAS` and
+  `_INDEX`) answers "what does the derivation say about this file in this
+  tree" in twenty seconds, against a stored index's mapping when given one.
 - `launch.sh sync` once reported `BUILD FAILED` on a healthy build: `set -x`
   echoes the `trap 'echo "BOOTSTRAP FAILED"'` line into the log. The greps are
   anchored now; if it recurs, read the log's last line.
 - Two `cargo test` runs at once share `$TMPDIR/cambium-tests` and the
   store-layout test fails on the race. Run one at a time.
+
+## Known noise
+
+What a healthy run reports that is not a regression. Anything not on this
+list is.
+
+- envoy fails 3 change sets on recall by design: `external_route`, the
+  documented round trip through `@quiche` (METHODOLOGY.md, RESULTS.md). The
+  diagnosis lists at most 25 of a set's missing labels as probed
+  (`MAX_ROUTE_PROBES`); the rest of that set are the same quic targets past
+  the cap, not a second cause.
+- History replays of envoy and sourcegraph differ from the recorded run by a
+  few packages on a handful of commits. That is the pin-versus-base drift the
+  replay names, not an engine change; change-set replays are exact, and one
+  that is not is a finding.
+- `WARN skipping an index this build cannot read`, and a results directory
+  another cambium build wrote being started over rather than resumed: see the
+  gotcha above, benign.
