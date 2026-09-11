@@ -784,6 +784,48 @@ mod tests {
         );
     }
 
+    /// The generator's output is pinned to a hash: a preset and a seed must
+    /// produce the same workspace on every machine and after every refactor,
+    /// because a synthetic subject is emitted on demand and compared with
+    /// itself across runs. Everything the emitter writes is folded in — the
+    /// package paths and their `BUILD` text, the `.bzl` files, every target's
+    /// hash — plus five commits of the default change preset, so a change to
+    /// the order of a single random draw moves the digest.
+    #[test]
+    fn a_small_workspace_and_its_history_hash_to_what_they_did() {
+        let mut g = generate(&GraphSpec::preset("small").unwrap());
+        let mut h = blake3::Hasher::new();
+        for (i, p) in g.packages.iter().enumerate() {
+            h.update(p.path.as_bytes());
+            h.update(crate::emit::build_file_loads(&g, i as u32).as_bytes());
+        }
+        for b in &g.bzl {
+            h.update(b.path.as_bytes());
+            h.update(&b.version.to_le_bytes());
+        }
+        for id in 0..g.targets.len() as u32 {
+            h.update(&g.target_hash(id));
+        }
+        let before = h.finalize().to_hex().to_string();
+        assert_eq!(
+            before,
+            "4bed7f55d5e486941136674f64cdd6c81955515dd95465a7638867c4eea0d42b",
+            "the generated graph moved"
+        );
+        let spec = crate::ChangeSpec::default();
+        let mut h = blake3::Hasher::new();
+        for rev in 0..5 {
+            for c in crate::commit(&mut g, &spec, rev).changes {
+                h.update(format!("{:?} {}\n", c.status, c.path).as_bytes());
+            }
+        }
+        assert_eq!(
+            h.finalize().to_hex().to_string(),
+            "14bcc52f9b03050bb78ede0d672f64291ef4eaa6f86b69011b9b44326c241755",
+            "the generated history moved"
+        );
+    }
+
     #[test]
     fn graph_is_acyclic_by_layer() {
         let g = generate(&GraphSpec::preset("small").unwrap());
