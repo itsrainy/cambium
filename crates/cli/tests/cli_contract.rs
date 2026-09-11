@@ -64,12 +64,21 @@ fn the_binary_is_named_cambi() {
 #[test]
 fn the_subcommands_are_the_ones_the_readme_documents() {
     let (_, stdout, _) = run(&["--help"]);
-    for sub in ["affected", "baseline", "index", "bench", "synth", "config"] {
+    // The verb tree docs/CLI.md settles on, plus the two that leave the
+    // binary in a later step. `baseline` is deliberately absent: it still
+    // works, and a deprecated spelling is not advertised.
+    for sub in ["affected", "index", "inspect", "config", "bench", "synth"] {
         assert!(
             stdout.contains(sub),
             "`{sub}` is missing from the top-level help:\n{stdout}"
         );
     }
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("baseline")),
+        "a deprecated spelling should not be advertised as a verb:\n{stdout}"
+    );
 }
 
 #[test]
@@ -131,36 +140,35 @@ fn the_exit_codes_are_the_ones_the_readme_documents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
 
-    let (code, _, _) = run(&["index", "stats", index.to_str().unwrap()]);
+    let (code, _, _) = run(&["inspect", "stats", index.to_str().unwrap()]);
     assert_eq!(code, 0, "a question we can answer exits 0");
 
     let missing = dir.path().join("nope.cmbx");
-    let (code, stdout, stderr) = run(&["index", "stats", missing.to_str().unwrap()]);
+    let (code, stdout, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
     assert_eq!(code, 1, "an unreadable index is a plain error");
     assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
     assert!(!stderr.is_empty(), "the error should say what went wrong");
 
     let (code, _, _) = run(&[
-        "index",
         "inspect",
+        "target",
         index.to_str().unwrap(),
-        "--label",
         "//nowhere:nothing",
     ]);
     assert_eq!(code, 1, "an unknown label is a plain error");
 }
 
-/// The hub labels `index stats` reports, which is the only way to learn a
+/// The hub labels `inspect stats` reports, which is the only way to learn a
 /// label out of an index without already knowing one.
 fn hub_labels(index: &std::path::Path) -> Vec<String> {
     let (code, stdout, stderr) = run(&[
-        "index",
+        "inspect",
         "stats",
         index.to_str().unwrap(),
         "--format",
         "json",
     ]);
-    assert_eq!(code, 0, "index stats failed: {stderr}");
+    assert_eq!(code, 0, "inspect stats failed: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("stats prints json");
     v["in_degree"]["top"]
         .as_array()
@@ -187,14 +195,14 @@ fn json_documents_carry_the_current_schema_version() {
 
     for args in [
         vec![
-            "index",
+            "inspect",
             "stats",
             index.to_str().unwrap(),
             "--format",
             "json",
         ],
         vec![
-            "index",
+            "inspect",
             "targets",
             index.to_str().unwrap(),
             &package,
@@ -202,7 +210,7 @@ fn json_documents_carry_the_current_schema_version() {
             "json",
         ],
         vec![
-            "index",
+            "inspect",
             "rdeps",
             index.to_str().unwrap(),
             &hub,
@@ -223,7 +231,7 @@ fn json_documents_carry_the_current_schema_version() {
 }
 
 #[test]
-fn index_path_exits_nonzero_when_there_is_no_path() {
+fn inspect_path_exits_nonzero_when_there_is_no_path() {
     // A shell branches on the exit code rather than parsing the output, so
     // "no path" must not look like "here is your path".
     let dir = tempfile::tempdir().expect("tempdir");
@@ -235,8 +243,8 @@ fn index_path_exits_nonzero_when_there_is_no_path() {
     // can have a dependency path; the other must report there is none.
     let (a, b) = (&labels[0], &labels[1]);
     let both = [
-        run(&["index", "path", index.to_str().unwrap(), a, b]),
-        run(&["index", "path", index.to_str().unwrap(), b, a]),
+        run(&["inspect", "path", index.to_str().unwrap(), a, b]),
+        run(&["inspect", "path", index.to_str().unwrap(), b, a]),
     ];
     let (code, stdout, stderr) = both
         .iter()
@@ -259,19 +267,19 @@ fn the_old_output_spelling_still_works() {
     let index = synth_index(dir.path());
     let file = index.to_str().unwrap();
 
-    let (code, by_format, _) = run(&["index", "stats", file, "--format", "json"]);
+    let (code, by_format, _) = run(&["inspect", "stats", file, "--format", "json"]);
     assert_eq!(code, 0, "--format json should be accepted");
-    let (code, by_output, _) = run(&["index", "stats", file, "--output", "json"]);
+    let (code, by_output, _) = run(&["inspect", "stats", file, "--output", "json"]);
     assert_eq!(code, 0, "--output stays as an alias of --format");
     assert_eq!(by_format, by_output, "the alias must not change the answer");
 
-    let (code, human, _) = run(&["index", "stats", file, "--format", "human"]);
+    let (code, human, _) = run(&["inspect", "stats", file, "--format", "human"]);
     assert_eq!(code, 0);
-    let (code, text, _) = run(&["index", "stats", file, "--format", "text"]);
+    let (code, text, _) = run(&["inspect", "stats", file, "--format", "text"]);
     assert_eq!(code, 0, "`text` stays as an alias of `human`");
     assert_eq!(human, text);
     // And the default is still what it was, which is `human`.
-    let (_, default, _) = run(&["index", "stats", file]);
+    let (_, default, _) = run(&["inspect", "stats", file]);
     assert_eq!(default, human, "human is the default, TTY or not");
 }
 
@@ -282,7 +290,7 @@ fn asking_a_data_query_for_the_query_format_is_a_usage_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
     let (code, stdout, stderr) = run(&[
-        "index",
+        "inspect",
         "stats",
         index.to_str().unwrap(),
         "--format",
@@ -301,7 +309,7 @@ fn the_null_format_answers_with_the_exit_code_alone() {
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
     let (code, stdout, _) = run(&[
-        "index",
+        "inspect",
         "stats",
         index.to_str().unwrap(),
         "--format",
@@ -316,7 +324,7 @@ fn the_null_format_answers_with_the_exit_code_alone() {
     // And the exit code is still the answer where it carries one.
     let missing = dir.path().join("nope.cmbx");
     let (code, stdout, _) = run(&[
-        "index",
+        "inspect",
         "stats",
         missing.to_str().unwrap(),
         "--format",
@@ -332,7 +340,7 @@ fn the_null_format_answers_with_the_exit_code_alone() {
 fn an_error_carries_a_code_on_stderr() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("nope.cmbx");
-    let (code, _, stderr) = run(&["index", "stats", missing.to_str().unwrap()]);
+    let (code, _, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(
         stderr.contains("error[CAMBI-E"),
@@ -345,7 +353,7 @@ fn no_color_means_no_escape_codes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("nope.cmbx");
     let (_, stdout, stderr) = run_with_env(
-        &["index", "stats", missing.to_str().unwrap()],
+        &["inspect", "stats", missing.to_str().unwrap()],
         &[("NO_COLOR", "1")],
     );
     assert!(
@@ -355,7 +363,7 @@ fn no_color_means_no_escape_codes() {
     // --color always is an explicit request and outranks a bare NO_COLOR.
     let (_, _, coloured) = run_with_env(
         &[
-            "index",
+            "inspect",
             "stats",
             missing.to_str().unwrap(),
             "--color",
@@ -367,4 +375,76 @@ fn no_color_means_no_escape_codes() {
         coloured.contains('\x1b'),
         "--color always should colour anyway:\n{coloured}"
     );
+}
+
+/// Every spelling the rename moved keeps working for a release, and says so
+/// once, on stderr, with the code `docs/DIAGNOSTICS.md` documents.
+#[test]
+fn the_old_spellings_still_work_and_name_the_new_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let file = index.to_str().unwrap();
+
+    let (code, old, stderr) = run(&["index", "stats", file]);
+    assert_eq!(code, 0, "the old query spelling still answers: {stderr}");
+    assert!(
+        stderr.contains("warning[CAMBI-W001]")
+            && stderr.contains("cambi index stats is now cambi inspect stats"),
+        "the deprecation should name the new spelling:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.lines().filter(|l| l.contains("CAMBI-W001")).count(),
+        1,
+        "one line per invocation:\n{stderr}"
+    );
+    let (_, new, _) = run(&["inspect", "stats", file]);
+    assert_eq!(old, new, "the rename must not change the answer");
+
+    // The selectors that became verbs, and the no-selector form that became
+    // `index show`.
+    let hub = hub_labels(&index).first().expect("a hub").clone();
+    let (code, old, stderr) = run(&["index", "inspect", file, "--label", &hub]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("cambi index inspect --label is now cambi inspect target"));
+    let (_, new, _) = run(&["inspect", "target", file, &hub]);
+    assert_eq!(old, new);
+
+    let (code, old, stderr) = run(&["index", "inspect", file]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("cambi index inspect is now cambi index show"));
+    let (_, new, _) = run(&["index", "show", file]);
+    assert_eq!(old, new);
+
+    // `baseline` is `index`. `list` needs no workspace-side work beyond the
+    // store, and a missing store is an error — the deprecation still fires,
+    // which is the point.
+    let (_, _, stderr) = run(&["baseline", "list"]);
+    assert!(
+        stderr.contains("cambi baseline list is now cambi index list"),
+        "{stderr}"
+    );
+
+    // The old output flag and its old value.
+    let (code, _, stderr) = run(&["inspect", "stats", file, "--output", "text"]);
+    assert_eq!(code, 0);
+    assert!(stderr.contains("--output is now --format"), "{stderr}");
+    assert!(
+        stderr.contains("--format text is now --format human"),
+        "{stderr}"
+    );
+}
+
+/// A deprecation is a warning like any other, so `--quiet` silences it and
+/// stdout never carries it.
+#[test]
+fn quiet_suppresses_the_deprecation_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let (code, stdout, stderr) = run(&["index", "stats", index.to_str().unwrap(), "--quiet"]);
+    assert_eq!(code, 0);
+    assert!(
+        !stderr.contains("CAMBI-W001"),
+        "--quiet means nothing on stderr on success:\n{stderr}"
+    );
+    assert!(!stdout.contains("CAMBI-W001"), "{stdout}");
 }

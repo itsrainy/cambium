@@ -1,7 +1,7 @@
 pub mod affected;
-pub mod baseline;
 pub mod bench;
 pub mod index;
+pub mod inspect;
 pub mod replay;
 pub mod synth;
 
@@ -46,9 +46,47 @@ impl Context {
     }
 }
 
+/// `cambi config show|hash`. `explain` — every value and where it came from —
+/// is a later step.
+#[derive(clap::Subcommand)]
+pub enum ConfigArgs {
+    /// Print the effective configuration and its hash.
+    Show,
+    /// Print the config hash alone, as hex.
+    Hash,
+}
+
+pub fn config(ctx: &Context, args: ConfigArgs) -> Result<u8> {
+    match args {
+        ConfigArgs::Show => config_show(ctx),
+        ConfigArgs::Hash => {
+            // One line, no formatting of its own: this exists so a script can
+            // compare it against an index's, and `--format json` wraps it in
+            // the same document `show` prints.
+            let cfg = ctx.config()?;
+            match ctx.format.data("cambi config hash")? {
+                None => {}
+                Some(crate::DataFormat::Text) => println!("{}", hex(&cfg.hash())),
+                Some(fmt) => {
+                    let doc = serde_json::json!({
+                        "schema": cambium_engine::report::SCHEMA_VERSION,
+                        "config_hash": hex(&cfg.hash()),
+                    });
+                    if fmt == crate::DataFormat::Jsonl {
+                        println!("{}", result_event(&doc)?);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&doc)?);
+                    }
+                }
+            }
+            Ok(crate::EXIT_OK)
+        }
+    }
+}
+
 pub fn config_show(ctx: &Context) -> Result<u8> {
     let cfg = ctx.config()?;
-    let Some(fmt) = ctx.format.data("cambi config")? else {
+    let Some(fmt) = ctx.format.data("cambi config show")? else {
         return Ok(crate::EXIT_OK);
     };
     match fmt {
@@ -56,8 +94,8 @@ pub fn config_show(ctx: &Context) -> Result<u8> {
             print!("{}", cfg.to_toml());
             println!("\n# config_hash = {}", hex(&cfg.hash()));
         }
-        // The config has no JSON document of its own yet (`config show` is a
-        // later step), so the JSON forms print the TOML as one string field
+        // The config has no JSON document of its own yet (`config explain` is
+        // a later step), so the JSON forms print the TOML as one string field
         // beside the hash every index carries.
         crate::DataFormat::Json | crate::DataFormat::Jsonl => {
             let doc = serde_json::json!({
