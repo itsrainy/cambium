@@ -64,6 +64,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::label::{Label, Repo};
 use crate::loads::{lex, Lexed, Tok};
 use crate::starlark::{parse_args, render_all, render_stmt, statements};
+use crate::util::diff_maps;
 use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
 
 /// What a `WORKSPACE` edit means.
@@ -95,6 +96,11 @@ enum Key {
 }
 
 /// One classified statement.
+///
+/// Every field is derived from the statement's token slice, so two `Parsed`
+/// under the same [`Key`] are equal exactly when their `text` is: that is
+/// what "did it change" means here, and what the diff compares.
+#[derive(PartialEq, Eq)]
 struct Parsed {
     key: Key,
     /// The callee, for a call.
@@ -181,10 +187,10 @@ fn call_shape<'a>(t: &[Lexed<'a>]) -> Option<&'a str> {
 pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
     let (bs, bl) = scan(base);
     let (hs, hl) = scan(head);
-    let index = |v: &[Parsed]| -> Result<BTreeMap<Key, usize>, String> {
+    fn index(v: &[Parsed]) -> Result<BTreeMap<Key, &Parsed>, String> {
         let mut m = BTreeMap::new();
-        for (i, p) in v.iter().enumerate() {
-            if m.insert(p.key.clone(), i).is_some() {
+        for p in v {
+            if m.insert(p.key.clone(), p).is_some() {
                 return Err(format!(
                     "`{}` appears twice at the top level, so cambium cannot match the two \
                      revisions of it up",
@@ -193,7 +199,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
             }
         }
         Ok(m)
-    };
+    }
     let (bi, hi) = match (index(&bs), index(&hs)) {
         (Ok(b), Ok(h)) => (b, h),
         (Err(e), _) | (_, Err(e)) => return WorkspaceChange::Global(e),
@@ -202,7 +208,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
     // The statements both sides have must appear in the same relative order:
     // in an imperative file, moving a declaration past another can change what
     // the second one sees.
-    let order = |v: &[Parsed], other: &BTreeMap<Key, usize>| -> Vec<Key> {
+    let order = |v: &[Parsed], other: &BTreeMap<Key, &Parsed>| -> Vec<Key> {
         v.iter()
             .filter(|p| other.contains_key(&p.key))
             .map(|p| p.key.clone())
@@ -218,15 +224,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
 
     let mut repos = BTreeSet::new();
     let mut bzl_paths = BTreeSet::new();
-    let keys: BTreeSet<&Key> = bi.keys().chain(hi.keys()).collect();
-    for k in keys {
-        let b = bi.get(k).map(|&i| &bs[i]);
-        let h = hi.get(k).map(|&i| &hs[i]);
-        if let (Some(b), Some(h)) = (b, h) {
-            if b.text == h.text {
-                continue;
-            }
-        }
+    for (k, b, h) in diff_maps(&bi, &hi) {
         let one = h.or(b).expect("a key comes from one of the two sides");
         if registers_toolchains(&one.callee) {
             return WorkspaceChange::Global(format!(

@@ -66,6 +66,7 @@ use serde_json::{Map, Value};
 
 use crate::externals::{apparent_of, is_toolchain_module, ModuleChange, ModuleFacts};
 use crate::label::Label;
+use crate::util::diff_maps;
 
 /// Lock format versions this parser was written against.
 ///
@@ -143,12 +144,7 @@ pub fn diff_lock(base: &str, head: &str, facts: &ModuleFacts) -> ModuleChange {
     }
 
     let mut repos: BTreeSet<String> = BTreeSet::new();
-    let keys: BTreeSet<&String> = b.keys().chain(h.keys()).collect();
-    for k in keys {
-        let (bx, hx) = (b.get(k), h.get(k));
-        if bx == hx {
-            continue;
-        }
+    for (k, bx, hx) in diff_maps(&b, &h) {
         if !KNOWN_TOP.contains(&k.as_str()) {
             return ModuleChange::Global(format!(
                 "`MODULE.bazel.lock` has an unrecognised top-level key `{k}`, which changed"
@@ -236,11 +232,7 @@ fn registry_moves(
         normalise_registry(object(h, "registryFileHashes")?)?,
     );
     let mut out = BTreeSet::new();
-    let keys: BTreeSet<&String> = b.keys().chain(h.keys()).collect();
-    for k in keys {
-        if b.get(k) == h.get(k) {
-            continue;
-        }
+    for (k, _, _) in diff_maps(&b, &h) {
         match k.split('/').next() {
             // A registry-level file (`bazel_registry.json`) carries the mirror
             // list and the source-repository layout for every module in it.
@@ -290,11 +282,7 @@ fn dep_graph_moves(
 ) -> Result<BTreeSet<String>, String> {
     let (b, h) = (object(b, "moduleDepGraph")?, object(h, "moduleDepGraph")?);
     let mut out = BTreeSet::new();
-    let keys: BTreeSet<&String> = b.keys().chain(h.keys()).collect();
-    for k in keys {
-        if b.get(k) == h.get(k) {
-            continue;
-        }
+    for (k, _, _) in diff_maps(b, h) {
         // The key is `<module>@<version>`, or `<root>` for the main module.
         let module = k.split('@').next().unwrap_or(k);
         if module.is_empty() {
@@ -318,12 +306,7 @@ fn extension_moves(
         object(h, "moduleExtensions")?,
     );
     let mut out = BTreeSet::new();
-    let keys: BTreeSet<&String> = b.keys().chain(h.keys()).collect();
-    for ext in keys {
-        let (be, he) = (b.get(ext), h.get(ext));
-        if be == he {
-            continue;
-        }
+    for (ext, be, he) in diff_maps(b, h) {
         let mut moved: BTreeSet<String> = BTreeSet::new();
         // An extension entry is keyed by platform (`general`, or one key per
         // `os:...,arch:...` when the extension is platform-dependent); every
@@ -338,12 +321,8 @@ fn extension_moves(
                 "`MODULE.bazel.lock`'s entry for extension `{ext}` is not an object"
             ));
         }
-        let plats: BTreeSet<&String> = bp.keys().chain(hp.keys()).collect();
-        for p in plats {
-            if bp.get(p) == hp.get(p) {
-                continue;
-            }
-            moved.extend(specs_moved(ext, p, bp.get(p), hp.get(p))?);
+        for (p, bv, hv) in diff_maps(bp, hp) {
+            moved.extend(specs_moved(ext, p, bv, hv)?);
         }
         if moved.is_empty() {
             // Only the digests moved: the extension was re-evaluated and
@@ -389,8 +368,8 @@ fn specs_moved(
     // An unrecognised key that is *equal* on both sides cannot have moved
     // anything, so it is only rejected when it differs.
     let (b, h) = (sides[0], sides[1]);
-    for k in b.keys().chain(h.keys()) {
-        if !KNOWN_EXT.contains(&k.as_str()) && b.get(k) != h.get(k) {
+    for (k, _, _) in diff_maps(b, h) {
+        if !KNOWN_EXT.contains(&k.as_str()) {
             return Err(format!(
                 "`MODULE.bazel.lock`'s extension `{ext}` has an unrecognised key `{k}` under \
                  `{plat}`, which changed"
@@ -408,12 +387,7 @@ fn specs_moved(
         }
     };
     let (bs, hs) = (specs(b)?, specs(h)?);
-    Ok(bs
-        .keys()
-        .chain(hs.keys())
-        .filter(|k| bs.get(*k) != hs.get(*k))
-        .cloned()
-        .collect())
+    Ok(diff_maps(&bs, &hs).map(|(k, _, _)| k.clone()).collect())
 }
 
 /// Maps repository names as an extension spelled them to the apparent names
