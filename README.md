@@ -89,6 +89,9 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 
 ```console
 $ cambi                            # no verb: cambi status
+$ cambi init      [--store-dir PATH | --store-s3 BUCKET/PREFIX |
+                    --store-gcs BUCKET/PREFIX | --store-http URL | --store-none]
+                   [--default-branch BRANCH] [--yes]
 $ cambi status    [--format human|json]
 $ cambi doctor    [--format human|json]
 $ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
@@ -355,7 +358,35 @@ meaningful.
 ### Configuration
 
 `cambium.toml` at the repository root. Every field is optional; the defaults
-below are what you get with no file at all.
+below are what you get with no file at all. `cambi init` writes one, asking
+only what it cannot detect — the store — and editing only the keys it was asked
+about on a file that already exists, with its comments and its key order
+preserved. It never runs Bazel, never builds an index, and never asks for or
+stores a credential: the store backends are a directory, an HTTP base, or a
+command template that drives `aws s3` or `gsutil` under whatever credentials
+the environment already has, and that is the whole of what `cambi` knows about
+authentication.
+
+Beside it, `cambium.local.toml`: what is true of this machine and not of the
+graph. Only the five keys that are already outside the config hash may appear —
+`bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
+`baseline.compress_indexes`, `baseline.publish_partial` — and any other key is
+`CAMBI-E014` naming the key and the file it belongs in, because an override
+that could move the hash would let two checkouts of one commit publish indexes
+that claim to be interchangeable and are not. Keep it out of git; `cambi init`
+says so if `.gitignore` does not mention it (and does not edit `.gitignore`).
+
+Precedence is flags and environment variables, then `cambium.local.toml`, then
+`cambium.toml`, then the defaults. `cambi config explain` prints every
+effective leaf value with the layer that decided it:
+
+```console
+$ cambi config explain
+bazel.binary               = "bazelisk"  (/src/repo/cambium.local.toml)
+baseline.cache_dir         = "/fast/ssd/cambium"  ($CAMBIUM_CACHE_DIR)
+baseline.retention_days    = 30  (default)
+limits.max_dirty_packages  = 900  (/src/repo/cambium.toml)
+```
 
 ```toml
 [bazel]

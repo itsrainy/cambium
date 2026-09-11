@@ -39,6 +39,7 @@ on. A log line (`--log info`) is not a diagnostic.
 | `CAMBI-W017` | the Bazel that answered `--version` is older than the oldest major cambium is tested against | upgrade Bazel, or pin a tested version in `.bazelversion`. An untested version is not refused, only unverified |
 | `CAMBI-W018` | a stored index is in an older on-disk format than this `cambi` reads, so it cannot be spliced onto | mint a fresh lineage with `cambi index build --publish`; the old blobs age out under `[baseline].retention_days`, or go now with `cambi index gc` |
 | `CAMBI-W019` | the store holds a lineage whose `config_hash` is not this workspace's, or that an engine with a different rule-hash version or index content revision wrote | expected right after a `cambium.toml` edit or a `cambi` upgrade; the stale lineage is skipped rather than used. `cambi index gc` removes it now |
+| `CAMBI-W020` | `cambi init` found a `.gitignore` that does not mention `cambium.local.toml` | add a `cambium.local.toml` line to it: the file holds this machine's paths and binaries, and committing one makes them everybody's. `init` says so and does not edit `.gitignore`, which belongs to the repository |
 
 ## Errors
 

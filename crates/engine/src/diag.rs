@@ -75,6 +75,8 @@ pub enum Code {
     /// The store holds a lineage built with a different configuration or a
     /// different engine derivation.
     W019LineageConflict,
+    /// `.gitignore` exists and does not mention `cambium.local.toml`.
+    W020GitignoreLocalConfig,
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,
@@ -134,6 +136,7 @@ impl Code {
         Code::W017BazelVersionUnsupported,
         Code::W018IndexFormatOlder,
         Code::W019LineageConflict,
+        Code::W020GitignoreLocalConfig,
         Code::E001Internal,
         Code::E002Config,
         Code::E003Git,
@@ -174,6 +177,7 @@ impl Code {
             Code::W017BazelVersionUnsupported => "CAMBI-W017",
             Code::W018IndexFormatOlder => "CAMBI-W018",
             Code::W019LineageConflict => "CAMBI-W019",
+            Code::W020GitignoreLocalConfig => "CAMBI-W020",
             Code::E001Internal => "CAMBI-E001",
             Code::E002Config => "CAMBI-E002",
             Code::E003Git => "CAMBI-E003",
