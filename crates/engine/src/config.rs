@@ -17,6 +17,7 @@ pub const CONFIG_FILE: &str = "cambium.toml";
 #[derive(Default)]
 pub struct Config {
     pub bazel: BazelConfig,
+    pub git: GitConfig,
     pub externals: Externals,
     pub invalidators: Invalidators,
     pub bazelrc: BazelrcConfig,
@@ -91,6 +92,25 @@ pub struct Ignore {
     /// marks its consumers direct however these globs read, because the graph
     /// knows better than the configuration does.
     pub globs: Vec<String>,
+}
+
+/// Git, as `cambi` reads it. Not part of the config hash: it says which
+/// revisions a run compares by default, not what the graph is — the same
+/// reason `cache_dir` is left out.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    /// The branch `cambi affected` measures from when it is given no range:
+    /// the merge base of this branch with `HEAD`.
+    pub default_branch: String,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            default_branch: "main".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -395,10 +415,13 @@ impl Config {
     /// byte of what is built — bumping either used to invalidate every
     /// published index. `[limits]` is a cost decision (splice or re-query
     /// `//...`), not an accuracy one, and is left out for the same reason.
+    /// So is `[git]`, which only says which revisions a bare `cambi affected`
+    /// compares.
     pub fn hash(&self) -> [u8; 32] {
         let mut graph_relevant = self.clone();
         graph_relevant.bazel.startup_flags.clear();
         graph_relevant.baseline = Baseline::default();
+        graph_relevant.git = GitConfig::default();
         graph_relevant.limits = Limits::default();
         let mut h = blake3::Hasher::new();
         h.update(b"cambium-rule-hash-v");

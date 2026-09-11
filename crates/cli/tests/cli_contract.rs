@@ -448,3 +448,19 @@ fn quiet_suppresses_the_deprecation_warning() {
     );
     assert!(!stdout.contains("CAMBI-W001"), "{stdout}");
 }
+
+/// The range is positional; `--base` / `--head` stay as aliases of its halves.
+/// Both at once is a contradiction, and it is the command line's own error —
+/// reported with a code, wherever it is typed, workspace or not.
+#[test]
+fn affected_rejects_a_range_and_the_old_flags_together() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = dir.path().to_str().unwrap();
+    let (code, stdout, stderr) = run(&["-C", outside, "affected", "a..b", "--base", "c"]);
+    assert_eq!(code, 1, "a usage error is exit 1");
+    assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
+    assert!(
+        stderr.contains("error[CAMBI-E013]") && stderr.contains("drop --base"),
+        "the caller should be told which half to drop:\n{stderr}"
+    );
+}
