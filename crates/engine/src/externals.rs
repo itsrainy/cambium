@@ -141,7 +141,7 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
-use cambium_index::externals::{diff_module, scan_module, ModuleChange, ModuleFacts};
+use cambium_index::externals::{diff_module, scan_module, Mode, ModuleChange, ModuleFacts};
 use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
@@ -192,6 +192,12 @@ pub struct Externals {
     /// replay reads the wording directly; the two are only ever set together,
     /// by [`Externals::escalate`].
     pub global: Option<String>,
+    /// Which world Bazel reads the base tree in, when the stage had to
+    /// decide. Only a diff that touches `MODULE.bazel` or its lock asks —
+    /// an edit to either is inert under WORKSPACE mode — and deciding reads
+    /// three files of the base tree, so a diff that touches neither never
+    /// pays for it.
+    pub mode: Option<Mode>,
     /// Apparent names of the repositories that moved.
     pub repos: BTreeSet<String>,
     /// The subset of [`Externals::repos`] whose *contents* may have moved in a
@@ -249,13 +255,16 @@ impl Externals {
 /// Runs the stage over a diff.
 ///
 /// `base` is the base index, which carries the input map; `texts` reads
-/// `MODULE.bazel` at either revision.
+/// `MODULE.bazel` at either revision. `mode` decides which world Bazel reads
+/// the base tree in — [`mode_at`] for a real run — and is asked at most
+/// once, and only when the diff touches `MODULE.bazel` or its lock.
 pub fn analyse(
     base: IndexRef<'_>,
     changes: &[impl Borrow<Change>],
     base_rev: &str,
     head_rev: &str,
     texts: &dyn WorkspaceText,
+    mode: impl FnOnce() -> Mode,
 ) -> Externals {
     let mut out = Externals::default();
 
@@ -277,18 +286,21 @@ pub fn analyse(
     // A tree Bazel reads in WORKSPACE mode has an inert `MODULE.bazel`: an
     // edit to it, or to its lock, moves nothing. A flip of the mode itself
     // is a bazelrc change, which the flags stage makes global.
-    if (module_changed || lock_changed) && !bzlmod_live_at(base, texts, base_rev) {
-        tracing::info!(
-            "MODULE.bazel changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
-        );
-        if module_changed {
-            out.handled.push(MODULE_FILE.to_string());
+    if module_changed || lock_changed {
+        let mode = *out.mode.insert(mode());
+        if !mode.bzlmod_live() {
+            tracing::info!(
+                "MODULE.bazel changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
+            );
+            if module_changed {
+                out.handled.push(MODULE_FILE.to_string());
+            }
+            if lock_changed {
+                out.handled.push(MODULE_LOCK.to_string());
+            }
+            module_changed = false;
+            lock_changed = false;
         }
-        if lock_changed {
-            out.handled.push(MODULE_LOCK.to_string());
-        }
-        module_changed = false;
-        lock_changed = false;
     }
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
@@ -522,9 +534,10 @@ fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<St
     Some(join_path(l.package(), l.explicit_name()?))
 }
 
-/// [`cambium_index::bzlmod_live`] for the base side of the diff: the tree
-/// as `texts` reads it at `base_rev`, and the mapping the base index carries.
-fn bzlmod_live_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> bool {
+/// [`Mode::detect`] for the base side of the diff: the tree as `texts` reads
+/// it at `rev`, and the mapping the base index carries. What a run hands
+/// [`analyse`], to be decided once and only if the diff asks.
+pub fn mode_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> Mode {
     struct At<'a>(&'a dyn WorkspaceText, &'a str);
     impl cambium_index::FileText for At<'_> {
         fn text(&self, path: &str) -> Option<String> {
@@ -534,7 +547,7 @@ fn bzlmod_live_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> b
     let m = cambium_index::RepoMapping::from_canonical(
         (0..base.num_repos()).map(|r| (base.repo_name(r), base.repo_canonical.get(r))),
     );
-    cambium_index::bzlmod_live(&At(texts, rev), &m)
+    Mode::detect(&At(texts, rev), &m)
 }
 
 fn facts_at(texts: &dyn WorkspaceText, rev: &str) -> ModuleFacts {

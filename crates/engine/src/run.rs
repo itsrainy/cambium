@@ -247,7 +247,12 @@ impl<'a> Run<'a> {
     /// file also fire the invalidator rule would throw that away.
     pub(crate) fn externals(&mut self, changes: &[Change], texts: &dyn WorkspaceText) -> Externals {
         let ext = if self.engine.cfg.externals.enabled {
-            crate::externals::analyse(self.base, changes, &self.req.base, &self.req.head, texts)
+            // Which world Bazel reads the base tree in is decided here, once
+            // per run, and only if the diff makes the stage ask.
+            let (base, base_rev) = (self.base, self.req.base.as_str());
+            crate::externals::analyse(base, changes, base_rev, &self.req.head, texts, || {
+                crate::externals::mode_at(base, texts, base_rev)
+            })
         } else {
             Externals::default()
         };

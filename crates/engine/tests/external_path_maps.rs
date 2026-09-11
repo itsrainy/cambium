@@ -467,33 +467,34 @@ fn an_input_edit_inside_an_exhaustive_mapping_still_re_queries() {
 /// closure carries.
 #[test]
 fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
-    use cambium_engine::externals::{analyse, reach};
+    use cambium_engine::externals::{analyse, mode_at, reach};
     use std::collections::BTreeSet;
     let (_e, index) = base(&scanning());
     let v = index.view();
 
     let change = |p: &str| vec![Change::new(Status::Modified, p)];
+    let both = texts(MODULE_BASE, MODULE_BASE);
     let e = analyse(
         v,
         &change("api/envoy/x.proto"),
         "base",
         "head",
-        &texts(MODULE_BASE, MODULE_BASE),
+        &both,
+        || mode_at(v, &both, "base"),
     );
     assert_eq!(e.dirtied_by["mod"], vec!["api/envoy/x.proto".to_string()]);
+    assert_eq!(e.mode, None, "an input-path edit never asks which mode");
 
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"mod\", version = \"1.0\")",
         "bazel_dep(name = \"mod\", version = \"2.0\")",
     );
-    let e = analyse(
-        v,
-        &change("MODULE.bazel"),
-        "base",
-        "head",
-        &texts(MODULE_BASE, &head),
-    );
+    let both = texts(MODULE_BASE, &head);
+    let e = analyse(v, &change("MODULE.bazel"), "base", "head", &both, || {
+        mode_at(v, &both, "base")
+    });
     assert_eq!(e.dirtied_by["mod"], vec!["MODULE.bazel".to_string()]);
+    assert_eq!(e.mode, Some(cambium_index::Mode::Bzlmod));
 
     // `//app`'s closure carries two `@mod` labels; it is one package.
     let repos: BTreeSet<String> = ["mod".to_string()].into_iter().collect();
