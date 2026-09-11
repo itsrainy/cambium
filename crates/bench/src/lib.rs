@@ -28,6 +28,11 @@
 //! whole beside `changes-<pin>.json` so a disagreement can be examined after
 //! the fact rather than through the twenty examples the JSON has room for.
 //!
+//! Beside them sits [`progress`], which is not a result either: it is the one
+//! file a run writes purely so that a reader can follow it — which step,
+//! which commit or change set, which tool, since when — and what
+//! `cambium-bench watch` polls. The harness is its only writer.
+//!
 //! Beside them sits [`replay`], which is not a workload: it drives the
 //! engine's static stages from a stored index and a list of changed paths, so
 //! that an engine change can be checked against a published run's own answers
@@ -49,6 +54,7 @@ pub mod labels;
 pub mod legacy;
 pub mod manifest;
 pub mod oracles;
+pub mod progress;
 pub mod replay;
 pub mod report;
 pub mod runner;

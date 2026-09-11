@@ -31,6 +31,99 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Now, as RFC 3339 in UTC: `2026-09-10T14:02:11Z`.
+///
+/// Every timestamp the harness writes for a *reader* is this shape — the
+/// progress file, the per-step stamps in the state file — because a watcher
+/// subtracts them and a person reads them, and `now_unix` above serves
+/// neither. No `chrono`: the conversion is twenty lines of civil-calendar
+/// arithmetic and a dependency that parses every timezone on earth is not
+/// worth carrying for one format.
+pub fn rfc3339_now() -> String {
+    rfc3339(now_unix())
+}
+
+/// `secs` since the epoch as RFC 3339 in UTC.
+pub fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// An RFC 3339 timestamp back to seconds since the epoch, or `None` when it is
+/// not one. Only the shape [`rfc3339`] writes is accepted, plus an offset of
+/// `Z` or `+00:00`: the harness is the only writer, and guessing at a local
+/// time would make an elapsed reading silently hours wrong.
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (date, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
+    let time = rest
+        .strip_suffix('Z')
+        .or_else(|| rest.strip_suffix("+00:00"))
+        .or_else(|| rest.strip_suffix("+0000"))?;
+    let mut dp = date.split('-');
+    let y: i64 = dp.next()?.parse().ok()?;
+    let m: u32 = dp.next()?.parse().ok()?;
+    let d: u32 = dp.next()?.parse().ok()?;
+    if dp.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut tp = time.split(':');
+    let h: u64 = tp.next()?.parse().ok()?;
+    let min: u64 = tp.next()?.parse().ok()?;
+    // Fractional seconds are accepted and dropped: a progress file is polled
+    // once a second.
+    let sec: u64 = tp.next()?.split('.').next()?.parse().ok()?;
+    if tp.next().is_some() || h > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400 + h * 3600 + min * 60 + sec)
+}
+
+/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 to `(y, m, d)`.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
+/// Its inverse, so a timestamp the harness wrote can be read back.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 } as u64;
+    let doy = (153 * mp + 2) / 5 + u64::from(d) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// How long `secs` is, for a table: `12s`, `4m12s`, `2h34m`.
+pub fn duration(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m{:02}s", s / 60, s % 60),
+        s => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
 /// The short git sha of the cambium that was built, or `"unknown"`.
 ///
 /// Stamped in at build time by `build.rs`, and *not* asked of `git` at run
@@ -168,5 +261,57 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = read_result(&path).unwrap();
         assert_eq!(v["repo"], "bazel");
+    }
+
+    #[test]
+    fn a_timestamp_round_trips_through_rfc_3339() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_789_048_931), "2026-09-10T14:02:11Z");
+        for secs in [
+            0,
+            1,
+            86_399,
+            86_400,
+            951_782_400,
+            1_789_048_931,
+            4_102_444_800,
+        ] {
+            assert_eq!(parse_rfc3339(&rfc3339(secs)), Some(secs), "{secs}");
+        }
+        // A leap day, which is where a hand-written calendar goes wrong.
+        assert_eq!(rfc3339(1_583_020_800), "2020-03-01T00:00:00Z");
+        assert_eq!(parse_rfc3339("2020-02-29T23:59:59Z"), Some(1_583_020_799));
+        assert_eq!(
+            parse_rfc3339("2026-09-10T14:02:11+00:00"),
+            Some(1_789_048_931)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-09-10T14:02:11.443Z"),
+            Some(1_789_048_931)
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_utc_timestamp_is_refused() {
+        // A local time would make an elapsed reading hours wrong in silence.
+        for bad in [
+            "",
+            "2026-09-10",
+            "2026-09-10T14:02:11+02:00",
+            "2026-09-10T14:02:11",
+            "2026-13-10T00:00:00Z",
+            "2026-09-10T24:00:00Z",
+            "not a time",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_duration_is_readable_at_every_scale() {
+        assert_eq!(duration(0), "0s");
+        assert_eq!(duration(59), "59s");
+        assert_eq!(duration(252), "4m12s");
+        assert_eq!(duration(9_240), "2h34m");
     }
 }
