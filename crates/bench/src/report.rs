@@ -32,6 +32,13 @@ use serde::{Deserialize, Serialize};
 use crate::compare::{ChangesResult, WallStats};
 use crate::util::percentile;
 
+mod compare;
+
+pub use compare::{
+    ClassTotal, CompareSection, DepthAgreement, GlobalRow, ReasonRow, Scope, SoundnessRow,
+    TimingRow, ToolNote,
+};
+
 /// `bench legacy`'s headline numbers at one graph size.
 ///
 /// The reporting shape, not the measured one: a [`StageResult`] is a stage,
@@ -886,15 +893,6 @@ fn render_history(rep: &HistoryResult) -> String {
     s
 }
 
-/// The two change set populations the timings table reports over.
-///
-/// `all change sets` is the published one: nothing is excluded from it. `incremental`
-/// drops the change sets where cambium answered `//...`, and exists because the
-/// precision and class numbers are computed over that set and their walls have
-/// to be readable next to them.
-const ALL_CHANGE_SETS: &str = "all change sets";
-const INCREMENTAL_CHANGE_SETS: &str = "incremental";
-
 /// The Bazel a comparison ran under: what it reported, else what was asked
 /// for, else `n/a`.
 fn compare_bazel(c: &ChangesResult) -> String {
@@ -905,21 +903,6 @@ fn compare_bazel(c: &ChangesResult) -> String {
         .unwrap_or_else(|| "n/a".into())
 }
 
-/// How many change sets a tool's distribution covers. The explicit count when
-/// the run recorded one; otherwise the sample count of its cold distribution,
-/// for results written before the field existed.
-fn tool_ran(
-    counts: &BTreeMap<String, usize>,
-    cold: &BTreeMap<String, WallStats>,
-    name: &str,
-) -> usize {
-    counts
-        .get(name)
-        .copied()
-        .or_else(|| cold.get(name).map(|w| w.samples))
-        .unwrap_or(0)
-}
-
 /// What the globally invalidated change sets cost.
 ///
 /// cambium answers `//...` on them, which is sound — it is a superset of any
@@ -927,9 +910,9 @@ fn tool_ran(
 /// table is the price of that, side by side with the precise set the tools
 /// found on the same change sets, so "cambium goes global on N% of commits" is a
 /// sentence with a number after it rather than an asterisk.
-fn render_globals(compares: &[ChangesResult]) -> String {
+fn render_globals(rows: &[GlobalRow]) -> String {
     let mut s = String::from("#### Globals\n\n");
-    if compares.iter().all(|c| c.summary.global_stats.is_empty()) {
+    if rows.is_empty() {
         s.push_str("No compared change set was globally invalidated.\n\n");
         return s;
     }
@@ -938,34 +921,27 @@ fn render_globals(compares: &[ChangesResult]) -> String {
          tool cold p50 | cambium cold/warm p50 |\n\
          |---|---:|---:|---|---:|---:|---:|\n",
     );
-    for c in compares {
-        let g = &c.summary.global_stats;
-        if g.is_empty() {
-            continue;
-        }
-        let ver = compare_bazel(c);
+    for g in rows {
         let cambium = format!(
             "{} / {}",
-            ms(g.cambium_cold.p50_ms),
-            ms(g.cambium_warm.p50_ms)
+            ms(g.cambium_cold_p50_ms),
+            ms(g.cambium_warm_p50_ms)
         );
-        let mut names: Vec<&String> = g.mean_tool_labels.keys().collect();
-        names.sort();
-        if names.is_empty() {
-            s.push_str(&format!(
-                "| `{ver}` | {} | {} | _none ran_ | n/a | n/a | {cambium} |\n",
+        match (&g.tool, g.tool_labels) {
+            (Some(name), Some(labels)) => s.push_str(&format!(
+                "| `{}` | {} | {} | {name} | {} | {} | {cambium} |\n",
+                g.bazel,
                 g.change_sets,
-                num(g.mean_cambium_labels.round() as u64),
-            ));
-        }
-        for name in names {
-            s.push_str(&format!(
-                "| `{ver}` | {} | {} | {name} | {} | {} | {cambium} |\n",
+                num(g.cambium_labels),
+                num(labels),
+                opt_ms(g.tool_cold_p50_ms),
+            )),
+            _ => s.push_str(&format!(
+                "| `{}` | {} | {} | _none ran_ | n/a | n/a | {cambium} |\n",
+                g.bazel,
                 g.change_sets,
-                num(g.mean_cambium_labels.round() as u64),
-                num(g.mean_tool_labels[name].round() as u64),
-                opt_ms(g.tool_cold.get(name).map(|w| w.p50_ms)),
-            ));
+                num(g.cambium_labels),
+            )),
         }
     }
     s.push_str(
@@ -981,49 +957,47 @@ fn render_globals(compares: &[ChangesResult]) -> String {
     s
 }
 
+/// The comparison section: the numbers in [`CompareSection`], as prose and
+/// tables.
 fn render_compare(r: &SubjectResults) -> String {
+    render_compare_section(&CompareSection::compute(r))
+}
+
+fn render_compare_section(c: &CompareSection) -> String {
     let mut s = String::new();
-    let compares = &r.compares;
 
     // ---- soundness first ----
     s.push_str("#### Three-way comparison\n\n");
-    let change_sets = r.change_sets_total();
-    let globals: usize = compares.iter().map(|c| c.summary.globals).sum();
     s.push_str(&format!(
-        "{change_sets} change sets compared, {} passed, {} failed ({globals} of them \
+        "{} change sets compared, {} passed, {} failed ({} of them \
          global, which pass by construction: `//...` contains every answer. \
          The tools still ran on them — see **Globals** below). Worst \
          oracle recall: **{}**.\n\n",
-        change_sets - r.failures(),
-        r.failures(),
-        opt_pct(r.min_recall()),
+        c.change_sets,
+        c.passed,
+        c.failed,
+        c.globals,
+        opt_pct(c.min_recall),
     ));
-
     s.push_str("| Bazel | tool | change sets | passed | precision | min recall |\n");
     s.push_str("|---|---|---:|---:|---:|---:|\n");
-    for c in compares {
-        let ver = compare_bazel(c);
-        let names = tool_names(c);
-        if names.is_empty() {
-            s.push_str(&format!(
-                "| `{ver}` | _none ran_ | {} | {} | n/a | {} |\n",
-                c.summary.change_sets,
-                c.summary.passed,
-                pct(c.summary.min_recall)
-            ));
-        }
-        for name in names {
-            s.push_str(&format!(
-                "| `{ver}` | {name} | {} | {} | {} | {} |\n",
-                c.summary.change_sets,
-                c.summary.passed,
-                c.summary
-                    .mean_precision
-                    .get(&name)
-                    .map(|p| pct(*p))
-                    .unwrap_or_else(|| "n/a".into()),
-                pct(c.summary.min_recall),
-            ));
+    for row in &c.soundness {
+        match &row.tool {
+            None => s.push_str(&format!(
+                "| `{}` | _none ran_ | {} | {} | n/a | {} |\n",
+                row.bazel,
+                row.change_sets,
+                row.passed,
+                pct(row.min_recall)
+            )),
+            Some(name) => s.push_str(&format!(
+                "| `{}` | {name} | {} | {} | {} | {} |\n",
+                row.bazel,
+                row.change_sets,
+                row.passed,
+                opt_pct(row.precision),
+                pct(row.min_recall),
+            )),
         }
     }
     s.push('\n');
@@ -1034,73 +1008,36 @@ fn render_compare(r: &SubjectResults) -> String {
         "| Bazel | tool | over | change sets | cold | warm |\n\
          |---|---|---|---:|---:|---:|\n",
     );
-    for c in compares {
-        let ver = compare_bazel(c);
-        for name in tool_names(c) {
-            // Per tool, because Tango is often capped:
-            // a p50 over 10 change sets and one over 50 are different claims and the
-            // table has to say which is which.
-            for (scope, ran, cold, warm) in [
-                (
-                    ALL_CHANGE_SETS,
-                    tool_ran(
-                        &c.summary.all_tool_change_sets,
-                        &c.summary.all_tool_cold,
-                        &name,
-                    ),
-                    c.summary.all_tool_cold.get(&name),
-                    c.summary.all_tool_warm.get(&name),
-                ),
-                (
-                    INCREMENTAL_CHANGE_SETS,
-                    tool_ran(&c.summary.tool_change_sets, &c.summary.tool_cold, &name),
-                    c.summary.tool_cold.get(&name),
-                    c.summary.tool_warm.get(&name),
-                ),
-            ] {
-                s.push_str(&format!(
-                    "| `{ver}` | {name} | {scope} | {ran} | {} | {} |\n",
-                    opt_wall(cold),
-                    opt_wall(warm),
-                ));
-            }
-        }
-        for (scope, cold, warm) in [
-            (
-                ALL_CHANGE_SETS,
-                &c.summary.all_cambium_cold,
-                &c.summary.all_cambium_warm,
-            ),
-            (
-                INCREMENTAL_CHANGE_SETS,
-                &c.summary.cambium_cold,
-                &c.summary.cambium_warm,
-            ),
-        ] {
-            s.push_str(&format!(
-                "| `{ver}` | **cambium** | {scope} | {} | {} | {} |\n",
-                cold.samples,
-                wall(cold),
-                wall(warm),
-            ));
-        }
+    for row in &c.timings {
+        let tool = match &row.tool {
+            Some(name) => name.clone(),
+            None => "**cambium**".to_string(),
+        };
+        s.push_str(&format!(
+            "| `{}` | {tool} | {} | {} | {} | {} |\n",
+            row.bazel,
+            row.scope.name(),
+            row.change_sets,
+            opt_wall(row.cold.as_ref()),
+            opt_wall(row.warm.as_ref()),
+        ));
     }
-    let cold_rebuilds: usize = compares
-        .iter()
-        .map(|c| c.summary.cold_rebuild_change_sets)
-        .sum();
     s.push_str(&format!(
-        "\n**Quote the `{ALL_CHANGE_SETS}` rows.** They cover every change set compared, \
-         including the {globals} where cambium fell back to `//...` and did no \
+        "\n**Quote the `{}` rows.** They cover every change set compared, \
+         including the {} where cambium fell back to `//...` and did no \
          incremental work at all — which is what a user running cambium over \
-         this history actually waits for. The `{INCREMENTAL_CHANGE_SETS}` rows drop \
+         this history actually waits for. The `{}` rows drop \
          those; they are the rows that belong with the precision and class \
          numbers above, because those are computed over exactly the same \
          change sets, but read on their own they flatter cambium — an average \
-         over the change sets it is fast on. {cold_rebuilds} of the incremental \
+         over the change sets it is fast on. {} of the incremental \
          change sets \
          re-indexed the whole repository (the dirty set was too large to \
-         splice), so their *warm* is a cold number under a warm label.\n\n"
+         splice), so their *warm* is a cold number under a warm label.\n\n",
+        Scope::All.name(),
+        c.globals,
+        Scope::Incremental.name(),
+        c.cold_rebuild_change_sets,
     ));
     s.push_str(
         "cambium's *cold* is a full index build from `bazel query //...`; its \
@@ -1113,61 +1050,37 @@ fn render_compare(r: &SubjectResults) -> String {
     );
 
     // ---- globals ----
-    s.push_str(&render_globals(compares));
+    s.push_str(&render_globals(&c.globals_table));
 
     // ---- classes ----
     s.push_str("#### Disagreements by class\n\n");
-    // Every class, at zero if it never fired: a failing class missing from
-    // the table reads as "not measured", and the whole point of printing
-    // `cambium_missing | 0` is that a reader can see it was looked for.
-    let mut totals: BTreeMap<crate::classify::Class, usize> = BTreeMap::new();
-    for c in compares {
-        for (k, v) in &c.summary.by_class {
-            *totals.entry(*k).or_default() += v;
-        }
-    }
     s.push_str("| class | labels | fails the run | meaning |\n|---|---:|---|---|\n");
-    for class in crate::classify::Class::ALL {
-        let n = totals.get(&class).copied().unwrap_or(0);
+    for t in &c.classes {
         s.push_str(&format!(
             "| `{}` | {} | {} | {} |\n",
-            class.name(),
-            num(n as u64),
-            if class.is_failure() { "**yes**" } else { "no" },
-            class.meaning(),
+            t.class.name(),
+            num(t.labels as u64),
+            if t.class.is_failure() {
+                "**yes**"
+            } else {
+                "no"
+            },
+            t.class.meaning(),
         ));
     }
     s.push_str("\nCounts are labels, summed over every change set and tool.\n\n");
 
     // ---- why cambium reported the extras ----
-    let mut reasons: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    let mut depth: BTreeMap<String, (f64, usize)> = BTreeMap::new();
-    let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
-    for c in compares {
-        for change_set in &c.change_sets {
-            for pr in &change_set.tools {
-                let e = reasons.entry(pr.name.clone()).or_default();
-                for (k, v) in &pr.cambium_only_reasons {
-                    *e.entry(k.clone()).or_default() += v;
-                }
-                *dropped.entry(pr.name.clone()).or_default() += pr.dropped_file_targets;
-                if let Some(d) = pr.depth_agreement {
-                    let slot = depth.entry(pr.name.clone()).or_default();
-                    slot.0 += d;
-                    slot.1 += 1;
-                }
-            }
-        }
-    }
-    if reasons.values().any(|m| !m.is_empty()) {
+    if c.has_reasons() {
         s.push_str("#### Why cambium reported the labels the tool did not\n\n");
         s.push_str("| tool | cambium's reason | labels |\n|---|---|---:|\n");
-        for (name, m) in &reasons {
-            let mut v: Vec<(&String, &usize)> = m.iter().collect();
-            v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-            for (why, n) in v {
-                s.push_str(&format!("| {name} | {why} | {} |\n", num(*n as u64)));
-            }
+        for row in &c.reasons {
+            s.push_str(&format!(
+                "| {} | {} | {} |\n",
+                row.tool,
+                row.reason,
+                num(row.labels as u64)
+            ));
         }
         s.push_str(
             "\nThese are cambium's *own* explanations for the extra labels \
@@ -1178,64 +1091,50 @@ fn render_compare(r: &SubjectResults) -> String {
     }
 
     // Two numbers that belong to the tools rather than to a class.
-    if !dropped.is_empty() {
-        for (name, n) in &dropped {
-            let agree = match depth.get(name) {
-                Some((sum, count)) if *count > 0 => format!(
-                    "depth agrees on {} of shared labels ({count} {})",
-                    pct(sum / *count as f64),
-                    if *count == 1 {
+    if !c.tool_notes.is_empty() {
+        for note in &c.tool_notes {
+            let agree = match &note.depth {
+                Some(d) => format!(
+                    "depth agrees on {} of shared labels ({} {})",
+                    pct(d.mean),
+                    d.change_sets,
+                    if d.change_sets == 1 {
                         "change set"
                     } else {
                         "change sets"
                     }
                 ),
-                _ => "no distances reported".to_string(),
+                None => "no distances reported".to_string(),
             };
             s.push_str(&format!(
-                "- `{name}`: {agree}; {} file-target rows dropped to match \
+                "- `{}`: {agree}; {} file-target rows dropped to match \
                  cambium's universe.\n",
-                num(*n as u64)
+                note.tool,
+                num(note.dropped_file_targets as u64)
             ));
         }
         s.push('\n');
     }
 
     // ---- the oracle ----
-    let mut with_oracle = 0usize;
-    let mut roots = 0usize;
-    let mut partial_change_sets = 0usize;
-    let mut partial_batches = 0usize;
-    let mut skipped_roots = 0usize;
-    let mut missing = 0usize;
-    let mut missing_external = 0usize;
-    let mut deleted_missing = 0usize;
-    let mut external_route = 0usize;
-    for c in compares {
-        for p in &c.change_sets {
-            if let Some(o) = &p.oracle {
-                with_oracle += 1;
-                roots += o.roots.len();
-                skipped_roots += o.skipped_roots.len();
-                missing += o.missing.len();
-                missing_external += o.missing_external.len();
-                deleted_missing += o.deleted_missing.len();
-                external_route += o.external_route.len();
-                if o.partial {
-                    partial_change_sets += 1;
-                    partial_batches += o.partial_batches;
-                }
-            }
-        }
-    }
     s.push_str("#### `rdeps` oracle\n\n");
-    if with_oracle == 0 {
+    if c.rdeps.is_empty() {
         s.push_str("No change set ran the oracle (`--oracle` without `rdeps`, or every change set was global).\n\n");
     } else {
+        let o = &c.rdeps;
         s.push_str("| change sets with an oracle | source labels queried | labels skipped | partial change sets | partial batches | missing labels | of those, deleted-file consumers | of those, external route | external labels not counted |\n");
         s.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         s.push_str(&format!(
-            "| {with_oracle} | {roots} | {skipped_roots} | {partial_change_sets} | {partial_batches} | {missing} | {deleted_missing} | {external_route} | {missing_external} |\n\n"
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n\n",
+            o.change_sets,
+            o.roots,
+            o.skipped_roots,
+            o.partial_change_sets,
+            o.partial_batches,
+            o.missing,
+            o.deleted_missing,
+            o.external_route,
+            o.missing_external
         ));
         s.push_str(
             "A *partial* batch is a `--keep_going` query that exited 3: Bazel \
@@ -1256,18 +1155,11 @@ fn render_compare(r: &SubjectResults) -> String {
     }
 
     // ---- the .bzl load-closure oracle ----
-    let mut bzl = crate::oracles::load::LoadOracleSummary::default();
-    for c in compares {
-        for p in &c.change_sets {
-            if let Some(o) = &p.load_oracle {
-                bzl.add(o);
-            }
-        }
-    }
     s.push_str("#### `.bzl` load-closure oracle\n\n");
-    if bzl.is_empty() {
+    if c.load.is_empty() {
         s.push_str("No change set changed a `.bzl` file.\n\n");
     } else {
+        let bzl = &c.load;
         s.push_str(
             "| change sets with a `.bzl` change | `.bzl` files checked | partial answers | repository-evaluation answers | packages cambium missed |\n",
         );
@@ -2061,5 +1953,165 @@ mod tests {
         assert_eq!(d.len(), 10, "{d}");
         assert!(d.starts_with("20"), "{d}");
         assert_eq!(civil_from_days(719_468 + 20_000), (2024, 10, 4));
+    }
+
+    /// The rendered Markdown is pinned byte for byte, the date line aside:
+    /// the section is generated into a document people read and diff, so a
+    /// refactor of the numbers behind it must not move a character of it.
+    fn rendered(r: &SubjectResults) -> String {
+        render_subject_section(r, None)
+            .lines()
+            .map(|l| {
+                if l.starts_with("- generated: ") {
+                    "- generated: <today>".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn the_section_renders_exactly_as_it_did() {
+        assert_eq!(
+            rendered(&bazel_results()),
+            include_str!("report/snapshots/bazel.md")
+        );
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.change_sets[0].load_oracle = Some(crate::oracles::load::LoadOracleResult {
+                checked: vec!["bazel/defs.bzl".into()],
+                bazel_packages: ["app".to_string(), "lib".to_string()].into_iter().collect(),
+                missing_packages: ["lib".to_string()].into_iter().collect(),
+                ..Default::default()
+            });
+            c.summarise();
+        }
+        assert_eq!(rendered(&r), include_str!("report/snapshots/bazel-load.md"));
+        let mut r = bazel_results();
+        for c in &mut r.compares {
+            c.change_sets.retain(|p| !p.global);
+            c.summarise();
+        }
+        assert_eq!(
+            rendered(&r),
+            include_str!("report/snapshots/bazel-no-global.md")
+        );
+        assert_eq!(
+            render_top_table(&[bazel_results(), SubjectResults::new("xla")]),
+            include_str!("report/snapshots/top.md")
+        );
+    }
+
+    /// The numbers the section prints, as the typed model carries them.
+    #[test]
+    fn the_comparison_section_is_computed_before_it_is_rendered() {
+        let c = CompareSection::compute(&bazel_results());
+        assert_eq!((c.change_sets, c.passed, c.failed, c.globals), (2, 2, 0, 1));
+        assert_eq!(c.min_recall, Some(1.0));
+        assert_eq!(c.soundness.len(), 1);
+        assert_eq!(c.soundness[0].tool.as_deref(), Some("bazel-diff-rust"));
+        assert_eq!(c.soundness[0].precision, Some(0.9));
+
+        // The tool over both scopes, then cambium over both.
+        let rows: Vec<(Option<&str>, Scope, usize)> = c
+            .timings
+            .iter()
+            .map(|t| (t.tool.as_deref(), t.scope, t.change_sets))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("bazel-diff-rust"), Scope::All, 2),
+                (Some("bazel-diff-rust"), Scope::Incremental, 1),
+                (None, Scope::All, 2),
+                (None, Scope::Incremental, 1),
+            ]
+        );
+        assert_eq!(c.timings[1].cold.as_ref().map(|w| w.p50_ms), Some(90_000));
+        assert_eq!(c.cold_rebuild_change_sets, 0);
+
+        assert_eq!(c.globals_table.len(), 1);
+        let g = &c.globals_table[0];
+        assert_eq!(
+            (g.change_sets, g.cambium_labels, g.tool_labels),
+            (1, 24_000, Some(40))
+        );
+        assert_eq!(g.tool_cold_p50_ms, Some(100_000));
+        assert_eq!((g.cambium_cold_p50_ms, g.cambium_warm_p50_ms), (30, 30));
+
+        assert_eq!(
+            c.classes.len(),
+            Class::ALL.len(),
+            "every class, at zero if it never fired"
+        );
+        let select = c
+            .classes
+            .iter()
+            .find(|t| t.class == Class::CambiumExtraSelect)
+            .unwrap();
+        assert_eq!(select.labels, 3);
+        assert_eq!(
+            c.reasons,
+            [ReasonRow {
+                tool: "bazel-diff-rust".into(),
+                reason: "rule definition changed".into(),
+                labels: 233
+            }]
+        );
+        assert_eq!(c.tool_notes.len(), 1);
+        assert_eq!(c.tool_notes[0].dropped_file_targets, 4);
+        assert_eq!(
+            c.tool_notes[0].depth,
+            Some(DepthAgreement {
+                mean: 0.8,
+                change_sets: 1
+            })
+        );
+
+        assert_eq!(c.rdeps.change_sets, 1);
+        assert_eq!(c.rdeps.roots, 2);
+        assert_eq!(
+            (c.rdeps.partial_change_sets, c.rdeps.partial_batches),
+            (1, 2)
+        );
+        assert_eq!(c.rdeps.missing, 0);
+        assert!(c.load.is_empty());
+    }
+
+    /// The reason rows come per tool in name order and most labels first
+    /// within a tool; a tool with no distances has no depth note.
+    #[test]
+    fn reasons_are_ordered_and_a_tool_without_distances_has_no_depth() {
+        let mut r = bazel_results();
+        let mut tango = r.compares[0].change_sets[0].tools[0].clone();
+        tango.name = "tango".into();
+        tango.depth_agreement = None;
+        tango.cambium_only_reasons.clear();
+        tango.cambium_only_reasons.insert("a".into(), 1);
+        tango.cambium_only_reasons.insert("b".into(), 5);
+        tango.cambium_only_reasons.insert("c".into(), 5);
+        r.compares[0].change_sets[0].tools.push(tango);
+        r.compares[0].summarise();
+        let c = CompareSection::compute(&r);
+        let rows: Vec<(&str, &str, usize)> = c
+            .reasons
+            .iter()
+            .map(|x| (x.tool.as_str(), x.reason.as_str(), x.labels))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("bazel-diff-rust", "rule definition changed", 233),
+                ("tango", "b", 5),
+                ("tango", "c", 5),
+                ("tango", "a", 1),
+            ]
+        );
+        let tango = c.tool_notes.iter().find(|n| n.tool == "tango").unwrap();
+        assert!(tango.depth.is_none());
+        assert!(c.rdeps.roots == 2 && !c.rdeps.is_empty());
     }
 }
