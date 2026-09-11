@@ -35,6 +35,29 @@ moves history commits only by pin-versus-base drift. If a clean single-binary
 run is ever wanted, `tools/bench/run-published.sh` on a wiped store does all
 five in about eight hours.
 
+## The surface split, landed (issue #2, step 5)
+
+The harness left `cambi`. `bench`, `replay`, `labels`, `report`, `subjects`
+and `synth` are `cambium-bench` now (`crates/bench-cli`), and `cambi --help`
+lists exactly the eight verbs `docs/CLI.md` settles on. Two things follow for
+anyone driving a run:
+
+- **Build both binaries.** `cargo build --release -p cambium-cli -p
+  cambium-bench-cli`. `tools/bench/run-published.sh` and `precheck.sh` do it
+  and export `CAMBI` for the harness; a hand-run `cambium-bench` needs
+  `--cambi <path>`, `$CAMBI`, or a `cambi` on `PATH`, and says so at once
+  rather than an hour in.
+- **The numbers now include the process.** The harness measures cambium by
+  running `cambi` — `index build`, `affected --format json`, `index publish`
+  — so a wall time carries process start and JSON serialisation. Each result
+  also records the engine's own `timings_ms.total` (`cold_engine_ms`,
+  `warm_engine_ms`, `engine_total_ms`) and the `cambi --version` string of
+  the binary that produced it. RESULTS.md still quotes the wall times only:
+  showing both columns needs a new aggregate in `ChangesSummary` and a fresh
+  run, so the published numbers were left alone. Expect the next run's warm
+  numbers to sit slightly above the published ones for that reason, and say
+  so when publishing them.
+
 ## Workflow work, landed 2026-09-10 (evening)
 
 All five proposals are in: `SMOKE=1`, `cambi inspect externals`,

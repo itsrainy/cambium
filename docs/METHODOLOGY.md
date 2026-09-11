@@ -114,6 +114,17 @@ over. Cold and warm are defined per tool:
 | bazel-diff | first run, no hash cache | second run on the same pair, its hash cache present |
 | Tango | every run; Tango has no cache | — |
 
+Every cambium time is a *whole-process* wall time: the harness runs `cambi`
+as a child process, and what it measures is what a user waits for, process
+start and the serialisation of the answer to JSON included. The engine's own
+`timings_ms.total` from the same document travels beside it in every result
+file (`cold_engine_ms`, `warm_engine_ms`, and a history commit's
+`engine_total_ms`), so the overhead around the computation is a number
+anyone can read rather than something a table quietly charges to the engine
+or quietly hides. The published tables in RESULTS.md currently quote the wall
+times; showing both columns needs a new aggregate in the result schema and a
+fresh run to fill it.
+
 **Fallbacks.** Where cambium gave up precision.
 
 - *Global rate.* The share of history commits and change sets on which
