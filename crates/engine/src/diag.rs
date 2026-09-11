@@ -64,6 +64,17 @@ pub enum Code {
     /// A Starlark build setting a `.bazelrc` edit changed could not be
     /// resolved against the index, so the run is global.
     W015FlagUnresolved,
+    /// `MODULE.bazel` and a `WORKSPACE` file are both present and nothing on
+    /// disk says which one Bazel will honour.
+    W016WorkspaceModeAmbiguous,
+    /// The Bazel on PATH is older than the oldest version cambium is tested
+    /// against.
+    W017BazelVersionUnsupported,
+    /// A stored index is in an older format than this `cambi` reads.
+    W018IndexFormatOlder,
+    /// The store holds a lineage built with a different configuration or a
+    /// different engine derivation.
+    W019LineageConflict,
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,
@@ -93,6 +104,12 @@ pub enum Code {
     E012StoreUnsupported,
     /// The command line does not make sense.
     E013Usage,
+    /// `cambium.local.toml` sets a key that belongs in `cambium.toml`.
+    E014LocalOverrideKey,
+    /// The Bazel binary could not be found or could not be run.
+    E015BazelNotFound,
+    /// A probe object could not be published to the store and fetched back.
+    E016StoreRoundTripFailed,
 }
 
 impl Code {
@@ -113,6 +130,10 @@ impl Code {
         Code::W013InvalidatorMatched,
         Code::W014ExternalsGlobal,
         Code::W015FlagUnresolved,
+        Code::W016WorkspaceModeAmbiguous,
+        Code::W017BazelVersionUnsupported,
+        Code::W018IndexFormatOlder,
+        Code::W019LineageConflict,
         Code::E001Internal,
         Code::E002Config,
         Code::E003Git,
@@ -126,6 +147,9 @@ impl Code {
         Code::E011StoreIo,
         Code::E012StoreUnsupported,
         Code::E013Usage,
+        Code::E014LocalOverrideKey,
+        Code::E015BazelNotFound,
+        Code::E016StoreRoundTripFailed,
     ];
 
     /// The stable string, e.g. `CAMBI-W004`.
@@ -146,6 +170,10 @@ impl Code {
             Code::W013InvalidatorMatched => "CAMBI-W013",
             Code::W014ExternalsGlobal => "CAMBI-W014",
             Code::W015FlagUnresolved => "CAMBI-W015",
+            Code::W016WorkspaceModeAmbiguous => "CAMBI-W016",
+            Code::W017BazelVersionUnsupported => "CAMBI-W017",
+            Code::W018IndexFormatOlder => "CAMBI-W018",
+            Code::W019LineageConflict => "CAMBI-W019",
             Code::E001Internal => "CAMBI-E001",
             Code::E002Config => "CAMBI-E002",
             Code::E003Git => "CAMBI-E003",
@@ -159,6 +187,9 @@ impl Code {
             Code::E011StoreIo => "CAMBI-E011",
             Code::E012StoreUnsupported => "CAMBI-E012",
             Code::E013Usage => "CAMBI-E013",
+            Code::E014LocalOverrideKey => "CAMBI-E014",
+            Code::E015BazelNotFound => "CAMBI-E015",
+            Code::E016StoreRoundTripFailed => "CAMBI-E016",
         }
     }
 }

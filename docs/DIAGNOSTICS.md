@@ -35,6 +35,10 @@ on. A log line (`--log info`) is not a diagnostic.
 | `CAMBI-W013` | a changed path matched an invalidator, so everything is affected | if the path cannot move the graph, remove it from `[invalidators].paths` / `globs`, or add it to `[ignore].globs` |
 | `CAMBI-W014` | the external-repository stage could not account for a change and escalated to global | the message names the file; `[externals].enabled = false` turns the stage off if its precision is not wanted |
 | `CAMBI-W015` | a Starlark build setting a `.bazelrc` edit changed could not be resolved against the index, so the run went global | the message says why (an external repository, a `.bzl` that reads the setting, an unparsed label). Move the setting into the main repository, or add the flag to `[bazelrc].allowlist_extra` if it cannot affect analysis |
+| `CAMBI-W016` | `MODULE.bazel` and a `WORKSPACE` file are both present and there is no `.bazelversion`, so which one Bazel honours depends on whichever Bazel runs — and the two describe different graphs | pin the version in `.bazelversion`, or delete the file the build does not use. `cambi status` names the inert one once the pin decides it |
+| `CAMBI-W017` | the Bazel that answered `--version` is older than the oldest major cambium is tested against | upgrade Bazel, or pin a tested version in `.bazelversion`. An untested version is not refused, only unverified |
+| `CAMBI-W018` | a stored index is in an older on-disk format than this `cambi` reads, so it cannot be spliced onto | mint a fresh lineage with `cambi index build --publish`; the old blobs age out under `[baseline].retention_days`, or go now with `cambi index gc` |
+| `CAMBI-W019` | the store holds a lineage whose `config_hash` is not this workspace's, or that an engine with a different rule-hash version or index content revision wrote | expected right after a `cambium.toml` edit or a `cambi` upgrade; the stale lineage is skipped rather than used. `cambi index gc` removes it now |
 
 ## Errors
 
@@ -55,3 +59,6 @@ An error ends the run; the exit code is in the README's table.
 | `CAMBI-E011` | an io error against the store | check the path and the permissions on `[baseline].store`; exit code 5 |
 | `CAMBI-E012` | the store backend does not support the operation (a listing, a gc) | use a backend that does, or skip the operation |
 | `CAMBI-E013` | the command line does not make sense — a format a verb has no rendering for, for instance | the message names the flag; `cambi <verb> --help` lists what it takes |
+| `CAMBI-E014` | `cambium.local.toml` sets a key that is part of the config hash, so it decides what the graph is rather than what this machine is | move the key the message names into `cambium.toml`, where it is checked in and hashed. Only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`, `baseline.compress_indexes` and `baseline.publish_partial` may appear in the local file |
+| `CAMBI-E015` | the Bazel binary could not be found on `$PATH`, or ran and printed no version | install Bazel or bazelisk, or name the binary with `--bazel-binary`, `[bazel].binary`, or `bazel.binary` in `cambium.local.toml` |
+| `CAMBI-E016` | `cambi doctor` published a probe object to the store and could not read it back | a run publishes indexes through the same calls, so this is the check that matters for `--publish`: confirm the store in `[baseline].store` is writable with the credentials in this environment |
