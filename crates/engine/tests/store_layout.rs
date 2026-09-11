@@ -329,12 +329,7 @@ fn a_command_store_over_a_nested_directory_round_trips() {
 
     let script = |name: &str, body: &str| {
         let p = dir.path().join(name);
-        std::fs::write(&p, format!("#!/bin/sh\nset -e\n{body}\n")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        cambium_testkit::executable_script(&p, &format!("set -e\n{body}"));
         p.display().to_string()
     };
     let r = root.display();

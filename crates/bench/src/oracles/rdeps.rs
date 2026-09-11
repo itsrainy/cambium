@@ -774,10 +774,8 @@ mod tests {
     // scored, not Bazel.
     #[cfg(unix)]
     fn stub_bazel(dir: &Path, answer: &str) -> Bazel {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("stub-bazel");
-        std::fs::write(&bin, format!("#!/bin/sh\ncat <<'EOF'\n{answer}\nEOF\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cambium_testkit::executable_script(&bin, &format!("cat <<'EOF'\n{answer}\nEOF"));
         Bazel::at(dir.to_path_buf(), Some(bin.to_str().unwrap()))
     }
 
