@@ -72,6 +72,13 @@ pub trait Supervisor {
 
     /// A key the screen did not use itself (`y`, `n`, anything else).
     fn key(&mut self, _key: KeyEvent) {}
+
+    /// Asked every poll: `true` closes the screen. It is how a supervisor that
+    /// refused a `q` — the launcher, asking before it kills a child — leaves
+    /// once the answer arrives, instead of making someone press `q` twice.
+    fn exit(&mut self) -> bool {
+        false
+    }
 }
 
 /// The supervisor of a run nobody here started.
@@ -160,6 +167,9 @@ pub fn screen(what: &Screen, sup: &mut dyn Supervisor) -> Result<()> {
     let mut last = Instant::now();
     loop {
         sup.tick();
+        if sup.exit() {
+            break;
+        }
         let footer = sup.footer();
         term.draw(|f| draw(f, &snap, view, selected, scroll, &footer, colour))?;
         let wait = what.interval.saturating_sub(last.elapsed());
@@ -256,10 +266,10 @@ fn draw(
 }
 
 /// Raw mode and the alternate screen, left on drop.
-struct TerminalGuard;
+pub struct TerminalGuard;
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    pub fn enter() -> Result<Self> {
         enable_raw_mode()?;
         std::io::stdout().execute(EnterAlternateScreen)?;
         Ok(Self)

@@ -7,12 +7,14 @@
 //! replay of engine stages against a stored index, and the in-process stage
 //! micro-benchmarks. See docs/CLI.md, "The benchmark tools".
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 
 mod bench;
+mod launcher;
 mod replay;
 mod synth;
 mod watch;
@@ -69,8 +71,10 @@ struct Cli {
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 
+    /// No verb at all, on a terminal, is the launcher: a screen that composes
+    /// a run and then watches it.
     #[command(subcommand)]
-    command: bench::Args,
+    command: Option<bench::Args>,
 }
 
 /// The harness follows `cambi`'s output rules because they are good rules, not
@@ -172,7 +176,23 @@ fn main() -> ExitCode {
         cambi_path: cli.cambi.clone(),
         cambi: std::cell::OnceCell::new(),
     };
-    match bench::run(&ctx, cli.command) {
+    let outcome = match cli.command {
+        Some(command) => bench::run(&ctx, command),
+        // No verb. On a terminal that is the launcher — the first thing
+        // somebody types is the binary's name, and answering it with a usage
+        // screen spends the one command they ran on nothing. In a pipe there
+        // is no screen to draw, so it is the usage error it has always been.
+        None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+            launcher::run(&ctx)
+        }
+        None => {
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
+            println!();
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    match outcome {
         Ok(c) => ExitCode::from(c),
         Err(e) => {
             eprintln!("cambium-bench: {e:#}");
