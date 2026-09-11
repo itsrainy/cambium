@@ -298,11 +298,7 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
             }
         }
         other => {
-            let mut t = toml_edit::InlineTable::new();
-            for (k, v) in store_fields(other) {
-                t.insert(&k, v);
-            }
-            table(&mut doc, "baseline")["store"] = toml_edit::value(t);
+            table(&mut doc, "baseline")["store"] = toml_edit::value(store_table(other)?);
         }
     }
     if let Some(branch) = default_branch {
@@ -314,42 +310,23 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
     Ok(text)
 }
 
-/// The store as inline-table fields, in the spelling `StoreConfig` parses.
-fn store_fields(store: &StoreConfig) -> Vec<(String, toml_edit::Value)> {
-    let mut out: Vec<(String, toml_edit::Value)> = Vec::new();
-    let array = |items: &[String]| {
-        let mut a = toml_edit::Array::new();
-        for i in items {
-            a.push(i.as_str());
-        }
-        toml_edit::Value::Array(a)
-    };
-    match store {
-        StoreConfig::None => {}
-        StoreConfig::Dir { path } => {
-            out.push(("kind".into(), "dir".into()));
-            out.push(("path".into(), path.display().to_string().into()));
-        }
-        StoreConfig::Http { url, .. } => {
-            out.push(("kind".into(), "http".into()));
-            out.push(("url".into(), url.as_str().into()));
-        }
-        StoreConfig::Command {
-            fetch_cmd,
-            push_cmd,
-            list_cmd,
-            not_found_exit,
-        } => {
-            out.push(("kind".into(), "command".into()));
-            out.push(("fetch_cmd".into(), array(fetch_cmd)));
-            out.push(("push_cmd".into(), array(push_cmd)));
-            out.push(("list_cmd".into(), array(list_cmd)));
-            if let Some(code) = not_found_exit {
-                out.push(("not_found_exit".into(), (*code as i64).into()));
-            }
-        }
+/// The store as an inline table, in the spelling `StoreConfig` parses — by
+/// serialising the value itself, so the tag and the field names cannot drift
+/// from the engine's own `serde` attributes.
+fn store_table(store: &StoreConfig) -> Result<toml_edit::InlineTable> {
+    #[derive(serde::Serialize)]
+    struct Doc<'a> {
+        store: &'a StoreConfig,
     }
-    out
+    let doc = toml_edit::ser::to_document(&Doc { store })?;
+    // The serializer may write the nested value as `[store]` or as an inline
+    // table; `into_table` reads either.
+    let table = doc
+        .get("store")
+        .cloned()
+        .and_then(|item| item.into_table().ok())
+        .ok_or_else(|| anyhow::anyhow!("a store serialises as a table"))?;
+    Ok(table.into_inline_table())
 }
 
 /// The named top-level table, created if the file does not have one yet.
