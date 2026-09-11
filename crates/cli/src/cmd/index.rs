@@ -6,7 +6,7 @@
 //! spelling of these verbs.
 
 use anyhow::{Context as _, Result};
-use cambium_engine::AffectedRequest;
+use cambium_engine::{AffectedRequest, PublishPolicy, PublishSource};
 use clap::Subcommand;
 
 use crate::cmd::{hex, Context};
@@ -79,7 +79,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     if let Args::Show { file } = &args {
         return crate::cmd::inspect::show(ctx, file);
     }
-    let mut engine = ctx.engine()?;
+    let engine = ctx.engine()?;
     match args {
         Args::Build {
             commit,
@@ -87,12 +87,16 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             out,
             allow_partial,
         } => {
-            engine.cfg.baseline.publish_partial |= allow_partial;
             let sha = engine.repo.rev_parse(&commit).with_context(|| {
                 format!("--commit {commit} is not a revision in this repository")
             })?;
             let index = engine.full_build(&sha)?;
-            emit(&engine, &index, out.as_deref(), publish)?;
+            emit(
+                &engine,
+                &index,
+                out.as_deref(),
+                publish.then_some(PublishPolicy { allow_partial }),
+            )?;
             Ok(crate::EXIT_OK)
         }
         Args::Update {
@@ -103,7 +107,6 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             no_rebuild_on_global,
             allow_partial,
         } => {
-            engine.cfg.baseline.publish_partial |= allow_partial;
             let to_sha = engine
                 .repo
                 .rev_parse(&to)
@@ -147,7 +150,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                     engine.full_build(&to_sha)?
                 }
             };
-            emit(&engine, &index, out.as_deref(), publish)?;
+            emit(
+                &engine,
+                &index,
+                out.as_deref(),
+                publish.then_some(PublishPolicy { allow_partial }),
+            )?;
             Ok(crate::EXIT_OK)
         }
         Args::Gc { keep } => {
@@ -186,21 +194,22 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     }
 }
 
+/// Writes the index to `out`, and publishes it when `publish` says how.
 fn emit(
     engine: &cambium_engine::Engine,
     index: &cambium_index::IndexData,
     out: Option<&std::path::Path>,
-    publish: bool,
+    publish: Option<PublishPolicy>,
 ) -> Result<()> {
     // An index is routinely gigabytes. Writing one into `temp_dir()` under a
     // content-addressed name and walking away leaves it there for good, so
     // the only run allowed to skip `--out` is one that publishes, and that
     // one writes through a `NamedTempFile` that is deleted on the way out.
     let scratch = match (out, publish) {
-        (None, false) => anyhow::bail!(
+        (None, None) => anyhow::bail!(
             "pass --out <file> to say where the index goes, or --publish to upload it"
         ),
-        (None, true) => Some(tempfile::NamedTempFile::new()?),
+        (None, Some(_)) => Some(tempfile::NamedTempFile::new()?),
         (Some(_), _) => None,
     };
     let path = match (out, &scratch) {
@@ -224,8 +233,15 @@ fn emit(
     if let Some(w) = cambium_engine::inspect::PartialLoad::from(index.view()).warning() {
         eprintln!("cambium: WARNING: {w}");
     }
-    if publish {
-        let names = engine.publish_index(&path, &index.header.lineage, &index.provenance.commit)?;
+    if let Some(policy) = publish {
+        let names = engine.publish(
+            PublishSource::File {
+                path: &path,
+                lineage: &index.header.lineage,
+                commit: &index.provenance.commit,
+            },
+            policy,
+        )?;
         for n in names {
             eprintln!("cambium: published {n}");
         }
