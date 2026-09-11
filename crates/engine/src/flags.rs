@@ -38,6 +38,7 @@
 //! is re-queried: the resolved nodes join the direct-set seeds, like external
 //! nodes do, and the walk does the rest.
 
+use cambium_index::label::Label;
 use cambium_index::IndexRef;
 
 use crate::bazelrc::LabelFlag;
@@ -57,28 +58,33 @@ pub struct FlagReach {
 
 /// A label split into the parts the index is searched by.
 struct Parsed<'a> {
-    /// The apparent (or canonical) repository name, empty for the main repo.
-    repo: &'a str,
+    /// The label as written; its repository is what the mapping resolves.
+    label: Label<'a>,
     /// `pkg:name`, as an index label writes it after the `//`.
     suffix: String,
 }
 
+impl Parsed<'_> {
+    /// The apparent (or canonical) repository name, empty for the main repo.
+    fn repo(&self) -> &str {
+        self.label.repo_name()
+    }
+}
+
 /// `@repo//pkg:name`, `@@canonical//pkg:name`, `//pkg:name`, and the shorthand
-/// `//pkg` whose target name is the package's last segment.
+/// `//pkg` whose target name is the package's last segment. A relative
+/// `:name` is no flag name.
 fn parse_label(label: &str) -> Option<Parsed<'_>> {
-    let (repo, rest) = match label.strip_prefix("@@") {
-        Some(rest) => rest.split_once("//")?,
-        None => match label.strip_prefix('@') {
-            Some(rest) => rest.split_once("//")?,
-            None => ("", label.strip_prefix("//")?),
-        },
-    };
-    let suffix = match rest.split_once(':') {
-        Some(_) => rest.to_string(),
+    let label = Label::parse(label)?;
+    if label.is_relative() {
+        return None;
+    }
+    let suffix = match label.explicit_name() {
+        Some(_) => label.rest().to_string(),
         // `--@repo//pkg` is `@repo//pkg:pkg`.
-        None => format!("{rest}:{}", rest.rsplit('/').next().unwrap_or(rest)),
+        None => format!("{}:{}", label.rest(), label.name()),
     };
-    Some(Parsed { repo, suffix })
+    Some(Parsed { label, suffix })
 }
 
 /// Whether any `.bzl` in the stored closure names this label as a string
@@ -149,7 +155,7 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
             out.global = Some(reason(f, FlagCause::Unparsed));
             return out;
         };
-        let main = mapping.is_main(p.repo);
+        let main = p.label.is_main(&mapping);
         if let Some(path) = bzl_witness(base, src, &p.suffix) {
             out.global = Some(reason(f, FlagCause::ReadByBzl { path }));
             return out;
@@ -158,7 +164,7 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
             out.global = Some(reason(
                 f,
                 FlagCause::External {
-                    repo: p.repo.to_string(),
+                    repo: p.repo().to_string(),
                 },
             ));
             return out;
@@ -201,16 +207,17 @@ mod tests {
     #[test]
     fn labels_split_into_repository_and_suffix() {
         let p = parse_label("@envoy//bazel:crypto").unwrap();
-        assert_eq!((p.repo, p.suffix.as_str()), ("envoy", "bazel:crypto"));
+        assert_eq!((p.repo(), p.suffix.as_str()), ("envoy", "bazel:crypto"));
         let p = parse_label("@@envoy+//bazel:crypto").unwrap();
-        assert_eq!((p.repo, p.suffix.as_str()), ("envoy+", "bazel:crypto"));
+        assert_eq!((p.repo(), p.suffix.as_str()), ("envoy+", "bazel:crypto"));
         let p = parse_label("//bazel:crypto").unwrap();
-        assert_eq!((p.repo, p.suffix.as_str()), ("", "bazel:crypto"));
+        assert_eq!((p.repo(), p.suffix.as_str()), ("", "bazel:crypto"));
         let p = parse_label("@quiche//:ssl_lib").unwrap();
-        assert_eq!((p.repo, p.suffix.as_str()), ("quiche", ":ssl_lib"));
+        assert_eq!((p.repo(), p.suffix.as_str()), ("quiche", ":ssl_lib"));
         let p = parse_label("//bazel/foreign_cc").unwrap();
         assert_eq!(p.suffix, "bazel/foreign_cc:foreign_cc");
         assert!(parse_label("define").is_none());
+        assert!(parse_label(":crypto").is_none());
     }
 
     #[test]

@@ -142,6 +142,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
 use cambium_index::externals::{diff_module, scan_module, ModuleChange, ModuleFacts};
+use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
 use cambium_index::IndexRef;
@@ -503,21 +504,22 @@ fn input_can_be_a_loaded_bzl(base: IndexRef<'_>, repo: u32, paths: &[&str]) -> b
 /// `@@envoy_api+//bazel:api_build_system.bzl` -> `bazel/api_build_system.bzl`,
 /// but only for labels in the repository named.
 fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<String> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (token, rest) = rest.split_once("//")?;
+    let l = Label::parse(label)?;
+    // The repository is matched by the shape of its token against the two
+    // names the index recorded, not resolved through a mapping: these labels
+    // are the ones Bazel wrote into query output, and which spelling of a
+    // repository they carry depends on the Bazel that ran. See
+    // [`repo_token_matches`].
+    let token = match l.repo() {
+        Repo::Main => return None,
+        Repo::Apparent(t) | Repo::Canonical(t) => t,
+    };
     if !repo_token_matches(token, apparent, canonical) {
         return None;
     }
     // `pkg:sub/file.bzl` is `pkg/sub/file.bzl`, and the root package's
-    // `:file.bzl` is just `file.bzl`.
-    let (pkg, name) = rest.split_once(':')?;
-    Some(if pkg.is_empty() {
-        name.to_string()
-    } else {
-        format!("{pkg}/{name}")
-    })
+    // `:file.bzl` is just `file.bzl`. A label with no `:` names no file.
+    Some(join_path(l.package(), l.explicit_name()?))
 }
 
 /// [`cambium_index::bzlmod_live`] for the base side of the diff: the tree
@@ -561,13 +563,15 @@ pub fn repos_of_workspace_bzl(base: IndexRef<'_>, bzl_id: u32) -> Option<Vec<Str
 
 // ------------------------------------------------- repositories to targets
 
-/// The repository part of a label: `@@rules_cc+//x:y` -> `rules_cc+`.
+/// The repository part of a label, as written: `@@rules_cc+//x:y` ->
+/// `rules_cc+`. `None` for the main repository however it is spelled, since
+/// the callers match the token by shape ([`repo_token_matches`]) rather than
+/// resolving it.
 fn label_repo(label: &str) -> Option<&str> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (repo, _) = rest.split_once("//")?;
-    (!repo.is_empty()).then_some(repo)
+    match Label::parse(label)?.repo() {
+        Repo::Apparent(r) | Repo::Canonical(r) if !r.is_empty() => Some(r),
+        _ => None,
+    }
 }
 
 /// Whether a repository token from a label denotes the repository whose
