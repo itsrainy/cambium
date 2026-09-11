@@ -50,7 +50,7 @@ An error ends the run; the exit code is in the README's table.
 |---|---|---|
 | `CAMBI-E001` | an internal failure with no more specific code: io, protobuf, index or classification | check the message; a bug report should carry `--log debug` output |
 | `CAMBI-E002` | `cambium.toml` could not be read or does not parse | fix the file the message names, or point `--config` elsewhere |
-| `CAMBI-E003` | git failed | the message carries git's own error; check the revisions passed to `--base` / `--head` exist in this checkout |
+| `CAMBI-E003` | git failed | the message carries git's own error; check that the revisions in the range exist in this checkout |
 | `CAMBI-E004` | Bazel failed, or no Bazel workspace was found | run the command from inside the workspace, or pass `-C`; check `--bazel-binary` |
 | `CAMBI-E005` | a `bazel query` failed | the message carries Bazel's stderr; the query has to succeed before `cambi` can answer |
 | `CAMBI-E006` | no baseline index is available for the base and `--no-full-build` was given | run `cambi index build --publish`, or drop `--no-full-build` and let the run build one |
