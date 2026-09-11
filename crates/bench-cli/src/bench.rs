@@ -294,10 +294,11 @@ pub struct RunArgs {
     /// Comma-separated; default: all of them.
     #[arg(long = "steps", value_delimiter = ',')]
     pub steps: Vec<String>,
-    /// How big: smoke, laptop, or published.
-    #[arg(long, default_value = "published")]
+    /// How big: small, medium or large (the published run). The old names,
+    /// smoke, laptop and published, are still accepted.
+    #[arg(long, default_value = "large")]
     pub size: String,
-    /// The fifteen-minute pass before the eight-hour one: `--size smoke`.
+    /// The fifteen-minute pass before the eight-hour one: `--size small`.
     #[arg(long, conflicts_with = "size")]
     pub smoke: bool,
     /// The foils `changes` compares against. Default: bazel-diff and tango.
@@ -673,10 +674,10 @@ pub fn plan_of(ctx: &Context, args: &RunArgs) -> Result<Plan> {
         false => args.subjects.clone(),
     };
     let size = if args.smoke {
-        Size::Smoke
+        Size::Small
     } else {
         Size::parse(&args.size)
-            .ok_or_else(|| anyhow::anyhow!("--size is smoke, laptop or published"))?
+            .ok_or_else(|| anyhow::anyhow!("--size is small, medium or large"))?
     };
     let steps = match args.steps.is_empty() {
         true => StepKind::ALL.to_vec(),
@@ -721,7 +722,7 @@ fn do_run(ctx: &Context, args: &RunArgs) -> Result<u8> {
             crate::VERSION
         );
     }
-    if plan.size == Size::Smoke {
+    if plan.size == Size::Small {
         println!(
             "=== SMOKE: results in {}/, 3 history commits, 1 change set per subject ===",
             plan.results().display()
@@ -731,7 +732,7 @@ fn do_run(ctx: &Context, args: &RunArgs) -> Result<u8> {
     println!(
         "{}",
         match (plan.size, failures) {
-            (Size::Smoke, 0) => "SMOKE RUN DONE".to_string(),
+            (Size::Small, 0) => "SMOKE RUN DONE".to_string(),
             (_, 0) => "PUBLISHED RUN DONE".to_string(),
             (_, n) => format!("RUN DONE WITH {n} FAILED STEP(S)"),
         }
@@ -816,7 +817,7 @@ mod tests {
         RunArgs {
             subjects: vec![],
             steps: vec![],
-            size: "published".into(),
+            size: "large".into(),
             smoke: false,
             tools: vec![],
             restart_history: false,
@@ -840,7 +841,7 @@ mod tests {
             ["bazel", "envoy"],
             "skipped subjects are left out"
         );
-        assert_eq!(plan.size, Size::Published);
+        assert_eq!(plan.size, Size::Large);
         assert_eq!(plan.steps, StepKind::ALL);
         assert_eq!(plan.tools, ["bazel-diff", "tango"]);
 
@@ -856,7 +857,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.subjects, ["envoy"]);
-        assert_eq!(plan.size, Size::Smoke);
+        assert_eq!(plan.size, Size::Small);
         assert_eq!(plan.steps, [StepKind::Changes, StepKind::Report]);
         assert!(plan.restart_changes && !plan.restart_history);
         let lines: Vec<String> = plan.steps().iter().map(|s| s.command_line()).collect();

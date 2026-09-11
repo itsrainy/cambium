@@ -17,36 +17,45 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
-/// How big a run is. The three sizes the repository already has: the fifteen
-/// minutes before an eight-hour pass, the laptop-sized slice `--quick` is
-/// sugar for, and the published run itself.
+/// How big a run is: small is the fifteen-minute check before a real run,
+/// medium the laptop-sized slice `--quick` is sugar for, and large the
+/// configuration `docs/RESULTS.md` is published from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Size {
-    Smoke,
-    Laptop,
-    Published,
+    Small,
+    Medium,
+    Large,
 }
 
 impl Size {
-    pub const ALL: [Size; 3] = [Size::Smoke, Size::Laptop, Size::Published];
+    pub const ALL: [Size; 3] = [Size::Small, Size::Medium, Size::Large];
 
     pub fn name(self) -> &'static str {
         match self {
-            Size::Smoke => "smoke",
-            Size::Laptop => "laptop",
-            Size::Published => "published",
+            Size::Small => "small",
+            Size::Medium => "medium",
+            Size::Large => "large",
         }
     }
 
+    /// The name, or the one each size had before: `smoke`, `laptop` and
+    /// `published` are what `run --size` and the scripts took first.
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|z| z.name() == s)
+        match s {
+            "smoke" => Some(Size::Small),
+            "laptop" => Some(Size::Medium),
+            "published" => Some(Size::Large),
+            _ => Self::ALL.iter().copied().find(|z| z.name() == s),
+        }
     }
 
     pub fn describe(self) -> &'static str {
         match self {
-            Size::Smoke => "3 commits, 1 change set, into bench-results-smoke/ (~15 min)",
-            Size::Laptop => "--quick: 50 commits, 50 change sets, Tango on the first 10",
-            Size::Published => "the subject's own window and 40 change sets: the published run",
+            Size::Small => "3 commits, 1 change set, into bench-results-smoke/: checks the machine (~15 min)",
+            Size::Medium => "50 commits, 50 change sets, Tango on the first 10 (--quick)",
+            Size::Large => {
+                "each subject's own history window, 40 change sets: what RESULTS.md publishes (~8 h for all five)"
+            }
         }
     }
 
@@ -54,7 +63,7 @@ impl Size {
     /// real one neither resumes nor overwrites it.
     pub fn results_dir(self) -> &'static str {
         match self {
-            Size::Smoke => "bench-results-smoke",
+            Size::Small => "bench-results-smoke",
             _ => "bench-results",
         }
     }
@@ -132,7 +141,7 @@ impl Plan {
             subjects,
             tools: vec!["bazel-diff".into(), "tango".into()],
             steps: StepKind::ALL.to_vec(),
-            size: Size::Published,
+            size: Size::Large,
             results_dir: None,
             restart_history: false,
             restart_changes: false,
@@ -177,13 +186,13 @@ impl Plan {
                 let mut a = vec!["--log", "info", "history", s, "--oracle", "rebuild"];
                 a.extend(&dir);
                 match self.size {
-                    Size::Smoke => a.extend(["--commits", "3"]),
-                    Size::Laptop => a.push("--quick"),
-                    Size::Published => {}
+                    Size::Small => a.extend(["--commits", "3"]),
+                    Size::Medium => a.push("--quick"),
+                    Size::Large => {}
                 }
                 // A smoke run always restarts: its three commits must not
                 // resume a fuller walk in the same tree.
-                if self.restart_history || self.size == Size::Smoke {
+                if self.restart_history || self.size == Size::Small {
                     a.push("--restart");
                 }
                 out.push(step(StepKind::History, a));
@@ -202,11 +211,11 @@ impl Plan {
                 ];
                 a.extend(&dir);
                 match self.size {
-                    Size::Smoke => a.extend(["--change-sets", "1"]),
-                    Size::Laptop => a.push("--quick"),
-                    Size::Published => {}
+                    Size::Small => a.extend(["--change-sets", "1"]),
+                    Size::Medium => a.push("--quick"),
+                    Size::Large => {}
                 }
-                if self.restart_changes || self.size == Size::Smoke {
+                if self.restart_changes || self.size == Size::Small {
                     a.push("--restart");
                 }
                 out.push(step(StepKind::Changes, a));
@@ -406,7 +415,7 @@ mod tests {
     #[test]
     fn the_published_size_is_the_published_run() {
         assert_eq!(
-            lines(&plan(Size::Published)),
+            lines(&plan(Size::Large)),
             [
                 "cambium-bench --log info subjects fetch bazel --results-dir bench-results",
                 "cambium-bench --log info subjects build bazel --results-dir bench-results",
@@ -420,7 +429,7 @@ mod tests {
 
     #[test]
     fn the_smoke_size_has_its_own_tree_and_three_commits() {
-        let got = lines(&plan(Size::Smoke));
+        let got = lines(&plan(Size::Small));
         assert!(
             got.iter()
                 .all(|l| l.contains("--results-dir bench-results-smoke")),
@@ -432,7 +441,7 @@ mod tests {
 
     #[test]
     fn the_laptop_size_is_the_quick_sugar_and_nothing_else() {
-        let got = lines(&plan(Size::Laptop));
+        let got = lines(&plan(Size::Medium));
         assert!(got[2].ends_with("--quick"), "{}", got[2]);
         assert!(got[3].ends_with("--quick"), "{}", got[3]);
         assert!(got[0].contains("bench-results"), "{}", got[0]);
@@ -444,7 +453,7 @@ mod tests {
             steps: vec![StepKind::Changes, StepKind::Report],
             restart_changes: true,
             restart_history: true,
-            ..plan(Size::Published)
+            ..plan(Size::Large)
         };
         let got = lines(&p);
         assert_eq!(got.len(), 3, "{got:?}");
@@ -458,7 +467,7 @@ mod tests {
         let smoke = lines(&Plan {
             restart_changes: true,
             restart_history: true,
-            ..plan(Size::Smoke)
+            ..plan(Size::Small)
         });
         assert_eq!(smoke[2].matches("--restart").count(), 1, "{}", smoke[2]);
         assert_eq!(smoke[3].matches("--restart").count(), 1, "{}", smoke[3]);
@@ -470,7 +479,7 @@ mod tests {
         assert!(p.is_runnable());
         assert!(!Plan {
             steps: vec![StepKind::Fetch],
-            ..plan(Size::Published)
+            ..plan(Size::Large)
         }
         .is_runnable());
     }
@@ -485,7 +494,7 @@ mod tests {
                 StepKind::Report,
             ],
             tools: vec![],
-            ..plan(Size::Laptop)
+            ..plan(Size::Medium)
         };
         let got = lines(&p);
         assert!(!got.iter().any(|l| l.contains(" history ")), "{got:?}");
@@ -497,15 +506,15 @@ mod tests {
     fn a_plan_with_no_subject_or_no_workload_runs_nothing() {
         assert!(!Plan {
             subjects: vec![],
-            ..plan(Size::Laptop)
+            ..plan(Size::Medium)
         }
         .is_runnable());
         assert!(!Plan {
             steps: vec![],
-            ..plan(Size::Laptop)
+            ..plan(Size::Medium)
         }
         .is_runnable());
-        assert!(plan(Size::Laptop).is_runnable());
+        assert!(plan(Size::Medium).is_runnable());
     }
 
     /// A subject whose fetch fails loses its own run and nobody else's.
@@ -557,6 +566,9 @@ mod tests {
         assert!(e.contains("REFUSING") && e.contains("abc1234"), "{e}");
         assert!(require_sha("cambi 0.1.0 (abc1234)", "").is_err());
         assert!(StepKind::parse("changes") == Some(StepKind::Changes));
-        assert!(Size::parse("smoke") == Some(Size::Smoke));
+        assert!(Size::parse("smoke") == Some(Size::Small));
+        assert!(Size::parse("large") == Some(Size::Large));
+        assert!(Size::parse("published") == Some(Size::Large));
+        assert!(Size::parse("huge").is_none());
     }
 }

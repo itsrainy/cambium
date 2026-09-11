@@ -295,9 +295,11 @@ results_dir, at, subjects}`) for a tool that wants the matrix without
 learning the result files.
 
 `cambium-bench` with no verb, on a terminal, is the launcher that composes a
-run: the manifest's subjects and the synthetic presets to pick from, the tools,
-the workloads, and a size (smoke, laptop, published), with the exact command
-lines it will run shown before anything does. On confirm it spawns those
+run: the manifest's subjects, with a line on each, and the synthetic presets
+in a list of their own; the tools; the workloads; and a size (small, medium,
+large, where large is the published run), with the exact command lines it
+will run shown before anything does. The screen scrolls to keep the cursor in
+view, and review scrolls to the plan. On confirm it spawns those
 command lines — ordinary `cambium-bench history ...` and `cambium-bench
 changes ...` invocations — one after another as child processes, and switches
 to the watch screen with the running child's stderr tail in the footer; `q`
