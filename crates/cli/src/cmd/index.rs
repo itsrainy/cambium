@@ -29,7 +29,7 @@ pub enum Args {
         #[arg(long)]
         allow_partial: bool,
     },
-    /// Bring a baseline forward from one revision to another.
+    /// Bring an index forward from one revision to another.
     Update {
         #[arg(long)]
         from: String,
@@ -49,14 +49,6 @@ pub enum Args {
         #[arg(long)]
         no_rebuild_on_global: bool,
     },
-    /// Delete published indexes older than the configured retention.
-    Gc {
-        /// Keep this artifact whatever its age.
-        #[arg(long)]
-        keep: Option<String>,
-    },
-    /// List published indexes.
-    List,
     /// Upload an index file to the configured store.
     ///
     /// The index says which lineage and which commit it is for, so this takes
@@ -66,10 +58,18 @@ pub enum Args {
         /// The index file to upload.
         file: std::path::PathBuf,
     },
+    /// List published indexes.
+    List,
     /// Print one index's header and counts.
     Show {
         /// The index file to read.
         file: std::path::PathBuf,
+    },
+    /// Delete published indexes older than the configured retention.
+    Gc {
+        /// Keep this artifact whatever its age.
+        #[arg(long)]
+        keep: Option<String>,
     },
 }
 
