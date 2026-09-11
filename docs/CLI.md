@@ -164,6 +164,14 @@ are not; any other key is `CAMBI-E014` naming the key and the file it belongs
 in. `--cache-dir`, `--bazel-binary`, `CAMBIUM_CACHE_DIR` and `--config` keep
 their precedence over both files.
 
+Every verb also takes the same global options, declared once on `cambi`
+itself: `-C, --workspace <dir>` (defaults to the current directory),
+`--config <cambium.toml>`, `--bazel-binary <binary>` (overrides config and
+`$BAZEL_REAL`), `--cache-dir <dir>` (overrides `baseline.cache_dir`; also
+`$CAMBIUM_CACHE_DIR`), `--log <error|warn|info|debug|trace>` (also
+`$CAMBIUM_LOG`, with an explicit `--log` winning), `--format`, `--quiet` and
+`--color`.
+
 ## The output contract
 
 - `--format human` (the default on a TTY), `json` (one document), `jsonl`

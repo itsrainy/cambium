@@ -18,9 +18,7 @@ It never under-approximates. Over-approximation is acceptable and measured;
 missing an affected target is a bug, and the test suite is built around
 proving it does not happen.
 
-## How it works
-
-The design rests on one invariant:
+That guarantee rests on one invariant:
 
 > The outgoing edges and rule attributes of a target are a pure function of its
 > `BUILD` file, the `.bzl` files that file transitively loads, the set of paths
@@ -28,50 +26,13 @@ The design rests on one invariant:
 > inputs (`MODULE.bazel`, lockfiles, `.bazelrc`, toolchains).
 
 So a graph index built at one commit stays valid at another for every package
-whose inputs did not change. A run is:
-
-1. **Load** a baseline index for `base` — from the artifact store, or by
-   bringing a first-parent ancestor's index forward, or (once per lineage) by
-   building one from scratch.
-2. **Classify** `git diff --name-status` into dirty packages (their rows must
-   be re-queried), directly-changed files (their consumers are affected but the
-   graph is unchanged), and global invalidators (everything is affected).
-3. **Query** only the dirty packages: `bazel query 'set(//a:* //b:* ...)'`.
-   `//pkg:*` loads that package without walking its dependencies.
-4. **Splice** the freshly queried rows into the index, replacing the rows those
-   packages own and leaving the rest untouched.
-5. **Derive the direct set**: targets whose own definition changed, consumers
-   of changed files, consumers of deleted targets, and every rule in a package
-   whose `.bzl` load closure moved.
-6. **Walk** the reverse edges from the direct set.
-
-| step | cost |
-|---|---|
-| load index | O(1) mmap, plus an O(labels) map only where a label lookup is needed |
-| dirty set | O(changed files × path depth), plus O(consumers) per changed `.bzl` from the stored load closure — no Bazel call |
-| query | O(targets in dirty packages) of Bazel loading time |
-| splice | O(changed edges) into an overlay, or O(edges) memcpy when a new index is written |
-| direct set | O(dirty targets + changed files) |
-| walk | O(affected + their in-edges) |
-
-The splice comes in two forms, and which one a command uses follows from what
-it owes at the end:
-
-- **`affected` takes the delta overlay.** It answers a question and throws the
-  graph away, so there is no reason to write a whole new index for it. The
-  overlay holds only the rows the dirty packages replaced and the reverse-edge
-  corrections they imply, and reads through to the mmapped baseline for
-  everything else — so the step is proportional to the change rather than to
-  the repository. This is the default, not a flag.
-- **`cambi index update` materialises.** Its output is the thing that gets
-  published, so it has to be a complete index.
-
-Both paths run the same direct-set derivation and the same walk over a
-`GraphView`, so they cannot disagree about the answer — only about what is left
-on disk afterwards. Materialising was once the only option, and at ~52% of a
-run on a 500k-target graph it was the single most expensive step;
-[docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md#where-the-time-actually-goes) has the numbers for
-both.
+whose inputs did not change. A run loads an index for the base, classifies
+`git diff --name-status` into dirty packages and directly-changed files,
+re-queries only the dirty packages (`bazel query 'set(//a:* //b:* ...)'`),
+splices those rows into the index, derives the direct set, and walks the
+reverse edges. Every step is proportional to the change or to the answer.
+[docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where the time and the bytes
+actually go.
 
 ## Install
 
@@ -87,132 +48,87 @@ in it is part of the contract below.
 No `protoc` needed — the vendored `build.proto` is compiled by `protox`, a
 pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 
-## Usage
+## Five minutes
+
+`cambi` has eight verbs: `init`, `status`, `doctor`, `affected`, `explain`,
+`index`, `inspect`, `config`. [docs/CLI.md](docs/CLI.md) is the reference for
+all of them, their flags and their output rules; this is the path through.
 
 ```console
-$ cambi                            # no verb: cambi status
-$ cambi init      [--store-dir PATH | --store-s3 BUCKET/PREFIX |
-                    --store-gcs BUCKET/PREFIX | --store-http URL | --store-none]
-                   [--default-branch BRANCH] [--yes]
-$ cambi status    [--format human|json]
-$ cambi doctor    [--format human|json]
-$ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
-                   [--format human|json|jsonl|query|null] [--max-depth n]
-                   [--no-full-build] [--publish-base] [--out <index file>] [--dry-run]
-$ cambi explain [<label>] [<base>..<head>]   # the same flags as affected
-$ cambi index build  [--commit <sha>] [--publish] [--out <file>]
-$ cambi index update --from <sha> [--to <sha>] [--publish] [--out <file>]
-                   [--no-rebuild-on-global]
-$ cambi index publish <file>
-$ cambi index show    <file>
-$ cambi index list
-$ cambi index gc      [--keep <file>]
-$ cambi inspect target    <file> //x:y
-$ cambi inspect package   <file> <package>
-$ cambi inspect rdeps     <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi inspect deps      <file> //x:y  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi inspect path      <file> //from:a //to:b
-$ cambi inspect consumers <file> <path>...  [--transitive] [--include-manual] [--tests-only] [--max-depth n]
-$ cambi inspect owner     <file> <path>...
-$ cambi inspect targets   <file> <package> [--kind rule]
-$ cambi inspect stats     <file>
-$ cambi inspect externals <file> [--repo <name>]
-$ cambi inspect verify    <file> [--sample n] [--seed n]
-$ cambium-bench subjects list|fetch|build [<subject>]
-$ cambium-bench history  <subject> [--commits n] [--oracle rebuild|none]
-$ cambium-bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
-                   [--tools cambium,bazel-diff,tango] [--oracle rdeps,load]
-$ cambium-bench stages|sweep <subject>
-$ cambium-bench regress <a.json> <b.json>
-$ cambium-bench report  [<subject>]
-$ cambium-bench synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
-                   [--revisions n] [--seed n] [--force]
-$ cambium-bench synth describe    [--spec <preset>] [--seed n]
-$ cambium-bench synth build-index [--spec <preset>] --out <file> [--seed n]
-$ cambium-bench synth presets
-$ cambi config show|explain|hash
+$ cambi init --store-dir /var/cache/cambium
 ```
 
-`cambi index build` and `cambi index update` need `--out <file>` to say where the
-index goes; only a run that also `--publish`es may omit it, and that run
-writes through a temporary file it deletes once the upload is done. An index
-is routinely gigabytes, so there is no default path.
-
-Every subcommand also accepts these global options, declared once on `cambi`
-itself: `-C, --workspace <dir>` (defaults to the current directory),
-`--config <cambium.toml>`, `--bazel-binary <binary>` (overrides config and
-`$BAZEL_REAL`), `--log <level>` (`error`, `warn`, `info`, `debug`, `trace`;
-also settable via `$CAMBIUM_LOG`, with an explicit `--log` winning),
-`--format <human|json|jsonl|query|null>`, `--quiet` (nothing on stderr on
-success) and `--color <auto|always|never>` (never under `$NO_COLOR`, and only
-on a TTY under `auto`).
-
-`--format` replaces the per-command `--output`, which stays as a hidden alias,
-as does `text` for the value `human`, so existing invocations keep working.
-`human` is the default. `jsonl` streams one `{"event": ...}` line at a time —
-a diagnostic event per diagnostic, then the result — so a watcher can follow a
-long run. `null` prints nothing and only sets the exit code. `query` is
-`affected` only; asking any other verb for it is a usage error.
-
-`--format query` emits a `set(...)` expression you can hand straight to Bazel:
+Writes `cambium.toml` and nothing else — no index, no Bazel, no credentials.
+It detects `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
+`try-import`s and the default branch, and asks only for the store.
 
 ```console
+$ cambi doctor
+```
+
+Grades what a run needs: Bazel found and its version supported, the workspace
+mode unambiguous, the config parsed, the store answering both a fetch and a
+push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
+finding is a diagnostic with a code and a `help:` line.
+
+```console
+$ cambi index build --publish
+```
+
+One cold `bazel query //...:*`, which mints a lineage and uploads the first
+index. Everything after this is incremental. `cambi status` says where the
+checkout is and which index a run would load.
+
+```console
+$ cambi affected origin/main..HEAD --tests-only
 $ bazel test $(cambi affected origin/main --tests-only --format query)
 ```
 
-`cambi explain` answers "why is this test running?". With a label it prints
-the shortest path from that target back to the change and the direct reason at
-the end of it; with no label it tells the run's own story — the cause that made
-it global or cold, with the `help:` line that names the fix, or the numbers
-that say why the answer was the size it was. It runs the same computation
-`affected` does and takes the same range and the same flags. `--explain` on
-`affected` is the old spelling: it still works for a release and says so
-(`CAMBI-W001`).
-
-`cambi affected --dry-run` prints the plan and exits before any Bazel query:
-which index would be loaded (revision, lineage, age, distance), how the diff
-classifies (changed files, dirty packages, whether an invalidator, externals or
-`.bazelrc` cause makes it global), and what the run would therefore do —
-`splice`, `cold rebuild`, `global` or `cold build`. Exit 0, or 2 when the plan
-already knows the answer is `//...`.
-
-### Querying an index
-
-The `inspect` subcommands answer the same questions against an index that
-already exists, in text or JSON (`--format json`, carrying `schema`):
+The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
+and no range means the merge base of `[git].default_branch` with `HEAD`.
+`--dry-run` prints the plan — which index would be loaded, how the diff
+classifies, and whether the run would splice, cold-rebuild or go global —
+and exits before any Bazel query.
 
 ```console
-$ cambi inspect consumers idx.bin lib/core/parser.cc --transitive
-lib/core/parser.cc	//lib/core:core
-lib/core/parser.cc	//app:main
-lib/core/parser.cc	//app:main_test
-
-$ cambi inspect path idx.bin //app:main_test //lib/core:core
-//app:main_test
-  -> //app:main
-  -> //lib/core:core
+$ cambi explain //app:main_test origin/main..HEAD
 ```
 
-`rdeps` and `deps` are one hop by default and transitive with `--transitive`;
-the transitive form includes the subject itself, matching
-`bazel query rdeps`. `path` exits non-zero when there is no path, and says so
-if one exists the other way round. `stats` reports counts, the in-degree
-distribution, and per-component byte sizes — which is how you find out what an
-index is actually spending its bytes on. It also projects what labels would
-cost stored as `(package_id, relative_name)`, which is the measurement behind
-[not doing that](docs/ENGINE_COSTS.md#labels-33-and-not-compressed); run it on an index
-of your own repository, where package paths are longer than the generators'
-and the answer may well come out differently.
+Answers "why is this test running?": the shortest path from the target back to
+the change and the direct reason at the end of it. With no label it tells the
+run's own story instead — what made it global or cold, with the `help:` line
+that names the fix.
 
-To get an index to point it at without going near Bazel:
+`cambi inspect` asks graph questions against one index file — `deps`, `rdeps`,
+`path`, `owner`, `consumers`, `targets`, `stats`, `externals`, `verify`. It is
+plumbing, and it is how a surprising `explain` answer gets checked.
+
+### Keeping indexes warm
+
+A post-merge job on the main branch keeps the store populated, so pull-request
+runs almost always find their merge base directly:
 
 ```console
-$ cambium-bench synth build-index --spec large --out large.bin
-$ cambi inspect stats large.bin
+$ cambi index update --from <parent-sha> --to <merge-sha> --publish
 ```
 
-They share the engine's walk and the same package-ownership lookup the dirty
-set uses, so an `inspect` answer and an `affected` answer cannot disagree.
+When a run does not find one, it walks back up to `max_ancestor_walk`
+first-parent ancestors, takes the nearest index it finds, and replays it
+forward to the base in a single update. Failing that, it builds cold.
+`cambi affected --publish-base` publishes that computed base index so the next
+run on the same base finds it; only the base, because a pull-request head is
+not on the main line and nothing will ask for it again.
+
+Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop the
+accumulated tombstones:
+
+```console
+$ cambi index build --publish && cambi index gc
+```
+
+[docs/STORE.md](docs/STORE.md) is the store: the key layout, compression at
+rest, what makes an index incompatible, why concurrent publishers are safe,
+and the exact S3 and GCS command templates.
 
 ## The JSON contract
 
@@ -428,26 +344,21 @@ at 3, and `--max-depth n` (on `affected` and `inspect rdeps --transitive`)
 truncates the walk at `n` hops, which is what the per-target `depth` makes
 meaningful.
 
-### Configuration
+## Configuration
 
-`cambium.toml` at the repository root. Every field is optional; the defaults
-below are what you get with no file at all. `cambi init` writes one, asking
-only what it cannot detect — the store — and editing only the keys it was asked
-about on a file that already exists, with its comments and its key order
-preserved. It never runs Bazel, never builds an index, and never asks for or
-stores a credential: the store backends are a directory, an HTTP base, or a
-command template that drives `aws s3` or `gsutil` under whatever credentials
-the environment already has, and that is the whole of what `cambi` knows about
-authentication.
+`cambium.toml` at the repository root, checked in, every field optional. It
+says what the graph is — Bazel flags, invalidators, ignore globs, the
+`.bazelrc` allowlist, the store, the limits — and is hashed into every index
+it produces, so an index built under a different config cannot be spliced
+onto and `cambi index build` mints a fresh lineage instead.
 
-Beside it, `cambium.local.toml`: what is true of this machine and not of the
-graph. Only the five keys that are already outside the config hash may appear —
-`bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
+Beside it, gitignored, `cambium.local.toml`: what is true of this machine and
+not of the graph. Only the five keys already outside the config hash may
+appear — `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
 `baseline.compress_indexes`, `baseline.publish_partial` — and any other key is
-`CAMBI-E014` naming the key and the file it belongs in, because an override
-that could move the hash would let two checkouts of one commit publish indexes
-that claim to be interchangeable and are not. Keep it out of git; `cambi init`
-says so if `.gitignore` does not mention it (and does not edit `.gitignore`).
+`CAMBI-E014`, because an override that could move the hash would let two
+checkouts of one commit publish indexes that claim to be interchangeable and
+are not.
 
 Precedence is flags and environment variables, then `cambium.local.toml`, then
 `cambium.toml`, then the defaults. `cambi config explain` prints every
@@ -461,134 +372,29 @@ baseline.retention_days    = 30  (default)
 limits.max_dirty_packages  = 900  (/src/repo/cambium.toml)
 ```
 
-```toml
-[bazel]
-binary = ""                  # else $BAZEL_REAL, $BAZEL, bazelisk, bazel
-extra_query_flags = []
+Two keys are worth knowing before reading the full list:
+`[invalidators].paths` and `.globs` are the paths whose change means
+"everything is affected", and `limits.max_dirty_packages` bounds the only part
+of a run whose cost grows with the diff — past it the run asks Bazel for the
+whole repository once and reports `stats.cold_rebuild` with
+`cold_rebuild_reason`. The answer is exact either way: a cold rebuild is a
+slower route to the same affected set, not a surrender to `//...`.
 
-[git]
-default_branch = "main"      # `cambi affected` with no range compares the
-                             # merge base of this branch with HEAD. Not part
-                             # of the config hash: it says which revisions a
-                             # run compares, not what the graph is.
-
-[invalidators]               # any change here means "everything is affected"
-paths = ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel",
-         "WORKSPACE.bzlmod", "WORKSPACE.bzlmod.lock", ".bazelrc",
-         ".bazelversion", "REPO.bazel"]
-globs = ["tools/toolchains/**", "platforms/**"]
-
-[bazelrc]                    # a changed bazelrc is read rather than assumed:
-                             # if every flag it changed is known not to affect
-                             # loading or analysis (--remote_*, --jobs,
-                             # --test_output, BES, sandboxing, UI...) the run
-                             # is not invalidated. An unknown flag, a startup
-                             # line, an import, or the file appearing or
-                             # vanishing is still global. This extends that
-                             # allowlist; entries may end in `*`.
-allowlist_extra = []
-[externals]                  # map MODULE.bazel edits and repository-rule
-enabled = true               # inputs onto the repositories they move, rather
-                             # than invalidating everything. Turn it off for a
-                             # repository whose repository rules read main-repo
-                             # files by computed path rather than by label,
-                             # which no static scan can see.
-
-[ignore]                     # changes that cannot affect the build graph;
-                             # a path some rule consumes as a source is an
-                             # input anyway, whatever the glob says
-globs = ["**/*.md", "docs/**", ".github/**"]
-
-[output]
-exclude_tags = ["manual"]
-test_rule_suffixes = ["_test"]
-
-[baseline]
-store = { kind = "dir", path = "/var/cache/cambium" }
-max_ancestor_walk = 20
-retention_days = 30
-
-[limits]
-max_dirty_packages = 500     # past this many dirty packages, re-index `//...`
-                             # at head instead of splicing; 0 disables it
-```
-
-`max_dirty_packages` bounds the only part of a run whose cost grows with the
-diff: the per-package re-query. Past it the run asks Bazel for the whole
-repository once, splices all of it onto the baseline, and reports
-`stats.cold_rebuild` with `cold_rebuild_reason`. The answer is exact either
-way — a cold rebuild is a slower route to the same affected set, not a
-surrender to `//...`. (`limits.max_changed_files`, which *did* surrender, is
-gone; a config that still sets it loads with a warning and the key ignored.)
-
-The config is hashed into every index it produces. An index built under a
-different config cannot be spliced onto, because the invalidator rules that
-produced it may no longer hold — `cambi index build` mints a fresh
-lineage instead.
-
-Store backends: `dir` (a local directory), `http` (GET/PUT against a base
-URL), and `command`, whose argument templates get `{name}` and `{path}`
-substituted so `aws s3`, `gsutil`, `curl` or an internal CLI can be plugged in
-without touching Rust. Keys are `indexes/<lineage>/<tree>.bin` — the git
-*tree* hash, so a rebased or squash-merged commit finds the index its twin
-published — with a `commits/<lineage>/<sha>` pointer for callers that only
-have a sha. Writes are idempotent, and concurrent publishers are safe — see
-[docs/STORE.md](docs/STORE.md), which also has the exact S3 and GCS templates
-and the design note for content-addressed blobs.
-
-### Keeping indexes warm
-
-A post-merge job on the main branch keeps the store populated, so pull-request
-runs almost always find their merge base directly:
-
-```console
-$ cambi index update --from <parent-sha> --to <merge-sha> --publish
-```
-
-When a run does not find one, it walks back up to `max_ancestor_walk`
-first-parent ancestors, takes the nearest index it finds, and replays it
-forward to the base in a single update — the dirty set over the whole range is
-the union, so re-querying a package once per commit would buy nothing. Failing
-that, it builds cold.
-
-`cambi affected --publish-base` publishes that computed base index under the
-base revision, so the next run on the same base finds it instead of replaying
-again. Only the base: the head-side index of an `affected` run is never
-published, because a pull-request head is not on the main line and nothing will
-ask for it again.
-
-Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop the
-accumulated tombstones:
-
-```console
-$ cambi index build --publish && cambi index gc
-```
+Every section, every default and every store backend is in
+[docs/CLI.md](docs/CLI.md#configuration).
 
 ## Benchmarks
 
 `cambium-bench` runs cambium, bazel-diff and Tango on the same *subject* — an
-open-source Bazel monorepo from `subject_repos.toml` (bazel, envoy,
-sourcegraph, apollo, xla, tensorflow), or a generated graph named
-`synth:<preset>` and emitted as a real workspace with a real history. The same
-commands run on either.
-
-The harness is its own binary (`crates/bench-cli`) and drives `cambi` the way a
-user does, by running it: the benchmark measures the binary that ships, with
-the same flags, the same store and the same exit codes.
-
-Two workloads: `cambium-bench history` applies a subject's last N first-parent commits
-one at a time and ends by diffing the result against a cold rebuild, and
-`cambium-bench changes` runs every tool over `(base, head)` change sets shaped like the
-question a CI job asks, scoring recall against a `bazel query rdeps` oracle and
-filing every disagreement under a named class. `cambium-bench stages` and `cambium-bench sweep`
-time each in-memory stage at sizes no real repository reaches.
+open-source Bazel monorepo from `subject_repos.toml`, or a generated graph
+named `synth:<preset>` emitted as a real workspace with a real history. It is
+its own binary and drives `cambi` the way a user does, by running it, so the
+benchmark measures the binary that ships.
 
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
 measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
-numbers; [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where an `affected`
-run spends its time and where an index spends its bytes; and
-[docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run the five real subjects
-at full size, which does not fit on a laptop.
+numbers; [docs/OPERATIONS.md](docs/OPERATIONS.md) is how to run the five real
+subjects at full size, which does not fit on a laptop.
 
 ## Layout
 
@@ -670,35 +476,29 @@ pulling in a plotting crate and its font stack for two dozen line segments.
 
 And one deferral, which is worth being precise about because it looks like a
 soundness question: `Packages::bzl_closure_hash` exists in the format but is
-written as zero.
+written as zero. The spec uses it to drive one branch of the direct-set rule —
+when a package's `.bzl` load closure changed, every rule in it is direct
+regardless of its own hash — and that branch is load-bearing: a `.bzl` edit
+that changes a rule implementation without changing any BUILD attribute leaves
+every rule proto byte-identical, so nothing would be reported. cambium takes
+the branch on **load-closure membership** instead. The index stores, per `.bzl`
+file, the packages whose BUILD file transitively loads it
+(`crates/index/src/loads.rs`), and those are exactly the packages whose closure
+hash would have moved — a hash could only say *that* something moved, where the
+stored closure says *which packages*, which is the question the direct set
+actually asks. The `edit bzl` end-to-end scenario pins it: it asserts every
+downstream target is reported *because of the load closure* rather than a rule
+hash, so if the coverage ever moves to the other branch, the test says so.
 
-The hash exists in the spec to drive one branch of the direct-set rule — when a
-package's `.bzl` load closure changed, every rule in it is direct regardless of
-its own hash. That branch is load-bearing, not a nicety: a `.bzl` edit that
-changes a rule implementation without changing any BUILD attribute leaves every
-rule proto in the loading packages byte-identical, so every rule hash matches
-and nothing would be reported. cambium takes that branch on **load-closure
-membership** instead: the index stores, per `.bzl` file, the packages whose
-BUILD file transitively loads it (`crates/index/src/loads.rs`), and those are
-exactly the packages whose closure hash would have moved. A hash could only say
-*that* something moved; the stored closure says *which packages*, which is the
-question the direct set actually asks, so the hash stays a second, redundant
-answer and is written as zero.
-
-The closure is computed by scanning `load()` statements at index time, which is
-also what removed the last Bazel call from the dirty-set step. It used to be
+Computing the closure by scanning `load()` statements at index time is also
+what removed the last Bazel call from the dirty-set step. It used to be
 `rbuildfiles`, which needs Sky Query (`--universe_scope=//...`) and therefore
-loads every external repository: on a machine that cannot fetch one, it exits 3
+loads every external repository: on a machine that cannot fetch one it exits 3
 with a partial answer, and a partial answer there can be missing exactly the
 package that loads the changed file — so the run had to invalidate everything.
 That fired on 5 of 150 `bazel/bazel` commits. The benchmark still makes the
 call, as the `load` oracle over the static closure
 (`crates/bench/src/oracles/load.rs`).
-
-The `edit bzl` end-to-end scenario pins this: it edits a constant nothing uses,
-asserts the whole downstream closure is reported, and asserts that every one of
-those targets is reported *because of the load closure* rather than a rule hash
-— so if the coverage ever moves to the other branch, the test says so.
 
 ## License
 
