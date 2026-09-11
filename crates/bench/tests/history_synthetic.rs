@@ -11,6 +11,7 @@ use cambium_bench::history::{history, EngineDriver, HistoryOptions, HistoryResul
 use cambium_bench::state::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
+use cambium_testkit::synthetic_engine;
 
 struct SynthDriver {
     commits: Vec<String>,
@@ -62,12 +63,7 @@ fn fixture(revisions: u64, change_preset: &str) -> Fixture {
     cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
         path: dir.path().join("store"),
     };
-    let engine = Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(root.clone()),
-        cambium_bazel::Bazel::at(root.clone(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(dir.path().join("cache"));
+    let engine = synthetic_engine(&root, cfg).with_cache_dir(dir.path().join("cache"));
     Fixture {
         results: dir.path().join("results"),
         _dir: dir,
@@ -311,19 +307,7 @@ fn change_sets_are_deterministic_and_cover_the_range() {
 #[test]
 fn pr_change_sets_come_from_merge_commits() {
     let f = fixture(3, "typical-pr");
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .current_dir(&f.root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
+    let git = |args: &[&str]| cambium_testkit::git(&f.root, args);
     let main_tip = git(&["rev-parse", "HEAD"]);
     let base = git(&["rev-parse", "HEAD~2"]);
     git(&["checkout", "-q", "-b", "pr", &base]);
