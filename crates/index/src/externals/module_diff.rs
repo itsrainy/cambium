@@ -19,15 +19,18 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     // the file loaded, say) moves nothing on its own; the `.bzl` behind it
     // has its own route.
     if base.unparsed != head.unparsed {
-        let what = head
-            .unparsed
-            .iter()
-            .find(|s| !base.unparsed.contains(s))
-            .or_else(|| base.unparsed.iter().find(|s| !head.unparsed.contains(s)))
-            .unwrap();
-        return ModuleChange::Global(format!(
-            "MODULE.bazel contains a statement cambium cannot parse: `{what}`"
-        ));
+        let added = head.unparsed.iter().find(|s| !base.unparsed.contains(s));
+        let removed = base.unparsed.iter().find(|s| !head.unparsed.contains(s));
+        return ModuleChange::Global(match added.or(removed) {
+            Some(what) => {
+                format!("MODULE.bazel contains a statement cambium cannot parse: `{what}`")
+            }
+            // The two lists differ but every statement is on both sides: one
+            // was repeated, or they were reordered. Text the parser cannot
+            // read moved, which is the same global answer with no single
+            // statement to name.
+            None => "MODULE.bazel's unparsed statements were repeated or reordered".into(),
+        });
     }
     if base.module != head.module {
         return ModuleChange::Global(
