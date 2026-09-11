@@ -853,6 +853,21 @@ impl Bazel {
             }
         }
     }
+
+    /// Stops the Bazel server behind this output base, if one is running.
+    ///
+    /// Best effort by design: it is called on the way out of a run, where a
+    /// failure has nothing left to spoil, so it is logged and not returned.
+    /// A server that is not running is not an error either; `bazel shutdown`
+    /// exits 0 without starting one.
+    pub fn shutdown(&self) {
+        let mut cmd = self.command("shutdown");
+        match self.runner.output(&mut cmd) {
+            Ok(o) if o.exit.success => {}
+            Ok(o) => tracing::debug!(status = %o.exit, "bazel shutdown did not succeed"),
+            Err(e) => tracing::debug!(error = %e, "could not run bazel shutdown"),
+        }
+    }
 }
 
 /// What `rbuildfiles` said, split by what cambium can act on.
