@@ -71,8 +71,9 @@ own output shape and its own audience.
 ### `index`
 
 The stored artifact is an index and the chain of them is a lineage; those
-are the only two nouns. `build [--commit <sha>]` is the cold build that mints
-a lineage; `update --from <sha> [--to <sha>]` brings an index forward. Both
+are the only two nouns. `build [REV]` is the cold build that mints a
+lineage; `update FROM..TO` brings an index forward (a bare `FROM` means
+`FROM..HEAD`). Both
 need `--out <file>` to say where the index goes, and only a run that also
 `--publish`es may omit it — an index is routinely gigabytes, so there is no
 default path. `publish` uploads one, `list` shows what the store holds, `show`
