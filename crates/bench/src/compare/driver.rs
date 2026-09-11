@@ -34,7 +34,7 @@ use super::summary::{classify_all, examples_of, precision};
 /// [`RunContext::tool_startup_flags`].
 fn bazel_at(engine: &Engine, workspace: &Path) -> Bazel {
     let startup: Vec<String> = engine
-        .bazel
+        .bazel()
         .startup_flags()
         .iter()
         .filter(|f| !f.starts_with("--output_base"))
@@ -42,18 +42,18 @@ fn bazel_at(engine: &Engine, workspace: &Path) -> Bazel {
         .collect();
     Bazel::at(
         workspace.to_path_buf(),
-        Some(&engine.bazel.binary().display().to_string()),
+        Some(&engine.bazel().binary().display().to_string()),
     )
     .with_startup_flags(startup)
-    .with_env(engine.bazel.env().to_vec())
+    .with_env(engine.bazel().env().to_vec())
 }
 
 /// The run context tools are handed for one change set.
 pub fn run_context(engine: &Engine, scratch: &Path, base_worktree: &Path) -> RunContext {
     RunContext {
-        bazel_binary: engine.bazel.binary().to_path_buf(),
-        startup_flags: engine.bazel.startup_flags().to_vec(),
-        env: engine.bazel.env().to_vec(),
+        bazel_binary: engine.bazel().binary().to_path_buf(),
+        startup_flags: engine.bazel().startup_flags().to_vec(),
+        env: engine.bazel().env().to_vec(),
         scratch: absolute(scratch),
         base_worktree: absolute(base_worktree),
     }
@@ -372,7 +372,7 @@ fn run_rdeps_oracle(
     let base_index = base_index_for_oracle(engine, &change_set.base);
     RdepsOracle::new(opts.oracle_k, opts.seed)
         .run(
-            &engine.bazel,
+            engine.bazel(),
             &OracleInputs {
                 head: index.view(),
                 base: base_index.as_ref().map(|f| f.view()),
@@ -430,7 +430,7 @@ fn classification_facts<'a>(
         _ => false,
     });
     let facts = BazelFacts::new(
-        &engine.bazel,
+        engine.bazel(),
         index.view(),
         report.direct.iter().cloned(),
         changed.iter().cloned(),
@@ -567,7 +567,7 @@ fn run_tools(
 /// The `.bzl` load-closure oracle, when it is on.
 ///
 /// Only on change sets that changed a `.bzl`, which is where the static
-/// closure is the thing under test. `engine.bazel` is the head checkout,
+/// closure is the thing under test. `engine.bazel()` is the head checkout,
 /// which is the tree `rbuildfiles` has to be asked about.
 fn run_load_oracle(
     engine: &Engine,
@@ -580,7 +580,7 @@ fn run_load_oracle(
         return Ok(None);
     }
     let load_oracle = crate::oracles::load::run(
-        &engine.bazel,
+        engine.bazel(),
         changed,
         &report.dirty_packages.iter().cloned().collect(),
     )
@@ -659,7 +659,7 @@ fn compare_global(
     // A failure here must not take the run down: the universe is a
     // reporting number, not a gate, and a repository whose `//...` will
     // not fully load still has a change set worth timing.
-    let universe = match crate::oracles::rdeps::rule_universe(&engine.bazel) {
+    let universe = match crate::oracles::rdeps::rule_universe(engine.bazel()) {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(
@@ -754,7 +754,7 @@ fn compare_global(
 /// costs the deleted half of one change set and nothing else.
 fn base_index_for_oracle(engine: &Engine, base: &str) -> Option<cambium_index::IndexFile> {
     let rev = engine
-        .repo
+        .repo()
         .rev_parse(base)
         .unwrap_or_else(|_| base.to_string());
     let path = match engine.fetch_baseline(&rev) {
@@ -845,7 +845,7 @@ pub fn compare_change_sets(
     owned.make_absolute();
     let opts = &owned;
     let path = opts.output_path();
-    let engine_id = State::engine_id(&engine.cfg.hash());
+    let engine_id = State::engine_id(&engine.config().hash());
     let mut state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
     let mut result = match (opts.resume, ChangesResult::read(&path)) {
         (true, Ok(prev)) if resumable(&prev, opts, &engine_id) => prev,
@@ -863,7 +863,7 @@ pub fn compare_change_sets(
     // predates the field: the report's numbers are only worth reading if they
     // name the Bazel that actually answered.
     if result.bazel_version_used.is_none() {
-        let v = engine.bazel.version();
+        let v = engine.bazel().version();
         let v = v.lines().next().unwrap_or("").trim().to_string();
         if !v.is_empty() {
             result.bazel_version_used = Some(v);

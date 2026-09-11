@@ -66,6 +66,7 @@ use anyhow::{Context, Result};
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{self, WorkspaceText};
 use cambium_engine::Config;
+use cambium_index::label::{Label, Repo};
 use cambium_index::{walk, IndexRef};
 use serde::{Deserialize, Serialize};
 
@@ -692,7 +693,31 @@ pub fn replay(
     changes: &[Change],
     texts: &dyn WorkspaceText,
 ) -> ReplayOutcome {
-    replay_with(base, cfg, base_rev, head_rev, changes, texts, BaseKind::Pin)
+    replay_with(ReplayInputs {
+        base,
+        cfg,
+        base_rev,
+        head_rev,
+        changes,
+        texts,
+        base_kind: BaseKind::Pin,
+    })
+}
+
+/// What one replay is given: the index it runs against and what that index
+/// is, the change set, and where the two sides' workspace texts come from.
+pub struct ReplayInputs<'a> {
+    /// The base index: the pin's, or the run's own archived base.
+    pub base: IndexRef<'a>,
+    /// The configuration the run used, for its invalidators and limits.
+    pub cfg: &'a Config,
+    pub base_rev: &'a str,
+    pub head_rev: &'a str,
+    pub changes: &'a [Change],
+    /// Reads `MODULE.bazel`, its lock and `WORKSPACE` at either revision.
+    pub texts: &'a dyn WorkspaceText,
+    /// Which index `base` is, and so whether the drift guards apply.
+    pub base_kind: BaseKind,
 }
 
 /// As [`replay`], saying what `base` is.
@@ -702,16 +727,16 @@ pub fn replay(
 /// [`BaseKind::RunsOwn`] they are silent: that index *is* the graph the run
 /// spliced onto, and what the replay then answers is the engine's answer, not
 /// a lead.
-#[allow(clippy::too_many_arguments)]
-pub fn replay_with(
-    base: IndexRef<'_>,
-    cfg: &Config,
-    base_rev: &str,
-    head_rev: &str,
-    changes: &[Change],
-    texts: &dyn WorkspaceText,
-    base_kind: BaseKind,
-) -> ReplayOutcome {
+pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
+    let ReplayInputs {
+        base,
+        cfg,
+        base_rev,
+        head_rev,
+        changes,
+        texts,
+        base_kind,
+    } = inputs;
     let mut out = ReplayOutcome {
         base: base_rev.to_string(),
         head: head_rev.to_string(),
@@ -724,7 +749,9 @@ pub fn replay_with(
     out.indeterminate = undecidable_inputs(base, changes, head_rev, texts, drifts);
 
     let mut ext = if cfg.externals.enabled {
-        externals::analyse(base, changes, base_rev, head_rev, texts)
+        externals::analyse(base, changes, base_rev, head_rev, texts, || {
+            externals::mode_at(base, texts, base_rev)
+        })
     } else {
         externals::Externals::default()
     };
@@ -927,7 +954,12 @@ fn dirty_packages(
     }
 
     let mut global = dirty.global;
-    let mut reason = dirty.global_reason.clone();
+    // The classifier hands back the matching path; the engine's typed
+    // reason puts it into the words the report and the histogram carry.
+    let mut reason = dirty
+        .invalidator
+        .as_ref()
+        .map(|path| cambium_engine::GlobalReason::Invalidator { path: path.clone() }.to_string());
 
     // Changed `.bzl` files, from the static closure. The engine escalates when
     // the index carries no closure or when a changed `.bzl` is loaded outside
@@ -976,9 +1008,9 @@ fn dirty_packages(
         }
     }
 
-    if let Some(r) = &ext.global {
+    if let Some(cause) = &ext.cause {
         global = true;
-        reason = Some(r.clone());
+        reason = Some(cause.to_string());
     }
     Ok(DirtySet {
         by_package,
@@ -1053,12 +1085,14 @@ fn package_routes(
     out
 }
 
+/// The repository part of a label, as written: `@@rules_cc+//x:y` ->
+/// `rules_cc+`. `None` for the main repository however it is spelled; the
+/// token is matched by shape, the way the engine's stage does, not resolved.
 fn label_repo(label: &str) -> Option<&str> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (repo, _) = rest.split_once("//")?;
-    (!repo.is_empty()).then_some(repo)
+    match Label::parse(label)?.repo() {
+        Repo::Apparent(r) | Repo::Canonical(r) if !r.is_empty() => Some(r),
+        _ => None,
+    }
 }
 
 /// Per-repository attribution for the human report.
@@ -1761,15 +1795,15 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(pin.base_kind, BaseKind::Pin);
         assert_eq!(pin.indeterminate.len(), 2, "{:?}", pin.indeterminate);
 
-        let own = replay_with(
-            file.view(),
-            &cfg,
-            base,
-            "head",
-            &changes,
-            &texts,
-            BaseKind::RunsOwn,
-        );
+        let own = replay_with(ReplayInputs {
+            base: file.view(),
+            cfg: &cfg,
+            base_rev: base,
+            head_rev: "head",
+            changes: &changes,
+            texts: &texts,
+            base_kind: BaseKind::RunsOwn,
+        });
         assert_eq!(own.base_kind, BaseKind::RunsOwn);
         assert!(own.base_kind.exact_at_base());
         assert!(own.indeterminate.is_empty(), "{:?}", own.indeterminate);
@@ -1783,15 +1817,15 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
     fn an_archived_base_does_not_silence_the_guards_that_are_not_drift() {
         let index = stored_index();
         let cfg = Config::default();
-        let o = replay_with(
-            index.view(),
-            &cfg,
-            "base",
-            "head",
-            &[Change::new(Status::Modified, externals::MODULE_FILE)],
-            &NoText,
-            BaseKind::RunsOwn,
-        );
+        let o = replay_with(ReplayInputs {
+            base: index.view(),
+            cfg: &cfg,
+            base_rev: "base",
+            head_rev: "head",
+            changes: &[Change::new(Status::Modified, externals::MODULE_FILE)],
+            texts: &NoText,
+            base_kind: BaseKind::RunsOwn,
+        });
         assert_eq!(o.indeterminate.len(), 1, "{:?}", o.indeterminate);
         assert!(o.indeterminate[0].contains("--repo"));
     }

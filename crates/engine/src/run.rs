@@ -246,8 +246,13 @@ impl<'a> Run<'a> {
     /// repositories has been accounted for precisely, and letting the same
     /// file also fire the invalidator rule would throw that away.
     pub(crate) fn externals(&mut self, changes: &[Change], texts: &dyn WorkspaceText) -> Externals {
-        let ext = if self.engine.cfg.externals.enabled {
-            crate::externals::analyse(self.base, changes, &self.req.base, &self.req.head, texts)
+        let ext = if self.engine.config().externals.enabled {
+            // Which world Bazel reads the base tree in is decided here, once
+            // per run, and only if the diff makes the stage ask.
+            let (base, base_rev) = (self.base, self.req.base.as_str());
+            crate::externals::analyse(base, changes, base_rev, &self.req.head, texts, || {
+                crate::externals::mode_at(base, texts, base_rev)
+            })
         } else {
             Externals::default()
         };
@@ -269,7 +274,7 @@ impl<'a> Run<'a> {
         if let Some(reason) = &reach.global {
             // W004 covers the bazelrc half; this is the other cause, and it
             // names a setting rather than a flag.
-            self.engine.diagnostics.emit(reason.diagnostic());
+            self.engine.diagnostics().emit(reason.diagnostic());
         }
         reach
     }
@@ -279,7 +284,7 @@ impl<'a> Run<'a> {
     /// BUILD file did not really delete, and the external repositories' reach
     /// into the graph.
     pub(crate) fn dirty(&mut self, changes: &[&Change], ext: &mut Externals) -> Result<DirtyStage> {
-        let mut matchers = Matchers::compile(&self.engine.cfg.rules())?;
+        let mut matchers = Matchers::compile(&self.engine.config().rules())?;
         matchers.exempt(ext.handled.clone());
         let mut packages = PackageSet::from_index(self.base);
         let mut dirty = cambium_classify::dirty_set(
@@ -298,7 +303,7 @@ impl<'a> Run<'a> {
             let reason = GlobalReason::Invalidator {
                 path: dirty.invalidator.clone().unwrap_or_default(),
             };
-            self.engine.diagnostics.emit(reason.diagnostic());
+            self.engine.diagnostics().emit(reason.diagnostic());
             global = Some(reason);
         }
 
@@ -308,8 +313,8 @@ impl<'a> Run<'a> {
             dirty: &mut dirty,
             ext,
             stats: &mut self.stats,
-            diags: &self.engine.diagnostics,
-            externals_enabled: self.engine.cfg.externals.enabled,
+            diags: self.engine.diagnostics(),
+            externals_enabled: self.engine.config().externals.enabled,
         });
         if let Some(reason) = resolved.global {
             dirty.global = true;
@@ -323,7 +328,7 @@ impl<'a> Run<'a> {
         // module system.
         if let Some(cause) = ext.take_cause() {
             let reason = GlobalReason::Externals(cause);
-            self.engine.diagnostics.emit(reason.diagnostic());
+            self.engine.diagnostics().emit(reason.diagnostic());
             dirty.global = true;
             global = Some(reason);
         }
@@ -381,7 +386,7 @@ impl<'a> Run<'a> {
     fn query(&mut self, stage: &DirtyStage, ext: &Externals) -> Result<Queried> {
         let dirty = &stage.dirty;
         self.stats.dirty_packages = dirty.dirty.len();
-        let limit = self.engine.cfg.limits.max_dirty_packages;
+        let limit = self.engine.config().limits.max_dirty_packages;
         let cold = limit > 0 && dirty.dirty.len() > limit;
         let out = if cold {
             let reason = reason::cold_rebuild_reason(dirty.dirty.len(), limit);
@@ -440,7 +445,7 @@ impl<'a> Run<'a> {
         let base = self.base;
         let dirty = &stage.dirty;
         let mut builder = IndexBuilder::from_view(base);
-        builder.set_config_hash(self.engine.cfg.hash());
+        builder.set_config_hash(self.engine.config().hash());
         // A query that exited 3 under `--keep_going` loaded some of what it
         // was asked for, and the index has to say so — a package that failed
         // to load was tombstoned as if deleted, and only this flag tells a
@@ -644,7 +649,7 @@ impl<'a> Run<'a> {
                 .explain
                 .then(|| direct::explain(view, &result, &reasons)),
             // Filled by `Engine::affected` from the sink; a caller that drives
-            // `compute` directly fills it from `engine.diagnostics` itself.
+            // `compute` directly fills it from `engine.diagnostics()` itself.
             diagnostics: Vec::new(),
         }
     }

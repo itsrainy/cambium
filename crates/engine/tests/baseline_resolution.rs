@@ -74,8 +74,7 @@ impl Fixture {
     /// `commits/<lineage>/<sha>` pointer; those are not counted here.
     fn store_keys(&self) -> Vec<String> {
         self.engine
-            .store
-            .as_ref()
+            .store()
             .unwrap()
             .list()
             .unwrap()
@@ -180,7 +179,9 @@ fn a_missing_baseline_is_replayed_forward_from_an_ancestor() {
 fn the_walk_stops_after_max_ancestor_walk() {
     let mut f = fixture(4);
     f.publish_at(0);
-    f.engine.cfg.baseline.max_ancestor_walk = 1;
+    let mut cfg = f.engine.config().clone();
+    cfg.baseline.max_ancestor_walk = 1;
+    f.engine = f.engine.with_config(cfg);
     let base = f.commits[4].clone();
     let req = f.request(&base, &base);
 
@@ -262,7 +263,7 @@ fn affected_never_publishes_the_head_index() {
     assert!(matches!(origin, BaselineOrigin::Replayed { .. }));
     f.engine.publish_baseline(&base_index, false).unwrap();
 
-    let changes = f.engine.repo.diff(&base, &head).unwrap();
+    let changes = f.engine.repo().diff(&base, &head).unwrap();
     let out = f
         .engine
         .compute(
