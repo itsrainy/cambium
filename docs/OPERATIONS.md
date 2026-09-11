@@ -68,7 +68,7 @@ size, which do not fit on a laptop.
   the old tables back and looks like a post-fix measurement — issue #9's
   first run did exactly that. `[baseline]` is outside `Config::hash()`, so
   redirect `store.path` and `--cache-dir` to force a cold build without
-  changing the hash, or check `cambi index externals` against the change you
+  changing the hash, or check `cambi inspect externals` against the change you
   expect before trusting the number.
 - `changes-<pin>.json` keeps per-class counts and at most 20 example labels
   per tool, which is not enough to explain a change set where a tool named 990
@@ -120,7 +120,7 @@ size, which do not fit on a laptop.
   what the derivation did there. When a change set's `dirty_packages` looks
   wrong, copy the index the run loaded (`loaded baseline index ... path=` in
   the log, under `/tmp/cambium-cache/`) and replay with `--index` pointed at
-  it; `cambi index externals <file> --repo <name>` diffs the repository
+  it; `cambi inspect externals <file> --repo <name>` diffs the repository
   tables of the two.
 - `launch.sh sync` once reported `BUILD FAILED` on a healthy build: `set -x`
   echoes the `trap 'echo "BOOTSTRAP FAILED"'` line into the log. The greps are

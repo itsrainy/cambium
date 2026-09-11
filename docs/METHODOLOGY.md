@@ -130,7 +130,7 @@ over. Cold and warm are defined per tool:
 
 How each tool is invoked, so the comparison can be checked for fairness.
 
-- **cambium**: `cambi affected --base <base> --head <head>` with the
+- **cambium**: `cambi affected <base>..<head>` with the
   subject's generated `cambium.toml` (defaults plus a per-subject output base
   and store). The only subject-specific configuration is the manifest's
   invalidator list -- paths whose change invalidates everything, which is a

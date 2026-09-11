@@ -37,7 +37,7 @@ five in about eight hours.
 
 ## Workflow work, landed 2026-09-10 (evening)
 
-All five proposals are in: `SMOKE=1`, `cambi index externals`,
+All five proposals are in: `SMOKE=1`, `cambi inspect externals`,
 `CAMBIUM_REDERIVE_DUMP`, base-index archive (`bases/`) and label sets
 (`bench labels`), the head-index archive with `--head-check`, and the e2e
 tests for the permanently-unloadable package, the inert `MODULE.bazel` in
@@ -62,7 +62,7 @@ box, hours in. What has landed:
   (`fee13a7`: an unrecorded canonical name was read as a main-repository
   alias, and sourcegraph's `deps.bzl` replayed as six cold rebuilds the run
   never made). `CAMBIUM_REDERIVE_DUMP=<dir>` keeps each re-derived index for
-  `cambi index externals`, which dumps an index's repository tables and is
+  `cambi inspect externals`, which dumps an index's repository tables and is
   how the envoy mode bug was found (diff the pin's tables against the run's
   base index's).
 - The corpus attribution test (`cargo test -p cambium-index corpus_attribution
