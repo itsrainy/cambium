@@ -583,6 +583,7 @@ mod tests {
     fn a_result_round_trips_through_json() {
         let dir = tempfile::tempdir().unwrap();
         let mut r = ChangesResult {
+            cambi_version: None,
             schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "abc".into(),

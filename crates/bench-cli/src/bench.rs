@@ -330,6 +330,24 @@ impl Run {
         self.subjects.open_or_fetch(&self.subject, &self.entry)
     }
 
+    /// The `cambi` this run measures, carrying the subject's bazelisk
+    /// environment: a child `cambi` must run the same Bazel the rest of the
+    /// comparison does, and on a subject whose `.bazeliskrc` routes through
+    /// the Aspect CLI that is not the Bazel `bazelisk` would pick on its own.
+    fn cambi(
+        &self,
+        ctx: &Context,
+        checkout: &cambium_bench::checkout::Checkout,
+    ) -> Result<cambium_bench::tools::cambi::Cambi> {
+        Ok(ctx
+            .cambi()?
+            .clone()
+            .with_env(cambium_bench::checkout::bazelisk_env(
+                &checkout.dir,
+                self.version(),
+            )))
+    }
+
     /// `bench-results/<subject>/<workload>/`, created.
     fn workload(&self, name: &str) -> Result<PathBuf> {
         let dir = self.results.join(name);
@@ -619,7 +637,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         } => {
             let run = Run::open(ctx, &subject, &common)?;
             let commits = commits.or(run.quick.then_some(cambium_bench::QUICK_COMMITS));
-            do_history(&run, commits, &oracles, !restart)?;
+            do_history(ctx, &run, commits, &oracles, !restart)?;
             Ok(crate::EXIT_OK)
         }
         Args::Changes {
@@ -644,6 +662,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 return Ok(crate::EXIT_OK);
             }
             do_compare(
+                ctx,
                 &run,
                 &CompareArgs {
                     change_sets: change_set_file,
@@ -814,7 +833,7 @@ fn do_subjects(ctx: &Context, what: SubjectArgs) -> Result<u8> {
         } => {
             for name in subject_names(ctx, subject, &c)? {
                 let run = Run::open(ctx, &name, &c)?;
-                build(&run, at.as_deref(), force)?;
+                build(ctx, &run, at.as_deref(), force)?;
             }
             Ok(crate::EXIT_OK)
         }
@@ -853,7 +872,7 @@ fn fetch(run: &Run) -> Result<()> {
     Ok(())
 }
 
-fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
+fn build(ctx: &Context, run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
     let checkout = run.checkout()?;
     let want = at.unwrap_or(&run.entry.pin);
     let sha = checkout
@@ -877,13 +896,16 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
         }
     }
     checkout.checkout(&sha)?;
-    let engine = checkout.engine(&run.entry, run.version())?;
-    tracing::info!(%sha, "cold build: bazel query //...:all-targets (this takes a while)");
-    let t = std::time::Instant::now();
-    let index = engine.full_build(&sha)?;
-    let wall = t.elapsed();
-    cambium_index::format::write_index(&out, &index)?;
-    let c = &index.header.counts;
+    // The configuration the subject's runs share has to be on disk before a
+    // child `cambi` can read it; the engine handle itself is only opened for
+    // the compression setting and the store the rest of the workload uses.
+    checkout.write_config(&run.entry, run.version())?;
+    let cambi = run.cambi(ctx, &checkout)?;
+    tracing::info!(%sha, cambi = %cambi.version(), "cold build: cambi index build (this takes a while)");
+    let wall = cambi.index_build(&checkout.dir, &sha, &out, true)?;
+    let index = cambium_index::IndexFile::open(&out)?;
+    let v = index.view();
+    let c = v.counts();
     tracing::info!(
         %sha,
         nodes = c.nodes,
@@ -895,16 +917,9 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
         path = %out.display(),
         "built"
     );
-    if let Some(w) = cambium_engine::inspect::PartialLoad::from(index.view()).warning() {
-        tracing::warn!(
-            packages_in_error = index.provenance.packages_in_error,
-            first = ?index.provenance.error_packages,
-            "{w}"
-        );
-        eprintln!("cambium: WARNING: {w}");
-    }
-    for n in engine.publish_base_index(&index)? {
-        tracing::info!(artifact = %n, "published");
+    if let Some(w) = cambium_engine::inspect::PartialLoad::from(v).warning() {
+        tracing::warn!("{w}");
+        eprintln!("cambium-bench: WARNING: {w}");
     }
     state.built.insert(sha, out.clone());
     state.save(&run.results)?;
@@ -912,10 +927,17 @@ fn build(run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
     Ok(out)
 }
 
-fn do_history(run: &Run, commits: Option<usize>, oracles: &[String], resume: bool) -> Result<()> {
+fn do_history(
+    ctx: &Context,
+    run: &Run,
+    commits: Option<usize>,
+    oracles: &[String],
+    resume: bool,
+) -> Result<()> {
     let rebuild_oracle = parse_history_oracles(oracles)?;
     let checkout = run.checkout()?;
     let engine = checkout.engine(&run.entry, run.version())?;
+    let cambi = run.cambi(ctx, &checkout)?;
     let results = run.workload("history")?;
     let range = commits.unwrap_or(run.entry.history_window);
     let commits = changes::range_commits(&checkout.repo, &run.entry.pin, range)?;
@@ -935,10 +957,11 @@ fn do_history(run: &Run, commits: Option<usize>, oracles: &[String], resume: boo
         bazel_version: run.version().unwrap_or_default().to_string(),
         diff_cap: 50,
         rebuild_oracle,
+        cambi_version: Some(cambi.version().to_string()),
     };
-    let driver = history::BazelDriver {
+    let driver = history::CambiDriver {
         checkout: &checkout,
-        engine: &engine,
+        cambi: &cambi,
     };
     let result = history::history(&engine, &driver, &commits, &opts)?;
     let path = history::HistoryResult::path_versioned(&results, &run.entry.pin, run.version());
@@ -1108,7 +1131,7 @@ fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::tools::Tool>>> 
     }
 }
 
-fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
+fn do_compare(ctx: &Context, run: &Run, args: &CompareArgs) -> Result<u8> {
     let wanted = args.wanted()?;
     let owned: Vec<Box<dyn cambium_bench::tools::Tool>> = wanted
         .iter()
@@ -1161,6 +1184,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
     );
     let result = cambium_bench::compare::compare_change_sets(
         &engine,
+        &run.cambi(ctx, &checkout)?,
         &checkout,
         &change_sets,
         &tools,
