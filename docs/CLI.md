@@ -259,3 +259,14 @@ benchmark box. `--once` prints the same table as text and exits, and
 `--once --format json` answers with the snapshot document (`{schema,
 results_dir, at, subjects}`) for a tool that wants the matrix without
 learning the result files.
+
+`cambium-bench` with no verb, on a terminal, is the launcher that composes a
+run: the manifest's subjects and the synthetic presets to pick from, the tools,
+the workloads, and a size (smoke, laptop, published), with the exact command
+lines it will run shown before anything does. On confirm it spawns those
+command lines — ordinary `cambium-bench history ...` and `cambium-bench
+changes ...` invocations, the same ones `tools/bench/run-published.sh` runs —
+one after another as child processes, and switches to the watch screen with the
+running child's stderr tail in the footer; `q` asks before killing a child.
+It reimplements no workload, and the script remains the scripted way to do the
+same thing. In a pipe, no verb is the usage error it has always been.

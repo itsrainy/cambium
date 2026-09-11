@@ -54,6 +54,57 @@ fn the_binary_is_named_cambium_bench() {
     );
 }
 
+/// No verb, in a pipe, is the usage error it has always been: the launcher is
+/// a screen, and a caller with no terminal must get `--help` and a non-zero
+/// exit rather than a process waiting on a keystroke nobody can send.
+#[test]
+fn no_verb_without_a_terminal_prints_the_help_and_fails() {
+    let (code, stdout, _) = run(Path::new(BENCH), &[]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("Usage: cambium-bench "), "{stdout}");
+    assert!(
+        stdout.contains("watch"),
+        "the new verb is listed:\n{stdout}"
+    );
+}
+
+/// `watch` reads files and nothing else, so it answers on a results tree with
+/// no run behind it — which is what makes it usable on a copy.
+#[test]
+fn watch_once_reads_a_results_tree_it_did_not_produce() {
+    let dir = tempfile::tempdir().unwrap();
+    let subject = dir.path().join("envoy");
+    std::fs::create_dir_all(subject.join("history")).unwrap();
+    let (code, stdout, _) = run(
+        Path::new(BENCH),
+        &[
+            "watch",
+            "--once",
+            "--results-dir",
+            &dir.path().display().to_string(),
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("cambium-bench watch"), "{stdout}");
+    assert!(stdout.contains("envoy"), "{stdout}");
+
+    let (code, stdout, _) = run(
+        Path::new(BENCH),
+        &[
+            "--format",
+            "json",
+            "watch",
+            "--once",
+            "--results-dir",
+            &dir.path().display().to_string(),
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(doc["schema"], 1);
+    assert_eq!(doc["subjects"][0]["subject"], "envoy");
+}
+
 /// The verbs that left `cambi`. `subjects`, `history` and `changes` are what
 /// `tools/bench/run-published.sh` drives; `replay` is what
 /// `tools/bench/precheck.sh` drives.
