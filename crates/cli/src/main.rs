@@ -93,6 +93,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write cambium.toml, asking only what cannot be detected.
+    Init(cmd::init::Args),
     /// Where this checkout is and what index a run would load.
     Status,
     /// Check that a run can work here, and say what to fix if it cannot.
@@ -237,6 +239,7 @@ fn main() -> ExitCode {
     }
 
     let code = match cli.command.unwrap_or(Command::Status) {
+        Command::Init(args) => cmd::init::run(&ctx, args),
         Command::Status => cmd::status::run(&ctx),
         Command::Doctor => cmd::doctor::run(&ctx),
         Command::Affected(args) => cmd::affected::run(&ctx, args),

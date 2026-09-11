@@ -607,3 +607,150 @@ fn doctor_grades_an_unconfigured_store_ok() {
     assert_eq!(store["level"], "ok", "{store}");
     assert!(store.get("diagnostic").is_none());
 }
+
+/// A workspace with nothing in it, the way someone's first five minutes go.
+fn bare_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"x\")\n").unwrap();
+    std::fs::write(dir.path().join(".bazelversion"), "7.4.1\n").unwrap();
+    dir
+}
+
+/// What `init` writes has to be what the engine reads, and `config explain` has
+/// to be able to say where every value came from — otherwise the file it wrote
+/// is a file nothing can account for.
+#[test]
+fn init_writes_a_config_the_engine_loads_and_explain_attributes() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let store = dir.path().join("store");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "init",
+        "--yes",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "init failed: {stderr}");
+    assert!(
+        stdout.contains("bzlmod"),
+        "it shows what it detected:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .trim_end()
+            .ends_with("next: cambi index build --publish"),
+        "the last line is the next command:\n{stdout}"
+    );
+    let written = std::fs::read_to_string(dir.path().join("cambium.toml")).expect("a config file");
+    assert!(written.contains("kind = \"dir\""), "{written}");
+
+    // `config show` only prints what `Config::load` accepted, so it passing at
+    // all is the engine accepting the file.
+    let (code, shown, stderr) = run(&["-C", ws, "config", "show"]);
+    assert_eq!(code, 0, "the engine should load what init wrote: {stderr}");
+    assert!(shown.contains("config_hash = "), "{shown}");
+
+    let (code, explained, stderr) = run(&["-C", ws, "config", "explain", "--format", "json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&explained).expect("explain prints json");
+    let values = v["values"].as_array().expect("a value per leaf key");
+    let store_kind = values
+        .iter()
+        .find(|v| v["key"] == "baseline.store.kind")
+        .expect("the store init wrote is explained");
+    assert_eq!(store_kind["value"], "\"dir\"");
+    assert!(
+        store_kind["origin_label"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("cambium.toml")),
+        "the origin should be the file init wrote: {store_kind}"
+    );
+    // And a key nobody set is attributed to the defaults, not to the file.
+    let untouched = values
+        .iter()
+        .find(|v| v["key"] == "baseline.retention_days")
+        .expect("every leaf key is explained");
+    assert_eq!(untouched["origin_label"], "default");
+}
+
+/// `cambium.toml` is checked in, and somebody wrote the rest of it on purpose.
+#[test]
+fn init_on_an_existing_file_preserves_what_it_was_not_asked_about() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    std::fs::write(
+        dir.path().join("cambium.toml"),
+        "# our notes\n[limits]\nmax_dirty_packages = 900\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = run(&["-C", ws, "init", "--yes", "--store-http", "https://x/y"]);
+    assert_eq!(code, 0, "{stderr}");
+    let written = std::fs::read_to_string(dir.path().join("cambium.toml")).unwrap();
+    assert!(
+        written.contains("# our notes"),
+        "a comment was dropped:\n{written}"
+    );
+    assert!(
+        written.contains("max_dirty_packages = 900"),
+        "an unrelated key was dropped:\n{written}"
+    );
+    assert!(written.contains("kind = \"http\""), "{written}");
+}
+
+/// A script with no flags on a pipe cannot be prompted, and must be told which
+/// flags exist rather than handed a store it did not choose.
+#[test]
+fn init_without_flags_on_a_pipe_is_a_usage_error_naming_the_flags() {
+    let dir = bare_workspace();
+    let (code, _, stderr) = run(&["-C", dir.path().to_str().unwrap(), "init"]);
+    assert_eq!(code, 1, "a usage error is exit 1");
+    assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
+    for flag in ["--store-dir", "--store-s3", "--store-none", "--yes"] {
+        assert!(stderr.contains(flag), "{flag} is not offered:\n{stderr}");
+    }
+    assert!(
+        !dir.path().join("cambium.toml").exists(),
+        "a usage error must not write a file"
+    );
+}
+
+/// `init` is the one verb a user runs before they trust cambium, so what it
+/// does and does not touch is part of the contract: a config file, and nothing
+/// else.
+#[test]
+fn init_writes_the_config_and_nothing_else() {
+    let dir = bare_workspace();
+    std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+    let before: std::collections::BTreeSet<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "init",
+        "--yes",
+        "--store-none",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let after: std::collections::BTreeSet<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let new: Vec<_> = after.difference(&before).collect();
+    assert_eq!(new.len(), 1, "init created more than cambium.toml: {new:?}");
+    assert_eq!(new[0].to_str(), Some("cambium.toml"));
+    assert!(
+        stdout.trim_end().ends_with("next: cambi doctor"),
+        "with no store the next step is doctor:\n{stdout}"
+    );
+    // A .gitignore that does not mention the local override is said, not fixed.
+    assert!(stderr.contains("CAMBI-W020"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
+        "target/\n",
+        "init must not edit .gitignore"
+    );
+}

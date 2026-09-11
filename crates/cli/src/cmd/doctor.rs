@@ -191,7 +191,7 @@ pub fn judge(p: &probe::Probes) -> Vec<Check> {
                 .diagnostics
                 .first()
                 .cloned()
-                .unwrap_or_else(|| unreachable_fallback()),
+                .unwrap_or_else(unreachable_fallback),
         ),
     });
 

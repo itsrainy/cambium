@@ -55,6 +55,10 @@ rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# Already in the lock as `toml`'s own parser; taken directly so that `cambi
+# init` can rewrite a checked-in cambium.toml without reformatting it or
+# dropping its comments.
+toml_edit = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"

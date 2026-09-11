@@ -2,6 +2,7 @@ pub mod affected;
 pub mod bench;
 pub mod doctor;
 pub mod index;
+pub mod init;
 pub mod inspect;
 pub mod replay;
 pub mod status;
