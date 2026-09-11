@@ -1,0 +1,202 @@
+name: nightly
+
+# The slow tiers: end-to-end against real Bazel, the Bazel version matrix,
+# the soundness sweeps, the synthetic change-set comparison against
+# bazel-diff, the stage benchmarks, and clippy on the next toolchain. Every
+# push runs only ci.yml; these run once a night, and from the Actions tab
+# (`gh workflow run nightly`) when a change to the engine or the harness
+# needs them before the night.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint-next:
+    name: clippy on the next toolchain (advisory)
+    runs-on: ubuntu-latest
+    # Never blocks. Its job is to say "the next stable adds a lint" while the
+    # pinned gate keeps main green, so bumping rust-toolchain.toml is a commit
+    # with the fixes in it rather than an emergency.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `+stable` on the command line is the one form that outranks
+      # rust-toolchain.toml, so this really does run the newer clippy.
+      - run: cargo +stable clippy --workspace --all-targets -- -D warnings
+
+  soundness:
+    name: soundness sweep (small)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # The oracle that matters: the engine's answer must contain everything a
+      # full rebuild reports, over many seeds and every change preset.
+      - run: cargo test --release -p cambium-engine --test soundness -- --nocapture
+        env:
+          CAMBIUM_SOUNDNESS_SIZE: small
+          CAMBIUM_SOUNDNESS_SEEDS: "24"
+          CAMBIUM_SOUNDNESS_REVISIONS: "10"
+
+  e2e:
+    name: end-to-end against Bazel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: bazel-contrib/setup-bazel@0.9.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
+        env:
+          CAMBIUM_E2E: "1"
+
+  bazel-version-matrix:
+    name: bazel version matrix (${{ matrix.bazel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: ["7.4.1", "8.5.1", "9.2.0"]
+    env:
+      USE_BAZEL_VERSION: ${{ matrix.bazel }}
+      BAZELISK_VERSION: "v1.26.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Cache bazelisk downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ matrix.bazel }}-${{ env.BAZELISK_VERSION }}
+      - name: Install bazelisk
+        run: |
+          mkdir -p "$HOME/.cache/cambium/bin"
+          curl -sSL -o "$HOME/.cache/cambium/bin/bazelisk" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64"
+          chmod +x "$HOME/.cache/cambium/bin/bazelisk"
+          "$HOME/.cache/cambium/bin/bazelisk" --version
+      - name: Cache bazel-diff build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/bazel-diff
+          key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
+      - run: tools/bazel-diff/fetch.sh
+      - name: Cache tango build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/tango
+          key: tango-${{ hashFiles('tools/tango/**') }}
+      - run: tools/tango/fetch.sh
+      # Both real-tool tests skip when a tool is absent, so a fetch.sh that
+      # silently produced nothing would still read green; here the tools were
+      # just built, and CAMBIUM_REQUIRE_TOOLS turns a skip into a failure.
+      - run: cargo test -p cambium-bench --test legacy_bazel_diff --test smoke_real_bazel -- --include-ignored --nocapture
+        env:
+          CAMBIUM_REQUIRE_TOOLS: "1"
+      - run: cargo test --release -p cambium-engine --test e2e_bazel -- --test-threads=1
+        env:
+          CAMBIUM_E2E: "1"
+
+  synthetic-changes:
+    name: change sets on synth:small, vs bazel-diff
+    # The nightly run of the real benchmark, on a synthetic subject:
+    # the same `cambium-bench changes` a person points at envoy, over a generated
+    # workspace small enough to emit, load and diff on a hosted runner. Tango
+    # is left out because it costs 30-500 s a change set; the weekly job on the
+    # real subjects runs all three.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: bazel-contrib/setup-bazel@0.9.1
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Cache bazel-diff build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cambium/bazel-diff
+          # Keyed on the pinned commit in the fetch script, so a bump of
+          # BAZEL_DIFF_COMMIT/BAZEL_DIFF_TAG invalidates the cache and forces
+          # a rebuild rather than silently reusing the old binary.
+          key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
+      - run: tools/bazel-diff/fetch.sh
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
+      - name: bench changes synth:small
+        # Non-zero exit is the gate: the run fails on any `cambium_missing`,
+        # any `cambium_missing_bzl_closure`, any `unclassified` disagreement,
+        # or recall under 1.0 against the rdeps oracle. Everything else in the
+        # taxonomy is an over-approximation and is reported, not gated.
+        run: |
+          ./target/release/cambium-bench --cambi ./target/release/cambi changes synth:small \
+            --tools cambium,bazel-diff --change-sets 5 --kind adjacent
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results-synth-small
+          path: bench-results/
+
+  bench:
+    name: benchmarks (small, medium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
+      - run: |
+          ./target/release/cambium-bench stages synth:small --runs 5 \
+            --out bench-results/synth-small/stages/ci.json \
+            --markdown bench-results/synth-small/stages/ci.md
+          ./target/release/cambium-bench stages synth:medium --runs 5 \
+            --out bench-results/synth-medium/stages/ci.json \
+            --markdown bench-results/synth-medium/stages/ci.md
+      # Machine fingerprints differ between runners, so gating only makes sense
+      # against a baseline captured on the same runner class; `cambium-bench regress`
+      # refuses to compare across machines rather than reporting noise.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results/
+
+  large:
+    name: medium soundness, large benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release -p cambium-engine --test soundness -- --nocapture
+        env:
+          CAMBIUM_SOUNDNESS_SIZE: medium
+          CAMBIUM_SOUNDNESS_SEEDS: "8"
+          CAMBIUM_SOUNDNESS_REVISIONS: "10"
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
+      - run: |
+          ./target/release/cambium-bench stages synth:large --runs 3 \
+            --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
+            --out bench-results/synth-large/stages/nightly.json \
+            --markdown bench-results/synth-large/stages/nightly.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bench-results
+          path: bench-results/
