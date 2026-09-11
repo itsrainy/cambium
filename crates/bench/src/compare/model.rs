@@ -430,6 +430,18 @@ pub struct ChangesSummary {
     pub all_cambium_cold: WallStats,
     #[serde(default)]
     pub all_cambium_warm: WallStats,
+    /// cambium's own `timings_ms.total`, over the same two sets of change
+    /// sets as the walls: the wall minus process start and serialisation.
+    /// Only change sets that recorded one are sampled, so results written
+    /// before the harness ran `cambi` as a child process leave these empty.
+    #[serde(default)]
+    pub cambium_cold_engine: WallStats,
+    #[serde(default)]
+    pub cambium_warm_engine: WallStats,
+    #[serde(default)]
+    pub all_cambium_cold_engine: WallStats,
+    #[serde(default)]
+    pub all_cambium_warm_engine: WallStats,
     /// How many change sets of any kind each tool ran on.
     #[serde(default)]
     pub all_tool_change_sets: BTreeMap<String, usize>,

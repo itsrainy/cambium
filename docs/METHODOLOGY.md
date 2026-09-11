@@ -121,9 +121,10 @@ start and the serialisation of the answer to JSON included. The engine's own
 file (`cold_engine_ms`, `warm_engine_ms`, and a history commit's
 `engine_total_ms`), so the overhead around the computation is a number
 anyone can read rather than something a table quietly charges to the engine
-or quietly hides. The published tables in RESULTS.md currently quote the wall
-times; showing both columns needs a new aggregate in the result schema and a
-fresh run to fill it.
+or quietly hides. The report's timings table prints both: the walls, and the
+engine's p50/p90 beside them as *engine cold* and *engine warm*. Results
+written before the harness ran `cambi` as a child process carry no engine
+time, and those cells read `n/a`.
 
 **Fallbacks.** Where cambium gave up precision.
 

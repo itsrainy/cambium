@@ -159,6 +159,12 @@ pub fn summarise(change_sets: &[ChangeSetResult]) -> ChangesSummary {
         .collect();
     s.all_cambium_cold = wall_stats(change_sets.iter().map(|p| p.cambium.cold_wall_ms).collect());
     s.all_cambium_warm = wall_stats(change_sets.iter().map(|p| p.cambium.warm_wall_ms).collect());
+    // 0 is "not recorded", not a zero-millisecond run.
+    let engine = |it: &mut dyn Iterator<Item = u64>| wall_stats(it.filter(|ms| *ms > 0).collect());
+    s.cambium_cold_engine = engine(&mut timed().map(|p| p.cambium.cold_engine_ms));
+    s.cambium_warm_engine = engine(&mut timed().map(|p| p.cambium.warm_engine_ms));
+    s.all_cambium_cold_engine = engine(&mut change_sets.iter().map(|p| p.cambium.cold_engine_ms));
+    s.all_cambium_warm_engine = engine(&mut change_sets.iter().map(|p| p.cambium.warm_engine_ms));
     s.global_stats = GlobalStats {
         change_sets: s.globals,
         mean_cambium_labels: mean(g_cambium.iter().map(|n| *n as f64)),

@@ -1005,8 +1005,8 @@ fn render_compare_section(c: &CompareSection) -> String {
     // ---- timings ----
     s.push_str("#### Timings (p50 / p90)\n\n");
     s.push_str(
-        "| Bazel | tool | over | change sets | cold | warm |\n\
-         |---|---|---|---:|---:|---:|\n",
+        "| Bazel | tool | over | change sets | cold | warm | engine cold | engine warm |\n\
+         |---|---|---|---:|---:|---:|---:|---:|\n",
     );
     for row in &c.timings {
         let tool = match &row.tool {
@@ -1014,12 +1014,14 @@ fn render_compare_section(c: &CompareSection) -> String {
             None => "**cambium**".to_string(),
         };
         s.push_str(&format!(
-            "| `{}` | {tool} | {} | {} | {} | {} |\n",
+            "| `{}` | {tool} | {} | {} | {} | {} | {} | {} |\n",
             row.bazel,
             row.scope.name(),
             row.change_sets,
             opt_wall(row.cold.as_ref()),
             opt_wall(row.warm.as_ref()),
+            opt_wall(row.cold_engine.as_ref()),
+            opt_wall(row.warm_engine.as_ref()),
         ));
     }
     s.push_str(&format!(
@@ -1047,6 +1049,14 @@ fn render_compare_section(c: &CompareSection) -> String {
          how many change sets each tool's distribution is taken over: Tango is \
          often capped (it costs 30-500 s a change set) while cambium and \
          bazel-diff run on all of them.\n\n",
+    );
+    s.push_str(
+        "*cold* and *warm* are whole-process walls: for cambium that includes \
+         `cambi` starting and serialising its JSON answer. *engine cold* and \
+         *engine warm* are the engine's own `timings_ms.total` from the same \
+         runs, the wall without the process around it; they are `n/a` for the \
+         other tools, which report no such split, and for results recorded \
+         before the harness ran `cambi` as a child process.\n\n",
     );
 
     // ---- globals ----
@@ -1438,6 +1448,8 @@ mod tests {
             cambium: CambiumRun {
                 cold_wall_ms: 4200,
                 warm_wall_ms: 180,
+                cold_engine_ms: 3900,
+                warm_engine_ms: 95,
                 ..Default::default()
             },
             tools: vec![ToolComparison {
@@ -1502,6 +1514,8 @@ mod tests {
                 universe: 24_000,
                 cold_wall_ms: 30,
                 warm_wall_ms: 30,
+                cold_engine_ms: 12,
+                warm_engine_ms: 12,
                 ..Default::default()
             },
             tools: vec![ToolComparison {

@@ -63,6 +63,10 @@ pub struct TimingRow {
     /// `None` when the run recorded no such distribution for the tool.
     pub cold: Option<WallStats>,
     pub warm: Option<WallStats>,
+    /// cambium's own engine time under the same scope; `None` for a tool, and
+    /// for a run that recorded none.
+    pub cold_engine: Option<WallStats>,
+    pub warm_engine: Option<WallStats>,
 }
 
 /// One row of the globals table: what cambium's `//...` cost against the
@@ -234,12 +238,27 @@ fn timing_rows(c: &ChangesResult) -> Vec<TimingRow> {
                 change_sets: tool_ran(counts, cold, &name),
                 cold: cold.get(&name).cloned(),
                 warm: warm.get(&name).cloned(),
+                cold_engine: None,
+                warm_engine: None,
             });
         }
     }
-    for (scope, cold, warm) in [
-        (Scope::All, &s.all_cambium_cold, &s.all_cambium_warm),
-        (Scope::Incremental, &s.cambium_cold, &s.cambium_warm),
+    let recorded = |w: &WallStats| (w.samples > 0).then(|| w.clone());
+    for (scope, cold, warm, cold_engine, warm_engine) in [
+        (
+            Scope::All,
+            &s.all_cambium_cold,
+            &s.all_cambium_warm,
+            &s.all_cambium_cold_engine,
+            &s.all_cambium_warm_engine,
+        ),
+        (
+            Scope::Incremental,
+            &s.cambium_cold,
+            &s.cambium_warm,
+            &s.cambium_cold_engine,
+            &s.cambium_warm_engine,
+        ),
     ] {
         out.push(TimingRow {
             bazel: bazel.clone(),
@@ -248,6 +267,8 @@ fn timing_rows(c: &ChangesResult) -> Vec<TimingRow> {
             change_sets: cold.samples,
             cold: Some(cold.clone()),
             warm: Some(warm.clone()),
+            cold_engine: recorded(cold_engine),
+            warm_engine: recorded(warm_engine),
         });
     }
     out
