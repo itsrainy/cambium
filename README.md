@@ -613,7 +613,7 @@ the harness's front door, and the harness measures `cambi` by running it.
 
 ```console
 $ cargo test --workspace                     # unit, integration, oracles
-$ CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel   # needs Bazel
+$ CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel -- --ignored   # needs Bazel
 $ CAMBIUM_SOUNDNESS_SIZE=medium CAMBIUM_SOUNDNESS_SEEDS=50 \
     cargo test --release -p cambium-engine --test soundness      # nightly
 ```
