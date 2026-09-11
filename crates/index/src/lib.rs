@@ -28,6 +28,7 @@ pub mod loads;
 pub mod lockfile;
 pub mod overlay;
 pub mod space;
+mod starlark;
 pub mod strtab;
 pub mod view;
 pub mod walk;
