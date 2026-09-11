@@ -166,19 +166,24 @@ impl RepoMapping {
     /// error. Getting this wrong costs precision on external load *names*, not
     /// soundness.
     pub fn from_dump(s: &str) -> Self {
+        Self::try_from_dump(s).unwrap_or_else(|why| {
+            tracing::warn!("{why}; falling back to identity mapping");
+            Self::identity()
+        })
+    }
+
+    /// [`from_dump`](Self::from_dump) without the fallback: the reason the
+    /// text is not a mapping, for a caller that has to report it. An identity
+    /// mapping from unreadable output is exactly the condition under which an
+    /// external label names the wrong repository, so the engine turns this
+    /// error into a diagnostic rather than a log line.
+    pub fn try_from_dump(s: &str) -> Result<Self, String> {
         let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) else {
-            tracing::warn!(
-                "dump_repo_mapping output had no JSON object; falling back to identity mapping"
-            );
-            return Self::identity();
+            return Err("dump_repo_mapping output had no JSON object".to_string());
         };
-        match serde_json::from_str::<FxHashMap<String, String>>(&s[start..=end]) {
-            Ok(map) => Self { map },
-            Err(e) => {
-                tracing::warn!("dump_repo_mapping output was not valid JSON ({e}); falling back to identity mapping");
-                Self::identity()
-            }
-        }
+        serde_json::from_str::<FxHashMap<String, String>>(&s[start..=end])
+            .map(|map| Self { map })
+            .map_err(|e| format!("dump_repo_mapping output was not valid JSON ({e})"))
     }
 
     pub fn is_empty(&self) -> bool {

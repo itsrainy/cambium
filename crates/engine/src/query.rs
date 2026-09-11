@@ -261,10 +261,32 @@ impl PackageQuerier for BazelQuerier {
     }
 
     fn repo_mapping(&self) -> cambium_index::RepoMapping {
-        match self.bazel.repo_mapping_dump() {
-            Some(dump) => cambium_index::RepoMapping::from_dump(&dump),
-            None => cambium_index::RepoMapping::identity(),
-        }
+        // A failed command is WORKSPACE mode or an old Bazel, where identity
+        // is the right mapping and `cambium_bazel` already logs it. A command
+        // that succeeded and printed something unreadable is not: the module
+        // graph has a mapping and it was lost.
+        let Some(dump) = self.bazel.repo_mapping_dump() else {
+            return cambium_index::RepoMapping::identity();
+        };
+        cambium_index::RepoMapping::try_from_dump(&dump).unwrap_or_else(|why| {
+            tracing::warn!("{why}; falling back to the identity repository mapping");
+            self.diags.emit(
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::W022RepoMappingUnparsed,
+                    format!(
+                        "{why}, so external repositories are named by their apparent names \
+                         and a load through a renamed `bazel_dep` can be attributed to the \
+                         wrong repository"
+                    ),
+                )
+                .with_help(
+                    "run `bazel mod dump_repo_mapping \"\"` in the workspace: its stdout must be \
+                     one JSON object. File the output with cambium if Bazel printed one and \
+                     this still fired",
+                ),
+            );
+            cambium_index::RepoMapping::identity()
+        })
     }
 
     fn workspace(&self) -> Option<&Path> {
@@ -578,6 +600,39 @@ mod tests {
                 if stderr.contains("something else")),
             "{err}"
         );
+        assert!(codes(&q).is_empty());
+    }
+
+    fn querier_printing(code: i32, stdout: &str) -> BazelQuerier {
+        let mut q = querier(code, &[], "");
+        q.bazel =
+            Bazel::at(std::env::temp_dir(), Some("bazel")).with_runner(Arc::new(CannedRunner {
+                code,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: String::new(),
+            }));
+        q
+    }
+
+    /// Unreadable output from a command that succeeded loses a real mapping,
+    /// and says so with a code; a command that failed is WORKSPACE mode, where
+    /// identity is the answer and there is nothing to act on.
+    #[test]
+    fn an_unreadable_repo_mapping_is_a_diagnostic_and_a_failed_one_is_not() {
+        let q = querier_printing(0, "Starting local Bazel server...\n");
+        assert!(q.repo_mapping().is_identity());
+        assert_eq!(codes(&q), vec![Code::W022RepoMappingUnparsed]);
+
+        let q = querier_printing(0, "{\"rules_cc\": ");
+        assert!(q.repo_mapping().is_identity());
+        assert_eq!(codes(&q), vec![Code::W022RepoMappingUnparsed]);
+
+        let q = querier_printing(0, "{\"\": \"\", \"rules_cc\": \"rules_cc+\"}");
+        assert!(!q.repo_mapping().is_identity());
+        assert!(codes(&q).is_empty());
+
+        let q = querier_printing(2, "");
+        assert!(q.repo_mapping().is_identity());
         assert!(codes(&q).is_empty());
     }
 
