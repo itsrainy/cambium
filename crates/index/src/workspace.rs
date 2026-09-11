@@ -61,6 +61,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::label::{Label, Repo};
 use crate::loads::{lex, Lexed, Tok};
 use crate::starlark::{parse_args, render_all, render_stmt, statements};
 
@@ -341,27 +342,25 @@ fn loaded_main_bzl(
 ) -> Option<String> {
     head.get(callee)
         .or_else(|| base.get(callee))
-        .and_then(|l| main_bzl_path(l))
+        .and_then(|l| literal_main_bzl_path(l))
 }
 
-/// `//dev:deps.bzl` -> `dev/deps.bzl`, for a label in the main repository.
+/// `//dev:deps.bzl` -> `dev/deps.bzl`, for a label that spells the main
+/// repository out as `//` or `@//`.
 ///
-/// A label into another repository is not this repository's `.bzl` and has no
-/// path here; `@//` is the main repository written out.
-fn main_bzl_path(label: &str) -> Option<String> {
-    let rest = match label.strip_prefix("@//") {
-        Some(r) => r,
-        None => label.strip_prefix("//")?,
-    };
-    let (pkg, name) = rest.split_once(':')?;
-    if !name.ends_with(".bzl") {
+/// This is deliberately narrower than the mapped reading the index build uses
+/// (`externals::inputs::main_bzl_path`): a `WORKSPACE` diff is two texts with
+/// no repository mapping in hand, so `@sg//dev:deps.bzl` — the main
+/// repository under its `workspace(name = "sg")` alias — is not recognised
+/// here, and a changed call to a macro loaded that way stays global. That is
+/// the sound side; following the alias would need the mapping to be right.
+fn literal_main_bzl_path(label: &str) -> Option<String> {
+    let l = Label::parse(label)?;
+    if l.is_relative() || !matches!(l.repo(), Repo::Main | Repo::Apparent("")) {
         return None;
     }
-    Some(if pkg.is_empty() {
-        name.to_string()
-    } else {
-        format!("{pkg}/{name}")
-    })
+    let name = l.explicit_name()?;
+    name.ends_with(".bzl").then(|| l.path())
 }
 
 #[cfg(test)]

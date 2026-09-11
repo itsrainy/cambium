@@ -618,7 +618,7 @@ impl<'a> IndexRef<'a> {
             let pat = self.repo_input_patterns.get(p);
             // A label pattern is not a path and is answered from the graph
             // instead; see [`IndexRef::repos_for_label_kinds`].
-            if pat.starts_with("//") {
+            if crate::externals::Pattern::is_stored_label(pat) {
                 continue;
             }
             let hit = if self.repo_input_prefix[p as usize] {
@@ -668,7 +668,7 @@ impl<'a> IndexRef<'a> {
         let mut out = Vec::new();
         for p in 0..self.repo_input_patterns.len() as u32 {
             let pat = self.repo_input_patterns.get(p);
-            if !pat.starts_with("//") {
+            if !crate::externals::Pattern::is_stored_label(pat) {
                 continue;
             }
             let feeds = !self.repo_input_target_only[p as usize];

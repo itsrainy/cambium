@@ -65,10 +65,18 @@ impl Pattern {
         matches!(self, Pattern::Label(_))
     }
 
+    /// Whether a stored pattern string is a [`Pattern::Label`]: a
+    /// repo-relative path never begins with `//`, so one that does is a label
+    /// and nothing else can be. The readers that walk the stored column
+    /// without materialising a `Pattern` ask this rather than re-deciding.
+    pub fn is_stored_label(s: &str) -> bool {
+        s.starts_with("//")
+    }
+
     /// Reads back a stored pattern: a leading `//` means a label, and
     /// otherwise the boolean says whether it is a prefix.
     pub fn from_stored(s: &str, prefix: bool) -> Self {
-        if s.starts_with("//") {
+        if Self::is_stored_label(s) {
             Pattern::Label(s.to_string())
         } else if prefix {
             Pattern::Prefix(s.to_string())

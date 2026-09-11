@@ -89,6 +89,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::data::IndexRef;
+use crate::label::{join_path, Label};
 
 /// Files whose loads make up the workspace closure, most-preferred first.
 /// All that exist are scanned: a repository can carry both.
@@ -242,63 +243,27 @@ pub enum Load {
 /// `@repo//pkg:file.bzl`, `@@canonical//pkg:file.bzl`, and `@//pkg:file.bzl`
 /// (the main repository, spelled explicitly).
 pub fn resolve_label(label: &str, from_pkg: &str, m: &RepoMapping) -> Option<Load> {
-    let (repo, rest) = match label.strip_prefix("@@") {
-        // A doubled `@` means the name is already canonical.
-        Some(rest) => match rest.split_once("//") {
-            Some((r, rest)) => (Some(r.to_string()), format!("//{rest}")),
-            None => return None,
-        },
-        None => match label.strip_prefix('@') {
-            Some(rest) => match rest.split_once("//") {
-                Some((r, rest)) => (Some(m.canonical(r).to_string()), format!("//{rest}")),
-                // `@repo` on its own is not a file label.
-                None => return None,
-            },
-            None => (None, label.to_string()),
-        },
-    };
-
+    // `@repo` on its own, and a bare `file.bzl` with no leading colon, are
+    // not file labels in any supported Bazel.
+    let l = Label::parse(label)?;
+    // `//pkg/file.bzl` is not valid, and `//pkg` with an implicit target name
+    // never names a `.bzl`: a file label always writes its `:`.
+    let name = l.explicit_name()?;
     // An external repository: name it canonically and stop.
-    if let Some(repo) = &repo {
-        if !repo.is_empty() {
-            let (pkg, name) = split_target(&rest)?;
-            return Some(Load::External(format!("@@{repo}//{pkg}:{name}")));
-        }
+    let repo = l.canonical_repo(m);
+    if !repo.is_empty() {
+        return Some(Load::External(format!("@@{repo}//{}:{name}", l.package())));
     }
-
-    let (pkg, name) = match rest.strip_prefix("//") {
-        Some(rest) => {
-            let (pkg, name) = split_target_body(rest)?;
-            (pkg.to_string(), name.to_string())
-        }
-        // Relative to the loading file's own package. A bare `file.bzl` with
-        // no leading colon is not a legal load label in any supported Bazel.
-        None => (from_pkg.to_string(), rest.strip_prefix(':')?.to_string()),
-    };
     if name.is_empty() {
         return None;
     }
-    Some(Load::Main(if pkg.is_empty() {
-        name
+    // A relative label resolves against the loading file's own package.
+    let pkg = if l.is_relative() {
+        from_pkg
     } else {
-        format!("{pkg}/{name}")
-    }))
-}
-
-/// `//pkg:name` -> `(pkg, name)`, for a label already known to start `//`.
-fn split_target(label: &str) -> Option<(String, String)> {
-    let rest = label.strip_prefix("//")?;
-    let (pkg, name) = split_target_body(rest)?;
-    Some((pkg.to_string(), name.to_string()))
-}
-
-fn split_target_body(rest: &str) -> Option<(&str, &str)> {
-    match rest.split_once(':') {
-        Some((pkg, name)) => Some((pkg, name)),
-        // `//pkg/file.bzl` is not valid, but `//pkg` with an implicit target
-        // name never names a `.bzl`; treat it as unresolvable.
-        None => None,
-    }
+        l.package()
+    };
+    Some(Load::Main(join_path(pkg, name)))
 }
 
 // ------------------------------------------------------------------ the lexer
@@ -705,11 +670,7 @@ impl LoadGraph {
         let mut roots = Vec::new();
         let mut external = Vec::new();
         for name in ["BUILD.bazel", "BUILD"] {
-            let path = if pkg.is_empty() {
-                name.to_string()
-            } else {
-                format!("{pkg}/{name}")
-            };
+            let path = join_path(pkg, name);
             let Some(text) = src.text(&path) else {
                 continue;
             };

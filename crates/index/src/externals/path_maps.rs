@@ -5,6 +5,7 @@
 //! would hide an edit to it — so every shape the reader is not certain of is
 //! simply not recorded, and the repository keeps the wide answer.
 
+use crate::label::Label;
 use crate::loads::{lex, unescape, Lexed, RepoMapping, Tok};
 use crate::starlark::{arg_spans, parse_args};
 
@@ -152,12 +153,7 @@ fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
     }
     let dst = dst.trim_start_matches("./").trim_end_matches('/');
     let from = if src.contains("//") {
-        let (pkg, name) = main_repo_target(src, m)?;
-        if pkg.is_empty() {
-            name
-        } else {
-            format!("{pkg}/{name}")
-        }
+        main_repo_target(src, m)?.path()
     } else if src.starts_with('/') || src.split('/').any(|s| s == ".." || s == ".") {
         return None;
     } else {
@@ -186,21 +182,14 @@ fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
     }
 }
 
-/// `//pkg:name` in the main repository, split. `None` for any other label.
-fn main_repo_target(label: &str, m: &RepoMapping) -> Option<(String, String)> {
-    let rest = match label.strip_prefix("@@") {
-        Some(r) => r.strip_prefix("//")?,
-        None => match label.strip_prefix('@') {
-            Some(r) => {
-                let (repo, rest) = r.split_once("//")?;
-                if !m.is_main(repo) {
-                    return None;
-                }
-                rest
-            }
-            None => label.strip_prefix("//")?,
-        },
-    };
-    let (pkg, name) = rest.split_once(':')?;
-    (!name.is_empty() && !pkg.starts_with('/')).then(|| (pkg.to_string(), name.to_string()))
+/// `//pkg:name` in the main repository, with its target written out. `None`
+/// for any other label: another repository, a relative `:name`, the `//pkg`
+/// shorthand, or a package that starts with `/`.
+fn main_repo_target<'a>(label: &'a str, m: &RepoMapping) -> Option<Label<'a>> {
+    let l = Label::parse(label)?;
+    if l.is_relative() || !l.is_main(m) {
+        return None;
+    }
+    let name = l.explicit_name()?;
+    (!name.is_empty() && !l.package().starts_with('/')).then_some(l)
 }
