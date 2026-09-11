@@ -181,6 +181,17 @@ fn an_unparsed_statement_is_global_only_when_it_changed() {
     ));
 }
 
+/// The unparsed lists differ, yet every statement is on both sides: a call
+/// repeated. There is no single statement to name, and the answer is still
+/// global rather than a panic.
+#[test]
+fn a_repeated_unparsed_statement_is_global() {
+    let base = scan_module("load(\"//bazel:v.bzl\", \"vendored\")\nvendored()\nvendored()\n");
+    let head = scan_module("load(\"//bazel:v.bzl\", \"vendored\")\nvendored()\n");
+    assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
+    assert!(matches!(diff_module(&head, &base), ModuleChange::Global(_)));
+}
+
 #[test]
 fn an_unchanged_module_names_nothing() {
     let t = "bazel_dep(name = \"fmt\", version = \"1.0\")\nregister_toolchains(\"//a:b\")\n";
