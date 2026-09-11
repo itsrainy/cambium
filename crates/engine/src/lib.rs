@@ -9,8 +9,10 @@
 
 pub mod baseline;
 pub mod bazelrc;
+mod bzl;
 pub mod config;
 pub mod diag;
+mod direct;
 pub mod engine;
 pub mod error;
 pub mod externals;
@@ -19,8 +21,10 @@ pub mod inspect;
 pub mod plan;
 pub mod probe;
 pub mod query;
+pub mod reason;
 pub mod report;
 pub mod revision;
+mod run;
 pub mod store;
 pub mod synthq;
 
@@ -42,6 +46,7 @@ pub use inspect::{IndexQuery, QueryOptions};
 pub use plan::{PlanMode, RunPlan};
 pub use probe::Probes;
 pub use query::{BazelQuerier, PackageQuerier};
+pub use reason::GlobalReason;
 pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
 pub use revision::{RevisionQuerier, RevisionWorkspace};
 pub use synthq::SynthQuerier;
