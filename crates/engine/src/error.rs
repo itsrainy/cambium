@@ -90,6 +90,14 @@ impl EngineError {
         use crate::store::StoreError;
 
         let (code, help): (Code, Option<&str>) = match self {
+            EngineError::Config(crate::config::ConfigError::LocalOverrideKey { .. }) => (
+                Code::E014LocalOverrideKey,
+                Some(
+                    "move the key into cambium.toml; cambium.local.toml may only set \
+                     bazel.binary, bazel.startup_flags, baseline.cache_dir, \
+                     baseline.compress_indexes and baseline.publish_partial",
+                ),
+            ),
             EngineError::Config(_) => (
                 Code::E002Config,
                 Some("fix the file the message names, or point --config at another one"),

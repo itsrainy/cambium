@@ -23,6 +23,15 @@ pub mod revision;
 pub mod store;
 pub mod synthq;
 
+/// The Bazel workspace root containing `start`, if there is one.
+///
+/// Re-exported so a caller that only needs to know where the workspace is —
+/// `cambi config explain` outside one, for instance — does not have to depend
+/// on `cambium-bazel` for it.
+pub fn bazel_workspace_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    cambium_bazel::find_workspace_root(start)
+}
+
 pub use baseline::BaselineCache;
 pub use config::Config;
 pub use diag::{Code, Diagnostic, Diagnostics, Level, Location};

@@ -213,11 +213,23 @@ impl Engine {
     ) -> Result<Self> {
         let mut bazel = Bazel::discover(start, bazel_binary)?;
         let workspace = bazel.workspace().to_path_buf();
-        let cfg = match config_path {
-            Some(p) => Config::load_from(p)?,
-            None => Config::load(&workspace)?,
+        // The whole stack, so that `cambium.local.toml` reaches a real run and
+        // not only `cambi config explain`: the flag is folded in as the
+        // highest layer, which is why the binary is taken off the effective
+        // config below rather than from the parameter.
+        let over = crate::config::Overrides {
+            bazel_binary: bazel_binary.map(|b| {
+                (
+                    b.to_string(),
+                    crate::config::Origin::Flag {
+                        name: "--bazel-binary".into(),
+                    },
+                )
+            }),
+            cache_dir: None,
         };
-        if bazel_binary.is_none() && !cfg.bazel.binary.is_empty() {
+        let cfg = Config::load_layered(&workspace, config_path, &over)?.config;
+        if !cfg.bazel.binary.is_empty() {
             bazel = Bazel::at(workspace.clone(), Some(&cfg.bazel.binary));
         }
         let bazel = bazel
