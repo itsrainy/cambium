@@ -697,8 +697,8 @@ pub fn replay(
 
 /// As [`replay`], saying what `base` is.
 ///
-/// The three drift guards below say the same thing in three different ways --
-/// the index is at the pin and the change set is not -- so with
+/// The three drift guards say the same thing in three different ways -- the
+/// index is at the pin and the change set is not -- so with
 /// [`BaseKind::RunsOwn`] they are silent: that index *is* the graph the run
 /// spliced onto, and what the replay then answers is the engine's answer, not
 /// a lead.
@@ -721,13 +721,78 @@ pub fn replay_with(
         ..Default::default()
     };
     let drifts = !base_kind.exact_at_base();
+    out.indeterminate = undecidable_inputs(base, changes, head_rev, texts, drifts);
+
+    let mut ext = if cfg.externals.enabled {
+        externals::analyse(base, changes, base_rev, head_rev, texts)
+    } else {
+        externals::Externals::default()
+    };
+    if drifts {
+        out.indeterminate
+            .extend(undeclared_repositories(base_rev, texts, &ext.repos));
+    }
+
+    let dirty = match dirty_packages(base, cfg, changes, &mut ext) {
+        Ok(d) => d,
+        Err(reason) => {
+            out.global = true;
+            out.global_reason = Some(reason);
+            return out;
+        }
+    };
+    let mut by_package = dirty.by_package;
+
+    out.repos = attribute_repos(base, changes, &ext);
+    let mut external_nodes: Vec<u32> = Vec::new();
+    if !dirty.global && !ext.repos.is_empty() {
+        let r = externals::reach(base, &ext.repos, &ext.load_repos);
+        external_nodes = r.nodes;
+        let routes = package_routes(base, &ext.load_repos);
+        for p in r.packages {
+            let rule = routes
+                .get(p.as_str())
+                .copied()
+                .unwrap_or(PackageRule::ExternalBzlClosure);
+            by_package.entry(p).or_insert(rule);
+        }
+    }
+
+    out.global = dirty.global;
+    out.global_reason = dirty.reason;
+    out.external_direct_targets = external_nodes.len();
+    out.dirty_packages = by_package.len();
+    out.cold_rebuild = !out.global
+        && cfg.limits.max_dirty_packages > 0
+        && by_package.len() > cfg.limits.max_dirty_packages;
+    out.packages = by_package
+        .into_iter()
+        .map(|(package, rule)| PackageDirty { package, rule })
+        .collect();
+
+    if !out.global {
+        out.affected_lower_bound = lower_bound(base, changes, &external_nodes);
+    }
+    out
+}
+
+/// What the replay cannot decide from its inputs, each as the note the
+/// outcome carries. Empty means the verdict may be compared.
+fn undecidable_inputs(
+    base: IndexRef<'_>,
+    changes: &[Change],
+    head_rev: &str,
+    texts: &dyn WorkspaceText,
+    drifts: bool,
+) -> Vec<String> {
+    let mut notes = Vec::new();
 
     // A `MODULE.bazel` this replay cannot read is the one case where the
     // stage's own answer ("unparseable, so global") is an artefact of the
     // replay rather than a statement about the engine.
     let touches_module = changes.iter().any(|c| c.path == externals::MODULE_FILE);
     if touches_module && texts.text_at(head_rev, externals::MODULE_FILE).is_none() {
-        out.indeterminate.push(format!(
+        notes.push(format!(
             "the change set edits {} and no git repository was given to read it at either \
              revision; pass --repo to decide this one",
             externals::MODULE_FILE
@@ -742,7 +807,7 @@ pub fn replay_with(
         .iter()
         .find(|c| cambium_engine::bazelrc::is_bazelrc_path(&c.path))
     {
-        out.indeterminate.push(format!(
+        notes.push(format!(
             "the change set edits {}, and whether a bazelrc edit goes global depends on which \
              flags it changed, which needs the file at both revisions",
             c.path
@@ -761,18 +826,12 @@ pub fn replay_with(
                 Some("BUILD") | Some("BUILD.bazel")
             )
     }) {
-        out.indeterminate.push(format!(
+        notes.push(format!(
             "the change set adds or removes {}, so the package set at the base differs from the \
              one in the stored index at the pin",
             c.path
         ));
     }
-
-    let mut ext = if cfg.externals.enabled {
-        externals::analyse(base, changes, base_rev, head_rev, texts)
-    } else {
-        externals::Externals::default()
-    };
 
     // The same drift, one level down. A `.bzl` the diff *modified* existed at
     // the base by definition; one the stored index's load graph has never
@@ -793,7 +852,7 @@ pub fn replay_with(
             .map(|c| c.path.as_str())
             .collect();
         if !unknown.is_empty() {
-            out.indeterminate.push(format!(
+            notes.push(format!(
                 "the change set modifies {}, and the stored index's load closure does not \
                  contain {} at all; whatever they loaded at the base is not in this graph",
                 unknown.join(", "),
@@ -801,38 +860,58 @@ pub fn replay_with(
             ));
         }
     }
+    notes
+}
 
-    if let Some(declared) = repos_declared_at(base_rev, texts).filter(|_| drifts) {
-        let undeclared: Vec<&str> = ext
-            .repos
-            .iter()
-            .filter(|r| !declared.contains(*r))
-            .map(String::as_str)
-            .collect();
-        if !undeclared.is_empty() {
-            out.indeterminate.push(format!(
-                "the stage dirtied {} that {} at the base does not declare ({}); those \
-                 repositories arrived between the base and the pin, so this answer is the \
-                 stored index's graph rather than the run's",
-                if undeclared.len() == 1 {
-                    "a repository".to_string()
-                } else {
-                    format!("{} repositories", undeclared.len())
-                },
-                externals::MODULE_FILE,
-                undeclared.join(", "),
-            ));
-        }
+/// The note for a repository the stage dirtied that the base's `MODULE.bazel`
+/// does not declare; see [`repos_declared_at`]. Nothing without `--repo`.
+fn undeclared_repositories(
+    base_rev: &str,
+    texts: &dyn WorkspaceText,
+    dirtied: &BTreeSet<String>,
+) -> Option<String> {
+    let declared = repos_declared_at(base_rev, texts)?;
+    let undeclared: Vec<&str> = dirtied
+        .iter()
+        .filter(|r| !declared.contains(*r))
+        .map(String::as_str)
+        .collect();
+    if undeclared.is_empty() {
+        return None;
     }
+    Some(format!(
+        "the stage dirtied {} that {} at the base does not declare ({}); those \
+         repositories arrived between the base and the pin, so this answer is the \
+         stored index's graph rather than the run's",
+        if undeclared.len() == 1 {
+            "a repository".to_string()
+        } else {
+            format!("{} repositories", undeclared.len())
+        },
+        externals::MODULE_FILE,
+        undeclared.join(", "),
+    ))
+}
 
-    let mut matchers = match cambium_classify::Matchers::compile(&cfg.rules()) {
-        Ok(m) => m,
-        Err(e) => {
-            out.global = true;
-            out.global_reason = Some(format!("invalidator rules do not compile: {e}"));
-            return out;
-        }
-    };
+/// What the dirty-set stage concluded, before the external reach is added.
+struct DirtySet {
+    by_package: BTreeMap<String, PackageRule>,
+    global: bool,
+    reason: Option<String>,
+}
+
+/// The dirty-set stage: the invalidators, the changed files' packages, and
+/// the changed `.bzl` files through the static closure — including the
+/// workspace-level ones, whose repositories join `ext`. `Err` is a
+/// configuration that does not compile, which is global with that reason.
+fn dirty_packages(
+    base: IndexRef<'_>,
+    cfg: &Config,
+    changes: &[Change],
+    ext: &mut externals::Externals,
+) -> Result<DirtySet, String> {
+    let mut matchers = cambium_classify::Matchers::compile(&cfg.rules())
+        .map_err(|e| format!("invalidator rules do not compile: {e}"))?;
     matchers.exempt(ext.handled.clone());
     let mut packages = cambium_classify::PackageSet::from_index(base);
     let dirty = cambium_classify::dirty_set(
@@ -901,38 +980,11 @@ pub fn replay_with(
         global = true;
         reason = Some(r.clone());
     }
-
-    out.repos = attribute_repos(base, changes, &ext);
-    let mut external_nodes: Vec<u32> = Vec::new();
-    if !global && !ext.repos.is_empty() {
-        let r = externals::reach(base, &ext.repos, &ext.load_repos);
-        external_nodes = r.nodes;
-        let routes = package_routes(base, &ext.load_repos);
-        for p in r.packages {
-            let rule = routes
-                .get(p.as_str())
-                .copied()
-                .unwrap_or(PackageRule::ExternalBzlClosure);
-            by_package.entry(p).or_insert(rule);
-        }
-    }
-
-    out.global = global;
-    out.global_reason = reason;
-    out.external_direct_targets = external_nodes.len();
-    out.dirty_packages = by_package.len();
-    out.cold_rebuild = !global
-        && cfg.limits.max_dirty_packages > 0
-        && by_package.len() > cfg.limits.max_dirty_packages;
-    out.packages = by_package
-        .into_iter()
-        .map(|(package, rule)| PackageDirty { package, rule })
-        .collect();
-
-    if !out.global {
-        out.affected_lower_bound = lower_bound(base, changes, &external_nodes);
-    }
-    out
+    Ok(DirtySet {
+        by_package,
+        global,
+        reason,
+    })
 }
 
 /// Which of the two rule (2) routes reaches each package.
