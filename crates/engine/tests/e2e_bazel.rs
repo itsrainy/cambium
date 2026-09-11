@@ -79,6 +79,11 @@ fn write_golden_workspace(root: &Path, store: &Path) {
         "module(name = \"golden\", version = \"0.0.1\")\n",
     );
     write(root, ".bazelversion", "7.4.1\n");
+    // The cold build at base runs Bazel, which writes `MODULE.bazel.lock`
+    // into the tree; the first scenario's `git add -A` would otherwise commit
+    // it, and an added lockfile is a global change, so that scenario would
+    // test the lockfile rule instead of its own edit.
+    write(root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n");
     write(root, "rules/BUILD.bazel", "");
     write(
         root,
@@ -1008,13 +1013,22 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             ["mod_a".to_string()].into_iter().collect::<BTreeSet<_>>(),
             "{version}: a local_path_override directory is an input map entry"
         );
+        // `@root//data` in the generated BUILD file is a rule-shaped label:
+        // the target `//data:data`, not the `data/` subtree. It is stored as
+        // a label pattern the graph answers, so no path under `data/` is in
+        // the path map at all — the edit below reaches `@gen` through
+        // `//data:data`'s own edge instead.
         assert_eq!(
-            v.repos_for_path_kinds("data/notes.txt")
+            v.repos_for_label_kinds("//data:data")
                 .into_iter()
                 .map(|(r, feeds)| (v.repo_name(r).to_string(), feeds))
                 .collect::<Vec<_>>(),
             vec![("gen".to_string(), false)],
-            "{version}: a path only the generated BUILD file names is target-only"
+            "{version}: a target only the generated BUILD file names is target-only"
+        );
+        assert!(
+            v.repos_for_path_kinds("data/notes.txt").is_empty(),
+            "{version}: a file of a target the generated BUILD file names is not a path input"
         );
 
         let check = |name: &str, rel: &str, contents: &str, pattern: Option<&str>| {
@@ -1093,9 +1107,15 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             "{version}: {n:?}"
         );
         assert!(!n.contains("//app:unrelated"), "{version}: {n:?}");
+        // Nothing in the diff named a repository; the walk did, when it
+        // reached `//data:data`.
         assert_eq!(
-            n_report.stats.repos_label_only, 1,
-            "{version}: a path only a generated target names spares rule (a)"
+            n_report.stats.repos_dirty_by_input, 0,
+            "{version}: a file of a target the generated BUILD file names is no path input"
+        );
+        assert_eq!(
+            n_report.stats.repos_dirty_by_target, 1,
+            "{version}: the walk reaching `//data:data` is what moves `@gen`"
         );
         assert!(
             !n_report.dirty_packages.contains(&"app".to_string()),
