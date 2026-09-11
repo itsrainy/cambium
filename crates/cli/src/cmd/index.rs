@@ -6,7 +6,7 @@
 //! spelling of these verbs.
 
 use anyhow::{Context as _, Result};
-use cambium_engine::{AffectedRequest, PublishPolicy, PublishSource};
+use cambium_engine::{AffectedRequest, OnGlobal, PublishPolicy, PublishSource};
 use clap::Subcommand;
 
 use crate::cmd::{hex, Context};
@@ -113,7 +113,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 .with_context(|| format!("--to {to} is not a revision in this repository"))?;
             let req = AffectedRequest {
                 base: from,
-                head: to_sha.clone(),
+                head: to_sha,
                 include_manual: false,
                 explain: false,
                 // `baseline update` publishes its output, so it needs one.
@@ -125,34 +125,20 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 allow_partial,
                 max_depth: None,
             };
-            let outcome = engine.affected(&req)?;
-            let index = match outcome.index {
-                Some(i) => i,
-                None => {
-                    if no_rebuild_on_global {
-                        anyhow::bail!(
-                            "the range invalidates everything ({}); drop --no-rebuild-on-global \
-                             to mint a fresh lineage instead",
-                            outcome
-                                .report
-                                .global_reason
-                                .unwrap_or_else(|| "global".into())
-                        );
-                    }
-                    eprintln!(
-                        "cambium: range invalidates everything ({}); rebuilding a fresh lineage",
-                        outcome
-                            .report
-                            .global_reason
-                            .clone()
-                            .unwrap_or_else(|| "global".into())
-                    );
-                    engine.full_build(&to_sha)?
-                }
+            let on_global = if no_rebuild_on_global {
+                OnGlobal::Fail
+            } else {
+                OnGlobal::Rebuild
             };
+            let updated = engine.update_index(&req, on_global)?;
+            if let Some(reason) = &updated.rebuilt_because {
+                eprintln!(
+                    "cambium: range invalidates everything ({reason}); rebuilt a fresh lineage"
+                );
+            }
             emit(
                 &engine,
-                &index,
+                &updated.index,
                 out.as_deref(),
                 publish.then_some(PublishPolicy { allow_partial }),
             )?;

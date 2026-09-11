@@ -178,7 +178,16 @@ pub fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     }
     let engine = ctx.engine()?;
     let f = IndexFile::open(&args.file)?;
-    let result = inspect::verify(&engine.bazel, f.view(), args.sample, args.seed)?;
+    let result = inspect::verify(
+        &engine.bazel,
+        f.view(),
+        args.sample,
+        args.seed,
+        &engine.diagnostics,
+    )?;
+    for d in engine.diagnostics.drain() {
+        ctx.render.warn(&d);
+    }
     if let Some(fmt) = ctx.format.data("cambi inspect verify")? {
         emit(&result, fmt, print_verify)?;
     }

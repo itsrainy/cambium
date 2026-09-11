@@ -143,6 +143,19 @@ pub enum BaseIndex {
     Owned(Box<IndexData>),
 }
 
+impl BaseIndex {
+    /// Whether the base index has a node for `label`. `None` when the mapped
+    /// file can no longer be read: the cache may have been pruned since.
+    pub fn has_label(&self, label: &str) -> Option<bool> {
+        match self {
+            BaseIndex::Owned(d) => Some(d.view().id_of(label).is_some()),
+            BaseIndex::Mapped(path) => IndexFile::open(path)
+                .ok()
+                .map(|f| f.view().id_of(label).is_some()),
+        }
+    }
+}
+
 impl std::fmt::Debug for BaseIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -187,6 +200,43 @@ pub struct RunOutcome {
     /// not in [`AffectedReport`]: that JSON is a contract, and this is a local
     /// fact about one machine's cache.
     pub base_index: Option<BaseIndex>,
+}
+
+/// Whether a label exists at either end of a run, for `cambi explain` to
+/// tell "not affected" from "no such target".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LabelPresence {
+    /// `None` when the run did not materialise a head index.
+    pub at_head: Option<bool>,
+    /// `None` when the run kept no base, or its file can no longer be read.
+    pub at_base: Option<bool>,
+}
+
+impl RunOutcome {
+    /// Looks `label` up in the two graphs this run had.
+    pub fn label_presence(&self, label: &str) -> LabelPresence {
+        LabelPresence {
+            at_head: self.index.as_ref().map(|i| i.view().id_of(label).is_some()),
+            at_base: self.base_index.as_ref().and_then(|b| b.has_label(label)),
+        }
+    }
+}
+
+/// What `index update` does when the range invalidates everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnGlobal {
+    /// Mint a fresh lineage with a cold build at the target revision.
+    Rebuild,
+    /// Fail with [`EngineError::RangeInvalidated`].
+    Fail,
+}
+
+/// The index `index update` produced.
+pub struct IndexUpdate {
+    pub index: IndexData,
+    /// Set when the range invalidated everything and the index is a cold
+    /// build rather than the base brought forward; the reason the run gave.
+    pub rebuilt_because: Option<String>,
 }
 
 pub struct Engine {
@@ -710,6 +760,44 @@ impl Engine {
         // including the ones that happened before the report existed.
         out.report.diagnostics = self.diagnostics.drain();
         Ok(out)
+    }
+
+    /// Brings an index forward from `req.base` to `req.head`: the run with
+    /// `materialize` on, and — when the range invalidates everything and
+    /// `on_global` allows — a cold build at head in its place.
+    ///
+    /// `cambi index update` is this; the choice between rebuilding and
+    /// failing is the caller's, the rebuild itself is not.
+    pub fn update_index(&self, req: &AffectedRequest, on_global: OnGlobal) -> Result<IndexUpdate> {
+        let req = AffectedRequest {
+            materialize: true,
+            ..req.clone()
+        };
+        let outcome = self.affected(&req)?;
+        if let Some(index) = outcome.index {
+            return Ok(IndexUpdate {
+                index,
+                rebuilt_because: None,
+            });
+        }
+        let reason = outcome
+            .report
+            .global_reason
+            .unwrap_or_else(|| "global".into());
+        match on_global {
+            OnGlobal::Fail => Err(EngineError::RangeInvalidated { reason }),
+            OnGlobal::Rebuild => {
+                tracing::info!(%reason, "the range invalidates everything; rebuilding a fresh lineage");
+                let head = self
+                    .repo
+                    .rev_parse(&req.head)
+                    .unwrap_or_else(|_| req.head.clone());
+                Ok(IndexUpdate {
+                    index: self.full_build(&head)?,
+                    rebuilt_because: Some(reason),
+                })
+            }
+        }
     }
 
     /// The incremental pipeline, given a base index already in hand. Asks git
