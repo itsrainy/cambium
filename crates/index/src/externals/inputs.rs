@@ -6,10 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::attribution::Attribution;
 use crate::label::{rule_label, Label};
-use crate::loads::{lex, unescape, FileText, LoadGraph, RepoMapping, Tok};
+use crate::loads::{FileText, LoadGraph, RepoMapping};
+use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 
 use super::module_facts::{apparent_of, ModuleFacts};
-use super::path_maps::scan_bzl_path_maps;
+use super::path_maps::scan_path_maps;
 use super::pattern::{PathMap, Pattern, RepoInputs};
 
 /// What a main-repo label an external repository names can be an input
@@ -267,15 +268,15 @@ pub fn build_repo_inputs(
     // of the symbols it exports does. The extra repositories a *label* in it
     // feeds are folded in here.
     let mut own: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (path, text) in &texts {
-        let path = path.clone();
+    for (path, module) in att.modules() {
+        let path = path.to_string();
         let mut file_repos = att.file_repos(&path).repos;
-        for (tok, l) in string_literals(text) {
+        for (offset, l) in string_literals(module) {
             let pats = main_repo_patterns(&l.text, m);
             if pats.is_empty() {
                 continue;
             }
-            let a = att.at(&path, tok);
+            let a = att.at(&path, offset);
             if a.repos.is_empty() {
                 continue;
             }
@@ -312,19 +313,21 @@ pub fn build_repo_inputs(
     // implementation of the rule the mapping is true of — and dropped when
     // that position is unattributable, rather than being handed to every
     // repository the main repository defines.
-    for (path, text) in &texts {
-        let maps = scan_bzl_path_maps(text, m);
+    for (path, module) in att.modules() {
+        let maps = scan_path_maps(module, m);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
                 let pat = Pattern::Prefix(pm.from.clone());
                 direct.insert(pat.clone());
                 out.patterns.entry(pat).or_default().insert(repo.clone());
-                own.entry(path.clone()).or_default().insert(repo.clone());
+                own.entry(path.to_string())
+                    .or_default()
+                    .insert(repo.clone());
                 out.path_maps.entry(repo).or_default().insert(pm);
             }
         }
-        for (tok, pm) in &maps.symlinks {
-            let a = att.at(path, *tok);
+        for (offset, pm) in &maps.symlinks {
+            let a = att.at(path, *offset);
             if !a.exact || a.repos.is_empty() {
                 continue;
             }
@@ -401,42 +404,64 @@ fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
 /// packages whose load closure reaches `@envoy_repo//:compiler.bzl` on every
 /// commit that adds a changelog entry.
 ///
-/// Comments and nesting are handled by the shared lexer, so a `//` in a
-/// comment is not a label. A `//` preceded by `:` or `/` is not either, which
-/// is what keeps `https://github.com/envoyproxy/envoy` out.
-/// Each literal comes back with the index of its token, which is what the
+/// Comments and nesting are the parser's business, so a `//` in a comment is
+/// not a label; a literal inside a statement the parser could not read is
+/// still found, off the tokens. A `//` preceded by `:` or `/` is not a label
+/// either, which is what keeps `https://github.com/envoyproxy/envoy` out.
+/// Each literal comes back with its byte offset, which is what the
 /// per-occurrence attribution is keyed on.
-fn string_literals(text: &str) -> Vec<(usize, Literal)> {
+fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
+    let mut raw: Vec<(usize, String)> = Vec::new();
+    // The label of a `load()` is an edge of the load graph, not a file
+    // the repository rule reads: the `.bzl` it names is in the workspace
+    // closure, and a change to it is answered by that file's own
+    // repositories. Read as an input it would make every `.bzl` a root
+    // workspace file loads an input of everything that file can define.
+    // `use_repo_rule("//tools:gen.bzl", "gen_repo")` and
+    // `use_extension("//bazel:ext.bzl", "ext")` in `MODULE.bazel` are the
+    // same edge: written at module level, where nothing attributes them
+    // more finely than the whole universe, so as inputs they would feed
+    // every repository the module declares.
+    let mut skip: BTreeSet<usize> = BTreeSet::new();
+    let mut skip_first = |args: &[crate::starlark::Arg<'_>]| {
+        if let Some(a) = args.first() {
+            if matches!(a.kind, ArgKind::Positional(_)) && a.value().as_str().is_some() {
+                skip.insert(a.value().span.start);
+            }
+        }
+    };
+    walk_stmts(&m.stmts, &mut |st| {
+        match st {
+            Stmt::Unparsed(span) => {
+                raw.extend(m.strings_in(span).into_iter().map(|(s, v)| (s.start, v)));
+            }
+            Stmt::Load(l) => skip_first(&l.args),
+            _ => {}
+        }
+        for e in stmt_exprs(st) {
+            e.walk(&mut |x| match &x.kind {
+                ExprKind::Str(s) => raw.push((x.span.start, s.clone())),
+                ExprKind::Unparsed => {
+                    raw.extend(m.strings_in(&x.span).into_iter().map(|(s, v)| (s.start, v)));
+                }
+                ExprKind::Call { callee, args }
+                    if matches!(callee.as_name(), Some("use_repo_rule" | "use_extension")) =>
+                {
+                    skip_first(args);
+                }
+                _ => {}
+            });
+        }
+    });
     let mut out = Vec::new();
-    let toks = lex(text);
-    for (i, t) in toks.iter().enumerate() {
-        let Tok::Str(s, e) = t.tok else {
-            continue;
-        };
-        // The label of a `load()` is an edge of the load graph, not a file
-        // the repository rule reads: the `.bzl` it names is in the workspace
-        // closure, and a change to it is answered by that file's own
-        // repositories. Read as an input it would make every `.bzl` a root
-        // workspace file loads an input of everything that file can define.
-        // `use_repo_rule("//tools:gen.bzl", "gen_repo")` and
-        // `use_extension("//bazel:ext.bzl", "ext")` in `MODULE.bazel` are the
-        // same edge: written at module level, where nothing attributes them
-        // more finely than the whole universe, so as inputs they would feed
-        // every repository the module declares.
-        if i >= 2
-            && matches!(toks[i - 1].tok, Tok::Open(b'('))
-            && matches!(
-                toks[i - 2].tok,
-                Tok::Name("load") | Tok::Name("use_repo_rule") | Tok::Name("use_extension")
-            )
-        {
+    for (offset, lit) in raw {
+        if skip.contains(&offset) {
             continue;
         }
-        let lit = unescape(&text[s..e]);
         for l in labels_in(&lit) {
             if l != lit {
                 out.push((
-                    i,
+                    offset,
                     Literal {
                         text: l,
                         embedded: true,
@@ -445,7 +470,7 @@ fn string_literals(text: &str) -> Vec<(usize, Literal)> {
             }
         }
         out.push((
-            i,
+            offset,
             Literal {
                 text: lit,
                 embedded: false,
@@ -507,12 +532,13 @@ fn labels_in(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::string_literals;
+    use crate::starlark::Module;
 
     #[test]
     fn a_label_inside_a_larger_literal_is_embedded() {
-        let lits = string_literals(
-            "A = \"@envoy//:VERSION.txt\"\nB = 'tools = [\"@envoy//changelogs\"]'\n",
-        );
+        let m =
+            Module::parse("A = \"@envoy//:VERSION.txt\"\nB = 'tools = [\"@envoy//changelogs\"]'\n");
+        let lits = string_literals(&m);
         let find = |text: &str| -> Vec<bool> {
             lits.iter()
                 .filter(|(_, l)| l.text == text)

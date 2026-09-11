@@ -7,13 +7,48 @@
 
 use std::collections::BTreeMap;
 
-use crate::loads::{lex, unescape, Lexed, Tok};
-use crate::starlark_old::{parse_args, render_all, render_limited, statements};
+use crate::starlark::{Arg, ArgKind, Expr, ExprKind, Module, Stmt};
 use crate::vocabulary::{is_local_repo_rule, HARMLESS};
 
 use super::module_facts::{Dep, ModuleFacts};
 use super::path_maps::local_dir;
 use super::pattern::SEP;
+
+/// A top-level statement in one of the shapes `MODULE.bazel` is made of:
+/// `f(...)`, `x = f(...)`, `x.tag(...)`, or a bare name.
+struct Shape<'s, 'a> {
+    /// `x` in `x = ...`.
+    target: Option<&'a str>,
+    /// `x` in `x.tag(...)`.
+    receiver: Option<&'a str>,
+    /// `f`, or `tag`.
+    name: &'a str,
+    /// The arguments, when the head is a call.
+    args: Option<&'s [Arg<'a>]>,
+}
+
+fn shape<'s, 'a>(stmt: &'s Stmt<'a>) -> Option<Shape<'s, 'a>> {
+    let (target, head) = match stmt {
+        Stmt::Expr(e) => (None, e),
+        Stmt::Assign(a) => (Some(a.target.as_name()?), &a.value),
+        _ => return None,
+    };
+    let (callee, args) = match &head.kind {
+        ExprKind::Call { callee, args } => (callee.as_ref(), Some(args.as_slice())),
+        _ => (head, None),
+    };
+    let (receiver, name) = match &callee.kind {
+        ExprKind::Name(n) => (None, *n),
+        ExprKind::Attr { object, name } => (Some(object.as_name()?), *name),
+        _ => return None,
+    };
+    Some(Shape {
+        target,
+        receiver,
+        name,
+        args,
+    })
+}
 
 /// Reads a `MODULE.bazel`'s structure.
 ///
@@ -22,68 +57,77 @@ use super::pattern::SEP;
 /// anything else in [`ModuleFacts::unparsed`] so the engine can escalate
 /// rather than silently under-approximate.
 pub fn scan_module(text: &str) -> ModuleFacts {
-    let toks = lex(text);
+    let m = Module::parse(text);
     let mut f = ModuleFacts::default();
     // Variable name -> the extension / repo-rule key it was bound to.
     let mut ext_vars: BTreeMap<String, String> = BTreeMap::new();
     let mut rule_vars: BTreeMap<String, String> = BTreeMap::new();
 
-    for st in statements(&toks) {
-        let t = st.toks();
-        // `x = f(...)`
-        let (target, head) = match (t.first().map(|x| x.tok), t.get(1).map(|x| x.tok)) {
-            (Some(Tok::Name(v)), Some(Tok::Punct(b'='))) => (Some(v), 2usize),
-            _ => (None, 0usize),
-        };
-        let Some(Tok::Name(name)) = t.get(head).map(|x| x.tok) else {
+    for st in &m.stmts {
+        let span = st.span();
+        // A `load()` is an edge the load graph already has.
+        if matches!(st, Stmt::Load(_)) {
+            continue;
+        }
+        let Some(sh) = shape(st) else {
+            // A bare string (a docstring) says nothing.
+            if matches!(
+                st,
+                Stmt::Expr(Expr {
+                    kind: ExprKind::Str(_),
+                    ..
+                })
+            ) {
+                continue;
+            }
             // A list comprehension of tag calls — `[maven.artifact(...) for a
             // in ARTIFACTS]`, which `bazel/bazel` writes twice. The loop body
             // cannot be evaluated statically, but it does not have to be: what
             // the diff needs is a rendering that moves when the statement's
-            // text moves, and the extension it belongs to.
-            if let Some(key) = comprehension_target(t, &ext_vars) {
-                let e = f.extensions.entry(key).or_default();
-                e.tags.push(render_limited(text, t, usize::MAX));
-                e.labels.extend(statement_strings(text, t));
-                continue;
+            // text moves, and the extension it belongs to. Control flow is
+            // not read this way: an `if` around a tag call is a statement
+            // this reader does not know.
+            if matches!(st, Stmt::Expr(_) | Stmt::Assign(_)) {
+                if let Some(key) = comprehension_target(st, &ext_vars) {
+                    let e = f.extensions.entry(key).or_default();
+                    e.tags.push(m.render_all(&span));
+                    e.labels
+                        .extend(m.strings_in(&span).into_iter().map(|(_, s)| s));
+                    continue;
+                }
             }
-            // A bare string (a docstring) or a comment-only line.
-            if t.iter()
-                .any(|x| matches!(x.tok, Tok::Name(_) | Tok::Open(_) | Tok::Close))
-            {
-                f.unparsed.push(render_all(text, t));
+            f.unparsed.push(m.render_all(&span));
+            continue;
+        };
+        let Some(args) = sh.args else {
+            if !HARMLESS.contains(&sh.name) {
+                f.unparsed.push(m.render_all(&span));
             }
             continue;
         };
-        // `x.tag(...)`
-        let (dotted, call_at) = match (
-            t.get(head + 1).map(|x| x.tok),
-            t.get(head + 2).map(|x| x.tok),
-        ) {
-            (Some(Tok::Punct(b'.')), Some(Tok::Name(m))) => (Some(m), head + 3),
-            _ => (None, head + 1),
-        };
-        if !matches!(t.get(call_at).map(|x| x.tok), Some(Tok::Open(b'('))) {
-            if !HARMLESS.contains(&name) {
-                f.unparsed.push(render_all(text, t));
-            }
-            continue;
-        }
-        let args = parse_args(text, t, call_at);
+        let args = m.args(args);
+        let name = sh.name;
 
-        if let Some(method) = dotted {
+        if let Some(var) = sh.receiver {
             // A tag call on an extension proxy.
-            let Some(key) = ext_vars.get(name) else {
-                f.unparsed.push(render_all(text, t));
+            let Some(key) = ext_vars.get(var) else {
+                f.unparsed.push(m.render_all(&span));
                 continue;
             };
             let e = f.extensions.entry(key.clone()).or_default();
-            e.tags.push(args.render(method));
+            e.tags.push(args.render(name));
             e.labels.extend(args.strings().cloned());
             continue;
         }
 
-        match (target, name) {
+        // `use_repo(proxy, ...)`: the first argument is an extension proxy,
+        // which is a name rather than a literal and so never reaches `Args`.
+        let proxy = sh.args.and_then(|a| a.first()).and_then(|a| match &a.kind {
+            ArgKind::Positional(e) => e.as_name(),
+            _ => None,
+        });
+
+        match (sh.target, name) {
             (Some(v), "use_extension") => {
                 let bzl = args.positional.first().cloned().unwrap_or_default();
                 let ext = args.positional.get(1).cloned().unwrap_or_default();
@@ -107,12 +151,8 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 // names and the *values* of the keyword aliases are repository
                 // names; the keyword is the apparent name the main repository
                 // sees, and both are worth recording.
-                let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
-                    f.unparsed.push(render_all(text, t));
-                    continue;
-                };
-                let Some(key) = ext_vars.get(var) else {
-                    f.unparsed.push(render_all(text, t));
+                let Some(key) = proxy.and_then(|v| ext_vars.get(v)) else {
+                    f.unparsed.push(m.render_all(&span));
                     continue;
                 };
                 let e = f.extensions.entry(key.clone()).or_default();
@@ -126,15 +166,8 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 e.repos.extend(args.positional.iter().cloned());
             }
             (None, "override_repo") | (None, "inject_repo") => {
-                // The same shape as `use_repo`: the first argument is an
-                // extension proxy, which is a name rather than a literal and
-                // so never reaches `Args`.
-                let Some(Tok::Name(var)) = t.get(call_at + 1).map(|x| x.tok) else {
-                    f.unparsed.push(render_all(text, t));
-                    continue;
-                };
-                let Some(key) = ext_vars.get(var) else {
-                    f.unparsed.push(render_all(text, t));
+                let Some(key) = proxy.and_then(|v| ext_vars.get(v)) else {
+                    f.unparsed.push(m.render_all(&span));
                     continue;
                 };
                 let e = f.extensions.entry(key.clone()).or_default();
@@ -164,21 +197,19 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 f.registrations.push(args.render(name));
             }
             (None, n) if n.ends_with("_override") => {
-                let m = args.first("module_name").unwrap_or_default().to_string();
-                f.overrides.insert(m.clone(), args.render(n));
+                let module = args.first("module_name").unwrap_or_default().to_string();
+                f.overrides.insert(module.clone(), args.render(n));
                 if n == "local_path_override" {
                     if let Some(d) = args.first("path").and_then(local_dir) {
-                        f.local_paths.insert(m, d);
+                        f.local_paths.insert(module, d);
                     }
                 }
             }
             (None, n) if HARMLESS.contains(&n) => {}
-            (Some(_), n) if rule_vars.contains_key(n) => {
+            (Some(v), n) if rule_vars.contains_key(n) => {
                 // Assigning a repo-rule proxy to another name; follow it.
                 let key = rule_vars[n].clone();
-                if let Some(v) = target {
-                    rule_vars.insert(v.to_string(), key);
-                }
+                rule_vars.insert(v.to_string(), key);
             }
             (None, n) if rule_vars.contains_key(n) => {
                 let key = rule_vars[n].clone();
@@ -200,7 +231,7 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                 }
                 r.labels.extend(args.strings().cloned());
             }
-            _ => f.unparsed.push(render_all(text, t)),
+            _ => f.unparsed.push(m.render_all(&span)),
         }
     }
     f
@@ -208,32 +239,26 @@ pub fn scan_module(text: &str) -> ModuleFacts {
 
 /// The extension a bracketed statement's tag calls belong to, when every
 /// `x.tag(` in it names the same known extension proxy.
-fn comprehension_target(t: &[Lexed<'_>], ext_vars: &BTreeMap<String, String>) -> Option<String> {
+fn comprehension_target(st: &Stmt<'_>, ext_vars: &BTreeMap<String, String>) -> Option<String> {
     let mut found: Option<String> = None;
-    for w in t.windows(4) {
-        let (Tok::Name(v), Tok::Punct(b'.'), Tok::Name(_), Tok::Open(b'(')) =
-            (w[0].tok, w[1].tok, w[2].tok, w[3].tok)
-        else {
-            continue;
-        };
-        // Other calls in the same statement — `coord.split(":")` in
-        // `bazel/bazel`'s nested comprehension — are not tag calls.
-        let Some(key) = ext_vars.get(v) else {
-            continue;
-        };
-        if found.get_or_insert_with(|| key.clone()) != key {
-            return None;
-        }
+    let mut agree = true;
+    for e in crate::starlark::stmt_exprs(st) {
+        e.walk(&mut |x| {
+            let ExprKind::Call { callee, .. } = &x.kind else {
+                return;
+            };
+            let ExprKind::Attr { object, .. } = &callee.kind else {
+                return;
+            };
+            // Other calls in the same statement — `coord.split(":")` in
+            // `bazel/bazel`'s nested comprehension — are not tag calls.
+            let Some(key) = object.as_name().and_then(|v| ext_vars.get(v)) else {
+                return;
+            };
+            if found.get_or_insert_with(|| key.clone()) != key {
+                agree = false;
+            }
+        });
     }
-    found
-}
-
-/// Every string literal in a statement.
-fn statement_strings(text: &str, t: &[Lexed<'_>]) -> Vec<String> {
-    t.iter()
-        .filter_map(|x| match x.tok {
-            Tok::Str(a, b) => Some(unescape(&text[a..b])),
-            _ => None,
-        })
-        .collect()
+    agree.then_some(found).flatten()
 }
