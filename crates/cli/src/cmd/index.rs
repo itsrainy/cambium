@@ -209,12 +209,14 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     if let Args::Verify(v) = args {
         return run_verify(ctx, v);
     }
+    // `--format query` has no meaning for a byte count or a path, and a silent
+    // fallback to text would be worse than saying so. Checked before the file
+    // is opened: a usage error is the caller's, whatever the file's state.
+    let fmt = ctx.format.data("cambi index")?;
     let common = args.common().clone();
     let f = IndexFile::open(&common.file)?;
     let q = IndexQuery::new(f.view());
-    // `--format query` has no meaning for a byte count or a path, and a silent
-    // fallback to text would be worse than saying so.
-    let Some(fmt) = ctx.format.data("cambi index")? else {
+    let Some(fmt) = fmt else {
         return run_quietly(&f, &q, args);
     };
 

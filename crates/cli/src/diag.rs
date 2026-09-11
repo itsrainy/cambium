@@ -123,13 +123,48 @@ pub fn of_error(e: &anyhow::Error) -> Diagnostic {
     if let Some(usage) = e.downcast_ref::<UsageError>() {
         return Diagnostic::error(Code::E013Usage, usage.0.clone());
     }
-    Diagnostic::error(Code::E001Internal, format!("{e:#}"))
+    Diagnostic::error(Code::E001Internal, chain(e))
+}
+
+/// The error and its causes, joined the way `{e:#}` would — except that a
+/// cause whose text the error above it already carries is not repeated.
+/// `io error on {path}: {source}` names its source in its own message, and
+/// `{e:#}` would print the same "No such file or directory" twice.
+fn chain(e: &anyhow::Error) -> String {
+    let mut out = String::new();
+    let mut prev: Option<String> = None;
+    for cause in e.chain() {
+        let text = cause.to_string();
+        if prev.as_deref().is_some_and(|p| p.contains(&text)) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(": ");
+        }
+        out.push_str(&text);
+        prev = Some(text);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cambium_engine::Diagnostic;
+
+    #[test]
+    fn a_cause_the_message_already_names_is_not_repeated() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let e = anyhow::Error::from(cambium_engine::EngineError::IoAt {
+            path: "/x".into(),
+            source: io,
+        });
+        // `EngineError` has its own code; force the generic path.
+        let e = anyhow::anyhow!("{e}").context("opening the index");
+        assert_eq!(chain(&e), "opening the index: io error on /x: gone");
+        let plain = anyhow::anyhow!("inner").context("outer");
+        assert_eq!(chain(&plain), "outer: inner");
+    }
 
     fn full() -> Diagnostic {
         Diagnostic::warning(
