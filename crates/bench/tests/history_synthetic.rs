@@ -11,6 +11,7 @@ use cambium_bench::history::{history, EngineDriver, HistoryOptions, HistoryResul
 use cambium_bench::state::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
+use cambium_testkit::synthetic_engine;
 
 struct SynthDriver {
     commits: Vec<String>,
@@ -62,12 +63,7 @@ fn fixture(revisions: u64, change_preset: &str) -> Fixture {
     cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
         path: dir.path().join("store"),
     };
-    let engine = Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(root.clone()),
-        cambium_bazel::Bazel::at(root.clone(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(dir.path().join("cache"));
+    let engine = synthetic_engine(&root, cfg).with_cache_dir(dir.path().join("cache"));
     Fixture {
         results: dir.path().join("results"),
         _dir: dir,
@@ -264,22 +260,22 @@ fn change_sets_are_deterministic_and_cover_the_range() {
         invalidator_paths: vec!["MODULE.bazel".into()],
         invalidator_globs: vec!["rules/**".into()],
     };
-    let adjacent = changes::adjacent(&f.engine.repo, &pin, o.history_window).unwrap();
+    let adjacent = changes::adjacent(f.engine.repo(), &pin, o.history_window).unwrap();
     assert_eq!(adjacent.len(), commits.len() - 1);
     assert_eq!(adjacent[0].base, commits[0]);
     assert_eq!(adjacent.last().unwrap().head, pin);
 
     // A linear history has no merges.
-    assert!(changes::pr_shaped(&f.engine.repo, &pin, o.history_window)
+    assert!(changes::pr_shaped(f.engine.repo(), &pin, o.history_window)
         .unwrap()
         .is_empty());
 
-    let stress = changes::stress(&f.engine.repo, &o).unwrap();
-    let again = changes::stress(&f.engine.repo, &o).unwrap();
+    let stress = changes::stress(f.engine.repo(), &o).unwrap();
+    let again = changes::stress(f.engine.repo(), &o).unwrap();
     assert_eq!(stress, again, "stress selection is deterministic");
     for p in &stress {
         assert!(p.category.is_some());
-        assert_eq!(f.engine.repo.parents(&p.head).unwrap()[0], p.base);
+        assert_eq!(f.engine.repo().parents(&p.head).unwrap()[0], p.base);
     }
     let per_category = |c: StressCategory| stress.iter().filter(|p| p.category == Some(c)).count();
     assert!(
@@ -289,7 +285,7 @@ fn change_sets_are_deterministic_and_cover_the_range() {
     assert!(per_category(StressCategory::Bzl) > 0, "{stress:?}");
 
     let set = changes::select(
-        &f.engine.repo,
+        f.engine.repo(),
         &[ChangeSetKind::Adjacent, ChangeSetKind::Stress],
         &o,
     )
@@ -311,19 +307,7 @@ fn change_sets_are_deterministic_and_cover_the_range() {
 #[test]
 fn pr_change_sets_come_from_merge_commits() {
     let f = fixture(3, "typical-pr");
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .current_dir(&f.root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
+    let git = |args: &[&str]| cambium_testkit::git(&f.root, args);
     let main_tip = git(&["rev-parse", "HEAD"]);
     let base = git(&["rev-parse", "HEAD~2"]);
     git(&["checkout", "-q", "-b", "pr", &base]);
@@ -334,7 +318,7 @@ fn pr_change_sets_come_from_merge_commits() {
     git(&["merge", "-q", "--no-ff", "-m", "merge pr", "pr"]);
     let merge = git(&["rev-parse", "HEAD"]);
 
-    let prs = changes::pr_shaped(&f.engine.repo, &merge, 10).unwrap();
+    let prs = changes::pr_shaped(f.engine.repo(), &merge, 10).unwrap();
     assert_eq!(prs.len(), 1);
     assert_eq!(prs[0].head, merge);
     assert_eq!(

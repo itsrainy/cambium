@@ -117,13 +117,19 @@ fn read_varint(b: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+/// Decodes one frame of a slab, given the range [`read_frames`] handed out
+/// for it.
+pub fn decode_frame(slab: &[u8], (start, end): (usize, usize)) -> Result<Target, ReadError> {
+    Ok(Target::decode(&slab[start..end])?)
+}
+
 /// Convenience wrapper that decodes every frame serially. Used by tests and by
 /// small queries where the rayon fan-out is not worth it.
 pub fn decode_all<R: Read>(r: R) -> Result<Vec<Target>, ReadError> {
     let mut out = Vec::new();
     read_frames(r, DEFAULT_BATCH, |slab, ranges| {
-        for &(s, e) in ranges {
-            out.push(Target::decode(&slab[s..e])?);
+        for &range in ranges {
+            out.push(decode_frame(slab, range)?);
         }
         Ok(())
     })?;

@@ -29,6 +29,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 cambium-bazel.workspace = true
+cambium-testkit.workspace = true
 # The launcher's tests build a subject manifest in memory rather than writing
 # one out to find it again.
 toml.workspace = true

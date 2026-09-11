@@ -28,8 +28,13 @@ pub mod loads;
 pub mod lockfile;
 pub mod overlay;
 pub mod space;
+mod starlark;
 pub mod strtab;
+#[cfg(test)]
+mod testutil;
+mod util;
 pub mod view;
+mod vocabulary;
 pub mod walk;
 pub mod workspace;
 
@@ -42,7 +47,8 @@ pub use data::{
 };
 pub use externals::{
     build_repo_inputs, bzlmod_live, diff_module, is_toolchain_module, read_live_module_facts,
-    read_module_facts, scan_module, ModuleChange, ModuleFacts, PathMap, Pattern, RepoInputs,
+    read_module_facts, read_module_facts_in, scan_module, Mode, ModuleChange, ModuleFacts, PathMap,
+    Pattern, RepoInputs,
 };
 pub use format::{
     commit_pointer_key, index_file_name, index_key, is_zstd, parse_commit_pointer_key,

@@ -244,9 +244,12 @@ ordinary unknown-subcommand error from clap.
 
 ## The benchmark tools
 
-The harness is its own binary, `cambium-bench` (`crates/bench-cli`), built
-from the `bench` and `synth` crates, and it drives
-`cambi` by shelling out to it: `cambi index build` for a cold index, `cambi
+The harness — the `subjects`, `history`, `changes` and `run` verbs, the
+offline `replay` and the `pull-results` that feeds it, `labels`, `watch`,
+`report`, the stage micro-benchmarks, the subject manifest and the `synth`
+generator — is its own binary, `cambium-bench` (`crates/bench-cli`), built
+from the `bench` and `synth` crates, and it drives `cambi` by shelling out to
+it: `cambi index build` for a cold index, `cambi
 index update` to bring one forward, `cambi index publish` to upload one, and
 `cambi affected --format json` for the answer, read back with the engine's own
 report types. That is the honest arrangement: the harness measures the binary
@@ -263,8 +266,10 @@ cambium-bench                 # no verb, on a terminal: the launcher
 cambium-bench subjects {list, fetch, build}
 cambium-bench history  <subject>     # the history workload
 cambium-bench changes  <subject>     # the change-set workload, across tools
+cambium-bench run                    # the whole plan from flags
 cambium-bench stages|sweep|regress   # engine stage micro-benchmarks
 cambium-bench replay   <subject>     # the static stages, offline
+cambium-bench pull-results           # copy a run's results off the box
 cambium-bench labels   <subject>     # the label sets a comparison kept
 cambium-bench watch                  # follow a run
 cambium-bench report                 # regenerate docs/RESULTS.md
@@ -294,8 +299,21 @@ run: the manifest's subjects and the synthetic presets to pick from, the tools,
 the workloads, and a size (smoke, laptop, published), with the exact command
 lines it will run shown before anything does. On confirm it spawns those
 command lines — ordinary `cambium-bench history ...` and `cambium-bench
-changes ...` invocations, the same ones `tools/bench/run-published.sh` runs —
-one after another as child processes, and switches to the watch screen with the
-running child's stderr tail in the footer; `q` asks before killing a child.
-It reimplements no workload, and the script remains the scripted way to do the
-same thing. In a pipe, no verb is a usage error.
+changes ...` invocations — one after another as child processes, and switches
+to the watch screen with the running child's stderr tail in the footer; `q`
+asks before killing a child. It reimplements no workload. `cambium-bench run`
+is the same plan from flags (`--subject`, `--steps`, `--smoke`,
+`--restart-changes`, `--restart-history`, `--require-sha`), which is what
+`tools/bench/run-published.sh` calls; the plan has one definition,
+`crates/bench/src/plan.rs`. In a pipe, no verb is the usage error it has
+always been.
+
+`cambium-bench pull-results` copies a subject's results off the benchmark
+box for an offline replay — the index at the pin, the recorded results, the
+archived base and head indexes, and the diff of every recorded change set —
+and `cambium-bench replay` reruns the engine's static stages over them with
+no Bazel and no checkout, milliseconds a change set, against the answers the
+run recorded. The diffs it reads are written on the box by `cambium-bench
+replay --write-paths` from the subject's git mirror, so a replay elsewhere
+has every change set without the repository. `tools/bench/precheck.sh` is
+that sequence, and `docs/OPERATIONS.md` says when to run it.

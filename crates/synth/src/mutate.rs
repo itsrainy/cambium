@@ -495,59 +495,8 @@ fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
             let pkg = g.targets[*target as usize].package;
             changes.push(Change::new(Status::Modified, g.build_path(pkg)));
         }
-        Mutation::AddTarget { package, deps } => {
-            let id = g.targets.len() as u32;
-            let layer = g.packages[*package as usize]
-                .targets
-                .iter()
-                .filter(|&&t| g.targets[t as usize].alive)
-                .map(|&t| g.targets[t as usize].layer)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let deps: Vec<u32> = deps
-                .iter()
-                .copied()
-                .filter(|&d| g.targets[d as usize].alive && g.targets[d as usize].layer < layer)
-                .collect();
-            g.targets.push(SynthTarget {
-                package: *package,
-                kind: Kind::Lib,
-                layer,
-                deps,
-                select_deps: 0,
-                ext_deps: 0,
-                srcs: vec![0],
-                src_versions: vec![0],
-                foreign_srcs: Vec::new(),
-                attr_salt: 0,
-                tags: 0,
-                alive: true,
-            });
-            g.packages[*package as usize].targets.push(id);
-            changes.push(Change::new(Status::Added, g.src_path(id, 0)));
-            changes.push(Change::new(Status::Modified, g.build_path(*package)));
-        }
-        Mutation::DeleteTarget { target } => {
-            let pkg = g.targets[*target as usize].package;
-            let srcs = g.targets[*target as usize].srcs.clone();
-            g.targets[*target as usize].alive = false;
-            // Dependents keep a dangling dep until they are rebuilt; the
-            // package_update filters dead deps, which is what a real BUILD edit
-            // would have done.
-            for &s in &srcs {
-                changes.push(Change::new(Status::Deleted, g.src_path(*target, s)));
-            }
-            changes.push(Change::new(Status::Modified, g.build_path(pkg)));
-            // Every package holding a dependent had to drop the reference.
-            for p in dependent_packages(g, &[*target]) {
-                changes.push(Change::new(Status::Modified, g.build_path(p)));
-            }
-            // Its files are gone too, so nothing may still export or consume
-            // them: a consumer's `srcs` naming a deleted file is a BUILD error,
-            // and the reference oracle would read a dead target's versions.
-            unexport(g, *target, None, changes);
-        }
+        Mutation::AddTarget { package, deps } => add_target(g, *package, deps, changes),
+        Mutation::DeleteTarget { target } => delete_target(g, *target, changes),
         Mutation::EditBzl { bzl } => {
             g.bzl[*bzl as usize].version += 1;
             changes.push(Change::new(
@@ -555,66 +504,131 @@ fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
                 g.bzl[*bzl as usize].path.clone(),
             ));
         }
-        Mutation::SplitPackage { package, targets } => {
-            let parent_path = g.packages[*package as usize].path.clone();
-            let mut i = 0;
-            let new_path = loop {
-                let p = format!("{parent_path}/sub{i}");
-                if !g.pkg_by_path.contains_key(&p) {
-                    break p;
-                }
-                i += 1;
-            };
-            let new_id = g.packages.len() as u32;
-            let bzl = g.packages[*package as usize].bzl.clone();
-            g.packages.push(SynthPackage {
-                path: new_path.clone(),
-                targets: Vec::new(),
-                bzl: bzl.clone(),
-                exported: Vec::new(),
-                alive: true,
-            });
-            for &b in &bzl {
-                g.bzl[b as usize].loaded_by.push(new_id);
-            }
-            g.pkg_by_path.insert(new_path.clone(), new_id);
-
-            let moved: Vec<u32> = targets
-                .iter()
-                .copied()
-                .filter(|&t| {
-                    g.targets[t as usize].alive && g.targets[t as usize].package == *package
-                })
-                .collect();
-            move_targets(g, &moved, new_id, changes);
-            changes.push(Change::new(Status::Added, g.build_path(new_id)));
-            changes.push(Change::new(Status::Modified, g.build_path(*package)));
-        }
-        Mutation::MergePackage { package } => {
-            let path = g.packages[*package as usize].path.clone();
-            let Some(parent) = cambium_index::label::parent_package(&path) else {
-                return;
-            };
-            let Some(&parent_id) = g.pkg_by_path.get(parent) else {
-                return;
-            };
-            let moved: Vec<u32> = g.packages[*package as usize]
-                .targets
-                .iter()
-                .copied()
-                .filter(|&t| g.targets[t as usize].alive)
-                .collect();
-            changes.push(Change::new(Status::Deleted, g.build_path(*package)));
-            move_targets(g, &moved, parent_id, changes);
-            g.packages[*package as usize].alive = false;
-            g.packages[*package as usize].targets.clear();
-            g.pkg_by_path.remove(&path);
-            changes.push(Change::new(Status::Modified, g.build_path(parent_id)));
-        }
+        Mutation::SplitPackage { package, targets } => split_package(g, *package, targets, changes),
+        Mutation::MergePackage { package } => merge_package(g, *package, changes),
         Mutation::Global => {
             changes.push(Change::new(Status::Modified, "MODULE.bazel".to_string()));
         }
     }
+}
+
+/// A new `Lib` with one source, one layer above everything alive in its
+/// package, keeping only the deps that keep the DAG.
+fn add_target(g: &mut SynthGraph, package: u32, deps: &[u32], changes: &mut Vec<Change>) {
+    let id = g.targets.len() as u32;
+    let layer = g.packages[package as usize]
+        .targets
+        .iter()
+        .filter(|&&t| g.targets[t as usize].alive)
+        .map(|&t| g.targets[t as usize].layer)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let deps: Vec<u32> = deps
+        .iter()
+        .copied()
+        .filter(|&d| g.targets[d as usize].alive && g.targets[d as usize].layer < layer)
+        .collect();
+    g.targets.push(SynthTarget {
+        package,
+        kind: Kind::Lib,
+        layer,
+        deps,
+        select_deps: 0,
+        ext_deps: 0,
+        srcs: vec![0],
+        src_versions: vec![0],
+        foreign_srcs: Vec::new(),
+        attr_salt: 0,
+        tags: 0,
+        alive: true,
+    });
+    g.packages[package as usize].targets.push(id);
+    changes.push(Change::new(Status::Added, g.src_path(id, 0)));
+    changes.push(Change::new(Status::Modified, g.build_path(package)));
+}
+
+/// Kills a target: its sources go, its BUILD file and every dependent's
+/// BUILD file change, and nothing may still export or consume its files.
+fn delete_target(g: &mut SynthGraph, target: u32, changes: &mut Vec<Change>) {
+    let pkg = g.targets[target as usize].package;
+    let srcs = g.targets[target as usize].srcs.clone();
+    g.targets[target as usize].alive = false;
+    // Dependents keep a dangling dep until they are rebuilt; the
+    // package_update filters dead deps, which is what a real BUILD edit
+    // would have done.
+    for &s in &srcs {
+        changes.push(Change::new(Status::Deleted, g.src_path(target, s)));
+    }
+    changes.push(Change::new(Status::Modified, g.build_path(pkg)));
+    // Every package holding a dependent had to drop the reference.
+    for p in dependent_packages(g, &[target]) {
+        changes.push(Change::new(Status::Modified, g.build_path(p)));
+    }
+    // Its files are gone too: a consumer's `srcs` naming a deleted file is a
+    // BUILD error, and the reference oracle would read a dead target's
+    // versions.
+    unexport(g, target, None, changes);
+}
+
+/// Moves `targets` out of `package` into a fresh `sub<n>` package under it,
+/// which loads what its parent loads.
+fn split_package(g: &mut SynthGraph, package: u32, targets: &[u32], changes: &mut Vec<Change>) {
+    let parent_path = g.packages[package as usize].path.clone();
+    let mut i = 0;
+    let new_path = loop {
+        let p = format!("{parent_path}/sub{i}");
+        if !g.pkg_by_path.contains_key(&p) {
+            break p;
+        }
+        i += 1;
+    };
+    let new_id = g.packages.len() as u32;
+    let bzl = g.packages[package as usize].bzl.clone();
+    g.packages.push(SynthPackage {
+        path: new_path.clone(),
+        targets: Vec::new(),
+        bzl: bzl.clone(),
+        exported: Vec::new(),
+        alive: true,
+    });
+    for &b in &bzl {
+        g.bzl[b as usize].loaded_by.push(new_id);
+    }
+    g.pkg_by_path.insert(new_path.clone(), new_id);
+
+    let moved: Vec<u32> = targets
+        .iter()
+        .copied()
+        .filter(|&t| g.targets[t as usize].alive && g.targets[t as usize].package == package)
+        .collect();
+    move_targets(g, &moved, new_id, changes);
+    changes.push(Change::new(Status::Added, g.build_path(new_id)));
+    changes.push(Change::new(Status::Modified, g.build_path(package)));
+}
+
+/// Folds `package` into its parent package: its BUILD file is deleted and
+/// its live targets move up. A package with no live parent stays as it is.
+fn merge_package(g: &mut SynthGraph, package: u32, changes: &mut Vec<Change>) {
+    let path = g.packages[package as usize].path.clone();
+    let Some(parent) = cambium_index::label::parent_package(&path) else {
+        return;
+    };
+    let Some(&parent_id) = g.pkg_by_path.get(parent) else {
+        return;
+    };
+    let moved: Vec<u32> = g.packages[package as usize]
+        .targets
+        .iter()
+        .copied()
+        .filter(|&t| g.targets[t as usize].alive)
+        .collect();
+    changes.push(Change::new(Status::Deleted, g.build_path(package)));
+    move_targets(g, &moved, parent_id, changes);
+    g.packages[package as usize].alive = false;
+    g.packages[package as usize].targets.clear();
+    g.pkg_by_path.remove(&path);
+    changes.push(Change::new(Status::Modified, g.build_path(parent_id)));
 }
 
 /// Moves targets (and their source files) into another package.

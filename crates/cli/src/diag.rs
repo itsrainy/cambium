@@ -47,6 +47,28 @@ impl Renderer {
         eprintln!("{}", self.format_one(d));
     }
 
+    /// A run's diagnostics, for a verb whose document carries them.
+    ///
+    /// Under `--format json` they are already in the document and nothing is
+    /// printed; every other form puts them on stderr, where they cannot be
+    /// mistaken for the answer — except `jsonl`, which streams them to stdout
+    /// as `diagnostic` events ahead of the `result`, so a watcher sees them as
+    /// the run raised them rather than only at the end.
+    pub fn report(&self, diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
+        match self.format {
+            Format::Json => {}
+            Format::Jsonl => {
+                if !self.quiet {
+                    for d in diagnostics {
+                        println!("{}", diagnostic_event(d)?);
+                    }
+                }
+            }
+            _ => diagnostics.iter().for_each(|d| self.warn(d)),
+        }
+        Ok(())
+    }
+
     fn format_one(&self, d: &Diagnostic) -> String {
         match self.format {
             Format::Json | Format::Jsonl => serde_json::to_string(d)
@@ -54,6 +76,17 @@ impl Renderer {
             _ => render_human(d, self.color),
         }
     }
+}
+
+/// One streamed `jsonl` diagnostic line: the diagnostic's own fields behind
+/// `"event": "diagnostic"`.
+fn diagnostic_event(d: &Diagnostic) -> anyhow::Result<String> {
+    let mut doc = serde_json::json!({"event": "diagnostic"});
+    let map = doc.as_object_mut().expect("an object");
+    if let serde_json::Value::Object(fields) = serde_json::to_value(d)? {
+        map.extend(fields);
+    }
+    Ok(serde_json::to_string(&doc)?)
 }
 
 /// ANSI, when colour is on: bold yellow for a `warning[CODE]` header, bold red

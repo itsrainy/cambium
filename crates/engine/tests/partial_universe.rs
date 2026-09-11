@@ -15,6 +15,7 @@ use cambium_engine::query::Rows;
 use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier, SynthQuerier};
 use cambium_index::IndexBuilder;
 use cambium_synth::{generate, GraphSpec};
+use cambium_testkit::engine;
 
 /// A querier whose universe query "exited 3": the same rows, plus the load
 /// errors Bazel printed for the packages it could not load.
@@ -30,16 +31,6 @@ impl PackageQuerier for PartialUniverse<'_> {
             partial: Some(self.1.clone()),
         })
     }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
 }
 
 fn load_errors() -> LoadErrors {
@@ -210,7 +201,7 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
     .with_cache_dir(dir.path().join("cache"));
 
     let mut index = incremental_head(&e, true);
-    index.header.config_hash = e.cfg.hash();
+    index.header.config_hash = e.config().hash();
     let path = dir.path().join("head.bin");
     cambium_index::format::write_index(&path, &index).unwrap();
 
@@ -230,8 +221,12 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
 
     // The escape hatch: a repository that genuinely cannot load everything —
     // apollo under Bazel 9 — has to be able to say so once and get on with it.
-    let mut e = e;
-    e.cfg.baseline.publish_partial = true;
+    let publish_partial = |e: Engine, allow: bool| {
+        let mut cfg = e.config().clone();
+        cfg.baseline.publish_partial = allow;
+        e.with_config(cfg)
+    };
+    let e = publish_partial(e, true);
     let keys = e
         .publish_index(&path, &index.header.lineage, "head")
         .expect("publish_partial makes it explicit and allowed");
@@ -239,8 +234,8 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
 
     // And a complete index was never in question.
     let mut good = incremental_head(&e, false);
-    good.header.config_hash = e.cfg.hash();
-    e.cfg.baseline.publish_partial = false;
+    good.header.config_hash = e.config().hash();
+    let e = publish_partial(e, false);
     let path = dir.path().join("good.bin");
     cambium_index::format::write_index(&path, &good).unwrap();
     e.publish_index(&path, &good.header.lineage, "head2")
@@ -375,7 +370,7 @@ fn a_splice_over_a_declared_deleted_package_publishes() {
         !index.view().partial,
         "a package Bazel says is deleted leaves nothing missing"
     );
-    index.header.config_hash = e.cfg.hash();
+    index.header.config_hash = e.config().hash();
     let path = dir.path().join("head.bin");
     cambium_index::format::write_index(&path, &index).unwrap();
     e.publish_index(&path, &index.header.lineage, "head")

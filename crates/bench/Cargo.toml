@@ -29,6 +29,7 @@ zstd.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 cambium-bench = { path = "." }
+cambium-testkit.workspace = true
 
 [[bench]]
 name = "stages"

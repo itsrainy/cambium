@@ -4,26 +4,15 @@
 //!
 //! The rows come from the synthetic source, so none of this needs Bazel.
 
-use cambium_engine::{AffectedRequest, Code, Config, DirectReason, Engine, SynthQuerier};
+use cambium_engine::{AffectedRequest, Code, DirectReason, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, Mutation};
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
+use cambium_testkit::{engine, req};
 
 fn request() -> AffectedRequest {
     AffectedRequest {
         explain: true,
-        include_manual: true,
         materialize: true,
-        no_full_build: true,
-        ..AffectedRequest::new("base", "head")
+        ..req()
     }
 }
 
@@ -135,7 +124,7 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
         report.global_reason.is_some(),
         "the reason is in the report"
     );
-    let diagnostics = e.diagnostics.drain();
+    let diagnostics = e.diagnostics().drain();
     let cause = diagnostics
         .iter()
         .find(|d| {

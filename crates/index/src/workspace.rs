@@ -61,8 +61,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::externals::{parse_args, render_all, render_stmt, statements};
-use crate::loads::{lex, Lexed, Tok};
+use crate::label::{Label, Repo};
+use crate::starlark::{Arg, Expr, ExprKind, Module, Stmt};
+use crate::util::diff_maps;
+use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
 
 /// What a `WORKSPACE` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,34 +78,6 @@ pub enum WorkspaceChange {
         repos: BTreeSet<String>,
         bzl_paths: BTreeSet<String>,
     },
-}
-
-/// Statements that declare a repository under a name but whose effect is not
-/// confined to it.
-///
-/// `bind` rewrites `//external:` labels, which is a whole-workspace aliasing
-/// table. `workspace()` renames the main repository itself.
-const NOT_JUST_A_REPOSITORY: &[&str] = &["bind", "workspace"];
-
-/// Whether a callee registers toolchains.
-///
-/// Toolchain resolution has no edge in the query graph — the same reason
-/// `register_toolchains` in a `MODULE.bazel` is global. In WORKSPACE the
-/// registration is usually wrapped in a rules-provided macro, and the naming
-/// convention is universal enough to match on: `go_register_toolchains`,
-/// `oci_register_toolchains`, `python_register_toolchains`. A macro that
-/// registers toolchains under some *other* name is the documented gap.
-fn registers_toolchains(callee: &str) -> bool {
-    callee == "register_toolchains"
-        || callee == "register_execution_platforms"
-        || callee.ends_with("_register_toolchains")
-        || callee.ends_with("_register_execution_platforms")
-}
-
-/// Repository rules whose `path` attribute maps a main-repo directory into the
-/// repository: if it moves, so does every file the repository is made of.
-fn is_local_repo_rule(callee: &str) -> bool {
-    matches!(callee, "local_repository" | "new_local_repository")
 }
 
 /// How a statement is matched against the other side.
@@ -121,6 +95,11 @@ enum Key {
 }
 
 /// One classified statement.
+///
+/// Every field is derived from the statement's token slice, so two `Parsed`
+/// under the same [`Key`] are equal exactly when their `text` is: that is
+/// what "did it change" means here, and what the diff compares.
+#[derive(PartialEq, Eq)]
 struct Parsed {
     key: Key,
     /// The callee, for a call.
@@ -137,24 +116,24 @@ struct Parsed {
 /// Reads one side into classified statements, plus its `load()` map from
 /// symbol to the label it came from.
 fn scan(text: &str) -> (Vec<Parsed>, BTreeMap<String, String>) {
-    let toks = lex(text);
+    let m = Module::parse(text);
     let mut out: Vec<Parsed> = Vec::new();
     let mut loaded: BTreeMap<String, String> = BTreeMap::new();
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
     let mut opaque = 0usize;
-    for st in statements(&toks) {
-        let t = st.toks();
+    for st in &m.stmts {
+        let span = st.span();
         let mut p = Parsed {
             key: Key::Opaque(opaque),
             callee: String::new(),
             path: None,
-            text: render_all(text, t),
-            short: render_stmt(text, t),
+            text: m.render_all(&span),
+            short: m.render_short(&span),
         };
-        match call_shape(t) {
+        match call_shape(st) {
             None => opaque += 1,
-            Some(callee) => {
-                let args = parse_args(text, t, 1);
+            Some((callee, args)) => {
+                let args = m.args(args);
                 p.callee = callee.to_string();
                 p.path = args.first("path").map(String::from);
                 if callee == "load" {
@@ -186,31 +165,30 @@ fn scan(text: &str) -> (Vec<Parsed>, BTreeMap<String, String>) {
     (out, loaded)
 }
 
-/// The callee of a statement that is exactly one top-level call, `f(...)`.
+/// The callee and arguments of a statement that is exactly one top-level
+/// call, `f(...)`, or a `load(...)`.
 ///
 /// An assignment, a dotted call, a comprehension, a `for` or an `if` all fail
-/// this and are opaque — as does anything trailing the call's closing bracket.
-fn call_shape<'a>(t: &[Lexed<'a>]) -> Option<&'a str> {
-    let Some(Tok::Name(n)) = t.first().map(|x| x.tok) else {
-        return None;
-    };
-    if !matches!(t.get(1).map(|x| x.tok), Some(Tok::Open(b'('))) {
-        return None;
+/// this and are opaque.
+fn call_shape<'s, 'a>(st: &'s Stmt<'a>) -> Option<(&'a str, &'s [Arg<'a>])> {
+    match st {
+        Stmt::Load(l) => Some(("load", &l.args)),
+        Stmt::Expr(Expr {
+            kind: ExprKind::Call { callee, args },
+            ..
+        }) => callee.as_name().map(|n| (n, args.as_slice())),
+        _ => None,
     }
-    if !matches!(t.last().map(|x| x.tok), Some(Tok::Close)) {
-        return None;
-    }
-    Some(n)
 }
 
 /// Diffs two `WORKSPACE` texts.
 pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
     let (bs, bl) = scan(base);
     let (hs, hl) = scan(head);
-    let index = |v: &[Parsed]| -> Result<BTreeMap<Key, usize>, String> {
+    fn index(v: &[Parsed]) -> Result<BTreeMap<Key, &Parsed>, String> {
         let mut m = BTreeMap::new();
-        for (i, p) in v.iter().enumerate() {
-            if m.insert(p.key.clone(), i).is_some() {
+        for p in v {
+            if m.insert(p.key.clone(), p).is_some() {
                 return Err(format!(
                     "`{}` appears twice at the top level, so cambium cannot match the two \
                      revisions of it up",
@@ -219,7 +197,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
             }
         }
         Ok(m)
-    };
+    }
     let (bi, hi) = match (index(&bs), index(&hs)) {
         (Ok(b), Ok(h)) => (b, h),
         (Err(e), _) | (_, Err(e)) => return WorkspaceChange::Global(e),
@@ -228,7 +206,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
     // The statements both sides have must appear in the same relative order:
     // in an imperative file, moving a declaration past another can change what
     // the second one sees.
-    let order = |v: &[Parsed], other: &BTreeMap<Key, usize>| -> Vec<Key> {
+    let order = |v: &[Parsed], other: &BTreeMap<Key, &Parsed>| -> Vec<Key> {
         v.iter()
             .filter(|p| other.contains_key(&p.key))
             .map(|p| p.key.clone())
@@ -244,15 +222,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
 
     let mut repos = BTreeSet::new();
     let mut bzl_paths = BTreeSet::new();
-    let keys: BTreeSet<&Key> = bi.keys().chain(hi.keys()).collect();
-    for k in keys {
-        let b = bi.get(k).map(|&i| &bs[i]);
-        let h = hi.get(k).map(|&i| &hs[i]);
-        if let (Some(b), Some(h)) = (b, h) {
-            if b.text == h.text {
-                continue;
-            }
-        }
+    for (k, b, h) in diff_maps(&bi, &hi) {
         let one = h.or(b).expect("a key comes from one of the two sides");
         if registers_toolchains(&one.callee) {
             return WorkspaceChange::Global(format!(
@@ -341,27 +311,25 @@ fn loaded_main_bzl(
 ) -> Option<String> {
     head.get(callee)
         .or_else(|| base.get(callee))
-        .and_then(|l| main_bzl_path(l))
+        .and_then(|l| literal_main_bzl_path(l))
 }
 
-/// `//dev:deps.bzl` -> `dev/deps.bzl`, for a label in the main repository.
+/// `//dev:deps.bzl` -> `dev/deps.bzl`, for a label that spells the main
+/// repository out as `//` or `@//`.
 ///
-/// A label into another repository is not this repository's `.bzl` and has no
-/// path here; `@//` is the main repository written out.
-fn main_bzl_path(label: &str) -> Option<String> {
-    let rest = match label.strip_prefix("@//") {
-        Some(r) => r,
-        None => label.strip_prefix("//")?,
-    };
-    let (pkg, name) = rest.split_once(':')?;
-    if !name.ends_with(".bzl") {
+/// This is deliberately narrower than the mapped reading the index build uses
+/// (`externals::inputs::main_bzl_path`): a `WORKSPACE` diff is two texts with
+/// no repository mapping in hand, so `@sg//dev:deps.bzl` — the main
+/// repository under its `workspace(name = "sg")` alias — is not recognised
+/// here, and a changed call to a macro loaded that way stays global. That is
+/// the sound side; following the alias would need the mapping to be right.
+fn literal_main_bzl_path(label: &str) -> Option<String> {
+    let l = Label::parse(label)?;
+    if l.is_relative() || !matches!(l.repo(), Repo::Main | Repo::Apparent("")) {
         return None;
     }
-    Some(if pkg.is_empty() {
-        name.to_string()
-    } else {
-        format!("{pkg}/{name}")
-    })
+    let name = l.explicit_name()?;
+    name.ends_with(".bzl").then(|| l.path())
 }
 
 #[cfg(test)]

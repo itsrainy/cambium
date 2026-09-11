@@ -6,21 +6,17 @@
 //! It runs no Bazel and needs no checkout, so it is the check to run *before*
 //! the benchmark machine is started, not after.
 //!
-//! See [`cambium_bench::replay`] for what a replay can and cannot know; the
-//! rendering here repeats the important half in the output, because a number
-//! whose limits are only in a doc comment will be quoted without them.
+//! The orchestration is [`cambium_bench::precheck`]; this file is the flags
+//! and the rendering. See [`cambium_bench::replay`] for what a replay can and
+//! cannot know; the rendering repeats the important half in the output,
+//! because a number whose limits are only in a doc comment will be quoted
+//! without them.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
-use cambium_bench::checkout::SubjectsDir;
-use cambium_bench::compare::ChangesResult;
-use cambium_bench::history::HistoryResult;
-use cambium_bench::manifest::Manifest;
-use cambium_bench::replay::{
-    self, PackageRule, PathsCache, RecordedAnswer, ReplayOutcome, ReplayRun,
-};
-use cambium_index::IndexFile;
+use anyhow::Result;
+use cambium_bench::precheck::{self, ReplayReport, ReplayRequest};
+use cambium_bench::replay::{self, PackageRule, RecordedAnswer, ReplayOutcome, ReplayRun};
 use clap::Args as ClapArgs;
 
 use crate::Context;
@@ -57,23 +53,13 @@ pub struct Args {
     /// <results-dir>/<subject>/index-<pin>.bin.
     #[arg(long)]
     pub index: Option<PathBuf>,
-    /// Where the recorded results are.
-    #[arg(long, default_value = "bench-results")]
-    pub results_dir: PathBuf,
-    /// Path to subject_repos.toml (default: discovered upward from the cwd).
-    #[arg(long)]
-    pub manifest: Option<PathBuf>,
-    /// Mirrors and caches, for the generated per-subject configuration
-    /// (default: $CAMBIUM_SUBJECTS_DIR, else ~/.cache/cambium/subjects).
-    #[arg(long)]
-    pub subjects_dir: Option<PathBuf>,
-    /// Bazel version suffix on the result and index file names.
-    #[arg(long)]
-    pub bazel_version: Option<String>,
+    #[command(flatten)]
+    pub common: crate::bench::Common,
 
-    /// A cached diff per change set, written by tools/bench/precheck.sh. The
-    /// recorded change sets carry `(base, head)` and no paths, so without
-    /// either this or --repo there is nothing to replay.
+    /// A cached diff per change set, written by `--write-paths` on the box
+    /// and pulled by `cambium-bench pull-results`. The recorded change sets
+    /// carry `(base, head)` and no paths, so without either this or --repo
+    /// there is nothing to replay.
     #[arg(long = "paths-file")]
     pub paths_file: Option<PathBuf>,
     /// A git repository (a clone or the subject's mirror) to take the diff
@@ -81,6 +67,11 @@ pub struct Args {
     /// decides the change sets it otherwise marks indeterminate.
     #[arg(long = "repo")]
     pub repo: Option<PathBuf>,
+    /// Write the diff of every recorded change set — the paths cache a
+    /// replay away from --repo reads — and replay nothing. `-` prints it.
+    /// Default: <results-dir>/<subject>/paths-<pin>.json.
+    #[arg(long = "write-paths", value_name = "FILE", num_args = 0..=1, default_missing_value = "")]
+    pub write_paths: Option<String>,
 
     /// Rebuild the externals side tables from the repository text at each
     /// change set's base before replaying it, instead of reading back the
@@ -90,6 +81,10 @@ pub struct Args {
     /// one as engine evidence; --baseline says which side was which.
     #[arg(long)]
     pub rederive: bool,
+    /// With --rederive, keep each re-derived index at
+    /// <DIR>/rederived-<base>.bin for `cambi inspect externals`.
+    #[arg(long, value_name = "DIR", env = "CAMBIUM_REDERIVE_DUMP")]
+    pub rederive_dump: Option<PathBuf>,
 
     /// Check the *rebuild oracle's* externals half offline, instead of
     /// replaying change sets: open the index Bazel cold-built at the pin
@@ -118,294 +113,94 @@ pub struct Args {
 }
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    let (_, manifest) = match &args.manifest {
-        Some(p) => (p.clone(), Manifest::load(p)?),
-        None => Manifest::discover(&ctx.root)?,
-    };
-    let entry = manifest.get(&args.subject)?.clone();
-    let subjects = match &args.subjects_dir {
-        Some(p) => SubjectsDir::new(p.clone()),
-        None => SubjectsDir::from_env(),
-    };
-    let version = args
-        .bazel_version
-        .clone()
-        .or_else(|| entry.bazel_version.clone())
-        .filter(|v| !v.is_empty());
-    // Generated, not read from a worktree, so this costs no Bazel and no
-    // checkout — the same configuration `bench changes` would have run under.
-    let cfg = subjects.config_for(&entry, version.as_deref());
-
-    let results = args.results_dir.join(&entry.id);
+    let session = ctx.session(&args.common)?;
+    let run = session.subject(&args.subject)?;
+    if let Some(out) = &args.write_paths {
+        let repo = args.repo.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("--write-paths takes the diffs from --repo <git dir>")
+        })?;
+        let dest = match out.as_str() {
+            "" => None,
+            "-" => Some(PathBuf::from("/dev/stdout")),
+            p => Some(PathBuf::from(p)),
+        };
+        let written = precheck::write_paths_cache(&run, repo, dest.as_deref())?;
+        if out != "-" {
+            eprintln!("cambium-bench replay: wrote {}", written.display());
+        }
+        return Ok(crate::EXIT_OK);
+    }
     if args.head_check {
-        return head_check(ctx, &args, &entry.id, &entry.pin, &results);
+        return head_check(ctx, &args, &run);
     }
-    let index_path = match &args.index {
-        Some(p) => p.clone(),
-        None => results.join(cambium_bench::util::versioned_name(
-            &format!("index-{}", entry.pin),
-            version.as_deref(),
-            "bin",
-        )),
+    let req = ReplayRequest {
+        paths: args.paths.clone(),
+        change_set: args.change_set.clone(),
+        commit: args.commit.clone(),
+        all: args.all,
+        history: args.history,
+        index: args.index.clone(),
+        paths_file: args.paths_file.clone(),
+        repo: args.repo.clone(),
+        rederive: args.rederive,
+        rederive_dump: args.rederive_dump.clone(),
+        baseline: args.baseline.clone(),
+        save_baseline: args.save_baseline.clone(),
     };
-    anyhow::ensure!(
-        index_path.exists(),
-        "no stored index at {}; pull one from the benchmark machine \
-         (tools/bench/precheck.sh) or pass --index",
-        index_path.display()
-    );
-    let file = IndexFile::open(&index_path)
-        .with_context(|| format!("opening {}", index_path.display()))?;
-    let view = file.view();
-
-    anyhow::ensure!(
-        !args.rederive || args.repo.is_some(),
-        "--rederive reads MODULE.bazel, WORKSPACE and the workspace .bzl closure at each base \
-         revision, so it needs --repo <git dir>"
-    );
-    let repo = args
-        .repo
-        .as_ref()
-        .map(|p| cambium_diff::Repo::new(p.clone()));
-    let paths_cache = match &args.paths_file {
-        Some(p) => Some(PathsCache::read(p)?),
-        None => {
-            let p = default_paths_file(&results, &entry.pin, version.as_deref());
-            p.exists().then(|| PathsCache::read(&p)).transpose()?
+    let report = precheck::replay_subject(&run, &req)?;
+    match ctx.format.data() {
+        None => {}
+        Some(DataFormat::Json) | Some(DataFormat::Jsonl) => {
+            println!("{}", serde_json::to_string_pretty(&report.json())?);
         }
-    };
-
-    // What to replay.
-    let recorded = load_recorded(&results, &entry.pin, version.as_deref(), args.history)?;
-    let wanted: Vec<RecordedAnswer> = if !args.paths.is_empty() {
-        vec![RecordedAnswer {
-            base: "explicit".into(),
-            head: "paths".into(),
-            ..Default::default()
-        }]
-    } else if let Some(cs) = &args.change_set {
-        let (b, h) = cs
-            .split_once("..")
-            .context("--change-set takes base..head")?;
-        vec![find(&recorded, b, h)
-            .with_context(|| format!("no recorded change set {cs}"))?
-            .clone()]
-    } else if let Some(sha) = &args.commit {
-        vec![recorded
-            .iter()
-            .find(|r| r.head.starts_with(sha.as_str()) || sha.starts_with(r.head.as_str()))
-            .with_context(|| format!("no recorded change set or commit at {sha}"))?
-            .clone()]
-    } else if args.all {
-        recorded.clone()
-    } else {
-        anyhow::bail!(
-            "say what to replay: --paths, --change-set base..head, --commit sha, or --all"
-        )
-    };
-
-    let explicit = !args.paths.is_empty();
-    // What every change set without an archived base falls back to. `--index`
-    // is named rather than discovered, so a replay against it cannot claim to
-    // be at any particular revision and is read as the pin's case.
-    let pin_kind = if args.index.is_some() {
-        replay::BaseKind::Explicit
-    } else {
-        replay::BaseKind::Pin
-    };
-    let archived = ArchivedBases {
-        results: results.clone(),
-    };
-    let mut rederived = replay::RederiveCache::new();
-    let mut outcomes: Vec<ReplayOutcome> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-    for want in &wanted {
-        let changes = if explicit {
-            replay::parse_name_status(&args.paths)
-        } else if let Some(r) = &repo {
-            r.diff(&want.base, &want.head)
-                .with_context(|| format!("git diff {}..{}", want.base, want.head))?
-        } else if let Some(c) = &paths_cache {
-            match c.lookup(&want.base, &want.head) {
-                Some(c) => c,
-                None => {
-                    skipped.push(format!("{}: not in the paths cache", want.key()));
-                    continue;
-                }
-            }
-        } else {
-            anyhow::bail!(
-                "the recorded change sets carry no diff; pass --repo <git dir> or --paths-file \
-                 (tools/bench/precheck.sh writes one)"
-            );
-        };
-        let texts: Box<dyn cambium_engine::externals::WorkspaceText> = match &repo {
-            Some(r) => Box::new(GitTextOwned(r.clone())),
-            None => Box::new(replay::NoText),
-        };
-        // The base the run itself spliced onto, when the change-set driver
-        // archived one: that is the graph the run walked, where the index at
-        // the pin is the graph as of some later commit. `--index` is the one
-        // thing that outranks it, because it is an explicit instruction.
-        let opened = if args.index.is_some() {
-            None
-        } else {
-            match archived.open(&want.base) {
-                Ok(f) => f,
-                Err(e) => {
-                    skipped.push(format!("{}: {e:#}", want.key()));
-                    continue;
-                }
-            }
-        };
-        let base_kind = if opened.is_some() {
-            replay::BaseKind::RunsOwn
-        } else {
-            pin_kind
-        };
-        let base_view = opened.as_ref().map(|f| f.view()).unwrap_or(view);
-
-        // With --rederive the index the stages see is that one with its
-        // externals tables rebuilt from the base's own text; without it, the
-        // index exactly as the run left it.
-        let mut cost = None;
-        let replay_view = if args.rederive {
-            match rederived.ensure(base_view, &want.base, texts.as_ref()) {
-                Ok(ms) => {
-                    cost = ms;
-                    rederived.get(&want.base).unwrap_or(base_view)
-                }
-                Err(e) => {
-                    skipped.push(format!("{}: cannot re-derive: {e:#}", want.key()));
-                    continue;
-                }
-            }
-        } else {
-            base_view
-        };
-        let mut o = replay::replay_with(
-            replay_view,
-            &cfg,
-            &want.base,
-            &want.head,
-            &changes,
-            texts.as_ref(),
-            base_kind,
-        );
-        o.rederived = args.rederive;
-        o.rederive_ms = cost;
-        outcomes.push(o);
+        Some(DataFormat::Text) => render(&report, &args),
     }
-
-    let run = ReplayRun {
-        schema: replay::REPLAY_SCHEMA,
-        subject: entry.id.clone(),
-        pin: entry.pin.clone(),
-        outcomes,
-    };
-    if let Some(p) = &args.save_baseline {
-        run.write(p)?;
-    }
-
-    // Divergences: against a previous replay when one is given (both sides on
-    // the same index, so every difference is the engine's), otherwise against
-    // what the run recorded.
-    let (divergences, against) = match &args.baseline {
-        Some(p) => (run.divergences_against(&ReplayRun::read(p)?), "baseline"),
-        None if explicit => (Vec::new(), "nothing"),
-        None => {
-            let mut d = Vec::new();
-            for o in &run.outcomes {
-                if let Some(r) = find(&recorded, &o.base, &o.head) {
-                    d.extend(replay::diverge(r, o));
-                }
-            }
-            (d, "the recorded run")
-        }
-    };
-
-    let Some(output) = ctx.format.data() else {
-        return Ok(if divergences.is_empty() {
-            crate::EXIT_OK
-        } else {
-            crate::EXIT_ERROR
-        });
-    };
-    match output {
-        DataFormat::Json | DataFormat::Jsonl => {
-            let doc = serde_json::json!({
-                "schema": replay::REPLAY_SCHEMA,
-                "subject": run.subject,
-                "pin": run.pin,
-                "index": index_path.display().to_string(),
-                "archived_bases": run
-                    .outcomes
-                    .iter()
-                    .filter(|o| o.base_kind.exact_at_base())
-                    .count(),
-                "compared_against": against,
-                "rederived": args.rederive,
-                "replays": run.outcomes,
-                "divergences": divergences,
-                "skipped": skipped,
-            });
-            println!("{}", serde_json::to_string_pretty(&doc)?);
-        }
-        DataFormat::Text => {
-            if args.all || run.outcomes.len() > 1 {
-                render_all(&run, &divergences, &skipped, against);
-            } else {
-                for o in &run.outcomes {
-                    render_one(o, find(&recorded, &o.base, &o.head), args.max_listed);
-                }
-                for d in &divergences {
-                    println!("DIVERGENCE {d}");
-                }
-            }
-        }
-    }
-
-    Ok(if divergences.is_empty() {
+    Ok(if report.clean() {
         crate::EXIT_OK
     } else {
         crate::EXIT_ERROR
     })
 }
 
+fn render(report: &ReplayReport, args: &Args) {
+    if args.all || report.run.outcomes.len() > 1 {
+        render_all(report);
+        return;
+    }
+    for o in &report.run.outcomes {
+        render_one(
+            o,
+            replay::find_recorded(&report.recorded, &o.base, &o.head),
+            args.max_listed,
+        );
+    }
+    for d in &report.divergences {
+        println!("DIVERGENCE {d}");
+    }
+}
+
 /// `--head-check`: the rebuild oracle's externals half, offline.
 ///
-/// The oracle on the box compares the incrementally applied index against a
-/// fresh Bazel build at the pin, and that fresh build is the only artefact
-/// that says what the externals tables *are* there. The history archives it;
-/// this opens it, re-derives its tables from the head tree's own text with
-/// this build, and compares. The nodes and the edges are the archived
-/// index's on both sides by construction, so an empty graph diff proves
-/// nothing and the externals section is the whole signal — which is why the
-/// summary line counts externals mismatches and mentions the rest only when
-/// there are any (there should never be, and a count here is a bug in the
-/// re-derivation rather than in the derivation under test).
-fn head_check(ctx: &Context, args: &Args, subject: &str, pin: &str, results: &Path) -> Result<u8> {
-    let Some(path) = replay::archived_head(results, pin) else {
-        // Quiet by design: precheck.sh runs this for every subject, and a run
-        // published before the history archived its head index has none.
-        tracing::info!(%subject, %pin, "no archived head index; nothing to check");
+/// The nodes and the edges are the archived index's on both sides by
+/// construction, so an empty graph diff proves nothing and the externals
+/// section is the whole signal — which is why the summary line counts
+/// externals mismatches and mentions the rest only when there are any (there
+/// should never be, and a count here is a bug in the re-derivation rather
+/// than in the derivation under test).
+fn head_check(
+    ctx: &Context,
+    args: &Args,
+    run: &cambium_bench::session::SubjectRun<'_>,
+) -> Result<u8> {
+    let Some((path, diff)) =
+        precheck::head_check_subject(run, args.repo.as_deref(), args.max_listed)?
+    else {
         return Ok(crate::EXIT_OK);
     };
-    let repo = args.repo.clone().context(
-        "--head-check re-derives the externals tables from MODULE.bazel, WORKSPACE and the \
-         workspace .bzl closure at the pin, so it needs --repo <git dir>",
-    )?;
-    let texts = GitTextOwned(cambium_diff::Repo::new(repo));
-    let file = IndexFile::open(&path)
-        .with_context(|| format!("opening the archived head {}", path.display()))?;
-    let diff = replay::head_check(file.view(), pin, &texts, args.max_listed)
-        .with_context(|| format!("re-deriving the externals tables at {pin}"))?;
-
-    let Some(output) = ctx.format.data() else {
-        return Ok(crate::EXIT_OK);
-    };
-    match output {
-        DataFormat::Json | DataFormat::Jsonl => {
+    let (subject, pin) = (&run.entry.id, &run.entry.pin);
+    match ctx.format.data() {
+        None => {}
+        Some(DataFormat::Json) | Some(DataFormat::Jsonl) => {
             let doc = serde_json::json!({
                 "schema": replay::REPLAY_SCHEMA,
                 "subject": subject,
@@ -415,7 +210,7 @@ fn head_check(ctx: &Context, args: &Args, subject: &str, pin: &str, results: &Pa
             });
             println!("{}", serde_json::to_string_pretty(&doc)?);
         }
-        DataFormat::Text => {
+        Some(DataFormat::Text) => {
             println!(
                 "{subject}: head check at {pin}: {} externals mismatches",
                 diff.counts.externals_mismatch
@@ -444,100 +239,6 @@ fn head_check(ctx: &Context, args: &Args, subject: &str, pin: &str, results: &Pa
     } else {
         crate::EXIT_ERROR
     })
-}
-
-/// The base indexes a run archived under `<results>/<subject>/bases/`.
-///
-/// A change set replayed against one of these is replayed against the graph
-/// the run itself spliced onto, which is what makes it exact; see
-/// [`cambium_bench::replay::BaseKind`].
-struct ArchivedBases {
-    results: PathBuf,
-}
-
-impl ArchivedBases {
-    /// The archived base at `base`, or `None` when the run left none.
-    fn open(&self, base: &str) -> Result<Option<IndexFile>> {
-        let Some(path) = replay::archived_base(&self.results, base) else {
-            return Ok(None);
-        };
-        let f = IndexFile::open(&path)
-            .with_context(|| format!("opening the archived base index {}", path.display()))?;
-        Ok(Some(f))
-    }
-}
-
-/// A [`cambium_diff::Repo`] that owns itself, so it can outlive a borrow.
-struct GitTextOwned(cambium_diff::Repo);
-
-impl cambium_engine::externals::WorkspaceText for GitTextOwned {
-    fn text_at(&self, rev: &str, path: &str) -> Option<String> {
-        self.0
-            .read_at(rev, path)
-            .and_then(|b| String::from_utf8(b).ok())
-    }
-}
-
-fn find<'a>(recorded: &'a [RecordedAnswer], base: &str, head: &str) -> Option<&'a RecordedAnswer> {
-    recorded
-        .iter()
-        .find(|r| pre(&r.base, base) && pre(&r.head, head))
-}
-
-fn pre(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
-}
-
-fn default_paths_file(results: &Path, pin: &str, version: Option<&str>) -> PathBuf {
-    results.join(cambium_bench::util::versioned_name(
-        &format!("paths-{pin}"),
-        version,
-        "json",
-    ))
-}
-
-/// Every recorded answer under one subject: the change sets always, the
-/// history commits when asked.
-fn load_recorded(
-    results: &Path,
-    pin: &str,
-    version: Option<&str>,
-    history: bool,
-) -> Result<Vec<RecordedAnswer>> {
-    let mut out = Vec::new();
-    let changes = results
-        .join("changes")
-        .join(cambium_bench::util::versioned_name(
-            &format!("changes-{pin}"),
-            version,
-            "json",
-        ));
-    if changes.exists() {
-        out.extend(replay::recorded_from_changes(&ChangesResult::read(
-            &changes,
-        )?));
-    }
-    if history {
-        let h = results
-            .join("history")
-            .join(cambium_bench::util::versioned_name(
-                &format!("history-{pin}"),
-                version,
-                "json",
-            ));
-        if h.exists() {
-            let s = std::fs::read_to_string(&h)?;
-            let r: HistoryResult =
-                serde_json::from_str(&s).with_context(|| format!("parsing {}", h.display()))?;
-            out.extend(replay::recorded_from_history(&r));
-        }
-    }
-    anyhow::ensure!(
-        !out.is_empty(),
-        "no recorded results under {}: nothing to replay against",
-        results.display()
-    );
-    Ok(out)
 }
 
 fn render_one(o: &ReplayOutcome, recorded: Option<&RecordedAnswer>, max: usize) {
@@ -660,12 +361,8 @@ fn rule_name(r: PackageRule) -> &'static str {
     }
 }
 
-fn render_all(
-    run: &ReplayRun,
-    divergences: &[replay::Divergence],
-    skipped: &[String],
-    against: &str,
-) {
+fn render_all(report: &ReplayReport) {
+    let run: &ReplayRun = &report.run;
     let globals = run.outcomes.iter().filter(|o| o.global).count();
     let colds = run.outcomes.iter().filter(|o| o.cold_rebuild).count();
     let indet = run
@@ -680,11 +377,7 @@ fn render_all(
         run.pin
     );
     println!("  global: {globals}   cold rebuild: {colds}   indeterminate (not gated): {indet}");
-    let own = run
-        .outcomes
-        .iter()
-        .filter(|o| o.base_kind.exact_at_base())
-        .count();
+    let own = report.archived_bases();
     if own > 0 {
         println!(
             "  base index: {own} of {} replayed against the base index the run itself spliced \
@@ -705,15 +398,16 @@ fn render_all(
             costs.len(),
         );
     }
-    for s in skipped {
+    for s in &report.skipped {
         println!("  SKIPPED {s}");
     }
-    for d in divergences {
+    for d in &report.divergences {
         println!("  DIVERGENCE {d}");
     }
-    if divergences.is_empty() {
+    let against = report.compared_against;
+    if report.divergences.is_empty() {
         println!("  no divergence from {against}");
     } else {
-        println!("  {} divergences from {against}", divergences.len());
+        println!("  {} divergences from {against}", report.divergences.len());
     }
 }

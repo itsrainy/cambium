@@ -197,6 +197,7 @@ dependencies = [
  "cambium-index",
  "cambium-proto",
  "cambium-synth",
+ "cambium-testkit",
  "criterion",
  "prost",
  "rand",
@@ -220,6 +221,7 @@ dependencies = [
  "cambium-engine",
  "cambium-index",
  "cambium-synth",
+ "cambium-testkit",
  "clap",
  "crossterm",
  "ratatui",
@@ -254,6 +256,7 @@ dependencies = [
  "cambium-engine",
  "cambium-index",
  "cambium-synth",
+ "cambium-testkit",
  "clap",
  "serde",
  "serde_json",
@@ -284,6 +287,7 @@ dependencies = [
  "cambium-index",
  "cambium-proto",
  "cambium-synth",
+ "cambium-testkit",
  "prost",
  "rayon",
  "rustc-hash",
@@ -302,7 +306,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fixedbitset",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "memmap2",
  "rayon",
  "rkyv",
@@ -345,6 +349,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "cambium-testkit"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cambium-bazel",
+ "cambium-diff",
+ "cambium-engine",
+ "cambium-index",
+ "cambium-synth",
+ "tempfile",
 ]
 
 [[package]]

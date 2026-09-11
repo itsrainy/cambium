@@ -100,7 +100,7 @@ a lineage.
 Three separate things, and they are not interchangeable:
 
 - **`FORMAT_VERSION`** (`crates/index/src/format.rs`) versions the *file
-  layout*. A bump makes older files unreadable — `index inspect` can still name
+  layout*. A bump makes older files unreadable — `index show` can still name
   their version, nothing else can touch them. Bump it only when the bytes move.
   It went to **4** when the payload gained the static `.bzl` load closure — a
   `.bzl` path table plus three flat sections over it (direct loads, the

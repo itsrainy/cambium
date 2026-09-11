@@ -3,39 +3,23 @@
 
 use std::collections::BTreeSet;
 
-use cambium_engine::{AffectedRequest, Config, Engine, SynthQuerier};
+use cambium_engine::{AffectedRequest, Engine, SynthQuerier};
 use cambium_index::IndexData;
 use cambium_synth::{
     commit, generate, reference::reference_affected, ChangeSpec, GraphSpec, Mutation, SynthGraph,
 };
-
-fn engine() -> Engine {
-    let cfg = Config::default();
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
+use cambium_testkit::{engine, req};
 
 fn build(e: &Engine, g: &SynthGraph, commit_id: &str) -> IndexData {
     e.full_build_with(commit_id, &SynthQuerier::new(g)).unwrap()
 }
 
 fn request() -> AffectedRequest {
+    // The reference algorithm has no notion of tags, so `req()`'s
+    // `include_manual` compares like for like.
     AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        // The reference algorithm has no notion of tags, so compare like for like.
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
         materialize: true,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
+        ..req()
     }
 }
 

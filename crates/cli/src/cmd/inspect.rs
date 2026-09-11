@@ -14,8 +14,7 @@ use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
-use crate::cmd::Context;
-use crate::DataFormat;
+use crate::cmd::{emit, human_bytes as human, Context};
 
 /// Options every query shares.
 #[derive(ClapArgs, Clone)]
@@ -52,9 +51,9 @@ impl From<&Reach> for QueryOptions {
     }
 }
 
-/// `index verify`, dispatched separately from the other subcommands: it does
-/// not take a [`Common`] (it shells out to Bazel rather than answering from
-/// the index alone), so it never shares `IndexQuery::common()`.
+/// `inspect verify`: the one subcommand that is not a question against the
+/// index alone. It shells out to Bazel, so it takes no [`Common`] and is its
+/// own arm of [`Args`] rather than a [`Query`].
 #[derive(ClapArgs)]
 pub struct Verify {
     file: PathBuf,
@@ -66,8 +65,21 @@ pub struct Verify {
     seed: u64,
 }
 
+/// `cambi inspect <verb>`: the questions against one index file, and the
+/// cross-check against Bazel.
 #[derive(Subcommand)]
 pub enum Args {
+    #[command(flatten)]
+    Query(Query),
+    /// Check an index against Bazel (spec 12.3): sample rule targets and
+    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
+    Verify(Verify),
+}
+
+/// The questions that read one index file and nothing else; every one takes
+/// a [`Common`].
+#[derive(Subcommand)]
+pub enum Query {
     /// One target's row: kind, package, hash, deps and rdeps.
     Target {
         #[command(flatten)]
@@ -147,41 +159,54 @@ pub enum Args {
         #[arg(long)]
         repo: Option<String>,
     },
-    /// Check an index against Bazel (spec 12.3): sample rule targets and
-    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
-    Verify(Verify),
 }
 
-impl Args {
+impl Query {
     fn common(&self) -> &Common {
         match self {
-            Args::Target { common, .. }
-            | Args::Package { common, .. }
-            | Args::Rdeps { common, .. }
-            | Args::Deps { common, .. }
-            | Args::Path { common, .. }
-            | Args::Consumers { common, .. }
-            | Args::Owner { common, .. }
-            | Args::Targets { common, .. }
-            | Args::Stats { common }
-            | Args::Externals { common, .. } => common,
-            Args::Verify(_) => unreachable!("inspect::run intercepts Verify before common()"),
+            Query::Target { common, .. }
+            | Query::Package { common, .. }
+            | Query::Rdeps { common, .. }
+            | Query::Deps { common, .. }
+            | Query::Path { common, .. }
+            | Query::Consumers { common, .. }
+            | Query::Owner { common, .. }
+            | Query::Targets { common, .. }
+            | Query::Stats { common }
+            | Query::Externals { common, .. } => common,
         }
     }
 }
 
-/// Dispatches `inspect verify`, which does not go through [`Args`] or
-/// [`Args::common`] since it has no [`Common`] and talks to Bazel directly.
-pub fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
+pub fn run(ctx: &Context, args: Args) -> Result<u8> {
+    match args {
+        Args::Query(q) => run_query(ctx, q),
+        Args::Verify(v) => run_verify(ctx, v),
+    }
+}
+
+/// `inspect verify`: the cross-check against a live Bazel.
+fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     if args.sample == 0 {
         anyhow::bail!("--sample must be at least 1");
     }
     let engine = ctx.engine()?;
     let f = IndexFile::open(&args.file)?;
-    let result = inspect::verify(&engine.bazel, f.view(), args.sample, args.seed)?;
-    if let Some(fmt) = ctx.format.data("cambi inspect verify")? {
-        emit(&result, fmt, print_verify)?;
+    let result = inspect::verify(
+        engine.bazel(),
+        f.view(),
+        args.sample,
+        args.seed,
+        engine.diagnostics(),
+    )?;
+    for d in engine.diagnostics().drain() {
+        ctx.render.warn(&d);
     }
+    emit(
+        &result,
+        ctx.format.data("cambi inspect verify")?,
+        print_verify,
+    )?;
     Ok(if result.is_sound() {
         crate::EXIT_OK
     } else {
@@ -208,113 +233,55 @@ fn print_verify(r: &inspect::VerifyResult) {
     );
 }
 
-pub fn run(ctx: &Context, args: Args) -> Result<u8> {
-    if let Args::Verify(v) = args {
-        return run_verify(ctx, v);
-    }
+/// One question against the index.
+///
+/// The query runs under every format, `null` included: the exit code is an
+/// answer — `path` says whether there is a path, and an unknown label is
+/// still an error — and `emit` is what decides whether anything is printed.
+fn run_query(ctx: &Context, args: Query) -> Result<u8> {
     // `--format query` has no meaning for a byte count or a path, and a silent
     // fallback to text would be worse than saying so. Checked before the file
     // is opened: a usage error is the caller's, whatever the file's state.
     let fmt = ctx.format.data("cambi inspect")?;
-    let common = args.common().clone();
-    let f = IndexFile::open(&common.file)?;
+    let f = IndexFile::open(&args.common().file)?;
     let q = IndexQuery::new(f.view());
-    let Some(fmt) = fmt else {
-        return run_quietly(&f, &q, args);
-    };
 
     match args {
-        Args::Target { label, .. } => emit(&q.detail(&label)?, fmt, print_detail),
-        Args::Package { package, .. } => {
+        Query::Target { label, .. } => emit(&q.detail(&label)?, fmt, print_detail),
+        Query::Package { package, .. } => {
             emit(&q.targets(&package, None)?, fmt, print_package_targets)
         }
-        Args::Rdeps { label, reach, .. } => {
+        Query::Rdeps { label, reach, .. } => {
             emit(&q.rdeps(&label, &(&reach).into())?, fmt, print_targets)
         }
-        Args::Deps { label, reach, .. } => {
+        Query::Deps { label, reach, .. } => {
             emit(&q.deps(&label, &(&reach).into())?, fmt, print_targets)
         }
-        Args::Path { from, to, .. } => {
+        Query::Path { from, to, .. } => {
             let r = q.path(&from, &to)?;
-            let found = r.found;
             emit(&r, fmt, print_path)?;
             // Exit non-zero when there is no path, so a shell can branch on it.
-            return Ok(if found {
+            return Ok(if r.found {
                 crate::EXIT_OK
             } else {
                 crate::EXIT_ERROR
             });
         }
-        Args::Consumers { paths, reach, .. } => emit(
+        Query::Consumers { paths, reach, .. } => emit(
             &q.consumers(&paths, &(&reach).into())?,
             fmt,
             print_consumers,
         ),
-        Args::Owner { paths, .. } => emit(&q.owner(&paths)?, fmt, print_owner),
-        Args::Targets { package, kind, .. } => {
+        Query::Owner { paths, .. } => emit(&q.owner(&paths)?, fmt, print_owner),
+        Query::Targets { package, kind, .. } => {
             let kind = kind.as_deref().map(inspect::parse_kind).transpose()?;
             emit(&q.targets(&package, kind)?, fmt, print_package_targets)
         }
-        Args::Stats { .. } => emit(&q.stats(f.file_size() as u64), fmt, print_stats),
-        Args::Externals { repo, .. } => {
+        Query::Stats { .. } => emit(&q.stats(f.file_size() as u64), fmt, print_stats),
+        Query::Externals { repo, .. } => {
             emit(&externals(f.view(), repo.as_deref()), fmt, print_externals)
         }
-        Args::Verify(_) => unreachable!("handled above"),
     }?;
-    Ok(crate::EXIT_OK)
-}
-
-/// Prints a result as JSON or through a text formatter.
-fn emit<T: Serialize>(value: &T, fmt: DataFormat, text: fn(&T)) -> Result<()> {
-    match fmt {
-        DataFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
-        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(value)?),
-        DataFormat::Text => text(value),
-    }
-    Ok(())
-}
-
-/// `--format null`: run the query for its exit code and print nothing.
-///
-/// The query still runs, because the exit code is an answer — `path` says
-/// whether there is a path, and an unknown label is still an error.
-fn run_quietly(f: &IndexFile, q: &IndexQuery<'_>, args: Args) -> Result<u8> {
-    match args {
-        Args::Target { label, .. } => {
-            q.detail(&label)?;
-        }
-        Args::Package { package, .. } => {
-            q.targets(&package, None)?;
-        }
-        Args::Rdeps { label, reach, .. } => {
-            q.rdeps(&label, &(&reach).into())?;
-        }
-        Args::Deps { label, reach, .. } => {
-            q.deps(&label, &(&reach).into())?;
-        }
-        Args::Path { from, to, .. } => {
-            return Ok(if q.path(&from, &to)?.found {
-                crate::EXIT_OK
-            } else {
-                crate::EXIT_ERROR
-            });
-        }
-        Args::Consumers { paths, reach, .. } => {
-            q.consumers(&paths, &(&reach).into())?;
-        }
-        Args::Owner { paths, .. } => {
-            q.owner(&paths)?;
-        }
-        Args::Targets { package, kind, .. } => {
-            let kind = kind.as_deref().map(inspect::parse_kind).transpose()?;
-            q.targets(&package, kind)?;
-        }
-        Args::Stats { .. } => {
-            q.stats(f.file_size() as u64);
-        }
-        Args::Externals { .. } => {}
-        Args::Verify(_) => unreachable!("handled above"),
-    }
     Ok(crate::EXIT_OK)
 }
 
@@ -338,11 +305,10 @@ fn print_path(r: &inspect::PathResult) {
 fn print_consumers(r: &inspect::ConsumersResult) {
     for f in &r.files {
         match (&f.package, &f.label) {
-            (Some(_), Some(label)) if !f.consumers.is_empty() => {
+            (Some(_), Some(_)) if !f.consumers.is_empty() => {
                 for c in &f.consumers {
                     println!("{}\t{c}", f.path);
                 }
-                let _ = label;
             }
             (Some(pkg), Some(_)) => {
                 eprintln!("cambium: {} is in //{pkg} but no rule consumes it", f.path);
@@ -489,21 +455,6 @@ fn share(part: i64, total: u64) -> f64 {
     }
 }
 
-fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u + 1 < UNITS.len() {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
 /// `cambi index show FILE`: one index's header and counts.
 ///
 /// It lives here because it is the same read of the same file the queries
@@ -512,45 +463,35 @@ pub fn show(ctx: &Context, file: &std::path::Path) -> Result<u8> {
     let fmt = ctx.format.data("cambi index show")?;
     let f = IndexFile::open(file)?;
     let q = IndexQuery::new(f.view());
-    if let Some(fmt) = fmt {
-        print_header(&f, &q, fmt)?;
-    }
-    Ok(crate::EXIT_OK)
-}
-
-fn print_header(f: &IndexFile, q: &IndexQuery<'_>, fmt: DataFormat) -> Result<()> {
-    let stats = q.stats(f.file_size() as u64);
-    match fmt {
-        DataFormat::Json => println!("{}", serde_json::to_string_pretty(&stats)?),
-        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(&stats)?),
-        DataFormat::Text => {
-            let v = q.view();
-            println!("file:            {}", f.path().display());
-            println!("format version:  {}", v.format_version);
-            println!("commit:          {}", v.commit);
-            println!("lineage:         {}", inspect::hex(&v.lineage));
-            println!("bazel:           {}", v.bazel_version);
-            println!("config hash:     {}", inspect::hex(&v.config_hash));
-            println!("created:         {}", v.created_unix);
-            if let Some(w) = inspect::PartialLoad::from(v).warning() {
-                println!("WARNING:         {w}");
-            }
-            println!("size on disk:    {}", human(f.file_size() as u64));
-            if f.is_compressed() {
-                println!(
-                    "                 zstd, {} decompressed",
-                    human(f.framed_size() as u64)
-                );
-            }
-            println!("nodes:           {}", v.num_nodes());
-            println!("edges:           {}", v.num_edges());
-            println!("packages:        {}", v.num_packages());
-            for (kind, n) in q.kind_histogram() {
-                println!("  {kind:<18} {n}");
-            }
+    // The JSON forms are the stats document; the text form is the header a
+    // person reads, off the same view.
+    emit(&q.stats(f.file_size() as u64), fmt, |_| {
+        let v = q.view();
+        println!("file:            {}", f.path().display());
+        println!("format version:  {}", v.format_version);
+        println!("commit:          {}", v.commit);
+        println!("lineage:         {}", inspect::hex(&v.lineage));
+        println!("bazel:           {}", v.bazel_version);
+        println!("config hash:     {}", inspect::hex(&v.config_hash));
+        println!("created:         {}", v.created_unix);
+        if let Some(w) = inspect::PartialLoad::from(v).warning() {
+            println!("WARNING:         {w}");
         }
-    }
-    Ok(())
+        println!("size on disk:    {}", human(f.file_size() as u64));
+        if f.is_compressed() {
+            println!(
+                "                 zstd, {} decompressed",
+                human(f.framed_size() as u64)
+            );
+        }
+        println!("nodes:           {}", v.num_nodes());
+        println!("edges:           {}", v.num_edges());
+        println!("packages:        {}", v.num_packages());
+        for (kind, n) in q.kind_histogram() {
+            println!("  {kind:<18} {n}");
+        }
+    })?;
+    Ok(crate::EXIT_OK)
 }
 
 fn print_detail(d: &inspect::TargetDetail) {

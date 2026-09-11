@@ -28,6 +28,8 @@ use cambium_engine::{Config, Engine};
 use crate::manifest::RepoEntry;
 use crate::subject::Subject;
 
+/// The environment variable `--subjects-dir` falls back to. Read by the
+/// binary (clap's `env`), never here.
 pub const SUBJECTS_DIR_ENV: &str = "CAMBIUM_SUBJECTS_DIR";
 
 #[derive(Clone, Debug)]
@@ -36,11 +38,10 @@ pub struct SubjectsDir {
 }
 
 impl SubjectsDir {
-    pub fn from_env() -> Self {
-        let root = std::env::var_os(SUBJECTS_DIR_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| crate::util::cache_dir("subjects"));
-        Self { root }
+    /// `~/.cache/cambium/subjects`: where the mirrors go when nothing says
+    /// otherwise.
+    pub fn default_root() -> PathBuf {
+        crate::util::cache_dir("subjects")
     }
 
     pub fn new(root: PathBuf) -> Self {
@@ -301,7 +302,8 @@ impl Checkout {
             .with_context(|| format!("opening {}", self.dir.display()))?;
         let env = bazelisk_env(&self.dir, bazel_version);
         if !env.is_empty() {
-            engine.bazel = engine.bazel.clone().with_env(env);
+            let bazel = engine.bazel().clone().with_env(env);
+            engine = engine.with_bazel(bazel);
         }
         Ok(engine)
     }

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 mod cmd;
 mod compat;
@@ -210,8 +210,14 @@ fn main() -> ExitCode {
     // clap sees them (see `compat`); the diagnostics they raised are printed
     // below, once `--quiet` and `--format` are known.
     let compat::Rewritten { argv, notes } = compat::rewrite(std::env::args().collect());
-    let cli = Cli::parse_from(argv);
+    // Through the matches rather than `parse_from`, so that where each value
+    // came from is still known: `--cache-dir` and `$CAMBIUM_CACHE_DIR` reach
+    // the struct as one `Option`, and `cambi config explain` has to say
+    // which one set it.
+    let matches = Cli::command().get_matches_from(argv);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     init_logging(&cli.log);
+    let overrides = overrides(&cli, &matches);
 
     let root = match cli.workspace.clone() {
         Some(w) => w,
@@ -231,8 +237,7 @@ fn main() -> ExitCode {
     let ctx = cmd::Context {
         root,
         config: cli.config.clone(),
-        bazel_binary: cli.bazel_binary.clone(),
-        cache_dir: cli.cache_dir.clone(),
+        overrides,
         format: cli.format,
         render,
     };
@@ -264,6 +269,38 @@ fn main() -> ExitCode {
                 .unwrap_or(EXIT_ERROR);
             ExitCode::from(code)
         }
+    }
+}
+
+/// The values the command line and the environment set, each with the
+/// spelling to attribute it to. Clap knows which of a flag and its `env` fell
+/// in, and that is the only place the question can be answered without
+/// consulting the environment a second time.
+fn overrides(cli: &Cli, matches: &clap::ArgMatches) -> cambium_engine::config::Overrides {
+    use cambium_engine::config::Origin;
+    use clap::parser::ValueSource;
+    cambium_engine::config::Overrides {
+        // `--bazel-binary` has no environment spelling: `$BAZEL_REAL` and
+        // `$BAZEL` are read by the Bazel handle itself, below the config.
+        bazel_binary: cli.bazel_binary.clone().map(|b| {
+            (
+                b,
+                Origin::Flag {
+                    name: "--bazel-binary".into(),
+                },
+            )
+        }),
+        cache_dir: cli.cache_dir.clone().map(|d| {
+            let origin = match matches.value_source("cache_dir") {
+                Some(ValueSource::EnvVariable) => Origin::Env {
+                    name: "CAMBIUM_CACHE_DIR".into(),
+                },
+                _ => Origin::Flag {
+                    name: "--cache-dir".into(),
+                },
+            };
+            (d, origin)
+        }),
     }
 }
 

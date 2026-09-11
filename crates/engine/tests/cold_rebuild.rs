@@ -11,30 +11,18 @@
 use cambium_engine::{AffectedRequest, Config, Engine, SynthQuerier};
 use cambium_index::IndexData;
 use cambium_synth::{commit, generate, ChangeSpec, GraphSpec, SynthGraph};
+use cambium_testkit::{engine_with, req, Sandbox};
 
-fn engine(max_dirty_packages: usize) -> Engine {
+fn engine(max_dirty_packages: usize) -> Sandbox {
     let mut cfg = Config::default();
     cfg.limits.max_dirty_packages = max_dirty_packages;
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
+    engine_with(cfg)
 }
 
 fn request(materialize: bool) -> AffectedRequest {
     AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
         materialize,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
+        ..req()
     }
 }
 
