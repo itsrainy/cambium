@@ -59,6 +59,9 @@ pub struct ChangesOptions {
     /// A change set Tango did not run on carries no `tango` row at all: it is a change set
     /// with fewer tools, not a change set where a tool disagreed.
     pub tango_change_sets: Option<usize>,
+    /// Where to report progress, for `cambium-bench watch`. `None` compares
+    /// exactly as before and writes no progress file.
+    pub progress: Option<std::sync::Arc<crate::progress::Reporter>>,
 }
 
 /// Makes a path absolute without requiring it to exist.
@@ -100,6 +103,7 @@ impl ChangesOptions {
             resume: true,
             examples: DEFAULT_EXAMPLES,
             tango_change_sets: None,
+            progress: None,
         }
     }
 

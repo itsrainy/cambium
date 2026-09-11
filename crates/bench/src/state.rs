@@ -39,6 +39,15 @@ pub struct State {
     /// next load treats as a mismatch.
     #[serde(default)]
     pub engine: String,
+    /// When each step started and last moved, RFC 3339, keyed
+    /// `<step>.started`, `<step>.updated` and `<step>.done`.
+    ///
+    /// The state file said *what* had finished and never *when*, so elapsed
+    /// and an ETA could not be computed from it and a watcher had nothing to
+    /// show for a run whose progress file predates it. Absent from files
+    /// written before the field existed, which reads as an empty table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub steps: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -132,6 +141,20 @@ impl State {
         Ok(())
     }
 
+    /// Stamps `<step>.<event>` with the current time.
+    pub fn stamp(&mut self, step: &str, event: &str) {
+        self.steps
+            .insert(format!("{step}.{event}"), crate::util::rfc3339_now());
+    }
+
+    /// Stamps `<step>.started` only the first time, so a resume keeps the
+    /// clock the run actually started on.
+    pub fn stamp_start(&mut self, step: &str) {
+        self.steps
+            .entry(format!("{step}.started"))
+            .or_insert_with(crate::util::rfc3339_now);
+    }
+
     pub fn change_set_key(base: &str, head: &str) -> String {
         format!("{base}..{head}")
     }
@@ -152,6 +175,22 @@ mod tests {
         let other = State::load(dir.path(), "bazel", "b").unwrap();
         assert!(!other.fetched, "a new pin starts from scratch");
         assert_eq!(other.pin, "b");
+    }
+
+    #[test]
+    fn a_step_is_stamped_once_at_the_start_and_again_on_every_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = State::fresh("bazel", "a");
+        st.stamp_start("history");
+        let started = st.steps["history.started"].clone();
+        st.stamp_start("history");
+        assert_eq!(st.steps["history.started"], started, "a resume keeps it");
+        st.stamp("history", "updated");
+        st.stamp("history", "done");
+        st.save(dir.path()).unwrap();
+        let back = State::load(dir.path(), "bazel", "a").unwrap();
+        assert_eq!(back.steps.len(), 3);
+        assert!(crate::util::parse_rfc3339(&back.steps["history.done"]).is_some());
     }
 }
 

@@ -152,6 +152,10 @@ fn compare_one(
     // for. The engine's own `timings_ms.total` is kept beside each of them,
     // from the document, so the two can be read against each other instead of
     // one standing in for the other.
+    let progress = opts.progress.as_deref();
+    if let Some(p) = progress {
+        p.tool(Some(crate::tools::cambi::NAME));
+    }
     checkout.checkout(&change_set.head)?;
     let args = AffectedArgs {
         include_manual: true,
@@ -165,6 +169,12 @@ fn compare_one(
     };
     let cold = cambi.affected(&checkout.dir, &args)?;
     let warm = cambi.affected(&checkout.dir, &args)?;
+    // What the last `cambi` document said a person should act on, on the
+    // progress file: in a log these scroll away, and they are the half of a
+    // run's output someone watching it has to see.
+    if let Some(p) = progress {
+        p.diagnostics(&warm.report.diagnostics);
+    }
     let (cold_wall_ms, warm_wall_ms) = (cold.wall_ms(), warm.wall_ms());
     let (cold_engine_ms, warm_engine_ms) = (cold.engine_ms(), warm.engine_ms());
     let head_index = match &warm.index {
@@ -333,6 +343,11 @@ fn compare_one(
     let mut results = Vec::new();
     let mut rows: Vec<crate::labels::ClassRow> = Vec::new();
     for p in tools {
+        // One Tango invocation is minutes, so which tool is running is part
+        // of where the run is.
+        if let Some(r) = progress {
+            r.tool(Some(p.name()));
+        }
         let cmp = match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
             Ok(mut run) => {
                 // Both tools report source-file targets (`//pkg:BUILD.bazel`
@@ -537,8 +552,11 @@ fn compare_global(
     );
     let results: Vec<ToolComparison> = tools
         .iter()
-        .map(
-            |p| match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
+        .map(|p| {
+            if let Some(r) = opts.progress.as_deref() {
+                r.tool(Some(p.name()));
+            }
+            match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
                 Ok(mut run) => {
                     run.restrict_to_rule_set(&universe);
                     ToolComparison {
@@ -563,8 +581,8 @@ fn compare_global(
                     );
                     ToolComparison::failed(p.name(), p.version(), &e)
                 }
-            },
-        )
+            }
+        })
         .collect();
     // cambium cannot be unsound on a global change set -- it answered
     // `//...` -- but a tool that could not run still fails it, exactly as
@@ -722,6 +740,13 @@ pub fn compare_change_sets(
     // predates the field.
     result.cambi_version = Some(cambi.version().to_string());
     let done: BTreeSet<String> = result.change_sets.iter().map(|p| p.key()).collect();
+    let progress = opts.progress.as_deref();
+    if let Some(p) = progress {
+        p.step(crate::progress::Step::Changes);
+        p.total(change_sets.len());
+        p.item(done.len(), "");
+    }
+    state.stamp_start("changes");
 
     for (i, change_set) in change_sets.iter().enumerate() {
         let key = change_set.key();
@@ -748,7 +773,24 @@ pub fn compare_change_sets(
             tools = running.len(),
             "comparing"
         );
-        let cmp = compare_one(engine, cambi, checkout, change_set, &running, opts)?;
+        if let Some(p) = progress {
+            p.item(i + 1, &key);
+        }
+        let cmp = match compare_one(engine, cambi, checkout, change_set, &running, opts) {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(p) = progress {
+                    p.failed(&format!("{e:#}"));
+                }
+                return Err(e);
+            }
+        };
+        if let Some(p) = progress {
+            p.tool(None);
+            if let Some(e) = cmp.tools.iter().find_map(|t| t.error.as_deref()) {
+                p.error(e);
+            }
+        }
         if !cmp.pass {
             tracing::warn!(%key, "change set failed the three-way comparison");
         }
@@ -756,10 +798,16 @@ pub fn compare_change_sets(
         result.summarise();
         result.write(&path)?;
         state.compared.insert(key);
+        state.stamp("changes", "updated");
         state.save(&opts.state_dir)?;
     }
     result.summarise();
     result.write(&path)?;
+    state.stamp("changes", "done");
+    state.save(&opts.state_dir)?;
+    if let Some(p) = progress {
+        p.done();
+    }
     Ok(result)
 }
 

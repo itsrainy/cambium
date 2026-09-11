@@ -94,6 +94,16 @@ fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
         // No `cambi` ran: this walk is driven in process, which is the point
         // of the fixture.
         cambi_version: None,
+        // The walk reports where it is, so the file `cambium-bench watch`
+        // polls is written by the same code a real run writes it with.
+        progress: Some(std::sync::Arc::new(cambium_bench::progress::Reporter::new(
+            &f.results,
+            "history",
+            "synth",
+            f.driver.commits.last().unwrap(),
+            cambium_bench::progress::Step::History,
+            None,
+        ))),
     }
 }
 
@@ -105,6 +115,11 @@ fn a_history_runs_and_the_rebuild_oracle_holds() {
 
     assert!(r.done);
     assert_eq!(r.commits.len(), commits.len() - 1);
+    // And the progress file says so, which is all `cambium-bench watch` reads.
+    let p = cambium_bench::progress::Progress::read(&f.results).expect("a progress file");
+    assert_eq!(p.step, cambium_bench::progress::Step::Done);
+    assert_eq!(p.of, commits.len() - 1);
+    assert!(p.last_error.is_none(), "{:?}", p.last_error);
     assert_eq!(r.cold.commit, commits[0]);
     assert!(r.cold.nodes > 0 && r.cold.index_bytes > 0);
     assert!(r.cold.stats["counts"]["rules"].as_u64().unwrap() > 0);

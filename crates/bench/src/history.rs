@@ -221,6 +221,9 @@ pub struct HistoryOptions {
     pub rebuild_oracle: bool,
     /// `cambi --version` of the binary being measured, recorded in the result.
     pub cambi_version: Option<String>,
+    /// Where to report progress, for `cambium-bench watch`. `None` runs the
+    /// walk exactly as before and writes no progress file.
+    pub progress: Option<std::sync::Arc<crate::progress::Reporter>>,
 }
 
 /// One cold build.
@@ -548,6 +551,15 @@ pub fn history(
         }
         _ => start(engine, driver, &from, &to, &index_path, opts)?,
     };
+    let progress = opts.progress.as_deref();
+    if let Some(p) = progress {
+        p.step(crate::progress::Step::History);
+        p.total(commits.len().saturating_sub(1));
+        if let Some(last) = result.commits.last() {
+            p.item(result.commits.len(), &last.commit);
+        }
+    }
+    state.stamp_start("history");
     state.history = Some(HistoryState {
         from: from.clone(),
         to: to.clone(),
@@ -560,8 +572,23 @@ pub fn history(
     // ---- walk forward ----
     for i in start_at..commits.len() {
         let (parent, commit) = (&commits[i - 1], &commits[i]);
+        if let Some(p) = progress {
+            p.item(i, commit);
+            p.tool(Some(crate::tools::cambi::NAME));
+        }
         driver.checkout(commit)?;
-        let step = driver.update(parent, commit, &index_path, opts.publish)?;
+        let step = match driver.update(parent, commit, &index_path, opts.publish) {
+            Ok(s) => s,
+            Err(e) => {
+                // The walk stops either way; the progress file is what says
+                // so to whoever is watching, since the error itself goes to
+                // this process's stderr and nowhere a reader can see it.
+                if let Some(p) = progress {
+                    p.failed(&format!("{e:#}"));
+                }
+                return Err(e);
+            }
+        };
         // Whole-process wall time: what someone bringing their index forward
         // one commit waits for. The engine's own total travels beside it,
         // from the document, so the process overhead is visible rather than
@@ -608,12 +635,17 @@ pub fn history(
             rec.index_nodes = f.view().counts().nodes;
             rec.index_edges = f.view().counts().edges;
         }
+        if let Some(p) = progress {
+            p.diagnostics(&step.report.diagnostics);
+            p.tool(None);
+        }
         result.commits.push(rec);
         result.summarise();
         result.write(&path)?;
         if let Some(rs) = state.history.as_mut() {
             rs.last_completed = Some(commit.clone());
         }
+        state.stamp("history", "updated");
         state.save(&opts.state_dir)?;
         tracing::info!(
             step = i,
@@ -627,6 +659,9 @@ pub fn history(
 
     // ---- the rebuild oracle: applied == rebuilt ----
     if opts.rebuild_oracle {
+        if let Some(p) = progress {
+            p.item(commits.len().saturating_sub(1), "rebuild oracle");
+        }
         let fresh_path = index_path.with_extension("rebuild.bin");
         // The oracle's own cold build is never published: it would overwrite
         // the index the walk just proved, with an index the walk did not
@@ -654,7 +689,11 @@ pub fn history(
     if let Some(rs) = state.history.as_mut() {
         rs.done = true;
     }
+    state.stamp("history", "done");
     state.save(&opts.state_dir)?;
+    if let Some(p) = progress {
+        p.done();
+    }
     Ok(result)
 }
 

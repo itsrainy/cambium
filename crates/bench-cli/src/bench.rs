@@ -369,6 +369,26 @@ impl Run {
         )
     }
 
+    /// The progress file for this subject, `bench-results/<subject>/progress.json`.
+    ///
+    /// One per subject and not per workload: it is the run's liveness, and the
+    /// watcher's row is a subject.
+    fn progress(
+        &self,
+        workload: &str,
+        step: cambium_bench::progress::Step,
+        cambi_version: Option<String>,
+    ) -> std::sync::Arc<cambium_bench::progress::Reporter> {
+        std::sync::Arc::new(cambium_bench::progress::Reporter::new(
+            &self.results,
+            workload,
+            &self.entry.id,
+            &self.entry.pin,
+            step,
+            cambi_version,
+        ))
+    }
+
     fn version(&self) -> Option<&str> {
         self.version.as_deref()
     }
@@ -859,14 +879,22 @@ fn subject_names(ctx: &Context, subject: Option<String>, c: &Common) -> Result<V
 
 fn fetch(run: &Run) -> Result<()> {
     let mut state = run.state()?;
+    let progress = run.progress("subjects", cambium_bench::progress::Step::Fetch, None);
     tracing::info!(id = %run.entry.id, url = %run.entry.url, pin = %run.entry.pin, "fetching");
+    progress.item(1, &run.entry.pin);
     let checkout = run
         .subjects
         .fetch(&run.entry)
+        .map_err(|e| {
+            progress.failed(&format!("{e:#}"));
+            e
+        })
         .with_context(|| format!("fetching subject {}", run.entry.id))?;
     let cfg = checkout.write_config(&run.entry, run.version())?;
     state.fetched = true;
+    state.stamp("fetch", "done");
     state.save(&run.results)?;
+    progress.done();
     tracing::info!(worktree = %checkout.dir.display(), config = %cfg.display(), "fetched");
     println!("{}", checkout.dir.display());
     Ok(())
@@ -874,6 +902,7 @@ fn fetch(run: &Run) -> Result<()> {
 
 fn build(ctx: &Context, run: &Run, at: Option<&str>, force: bool) -> Result<PathBuf> {
     let checkout = run.checkout()?;
+    let progress = run.progress("subjects", cambium_bench::progress::Step::Build, None);
     let want = at.unwrap_or(&run.entry.pin);
     let sha = checkout
         .repo
@@ -888,6 +917,7 @@ fn build(ctx: &Context, run: &Run, at: Option<&str>, force: bool) -> Result<Path
             match cambium_index::IndexFile::open(prev) {
                 Ok(_) => {
                     tracing::info!(%sha, path = %prev.display(), "already built");
+                    progress.done();
                     println!("{}", prev.display());
                     return Ok(prev.clone());
                 }
@@ -902,7 +932,14 @@ fn build(ctx: &Context, run: &Run, at: Option<&str>, force: bool) -> Result<Path
     checkout.write_config(&run.entry, run.version())?;
     let cambi = run.cambi(ctx, &checkout)?;
     tracing::info!(%sha, cambi = %cambi.version(), "cold build: cambi index build (this takes a while)");
-    let wall = cambi.index_build(&checkout.dir, &sha, &out, true)?;
+    progress.item(1, &sha);
+    progress.tool(Some(cambium_bench::tools::cambi::NAME));
+    let wall = cambi
+        .index_build(&checkout.dir, &sha, &out, true)
+        .map_err(|e| {
+            progress.failed(&format!("{e:#}"));
+            e
+        })?;
     let index = cambium_index::IndexFile::open(&out)?;
     let v = index.view();
     let c = v.counts();
@@ -922,7 +959,9 @@ fn build(ctx: &Context, run: &Run, at: Option<&str>, force: bool) -> Result<Path
         eprintln!("cambium-bench: WARNING: {w}");
     }
     state.built.insert(sha, out.clone());
+    state.stamp("build", "done");
     state.save(&run.results)?;
+    progress.done();
     println!("{}", out.display());
     Ok(out)
 }
@@ -947,6 +986,11 @@ fn do_history(
         to = %run.entry.pin,
         "running the history"
     );
+    let progress = run.progress(
+        "history",
+        cambium_bench::progress::Step::History,
+        Some(cambi.version().to_string()),
+    );
     let opts = history::HistoryOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
@@ -958,6 +1002,7 @@ fn do_history(
         diff_cap: 50,
         rebuild_oracle,
         cambi_version: Some(cambi.version().to_string()),
+        progress: Some(progress.clone()),
     };
     let driver = history::CambiDriver {
         checkout: &checkout,
@@ -1159,8 +1204,14 @@ fn do_compare(ctx: &Context, run: &Run, args: &CompareArgs) -> Result<u8> {
     let engine = checkout.engine(&run.entry, run.version())?;
     let (rdeps, load) = parse_change_oracles(&args.oracles)?;
     let results = run.workload("changes")?;
+    let progress = run.progress(
+        "changes",
+        cambium_bench::progress::Step::Changes,
+        Some(run.cambi(ctx, &checkout)?.version().to_string()),
+    );
     let opts = cambium_bench::compare::ChangesOptions {
         bazel_version: run.version.clone(),
+        progress: Some(progress),
         rdeps_oracle: rdeps,
         oracle_k: args.oracle_sample,
         load_oracle: load,
