@@ -88,6 +88,8 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ## Usage
 
 ```console
+$ cambi                            # no verb: cambi status
+$ cambi status    [--format human|json]
 $ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
                    [--format human|json|jsonl|query|null] [--explain] [--max-depth n]
                    [--no-full-build] [--publish-base] [--out <index file>]
@@ -119,7 +121,7 @@ $ cambi synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
 $ cambi synth describe    [--spec <preset>] [--seed n]
 $ cambi synth build-index [--spec <preset>] --out <file> [--seed n]
 $ cambi synth presets
-$ cambi config
+$ cambi config show|explain|hash
 ```
 
 `baseline build` and `baseline update` need `--out <file>` to say where the
@@ -266,6 +268,43 @@ subset of what it would otherwise.
 `cambi inspect ... --format json` and `cambi bench` results carry `schema`
 on the same terms.
 
+### `cambi status --format json`
+
+One document, one field per probe, and nothing computed that the human form
+does not also show:
+
+```json
+{
+  "schema": 9,
+  "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
+                 "inert_module_bazel": false, "inert_workspace": false,
+                 "bazelversion": "7.4.1", "bazelversion_major": 7,
+                 "bazelrc_try_imports": ["%workspace%/user.bazelrc"],
+                 "bazelrc_imports": [], "diagnostics": [] },
+  "config":    { "path": "/src/repo/cambium.toml", "exists": true,
+                 "hash": "f6311c0b...", "parse_error": null, "diagnostics": [] },
+  "position":  { "head": "abc1234...", "head_tree": "9f8e...", "dirty": false,
+                 "has_index": false, "nearest": "def5678...", "distance": 3,
+                 "max_ancestor_walk": 20, "plan": "splice",
+                 "index_path": "...", "diagnostics": [] },
+  "index":     { "size_bytes": 81234567, "packages": 4120, "targets": 38211,
+                 "nodes": 120394, "edges": 488120, "external_repos": 212,
+                 "built_at_unix": 1789000000, "format_version": 8,
+                 "commit": "def5678...", "lineage": "9f...", "config_hash": "f6...",
+                 "bazel_version": "bazel 7.4.1", "partial": false, "diagnostics": [] },
+  "lineage":   { "current": "9f...", "others": [], "conflicting": [], "diagnostics": [] },
+  "store":     { "kind": "dir", "location": "...", "configured": true,
+                 "listable": true, "reachable": true, "indexes": 41,
+                 "lineages": ["9f..."], "error": null, "diagnostics": [] },
+  "diagnostics": []
+}
+```
+
+`plan` is `warm` (HEAD has an index), `splice` (an ancestor does) or `cold`.
+A field whose probe could not answer is `null` rather than absent, except the
+probes `status` does not run at all (`bazel`, `round_trip`), which are not in
+this document.
+
 ### Contract versions
 
 | version | change |
@@ -279,7 +318,7 @@ on the same terms.
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 
-| 9 | `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
+| 9 | `cambi status --format json`, a new document (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same will hold for `explain` and `doctor`. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did

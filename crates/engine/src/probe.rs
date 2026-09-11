@@ -559,7 +559,14 @@ pub fn position(
             p.diagnostics.push(unreachable_diagnostic(&e.to_string()));
         }
     }
-    p.diagnostics.extend(diags.drain());
+    // The walk can observe one fact twice — a tree key found both directly and
+    // through its `commits/` pointer is fetched, and refused, twice — and a
+    // reader of `status` should see each finding once.
+    for d in diags.drain() {
+        if !p.diagnostics.contains(&d) {
+            p.diagnostics.push(d);
+        }
+    }
     p
 }
 
@@ -831,16 +838,22 @@ pub fn collect(opts: &Options) -> Probes {
         _ => None,
     };
 
-    let position_probe = ws.root.as_ref().and_then(|root| {
-        let repo = cambium_diff::Repo::discover(root).ok()?;
-        Some(position(
-            &repo,
-            backend.as_deref(),
-            &cache_dir,
-            effective.hash(),
-            effective.baseline.max_ancestor_walk,
-        ))
-    });
+    // From the workspace root when there is one, and from where the caller
+    // started when there is not: a git checkout that is not (yet) a Bazel
+    // workspace still has a HEAD, and "no index for it" is a more useful
+    // answer than silence.
+    let position_probe = {
+        let root = ws.root.clone().unwrap_or_else(|| opts.start.clone());
+        cambium_diff::Repo::discover(&root).ok().map(|repo| {
+            position(
+                &repo,
+                backend.as_deref(),
+                &cache_dir,
+                effective.hash(),
+                effective.baseline.max_ancestor_walk,
+            )
+        })
+    };
 
     let (index_probe, index_diags) =
         match position_probe.as_ref().and_then(|p| p.index_path.clone()) {
