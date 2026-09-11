@@ -15,7 +15,7 @@
 use anyhow::Result;
 use cambium_engine::probe::{self, Check, Grade};
 
-use crate::cmd::{result_event, Context};
+use crate::cmd::{emit, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let mut opts = ctx.probe_options();
@@ -25,22 +25,13 @@ pub fn run(ctx: &Context) -> Result<u8> {
     let checks = probe::judge(&probes);
     let worst = checks.iter().map(|c| c.level).max();
 
-    if let Some(fmt) = ctx.format.data("cambi doctor")? {
-        match fmt {
-            crate::DataFormat::Text => print_human(&checks),
-            crate::DataFormat::Json | crate::DataFormat::Jsonl => {
-                let doc = serde_json::json!({
-                    "schema": cambium_engine::report::SCHEMA_VERSION,
-                    "checks": checks,
-                });
-                if fmt == crate::DataFormat::Jsonl {
-                    println!("{}", result_event(&doc)?);
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&doc)?);
-                }
-            }
-        }
-    }
+    let doc = serde_json::json!({
+        "schema": cambium_engine::report::SCHEMA_VERSION,
+        "checks": checks,
+    });
+    emit(&doc, ctx.format.data("cambi doctor")?, |_| {
+        print_human(&checks)
+    })?;
     Ok(if worst == Some(Grade::Fail) {
         crate::EXIT_ERROR
     } else {
