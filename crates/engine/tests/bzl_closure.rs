@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
-use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
-use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
+use cambium_engine::AffectedRequest;
+use cambium_index::{FileText, PackageUpdate, TargetRow};
+use cambium_testkit::{base, engine, req, Files, Scanning};
 
 /// An in-memory checkout.
 ///
@@ -22,14 +22,6 @@ use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
 /// MODULE.bazel use_extension("//bazel:ext.bzl")
 /// bazel/dead.bzl  loaded by nobody
 /// ```
-struct Files(BTreeMap<String, String>);
-
-impl FileText for Files {
-    fn text(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
-    }
-}
-
 fn files() -> Files {
     let mut m = BTreeMap::new();
     let mut put = |k: &str, v: &str| m.insert(k.to_string(), v.to_string());
@@ -69,70 +61,18 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["app", "bazel", "lib"];
 
-/// A querier that can read the tree, and so produces an index with a closure.
-struct Scanning(Files);
-
-impl PackageQuerier for Scanning {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn load_source(&self) -> Option<&dyn FileText> {
-        Some(&self.0)
-    }
-
-    /// The whole in-memory tree, which is what the witness enumerates.
-    fn starlark_files(&self) -> Option<Vec<String>> {
-        Some(self.0 .0.keys().cloned().collect())
-    }
+/// A querier that can read `tree`, and so produces an index with a closure;
+/// the whole in-memory tree is what the witness enumerates.
+fn scanning(tree: Files) -> Scanning {
+    Scanning::new(PACKAGES, rows)
+        .with_files(tree)
+        .enumerating_tree()
 }
 
 /// A querier with no filesystem behind it: the index it builds has no closure,
 /// which the engine must treat as "we do not know" rather than "nothing".
-struct Blind;
-
-impl PackageQuerier for Blind {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
-
-fn req() -> AffectedRequest {
-    AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
-        materialize: false,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
-    }
-}
-
-fn base() -> (Engine, IndexData) {
-    let e = engine();
-    let index = e.full_build_with("c0", &Scanning(files())).unwrap();
-    (e, index)
+fn blind() -> Scanning {
+    Scanning::new(PACKAGES, rows)
 }
 
 fn changed(path: &str) -> Vec<Change> {
@@ -141,7 +81,7 @@ fn changed(path: &str) -> Vec<Change> {
 
 #[test]
 fn the_index_stores_the_closure_it_scanned() {
-    let (_e, index) = base();
+    let (_e, index) = base(&scanning(files()));
     let v = index.view();
     assert!(v.bzl_closure);
     let paths: Vec<&str> = (0..v.num_bzl()).map(|i| v.bzl_path(i)).collect();
@@ -170,12 +110,12 @@ fn the_index_stores_the_closure_it_scanned() {
 
 #[test]
 fn a_transitively_loaded_bzl_dirties_exactly_its_consumers() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let out = e
         .compute(
             index.view(),
             &changed("bazel/common.bzl"),
-            &Scanning(files()),
+            &scanning(files()),
             &req(),
         )
         .unwrap();
@@ -193,12 +133,12 @@ fn a_transitively_loaded_bzl_dirties_exactly_its_consumers() {
 
 #[test]
 fn a_bzl_a_dependency_loads_reaches_the_dependent_through_the_walk() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let out = e
         .compute(
             index.view(),
             &changed("bazel/other.bzl"),
-            &Scanning(files()),
+            &scanning(files()),
             &req(),
         )
         .unwrap();
@@ -212,12 +152,12 @@ fn a_bzl_a_dependency_loads_reaches_the_dependent_through_the_walk() {
 
 #[test]
 fn a_bzl_in_the_workspace_closure_is_global() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let out = e
         .compute(
             index.view(),
             &changed("bazel/ext.bzl"),
-            &Scanning(files()),
+            &scanning(files()),
             &req(),
         )
         .expect("a workspace-level loader is not an error");
@@ -229,12 +169,12 @@ fn a_bzl_in_the_workspace_closure_is_global() {
 
 #[test]
 fn a_bzl_nothing_loads_dirties_nothing() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let out = e
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(files()),
+            &scanning(files()),
             &req(),
         )
         .unwrap();
@@ -247,10 +187,10 @@ fn a_bzl_nothing_loads_dirties_nothing() {
 #[test]
 fn an_index_without_a_closure_escalates() {
     let e = engine();
-    let index = e.full_build_with("c0", &Blind).unwrap();
+    let index = e.full_build_with("c0", &blind()).unwrap();
     assert!(!index.view().bzl_closure);
     let out = e
-        .compute(index.view(), &changed("bazel/common.bzl"), &Blind, &req())
+        .compute(index.view(), &changed("bazel/common.bzl"), &blind(), &req())
         .unwrap();
     assert!(
         out.report.global,
@@ -266,7 +206,7 @@ fn an_index_without_a_closure_escalates() {
 
 #[test]
 fn a_splice_refreshes_the_closure_of_the_packages_it_requeried() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     // At head, //app also loads //bazel:other.bzl.
     let mut head = files();
     head.0.insert(
@@ -277,7 +217,7 @@ fn a_splice_refreshes_the_closure_of_the_packages_it_requeried() {
         .compute(
             index.view(),
             &[Change::new(Status::Modified, "app/BUILD")],
-            &Scanning(head),
+            &scanning(head),
             &AffectedRequest {
                 materialize: true,
                 ..req()
@@ -313,12 +253,12 @@ fn a_splice_refreshes_the_closure_of_the_packages_it_requeried() {
 
 #[test]
 fn a_dead_bzl_is_witnessed_dead_rather_than_assumed_dead() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let out = e
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(files()),
+            &scanning(files()),
             &req(),
         )
         .unwrap();
@@ -337,9 +277,9 @@ fn a_row_source_with_no_checkout_says_the_witness_did_not_run() {
     let e = engine();
     // An index with a closure, but a head-side querier that cannot enumerate
     // a tree: the file is still ignored, and the report says why.
-    let index = e.full_build_with("c0", &Scanning(files())).unwrap();
+    let index = e.full_build_with("c0", &scanning(files())).unwrap();
     let out = e
-        .compute(index.view(), &changed("bazel/dead.bzl"), &Blind, &req())
+        .compute(index.view(), &changed("bazel/dead.bzl"), &blind(), &req())
         .unwrap();
     assert!(!out.report.global);
     assert_eq!(out.report.stats.bzl_witness_unavailable, 1);
@@ -348,7 +288,7 @@ fn a_row_source_with_no_checkout_says_the_witness_did_not_run() {
 
 #[test]
 fn a_loader_the_stored_closure_missed_still_dirties_its_package() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     // The gap: at head `//app` loads `bazel/dead.bzl`, and the base index's
     // closure has no node for that file — exactly what an unresolved load
     // label at index time leaves behind. Only the `.bzl` is in the diff, so
@@ -362,7 +302,7 @@ fn a_loader_the_stored_closure_missed_still_dirties_its_package() {
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(head),
+            &scanning(head),
             &req(),
         )
         .unwrap();
@@ -376,7 +316,7 @@ fn a_loader_the_stored_closure_missed_still_dirties_its_package() {
 
 #[test]
 fn the_witness_follows_a_chain_of_bzl_files_it_does_not_know() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     // `lib/BUILD` -> chain.bzl -> dead.bzl, with neither `.bzl` in the base
     // index's closure, and only `dead.bzl` in the diff.
     let mut head = files();
@@ -392,7 +332,7 @@ fn the_witness_follows_a_chain_of_bzl_files_it_does_not_know() {
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(head),
+            &scanning(head),
             &req(),
         )
         .unwrap();
@@ -412,7 +352,7 @@ fn the_witness_follows_a_chain_of_bzl_files_it_does_not_know() {
 
 #[test]
 fn a_known_bzl_loader_the_closure_missed_dirties_that_bzls_consumers() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     // `common.bzl` (known: `//app` loads it) starts loading `dead.bzl` at
     // head, and only `dead.bzl` changed. The witness hands the known loader
     // to the same logic the ordinary path uses, so `app` is dirty.
@@ -425,7 +365,7 @@ fn a_known_bzl_loader_the_closure_missed_dirties_that_bzls_consumers() {
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(head),
+            &scanning(head),
             &req(),
         )
         .unwrap();
@@ -435,7 +375,7 @@ fn a_known_bzl_loader_the_closure_missed_dirties_that_bzls_consumers() {
 
 #[test]
 fn a_workspace_file_loading_an_unknown_bzl_is_global() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     let mut head = files();
     head.0.insert(
         "MODULE.bazel".into(),
@@ -446,7 +386,7 @@ fn a_workspace_file_loading_an_unknown_bzl_is_global() {
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(head),
+            &scanning(head),
             &req(),
         )
         .unwrap();
@@ -461,7 +401,7 @@ fn a_workspace_file_loading_an_unknown_bzl_is_global() {
 
 #[test]
 fn the_main_repository_alias_is_resolved_when_the_witness_scans() {
-    let (e, index) = base();
+    let (e, index) = base(&scanning(files()));
     // `@demo//bazel:dead.bzl` inside module `demo` is a main-repo label. The
     // querier's mapping is the identity here — WORKSPACE mode, or a Bazel too
     // old for `mod dump_repo_mapping` — so without the main alias this load
@@ -479,7 +419,7 @@ fn the_main_repository_alias_is_resolved_when_the_witness_scans() {
         .compute(
             index.view(),
             &changed("bazel/dead.bzl"),
-            &Scanning(head),
+            &scanning(head),
             &req(),
         )
         .unwrap();

@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cambium_testkit::published_fixture;
+
 /// The binary is `cambium-bench`: `tools/bench/*.sh` and the CI jobs exec that
 /// name, and `CARGO_BIN_EXE_cambium-bench` does not exist unless the `[[bin]]`
 /// is named that, so a rename fails here at compile time.
@@ -231,68 +233,4 @@ fn the_harness_reads_back_a_document_the_real_cambi_printed() {
     assert_eq!(doc["schema"], cambium_engine::report::SCHEMA_VERSION);
     assert_eq!(doc["plan"]["mode"], "splice");
     assert_eq!(doc["plan"]["index"]["revision"], f.commits[1]);
-}
-
-/// A synthetic workspace with a real git history, a directory store, and an
-/// index published for the commit `at`. The rows come from the synthetic
-/// source, so Bazel never runs. The same fixture `crates/cli/tests` uses.
-struct PublishedFixture {
-    _dir: tempfile::TempDir,
-    ws: PathBuf,
-    cache: PathBuf,
-    commits: Vec<String>,
-}
-
-fn published_fixture(at: usize) -> PublishedFixture {
-    use cambium_engine::{Config, Engine, SynthQuerier};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store_dir = dir.path().join("store");
-    let cache = dir.path().join("cache");
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-
-    let graph = cambium_synth::generate(&cambium_synth::GraphSpec::preset("tiny").unwrap());
-    let spec = cambium_synth::ChangeSpec {
-        seed: 3,
-        ..cambium_synth::ChangeSpec::preset("typical-pr").unwrap()
-    };
-    let emitted = cambium_synth::emit_git_history(graph, &spec, 4, &ws, true).expect("a history");
-    let mut cfg = Config::load(&ws).unwrap();
-    cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
-        path: store_dir.clone(),
-    };
-    std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
-
-    let engine = Engine::with_parts(
-        cfg.clone(),
-        cambium_diff::Repo::new(ws.clone()),
-        cambium_bazel::Bazel::at(ws.clone(), Some("/nonexistent/bazel")),
-    )
-    .with_cache_dir(cache.clone());
-    let index = engine
-        .full_build_with(
-            &emitted.commits[at],
-            &SynthQuerier::new(&emitted.graphs[at]),
-        )
-        .unwrap();
-    std::fs::create_dir_all(&cache).unwrap();
-    let file = cache.join("published.cmbx");
-    cambium_index::format::write_index(&file, &index).unwrap();
-    let repo = cambium_diff::Repo::new(ws.clone());
-    let tree = repo.tree_of(&emitted.commits[at]).unwrap();
-    cambium_engine::BaselineCache::new(
-        &cambium_engine::store::DirStore::new(store_dir),
-        &cache,
-        cfg.hash(),
-    )
-    .publish(&file, &index.header.lineage, &emitted.commits[at], &tree)
-    .expect("publishing");
-
-    PublishedFixture {
-        _dir: dir,
-        ws,
-        cache,
-        commits: emitted.commits,
-    }
 }

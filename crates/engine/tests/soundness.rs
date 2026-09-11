@@ -10,19 +10,14 @@
 
 use std::collections::BTreeSet;
 
-use cambium_engine::{AffectedRequest, Config, Engine, SynthQuerier};
+use cambium_engine::{AffectedRequest, Config, SynthQuerier};
 use cambium_synth::{commit, generate, reference::reference_affected, ChangeSpec, GraphSpec};
+use cambium_testkit::{engine_with, req, Sandbox};
 
-fn engine(max_dirty_packages: usize) -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
+fn engine(max_dirty_packages: usize) -> Sandbox {
     let mut cfg = Config::default();
     cfg.limits.max_dirty_packages = max_dirty_packages;
-    Engine::with_parts(
-        cfg,
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
+    engine_with(cfg)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -50,15 +45,8 @@ fn sweep(max_dirty_packages: usize) {
     let revisions: u64 = env_or("CAMBIUM_SOUNDNESS_REVISIONS", "8").parse().unwrap();
     let e = engine(max_dirty_packages);
     let req = AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
         materialize: true,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
+        ..req()
     };
 
     // Every iteration lands in exactly one of these, and the totals are checked
