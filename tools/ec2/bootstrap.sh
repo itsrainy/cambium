@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bootstraps an Ubuntu 24.04 x86_64 benchmark box: everything a full
-# `cambi bench` run needs, for every subject in subject_repos.toml.
+# `cambium-bench` run needs, for every subject in subject_repos.toml.
 #
 # Runs as EC2 user-data (root) on first boot, then everything cambium-related
 # is owned by `ubuntu`. Idempotent enough to re-run by hand:

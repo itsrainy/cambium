@@ -1,7 +1,7 @@
-//! `cambi synth` — generated Bazel graphs and workspaces.
+//! `cambium-bench synth` — generated Bazel graphs and workspaces.
 //!
 //! The generator is deterministic from a preset and a seed, which is what lets
-//! a synthetic subject (`synth:<preset>`, see `cambi bench`) be emitted on
+//! a synthetic subject (`synth:<preset>`, see `cambium-bench`) be emitted on
 //! demand and compared with itself across machines.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use anyhow::Result;
 use cambium_bench::runner;
 use clap::Subcommand;
 
-use crate::cmd::Context;
+use crate::Context;
 
 #[derive(Subcommand)]
 pub enum Args {

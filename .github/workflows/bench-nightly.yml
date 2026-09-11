@@ -74,21 +74,21 @@ jobs:
           restore-keys: |
             bench-cache-${{ matrix.subject }}-
 
-      - run: cargo build --release -p cambium-cli
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
 
       - name: bench subjects fetch
-        run: ./target/release/cambi bench subjects fetch ${{ matrix.subject }}
+        run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects fetch ${{ matrix.subject }}
       - name: bench subjects build
-        run: ./target/release/cambi bench subjects build ${{ matrix.subject }}
+        run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects build ${{ matrix.subject }}
       - name: bench history --commits 50
-        run: ./target/release/cambi bench history ${{ matrix.subject }} --commits 50
+        run: ./target/release/cambium-bench --cambi ./target/release/cambi history ${{ matrix.subject }} --commits 50
       - name: bench changes
         run: |
-          ./target/release/cambi bench changes ${{ matrix.subject }} \
+          ./target/release/cambium-bench --cambi ./target/release/cambi changes ${{ matrix.subject }} \
             --kind pr,adjacent,stress --oracle rdeps,load
       - name: bench report
         if: always()
-        run: ./target/release/cambi bench report ${{ matrix.subject }}
+        run: ./target/release/cambium-bench report ${{ matrix.subject }}
 
       - uses: actions/upload-artifact@v4
         if: always()

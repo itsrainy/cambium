@@ -23,7 +23,7 @@
 //! One label per line, sorted, zstd-compressed — tens of kilobytes a change
 //! set, which is why none of it is behind a flag: a debugging artifact that
 //! has to be asked for in advance is not there on the run that needed it.
-//! [`crate::compare::driver`] writes them; `cambi bench labels` reads them
+//! [`crate::compare::driver`] writes them; `cambium-bench labels` reads them
 //! back.
 
 use std::collections::BTreeSet;
@@ -193,7 +193,7 @@ pub fn resolve(changes_dir: &Path, spec: &str) -> Result<PathBuf> {
     let mut hits: Vec<PathBuf> = Vec::new();
     let entries = std::fs::read_dir(&root).with_context(|| {
         format!(
-            "no stored label sets under {}; they are written by `cambi bench changes`",
+            "no stored label sets under {}; they are written by `cambium-bench changes`",
             root.display()
         )
     })?;

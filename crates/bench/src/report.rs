@@ -1322,7 +1322,7 @@ fn tool_names(c: &ChangesResult) -> Vec<String> {
 pub fn render_bench_section(rows: &[BenchLegacy], chart: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str(
-        "These are *synthetic* graphs (`cambi bench sweep --stage \
+        "These are *synthetic* graphs (`cambium-bench sweep --stage \
          legacy_bazel_diff`), not the real subjects above: cambium and bazel-diff on \
          the same generated workspace, the same change, and a `bazel` shim that \
          replays a recorded query, so what is measured is each tool's own work \
@@ -1640,7 +1640,7 @@ mod tests {
             .with_compares(vec![compare()])
     }
 
-    /// The whole path a `cambi bench report` walks, with no CLI in it: write
+    /// The whole path a `cambium-bench report` walks, with no CLI in it: write
     /// what a run writes, discover it, render it, and update the document.
     #[test]
     fn results_are_discovered_from_disk_and_rendered_into_the_doc() {

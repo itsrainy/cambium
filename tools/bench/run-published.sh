@@ -37,7 +37,11 @@ export PATH=/usr/local/go/bin:$PATH
 # not moved.
 export CAMBIUM_SUBJECTS_DIR=${CAMBIUM_SUBJECTS_DIR:-$HOME/.cache/cambium/corpus}
 cd "${CAMBIUM_REPO:-$HOME/cambium}"
+# Two binaries: the product that is measured, and the harness that measures it.
+# `CAMBI` is exported because the harness reads it when no --cambi is given.
 CAMBI=${CAMBI:-./target/release/cambi}
+export CAMBI
+CAMBIUM_BENCH=${CAMBIUM_BENCH:-./target/release/cambium-bench}
 
 # Preflight: the binary must be built from this tree, and the last sync's
 # build must have finished. Twice a run went on for hours with a binary that
@@ -53,6 +57,7 @@ if [ -f ~/finish-bootstrap.log ] && ! grep -q "BOOTSTRAP DONE" ~/finish-bootstra
   exit 2
 fi
 echo "=== $(date -u +%H:%M:%S) $($CAMBI --version) tree $TREE_SHA ==="
+echo "=== harness $($CAMBIUM_BENCH --version) ==="
 
 SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
 STEPS=${STEPS:-"fetch build history changes report"}
@@ -71,32 +76,32 @@ wants() { case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
 for S in $SUBJECTS; do
   if wants fetch; then
     step "$S fetch"
-    $CAMBI --log info bench subjects fetch "$S" "${results[@]}"   || { echo "FAILED $S fetch"; continue; }
+    $CAMBIUM_BENCH --log info subjects fetch "$S" "${results[@]}"   || { echo "FAILED $S fetch"; continue; }
   fi
   if wants build; then
     step "$S build"
-    $CAMBI --log info bench subjects build "$S" "${results[@]}"   || { echo "FAILED $S build"; continue; }
+    $CAMBIUM_BENCH --log info subjects build "$S" "${results[@]}"   || { echo "FAILED $S build"; continue; }
   fi
   if wants history; then
     step "$S history"
     history_args=(--oracle rebuild "${results[@]}")
     [ "$RESTART_HISTORY" = 1 ] && history_args+=(--restart)
     [ "$SMOKE" = 1 ] && history_args+=(--commits 3 --restart)
-    $CAMBI --log info bench history "$S" "${history_args[@]}" || echo "FAILED $S history"
+    $CAMBIUM_BENCH --log info history "$S" "${history_args[@]}" || echo "FAILED $S history"
   fi
   if wants changes; then
     step "$S changes"
     changes_args=(--tools cambium,bazel-diff,tango --oracle rdeps,load "${results[@]}")
     [ "$RESTART_CHANGES" = 1 ] && changes_args+=(--restart)
     [ "$SMOKE" = 1 ] && changes_args+=(--change-sets 1 --restart)
-    $CAMBI --log info bench changes "$S" "${changes_args[@]}" || echo "FAILED $S changes"
+    $CAMBIUM_BENCH --log info changes "$S" "${changes_args[@]}" || echo "FAILED $S changes"
   fi
   if wants report; then
     step "$S report"
-    $CAMBI bench report "$S" "${results[@]}" || echo "FAILED $S report"
+    $CAMBIUM_BENCH report "$S" "${results[@]}" || echo "FAILED $S report"
   fi
 done
 
 step "final report"
-$CAMBI bench report "${results[@]}"
+$CAMBIUM_BENCH report "${results[@]}"
 if [ "$SMOKE" = 1 ]; then echo "SMOKE RUN DONE"; else echo "PUBLISHED RUN DONE"; fi

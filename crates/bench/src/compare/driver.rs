@@ -150,7 +150,7 @@ fn compare_one(
 
     // Keep the base this run actually spliced onto. `state_dir` is
     // `bench-results/<subject>/`, so the archive sits beside `state.json` and
-    // the cold indexes every workload shares; `cambi bench replay` looks for
+    // the cold indexes every workload shares; `cambium-bench replay` looks for
     // it there. Without it the only base a later replay has is the index at
     // the pin, which is a different graph -- see `crate::replay`.
     if let Some(base) = out.base_index.as_ref() {

@@ -81,16 +81,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p cambium-cli
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
       - run: |
-          ./target/release/cambi bench stages synth:small --runs 5 \
+          ./target/release/cambium-bench stages synth:small --runs 5 \
             --out bench-results/synth-small/stages/ci.json \
             --markdown bench-results/synth-small/stages/ci.md
-          ./target/release/cambi bench stages synth:medium --runs 5 \
+          ./target/release/cambium-bench stages synth:medium --runs 5 \
             --out bench-results/synth-medium/stages/ci.json \
             --markdown bench-results/synth-medium/stages/ci.md
       # Machine fingerprints differ between runners, so gating only makes sense
-      # against a baseline captured on the same runner class; `bench regress`
+      # against a baseline captured on the same runner class; `cambium-bench regress`
       # refuses to compare across machines rather than reporting noise.
       - uses: actions/upload-artifact@v4
         with:
@@ -100,7 +100,7 @@ jobs:
   synthetic-changes:
     name: change sets on synth:small, vs bazel-diff
     # The per-pull-request run of the real benchmark, on a synthetic subject:
-    # the same `bench changes` a person points at envoy, over a generated
+    # the same `cambium-bench changes` a person points at envoy, over a generated
     # workspace small enough to emit, load and diff on a hosted runner. Tango
     # is left out because it costs 30-500 s a change set; the weekly job on the
     # real subjects runs all three.
@@ -122,14 +122,14 @@ jobs:
           # a rebuild rather than silently reusing the old binary.
           key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
       - run: tools/bazel-diff/fetch.sh
-      - run: cargo build --release -p cambium-cli
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
       - name: bench changes synth:small
         # Non-zero exit is the gate: the run fails on any `cambium_missing`,
         # any `cambium_missing_bzl_closure`, any `unclassified` disagreement,
         # or recall under 1.0 against the rdeps oracle. Everything else in the
         # taxonomy is an over-approximation and is reported, not gated.
         run: |
-          ./target/release/cambi bench changes synth:small \
+          ./target/release/cambium-bench --cambi ./target/release/cambi changes synth:small \
             --tools cambium,bazel-diff --change-sets 5 --kind adjacent
       - uses: actions/upload-artifact@v4
         if: always()
@@ -201,9 +201,9 @@ jobs:
           CAMBIUM_SOUNDNESS_SIZE: medium
           CAMBIUM_SOUNDNESS_SEEDS: "8"
           CAMBIUM_SOUNDNESS_REVISIONS: "10"
-      - run: cargo build --release -p cambium-cli
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
       - run: |
-          ./target/release/cambi bench stages synth:large --runs 3 \
+          ./target/release/cambium-bench stages synth:large --runs 3 \
             --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
             --out bench-results/synth-large/stages/nightly.json \
             --markdown bench-results/synth-large/stages/nightly.md

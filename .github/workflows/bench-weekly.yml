@@ -69,13 +69,13 @@ jobs:
           restore-keys: |
             bench-cache-${{ matrix.subject }}-
 
-      - run: cargo build --release -p cambium-cli
-      - run: ./target/release/cambi bench subjects fetch ${{ matrix.subject }}
-      - run: ./target/release/cambi bench subjects build ${{ matrix.subject }}
-      - run: ./target/release/cambi bench history ${{ matrix.subject }}
-      - run: ./target/release/cambi bench changes ${{ matrix.subject }}
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects fetch ${{ matrix.subject }}
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects build ${{ matrix.subject }}
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi history ${{ matrix.subject }}
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi changes ${{ matrix.subject }}
       - if: always()
-        run: ./target/release/cambi bench report ${{ matrix.subject }}
+        run: ./target/release/cambium-bench report ${{ matrix.subject }}
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -121,16 +121,16 @@ jobs:
           restore-keys: |
             bench-cache-tensorflow-
 
-      - run: cargo build --release -p cambium-cli
+      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
       # tensorflow carries `skip = true` in subject_repos.toml, which only ever
       # bounds the "every subject" form of `bench subjects`; naming it runs it,
       # which is what a deliberate monthly job is.
-      - run: ./target/release/cambi bench subjects fetch tensorflow
-      - run: ./target/release/cambi bench subjects build tensorflow
-      - run: ./target/release/cambi bench history tensorflow
-      - run: ./target/release/cambi bench changes tensorflow
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects fetch tensorflow
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi subjects build tensorflow
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi history tensorflow
+      - run: ./target/release/cambium-bench --cambi ./target/release/cambi changes tensorflow
       - if: always()
-        run: ./target/release/cambi bench report tensorflow
+        run: ./target/release/cambium-bench report tensorflow
 
       - uses: actions/upload-artifact@v4
         if: always()

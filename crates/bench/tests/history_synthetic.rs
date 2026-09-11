@@ -130,7 +130,7 @@ fn a_history_runs_and_the_rebuild_oracle_holds() {
 
 /// The rebuild oracle's fresh Bazel-built index is the only artefact that
 /// says what the graph and the externals tables are at the pin, and it used
-/// to be dropped on the floor. Archived, `cambi bench replay --head-check`
+/// to be dropped on the floor. Archived, `cambium-bench replay --head-check`
 /// can hold a later engine's derivation against it with no Bazel.
 #[test]
 fn the_rebuild_oracles_head_index_is_archived_and_reads_back() {

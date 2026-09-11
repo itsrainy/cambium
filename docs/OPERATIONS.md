@@ -5,9 +5,9 @@ somebody already. The *words* are [METHODOLOGY.md](METHODOLOGY.md), the
 numbers are [RESULTS.md](RESULTS.md), and what is left to do in the current
 session is [HANDOFF.md](../HANDOFF.md).
 
-Nothing here is needed to run the suite on a laptop. `cambi bench changes
+Nothing here is needed to run the suite on a laptop. `cambium-bench changes
 synth:small` emits its own subject and needs no setup at all; a real subject
-needs `tools/bazel-diff/fetch.sh`, `tools/tango/fetch.sh` and `cambi bench
+needs `tools/bazel-diff/fetch.sh`, `tools/tango/fetch.sh` and `cambium-bench
 subjects fetch <id>` first. This file is about the five real subjects at full
 size, which do not fit on a laptop.
 
@@ -35,7 +35,7 @@ size, which do not fit on a laptop.
 - **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` pulls
   each subject's `bases/*.bin` and `heads/*.bin` alongside the index and the
   results, replays every change set, and — with `REDERIVE=1` and a local
-  mirror — also runs `cambi bench replay <subject> --head-check`, which
+  mirror — also runs `cambium-bench replay <subject> --head-check`, which
   re-derives the externals tables from the head tree's text and compares them
   against the index the rebuild oracle cold-built at the pin. That is the
   rebuild oracle's externals half, offline: an engine change to the externals
@@ -51,7 +51,7 @@ size, which do not fit on a laptop.
   subject at a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla),
   `fetch` / `build` / `history --oracle rebuild` / `changes --tools
   cambium,bazel-diff,tango --oracle rdeps,load` / `report`, then a final
-  `bench report`. A failing subject does not stop the rest. Run it under
+  `cambium-bench report`. A failing subject does not stop the rest. Run it under
   `nohup` with a log and watch it with a Monitor; grep the log for
   `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`, `unclassified`,
   `cambium_missing`, `No space left`.
@@ -77,7 +77,7 @@ size, which do not fit on a laptop.
   `bench-results/<subject>/changes/labels/<base>..<head>/` holds
   `cambium.txt.zst`, one `<tool>.txt.zst` each, `oracle.txt.zst` when the rdeps
   oracle ran, and `classes.tsv.zst` — `tool`, `side`, `class`, `label` for
-  *every* disagreement, not just the examples. Read them with `cambi bench
+  *every* disagreement, not just the examples. Read them with `cambium-bench
   labels <subject> --change-set <base>..<head>` (abbreviated revisions are
   fine), narrowed with `--tool`, `--class` and `--side`, or `--diff` for the
   only-tool/only-cambium/both counts per tool. It needs no Bazel and no
@@ -112,7 +112,7 @@ size, which do not fit on a laptop.
 - zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
 - A subject whose pin is partial on the box for a constant reason (apollo's
   `@local_config_cuda`, xla's Windows toolchains) needs `publish_partial =
-  true` in `subject_repos.toml`, or `bench subjects build` refuses to publish
+  true` in `subject_repos.toml`, or `cambium-bench subjects build` refuses to publish
   the index and every later step of that subject fails.
 - The pin index is not the index a change set ran against. envoy's pin is past
   its bzlmod migration; the bases the run spliced onto were WORKSPACE-mode

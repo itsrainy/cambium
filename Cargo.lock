@@ -210,6 +210,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cambium-bench-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cambium-bazel",
+ "cambium-bench",
+ "cambium-diff",
+ "cambium-engine",
+ "cambium-index",
+ "cambium-synth",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cambium-classify"
 version = "0.1.0"
 dependencies = [
@@ -228,7 +247,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cambium-bazel",
- "cambium-bench",
  "cambium-diff",
  "cambium-engine",
  "cambium-index",

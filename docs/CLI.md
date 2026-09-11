@@ -222,17 +222,26 @@ deprecation diagnostic naming the new one (`CAMBI-W001: cambi baseline build
 is now cambi index build`). `--output` becomes `--format`, `baseline`
 becomes `index`, the old `index` queries become `inspect`, `--explain`
 becomes `explain`. The `bench` and `synth` verbs are removed rather than
-deprecated: they were never part of the contract and their only caller is
-the repository's own driver.
+deprecated — not aliased, not warned about: they were never part of the
+contract, their only caller is the repository's own driver, and they live in
+`cambium-bench` now. `cambi bench ...` is an ordinary unknown-subcommand error
+from clap.
 
 ## The benchmark tools
 
 The harness (`bench`, `replay`, `labels`, `report`, the subject manifest,
-the synthetic generator) becomes its own binary in this repository, built
-from the `bench` and `synth` crates, and drives `cambi` by shelling out to
-it. That is the honest arrangement: the harness measures the binary users
-run, with the same flags, the same store and the same exit codes, and a
+the synthetic generator) is its own binary, `cambium-bench`
+(`crates/bench-cli`), built from the `bench` and `synth` crates, and it drives
+`cambi` by shelling out to it: `cambi index build` for a cold index, `cambi
+index update` to bring one forward, `cambi index publish` to upload one, and
+`cambi affected --format json` for the answer, read back with the engine's own
+report types. That is the honest arrangement: the harness measures the binary
+users run, with the same flags, the same store and the same exit codes, and a
 change to the product surface shows up in the benchmark as it would for a
-user. The live matrix view proposed in issue #1 is that binary's front door,
+user. `replay` and the stage micro-benchmarks (`stages`, `sweep`, `regress`)
+are the exception and keep linking the engine directly, because they are
+white-box by nature: one replays the engine's static stages against a stored
+index with no product run to measure, and the others time a single in-memory
+stage. The live matrix view proposed in issue #1 is that binary's front door,
 not a `cambi` verb. It follows the output rules here because they are good
 rules, not because it is part of the contract.
