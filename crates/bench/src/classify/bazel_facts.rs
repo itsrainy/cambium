@@ -330,7 +330,7 @@ impl<'a> BazelFacts<'a> {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-                if let Some(rules) = query_rules(self.head, &expr) {
+                if let Some(rules) = crate::tools::bazel_query::rules(self.head, &expr) {
                     let mut c = self.implicit_cache.borrow_mut();
                     for r in rules {
                         c.insert(r.name.clone(), Some(r));
@@ -411,7 +411,7 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let Some(rules) = query_rules(bazel, &expr) else {
+        let Some(rules) = crate::tools::bazel_query::rules(bazel, &expr) else {
             continue;
         };
         let mut c = cache.borrow_mut();
@@ -424,14 +424,6 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
     }
 }
 
-/// Every rule proto a query expression yields, or `None` if the query could
-/// not be run at all. Exit 3 (`--keep_going` finished with errors) is kept:
-/// the labels Bazel could resolve are on stdout, and the ones it could not are
-/// cached as `None` by the caller.
-fn query_rules(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
-    crate::tools::bazel_query::rules(bazel, expr)
-}
-
 /// Whether a rule names a label outside the main repository among its
 /// inputs. Split out from the walk so the predicate can be tested on a
 /// hand-built proto without a Bazel.
@@ -442,11 +434,8 @@ pub fn names_external_input(rule: &Rule) -> bool {
 }
 
 /// One rule's proto at a revision, or `None` when Bazel cannot produce it.
-///
-/// `--proto:flatten_selects=false` is the point of the call: flattened, an
-/// attribute's `select` branches are merged into one list and the
-/// `selector_list` field is gone, so there is no way to tell a `select`ed dep
-/// from an unconditional one.
+/// [`crate::tools::bazel_query::rules`] carries the flags and the exit-3
+/// policy; this only asks for one label.
 fn query_rule(bazel: &Bazel, label: &str) -> Option<Rule> {
     crate::tools::bazel_query::rules(bazel, query_word(label).as_str())?
         .into_iter()

@@ -173,6 +173,21 @@ pub fn versioned_name(stem: &str, version: Option<&str>, ext: &str) -> String {
     format!("{}.{ext}", versioned_stem(stem, version))
 }
 
+/// A size as a person types one: `1000`, `1e6`, `2M`, `500k`.
+pub fn parse_size(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1_000.0),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1_000_000.0),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1_000_000_000.0),
+        _ => (s, 1.0),
+    };
+    let v: f64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("cannot parse size {s:?}"))?;
+    Ok((v * mult) as u64)
+}
+
 /// Just the `schema` field, so a file can be refused before it is parsed into
 /// a type whose fields have since been renamed.
 #[derive(serde::Deserialize)]
@@ -305,6 +320,16 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_size_takes_a_suffix_or_an_exponent() {
+        assert_eq!(parse_size("1000").unwrap(), 1000);
+        assert_eq!(parse_size("1e6").unwrap(), 1_000_000);
+        assert_eq!(parse_size("2M").unwrap(), 2_000_000);
+        assert_eq!(parse_size(" 500k ").unwrap(), 500_000);
+        assert_eq!(parse_size("1G").unwrap(), 1_000_000_000);
+        assert!(parse_size("lots").is_err());
     }
 
     #[test]

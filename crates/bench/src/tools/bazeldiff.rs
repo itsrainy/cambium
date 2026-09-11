@@ -36,7 +36,9 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-use crate::tools::{normalise_label, run_capture, RunContext, Tool, ToolRun};
+use crate::tools::{
+    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+};
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_BAZEL_DIFF";
@@ -92,12 +94,25 @@ pub struct BazelDiff {
     exclude_external_targets: bool,
 }
 
+/// How `tools/bazel-diff/fetch.sh` lays the installation out.
+const INSTALL: Install = Install {
+    cache_name: "bazel-diff",
+    binary: "bin/bazel-diff-rust",
+    bin_env: BIN_ENV,
+    dir_env: DIR_ENV,
+    fetch_script: "tools/bazel-diff/fetch.sh",
+};
+
+/// The jar's place in the same installation.
+const JAR: Install = Install {
+    binary: "bazel-diff_deploy.jar",
+    bin_env: JAR_ENV,
+    ..INSTALL
+};
+
 /// `~/.cache/cambium/bazel-diff`, where `tools/bazel-diff/fetch.sh` installs.
 pub fn default_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os(DIR_ENV) {
-        return PathBuf::from(d);
-    }
-    crate::util::cache_dir("bazel-diff")
+    INSTALL.dir(None)
 }
 
 /// The version fetch.sh recorded next to `bin/`, if it did.
@@ -106,35 +121,37 @@ pub fn default_dir() -> PathBuf {
 /// repository tag (the tag-v46 build reports `bazel-diff 39.0.0`), and it is
 /// the tag and commit that identify what was compared.
 pub fn read_version_file(dir: &Path) -> Option<String> {
-    let s = std::fs::read_to_string(dir.join("VERSION")).ok()?;
-    let s = s.trim();
-    (!s.is_empty()).then(|| s.lines().collect::<Vec<_>>().join(" "))
+    Install::version_text(dir).map(|s| s.lines().collect::<Vec<_>>().join(" "))
 }
 
 impl BazelDiff {
-    /// Locates the requested implementation, or explains where it looked.
+    /// Locates the requested implementation from the environment
+    /// (`$CAMBIUM_BAZEL_DIFF`, `$CAMBIUM_BAZEL_DIFF_JAR`,
+    /// `$CAMBIUM_BAZEL_DIFF_DIR`), or explains where it looked.
     pub fn discover(imp: Implementation) -> Result<Self> {
-        let dir = default_dir();
-        let override_env = match imp {
-            Implementation::Rust => BIN_ENV,
-            Implementation::Kotlin => JAR_ENV,
+        Self::discover_with(imp, &ToolLocations::from_env())
+    }
+
+    /// Locates the requested implementation where the command line said it
+    /// is, or under the installation directory.
+    pub fn discover_with(imp: Implementation, at: &ToolLocations) -> Result<Self> {
+        let dir = INSTALL.dir(at.bazel_diff_dir.as_deref());
+        let explicit = match imp {
+            Implementation::Rust => at.bazel_diff.clone(),
+            Implementation::Kotlin => at.bazel_diff_jar.clone(),
         };
-        match std::env::var_os(override_env) {
-            Some(p) => Self::at(imp, &dir, PathBuf::from(p)),
+        match explicit {
+            Some(p) => Self::at(imp, &dir, p),
             None => Self::discover_in(imp, &dir),
         }
     }
 
     /// The installation under `dir`, as `tools/bazel-diff/fetch.sh` lays one
     /// out.
-    ///
-    /// The environment is read by [`discover`](Self::discover) and nowhere
-    /// else, so a test can point at a directory of its own without setting a
-    /// process-wide variable that every other test in the binary shares.
     pub fn discover_in(imp: Implementation, dir: &Path) -> Result<Self> {
         let path = match imp {
-            Implementation::Rust => dir.join("bin/bazel-diff-rust"),
-            Implementation::Kotlin => dir.join("bazel-diff_deploy.jar"),
+            Implementation::Rust => INSTALL.locate_in(dir)?,
+            Implementation::Kotlin => JAR.locate_in(dir)?,
         };
         Self::at(imp, dir, path)
     }
@@ -142,25 +159,23 @@ impl BazelDiff {
     /// One implementation at an explicit path, with the version the
     /// installation `dir` records beside it.
     fn at(imp: Implementation, dir: &Path, path: PathBuf) -> Result<Self> {
+        anyhow::ensure!(
+            path.exists(),
+            "no bazel-diff at {}; set ${}, or ${DIR_ENV}",
+            path.display(),
+            match imp {
+                Implementation::Rust => BIN_ENV,
+                Implementation::Kotlin => JAR_ENV,
+            }
+        );
         match imp {
             Implementation::Rust => {
-                anyhow::ensure!(
-                    path.exists(),
-                    "no bazel-diff binary at {}; set ${BIN_ENV}, or ${DIR_ENV}, \
-                     or run tools/bazel-diff/fetch.sh",
-                    path.display()
-                );
                 let version = read_version_file(dir)
                     .or_else(|| binary_version(&path))
                     .unwrap_or_else(|| "unknown".into());
                 Ok(Self::new(imp, Exec::Binary(path), version))
             }
             Implementation::Kotlin => {
-                anyhow::ensure!(
-                    path.exists(),
-                    "no bazel-diff jar at {}; set ${JAR_ENV}, or ${DIR_ENV}",
-                    path.display()
-                );
                 let java = std::env::var_os("JAVA_HOME")
                     .map(|h| PathBuf::from(h).join("bin/java"))
                     .filter(|p| p.exists())
@@ -306,14 +321,13 @@ impl Tool for BazelDiff {
 
     fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun> {
         std::fs::create_dir_all(&ctx.scratch)?;
-        let short = |s: &str| s.chars().take(12).collect::<String>();
-        let base_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short(base)));
-        let head_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short(head)));
+        let base_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short_sha(base)));
+        let head_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short_sha(head)));
         let out = ctx.scratch_file(&format!(
             "{}-{}-{}.txt",
             self.name,
-            short(base),
-            short(head)
+            short_sha(base),
+            short_sha(head)
         ));
 
         // The base hash runs against the second worktree; the head hash

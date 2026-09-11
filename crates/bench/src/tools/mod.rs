@@ -35,6 +35,168 @@ pub mod bazeldiff;
 pub mod cambi;
 pub mod tango;
 
+// ------------------------------------------------------------ finding them
+
+/// Where the foil tools are, as the command line said.
+///
+/// Every field is "nothing was said", and the binary fills them from its
+/// flags — each with the environment variable of the same meaning as a
+/// fallback — so the library reads no environment on a workload's behalf.
+/// [`ToolLocations::from_env`] is the one place it can, for a caller with no
+/// command line (the real-tool tests).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolLocations {
+    /// The bazel-diff Rust binary (`$CAMBIUM_BAZEL_DIFF`).
+    pub bazel_diff: Option<PathBuf>,
+    /// The bazel-diff deploy jar (`$CAMBIUM_BAZEL_DIFF_JAR`).
+    pub bazel_diff_jar: Option<PathBuf>,
+    /// Where `tools/bazel-diff/fetch.sh` installed (`$CAMBIUM_BAZEL_DIFF_DIR`).
+    pub bazel_diff_dir: Option<PathBuf>,
+    /// `tango-cli` (`$CAMBIUM_TANGO`).
+    pub tango: Option<PathBuf>,
+    /// Where `tools/tango/fetch.sh` installed (`$CAMBIUM_TANGO_DIR`).
+    pub tango_dir: Option<PathBuf>,
+}
+
+impl ToolLocations {
+    /// The environment's answer for every field. The names are the ones
+    /// `docs/OPERATIONS.md` tables.
+    pub fn from_env() -> Self {
+        let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+        Self {
+            bazel_diff: var(bazeldiff::BIN_ENV),
+            bazel_diff_jar: var(bazeldiff::JAR_ENV),
+            bazel_diff_dir: var(bazeldiff::DIR_ENV),
+            tango: var(tango::BIN_ENV),
+            tango_dir: var(tango::DIR_ENV),
+        }
+    }
+}
+
+/// How one tool's installation is laid out, so the two adapters share one
+/// lookup instead of a copy each: an explicit binary wins, else the binary
+/// at its place under the installation directory, which is explicit or the
+/// cache directory `fetch.sh` writes into.
+#[derive(Clone, Copy, Debug)]
+pub struct Install {
+    /// `~/.cache/cambium/<cache_name>`.
+    pub cache_name: &'static str,
+    /// The binary's path under the installation directory.
+    pub binary: &'static str,
+    /// What the error names when nothing is found.
+    pub bin_env: &'static str,
+    pub dir_env: &'static str,
+    pub fetch_script: &'static str,
+}
+
+impl Install {
+    /// The installation directory: explicit, else the cache.
+    pub fn dir(&self, explicit: Option<&Path>) -> PathBuf {
+        explicit
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| crate::util::cache_dir(self.cache_name))
+    }
+
+    /// The binary under `dir`, which must exist.
+    pub fn locate_in(&self, dir: &Path) -> Result<PathBuf> {
+        let bin = dir.join(self.binary);
+        anyhow::ensure!(
+            bin.exists(),
+            "no {} at {}; set ${}, or ${}, or run {}",
+            Path::new(self.binary)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(self.binary),
+            bin.display(),
+            self.bin_env,
+            self.dir_env,
+            self.fetch_script
+        );
+        Ok(bin)
+    }
+
+    /// The `VERSION` file `fetch.sh` writes beside the binary, trimmed, or
+    /// `None` when there is none.
+    pub fn version_text(dir: &Path) -> Option<String> {
+        let s = std::fs::read_to_string(dir.join("VERSION")).ok()?;
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+}
+
+/// The first twelve characters of a sha, for a scratch file name.
+pub fn short_sha(s: &str) -> String {
+    s.chars().take(12).collect()
+}
+
+// ------------------------------------------------------------ naming them
+
+/// The tool names a `--tools` list asks for, before any is looked for on
+/// disk.
+///
+/// The list is exact when given; otherwise the default is both foils — a
+/// bazel-diff and Tango — because a comparison against one tool only tells
+/// you which of the two disagrees with cambium, not which of the three is the
+/// odd one out. cambium is not a foil: it is what the foils are compared
+/// against and runs on every change set whether or not it is named, so naming
+/// it alone is how a run measures cambium with no tool to disagree with it.
+pub fn wanted(names: &[String]) -> Result<Vec<String>> {
+    let names: Vec<&str> = match names.is_empty() {
+        true => vec!["bazel-diff", "tango"],
+        false => names.iter().map(String::as_str).collect(),
+    };
+    let mut out = Vec::new();
+    for n in names {
+        match n.trim() {
+            cambi::NAME => {}
+            "bazel-diff" | "bazel-diff-rust" | "rust" => {
+                out.push(bazeldiff::Implementation::Rust.name().to_string())
+            }
+            "bazel-diff-kotlin" | "kotlin" => {
+                out.push(bazeldiff::Implementation::Kotlin.name().to_string())
+            }
+            "tango" => out.push(tango::NAME.to_string()),
+            "none" | "" => {}
+            other => anyhow::bail!(
+                "unknown tool {other:?}: cambium, bazel-diff, bazel-diff-kotlin, tango"
+            ),
+        }
+    }
+    Ok(out)
+}
+
+/// Locates one tool by name, or explains on stderr why it is being skipped.
+///
+/// A missing binary is a warning, not an error: the machine that runs the
+/// nightly job may have bazel-diff and no Go toolchain, and a run that
+/// refuses to compare anything because one of two optional tools is absent is
+/// worse than a run that says so and compares the other.
+pub fn open(name: &str, at: &ToolLocations) -> Result<Option<Box<dyn Tool>>> {
+    use bazeldiff::{BazelDiff, Implementation};
+    let found: Result<Box<dyn Tool>> = match name {
+        "tango" => tango::Tango::discover_with(at).map(|t| Box::new(t) as _),
+        "bazel-diff-rust" | "rust" => {
+            BazelDiff::discover_with(Implementation::Rust, at).map(|b| Box::new(b) as _)
+        }
+        "bazel-diff-kotlin" | "kotlin" => {
+            BazelDiff::discover_with(Implementation::Kotlin, at).map(|b| Box::new(b) as _)
+        }
+        other => {
+            anyhow::bail!("unknown tool {other:?}: bazel-diff-rust, bazel-diff-kotlin, tango")
+        }
+    };
+    match found {
+        Ok(p) => {
+            tracing::info!(tool = p.name(), version = %p.version(), "tool");
+            Ok(Some(p))
+        }
+        Err(e) => {
+            eprintln!("cambium-bench: changes: skipping {name}: {e:#}");
+            Ok(None)
+        }
+    }
+}
+
 /// One tool's answer for one commit change set.
 #[derive(Clone, Debug, Default)]
 pub struct ToolRun {
@@ -222,40 +384,45 @@ impl RunContext {
     /// own environment already sets `CI` — see
     /// [`Self::apply_noninteractive`] for why.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut cmd = Command::new(program);
-        cmd.envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        Self::apply_noninteractive(&mut cmd, &self.env);
-        cmd
-    }
-
-    /// Makes `cmd` unable to block on a prompt: stdin is nulled, and `CI=1`
-    /// is set unless `env` already names `CI`.
-    ///
-    /// A tool never has a terminal to prompt against — it runs
-    /// unattended, in a batch of hundreds of change sets — but some of them
-    /// assume one anyway. Nulling stdin makes any such prompt fail at once
-    /// with EOF instead of hanging, and removes any ambiguity about where
-    /// that EOF came from; `CI=1` is the general signal most such CLIs
-    /// (Aspect's plugins included; see `.aspect/bazelrc/ci*.bazelrc` in the
-    /// benchmark's subject repositories) already check to skip interactive
-    /// behaviour rather than wait on a prompt no one will answer.
-    ///
-    /// Neither is a fix for a prompt that *cannot* be skipped. The Aspect
-    /// CLI's `query` wrapper opens an interactive preset picker whenever it
-    /// gets no positional expression — bazel-diff's `--query_file` invocation
-    /// exactly — and `CI=1` does not stop it; that is why the run never
-    /// reaches the Aspect CLI at all: see
-    /// [`crate::checkout::bazelisk_env`].
-    fn apply_noninteractive(cmd: &mut Command, env: &[(String, String)]) {
-        cmd.stdin(std::process::Stdio::null());
-        if !env.iter().any(|(k, _)| k == "CI") {
-            cmd.env("CI", "1");
-        }
+        noninteractive_command(program, &self.env)
     }
 
     pub fn scratch_file(&self, name: &str) -> PathBuf {
         self.scratch.join(name)
     }
+}
+
+/// A child process carrying `env`, unable to block on a prompt: stdin is
+/// nulled, and `CI=1` is set unless `env` already names `CI`.
+///
+/// A tool never has a terminal to prompt against — it runs unattended, in a
+/// batch of hundreds of change sets — but some of them assume one anyway.
+/// Nulling stdin makes any such prompt fail at once with EOF instead of
+/// hanging, and removes any ambiguity about where that EOF came from; `CI=1`
+/// is the general signal most such CLIs (Aspect's plugins included; see
+/// `.aspect/bazelrc/ci*.bazelrc` in the benchmark's subject repositories)
+/// already check to skip interactive behaviour rather than wait on a prompt
+/// no one will answer.
+///
+/// Neither is a fix for a prompt that *cannot* be skipped. The Aspect CLI's
+/// `query` wrapper opens an interactive preset picker whenever it gets no
+/// positional expression — bazel-diff's `--query_file` invocation exactly —
+/// and `CI=1` does not stop it; that is why the run never reaches the Aspect
+/// CLI at all: see [`crate::checkout::bazelisk_env`].
+///
+/// The one process builder for every tool and for `cambi`: the product under
+/// measurement is run exactly as a foil is.
+pub fn noninteractive_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    env: &[(String, String)],
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    cmd.stdin(std::process::Stdio::null());
+    if !env.iter().any(|(k, _)| k == "CI") {
+        cmd.env("CI", "1");
+    }
+    cmd
 }
 
 /// A tool that answers "what is affected between base and head".
@@ -282,12 +449,24 @@ pub struct Captured {
     pub stdout: String,
     pub stderr: String,
     pub wall: Duration,
+    /// The exit status, for a caller that accepts more than success.
+    pub status: std::process::ExitStatus,
 }
 
 /// Runs `cmd`, timing it, and turns a non-zero exit into an error that carries
 /// the tail of stderr — a tool failing on one change set out of two hundred is
 /// only debuggable if the message says why.
 pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
+    run_capture_accepting(cmd, what, |s| s.success())
+}
+
+/// [`run_capture`] with its own idea of which exit statuses are answers:
+/// `cambi affected` exits 2 for "everything is affected", which is one.
+pub fn run_capture_accepting(
+    cmd: &mut Command,
+    what: &str,
+    accept: impl Fn(std::process::ExitStatus) -> bool,
+) -> Result<Captured> {
     let t = Instant::now();
     let out = cmd
         .output()
@@ -296,7 +475,7 @@ pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     anyhow::ensure!(
-        out.status.success(),
+        accept(out.status),
         "{what} exited with {}\n--- stderr tail ---\n{}",
         out.status,
         tail(&stderr, 40)
@@ -305,6 +484,7 @@ pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
         stdout,
         stderr,
         wall,
+        status: out.status,
     })
 }
 

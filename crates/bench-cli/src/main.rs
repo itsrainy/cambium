@@ -11,6 +11,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cambium_bench::session::{Session, SessionOptions};
 use clap::{Parser, ValueEnum};
 
 mod bench;
@@ -22,7 +23,7 @@ mod watch;
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_ERROR: u8 = 1;
 
-const VERSION: &str = concat!(
+pub const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
     env!("CAMBIUM_GIT_SHA"),
@@ -44,10 +45,31 @@ struct Cli {
     #[arg(long, short = 'C', global = true)]
     workspace: Option<PathBuf>,
 
-    /// The `cambi` binary the harness measures. Without it, `$CAMBI`, and
-    /// failing that `cambi` on `PATH`.
-    #[arg(long, global = true, value_name = "PATH")]
+    /// The `cambi` binary the harness measures. Without it, `cambi` on
+    /// `PATH`.
+    #[arg(long, global = true, value_name = "PATH", env = "CAMBI")]
     cambi: Option<PathBuf>,
+
+    /// The bazel-diff Rust binary; default: under --bazel-diff-dir.
+    #[arg(long, global = true, value_name = "PATH", env = cambium_bench::tools::bazeldiff::BIN_ENV)]
+    bazel_diff: Option<PathBuf>,
+
+    /// The bazel-diff deploy jar; default: under --bazel-diff-dir.
+    #[arg(long, global = true, value_name = "PATH", env = cambium_bench::tools::bazeldiff::JAR_ENV)]
+    bazel_diff_jar: Option<PathBuf>,
+
+    /// Where tools/bazel-diff/fetch.sh installed (default:
+    /// ~/.cache/cambium/bazel-diff).
+    #[arg(long, global = true, value_name = "DIR", env = cambium_bench::tools::bazeldiff::DIR_ENV)]
+    bazel_diff_dir: Option<PathBuf>,
+
+    /// The tango-cli binary; default: under --tango-dir.
+    #[arg(long, global = true, value_name = "PATH", env = cambium_bench::tools::tango::BIN_ENV)]
+    tango: Option<PathBuf>,
+
+    /// Where tools/tango/fetch.sh installed (default: ~/.cache/cambium/tango).
+    #[arg(long, global = true, value_name = "DIR", env = cambium_bench::tools::tango::DIR_ENV)]
+    tango_dir: Option<PathBuf>,
 
     /// Bazel binary to use; overrides the subject's own.
     #[arg(long, global = true)]
@@ -108,7 +130,8 @@ impl Format {
     }
 }
 
-/// What every subcommand resolves from the globals.
+/// The globals, as parsed. A verb opens a [`Session`] from them plus its
+/// own shared flags; the session is what the library works against.
 pub struct Context {
     /// Where the manifest is discovered from.
     pub root: PathBuf,
@@ -117,27 +140,26 @@ pub struct Context {
     pub format: Format,
     pub quiet: bool,
     /// `--cambi`, if it was given.
-    cambi_path: Option<PathBuf>,
-    /// The product binary under measurement, located on first use.
-    cambi: std::cell::OnceCell<cambium_bench::tools::cambi::Cambi>,
+    pub cambi: Option<PathBuf>,
+    /// Where the foil tools are, from the flags.
+    pub tools: cambium_bench::tools::ToolLocations,
 }
 
 impl Context {
-    /// The `cambi` under measurement: `--cambi`, then `$CAMBI`, then `cambi` on
-    /// `PATH`, with its `--version` read once.
-    ///
-    /// Lazily, because half of these verbs measure nothing: `labels`,
-    /// `report`, `regress` and `replay` read files a run left behind, on a
-    /// laptop that need not have a `cambi` built at all, and refusing to print
-    /// a stored label set because of that would defeat the point of having
-    /// written it.
-    pub fn cambi(&self) -> anyhow::Result<&cambium_bench::tools::cambi::Cambi> {
-        if let Some(c) = self.cambi.get() {
-            return Ok(c);
-        }
-        let c = cambium_bench::tools::cambi::Cambi::locate(self.cambi_path.as_deref())?;
-        tracing::info!(cambi = %c.path().display(), version = %c.version(), "the binary under measurement");
-        Ok(self.cambi.get_or_init(|| c))
+    /// The session a verb runs in: the manifest found, the results directory
+    /// made absolute, `cambi` located on first use.
+    pub fn session(&self, common: &bench::Common) -> anyhow::Result<Session> {
+        Session::open(SessionOptions {
+            root: self.root.clone(),
+            manifest: common.manifest.clone(),
+            results_dir: common.results_dir.clone(),
+            subjects_dir: common.subjects_dir.clone(),
+            bazel_binary: self.bazel_binary.clone(),
+            bazel_version: common.bazel_version.clone(),
+            seed: common.seed,
+            quick: common.quick,
+            cambi: self.cambi.clone(),
+        })
     }
 }
 
@@ -173,8 +195,14 @@ fn main() -> ExitCode {
         bazel_binary: cli.bazel_binary.clone(),
         format: cli.format,
         quiet: cli.quiet,
-        cambi_path: cli.cambi.clone(),
-        cambi: std::cell::OnceCell::new(),
+        cambi: cli.cambi.clone(),
+        tools: cambium_bench::tools::ToolLocations {
+            bazel_diff: cli.bazel_diff.clone(),
+            bazel_diff_jar: cli.bazel_diff_jar.clone(),
+            bazel_diff_dir: cli.bazel_diff_dir.clone(),
+            tango: cli.tango.clone(),
+            tango_dir: cli.tango_dir.clone(),
+        },
     };
     let outcome = match cli.command {
         Some(command) => bench::run(&ctx, command),
@@ -228,8 +256,19 @@ mod tests {
         let cmd = Cli::command();
         let names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
         for v in [
-            "subjects", "history", "changes", "stages", "sweep", "regress", "replay", "labels",
-            "report", "synth",
+            "subjects",
+            "history",
+            "changes",
+            "stages",
+            "sweep",
+            "regress",
+            "replay",
+            "labels",
+            "report",
+            "synth",
+            "watch",
+            "run",
+            "pull-results",
         ] {
             assert!(names.contains(&v), "{v} is missing from {names:?}");
         }
