@@ -1,10 +1,9 @@
 # The `cambi` command line
 
-The surface `cambi` is moving to, and the rules every verb follows. This is
-the design for issue #2; it replaces the proposal in that issue's body where
-the two differ. The JSON field tables and the contract history stay in the
-README; this document is about the verbs, the diagnostics, and what a
-caller may rely on.
+The reference for `cambi`'s command line: the verbs, the rules every verb
+follows, and what a caller may rely on. The JSON field tables and the
+contract history are in the README; this document is the surface a caller
+types.
 
 ## What the tool is for
 
@@ -12,9 +11,9 @@ caller may rely on.
 which targets could a build or test see differently. Everything on the
 surface exists to ask that question, to keep the indexes that make the answer
 fast, or to explain the answer when it surprises someone. Nothing else
-belongs here. In particular the benchmark harness, the synthetic workspace
-generator, and the corpus tooling are not part of the product and leave the
-binary (see "The benchmark tools" below).
+belongs here. In particular the benchmark harness and the synthetic
+workspace generator are not part of the product and are not in this binary
+(see "The benchmark tools" below).
 
 The surface is organised around what someone is trying to do, not around
 the crates. Three people use it: a developer at a terminal who wants to know
@@ -52,10 +51,9 @@ rebuild or global, and how many packages it would re-query. This is the one
 line a developer wants before a two-minute wait, and it is what `status`
 shows in short form.
 
-Everything else `affected` takes today stays: `--tests-only`,
-`--include-manual`, `--max-depth`, `--no-full-build`, `--publish-base`,
-`--out`. `--explain` on `affected` is kept for a release and
-then goes: the verb below is its replacement.
+The rest of what `affected` takes: `--tests-only`, `--include-manual`,
+`--max-depth`, `--no-full-build`, `--publish-base`, `--out`. `--explain` is
+kept for one release and then goes; the verb below is its replacement.
 
 ### `explain`
 
@@ -75,7 +73,7 @@ The stored artifact is an index and the chain of them is a lineage; those
 are the only two nouns. `build [REV]` is the cold build that mints a lineage.
 `update A..B` brings an index forward. `publish` uploads one. `list` shows
 what the store holds, `show` one index's header and counts, `gc` applies the
-retention policy. These are today's `baseline` verbs under the noun they
+retention policy. These were the `baseline` verbs, now under the noun they
 were always about; `baseline` survives for one release as an alias with a
 deprecation diagnostic.
 
@@ -221,21 +219,20 @@ act on. A log line is not a diagnostic.
 
 ## Migration
 
-Every existing spelling keeps working for one release and prints a
+Every earlier spelling keeps working for one release and prints a
 deprecation diagnostic naming the new one (`CAMBI-W001: cambi baseline build
-is now cambi index build`). `--output` becomes `--format`, `baseline`
-becomes `index`, the old `index` queries become `inspect`, `--explain`
-becomes `explain`. The `bench` and `synth` verbs are removed rather than
-deprecated — not aliased, not warned about: they were never part of the
-contract, their only caller is the repository's own driver, and they live in
-`cambium-bench` now. `cambi bench ...` is an ordinary unknown-subcommand error
-from clap.
+is now cambi index build`). `--output` became `--format`, `baseline` became
+`index`, the old `index` queries became `inspect`, `--explain` became
+`explain`, and `text` became `human`. The `bench` and `synth` verbs were
+removed rather than deprecated — not aliased, not warned about: they were
+never part of the contract, their only caller was the repository's own
+driver, and they live in `cambium-bench` now. `cambi bench ...` is an
+ordinary unknown-subcommand error from clap.
 
 ## The benchmark tools
 
-The harness (`bench`, `replay`, `labels`, `report`, the subject manifest,
-the synthetic generator) is its own binary, `cambium-bench`
-(`crates/bench-cli`), built from the `bench` and `synth` crates, and it drives
+The harness is its own binary, `cambium-bench` (`crates/bench-cli`), built
+from the `bench` and `synth` crates, and it drives
 `cambi` by shelling out to it: `cambi index build` for a cold index, `cambi
 index update` to bring one forward, `cambi index publish` to upload one, and
 `cambi affected --format json` for the answer, read back with the engine's own
@@ -246,9 +243,24 @@ user. `replay` and the stage micro-benchmarks (`stages`, `sweep`, `regress`)
 are the exception and keep linking the engine directly, because they are
 white-box by nature: one replays the engine's static stages against a stored
 index with no product run to measure, and the others time a single in-memory
-stage. The live matrix view of issue #1 is that binary's front door, not a `cambi`
-verb. It follows the output rules here because they are good rules, not
-because it is part of the contract.
+stage. Its verbs:
+
+```
+cambium-bench                 # no verb, on a terminal: the launcher
+cambium-bench subjects {list, fetch, build}
+cambium-bench history  <subject>     # the history workload
+cambium-bench changes  <subject>     # the change-set workload, across tools
+cambium-bench stages|sweep|regress   # engine stage micro-benchmarks
+cambium-bench replay   <subject>     # the static stages, offline
+cambium-bench labels   <subject>     # the label sets a comparison kept
+cambium-bench watch                  # follow a run
+cambium-bench report                 # regenerate docs/RESULTS.md
+```
+
+What each workload measures and what it may claim is
+[METHODOLOGY.md](METHODOLOGY.md). The live matrix is that binary's front
+door, not a `cambi` verb. It follows the output rules here because they are
+good rules, not because it is part of the contract.
 
 `cambium-bench watch` is that view: one row per subject — step, progress,
 the commit or change set in hand and the tool on it, elapsed, an ETA from the
@@ -273,4 +285,4 @@ changes ...` invocations, the same ones `tools/bench/run-published.sh` runs —
 one after another as child processes, and switches to the watch screen with the
 running child's stderr tail in the footer; `q` asks before killing a child.
 It reimplements no workload, and the script remains the scripted way to do the
-same thing. In a pipe, no verb is the usage error it has always been.
+same thing. In a pipe, no verb is a usage error.
