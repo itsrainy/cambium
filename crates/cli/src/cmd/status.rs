@@ -10,7 +10,7 @@
 use anyhow::Result;
 use cambium_engine::probe;
 
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, human_bytes, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
@@ -215,21 +215,6 @@ fn lineage_suffix(p: &probe::Probes, plan: &str) -> String {
     }
 }
 
-fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit + 1 < UNITS.len() {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
-
 /// A unix timestamp as an age, which is what someone reading `status` wants:
 /// "how stale is this index", not "what time was it in UTC".
 fn unix_time(unix: u64) -> String {
@@ -258,13 +243,6 @@ pub fn duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bytes_are_rounded_the_way_a_reader_scans_them() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(2048), "2.0 KiB");
-        assert_eq!(human_bytes(3 * 1024 * 1024 + 512 * 1024), "3.5 MiB");
-    }
 
     #[test]
     fn an_unrecorded_build_time_does_not_print_as_the_epoch() {

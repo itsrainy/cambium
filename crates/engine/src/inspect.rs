@@ -814,6 +814,8 @@ pub fn parse_kind(s: &str) -> Result<NodeKind> {
     })
 }
 
+/// Lower-case hex, the spelling every lineage, config hash and rule hash is
+/// printed in. The one definition; `probe::hex` and the CLI re-export it.
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

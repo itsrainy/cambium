@@ -14,7 +14,7 @@ use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, human_bytes as human, Context};
 
 /// Options every query shares.
 #[derive(ClapArgs, Clone)]
@@ -452,21 +452,6 @@ fn share(part: i64, total: u64) -> f64 {
         0.0
     } else {
         part as f64 / total as f64 * 100.0
-    }
-}
-
-fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u + 1 < UNITS.len() {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
     }
 }
 

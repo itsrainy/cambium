@@ -1167,14 +1167,7 @@ fn lineage_of(key: &str) -> Option<String> {
     ok.then(|| lineage.to_string())
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
+pub use crate::inspect::hex;
 
 /// The first seven hex characters, the way git abbreviates a sha.
 pub fn short(rev: &str) -> String {
