@@ -101,6 +101,9 @@ codes! {
     W019LineageConflict => "CAMBI-W019",
     /// `.gitignore` exists and does not mention `cambium.local.toml`.
     W020GitignoreLocalConfig => "CAMBI-W020",
+    /// `cambi inspect verify` could not run the `rdeps` query for a sampled
+    /// target, and skipped it.
+    W021VerifyQueryFailed => "CAMBI-W021",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,
@@ -136,6 +139,12 @@ codes! {
     E015BazelNotFound => "CAMBI-E015",
     /// A probe object could not be published to the store and fetched back.
     E016StoreRoundTripFailed => "CAMBI-E016",
+    /// An index query named a label, package or node kind the index does not
+    /// have.
+    E017IndexQuery => "CAMBI-E017",
+    /// `cambi index update` found that the range invalidates everything, and
+    /// was told not to rebuild.
+    E018RangeInvalidated => "CAMBI-E018",
 }
 
 impl std::fmt::Display for Code {

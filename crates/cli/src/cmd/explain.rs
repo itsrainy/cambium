@@ -124,11 +124,7 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
         return Ok(About::Affected(Box::new(e.clone())));
     }
 
-    let at_head = outcome
-        .index
-        .as_ref()
-        .map(|i| i.view().id_of(label).is_some());
-    let at_base = base_has(outcome.base_index.as_ref(), label);
+    let cambium_engine::LabelPresence { at_head, at_base } = outcome.label_presence(label);
     match (at_head, at_base) {
         (Some(false), Some(true)) => Ok(About::NotAffected {
             note: format!("it no longer exists at {}", short(&report.head)),
@@ -150,16 +146,6 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
                 plural(report.stats.dirty_packages),
             ),
         }),
-    }
-}
-
-/// Whether the base index this run spliced onto has a node for `label`.
-fn base_has(base: Option<&cambium_engine::BaseIndex>, label: &str) -> Option<bool> {
-    match base? {
-        cambium_engine::BaseIndex::Owned(d) => Some(d.view().id_of(label).is_some()),
-        cambium_engine::BaseIndex::Mapped(path) => cambium_index::IndexFile::open(path)
-            .ok()
-            .map(|f| f.view().id_of(label).is_some()),
     }
 }
 
