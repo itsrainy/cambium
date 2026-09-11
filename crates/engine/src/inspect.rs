@@ -895,27 +895,28 @@ pub fn verify(
 
     for id in picked {
         let label = view.label(id);
-        let out = bazel
-            .command("query")
-            .args([
-                &format!("rdeps(//..., {label})"),
-                "--output=label",
-                // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
-                // implicit edges, so the cross-check must too.
-                "--order_output=no",
-                "--keep_going",
-                "--noshow_progress",
-                "--ui_event_filters=-info",
-            ])
-            .output()?;
-        if !out.status.success() {
+        let mut cmd = bazel.command("query");
+        cmd.args([
+            &format!("rdeps(//..., {label})"),
+            "--output=label",
+            // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
+            // implicit edges, so the cross-check must too.
+            "--order_output=no",
+            "--keep_going",
+            "--noshow_progress",
+            "--ui_event_filters=-info",
+        ]);
+        // Through the same seam every other query uses, so a test can hand
+        // the check a canned Bazel.
+        let out = bazel.runner().output(&mut cmd)?;
+        if !out.exit.success {
             diags.emit(
                 crate::diag::Diagnostic::warning(
                     crate::diag::Code::W021VerifyQueryFailed,
                     format!(
-                        "`bazel query rdeps(//..., {label})` exited {}, so {label} was not \
+                        "`bazel query rdeps(//..., {label})` failed ({}), so {label} was not \
                          compared",
-                        out.status
+                        out.exit
                     ),
                 )
                 .with_help(
