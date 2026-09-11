@@ -15,6 +15,7 @@
 //!
 //! Nothing here writes. The harness ([`crate::progress`]) is the only writer.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,8 @@ pub struct SubjectSnapshot {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workload: String,
     /// The step's name: `fetch`, `build`, `history`, `changes`, `done`,
-    /// `failed`, or `idle` for a subject with results and no progress file.
+    /// `failed`, `idle` for a subject with results and no progress file, or
+    /// `stale` for a finished or idle subject another engine build wrote.
     pub step: String,
     pub index: usize,
     pub of: usize,
@@ -117,6 +119,18 @@ pub struct ChangeSetRow {
 /// results yet" is the answer someone starting a run wants to see, not an
 /// empty screen.
 pub fn snapshot(results_dir: &Path, subjects: &[String]) -> Snapshot {
+    snapshot_with(results_dir, subjects, &BTreeMap::new())
+}
+
+/// [`snapshot`], knowing the engine id this build records for each subject
+/// (`engines`, by subject id). A finished, failed or idle row whose state file
+/// another engine build wrote is `stale`: its numbers are real, but they are a
+/// different experiment's, and a watcher must not read them as this run's.
+pub fn snapshot_with(
+    results_dir: &Path,
+    subjects: &[String],
+    engines: &BTreeMap<String, String>,
+) -> Snapshot {
     let names = match subjects.is_empty() {
         false => subjects.to_vec(),
         true => subject_dirs(results_dir),
@@ -125,7 +139,10 @@ pub fn snapshot(results_dir: &Path, subjects: &[String]) -> Snapshot {
         schema: WATCH_SCHEMA,
         results_dir: results_dir.to_path_buf(),
         at: rfc3339_now(),
-        subjects: names.iter().map(|n| read_subject(results_dir, n)).collect(),
+        subjects: names
+            .iter()
+            .map(|n| read_subject(results_dir, n, engines.get(n)))
+            .collect(),
     }
 }
 
@@ -155,7 +172,7 @@ fn subject_dirs(results_dir: &Path) -> Vec<String> {
     out
 }
 
-fn read_subject(results_dir: &Path, subject: &str) -> SubjectSnapshot {
+fn read_subject(results_dir: &Path, subject: &str, engine: Option<&String>) -> SubjectSnapshot {
     let dir = crate::subject_dir(results_dir, subject);
     let progress = Progress::read(&dir);
     let state = State::peek(&dir);
@@ -200,6 +217,15 @@ fn read_subject(results_dir: &Path, subject: &str) -> SubjectSnapshot {
             .get("changes.started")
             .or_else(|| s.steps.get("history.started"))
             .and_then(|t| since(t));
+    }
+
+    if let (Some(now), Some(s)) = (engine, &state) {
+        if !s.engine.is_empty()
+            && s.engine != *now
+            && matches!(row.step.as_str(), "done" | "failed" | "idle")
+        {
+            row.step = "stale".into();
+        }
     }
 
     // The workload's own numbers, from whichever result file the subject's
@@ -254,7 +280,7 @@ fn read_subject(results_dir: &Path, subject: &str) -> SubjectSnapshot {
 /// `None` once the run is over, and `None` while nothing has finished: an ETA
 /// extrapolated from no samples is a guess dressed as a measurement.
 fn eta(row: &SubjectSnapshot) -> Option<u64> {
-    if row.step == "done" || row.step == "failed" || row.step == "idle" {
+    if matches!(row.step.as_str(), "done" | "failed" | "idle" | "stale") {
         return None;
     }
     let p50 = row.p50_ms.filter(|ms| *ms > 0)?;
@@ -900,6 +926,39 @@ mod tests {
         assert!(row.eta_secs.is_none(), "a failed run has no ETA");
         let text = render(&s).join("\n");
         assert!(text.contains("tango: worktree is locked"), "{text}");
+    }
+
+    /// Results another engine build wrote are not this run's, however
+    /// finished they look.
+    #[test]
+    fn a_row_another_build_wrote_is_stale_not_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let apollo = dir.path().join("apollo");
+        history_file(&apollo, "pin3", 5, 0);
+        changes_file(&apollo, "pin3", 5, 5, 1.0);
+        let mut st = State::fresh("apollo", "pin3");
+        st.engine = "f8/old".into();
+        st.history = Some(crate::state::HistoryState {
+            from: "a".into(),
+            to: "pin3".into(),
+            bazel_version: String::new(),
+            last_completed: None,
+            done: true,
+        });
+        st.compared.insert("a..b".into());
+        st.save(&apollo).unwrap();
+        let names = vec!["apollo".to_string()];
+
+        assert_eq!(snapshot(dir.path(), &names).subjects[0].step, "done");
+        let other = BTreeMap::from([("apollo".to_string(), "f8/new".to_string())]);
+        let row = &snapshot_with(dir.path(), &names, &other).subjects[0];
+        assert_eq!(row.step, "stale");
+        assert!(row.eta_secs.is_none());
+        let same = BTreeMap::from([("apollo".to_string(), "f8/old".to_string())]);
+        assert_eq!(
+            snapshot_with(dir.path(), &names, &same).subjects[0].step,
+            "done"
+        );
     }
 
     fn copy_tree(from: &Path, to: &Path) {

@@ -20,8 +20,8 @@
 # Two verbs underneath: `cambium-bench pull-results` copies each subject's
 # stored index, archived bases and heads, recorded results and (unless
 # PATHS_FROM_BOX=0) the diff of every change set off the box into
-# `bench-precheck/` (git-ignored; a subject already there is not pulled
-# again), and `cambium-bench replay --all` exits 1 on divergence. Read-only on
+# `bench-precheck/` (git-ignored; a subject already there is pulled again
+# only when the box's results have changed), and `cambium-bench replay --all` exits 1 on divergence. Read-only on
 # the box: scp, and one `cambium-bench replay --write-paths` over the mirror.
 set -uo pipefail
 

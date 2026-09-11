@@ -10,6 +10,7 @@
 //! needs, and it shells out to `aws`, `ssh` and `scp` rather than linking a
 //! cloud SDK for three commands.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -52,8 +53,12 @@ impl Default for BenchBox {
 /// What one subject's pull found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pulled {
-    /// The pull was skipped because the directory already existed.
+    /// The pull was skipped: the directory existed and the box's result files
+    /// are the ones in it, or there was no box to ask.
     pub cached: bool,
+    /// The directory existed with results the box no longer has, and was
+    /// pulled again.
+    pub refreshed: bool,
     /// `bases/*.bin` came over.
     pub bases: bool,
     /// `heads/*.bin` came over.
@@ -137,17 +142,36 @@ impl BenchBox {
     /// results, the archived bases and heads, and — with `paths` — the diff
     /// of every recorded change set, derived on the box by the same binary.
     ///
-    /// A subject already under `cache` is not pulled again; delete its
-    /// directory to refresh it. Read-only on the box, and small: the largest
+    /// A subject already under `cache` is pulled again only when the box's
+    /// result files differ from the cached ones, compared by sha256 over ssh,
+    /// so a precheck never replays a run the box has since replaced. With no
+    /// running box the cache is used as it is. Read-only on the box, and small: the largest
     /// index in the last published run was envoy's at 7.3 MB, the bases at
     /// most a few hundred megabytes a subject.
     pub fn pull(&self, subject: &str, cache: &Path, paths: bool) -> Result<Pulled> {
         let dir = cache.join(subject);
+        let mut refreshed = false;
         if dir.is_dir() {
-            return Ok(Pulled {
+            let cached = Pulled {
                 cached: true,
                 ..Default::default()
-            });
+            };
+            let Some(host) = self.host()? else {
+                tracing::warn!(%subject, "no running benchmark box to check the cached pull against; using it as it is");
+                return Ok(cached);
+            };
+            let remote = self.remote_sums(&host, subject)?;
+            if remote.is_empty() {
+                tracing::warn!(%subject, "the box has no results for this subject; keeping the cached pull");
+                return Ok(cached);
+            }
+            if remote == local_sums(&dir) {
+                return Ok(cached);
+            }
+            tracing::info!(%subject, "the box's results differ from the cached pull; pulling again");
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("removing the stale pull {}", dir.display()))?;
+            refreshed = true;
         }
         let host = self.host()?.with_context(|| {
             format!("no running benchmark box and nothing cached for {subject}")
@@ -181,10 +205,24 @@ impl BenchBox {
         let paths = paths && self.pull_paths(&host, subject, &dir)?;
         Ok(Pulled {
             cached: false,
+            refreshed,
             bases,
             heads,
             paths,
         })
+    }
+
+    /// sha256 of the subject's result files on the box, by path relative to
+    /// its results directory: the same files a pull copies.
+    fn remote_sums(&self, host: &str, subject: &str) -> Result<BTreeMap<String, String>> {
+        let out = self.ssh(
+            host,
+            &format!(
+                "cd ~/{} 2>/dev/null && sha256sum {RESULT_GLOBS} 2>/dev/null",
+                self.results_of(subject)
+            ),
+        )?;
+        Ok(parse_sums(&String::from_utf8_lossy(&out.stdout)))
     }
 
     /// The recorded change sets carry (base, head) and no diff — it was taken
@@ -217,6 +255,39 @@ impl BenchBox {
     }
 }
 
+/// The result files a pull copies, relative to a subject's results directory.
+const RESULT_GLOBS: &str = "changes/*.json history/*.json";
+
+/// sha256 of the cached result files, the same way the box is asked.
+fn local_sums(dir: &Path) -> BTreeMap<String, String> {
+    for tool in ["sha256sum", "shasum -a 256"] {
+        let Ok(out) = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{tool} {RESULT_GLOBS} 2>/dev/null"))
+            .current_dir(dir)
+            .output()
+        else {
+            continue;
+        };
+        let sums = parse_sums(&String::from_utf8_lossy(&out.stdout));
+        if !sums.is_empty() {
+            return sums;
+        }
+    }
+    BTreeMap::new()
+}
+
+/// `sha256sum` output, `<hash>  <path>` (or `<hash> *<path>`), as path to hash.
+pub fn parse_sums(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|l| {
+            let (hash, path) = l.trim().split_once(char::is_whitespace)?;
+            let path = path.trim_start().trim_start_matches('*');
+            (hash.len() == 64 && !path.is_empty()).then(|| (path.to_string(), hash.to_string()))
+        })
+        .collect()
+}
+
 /// The paths cache is named after the index file beside it
 /// (`index-<pin>[-<bazel version>].bin` -> `paths-<pin>[-<version>].json`):
 /// the pin spelling carries the Bazel-version suffix, which is also the name
@@ -238,6 +309,19 @@ pub fn paths_file_name(dir: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_sums;
+
+    #[test]
+    fn sums_read_both_spellings_and_skip_noise() {
+        let h = "a".repeat(64);
+        let sums = parse_sums(&format!(
+            "{h}  changes/changes-x.json\n{h} *history/history-x.json\nsha256sum: nope: No such file\n"
+        ));
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums["changes/changes-x.json"], h);
+        assert!(sums.contains_key("history/history-x.json"));
+    }
+
     use super::*;
 
     #[test]

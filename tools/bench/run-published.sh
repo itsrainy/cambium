@@ -9,7 +9,8 @@
 #   tools/bench/run-published.sh
 #   SUBJECTS="envoy" tools/bench/run-published.sh
 #   SUBJECTS="apollo" STEPS="changes report" tools/bench/run-published.sh
-#   SUBJECTS="sourcegraph" STEPS=changes RESTART_CHANGES=1 tools/bench/run-published.sh
+#   FRESH=1 tools/bench/run-published.sh
+#   SUBJECTS="sourcegraph" STEPS=changes RESUME=1 tools/bench/run-published.sh
 #   SMOKE=1 tools/bench/run-published.sh
 #
 # SMOKE=1 is the fifteen-minute pass to run before the eight-hour one: every
@@ -17,11 +18,10 @@
 # oracle, and one change set with every tool and both oracles, into
 # bench-results-smoke/ so the real run neither resumes nor overwrites it.
 #
-# RESTART_CHANGES=1 compares every change set again instead of resuming the
-# ones state.json says are finished — what a fix to a *tool driver* needs,
-# since a resumed change set keeps the old tool's answer. RESTART_HISTORY=1
-# does the same for the history walk, for a fix that changes what the walk
-# publishes without changing the engine id.
+# A results directory that already holds results is refused, never silently
+# continued. RESUME=1 continues them, and each workload refuses one it cannot
+# continue (another build's, another range's). FRESH=1 moves bench-results/
+# aside to bench-results-<timestamp>/ and starts with nothing.
 set -uo pipefail
 
 # ---- the box's environment; every value overridable ----
@@ -46,8 +46,8 @@ NO_BUILD=${NO_BUILD:-0}
 # ---- the run's knobs, each a flag of `cambium-bench run` ----
 SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
 STEPS=${STEPS:-"fetch build history changes report"}
-RESTART_CHANGES=${RESTART_CHANGES:-0}
-RESTART_HISTORY=${RESTART_HISTORY:-0}
+RESUME=${RESUME:-0}
+FRESH=${FRESH:-0}
 SMOKE=${SMOKE:-0}
 
 [ -f "$CARGO_ENV" ] && source "$CARGO_ENV"
@@ -67,6 +67,6 @@ args=(run --require-sha "$(git rev-parse --short HEAD 2>/dev/null || echo unknow
 for s in $SUBJECTS; do args+=(--subject "$s"); done
 args+=(--steps "$(echo "$STEPS" | tr ' ' ',')")
 [ "$SMOKE" = 1 ] && args+=(--smoke)
-[ "$RESTART_CHANGES" = 1 ] && args+=(--restart-changes)
-[ "$RESTART_HISTORY" = 1 ] && args+=(--restart-history)
+[ "$RESUME" = 1 ] && args+=(--resume)
+[ "$FRESH" = 1 ] && args+=(--fresh)
 exec "$CAMBIUM_BENCH" "${args[@]}"

@@ -548,7 +548,7 @@ enum Resume {
     Done(HistoryResult),
     /// The same range and cambium, part way: continue at this position.
     From(HistoryResult, usize),
-    /// No usable previous result.
+    /// Not resuming, or nothing recorded to resume.
     Fresh,
 }
 
@@ -563,14 +563,30 @@ fn resume(
     if !opts.resume {
         return Ok(Resume::Fresh);
     }
-    let Ok(prev) = HistoryResult::read(&result_path(opts)) else {
-        return Ok(Resume::Fresh);
-    };
-    let from = &commits[0];
-    let to = &commits[commits.len() - 1];
-    if prev.from != *from || prev.to != *to || prev.engine != engine_id {
+    // Nothing recorded is nothing to continue: a resumed run over a subject it
+    // has not reached yet starts that subject. Anything recorded that cannot
+    // be continued is an error, never a silent fresh start.
+    let path = result_path(opts);
+    if !path.exists() {
         return Ok(Resume::Fresh);
     }
+    let prev = HistoryResult::read(&path)
+        .map_err(|e| anyhow::anyhow!("cannot resume {}: {e:#}; pass --restart", path.display()))?;
+    let from = &commits[0];
+    let to = &commits[commits.len() - 1];
+    anyhow::ensure!(
+        prev.from == *from && prev.to == *to,
+        "cannot resume {}: it walked {}..{} and this walk is {from}..{to}; pass --restart",
+        path.display(),
+        prev.from,
+        prev.to
+    );
+    anyhow::ensure!(
+        prev.engine == engine_id,
+        "cannot resume {}: {} recorded it and this build is {engine_id}; pass --restart",
+        path.display(),
+        prev.engine
+    );
     if prev.done {
         tracing::info!("history already complete");
         return Ok(Resume::Done(prev));
@@ -589,10 +605,10 @@ fn resume(
             tracing::info!(%last, done = prev.commits.len(), "resuming history");
             Ok(Resume::From(prev, pos + 1))
         }
-        None => {
-            tracing::warn!(%last, "no published index to resume from; starting over");
-            Ok(Resume::Fresh)
-        }
+        None => anyhow::bail!(
+            "cannot resume {}: the store no longer holds the index for {last}; pass --restart",
+            path.display()
+        ),
     }
 }
 

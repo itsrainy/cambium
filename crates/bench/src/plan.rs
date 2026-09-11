@@ -128,10 +128,12 @@ pub struct Plan {
     pub size: Size,
     /// Overrides [`Size::results_dir`] when a caller has one.
     pub results_dir: Option<PathBuf>,
-    /// `--restart` on `history`: redo the walk rather than resume it.
-    pub restart_history: bool,
-    /// `--restart` on `changes`: compare every change set again.
-    pub restart_changes: bool,
+    /// Continue the results already in the results directory: every workload
+    /// gets `--resume`. Without it a run over recorded results is refused
+    /// ([`Plan::refuse_existing`]) unless they are moved aside first
+    /// ([`Plan::move_results_aside`]). A small run always starts its workloads
+    /// over, in a tree of its own.
+    pub resume: bool,
 }
 
 impl Plan {
@@ -143,8 +145,7 @@ impl Plan {
             steps: StepKind::ALL.to_vec(),
             size: Size::Large,
             results_dir: None,
-            restart_history: false,
-            restart_changes: false,
+            resume: false,
         }
     }
 
@@ -157,6 +158,76 @@ impl Plan {
 
     fn wants(&self, kind: StepKind) -> bool {
         self.steps.contains(&kind)
+    }
+
+    /// What each workload is told about a result already recorded. A smoke
+    /// run restarts: its three commits must not resume a fuller walk. A
+    /// resumed run resumes. Anything else says nothing, so the workload
+    /// refuses instead of guessing.
+    fn on_existing_flag(&self) -> Option<&'static str> {
+        match (self.size, self.resume) {
+            (Size::Small, _) => Some("--restart"),
+            (_, true) => Some("--resume"),
+            _ => None,
+        }
+    }
+
+    /// The results this plan's workloads would run over, one line per
+    /// subject: `envoy: history, changes`.
+    pub fn existing_results(&self) -> Vec<String> {
+        let root = self.results();
+        let mut out = Vec::new();
+        for s in &self.subjects {
+            let dir = root.join(crate::session::subject_dir_name(s));
+            let found: Vec<&str> = [StepKind::History, StepKind::Changes]
+                .into_iter()
+                .filter(|k| self.wants(*k) && has_result(&dir.join(k.name()), k.name()))
+                .map(|k| k.name())
+                .collect();
+            if !found.is_empty() {
+                out.push(format!("{s}: {}", found.join(", ")));
+            }
+        }
+        out
+    }
+
+    /// Refuses a run that would start over recorded results without being
+    /// told to resume them or to move them aside.
+    pub fn refuse_existing(&self) -> Result<()> {
+        if self.resume || self.size == Size::Small {
+            return Ok(());
+        }
+        let found = self.existing_results();
+        anyhow::ensure!(
+            found.is_empty(),
+            "{dir} already holds results ({}); pass --resume to continue them, or --fresh to move {dir} aside first",
+            found.join("; "),
+            dir = self.results().display()
+        );
+        Ok(())
+    }
+
+    /// Moves the results directory to `<dir>-<UTC timestamp>`, so the run
+    /// starts with nothing under it. `None` when there was nothing to move.
+    pub fn move_results_aside(&self) -> Result<Option<PathBuf>> {
+        let dir = self.results();
+        let empty = std::fs::read_dir(&dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+        if empty {
+            return Ok(None);
+        }
+        let stamp = crate::util::rfc3339_now().replace([':', '-'], "");
+        let base = format!("{}-{stamp}", dir.display());
+        let mut to = PathBuf::from(&base);
+        let mut n = 1;
+        while to.exists() {
+            n += 1;
+            to = PathBuf::from(format!("{base}-{n}"));
+        }
+        std::fs::rename(&dir, &to)
+            .with_context(|| format!("moving {} aside to {}", dir.display(), to.display()))?;
+        Ok(Some(to))
     }
 
     /// The command lines, in the order they run: per subject the fetch, the
@@ -190,10 +261,8 @@ impl Plan {
                     Size::Medium => a.push("--quick"),
                     Size::Large => {}
                 }
-                // A smoke run always restarts: its three commits must not
-                // resume a fuller walk in the same tree.
-                if self.restart_history || self.size == Size::Small {
-                    a.push("--restart");
+                if let Some(flag) = self.on_existing_flag() {
+                    a.push(flag);
                 }
                 out.push(step(StepKind::History, a));
             }
@@ -215,8 +284,8 @@ impl Plan {
                     Size::Medium => a.push("--quick"),
                     Size::Large => {}
                 }
-                if self.restart_changes || self.size == Size::Small {
-                    a.push("--restart");
+                if let Some(flag) = self.on_existing_flag() {
+                    a.push(flag);
                 }
                 out.push(step(StepKind::Changes, a));
             }
@@ -353,6 +422,20 @@ pub fn run_plan(plan: &Plan, exe: &Path) -> Result<usize> {
     Ok(failures)
 }
 
+/// Whether `dir` holds a `<workload>-*.json` result file.
+fn has_result(dir: &Path, workload: &str) -> bool {
+    let prefix = format!("{workload}-");
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".json"))
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// `HH:MM:SS`, UTC, for a step line.
 fn clock() -> String {
     let now = crate::util::rfc3339_now();
@@ -448,29 +531,31 @@ mod tests {
     }
 
     #[test]
-    fn restarts_and_step_filters_narrow_the_run() {
+    fn resume_and_step_filters_narrow_the_run() {
         let p = Plan {
             steps: vec![StepKind::Changes, StepKind::Report],
-            restart_changes: true,
-            restart_history: true,
+            resume: true,
             ..plan(Size::Large)
         };
         let got = lines(&p);
         assert_eq!(got.len(), 3, "{got:?}");
         assert!(
-            got[0].contains(" changes bazel ") && got[0].ends_with("--restart"),
+            got[0].contains(" changes bazel ") && got[0].ends_with("--resume"),
             "{}",
             got[0]
         );
         assert!(!got.iter().any(|l| l.contains(" history ")), "{got:?}");
-        // A smoke run's implied restart and an asked-for one are one flag.
+        // A smoke run starts over whatever it is told.
         let smoke = lines(&Plan {
-            restart_changes: true,
-            restart_history: true,
+            resume: true,
             ..plan(Size::Small)
         });
-        assert_eq!(smoke[2].matches("--restart").count(), 1, "{}", smoke[2]);
-        assert_eq!(smoke[3].matches("--restart").count(), 1, "{}", smoke[3]);
+        assert!(smoke[2].ends_with("--restart"), "{}", smoke[2]);
+        assert!(!smoke.iter().any(|l| l.contains("--resume")), "{smoke:?}");
+        // Told nothing, the workloads are told nothing, and refuse on their own.
+        assert!(!lines(&plan(Size::Large))
+            .iter()
+            .any(|l| l.contains("--resume") || l.contains("--restart")),);
         assert!(
             got[1].starts_with("cambium-bench report bazel"),
             "{}",
@@ -482,6 +567,46 @@ mod tests {
             ..plan(Size::Large)
         }
         .is_runnable());
+    }
+
+    /// Recorded results stop a run until it is told what to do with them.
+    #[test]
+    fn a_run_over_recorded_results_refuses_resumes_or_moves_them_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("bench-results");
+        std::fs::create_dir_all(results.join("bazel/changes")).unwrap();
+        std::fs::write(results.join("bazel/changes/changes-abc.json"), "{}").unwrap();
+        let p = Plan {
+            results_dir: Some(results.clone()),
+            ..plan(Size::Large)
+        };
+        assert_eq!(p.existing_results(), ["bazel: changes"]);
+        let err = p.refuse_existing().unwrap_err().to_string();
+        assert!(err.contains("--resume") && err.contains("--fresh"), "{err}");
+        assert!(Plan {
+            resume: true,
+            ..p.clone()
+        }
+        .refuse_existing()
+        .is_ok());
+        let history_only = Plan {
+            steps: vec![StepKind::History],
+            ..p.clone()
+        };
+        assert!(
+            history_only.existing_results().is_empty(),
+            "only the workloads the plan runs count"
+        );
+
+        let moved = p.move_results_aside().unwrap().expect("something to move");
+        assert!(!results.exists());
+        assert!(moved.join("bazel/changes/changes-abc.json").exists());
+        assert!(p.refuse_existing().is_ok());
+        assert_eq!(
+            p.move_results_aside().unwrap(),
+            None,
+            "nothing left to move"
+        );
     }
 
     #[test]

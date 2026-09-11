@@ -100,7 +100,7 @@ impl ChangesOptions {
             oracle_k: 0,
             load_oracle: true,
             seed: 0,
-            resume: true,
+            resume: false,
             examples: DEFAULT_EXAMPLES,
             tango_change_sets: None,
             progress: None,

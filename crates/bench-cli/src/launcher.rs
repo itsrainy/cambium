@@ -84,6 +84,19 @@ struct Compose {
     /// The first line of the screen drawn, so the cursor stays in view on a
     /// terminal shorter than the screen.
     scroll: usize,
+    /// Where the plan writes, when not its size's default (the tests).
+    results_dir: Option<PathBuf>,
+    /// On review, the results the plan would run over: `envoy: history`.
+    existing: Vec<String>,
+}
+
+/// How a confirmed run starts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Start {
+    /// Nothing was recorded, or the plan resumes it.
+    AsPlanned,
+    /// Move the results directory aside first.
+    Fresh,
 }
 
 impl Compose {
@@ -123,6 +136,8 @@ impl Compose {
             row: [0; 4],
             confirming: false,
             scroll: 0,
+            results_dir: None,
+            existing: Vec::new(),
         }
     }
 
@@ -150,7 +165,18 @@ impl Compose {
             .filter(|s| !StepKind::WORKLOADS.contains(s) || picked_workloads.contains(s))
             .collect();
         plan.size = self.size;
+        plan.results_dir = self.results_dir.clone();
         plan
+    }
+
+    /// `enter`: the plan, for confirmation, with whatever it would run over.
+    fn review(&mut self) {
+        let plan = self.plan();
+        self.confirming = plan.is_runnable();
+        self.existing = match plan.size {
+            Size::Small => Vec::new(),
+            _ => plan.existing_results(),
+        };
     }
 
     fn pane_index(&self) -> usize {
@@ -335,12 +361,30 @@ impl Compose {
                 "   nothing: pick at least one subject and one workload",
             ));
         }
+        if self.confirming && !self.existing.is_empty() {
+            let dir = plan.results().display().to_string();
+            out.push(Line::from(""));
+            out.push(Line::from(Span::styled(
+                format!("{dir} already holds results"),
+                bold,
+            )));
+            for e in &self.existing {
+                out.push(Line::from(format!("   {e}")));
+            }
+            out.push(Line::from(Span::styled(
+                format!("   r continues them; f moves {dir} aside and starts fresh"),
+                dim,
+            )));
+        }
         (out, cursor_line)
     }
 
     /// The key help, pinned below the scrolling part.
     fn help(&self) -> &'static str {
         match (self.confirming, self.in_synth) {
+            (true, _) if !self.existing.is_empty() => {
+                "r resume those results   f move them aside and start fresh   n back   q quit"
+            }
             (true, _) => "run these? y to start, n to go back, q to quit",
             (false, true) => "space toggle   up/down move   esc back   q quit",
             (false, false) => "space toggle   tab/up/down move   enter review   q quit",
@@ -420,8 +464,12 @@ fn flip<T>(rows: &mut [(T, bool)], row: usize) {
 /// `cambium-bench` with no verb, on a terminal.
 pub fn run(ctx: &Context) -> Result<u8> {
     let (_, manifest) = Manifest::discover(&ctx.root)?;
-    let Some(plan) = compose(&manifest)? else {
+    let Some((plan, start)) = compose(&manifest)? else {
         return Ok(crate::EXIT_OK);
+    };
+    let moved = match start {
+        Start::Fresh => plan.move_results_aside()?,
+        Start::AsPlanned => None,
     };
     let results = plan.results();
     std::fs::create_dir_all(&results)?;
@@ -432,11 +480,15 @@ pub fn run(ctx: &Context) -> Result<u8> {
         .map(|s| cambium_bench::session::subject_dir_name(s))
         .collect();
     let mut runner = Runner::start(&plan)?;
+    if let Some(to) = moved {
+        runner.push_tail(format!("moved the previous results to {}", to.display()));
+    }
     screen(
         &Screen {
             results_dir: results,
             subjects,
             interval: Duration::from_secs(1),
+            engines: crate::watch::engine_ids(ctx),
         },
         &mut runner,
     )?;
@@ -452,7 +504,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
 
 /// Draws the composition screen until the plan is confirmed (`Some`) or
 /// abandoned (`None`).
-fn compose(manifest: &Manifest) -> Result<Option<Plan>> {
+fn compose(manifest: &Manifest) -> Result<Option<(Plan, Start)>> {
     let _guard = crate::watch::TerminalGuard::enter()?;
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let mut c = Compose::new(manifest);
@@ -509,8 +561,18 @@ fn compose(manifest: &Manifest) -> Result<Option<Plan>> {
             KeyCode::BackTab => c.next_pane(-1),
             KeyCode::Down | KeyCode::Char('j') => c.move_by(1),
             KeyCode::Up | KeyCode::Char('k') => c.move_by(-1),
-            KeyCode::Enter if !c.confirming => c.confirming = c.plan().is_runnable(),
-            KeyCode::Char('y') | KeyCode::Enter if c.confirming => return Ok(Some(c.plan())),
+            KeyCode::Enter if !c.confirming => c.review(),
+            KeyCode::Char('y') | KeyCode::Enter if c.confirming && c.existing.is_empty() => {
+                return Ok(Some((c.plan(), Start::AsPlanned)))
+            }
+            KeyCode::Char('r') if c.confirming && !c.existing.is_empty() => {
+                let mut plan = c.plan();
+                plan.resume = true;
+                return Ok(Some((plan, Start::AsPlanned)));
+            }
+            KeyCode::Char('f') if c.confirming && !c.existing.is_empty() => {
+                return Ok(Some((c.plan(), Start::Fresh)))
+            }
             KeyCode::Char('n') if c.confirming => c.confirming = false,
             _ => {}
         }
@@ -816,6 +878,27 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(line.contains("large"), "{line}");
+    }
+
+    /// Review names the results a plan would run over, and only then offers
+    /// resume and move-aside instead of a plain start.
+    #[test]
+    fn review_offers_resume_or_fresh_over_recorded_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("bench-results");
+        let mut c = Compose::new(&manifest());
+        c.results_dir = Some(results.clone());
+        c.toggle();
+        c.review();
+        assert!(c.confirming && c.existing.is_empty());
+        assert!(c.help().contains("y to start"));
+
+        std::fs::create_dir_all(results.join("bazel/history")).unwrap();
+        std::fs::write(results.join("bazel/history/history-abc.json"), "{}").unwrap();
+        c.review();
+        assert_eq!(c.existing, ["bazel: history"]);
+        assert!(c.help().contains("r resume") && c.help().contains("f move"));
+        assert!(text(&c).iter().any(|l| l.contains("already holds results")));
     }
 
     /// The screen composes the library's plan, so a confirmed large run is

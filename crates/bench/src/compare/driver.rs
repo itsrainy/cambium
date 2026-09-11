@@ -847,15 +847,21 @@ pub fn compare_change_sets(
     let path = opts.output_path();
     let engine_id = State::engine_id(&engine.config().hash());
     let mut state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
+    // A resume continues the recorded comparison or fails; it never starts
+    // one over, which is what `--restart` is for.
     let mut result = match (opts.resume, ChangesResult::read(&path)) {
         (true, Ok(prev)) if resumable(&prev, opts, &engine_id) => prev,
-        (true, Ok(prev)) if prev.repo == opts.repo_id && prev.pin == opts.pin => {
-            tracing::warn!(
-                was = %prev.engine,
-                now = %engine_id,
-                "change sets were compared by a different cambium; starting over"
-            );
-            fresh_result(opts, &engine_id)
+        (true, Ok(prev)) => anyhow::bail!(
+            "cannot resume {}: it compared {} at {} under {}, and this run is {} at {} under {engine_id}; pass --restart",
+            path.display(),
+            prev.repo,
+            prev.pin,
+            prev.engine,
+            opts.repo_id,
+            opts.pin
+        ),
+        (true, Err(e)) if path.exists() => {
+            anyhow::bail!("cannot resume {}: {e:#}; pass --restart", path.display())
         }
         _ => fresh_result(opts, &engine_id),
     };

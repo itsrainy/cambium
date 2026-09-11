@@ -115,7 +115,7 @@ none of them. Unset means the default.
 | `SUBJECTS` | `run-published.sh`, `precheck.sh` | the five subjects | which subjects, space-separated |
 | `STEPS` | `run-published.sh` | `fetch build history changes report` | which steps |
 | `SMOKE` | `run-published.sh` | `0` | `1` is the fifteen-minute pass into `bench-results-smoke/` |
-| `RESTART_CHANGES`, `RESTART_HISTORY` | `run-published.sh` | `0` | `--restart` on the workload |
+| `RESUME`, `FRESH` | `run-published.sh` | `0` | `--resume` continues the results already in the results directory; `--fresh` moves the directory aside first. With neither, a directory holding results is refused |
 | `NO_BUILD` | `run-published.sh` | `0` | `1` skips the cargo build (the sha preflight still runs) |
 | `CAMBIUM_REPO` | `run-published.sh`, `finish-bootstrap.sh` | `~/cambium` | the checkout on the box |
 | `CAMBIUM_BENCH` | `run-published.sh`, `precheck.sh` | `target/release/cambium-bench` | the harness binary |
@@ -167,10 +167,21 @@ none of them. Unset means the default.
   stderr when it does), `git -C <mirror>.git worktree prune` is the manual
   fix. An `is not a working tree` line is *not* that failure — see the apollo
   item above.
-- Results written by another cambium build (format version or config hash)
-  are started over, not resumed; that identity is in every state file. You
-  will see `WARN skipping an index this build cannot read` for the same
-  reason, which is benign.
+- A run over a results directory that already holds results refuses to
+  start: `RESUME=1` (`--resume`, `r` in the launcher) continues them and
+  `FRESH=1` (`--fresh`, `f`) moves the directory aside to
+  `<dir>-<timestamp>`. A resume refuses results another cambium build wrote
+  (format version or config hash, the identity in every state file) or a
+  different range rather than starting them over; `--restart` on the
+  workload is the explicit way to discard one. `watch` shows such a subject
+  as `stale`. `WARN skipping an index this build cannot read` is the store's
+  side of the same identity check, and benign.
+- Each workload stops its subject's Bazel servers when it ends
+  (`crates/bench/src/servers.rs`), and a revision worktree's server stops
+  with the worktree. Before both, idle servers piled up to 35 JVMs and
+  29.6 GB and the OOM killer took a run together with its tmux session;
+  `sudo journalctl -k | grep 'Out of memory'` says whether that is what ended
+  one.
 - apollo: WORKSPACE-only, pinned to Bazel 7.4.1, history capped at 74
   commits because a deeper revision does not load. Its rebuild oracle is
   `partial` with 1 package in error — `@local_config_cuda`, no CUDA on the
@@ -218,6 +229,5 @@ list is.
   few packages on a handful of commits. That is the pin-versus-base drift the
   replay names, not an engine change; change-set replays are exact, and one
   that is not is a finding.
-- `WARN skipping an index this build cannot read`, and a results directory
-  another cambium build wrote being started over rather than resumed: see the
-  gotcha above, benign.
+- `WARN skipping an index this build cannot read`: see the gotcha above,
+  benign.

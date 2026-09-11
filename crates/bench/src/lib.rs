@@ -67,6 +67,7 @@ pub mod report;
 pub mod run;
 pub mod runner;
 pub mod schema;
+pub mod servers;
 pub mod session;
 pub mod stages;
 pub mod state;
