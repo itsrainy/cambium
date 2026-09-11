@@ -16,8 +16,10 @@ pub enum Args {
     /// Build an index from scratch with `bazel query //...`, minting a new lineage.
     Build {
         /// Revision the index describes. Defaults to HEAD.
-        #[arg(long, default_value = "HEAD")]
-        commit: String,
+        rev: Option<String>,
+        /// The old spelling of the revision; `cambi index build <rev>` now.
+        #[arg(long, hide = true, conflicts_with = "rev")]
+        commit: Option<String>,
         /// Upload the result to the configured store.
         #[arg(long)]
         publish: bool,
@@ -31,10 +33,18 @@ pub enum Args {
     },
     /// Bring an index forward from one revision to another.
     Update {
-        #[arg(long)]
-        from: String,
-        #[arg(long, default_value = "HEAD")]
-        to: String,
+        /// The range, spelled as `git diff` spells it: `FROM..TO`, or a single
+        /// revision for `<rev>..HEAD`. The index for FROM is fetched or built;
+        /// the result describes TO.
+        #[arg(value_name = "FROM..TO", conflicts_with_all = ["from", "to"])]
+        range: Option<String>,
+        /// The old spelling of the range's left half; `cambi index update
+        /// FROM..TO` now.
+        #[arg(long, hide = true)]
+        from: Option<String>,
+        /// The old spelling of the range's right half.
+        #[arg(long, hide = true)]
+        to: Option<String>,
         #[arg(long)]
         publish: bool,
         /// Write the index here. Required unless `--publish`.
@@ -79,23 +89,35 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     if let Args::Show { file } = &args {
         return crate::cmd::inspect::show(ctx, file);
     }
+    // A missing range is the caller's mistake, whatever the workspace's state,
+    // so it is reported before the workspace is opened.
+    if let Args::Update {
+        range, from, to, ..
+    } = &args
+    {
+        update_range(range.clone(), from.clone(), to.clone())?;
+    }
     let mut engine = ctx.engine()?;
     match args {
         Args::Build {
+            rev,
             commit,
             publish,
             out,
             allow_partial,
         } => {
             engine.cfg.baseline.publish_partial |= allow_partial;
-            let sha = engine.repo.rev_parse(&commit).with_context(|| {
-                format!("--commit {commit} is not a revision in this repository")
-            })?;
+            let rev = rev.or(commit).unwrap_or_else(|| "HEAD".to_string());
+            let sha = engine
+                .repo
+                .rev_parse(&rev)
+                .with_context(|| format!("{rev} is not a revision in this repository"))?;
             let index = engine.full_build(&sha)?;
             emit(&engine, &index, out.as_deref(), publish)?;
             Ok(crate::EXIT_OK)
         }
         Args::Update {
+            range,
             from,
             to,
             publish,
@@ -104,10 +126,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             allow_partial,
         } => {
             engine.cfg.baseline.publish_partial |= allow_partial;
+            let (from, to) = update_range(range, from, to)?;
             let to_sha = engine
                 .repo
                 .rev_parse(&to)
-                .with_context(|| format!("--to {to} is not a revision in this repository"))?;
+                .with_context(|| format!("{to} is not a revision in this repository"))?;
             let req = AffectedRequest {
                 base: from,
                 head: to_sha.clone(),
@@ -231,4 +254,56 @@ fn emit(
         }
     }
     Ok(())
+}
+
+/// The two revisions `index update` moves between: the positional range, or
+/// the old `--from`/`--to`. Unlike `affected`, there is no merge-base default:
+/// bringing an index forward from nowhere is not a thing.
+fn update_range(
+    range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<(String, String)> {
+    if let Some(range) = range {
+        if range.contains("...") {
+            return Err(crate::diag::UsageError::raised(format!(
+                "`{range}`: cambi takes a two-dot range (FROM..TO); a bare revision already \
+                 means <rev>..HEAD"
+            )));
+        }
+        return Ok(match range.split_once("..") {
+            Some((a, b)) => (a.to_string(), b.to_string()),
+            None => (range, "HEAD".to_string()),
+        });
+    }
+    match from {
+        Some(from) => Ok((from, to.unwrap_or_else(|| "HEAD".to_string()))),
+        None => Err(crate::diag::UsageError::raised(
+            "cambi index update needs a range: `cambi index update FROM..TO`, or FROM alone \
+             for FROM..HEAD",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::update_range;
+
+    #[test]
+    fn a_range_splits_and_a_bare_revision_means_head() {
+        assert_eq!(
+            update_range(Some("a..b".into()), None, None).unwrap(),
+            ("a".into(), "b".into())
+        );
+        assert_eq!(
+            update_range(Some("a".into()), None, None).unwrap(),
+            ("a".into(), "HEAD".into())
+        );
+        assert_eq!(
+            update_range(None, Some("a".into()), None).unwrap(),
+            ("a".into(), "HEAD".into())
+        );
+        assert!(update_range(None, None, None).is_err());
+        assert!(update_range(Some("a...b".into()), None, None).is_err());
+    }
 }

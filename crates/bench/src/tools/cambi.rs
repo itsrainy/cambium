@@ -225,21 +225,17 @@ impl Cambi {
         })
     }
 
-    /// `cambi index build --commit <rev> --out <file>`, timed end to end.
+    /// `cambi index build <rev> --out <file>`, timed end to end.
     pub fn index_build(&self, ws: &Path, rev: &str, out: &Path, publish: bool) -> Result<Duration> {
         let mut cmd = self.command(ws);
-        cmd.arg("index")
-            .arg("build")
-            .args(["--commit", rev])
-            .arg("--out")
-            .arg(out);
+        cmd.arg("index").arg("build").arg(rev).arg("--out").arg(out);
         if publish {
             cmd.arg("--publish");
         }
-        self.run(&mut cmd, &format!("cambi index build --commit {rev}"))
+        self.run(&mut cmd, &format!("cambi index build {rev}"))
     }
 
-    /// `cambi index update --from <base> --to <head> --out <file>`, timed end
+    /// `cambi index update <base>..<head> --out <file>`, timed end
     /// to end.
     pub fn index_update(
         &self,
@@ -252,17 +248,13 @@ impl Cambi {
         let mut cmd = self.command(ws);
         cmd.arg("index")
             .arg("update")
-            .args(["--from", base])
-            .args(["--to", head])
+            .arg(format!("{base}..{head}"))
             .arg("--out")
             .arg(out);
         if publish {
             cmd.arg("--publish");
         }
-        self.run(
-            &mut cmd,
-            &format!("cambi index update --from {base} --to {head}"),
-        )
+        self.run(&mut cmd, &format!("cambi index update {base}..{head}"))
     }
 
     /// `cambi index publish <file>`.
@@ -438,9 +430,9 @@ mod tests {
             .unwrap();
         c.index_publish(dir.path(), &out).unwrap();
         let log = std::fs::read_to_string(&argv).unwrap();
-        assert!(log.contains("index build --commit abc"), "{log}");
+        assert!(log.contains("index build abc"), "{log}");
         assert!(log.contains("--publish"), "{log}");
-        assert!(log.contains("index update --from abc --to def"), "{log}");
+        assert!(log.contains("index update abc..def"), "{log}");
         assert!(log.contains("index publish"), "{log}");
     }
 }

@@ -109,7 +109,7 @@ A post-merge job on the main branch keeps the store populated, so pull-request
 runs almost always find their merge base directly:
 
 ```console
-$ cambi index update --from <parent-sha> --to <merge-sha> --publish
+$ cambi index update <parent-sha>..<merge-sha> --publish
 ```
 
 When a run does not find one, it walks back up to `max_ancestor_walk`
