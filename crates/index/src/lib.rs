@@ -32,6 +32,7 @@ mod starlark;
 pub mod strtab;
 #[cfg(test)]
 mod testutil;
+mod util;
 pub mod view;
 mod vocabulary;
 pub mod walk;

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::util::diff_maps;
+
 use crate::vocabulary::is_toolchain_module;
 
 use super::module_facts::{apparent_of, ModuleChange, ModuleFacts};
@@ -45,12 +47,7 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     let mut repos: BTreeSet<String> = BTreeSet::new();
 
     // Dependencies: a version bump changes exactly one repository's contents.
-    let names: BTreeSet<&String> = base.deps.keys().chain(head.deps.keys()).collect();
-    for n in names {
-        let (b, h) = (base.deps.get(n), head.deps.get(n));
-        if b == h {
-            continue;
-        }
+    for (n, b, h) in diff_maps(&base.deps, &head.deps) {
         let module = h.or(b).map(|d| d.module.clone()).unwrap_or_default();
         if is_toolchain_module(&module) {
             return ModuleChange::Global(format!(
@@ -62,11 +59,7 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     }
 
     // Overrides: same, keyed by module name rather than apparent name.
-    let mods: BTreeSet<&String> = base.overrides.keys().chain(head.overrides.keys()).collect();
-    for m in mods {
-        if base.overrides.get(m) == head.overrides.get(m) {
-            continue;
-        }
+    for (m, _, _) in diff_maps(&base.overrides, &head.overrides) {
         if is_toolchain_module(m) {
             return ModuleChange::Global(format!(
                 "the override for `{m}` changed, and {m} registers toolchains"
@@ -80,31 +73,13 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     // Extensions: a changed tag, a changed `use_repo`, or a changed
     // `override_repo` / `inject_repo` moves the repositories on both sides of
     // the change.
-    let keys: BTreeSet<&String> = base
-        .extensions
-        .keys()
-        .chain(head.extensions.keys())
-        .collect();
-    for k in keys {
-        let (b, h) = (base.extensions.get(k), head.extensions.get(k));
-        if b == h {
-            continue;
-        }
+    for (_, b, h) in diff_maps(&base.extensions, &head.extensions) {
         for e in [b, h].into_iter().flatten() {
             repos.extend(e.repos.iter().cloned());
         }
     }
 
-    let keys: BTreeSet<&String> = base
-        .repo_rules
-        .keys()
-        .chain(head.repo_rules.keys())
-        .collect();
-    for k in keys {
-        let (b, h) = (base.repo_rules.get(k), head.repo_rules.get(k));
-        if b == h {
-            continue;
-        }
+    for (_, b, h) in diff_maps(&base.repo_rules, &head.repo_rules) {
         for r in [b, h].into_iter().flatten() {
             repos.extend(r.repos.iter().cloned());
         }
