@@ -186,12 +186,9 @@ impl WorkspaceText for FixedText {
 /// What the stage concluded.
 #[derive(Clone, Debug, Default)]
 pub struct Externals {
-    /// Invalidate everything, for this reason. What the engine reads.
+    /// Invalidate everything, for this reason. Its `Display` is the wording
+    /// the run reports.
     pub cause: Option<ExternalsCause>,
-    /// `cause`, in words. Kept as a field beside it because the benchmark's
-    /// replay reads the wording directly; the two are only ever set together,
-    /// by [`Externals::escalate`].
-    pub global: Option<String>,
     /// Which world Bazel reads the base tree in, when the stage had to
     /// decide. Only a diff that touches `MODULE.bazel` or its lock asks —
     /// an edit to either is inert under WORKSPACE mode — and deciding reads
@@ -231,13 +228,11 @@ pub struct Externals {
 impl Externals {
     /// Gives up on localising the diff: everything is affected, for `cause`.
     pub fn escalate(&mut self, cause: ExternalsCause) {
-        self.global = Some(cause.to_string());
         self.cause = Some(cause);
     }
 
     /// Takes the escalation, if there was one, leaving the stage clear.
     pub fn take_cause(&mut self) -> Option<ExternalsCause> {
-        self.global = None;
         self.cause.take()
     }
 

@@ -930,7 +930,12 @@ fn dirty_packages(
     }
 
     let mut global = dirty.global;
-    let mut reason = dirty.global_reason.clone();
+    // The classifier hands back the matching path; the engine's typed
+    // reason puts it into the words the report and the histogram carry.
+    let mut reason = dirty
+        .invalidator
+        .as_ref()
+        .map(|path| cambium_engine::GlobalReason::Invalidator { path: path.clone() }.to_string());
 
     // Changed `.bzl` files, from the static closure. The engine escalates when
     // the index carries no closure or when a changed `.bzl` is loaded outside
@@ -979,9 +984,9 @@ fn dirty_packages(
         }
     }
 
-    if let Some(r) = &ext.global {
+    if let Some(cause) = &ext.cause {
         global = true;
-        reason = Some(r.clone());
+        reason = Some(cause.to_string());
     }
     Ok(DirtySet {
         by_package,
