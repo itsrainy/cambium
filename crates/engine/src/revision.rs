@@ -10,7 +10,7 @@
 //! missed target, the one failure mode the whole design exists to prevent.
 //!
 //! The fix is a second checkout: `git worktree add --detach` at the revision,
-//! its own `Bazel` handle pointed at it, removed when the run is done. Two
+//! its own `Bazel` handle pointed at it, removed when the run is done. Three
 //! details make it safe and affordable:
 //!
 //! - **Its own output base.** Sharing one across workspace directories poisons
@@ -20,6 +20,13 @@
 //!   first workspace is deleted every one of those symlinks dangles, failing
 //!   *every* later query with a repository-mapping error. See
 //!   [`derive_startup_flags`].
+//! - **Its server stops with it.** Each output base is a Bazel server of its
+//!   own, holding a gigabyte or more, and Bazel keeps an idle one for three
+//!   hours. A process that answers several revisions — the benchmark's
+//!   change-set workload, one `cambi` per change set — left one server per
+//!   revision behind, and forty envoy change sets were enough to run a 32 GB
+//!   machine out of memory. [`RevisionQuerier`] shuts its server down when it
+//!   drops; the output base itself, and what was fetched into it, stays.
 //! - **Nothing is done when nothing needs doing.** `baseline update` and
 //!   the history workload checks each commit out before calling the engine, so their
 //!   revision is the one on disk and they must keep paying nothing: no
@@ -87,7 +94,7 @@ impl RevisionWorkspace {
 /// images routinely put it on the fast disk, and letting Bazel derive one would
 /// silently move it to `$HOME`), and it is a *stable* function of the revision,
 /// so the worktree can be removed while the output base stays — a later run at
-/// the same revision reconnects to a warm server instead of re-analysing.
+/// the same revision finds its external repositories already fetched.
 ///
 /// With no `--output_base` in the flags, nothing is added: Bazel derives one
 /// from the workspace path, and the worktree path is already unique per sha.
@@ -132,7 +139,8 @@ fn mirror_untracked_config(repo_root: &Path, dest: &Path) -> Result<()> {
 /// reads when that revision is not the one on disk.
 ///
 /// The worktree field is declared *after* the querier so that drop order
-/// removes the directory only once nothing is querying it any more.
+/// removes the directory only once nothing is querying it any more, and the
+/// `Drop` impl stops the worktree's Bazel server before either goes.
 pub struct RevisionQuerier {
     querier: BazelQuerier,
     _workspace: Option<RevisionWorkspace>,
@@ -155,6 +163,17 @@ impl RevisionQuerier {
     /// Whether this querier had to make a worktree.
     pub fn uses_worktree(&self) -> bool {
         self._workspace.is_some()
+    }
+}
+
+impl Drop for RevisionQuerier {
+    fn drop(&mut self) {
+        // Only a worktree's server is ours to stop. Without one, the querier
+        // runs in the caller's own workspace, whose server the caller (or the
+        // user's next build) is still using.
+        if self._workspace.is_some() {
+            self.querier.bazel.shutdown();
+        }
     }
 }
 
@@ -225,5 +244,85 @@ mod tests {
         let flags = vec!["--bazelrc=/etc/rc".to_string()];
         assert_eq!(derive_startup_flags(&flags, "abc"), flags);
         assert!(derive_startup_flags(&[], "abc").is_empty());
+    }
+
+    /// Records the subcommand of every Bazel invocation, in order.
+    #[derive(Debug, Default)]
+    struct Recorder(std::sync::Mutex<Vec<String>>);
+
+    impl cambium_bazel::BazelRunner for Recorder {
+        fn stream(
+            &self,
+            _cmd: &mut std::process::Command,
+            _on_stdout: &mut dyn FnMut(&mut dyn std::io::Read),
+            _on_stderr: &mut (dyn FnMut(&str) + Send),
+        ) -> std::result::Result<cambium_bazel::Captured, cambium_bazel::BazelError> {
+            unreachable!("nothing is queried")
+        }
+
+        fn output(
+            &self,
+            cmd: &mut std::process::Command,
+        ) -> std::io::Result<cambium_bazel::Captured> {
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            self.0.lock().unwrap().push(args.join(" "));
+            Ok(cambium_bazel::Captured {
+                exit: cambium_bazel::Exit {
+                    code: Some(0),
+                    success: true,
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn querier_with(
+        recorder: &std::sync::Arc<Recorder>,
+        ws: Option<RevisionWorkspace>,
+    ) -> RevisionQuerier {
+        let dir = ws
+            .as_ref()
+            .map(|w| w.path().to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let bazel = Bazel::at(dir, Some("bazel"))
+            .with_startup_flags(vec!["--output_base=/fast/ob-0123456789ab".into()])
+            .with_runner(recorder.clone());
+        RevisionQuerier::new(
+            BazelQuerier {
+                bazel,
+                opts: cambium_bazel::ConvertOptions::default(),
+                files: crate::query::no_files(),
+                diags: crate::diag::Diagnostics::new(),
+            },
+            ws,
+        )
+    }
+
+    /// A worktree's server is stopped when its querier goes, against the
+    /// worktree's own output base; the caller's server is left alone.
+    #[test]
+    fn a_worktree_querier_stops_its_bazel_server_and_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        cambium_testkit::init_repo(&root);
+        cambium_testkit::write(&root, "lib/BUILD", "a\n");
+        let sha = cambium_testkit::commit_all(&root, "base");
+        let repo = cambium_diff::Repo::new(&root);
+
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let ws = RevisionWorkspace::create(&repo, &sha, &dir.path().join("worktrees")).unwrap();
+        drop(querier_with(&recorder, Some(ws)));
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            ["--output_base=/fast/ob-0123456789ab shutdown"]
+        );
+
+        let recorder = std::sync::Arc::new(Recorder::default());
+        drop(querier_with(&recorder, None));
+        assert!(recorder.0.lock().unwrap().is_empty());
     }
 }
