@@ -281,7 +281,7 @@ fn the_engine_finds_a_baseline_by_commit_alone() {
     let src = dir.path().join("idx.bin");
     let mut d = index_at("feedface", false);
     // Only an index built with this configuration counts as a baseline.
-    d.header.config_hash = engine.cfg.hash();
+    d.header.config_hash = engine.config().hash();
     format::write_index(&src, &d).unwrap();
     engine
         .publish_index(&src, &d.header.lineage, "feedface")
@@ -374,7 +374,7 @@ fn a_command_store_over_a_nested_directory_round_trips() {
 
     let src = dir.path().join("idx.bin");
     let mut d = index_at("feedface", false);
-    d.header.config_hash = engine.cfg.hash();
+    d.header.config_hash = engine.config().hash();
     format::write_index(&src, &d).unwrap();
     let written = engine
         .publish_index(&src, &d.header.lineage, "feedface")

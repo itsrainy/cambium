@@ -87,7 +87,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             out,
             allow_partial,
         } => {
-            let sha = engine.repo.rev_parse(&commit).with_context(|| {
+            let sha = engine.repo().rev_parse(&commit).with_context(|| {
                 format!("--commit {commit} is not a revision in this repository")
             })?;
             let index = engine.full_build(&sha)?;
@@ -108,7 +108,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             allow_partial,
         } => {
             let to_sha = engine
-                .repo
+                .repo()
                 .rev_parse(&to)
                 .with_context(|| format!("--to {to} is not a revision in this repository"))?;
             let req = AffectedRequest {
@@ -145,12 +145,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
         Args::Gc { keep } => {
-            let store = engine
-                .store
-                .as_ref()
-                .context("no baseline store is configured")?;
+            let store = engine.store().context("no baseline store is configured")?;
             let removed = store.gc(
-                engine.cfg.baseline.retention_days,
+                engine.config().baseline.retention_days,
                 keep.as_deref().unwrap_or(""),
             )?;
             println!("removed {removed} index files");
@@ -168,10 +165,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
         Args::List => {
-            let store = engine
-                .store
-                .as_ref()
-                .context("no baseline store is configured")?;
+            let store = engine.store().context("no baseline store is configured")?;
             for n in store.list()? {
                 println!("{n}");
             }

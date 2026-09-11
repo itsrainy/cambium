@@ -193,13 +193,13 @@ fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     let engine = ctx.engine()?;
     let f = IndexFile::open(&args.file)?;
     let result = inspect::verify(
-        &engine.bazel,
+        engine.bazel(),
         f.view(),
         args.sample,
         args.seed,
-        &engine.diagnostics,
+        engine.diagnostics(),
     )?;
-    for d in engine.diagnostics.drain() {
+    for d in engine.diagnostics().drain() {
         ctx.render.warn(&d);
     }
     emit(

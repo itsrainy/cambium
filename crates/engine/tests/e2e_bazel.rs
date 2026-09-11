@@ -227,7 +227,7 @@ impl Golden {
         let out = engine
             .compute(
                 self.base_index.view(),
-                &engine.repo.diff(&self.base, &head).expect("git diff"),
+                &engine.repo().diff(&self.base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier for head"),
                 &req,
             )
@@ -700,7 +700,7 @@ fn differential_check_against_bazel_rdeps() {
             continue;
         }
         let label = v.label(id);
-        let out = Command::new(engine.bazel.binary())
+        let out = Command::new(engine.bazel().binary())
             .current_dir(engine.workspace())
             .args([
                 "query",
@@ -955,7 +955,7 @@ fn write_external_workspace(root: &Path, store: &Path, bazel_version: &str) {
 
 /// Main-repo targets `bazel query rdeps(//..., <pattern>)` reports.
 fn rdeps_oracle(engine: &Engine, pattern: &str) -> BTreeSet<String> {
-    let out = Command::new(engine.bazel.binary())
+    let out = Command::new(engine.bazel().binary())
         .current_dir(engine.workspace())
         .args([
             "query",
@@ -1058,7 +1058,7 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
             let out = engine
                 .compute(
                     base_index.view(),
-                    &engine.repo.diff(&base, &head).expect("git diff"),
+                    &engine.repo().diff(&base, &head).expect("git diff"),
                     &engine.bazel_querier(&head).expect("querier"),
                     &req,
                 )
@@ -1252,7 +1252,7 @@ fn a_build_files_direct_external_load_reaches_its_package() {
         let out = engine
             .compute(
                 base_index.view(),
-                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.repo().diff(&base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier"),
                 &req,
             )
@@ -1502,7 +1502,7 @@ fn a_permanently_unloadable_package_keeps_no_load_closure() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier for head"),
             &affected_request(&base, &head, true),
         )
@@ -1641,7 +1641,7 @@ fn an_inert_module_file_in_workspace_mode_moves_nothing() {
         let out = engine
             .compute(
                 base_index.view(),
-                &engine.repo.diff(&base, &head).expect("git diff"),
+                &engine.repo().diff(&base, &head).expect("git diff"),
                 &engine.bazel_querier(&head).expect("querier for head"),
                 &affected_request(&base, &head, false),
             )
@@ -1711,7 +1711,7 @@ fn a_config_scoped_bazelrc_line_does_not_set_the_mode() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier"),
             &affected_request(&base, &head, false),
         )
@@ -1773,7 +1773,7 @@ fn a_label_written_in_workspace_itself_reaches_its_repositorys_consumers() {
     let out = engine
         .compute(
             base_index.view(),
-            &engine.repo.diff(&base, &head).expect("git diff"),
+            &engine.repo().diff(&base, &head).expect("git diff"),
             &engine.bazel_querier(&head).expect("querier"),
             &affected_request(&base, &head, false),
         )
