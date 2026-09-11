@@ -65,6 +65,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use crate::externals::{apparent_of, is_toolchain_module, ModuleChange, ModuleFacts};
+use crate::label::Label;
 
 /// Lock format versions this parser was written against.
 ///
@@ -471,9 +472,10 @@ fn ext_matches(key: &str, bzl: &str, name: &str) -> bool {
 /// decoration removed: `@@envoy_api~//bazel:x.bzl` and `@envoy_api//bazel:x.bzl`
 /// both become `("envoy_api", "bazel:x.bzl")`.
 fn strip_repo(label: &str) -> (String, &str) {
-    let (repo, rest) = match label.strip_prefix("@@").or_else(|| label.strip_prefix('@')) {
-        Some(r) => r.split_once("//").unwrap_or(("", r)),
-        None => ("", label.trim_start_matches('/')),
+    let (repo, rest) = match Label::parse(label) {
+        Some(l) if !l.is_relative() => (l.repo_name(), l.rest()),
+        // `@x` with no `//`, or a bare path: no repository part to strip.
+        _ => ("", label.trim_start_matches('@')),
     };
     // `envoy_api~` and `envoy_api+` are the canonical spellings of the module
     // repository `envoy_api`; a repository an extension generated is spelled

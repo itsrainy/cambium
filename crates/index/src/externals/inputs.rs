@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::attribution::Attribution;
+use crate::label::{rule_label, Label};
 use crate::loads::{lex, unescape, FileText, LoadGraph, RepoMapping, Tok};
 
 use super::module_facts::{apparent_of, ModuleFacts};
@@ -40,23 +41,16 @@ use super::pattern::{PathMap, Pattern, RepoInputs};
 /// packages (issue #8); the graph gives the exact answer for the one case it
 /// was covering.
 pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
-    let rest = match label.strip_prefix("@@") {
-        Some(r) => match r.split_once("//") {
-            Some(("", rest)) => rest,
-            _ => return Vec::new(),
-        },
-        None => match label.strip_prefix('@') {
-            Some(r) => match r.split_once("//") {
-                Some((repo, rest)) if m.is_main(repo) => rest,
-                _ => return Vec::new(),
-            },
-            None => match label.strip_prefix("//") {
-                Some(rest) => rest,
-                None => return Vec::new(),
-            },
-        },
+    let Some(l) = Label::parse(label) else {
+        return Vec::new();
     };
-    // `rest` is now `pkg:name` or `pkg`, without the leading `//`. A format
+    // Another repository's file is not a main-repo input, and a relative
+    // `:name` in a `.bzl` is not a label a repository rule resolves.
+    if l.is_relative() || !l.is_main(m) {
+        return Vec::new();
+    }
+    let rest = l.rest();
+    // `rest` is `pkg:name` or `pkg`, without the leading `//`. A format
     // placeholder cuts the label short: `Label("//third_party/gpus/%s.tpl" %
     // name)` is how a configure rule reaches every template it writes into
     // its repository, and the directory before the placeholder is what can be
@@ -82,12 +76,9 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     if !rest.bytes().all(is_label_byte) {
         return Vec::new();
     }
-    let (pkg, name) = match rest.split_once(':') {
-        Some((p, n)) => (p, n),
-        // `//pkg` is `//pkg:pkg`, a rule target. Only the file it might also
-        // be — a source file called `pkg` in that directory — is an input.
-        None => (rest, rest.rsplit('/').next().unwrap_or(rest)),
-    };
+    // `//pkg` is `//pkg:pkg`, a rule target. Only the file it might also be —
+    // a source file called `pkg` in that directory — is an input.
+    let (pkg, name) = (l.package(), l.name());
     // A visibility token names no file and can never be read by a rule.
     if name.is_empty() || name.starts_with("__") {
         return Vec::new();
@@ -96,14 +87,9 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     // A source-file label is covered both ways at once, and harmlessly: its
     // `Label` pattern resolves to the file's own node, whose reverse row is
     // the rules that consume it.
-    let path = if pkg.is_empty() {
-        name.to_string()
-    } else {
-        format!("{pkg}/{name}")
-    };
     vec![
-        Pattern::Exact(path),
-        Pattern::Label(format!("//{pkg}:{name}")),
+        Pattern::Exact(l.path()),
+        Pattern::Label(rule_label(pkg, name)),
     ]
 }
 
@@ -375,7 +361,10 @@ pub fn build_repo_inputs(
     out
 }
 
-/// The repo-relative path of a `.bzl` label in the main repository.
+/// The repo-relative path of a `.bzl` label in the main repository, under
+/// the run's repository mapping: `@envoy//bazel:repo.bzl` resolves here when
+/// `envoy` is a main alias. The `WORKSPACE` diff has no mapping and reads
+/// only the literal spellings; see `workspace::literal_main_bzl_path`.
 fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
     match crate::loads::resolve_label(label, "", m) {
         Some(crate::loads::Load::Main(p)) => Some(p),
