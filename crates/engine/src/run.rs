@@ -321,7 +321,7 @@ impl<'a> Run<'a> {
         // The stage's own escalation replaces an invalidator's wording: both
         // say "everything", but only one of them says why in terms of the
         // module system.
-        if let Some(cause) = ext.global.take() {
+        if let Some(cause) = ext.take_cause() {
             let reason = GlobalReason::Externals(cause);
             self.engine.diagnostics.emit(reason.diagnostic());
             dirty.global = true;

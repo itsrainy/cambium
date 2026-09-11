@@ -185,8 +185,12 @@ impl WorkspaceText for FixedText {
 /// What the stage concluded.
 #[derive(Clone, Debug, Default)]
 pub struct Externals {
-    /// Invalidate everything, for this reason.
-    pub global: Option<ExternalsCause>,
+    /// Invalidate everything, for this reason. What the engine reads.
+    pub cause: Option<ExternalsCause>,
+    /// `cause`, in words. Kept as a field beside it because the benchmark's
+    /// replay reads the wording directly; the two are only ever set together,
+    /// by [`Externals::escalate`].
+    pub global: Option<String>,
     /// Apparent names of the repositories that moved.
     pub repos: BTreeSet<String>,
     /// The subset of [`Externals::repos`] whose *contents* may have moved in a
@@ -218,6 +222,18 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// Gives up on localising the diff: everything is affected, for `cause`.
+    pub fn escalate(&mut self, cause: ExternalsCause) {
+        self.global = Some(cause.to_string());
+        self.cause = Some(cause);
+    }
+
+    /// Takes the escalation, if there was one, leaving the stage clear.
+    pub fn take_cause(&mut self) -> Option<ExternalsCause> {
+        self.global = None;
+        self.cause.take()
+    }
+
     /// Record that `file` moved every repository in `repos`.
     pub fn name<'a>(&mut self, file: &str, repos: impl IntoIterator<Item = &'a String>) {
         for r in repos {
@@ -280,14 +296,14 @@ pub fn analyse(
     for path in workspaces {
         let (b, h) = (texts.text_at(base_rev, path), texts.text_at(head_rev, path));
         let (Some(b), Some(h)) = (b, h) else {
-            out.global = Some(ExternalsCause::WorkspaceAddedOrRemoved {
+            out.escalate(ExternalsCause::WorkspaceAddedOrRemoved {
                 path: path.to_string(),
             });
             return out;
         };
         match diff_workspace(&b, &h) {
             WorkspaceChange::Global(why) => {
-                out.global = Some(ExternalsCause::Workspace {
+                out.escalate(ExternalsCause::Workspace {
                     path: path.to_string(),
                     why,
                 });
@@ -303,7 +319,7 @@ pub fn analyse(
                         .bzl_id(p)
                         .and_then(|id| repos_of_workspace_bzl(base, id));
                     let Some(named) = named else {
-                        out.global = Some(ExternalsCause::WorkspaceBzlUnattributed {
+                        out.escalate(ExternalsCause::WorkspaceBzlUnattributed {
                             path: path.to_string(),
                             bzl: p.clone(),
                         });
@@ -330,7 +346,7 @@ pub fn analyse(
         let head_facts = facts_at(texts, head_rev);
         match diff_module(&base_facts, &head_facts) {
             ModuleChange::Global(why) => {
-                out.global = Some(ExternalsCause::Module { why });
+                out.escalate(ExternalsCause::Module { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -363,13 +379,13 @@ pub fn analyse(
             // One side has no lockfile at all: it was added or deleted, and
             // every repository in it is new or gone.
             _ => {
-                out.global = Some(ExternalsCause::LockAddedOrRemoved);
+                out.escalate(ExternalsCause::LockAddedOrRemoved);
                 return out;
             }
         };
         match change {
             ModuleChange::Global(why) => {
-                out.global = Some(ExternalsCause::Lock { why });
+                out.escalate(ExternalsCause::Lock { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
