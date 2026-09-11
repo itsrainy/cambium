@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use crate::loads::{lex, unescape, Lexed, Tok};
-use crate::starlark::{parse_args, render_all, render_limited, statements};
+use crate::starlark_old::{parse_args, render_all, render_limited, statements};
 use crate::vocabulary::{is_local_repo_rule, HARMLESS};
 
 use super::module_facts::{Dep, ModuleFacts};
