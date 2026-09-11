@@ -13,189 +13,129 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-/// A diagnostic's stable identifier.
-///
-/// **The numbers are assigned once and never reused.** A code that is retired
-/// keeps its variant and its number, and its row in `docs/DIAGNOSTICS.md`
-/// says it is retired; a new diagnostic takes the next free number. Callers
-/// grep for `CAMBI-W004` in stderr and in JSON, and a number that came to mean
-/// something else would break them silently.
-///
-/// `Display` is the wire form (`CAMBI-W004`, `CAMBI-E009`) and is what both
-/// the human rendering and the JSON carry.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Code {
+/// The one table every code lives in: the variant, its doc comment and its
+/// wire string. `Code`, [`Code::ALL`] and [`Code::as_str`] are all generated
+/// from it, so a code cannot be added to one list without the others.
+macro_rules! codes {
+    ($( $(#[$doc:meta])* $variant:ident => $wire:literal, )*) => {
+        /// A diagnostic's stable identifier.
+        ///
+        /// **The numbers are assigned once and never reused.** A code that is
+        /// retired keeps its variant and its number, and its row in
+        /// `docs/DIAGNOSTICS.md` says it is retired; a new diagnostic takes the
+        /// next free number. Callers grep for `CAMBI-W004` in stderr and in
+        /// JSON, and a number that came to mean something else would break
+        /// them silently.
+        ///
+        /// `Display` is the wire form (`CAMBI-W004`, `CAMBI-E009`) and is what
+        /// both the human rendering and the JSON carry.
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum Code {
+            $( $(#[$doc])* $variant, )*
+        }
+
+        impl Code {
+            /// Every code, in numeric order. The documentation test walks this.
+            pub const ALL: &'static [Code] = &[ $( Code::$variant, )* ];
+
+            /// The stable string, e.g. `CAMBI-W004`.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Code::$variant => $wire, )*
+                }
+            }
+        }
+    };
+}
+
+codes! {
     // ---- warnings ----
     /// A deprecated spelling was used and still worked: an old verb, an old
     /// flag, or an old value for one. Raised by the CLI's `compat` rewrite.
-    W001DeprecatedSpelling,
+    W001DeprecatedSpelling => "CAMBI-W001",
     /// `cambium.toml` sets a key this cambium no longer honours.
-    W002RemovedConfigKey,
+    W002RemovedConfigKey => "CAMBI-W002",
     /// A stored index was skipped because it was built with a different
     /// `cambium.toml` (or an older rule-hash version).
-    W003IndexConfigMismatch,
+    W003IndexConfigMismatch => "CAMBI-W003",
     /// A `.bazelrc` edit touched something that could move the graph, so the
     /// run is global.
-    W004BazelrcGlobal,
+    W004BazelrcGlobal => "CAMBI-W004",
     /// Dirty packages did not load under `--keep_going` and were tombstoned.
-    W005PackagesTombstoned,
+    W005PackagesTombstoned => "CAMBI-W005",
     /// `bazel query //...` finished with errors; the index is partial.
-    W006PartialQuery,
+    W006PartialQuery => "CAMBI-W006",
     /// A store fetch command failed with something on stderr, and the
     /// artifact was read as absent.
-    W007StoreFetchFailed,
+    W007StoreFetchFailed => "CAMBI-W007",
     /// The base index carries no static `.bzl` load closure, so a changed
     /// `.bzl` cannot be resolved and the run is global.
-    W008NoLoadClosure,
+    W008NoLoadClosure => "CAMBI-W008",
     /// A changed `.bzl` is loaded outside any package, so the run is global.
-    W009WorkspaceLevelBzl,
+    W009WorkspaceLevelBzl => "CAMBI-W009",
     /// The witness found a changed `.bzl` that *is* loaded at head but has no
     /// node in the stored closure: the closure was incomplete.
-    W010IncompleteClosure,
+    W010IncompleteClosure => "CAMBI-W010",
     /// The base index this run computed could not be published.
-    W011PublishFailed,
+    W011PublishFailed => "CAMBI-W011",
     /// The dirty set exceeded `limits.max_dirty_packages`, so the run
     /// re-indexed the whole repository at head.
-    W012ColdRebuild,
+    W012ColdRebuild => "CAMBI-W012",
     /// A changed path matched an invalidator, so the run is global.
-    W013InvalidatorMatched,
+    W013InvalidatorMatched => "CAMBI-W013",
     /// The external-repository stage escalated to global.
-    W014ExternalsGlobal,
+    W014ExternalsGlobal => "CAMBI-W014",
     /// A Starlark build setting a `.bazelrc` edit changed could not be
     /// resolved against the index, so the run is global.
-    W015FlagUnresolved,
+    W015FlagUnresolved => "CAMBI-W015",
     /// `MODULE.bazel` and a `WORKSPACE` file are both present and nothing on
     /// disk says which one Bazel will honour.
-    W016WorkspaceModeAmbiguous,
+    W016WorkspaceModeAmbiguous => "CAMBI-W016",
     /// The Bazel on PATH is older than the oldest version cambium is tested
     /// against.
-    W017BazelVersionUnsupported,
+    W017BazelVersionUnsupported => "CAMBI-W017",
     /// A stored index is in an older format than this `cambi` reads.
-    W018IndexFormatOlder,
+    W018IndexFormatOlder => "CAMBI-W018",
     /// The store holds a lineage built with a different configuration or a
     /// different engine derivation.
-    W019LineageConflict,
+    W019LineageConflict => "CAMBI-W019",
     /// `.gitignore` exists and does not mention `cambium.local.toml`.
-    W020GitignoreLocalConfig,
+    W020GitignoreLocalConfig => "CAMBI-W020",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,
     /// index and classify wrappers.
-    E001Internal,
+    E001Internal => "CAMBI-E001",
     /// `cambium.toml` could not be read or does not parse.
-    E002Config,
+    E002Config => "CAMBI-E002",
     /// git failed.
-    E003Git,
+    E003Git => "CAMBI-E003",
     /// Bazel failed.
-    E004Bazel,
+    E004Bazel => "CAMBI-E004",
     /// A `bazel query` failed.
-    E005BazelQuery,
+    E005BazelQuery => "CAMBI-E005",
     /// No baseline index is available and `--no-full-build` was given.
-    E006BaselineUnavailable,
+    E006BaselineUnavailable => "CAMBI-E006",
     /// The index on hand was built with a different `cambium.toml`.
-    E007ConfigHashMismatch,
+    E007ConfigHashMismatch => "CAMBI-E007",
     /// No baseline store is configured.
-    E008NoStore,
+    E008NoStore => "CAMBI-E008",
     /// Refusing to publish an index Bazel could not fully load.
-    E009PartialIndex,
+    E009PartialIndex => "CAMBI-E009",
     /// The store backend failed.
-    E010StoreBackend,
+    E010StoreBackend => "CAMBI-E010",
     /// An io error against the store.
-    E011StoreIo,
+    E011StoreIo => "CAMBI-E011",
     /// The store backend does not support the operation.
-    E012StoreUnsupported,
+    E012StoreUnsupported => "CAMBI-E012",
     /// The command line does not make sense.
-    E013Usage,
+    E013Usage => "CAMBI-E013",
     /// `cambium.local.toml` sets a key that belongs in `cambium.toml`.
-    E014LocalOverrideKey,
+    E014LocalOverrideKey => "CAMBI-E014",
     /// The Bazel binary could not be found or could not be run.
-    E015BazelNotFound,
+    E015BazelNotFound => "CAMBI-E015",
     /// A probe object could not be published to the store and fetched back.
-    E016StoreRoundTripFailed,
-}
-
-impl Code {
-    /// Every code, in numeric order. The documentation test walks this.
-    pub const ALL: &'static [Code] = &[
-        Code::W001DeprecatedSpelling,
-        Code::W002RemovedConfigKey,
-        Code::W003IndexConfigMismatch,
-        Code::W004BazelrcGlobal,
-        Code::W005PackagesTombstoned,
-        Code::W006PartialQuery,
-        Code::W007StoreFetchFailed,
-        Code::W008NoLoadClosure,
-        Code::W009WorkspaceLevelBzl,
-        Code::W010IncompleteClosure,
-        Code::W011PublishFailed,
-        Code::W012ColdRebuild,
-        Code::W013InvalidatorMatched,
-        Code::W014ExternalsGlobal,
-        Code::W015FlagUnresolved,
-        Code::W016WorkspaceModeAmbiguous,
-        Code::W017BazelVersionUnsupported,
-        Code::W018IndexFormatOlder,
-        Code::W019LineageConflict,
-        Code::W020GitignoreLocalConfig,
-        Code::E001Internal,
-        Code::E002Config,
-        Code::E003Git,
-        Code::E004Bazel,
-        Code::E005BazelQuery,
-        Code::E006BaselineUnavailable,
-        Code::E007ConfigHashMismatch,
-        Code::E008NoStore,
-        Code::E009PartialIndex,
-        Code::E010StoreBackend,
-        Code::E011StoreIo,
-        Code::E012StoreUnsupported,
-        Code::E013Usage,
-        Code::E014LocalOverrideKey,
-        Code::E015BazelNotFound,
-        Code::E016StoreRoundTripFailed,
-    ];
-
-    /// The stable string, e.g. `CAMBI-W004`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Code::W001DeprecatedSpelling => "CAMBI-W001",
-            Code::W002RemovedConfigKey => "CAMBI-W002",
-            Code::W003IndexConfigMismatch => "CAMBI-W003",
-            Code::W004BazelrcGlobal => "CAMBI-W004",
-            Code::W005PackagesTombstoned => "CAMBI-W005",
-            Code::W006PartialQuery => "CAMBI-W006",
-            Code::W007StoreFetchFailed => "CAMBI-W007",
-            Code::W008NoLoadClosure => "CAMBI-W008",
-            Code::W009WorkspaceLevelBzl => "CAMBI-W009",
-            Code::W010IncompleteClosure => "CAMBI-W010",
-            Code::W011PublishFailed => "CAMBI-W011",
-            Code::W012ColdRebuild => "CAMBI-W012",
-            Code::W013InvalidatorMatched => "CAMBI-W013",
-            Code::W014ExternalsGlobal => "CAMBI-W014",
-            Code::W015FlagUnresolved => "CAMBI-W015",
-            Code::W016WorkspaceModeAmbiguous => "CAMBI-W016",
-            Code::W017BazelVersionUnsupported => "CAMBI-W017",
-            Code::W018IndexFormatOlder => "CAMBI-W018",
-            Code::W019LineageConflict => "CAMBI-W019",
-            Code::W020GitignoreLocalConfig => "CAMBI-W020",
-            Code::E001Internal => "CAMBI-E001",
-            Code::E002Config => "CAMBI-E002",
-            Code::E003Git => "CAMBI-E003",
-            Code::E004Bazel => "CAMBI-E004",
-            Code::E005BazelQuery => "CAMBI-E005",
-            Code::E006BaselineUnavailable => "CAMBI-E006",
-            Code::E007ConfigHashMismatch => "CAMBI-E007",
-            Code::E008NoStore => "CAMBI-E008",
-            Code::E009PartialIndex => "CAMBI-E009",
-            Code::E010StoreBackend => "CAMBI-E010",
-            Code::E011StoreIo => "CAMBI-E011",
-            Code::E012StoreUnsupported => "CAMBI-E012",
-            Code::E013Usage => "CAMBI-E013",
-            Code::E014LocalOverrideKey => "CAMBI-E014",
-            Code::E015BazelNotFound => "CAMBI-E015",
-            Code::E016StoreRoundTripFailed => "CAMBI-E016",
-        }
-    }
+    E016StoreRoundTripFailed => "CAMBI-E016",
 }
 
 impl std::fmt::Display for Code {
@@ -325,6 +265,16 @@ impl Diagnostics {
         std::mem::take(&mut *v)
     }
 
+    /// Takes everything recorded so far and appends it to `out`, once each:
+    /// an entry `out` already holds is not repeated. A probe or a plan folds
+    /// the sink's findings into a list it has been building itself, and the
+    /// same fact can have been observed twice on the way (a tree key found
+    /// both directly and through its `commits/` pointer is fetched, and
+    /// refused, twice).
+    pub fn drain_into(&self, out: &mut Vec<Diagnostic>) {
+        extend_unique(out, self.drain());
+    }
+
     /// How many are buffered.
     pub fn len(&self) -> usize {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -335,9 +285,31 @@ impl Diagnostics {
     }
 }
 
+/// Appends `more` to `out`, skipping every entry `out` already holds.
+pub fn extend_unique(out: &mut Vec<Diagnostic>, more: impl IntoIterator<Item = Diagnostic>) {
+    for d in more {
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draining_into_a_list_repeats_nothing() {
+        let sink = Diagnostics::new();
+        let one = Diagnostic::warning(Code::W003IndexConfigMismatch, "seen twice");
+        sink.emit(one.clone());
+        sink.emit(one.clone());
+        sink.emit(Diagnostic::warning(Code::W007StoreFetchFailed, "once"));
+        let mut have = vec![one.clone()];
+        sink.drain_into(&mut have);
+        assert_eq!(have.len(), 2, "{have:?}");
+        assert!(sink.is_empty());
+    }
 
     #[test]
     fn codes_are_unique_and_well_formed() {

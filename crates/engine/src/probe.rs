@@ -585,11 +585,7 @@ pub fn position_at(
     // The walk can observe one fact twice — a tree key found both directly and
     // through its `commits/` pointer is fetched, and refused, twice — and a
     // reader of `status` should see each finding once.
-    for d in diags.drain() {
-        if !p.diagnostics.contains(&d) {
-            p.diagnostics.push(d);
-        }
-    }
+    diags.drain_into(&mut p.diagnostics);
     p
 }
 
@@ -802,26 +798,23 @@ pub struct Probes {
 }
 
 impl Probes {
-    /// Every diagnostic every probe raised, in the order the sections print.
+    /// Every diagnostic every probe raised, in the order the sections print
+    /// and each one once: an index header the reader refused is filed with
+    /// the position it was found for as well as with the index itself.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let sections: [Option<&[Diagnostic]>; 8] = [
+            Some(&self.workspace.diagnostics),
+            Some(&self.config.diagnostics),
+            self.bazel.as_ref().map(|b| b.diagnostics.as_slice()),
+            Some(&self.store.diagnostics),
+            self.round_trip.as_ref().map(|r| r.diagnostics.as_slice()),
+            self.position.as_ref().map(|p| p.diagnostics.as_slice()),
+            self.index.as_ref().map(|i| i.diagnostics.as_slice()),
+            self.lineage.as_ref().map(|l| l.diagnostics.as_slice()),
+        ];
         let mut out = Vec::new();
-        out.extend(self.workspace.diagnostics.iter().cloned());
-        out.extend(self.config.diagnostics.iter().cloned());
-        if let Some(b) = &self.bazel {
-            out.extend(b.diagnostics.iter().cloned());
-        }
-        out.extend(self.store.diagnostics.iter().cloned());
-        if let Some(r) = &self.round_trip {
-            out.extend(r.diagnostics.iter().cloned());
-        }
-        if let Some(pos) = &self.position {
-            out.extend(pos.diagnostics.iter().cloned());
-        }
-        if let Some(i) = &self.index {
-            out.extend(i.diagnostics.iter().cloned());
-        }
-        if let Some(l) = &self.lineage {
-            out.extend(l.diagnostics.iter().cloned());
+        for s in sections.into_iter().flatten() {
+            crate::diag::extend_unique(&mut out, s.iter().cloned());
         }
         out
     }

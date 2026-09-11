@@ -227,11 +227,7 @@ impl Engine {
 /// The probes' diagnostics plus whatever the stages emitted into the engine's
 /// own sink, each one once.
 fn drained(sink: &crate::diag::Diagnostics, mut have: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    for d in sink.drain() {
-        if !have.contains(&d) {
-            have.push(d);
-        }
-    }
+    sink.drain_into(&mut have);
     have
 }
 
