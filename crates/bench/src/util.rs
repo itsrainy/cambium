@@ -1,11 +1,9 @@
-//! The small things every module needed a copy of.
+//! The small things every module needs, spelled once.
 //!
-//! Nothing here is benchmark logic. It is the handful of one-liners that were
-//! written out three and four times over — a percentile, the clock, the cache
+//! Nothing here is benchmark logic: a percentile, the clock, the cache
 //! directory a fetch script installs into, the filename a Bazel version is
-//! stamped into — and drifted apart each time they were: two of the three
-//! version-suffix builders escaped `/` and space, the third escaped `:` as
-//! well.
+//! stamped into. Each has exactly one definition so that two result files
+//! cannot disagree about how a version is escaped or a timestamp is written.
 
 use std::path::{Path, PathBuf};
 
@@ -128,10 +126,7 @@ pub fn duration(secs: u64) -> String {
 ///
 /// Stamped in at build time by `build.rs`, and *not* asked of `git` at run
 /// time: a workload's working directory is a **subject's** checkout, so
-/// `git rev-parse HEAD` there answers with envoy's HEAD, not ours. The two
-/// call sites used to disagree about exactly that -- one ran `git` in the
-/// process's cwd, the other in `CARGO_MANIFEST_DIR` -- so a history and a
-/// stage report from the same binary could name two different cambiums.
+/// `git rev-parse HEAD` there answers with envoy's HEAD, not ours.
 pub fn tool_sha() -> &'static str {
     match option_env!("CAMBIUM_GIT_SHA") {
         Some(s) if !s.is_empty() => s,
@@ -171,6 +166,21 @@ pub fn versioned_stem(stem: &str, version: Option<&str>) -> String {
 /// [`versioned_stem`] with an extension.
 pub fn versioned_name(stem: &str, version: Option<&str>, ext: &str) -> String {
     format!("{}.{ext}", versioned_stem(stem, version))
+}
+
+/// A size as a person types one: `1000`, `1e6`, `2M`, `500k`.
+pub fn parse_size(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1_000.0),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1_000_000.0),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1_000_000_000.0),
+        _ => (s, 1.0),
+    };
+    let v: f64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("cannot parse size {s:?}"))?;
+    Ok((v * mult) as u64)
 }
 
 /// Just the `schema` field, so a file can be refused before it is parsed into
@@ -305,6 +315,16 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_size_takes_a_suffix_or_an_exponent() {
+        assert_eq!(parse_size("1000").unwrap(), 1000);
+        assert_eq!(parse_size("1e6").unwrap(), 1_000_000);
+        assert_eq!(parse_size("2M").unwrap(), 2_000_000);
+        assert_eq!(parse_size(" 500k ").unwrap(), 500_000);
+        assert_eq!(parse_size("1G").unwrap(), 1_000_000_000);
+        assert!(parse_size("lots").is_err());
     }
 
     #[test]

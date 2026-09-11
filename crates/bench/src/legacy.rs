@@ -72,6 +72,10 @@ pub struct LegacyRun {
 
 /// Runs the stage. Errors when bazel-diff is missing, when it fails, or when
 /// it reports a label cambium does not.
+///
+/// Three phases: emit both revisions and the query dumps the shim serves;
+/// time bazel-diff cold and warm over them; time cambium on the same commit
+/// against the base index. Then the two label sets are compared.
 pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> Result<LegacyRun> {
     // The stage's own bazel-diff: no `-k`, since the shim never fails to
     // "load", and `--excludeExternalTargets`, since the generated graph has no
@@ -82,117 +86,31 @@ pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> 
         .with_exclude_external_targets(true);
     let version = crate::tools::Tool::version(&tool);
 
-    // Base graph, and the head graph the same commit produces. The engine and
-    // bazel-diff see byte-identical inputs from here on.
     let spec = ctx.spec.clone().with_seed(opts.seed);
-    let mut graph = cambium_synth::generate(&spec);
-    let base_index = graph.build_index("c0");
-    let change = ChangeSpec {
-        seed: opts.seed,
-        ..ChangeSpec::preset(&opts.change_preset)
-            .with_context(|| format!("unknown change preset {}", opts.change_preset))?
-    };
-
     let scratch = Scratch::new(opts.workdir.as_deref())?;
     let root = scratch.path();
-    let base_ws = root.join("base");
-    let head_ws = root.join("head");
-    let fixtures = root.join("fixtures");
-    std::fs::create_dir_all(&fixtures)?;
-
-    cambium_synth::emit_workspace(&graph, &base_ws)?;
-    std::fs::write(
-        fixtures.join("base.pb"),
-        cambium_synth::proto::to_streamed_proto(&graph),
-    )?;
-
-    let commit = cambium_synth::commit(&mut graph, &change, 0);
-    if commit.changes.is_empty() {
-        bail!("change preset {} produced no changes", opts.change_preset);
-    }
-    cambium_synth::emit_workspace(&graph, &head_ws)?;
-    std::fs::write(
-        fixtures.join("head.pb"),
-        cambium_synth::proto::to_streamed_proto(&graph),
-    )?;
-
-    let shim = write_shim(root, &fixtures)?;
-
-    // bazel-diff, cold: hash both revisions, then diff. Warm: the base hashes
-    // are already on disk from the previous run, so only head is rehashed.
-    let base_hashes = root.join("base.json");
-    let head_hashes = root.join("head.json");
-    let impacted = root.join("impacted.txt");
-
-    // The shim *is* the Bazel: it serves the recorded query for whichever
-    // workspace it was pointed at, so the measurement is bazel-diff's own
-    // hashing and diffing with no server in it.
-    let ctx_for = |ws: &Path| RunContext {
-        bazel_binary: shim.clone(),
-        startup_flags: Vec::new(),
-        env: Vec::new(),
-        scratch: root.to_path_buf(),
-        base_worktree: ws.to_path_buf(),
-    };
-    let base_ctx = ctx_for(&base_ws);
-    let head_ctx = ctx_for(&head_ws);
-    let impact = |bd: &BazelDiff| -> Result<()> {
-        bd.get_impacted_targets(&head_ws, &base_hashes, &head_hashes, &impacted, &head_ctx)?;
-        Ok(())
-    };
-
-    let t = std::time::Instant::now();
-    tool.generate_hashes(&base_ws, &base_hashes, &base_ctx, &[])?;
-    tool.generate_hashes(&head_ws, &head_hashes, &head_ctx, &[])?;
-    impact(&tool)?;
-    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-    // Warm: the base hashes are already on disk, so only head is rehashed.
-    let t = std::time::Instant::now();
-    tool.generate_hashes(&head_ws, &head_hashes, &head_ctx, &[])?;
-    impact(&tool)?;
-    let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let revs = emit_revisions(&spec, opts, root)?;
+    let shim = write_shim(root, &revs.fixtures)?;
+    let bd_timing = time_bazel_diff(&tool, root, &revs, &shim)?;
+    let cam_timing = time_cambium(ctx, &revs)?;
 
     // Only rule labels are comparable: bazel-diff's hash files also cover
     // source files and external targets, which cambium's affected set never
     // names.
+    let graph = &revs.graph;
     let rules: BTreeSet<String> = (0..graph.targets.len() as u32)
         .filter(|&i| graph.targets[i as usize].alive)
         .map(|i| graph.target_label(i))
         .collect();
-    let bd: BTreeSet<String> = std::fs::read_to_string(&impacted)?
+    let bd: BTreeSet<String> = std::fs::read_to_string(&bd_timing.impacted)?
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .filter(|l| rules.contains(*l))
         .map(str::to_string)
         .collect();
-
-    // cambium, on the same commit against the base index.
-    let engine = crate::stages::engine();
-    let querier = SynthQuerier::new(&graph);
-    let req = AffectedRequest {
-        base: "c0".into(),
-        head: "c1".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
-        materialize: false,
-        publish_base: false,
-        allow_partial: false,
-        max_depth: None,
-    };
-    let (cambium_median, cambium_p90) = crate::harness::time(ctx.runs, || {
-        engine
-            .compute(base_index.view(), &commit.changes, &querier, &req)
-            .expect("cambium pipeline")
-    });
-    let out = engine
-        .compute(base_index.view(), &commit.changes, &querier, &req)
-        .context("cambium pipeline")?;
-    let cam: BTreeSet<String> = out
-        .report
-        .affected_labels()
+    let cam: BTreeSet<String> = cam_timing
+        .affected
         .into_iter()
         .filter(|l| rules.contains(l))
         .collect();
@@ -201,6 +119,8 @@ pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> 
     let cambium_only: BTreeSet<String> = cam.difference(&bd).cloned().collect();
     let bazel_diff_only: BTreeSet<String> = bd.difference(&cam).cloned().collect();
 
+    let (cold_ms, warm_ms) = (bd_timing.cold_ms, bd_timing.warm_ms);
+    let (cambium_median, cambium_p90) = (cam_timing.median_ms, cam_timing.p90_ms);
     let mut extra = BTreeMap::new();
     extra.insert("bazel_diff_cold_ms".to_string(), cold_ms);
     extra.insert("bazel_diff_warm_ms".to_string(), warm_ms);
@@ -219,7 +139,10 @@ pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> 
     extra.insert("bazel_diff_only".to_string(), bazel_diff_only.len() as f64);
     extra.insert("bazel_diff_impacted".to_string(), bd.len() as f64);
     extra.insert("cambium_affected".to_string(), cam.len() as f64);
-    extra.insert("changed_files".to_string(), commit.changes.len() as f64);
+    extra.insert(
+        "changed_files".to_string(),
+        revs.commit.changes.len() as f64,
+    );
     extra.insert("targets".to_string(), graph.num_alive_targets() as f64);
 
     let mut notes = BTreeMap::new();
@@ -267,6 +190,160 @@ pub fn run(ctx: &StageContext, bazel_diff: &BazelDiff, opts: &LegacyOptions) -> 
         agreed,
         cambium_only,
         bazel_diff_only,
+    })
+}
+
+/// The two revisions on disk, and the same commit in memory.
+struct Revisions {
+    /// The graph after the commit: the head revision.
+    graph: cambium_synth::SynthGraph,
+    /// The index at the base revision, which cambium answers from.
+    base_index: cambium_index::IndexData,
+    commit: cambium_synth::Commit,
+    base_ws: PathBuf,
+    head_ws: PathBuf,
+    /// The `streamed_proto` dumps the shim serves, one per revision.
+    fixtures: PathBuf,
+}
+
+/// Base graph, and the head graph the same commit produces. The engine and
+/// bazel-diff see byte-identical inputs from here on.
+fn emit_revisions(
+    spec: &cambium_synth::GraphSpec,
+    opts: &LegacyOptions,
+    root: &Path,
+) -> Result<Revisions> {
+    let mut graph = cambium_synth::generate(spec);
+    let base_index = graph.build_index("c0");
+    let change = ChangeSpec {
+        seed: opts.seed,
+        ..ChangeSpec::preset(&opts.change_preset)
+            .with_context(|| format!("unknown change preset {}", opts.change_preset))?
+    };
+    let base_ws = root.join("base");
+    let head_ws = root.join("head");
+    let fixtures = root.join("fixtures");
+    std::fs::create_dir_all(&fixtures)?;
+
+    cambium_synth::emit_workspace(&graph, &base_ws)?;
+    std::fs::write(
+        fixtures.join("base.pb"),
+        cambium_synth::proto::to_streamed_proto(&graph),
+    )?;
+
+    let commit = cambium_synth::commit(&mut graph, &change, 0);
+    if commit.changes.is_empty() {
+        bail!("change preset {} produced no changes", opts.change_preset);
+    }
+    cambium_synth::emit_workspace(&graph, &head_ws)?;
+    std::fs::write(
+        fixtures.join("head.pb"),
+        cambium_synth::proto::to_streamed_proto(&graph),
+    )?;
+    Ok(Revisions {
+        graph,
+        base_index,
+        commit,
+        base_ws,
+        head_ws,
+        fixtures,
+    })
+}
+
+/// bazel-diff's two numbers, and where its answer landed.
+struct BazelDiffTiming {
+    cold_ms: f64,
+    warm_ms: f64,
+    impacted: PathBuf,
+}
+
+/// bazel-diff, cold: hash both revisions, then diff. Warm: the base hashes
+/// are already on disk from the cold run, so only head is rehashed.
+///
+/// The shim *is* the Bazel: it serves the recorded query for whichever
+/// workspace it was pointed at, so the measurement is bazel-diff's own
+/// hashing and diffing with no server in it.
+fn time_bazel_diff(
+    tool: &BazelDiff,
+    root: &Path,
+    revs: &Revisions,
+    shim: &Path,
+) -> Result<BazelDiffTiming> {
+    let base_hashes = root.join("base.json");
+    let head_hashes = root.join("head.json");
+    let impacted = root.join("impacted.txt");
+    let ctx_for = |ws: &Path| RunContext {
+        bazel_binary: shim.to_path_buf(),
+        startup_flags: Vec::new(),
+        env: Vec::new(),
+        scratch: root.to_path_buf(),
+        base_worktree: ws.to_path_buf(),
+    };
+    let base_ctx = ctx_for(&revs.base_ws);
+    let head_ctx = ctx_for(&revs.head_ws);
+    let impact = || -> Result<()> {
+        tool.get_impacted_targets(
+            &revs.head_ws,
+            &base_hashes,
+            &head_hashes,
+            &impacted,
+            &head_ctx,
+        )?;
+        Ok(())
+    };
+
+    let t = std::time::Instant::now();
+    tool.generate_hashes(&revs.base_ws, &base_hashes, &base_ctx, &[])?;
+    tool.generate_hashes(&revs.head_ws, &head_hashes, &head_ctx, &[])?;
+    impact()?;
+    let cold_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = std::time::Instant::now();
+    tool.generate_hashes(&revs.head_ws, &head_hashes, &head_ctx, &[])?;
+    impact()?;
+    let warm_ms = t.elapsed().as_secs_f64() * 1000.0;
+    Ok(BazelDiffTiming {
+        cold_ms,
+        warm_ms,
+        impacted,
+    })
+}
+
+/// cambium's numbers and its answer.
+struct CambiumTiming {
+    median_ms: f64,
+    p90_ms: f64,
+    affected: Vec<String>,
+}
+
+/// cambium, on the same commit against the base index, timed over the
+/// stage's runs and then run once more for the answer.
+fn time_cambium(ctx: &StageContext, revs: &Revisions) -> Result<CambiumTiming> {
+    let engine = crate::stages::engine();
+    let querier = SynthQuerier::new(&revs.graph);
+    let req = AffectedRequest {
+        base: "c0".into(),
+        head: "c1".into(),
+        include_manual: true,
+        explain: false,
+        no_full_build: true,
+        materialize: false,
+        publish_base: false,
+        allow_partial: false,
+        max_depth: None,
+    };
+    let (median_ms, p90_ms) = crate::harness::time(ctx.runs, || {
+        engine
+            .compute(revs.base_index.view(), &revs.commit.changes, &querier, &req)
+            .expect("cambium pipeline")
+    });
+    let out = engine
+        .compute(revs.base_index.view(), &revs.commit.changes, &querier, &req)
+        .context("cambium pipeline")?;
+    Ok(CambiumTiming {
+        median_ms,
+        p90_ms,
+        affected: out.report.affected_labels(),
     })
 }
 

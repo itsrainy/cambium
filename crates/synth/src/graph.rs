@@ -395,10 +395,46 @@ impl SynthGraph {
 }
 
 /// Generates a graph from a spec.
+///
+/// Six phases, each drawing from the one seeded generator in this order, so
+/// the output for a preset and a seed is a function of nothing else: the
+/// packages and their paths, the `.bzl` files and who loads them, the targets
+/// and their layers, the dependency edges, the `test_suite`s, and the
+/// `exports_files` relationships.
 pub fn generate(spec: &GraphSpec) -> SynthGraph {
     let mut rng = ChaCha8Rng::seed_from_u64(spec.seed);
+    let (mut packages, pkg_by_path) = gen_packages(spec, &mut rng);
+    let bzl = gen_bzl(spec, &mut rng, &mut packages);
+    let layout = gen_targets(spec, &mut rng, &mut packages);
+    let mut targets = layout.targets;
+    gen_deps(
+        spec,
+        &mut rng,
+        &mut targets,
+        &layout.layer_members,
+        &layout.pkg_layer_members,
+    );
+    gen_test_suites(spec, &mut packages, &mut targets);
+    gen_exports(spec, &mut packages, &mut targets);
 
-    // ---- packages ----
+    let mut g = SynthGraph {
+        spec: spec.clone(),
+        packages,
+        targets,
+        bzl,
+        pkg_by_path,
+        bzl_by_path: FxHashMap::default(),
+    };
+    g.rebuild_pkg_index();
+    g
+}
+
+/// The packages: as many as the spec names, or enough to hold the targets at
+/// the mean package size, with paths whose ancestor segments are shared.
+fn gen_packages(
+    spec: &GraphSpec,
+    rng: &mut ChaCha8Rng,
+) -> (Vec<SynthPackage>, FxHashMap<String, u32>) {
     let per_pkg = spec.targets_per_package.mean_hint().max(1.0);
     let n_pkgs = if spec.packages > 0 {
         spec.packages
@@ -409,7 +445,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
     let mut packages: Vec<SynthPackage> = Vec::with_capacity(n_pkgs as usize);
     let mut pkg_by_path = FxHashMap::default();
     for i in 0..n_pkgs {
-        let depth = spec.path_depth.sample(&mut rng).max(1);
+        let depth = spec.path_depth.sample(rng).max(1);
         let mut path = String::new();
         // Ancestor segments are shared between packages (they come from the
         // high digits of the index), the leaf segment keeps paths unique.
@@ -436,8 +472,11 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             alive: true,
         });
     }
+    (packages, pkg_by_path)
+}
 
-    // ---- .bzl files ----
+/// The `.bzl` files, and which packages load which.
+fn gen_bzl(spec: &GraphSpec, rng: &mut ChaCha8Rng, packages: &mut [SynthPackage]) -> Vec<SynthBzl> {
     let mut bzl: Vec<SynthBzl> = (0..spec.bzl_files)
         .map(|i| SynthBzl {
             path: format!("tools/synth/rules{i}.bzl"),
@@ -449,7 +488,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         for (pi, p) in packages.iter_mut().enumerate() {
             let k = spec
                 .bzl_loads_per_package
-                .sample(&mut rng)
+                .sample(rng)
                 .min(spec.bzl_files as u64) as usize;
             let mut chosen: Vec<u32> = Vec::with_capacity(k);
             for _ in 0..k {
@@ -463,8 +502,26 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             p.bzl = chosen;
         }
     }
+    bzl
+}
 
-    // ---- targets and layers ----
+/// The targets with their layers, plus the two layer indexes the dependency
+/// phase draws from.
+struct TargetLayout {
+    targets: Vec<SynthTarget>,
+    /// Target ids per layer.
+    layer_members: Vec<Vec<u32>>,
+    /// Per package, target ids per layer.
+    pkg_layer_members: Vec<FxHashMap<u32, Vec<u32>>>,
+}
+
+/// The targets: packages filled round-robin at log-normal sizes, each package
+/// at a skewed base layer with a little jitter, kinds drawn per target.
+fn gen_targets(
+    spec: &GraphSpec,
+    rng: &mut ChaCha8Rng,
+    packages: &mut [SynthPackage],
+) -> TargetLayout {
     let layers = spec.layers.max(1);
     let mut targets: Vec<SynthTarget> = Vec::with_capacity(spec.targets as usize);
     let mut layer_members: Vec<Vec<u32>> = vec![Vec::new(); layers as usize];
@@ -478,7 +535,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         pkg_cursor += 1;
         let size = spec
             .targets_per_package
-            .sample(&mut rng)
+            .sample(rng)
             .min(spec.targets - next)
             .max(1);
         // Package base layer, skewed.
@@ -504,7 +561,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             let n_srcs = if kind == Kind::Alias {
                 0
             } else {
-                spec.srcs_per_target.sample(&mut rng) as u32
+                spec.srcs_per_target.sample(rng) as u32
             };
             targets.push(SynthTarget {
                 package: pkg as u32,
@@ -530,7 +587,24 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             next += 1;
         }
     }
+    TargetLayout {
+        targets,
+        layer_members,
+        pkg_layer_members,
+    }
+}
 
+/// The dependency edges: preferential attachment towards what already has
+/// in-edges, same-package edges at the configured ratio, a test on something
+/// in its own package, hubs at layer 0, and the `select`/external counts.
+fn gen_deps(
+    spec: &GraphSpec,
+    rng: &mut ChaCha8Rng,
+    targets: &mut [SynthTarget],
+    layer_members: &[Vec<u32>],
+    pkg_layer_members: &[FxHashMap<u32, Vec<u32>>],
+) {
+    let layers = spec.layers.max(1);
     // Hubs live at layer 0 so everything may depend on them.
     let mut hubs: Vec<u32> = Vec::new();
     if !layer_members[0].is_empty() {
@@ -564,7 +638,7 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             continue;
         }
         let pkg = targets[id as usize].package as usize;
-        let want = spec.deps_per_target.sample(&mut rng) as usize;
+        let want = spec.deps_per_target.sample(rng) as usize;
         let mut deps: Vec<u32> = Vec::with_capacity(want + 2);
 
         // Alias rules have exactly one dep.
@@ -667,8 +741,16 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         t.select_deps = n_select;
         t.ext_deps = ext;
     }
+}
 
-    // ---- test_suite targets ----
+/// The `test_suite` targets: one per chosen package, collecting its tests,
+/// one layer above them. Deterministic without the generator: the packages
+/// are chosen by stride.
+fn gen_test_suites(
+    spec: &GraphSpec,
+    packages: &mut [SynthPackage],
+    targets: &mut Vec<SynthTarget>,
+) {
     let n_suites = (packages.len() as f64 * spec.test_suite_fraction) as usize;
     for i in 0..n_suites {
         let pkg = (i * 7 + 1) % packages.len();
@@ -706,8 +788,12 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         });
         packages[pkg].targets.push(id);
     }
+}
 
-    // ---- exports_files ----
+/// The `exports_files` relationships: a package exports one of a target's
+/// sources and a target in another package consumes it. Chosen by stride,
+/// like the suites.
+fn gen_exports(spec: &GraphSpec, packages: &mut [SynthPackage], targets: &mut [SynthTarget]) {
     let n_exports = (packages.len() as f64 * spec.exports_files_ratio) as usize;
     for i in 0..n_exports {
         let exporter = (i * 13 + 3) % packages.len();
@@ -736,17 +822,6 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
             .foreign_srcs
             .push((exporter as u32, et, slot));
     }
-
-    let mut g = SynthGraph {
-        spec: spec.clone(),
-        packages,
-        targets,
-        bzl,
-        pkg_by_path,
-        bzl_by_path: FxHashMap::default(),
-    };
-    g.rebuild_pkg_index();
-    g
 }
 
 impl SynthGraph {
@@ -781,6 +856,47 @@ mod tests {
         assert_eq!(
             a.build_index("x").header.counts.edges,
             b.build_index("x").header.counts.edges
+        );
+    }
+
+    /// The generator's output is pinned to a hash: a preset and a seed must
+    /// produce the same workspace on every machine and after every refactor,
+    /// because a synthetic subject is emitted on demand and compared with
+    /// itself across runs. Everything the emitter writes is folded in — the
+    /// package paths and their `BUILD` text, the `.bzl` files, every target's
+    /// hash — plus five commits of the default change preset, so a change to
+    /// the order of a single random draw moves the digest.
+    #[test]
+    fn a_small_workspace_and_its_history_hash_to_what_they_did() {
+        let mut g = generate(&GraphSpec::preset("small").unwrap());
+        let mut h = blake3::Hasher::new();
+        for (i, p) in g.packages.iter().enumerate() {
+            h.update(p.path.as_bytes());
+            h.update(crate::emit::build_file_loads(&g, i as u32).as_bytes());
+        }
+        for b in &g.bzl {
+            h.update(b.path.as_bytes());
+            h.update(&b.version.to_le_bytes());
+        }
+        for id in 0..g.targets.len() as u32 {
+            h.update(&g.target_hash(id));
+        }
+        let before = h.finalize().to_hex().to_string();
+        assert_eq!(
+            before, "4bed7f55d5e486941136674f64cdd6c81955515dd95465a7638867c4eea0d42b",
+            "the generated graph moved"
+        );
+        let spec = crate::ChangeSpec::default();
+        let mut h = blake3::Hasher::new();
+        for rev in 0..5 {
+            for c in crate::commit(&mut g, &spec, rev).changes {
+                h.update(format!("{:?} {}\n", c.status, c.path).as_bytes());
+            }
+        }
+        assert_eq!(
+            h.finalize().to_hex().to_string(),
+            "14bcc52f9b03050bb78ede0d672f64291ef4eaa6f86b69011b9b44326c241755",
+            "the generated history moved"
         );
     }
 

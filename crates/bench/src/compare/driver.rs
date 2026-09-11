@@ -131,6 +131,11 @@ pub fn compare_change_set_with(
 /// Separate from [`compare_change_set_with`] because the loop in
 /// [`compare_change_sets`] normalised the paths once and then cloned the whole
 /// options struct again for every change set of the run.
+///
+/// The phases, in order: cambium cold and warm; the archive of the base it
+/// spliced onto; the oracle (before the tools, since its answer is one of the
+/// classifier's facts); the facts; each tool, classified; the `.bzl`
+/// load-closure oracle.
 fn compare_one(
     engine: &Engine,
     cambi: &Cambi,
@@ -140,18 +145,127 @@ fn compare_one(
     opts: &ChangesOptions,
 ) -> Result<ChangeSetResult> {
     std::fs::create_dir_all(&opts.scratch)?;
+    let runs = run_cambium(cambi, checkout, change_set, opts)?;
+    archive_base(engine, change_set, opts);
+    let report = &runs.warm.report;
+    let Some(index) = runs.head_index.as_ref() else {
+        return compare_global(
+            engine,
+            checkout,
+            change_set,
+            tools,
+            opts,
+            report,
+            runs.cambium,
+        );
+    };
 
-    // ---- cambium, cold then warm ----
-    //
-    // Twice, as a user would run it: the first run publishes whatever base
-    // index it had to compute, so the second one finds it in the store, and
-    // that is precisely the difference the two numbers are meant to show.
-    //
-    // Both are whole-process wall times — `cambi` started, its configuration
-    // read, the answer serialised to JSON — because that is what a user waits
-    // for. The engine's own `timings_ms.total` is kept beside each of them,
-    // from the document, so the two can be read against each other instead of
-    // one standing in for the other.
+    // The sets themselves, beside the JSON that keeps only their counts. Not
+    // behind a flag and not best-effort: they are tens of kilobytes, and the
+    // change set a run wants to explain afterwards is never the one somebody
+    // thought to ask for them on. See [`crate::labels`].
+    let cambium_set: BTreeSet<String> = report.affected_labels().into_iter().collect();
+    let labels_dir =
+        crate::labels::change_set_dir(&opts.results_dir, &change_set.base, &change_set.head);
+    std::fs::create_dir_all(&labels_dir)?;
+    crate::labels::write_set(&labels_dir, crate::labels::CAMBIUM, &cambium_set)?;
+
+    let base_wt = BaseWorktree::create(&checkout.dir, &change_set.base, &opts.scratch)?;
+    let changed = BazelFacts::changed_paths(&checkout.dir, &change_set.base, &change_set.head)?;
+
+    let oracle = run_rdeps_oracle(
+        engine,
+        index,
+        report,
+        &changed,
+        &cambium_set,
+        change_set,
+        opts,
+    )?;
+    // Only when it ran: no file at all says "the oracle was off", which a
+    // file holding an empty set would not.
+    if let Some(o) = &oracle {
+        crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
+    }
+
+    let facts = classification_facts(
+        engine,
+        index,
+        report,
+        &changed,
+        &cambium_set,
+        base_wt.path(),
+        oracle.as_ref(),
+    );
+    let ctx = run_context(engine, &opts.scratch, base_wt.path());
+    let (results, rows) = run_tools(
+        &ToolInputs {
+            checkout,
+            change_set,
+            index,
+            report,
+            cambium_set: &cambium_set,
+            facts: &facts,
+            labels_dir: &labels_dir,
+            ctx: &ctx,
+            opts,
+        },
+        tools,
+    )?;
+    // Written once, with every tool's rows in it: which tool a label
+    // disagreed with is a column, because the same label routinely disagrees
+    // with one tool and not another.
+    crate::labels::write_classes(&labels_dir, &rows)?;
+
+    let load_oracle = run_load_oracle(engine, report, &changed, change_set, opts)?;
+
+    let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
+    let pass = results.iter().all(|p| p.pass)
+        && oracle.as_ref().map_or(true, |o| o.ok())
+        && load_oracle.as_ref().map_or(true, |o| o.ok());
+    Ok(ChangeSetResult {
+        schema: crate::RESULT_SCHEMA,
+        base: change_set.base.clone(),
+        head: change_set.head.clone(),
+        kind: change_set.kind,
+        category: change_set.category,
+        cambium: runs.cambium,
+        tools: results,
+        oracle,
+        load_oracle,
+        recall: oracle_recall,
+        global: false,
+        pass,
+    })
+}
+
+/// cambium's two runs over one change set, and what they left behind.
+struct CambiumRuns {
+    /// The second run: its document is the one the comparison reads.
+    warm: crate::tools::cambi::AffectedRun,
+    /// The record both runs' walls and counts go into.
+    cambium: CambiumRun,
+    /// The head index the warm run wrote; `None` on a global.
+    head_index: Option<cambium_index::IndexFile>,
+}
+
+/// cambium, cold then warm.
+///
+/// Twice, as a user would run it: the first run publishes whatever base index
+/// it had to compute, so the second one finds it in the store, and that is
+/// precisely the difference the two numbers are meant to show.
+///
+/// Both are whole-process wall times — `cambi` started, its configuration
+/// read, the answer serialised to JSON — because that is what a user waits
+/// for. The engine's own `timings_ms.total` is kept beside each of them, from
+/// the document, so the two can be read against each other instead of one
+/// standing in for the other.
+fn run_cambium(
+    cambi: &Cambi,
+    checkout: &Checkout,
+    change_set: &ChangeSet,
+    opts: &ChangesOptions,
+) -> Result<CambiumRuns> {
     let progress = opts.progress.as_deref();
     if let Some(p) = progress {
         p.tool(Some(crate::tools::cambi::NAME));
@@ -175,8 +289,6 @@ fn compare_one(
     if let Some(p) = progress {
         p.diagnostics(&warm.report.diagnostics);
     }
-    let (cold_wall_ms, warm_wall_ms) = (cold.wall_ms(), warm.wall_ms());
-    let (cold_engine_ms, warm_engine_ms) = (cold.engine_ms(), warm.engine_ms());
     let head_index = match &warm.index {
         Some(p) => Some(
             cambium_index::IndexFile::open(p)
@@ -184,66 +296,106 @@ fn compare_one(
         ),
         None => None,
     };
-
-    // Keep the base this run actually spliced onto. The run published it, so
-    // this is a store read. `state_dir` is `bench-results/<subject>/`, so the
-    // archive sits beside `state.json` and the cold indexes every workload
-    // shares; `cambium-bench replay` looks for it there. Without it the only
-    // base a later replay has is the index at the pin, which is a different
-    // graph -- see `crate::replay`.
-    if let Some(base) = base_index_for_oracle(engine, &change_set.base) {
-        if let Err(e) = archive_base_index(
-            &opts.state_dir,
-            &change_set.base,
-            &cambium_engine::BaseIndex::Mapped(base.path().to_path_buf()),
-            engine.index_compression(),
-        ) {
-            // A comparison that produced the right answer should not fail
-            // because a diagnostic copy could not be written.
-            tracing::warn!(base = %change_set.base, error = format!("{e:#}"), "could not archive the base index");
-        }
-    }
-
     let report = &warm.report;
-    let cambium_set: BTreeSet<String> = report.affected_labels().into_iter().collect();
-    let cambium_depths: BTreeMap<String, u32> = report
-        .affected
-        .iter()
-        .map(|t| (t.label.clone(), t.depth))
-        .collect();
-    let direct: Vec<String> = report.direct.clone();
     let cambium = CambiumRun {
         direct: report.direct.len(),
         affected: report.affected.len(),
         tests: report.tests.len(),
         global: report.global,
         global_reason: report.global_reason.clone(),
-        cold_wall_ms,
-        warm_wall_ms,
-        cold_engine_ms,
-        warm_engine_ms,
+        cold_wall_ms: cold.wall_ms(),
+        warm_wall_ms: warm.wall_ms(),
+        cold_engine_ms: cold.engine_ms(),
+        warm_engine_ms: warm.engine_ms(),
         dirty_packages: report.stats.dirty_packages,
         queried_targets: report.stats.queried_targets,
         changed_files: report.stats.changed_files,
         cold_rebuild: report.stats.cold_rebuild,
         universe: 0,
     };
-    let Some(index) = head_index.as_ref() else {
-        return compare_global(engine, checkout, change_set, tools, opts, report, cambium);
+    Ok(CambiumRuns {
+        warm,
+        cambium,
+        head_index,
+    })
+}
+
+/// Keeps the base this run actually spliced onto, best effort.
+///
+/// The run published it, so this is a store read. `state_dir` is
+/// `bench-results/<subject>/`, so the archive sits beside `state.json` and
+/// the cold indexes every workload shares; `cambium-bench replay` looks for
+/// it there. Without it the only base a later replay has is the index at the
+/// pin, which is a different graph — see `crate::replay`.
+fn archive_base(engine: &Engine, change_set: &ChangeSet, opts: &ChangesOptions) {
+    let Some(base) = base_index_for_oracle(engine, &change_set.base) else {
+        return;
     };
+    if let Err(e) = archive_base_index(
+        &opts.state_dir,
+        &change_set.base,
+        &cambium_engine::BaseIndex::Mapped(base.path().to_path_buf()),
+        engine.index_compression(),
+    ) {
+        // A comparison that produced the right answer should not fail
+        // because a diagnostic copy could not be written.
+        tracing::warn!(base = %change_set.base, error = format!("{e:#}"), "could not archive the base index");
+    }
+}
 
-    // The sets themselves, beside the JSON that keeps only their counts. Not
-    // behind a flag and not best-effort: they are tens of kilobytes, and the
-    // change set a run wants to explain afterwards is never the one somebody
-    // thought to ask for them on. See [`crate::labels`].
-    let labels_dir =
-        crate::labels::change_set_dir(&opts.results_dir, &change_set.base, &change_set.head);
-    std::fs::create_dir_all(&labels_dir)?;
-    crate::labels::write_set(&labels_dir, crate::labels::CAMBIUM, &cambium_set)?;
+/// The `rdeps` oracle, when it is on.
+///
+/// Before the tools, not after: its answer is one of the classifier's facts.
+/// A cambium-side extra that no benign predicate explains is `tool_missing`
+/// rather than `unclassified` when Bazel's own `rdeps` reached the label too,
+/// and that verdict has to be available while the difference is being
+/// classified.
+///
+/// The base index is wanted only for the deleted half of the change set (see
+/// `crate::oracles::rdeps`): a file that is gone at head has no label to ask
+/// Bazel about, and the base index's `file -> consumers` rows are the only
+/// record of who read it. The run above published it, so this is a store
+/// read; when it is not there the oracle says so and checks the rest.
+fn run_rdeps_oracle(
+    engine: &Engine,
+    index: &cambium_index::IndexFile,
+    report: &cambium_engine::report::AffectedReport,
+    changed: &BTreeSet<String>,
+    cambium_set: &BTreeSet<String>,
+    change_set: &ChangeSet,
+    opts: &ChangesOptions,
+) -> Result<Option<crate::oracles::rdeps::RdepsResult>> {
+    if !opts.rdeps_oracle {
+        return Ok(None);
+    }
+    let dirty_packages: BTreeSet<String> = report.dirty_packages.iter().cloned().collect();
+    let base_index = base_index_for_oracle(engine, &change_set.base);
+    RdepsOracle::new(opts.oracle_k, opts.seed)
+        .run(
+            &engine.bazel,
+            &OracleInputs {
+                head: index.view(),
+                base: base_index.as_ref().map(|f| f.view()),
+                changed,
+                cambium: cambium_set,
+                dirty_packages: &dirty_packages,
+            },
+        )
+        .map(Some)
+        .with_context(|| format!("rdeps oracle at {}", change_set.head))
+}
 
-    // ---- the facts a classification needs ----
-    let base_wt = BaseWorktree::create(&checkout.dir, &change_set.base, &opts.scratch)?;
-    let changed = BazelFacts::changed_paths(&checkout.dir, &change_set.base, &change_set.head)?;
+/// The facts a classification needs, from cambium's own document and from
+/// Bazel at both revisions.
+fn classification_facts<'a>(
+    engine: &'a Engine,
+    index: &'a cambium_index::IndexFile,
+    report: &cambium_engine::report::AffectedReport,
+    changed: &BTreeSet<String>,
+    cambium_set: &BTreeSet<String>,
+    base_worktree: &Path,
+    oracle: Option<&crate::oracles::rdeps::RdepsResult>,
+) -> BazelFacts<'a> {
     use cambium_engine::report::DirectReason;
     let reasoned = |f: fn(&DirectReason) -> bool| -> Vec<String> {
         report
@@ -277,51 +429,10 @@ fn compare_one(
         DirectReason::File { path } => cambium_classify::is_build_file(path),
         _ => false,
     });
-    // ---- the oracle ----
-    //
-    // Before the tools, not after: its answer is one of the classifier's
-    // facts. A cambium-side extra that no benign predicate explains is
-    // `tool_missing` rather than `unclassified` when Bazel's own `rdeps`
-    // reached the label too, and that verdict has to be available while the
-    // difference is being classified.
-    //
-    // The base index is wanted only for the deleted half of the change set
-    // (see `crate::oracles::rdeps`): a file that is gone at head has no label
-    // to ask Bazel about, and the base index's `file -> consumers` rows are the
-    // only record of who read it. The run above published it, so this is a
-    // store read; when it is not there the oracle says so and checks the rest.
-    let dirty_packages: BTreeSet<String> = report.dirty_packages.iter().cloned().collect();
-    let oracle = match opts.rdeps_oracle {
-        true => {
-            let base_index = base_index_for_oracle(engine, &change_set.base);
-            Some(
-                RdepsOracle::new(opts.oracle_k, opts.seed)
-                    .run(
-                        &engine.bazel,
-                        &OracleInputs {
-                            head: index.view(),
-                            base: base_index.as_ref().map(|f| f.view()),
-                            changed: &changed,
-                            cambium: &cambium_set,
-                            dirty_packages: &dirty_packages,
-                        },
-                    )
-                    .with_context(|| format!("rdeps oracle at {}", change_set.head))?,
-            )
-        }
-        false => None,
-    };
-    let oracle_recall = oracle.as_ref().map(|o| o.recall()).unwrap_or(1.0);
-    // Only when it ran: no file at all says "the oracle was off", which a
-    // file holding an empty set would not.
-    if let Some(o) = &oracle {
-        crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
-    }
-
     let facts = BazelFacts::new(
         &engine.bazel,
         index.view(),
-        direct.iter().cloned(),
+        report.direct.iter().cloned(),
         changed.iter().cloned(),
     )
     .with_paths(paths)
@@ -329,26 +440,62 @@ fn compare_one(
     .with_deleted_dep(deleted_dep)
     .with_external_repo(external_repo)
     .with_build_file(from_build_file)
-    .with_base(bazel_at(engine, base_wt.path()));
+    .with_base(bazel_at(engine, base_worktree));
     // Only when it ran: `with_oracle` on an empty answer means "Bazel reached
     // nothing", which `tool_extra_source_directory` may lean on, and a run
     // with `--oracle` off must not be able to say that.
-    let facts = match &oracle {
+    match oracle {
         Some(o) => facts.with_oracle(o.oracle_set.iter().cloned()),
         None => facts,
-    };
+    }
+}
 
-    // ---- the tools ----
-    let ctx = run_context(engine, &opts.scratch, base_wt.path());
+/// What every tool's run over one change set reads.
+struct ToolInputs<'a> {
+    checkout: &'a Checkout,
+    change_set: &'a ChangeSet,
+    index: &'a cambium_index::IndexFile,
+    report: &'a cambium_engine::report::AffectedReport,
+    cambium_set: &'a BTreeSet<String>,
+    facts: &'a BazelFacts<'a>,
+    labels_dir: &'a Path,
+    ctx: &'a RunContext,
+    opts: &'a ChangesOptions,
+}
+
+/// Each tool over the change set, its answer restricted to cambium's
+/// vocabulary and classified against cambium's. Answers with the per-tool
+/// records and every classified disagreement, for the labels directory.
+fn run_tools(
+    inputs: &ToolInputs<'_>,
+    tools: &[&dyn Tool],
+) -> Result<(Vec<ToolComparison>, Vec<crate::labels::ClassRow>)> {
+    let ToolInputs {
+        checkout,
+        change_set,
+        index,
+        report,
+        cambium_set,
+        facts,
+        labels_dir,
+        ctx,
+        opts,
+    } = *inputs;
+    let cambium_depths: BTreeMap<String, u32> = report
+        .affected
+        .iter()
+        .map(|t| (t.label.clone(), t.depth))
+        .collect();
+    let explanations = report.explanations.as_deref().unwrap_or_default();
     let mut results = Vec::new();
     let mut rows: Vec<crate::labels::ClassRow> = Vec::new();
     for p in tools {
         // One Tango invocation is minutes, so which tool is running is part
         // of where the run is.
-        if let Some(r) = progress {
+        if let Some(r) = opts.progress.as_deref() {
             r.tool(Some(p.name()));
         }
-        let cmp = match p.affected(&checkout.dir, &change_set.base, &change_set.head, &ctx) {
+        let cmp = match p.affected(&checkout.dir, &change_set.base, &change_set.head, ctx) {
             Ok(mut run) => {
                 // Both tools report source-file targets (`//pkg:BUILD.bazel`
                 // at distance 0); cambium's walk emits rules only. Comparing
@@ -361,14 +508,14 @@ fn compare_one(
                 // one; see `BazelFacts::prefetch`.
                 facts.prefetch(with_paths(
                     cambium_set.symmetric_difference(&run.labels),
-                    report.explanations.as_deref().unwrap_or_default(),
+                    explanations,
                 ));
                 // Restricted to rules first, so the stored set is the same
                 // vocabulary the classification ran over: a file whose rows
                 // the JSON's counts cannot be reconciled with is worse than
                 // no file.
-                crate::labels::write_set(&labels_dir, p.name(), &run.labels)?;
-                let (counts, found) = classify_all(&cambium_set, &run.labels, &facts);
+                crate::labels::write_set(labels_dir, p.name(), &run.labels)?;
+                let (counts, found) = classify_all(cambium_set, &run.labels, facts);
                 rows.extend(found.iter().map(|d| crate::labels::ClassRow {
                     tool: p.name().to_string(),
                     side: d.side,
@@ -385,19 +532,19 @@ fn compare_one(
                     labels: run.labels.len(),
                     cold_wall_ms: run.cold_wall.as_millis() as u64,
                     warm_wall_ms: run.warm_wall.map(|d| d.as_millis() as u64),
-                    precision: precision(&run.labels, &cambium_set),
+                    precision: precision(&run.labels, cambium_set),
                     depth_agreement: run
                         .depths
                         .as_ref()
                         .and_then(|d| crate::tools::tango::depth_agreement(&cambium_depths, d)),
                     dropped_file_targets: run.dropped_file_targets,
                     cambium_only: cambium_set.difference(&run.labels).count(),
-                    tool_only: run.labels.difference(&cambium_set).count(),
+                    tool_only: run.labels.difference(cambium_set).count(),
                     counts,
                     examples,
                     cambium_only_reasons: reason_histogram(
                         cambium_set.difference(&run.labels),
-                        report.explanations.as_deref().unwrap_or_default(),
+                        explanations,
                     ),
                     pass: failures == 0,
                     ..ToolComparison::new(p.name(), p.version())
@@ -414,25 +561,30 @@ fn compare_one(
         };
         results.push(cmp);
     }
-    // Written once, with every tool's rows in it: which tool a label
-    // disagreed with is a column, because the same label routinely disagrees
-    // with one tool and not another.
-    crate::labels::write_classes(&labels_dir, &rows)?;
+    Ok((results, rows))
+}
 
-    // ---- the `.bzl` load-closure oracle ----
-    //
-    // Only on change sets that changed a `.bzl`, which is where the static closure
-    // is the thing under test. `engine.bazel` is the head checkout, which is
-    // the tree `rbuildfiles` has to be asked about.
-    let load_oracle = match opts.load_oracle {
-        true => crate::oracles::load::run(
-            &engine.bazel,
-            &changed,
-            &report.dirty_packages.iter().cloned().collect(),
-        )
-        .with_context(|| format!("bzl load-closure oracle at {}", change_set.head))?,
-        false => None,
-    };
+/// The `.bzl` load-closure oracle, when it is on.
+///
+/// Only on change sets that changed a `.bzl`, which is where the static
+/// closure is the thing under test. `engine.bazel` is the head checkout,
+/// which is the tree `rbuildfiles` has to be asked about.
+fn run_load_oracle(
+    engine: &Engine,
+    report: &cambium_engine::report::AffectedReport,
+    changed: &BTreeSet<String>,
+    change_set: &ChangeSet,
+    opts: &ChangesOptions,
+) -> Result<Option<crate::oracles::load::LoadOracleResult>> {
+    if !opts.load_oracle {
+        return Ok(None);
+    }
+    let load_oracle = crate::oracles::load::run(
+        &engine.bazel,
+        changed,
+        &report.dirty_packages.iter().cloned().collect(),
+    )
+    .with_context(|| format!("bzl load-closure oracle at {}", change_set.head))?;
     if let Some(o) = &load_oracle {
         if !o.repository_evaluation.is_empty() {
             tracing::info!(
@@ -457,25 +609,7 @@ fn compare_one(
             );
         }
     }
-
-    let pass = results.iter().all(|p| p.pass)
-        && oracle.as_ref().map_or(true, |o| o.ok())
-        && load_oracle.as_ref().map_or(true, |o| o.ok());
-
-    Ok(ChangeSetResult {
-        schema: crate::RESULT_SCHEMA,
-        base: change_set.base.clone(),
-        head: change_set.head.clone(),
-        kind: change_set.kind,
-        category: change_set.category,
-        cambium,
-        tools: results,
-        oracle,
-        load_oracle,
-        recall: oracle_recall,
-        global: false,
-        pass,
-    })
+    Ok(load_oracle)
 }
 
 /// The change set where cambium answered `//...`.

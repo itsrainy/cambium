@@ -8,12 +8,9 @@
 //! one after another, and switches to the watch screen with the running
 //! child's stderr tail in the footer.
 //!
-//! It reimplements no workload. Everything here builds argument vectors —
-//! [`Plan::steps`] is pure and unit-tested — and the thing that runs them is
-//! `cambium-bench` itself, which is also what `tools/bench/run-published.sh`
-//! runs. The script stays the scripted way to do the same thing, and a test
-//! reads it to check that the launcher's "published" size produces the
-//! command lines it does.
+//! It reimplements no workload. The plan is [`cambium_bench::plan::Plan`] —
+//! the same one `cambium-bench run` executes and `tools/bench/run-published.sh`
+//! calls — and the thing that runs its steps is `cambium-bench` itself.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
@@ -24,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use cambium_bench::manifest::Manifest;
+use cambium_bench::plan::{Invocation, Plan, Queue, Size, StepKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Modifier, Style};
@@ -33,172 +31,6 @@ use ratatui::Terminal;
 
 use crate::watch::{screen, Screen, Supervisor};
 use crate::Context;
-
-/// How big a run is. The three sizes the repository already has: the fifteen
-/// minutes before an eight-hour pass, the laptop-sized slice `--quick` is
-/// sugar for, and the published run itself.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Size {
-    Smoke,
-    Laptop,
-    Published,
-}
-
-impl Size {
-    pub const ALL: [Size; 3] = [Size::Smoke, Size::Laptop, Size::Published];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Size::Smoke => "smoke",
-            Size::Laptop => "laptop",
-            Size::Published => "published",
-        }
-    }
-
-    fn describe(self) -> &'static str {
-        match self {
-            Size::Smoke => "3 commits, 1 change set, into bench-results-smoke/ (~15 min)",
-            Size::Laptop => "--quick: 50 commits, 50 change sets, Tango on the first 10",
-            Size::Published => "the subject's own window and 40 change sets: the published run",
-        }
-    }
-
-    /// Where a run of this size writes. The smoke run has its own tree so the
-    /// real one neither resumes nor overwrites it, exactly as `SMOKE=1` in
-    /// `tools/bench/run-published.sh`.
-    fn results_dir(self) -> &'static str {
-        match self {
-            Size::Smoke => "bench-results-smoke",
-            _ => "bench-results",
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Workload {
-    History,
-    Changes,
-}
-
-impl Workload {
-    pub const ALL: [Workload; 2] = [Workload::History, Workload::Changes];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Workload::History => "history",
-            Workload::Changes => "changes",
-        }
-    }
-}
-
-/// What a composed run is.
-#[derive(Clone, Debug)]
-pub struct Plan {
-    pub subjects: Vec<String>,
-    /// Tool names as `--tools` takes them. `cambium` is always in the list it
-    /// passes, because it is what the others are compared against.
-    pub tools: Vec<String>,
-    pub workloads: Vec<Workload>,
-    pub size: Size,
-    /// Overrides [`Size::results_dir`] when a caller has one.
-    pub results_dir: Option<PathBuf>,
-}
-
-/// One child process: the argument vector, without the program.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Step {
-    pub args: Vec<String>,
-}
-
-impl Step {
-    fn new<const N: usize>(args: [&str; N]) -> Self {
-        Self {
-            args: args.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    fn with(mut self, more: &[&str]) -> Self {
-        self.args.extend(more.iter().map(|s| s.to_string()));
-        self
-    }
-
-    /// What the screen shows and what a person could paste.
-    pub fn command_line(&self) -> String {
-        format!("cambium-bench {}", self.args.join(" "))
-    }
-}
-
-impl Plan {
-    /// The command lines, in the order they run: per subject the fetch, the
-    /// cold build, the workloads and that subject's report, then one report
-    /// over every subject at the end.
-    ///
-    /// The same order and the same flags as `tools/bench/run-published.sh`,
-    /// which a test checks by reading the script.
-    pub fn steps(&self) -> Vec<Step> {
-        let results = self
-            .results_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(self.size.results_dir()));
-        let results = results.display().to_string();
-        let dir: Vec<&str> = vec!["--results-dir", &results];
-        let mut out = Vec::new();
-        for s in &self.subjects {
-            out.push(Step::new(["--log", "info", "subjects", "fetch", s]).with(&dir));
-            out.push(Step::new(["--log", "info", "subjects", "build", s]).with(&dir));
-            if self.workloads.contains(&Workload::History) {
-                let mut step =
-                    Step::new(["--log", "info", "history", s, "--oracle", "rebuild"]).with(&dir);
-                step = match self.size {
-                    Size::Smoke => step.with(&["--commits", "3", "--restart"]),
-                    Size::Laptop => step.with(&["--quick"]),
-                    Size::Published => step,
-                };
-                out.push(step);
-            }
-            if self.workloads.contains(&Workload::Changes) {
-                let tools = self.tool_flag();
-                let mut step = Step::new([
-                    "--log",
-                    "info",
-                    "changes",
-                    s,
-                    "--tools",
-                    &tools,
-                    "--oracle",
-                    "rdeps,load",
-                ])
-                .with(&dir);
-                step = match self.size {
-                    Size::Smoke => step.with(&["--change-sets", "1", "--restart"]),
-                    Size::Laptop => step.with(&["--quick"]),
-                    Size::Published => step,
-                };
-                out.push(step);
-            }
-            out.push(Step::new(["report", s]).with(&dir));
-        }
-        out.push(Step::new(["report"]).with(&dir));
-        out
-    }
-
-    /// The `--tools` value: cambium first and always, since naming it alone is
-    /// how a run measures cambium with no foil.
-    fn tool_flag(&self) -> String {
-        let mut names: Vec<&str> = vec![cambium_bench::tools::cambi::NAME];
-        names.extend(
-            self.tools
-                .iter()
-                .map(String::as_str)
-                .filter(|t| *t != cambium_bench::tools::cambi::NAME),
-        );
-        names.join(",")
-    }
-
-    fn is_runnable(&self) -> bool {
-        !self.subjects.is_empty() && !self.workloads.is_empty()
-    }
-}
 
 // ------------------------------------------------------------------ the screen
 
@@ -228,7 +60,7 @@ impl Pane {
 struct Compose {
     subjects: Vec<(String, bool)>,
     tools: Vec<(String, bool)>,
-    workloads: Vec<(Workload, bool)>,
+    workloads: Vec<(StepKind, bool)>,
     size: Size,
     pane: Pane,
     row: [usize; 4],
@@ -258,7 +90,7 @@ impl Compose {
                 .iter()
                 .map(|t| (t.to_string(), true))
                 .collect(),
-            workloads: Workload::ALL.iter().map(|w| (*w, true)).collect(),
+            workloads: StepKind::WORKLOADS.iter().map(|w| (*w, true)).collect(),
             size: Size::Laptop,
             pane: Pane::Subjects,
             row: [0; 4],
@@ -266,19 +98,24 @@ impl Compose {
         }
     }
 
+    /// The plan: the preparation steps and the reports always, the picked
+    /// workloads in between.
     fn plan(&self) -> Plan {
-        Plan {
-            subjects: picked(&self.subjects),
-            tools: picked(&self.tools),
-            workloads: self
-                .workloads
-                .iter()
-                .filter(|(_, on)| *on)
-                .map(|(w, _)| *w)
-                .collect(),
-            size: self.size,
-            results_dir: None,
-        }
+        let picked_workloads: Vec<StepKind> = self
+            .workloads
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(w, _)| *w)
+            .collect();
+        let mut plan = Plan::published(picked(&self.subjects));
+        plan.tools = picked(&self.tools);
+        plan.steps = StepKind::ALL
+            .iter()
+            .copied()
+            .filter(|s| !StepKind::WORKLOADS.contains(s) || picked_workloads.contains(s))
+            .collect();
+        plan.size = self.size;
+        plan
     }
 
     fn pane_index(&self) -> usize {
@@ -403,13 +240,14 @@ pub fn run(ctx: &Context) -> Result<u8> {
     let Some(plan) = compose(&manifest)? else {
         return Ok(crate::EXIT_OK);
     };
-    let results = plan
-        .results_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(plan.size.results_dir()));
+    let results = plan.results();
     std::fs::create_dir_all(&results)?;
     let results = cambium_bench::compare::absolute(&results);
-    let subjects: Vec<String> = plan.subjects.iter().map(|s| s.replace(':', "-")).collect();
+    let subjects: Vec<String> = plan
+        .subjects
+        .iter()
+        .map(|s| cambium_bench::session::subject_dir_name(s))
+        .collect();
     let mut runner = Runner::start(&plan)?;
     screen(
         &Screen {
@@ -460,18 +298,18 @@ fn compose(manifest: &Manifest) -> Result<Option<Plan>> {
     }
 }
 
-/// Runs the plan's steps in order, as children of this binary.
+/// Runs the plan's steps in order, as children of this binary, under the
+/// watch screen.
 ///
 /// It drives nothing itself: every step is a `cambium-bench` invocation, the
-/// same one a person would type and the same one the shell driver runs.
+/// same one a person would type and the same one `cambium-bench run` spawns.
 pub struct Runner {
-    queue: VecDeque<Step>,
+    queue: Queue,
     exe: PathBuf,
-    current: Option<(Step, Child)>,
+    current: Option<(Invocation, Child)>,
     tail: Arc<Mutex<VecDeque<String>>>,
     failures: usize,
     done: usize,
-    total: usize,
     /// `q` with a child running asks first.
     asking: bool,
     /// The answer was yes: the screen closes on its next poll.
@@ -483,10 +321,8 @@ const TAIL_LINES: usize = 4;
 
 impl Runner {
     fn start(plan: &Plan) -> Result<Self> {
-        let steps = plan.steps();
         let mut r = Self {
-            total: steps.len(),
-            queue: steps.into(),
+            queue: Queue::new(plan),
             exe: std::env::current_exe()?,
             current: None,
             tail: Arc::new(Mutex::new(VecDeque::new())),
@@ -500,7 +336,7 @@ impl Runner {
     }
 
     fn spawn_next(&mut self) {
-        let Some(step) = self.queue.pop_front() else {
+        let Some(step) = self.queue.pop() else {
             return;
         };
         let mut cmd = Command::new(&self.exe);
@@ -533,6 +369,7 @@ impl Runner {
                 self.failures += 1;
                 self.done += 1;
                 self.push_tail(format!("could not start {}: {e}", step.command_line()));
+                self.queue.finished(&step, false);
             }
         }
     }
@@ -557,8 +394,7 @@ impl Runner {
 
 impl Supervisor for Runner {
     /// Reaps a finished child and starts the next step. A step that failed
-    /// does not stop the rest, exactly as in the shell driver: a subject that
-    /// cannot fetch must not cost the other four their run.
+    /// does not stop the rest; a failed fetch or build skips its subject.
     fn tick(&mut self) {
         let mut wait_error = None;
         let finished = match self.current.as_mut() {
@@ -582,6 +418,7 @@ impl Supervisor for Runner {
                 self.failures += 1;
                 self.push_tail(format!("FAILED {}", step.command_line()));
             }
+            self.queue.finished(&step, ok);
             self.spawn_next();
         }
     }
@@ -592,12 +429,12 @@ impl Supervisor for Runner {
             Some((step, _)) => format!(
                 "step {}/{}  {}",
                 self.done + 1,
-                self.total,
+                self.queue.total,
                 step.command_line()
             ),
             None => format!(
                 "{} of {} steps done, {} failed",
-                self.done, self.total, self.failures
+                self.done, self.queue.total, self.failures
             ),
         });
         let tail = self.tail.lock().unwrap_or_else(|e| e.into_inner());
@@ -644,135 +481,18 @@ impl Supervisor for Runner {
 mod tests {
     use super::*;
 
-    fn plan(size: Size) -> Plan {
-        Plan {
-            subjects: vec!["bazel".into()],
-            tools: vec!["bazel-diff".into(), "tango".into()],
-            workloads: Workload::ALL.to_vec(),
-            size,
-            results_dir: None,
-        }
-    }
-
-    fn lines(p: &Plan) -> Vec<String> {
-        p.steps().iter().map(|s| s.command_line()).collect()
-    }
-
-    #[test]
-    fn the_published_size_is_what_the_shell_driver_runs() {
-        // The script is the scripted way to do the same thing, and the two
-        // must not drift: a run composed here has to be the run that produced
-        // the published numbers.
-        let script = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tools/bench/run-published.sh"),
-        )
-        .expect("the driver script");
-        let flags = |needle: &str| -> Vec<String> {
-            let line = script
-                .lines()
-                .find(|l| l.trim_start().starts_with(needle))
-                .unwrap_or_else(|| panic!("no {needle} line in run-published.sh"));
-            let inner = line
-                .split_once('(')
-                .and_then(|(_, r)| r.rsplit_once(')'))
-                .expect("an array literal")
-                .0;
-            inner
-                .split_whitespace()
-                .filter(|t| !t.starts_with("\"${"))
-                .map(str::to_string)
-                .collect()
-        };
-        // The verbs the script runs per subject, in its own order.
-        let verbs: Vec<&str> = script
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("if wants "))
-            .filter_map(|l| l.split(';').next())
-            .collect();
-        assert_eq!(verbs, ["fetch", "build", "history", "changes", "report"]);
-
-        let got = lines(&plan(Size::Published));
-        assert_eq!(
-            got,
-            [
-                "cambium-bench --log info subjects fetch bazel --results-dir bench-results",
-                "cambium-bench --log info subjects build bazel --results-dir bench-results",
-                "cambium-bench --log info history bazel --oracle rebuild --results-dir bench-results",
-                "cambium-bench --log info changes bazel --tools cambium,bazel-diff,tango --oracle rdeps,load --results-dir bench-results",
-                "cambium-bench report bazel --results-dir bench-results",
-                "cambium-bench report --results-dir bench-results",
-            ]
-        );
-        // And every flag the script passes for the two workloads is in them.
-        for f in flags("history_args=") {
-            assert!(got[2].contains(&f), "history is missing {f}: {}", got[2]);
-        }
-        for f in flags("changes_args=") {
-            assert!(got[3].contains(&f), "changes is missing {f}: {}", got[3]);
-        }
-        // The script's default subject list is still the manifest's, which is
-        // what the launcher offers.
-        assert!(script.contains("SUBJECTS=${SUBJECTS:-\"bazel sourcegraph apollo envoy xla\"}"));
-    }
-
-    #[test]
-    fn the_smoke_size_is_the_scripts_smoke_run() {
-        let got = lines(&plan(Size::Smoke));
-        assert!(
-            got.iter()
-                .all(|l| l.contains("--results-dir bench-results-smoke")),
-            "{got:?}"
-        );
-        assert!(got[2].ends_with("--commits 3 --restart"), "{}", got[2]);
-        assert!(got[3].ends_with("--change-sets 1 --restart"), "{}", got[3]);
-    }
-
-    #[test]
-    fn the_laptop_size_is_the_quick_sugar_and_nothing_else() {
-        let got = lines(&plan(Size::Laptop));
-        assert!(got[2].ends_with("--quick"), "{}", got[2]);
-        assert!(got[3].ends_with("--quick"), "{}", got[3]);
-        assert!(got[0].contains("bench-results"), "{}", got[0]);
-    }
-
-    #[test]
-    fn one_workload_runs_one_workload_and_cambium_is_always_a_tool() {
-        let p = Plan {
-            workloads: vec![Workload::Changes],
-            tools: vec![],
-            ..plan(Size::Laptop)
-        };
-        let got = lines(&p);
-        assert!(!got.iter().any(|l| l.contains(" history ")), "{got:?}");
-        // Naming no foil measures cambium alone, which is a run, not an error.
-        assert!(got[2].contains("--tools cambium "), "{}", got[2]);
-    }
-
-    #[test]
-    fn a_plan_with_no_subject_or_no_workload_runs_nothing() {
-        assert!(!Plan {
-            subjects: vec![],
-            ..plan(Size::Laptop)
-        }
-        .is_runnable());
-        assert!(!Plan {
-            workloads: vec![],
-            ..plan(Size::Laptop)
-        }
-        .is_runnable());
-        assert!(plan(Size::Laptop).is_runnable());
-    }
-
-    #[test]
-    fn the_screen_offers_the_manifest_and_the_synthetic_presets() {
-        let manifest: Manifest = toml::from_str(&format!(
+    fn manifest() -> Manifest {
+        toml::from_str(&format!(
             "[[repo]]\nid = \"bazel\"\nurl = \"u\"\npin = \"{0}\"\n\
              [[repo]]\nid = \"gone\"\nurl = \"u\"\npin = \"{0}\"\nskip = true\n",
             "a".repeat(40)
         ))
-        .unwrap();
-        let c = Compose::new(&manifest);
+        .unwrap()
+    }
+
+    #[test]
+    fn the_screen_offers_the_manifest_and_the_synthetic_presets() {
+        let c = Compose::new(&manifest());
         let names: Vec<&str> = c.subjects.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"bazel"));
         assert!(!names.contains(&"gone"), "a skipped subject is not offered");
@@ -781,18 +501,37 @@ mod tests {
         // question the screen asks is which repositories.
         assert!(c.plan().subjects.is_empty());
         assert_eq!(c.plan().tools, ["bazel-diff", "tango"]);
-        assert_eq!(c.plan().workloads, Workload::ALL);
+        assert_eq!(c.plan().steps, StepKind::ALL);
         assert_eq!(c.size, Size::Laptop);
+    }
+
+    /// The screen composes the library's plan, so a confirmed published run
+    /// is the published run.
+    #[test]
+    fn the_confirmed_plan_is_the_library_plan() {
+        let mut c = Compose::new(&manifest());
+        c.toggle();
+        c.next_pane(3);
+        c.move_by(5);
+        c.toggle();
+        let plan = c.plan();
+        assert_eq!(plan.size, Size::Published);
+        assert_eq!(
+            plan.steps()
+                .iter()
+                .map(|s| s.command_line())
+                .collect::<Vec<_>>(),
+            Plan::published(vec!["bazel".into()])
+                .steps()
+                .iter()
+                .map(|s| s.command_line())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn the_panes_toggle_what_the_cursor_is_on() {
-        let manifest: Manifest = toml::from_str(&format!(
-            "[[repo]]\nid = \"bazel\"\nurl = \"u\"\npin = \"{}\"\n",
-            "a".repeat(40)
-        ))
-        .unwrap();
-        let mut c = Compose::new(&manifest);
+        let mut c = Compose::new(&manifest());
         c.toggle();
         assert_eq!(c.plan().subjects, ["bazel"]);
         c.next_pane(1);
@@ -801,7 +540,16 @@ mod tests {
         c.next_pane(1);
         c.move_by(1);
         c.toggle();
-        assert_eq!(c.plan().workloads, [Workload::History]);
+        assert_eq!(
+            c.plan().steps,
+            [
+                StepKind::Fetch,
+                StepKind::Build,
+                StepKind::History,
+                StepKind::Report
+            ],
+            "changes was turned off; the preparation and the report stay"
+        );
         c.next_pane(1);
         c.move_by(-5);
         c.toggle();

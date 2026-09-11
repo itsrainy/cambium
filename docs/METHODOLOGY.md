@@ -317,10 +317,12 @@ $ tools/bench/precheck.sh                       # every cached subject
 $ SUBJECTS="envoy apollo" tools/bench/precheck.sh
 ```
 
-`precheck.sh` pulls each subject's stored index, the base indexes its change
-sets ran against, and the recorded results off the benchmark box into
-`bench-precheck/` (git-ignored, and skipped once cached), builds `cambi` in
-release, and runs the check. Underneath it is one command:
+`precheck.sh` builds both binaries and runs two verbs per subject:
+`cambium-bench pull-results`, which copies the stored index, the base indexes
+its change sets ran against, the recorded results and the diff of every change
+set (derived on the box by `cambium-bench replay --write-paths` over the
+mirror) into `bench-precheck/` (git-ignored, and skipped once cached), and the
+check itself, which is one command:
 
 ```console
 $ cambium-bench replay envoy --change-set b352846f..a6871fc6   # one change set
@@ -334,8 +336,8 @@ whatever the history walk left there, which is a different graph, and a bug can
 live entirely in that difference — an inert `MODULE.bazel` read in WORKSPACE
 mode was invisible against the pin and reproduced immediately against the base
 the run itself used. So the change-set driver archives each base it ran
-against at `bench-results/<subject>/bases/<base>.bin`, `precheck.sh` pulls those
-alongside the index, and `cambium-bench replay` uses a change set's own base whenever
+against at `bench-results/<subject>/bases/<base>.bin`, `pull-results` brings
+those over with the index, and `cambium-bench replay` uses a change set's own base whenever
 one is there — saying which it used per change set and how many in the `--all`
 summary, and dropping the drift guards below for those, because there is no
 drift left to guard against. `--index` still overrides everything. The recorded
