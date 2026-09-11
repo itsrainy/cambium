@@ -243,6 +243,26 @@ mod tests {
         );
         assert_eq!(s.cambium_warm.p50_ms, 30);
         assert_eq!(s.cambium_cold.p50_ms, 3000);
+        assert_eq!(
+            s.cambium_warm_engine.samples, 0,
+            "a result with no engine time records no engine distribution"
+        );
+    }
+
+    #[test]
+    fn the_engine_time_is_summarised_over_the_change_sets_that_recorded_it() {
+        let mut a = change_set_comparison("1", 1.0, 100, 10, true);
+        a.cambium.cold_engine_ms = 900;
+        a.cambium.warm_engine_ms = 8;
+        let mut b = change_set_comparison("2", 1.0, 300, 30, true);
+        b.cambium.cold_engine_ms = 2_700;
+        b.cambium.warm_engine_ms = 24;
+        let old = change_set_comparison("3", 1.0, 500, 50, true);
+        let s = summarise(&[a, b, old]);
+        assert_eq!(s.cambium_warm.samples, 3);
+        assert_eq!(s.cambium_warm_engine.samples, 2, "0 is not recorded");
+        assert_eq!(s.cambium_warm_engine.p50_ms, 24);
+        assert_eq!(s.all_cambium_cold_engine.p90_ms, 2_700);
     }
 
     #[test]
