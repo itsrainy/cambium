@@ -41,6 +41,7 @@ on. A log line (`--log info`) is not a diagnostic.
 | `CAMBI-W019` | the store holds a lineage whose `config_hash` is not this workspace's, or that an engine with a different rule-hash version or index content revision wrote | expected right after a `cambium.toml` edit or a `cambi` upgrade; the stale lineage is skipped rather than used. `cambi index gc` removes it now |
 | `CAMBI-W020` | `cambi init` found a `.gitignore` that does not mention `cambium.local.toml` | add a `cambium.local.toml` line to it: the file holds this machine's paths and binaries, and committing one makes them everybody's. `init` says so and does not edit `.gitignore`, which belongs to the repository |
 | `CAMBI-W021` | `cambi inspect verify` could not run the `rdeps` query for one sampled target, and skipped it; `checked` counts only the targets that were compared | run the query by hand (`bazel query 'rdeps(//..., <label>)'`) to see why Bazel refused it; the verdict over the other samples stands |
+| `CAMBI-W022` | `bazel mod dump_repo_mapping` succeeded but its stdout was not a JSON object, so the identity mapping stood in for the module's real one; an external load through a renamed `bazel_dep` can then name the wrong repository | run `bazel mod dump_repo_mapping ""` in the workspace and check its stdout is one JSON object (a wrapper script printing to stdout is the usual cause). Rebuild the lineage once it is, since the index records the mapping it was built with |
 
 ## Errors
 

@@ -104,6 +104,9 @@ codes! {
     /// `cambi inspect verify` could not run the `rdeps` query for a sampled
     /// target, and skipped it.
     W021VerifyQueryFailed => "CAMBI-W021",
+    /// `bazel mod dump_repo_mapping` succeeded but printed something that is
+    /// not a mapping, so the identity mapping stands in for it.
+    W022RepoMappingUnparsed => "CAMBI-W022",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,
