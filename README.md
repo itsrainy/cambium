@@ -90,6 +90,7 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 ```console
 $ cambi                            # no verb: cambi status
 $ cambi status    [--format human|json]
+$ cambi doctor    [--format human|json]
 $ cambi affected [<base>..<head>] [--tests-only] [--include-manual]
                    [--format human|json|jsonl|query|null] [--explain] [--max-depth n]
                    [--no-full-build] [--publish-base] [--out <index file>]
@@ -305,6 +306,31 @@ A field whose probe could not answer is `null` rather than absent, except the
 probes `status` does not run at all (`bazel`, `round_trip`), which are not in
 this document.
 
+### `cambi doctor --format json`
+
+One graded check per probe. `level` is `ok`, `warn` or `fail`; anything that is
+not `ok` carries the diagnostic that graded it, and the exit code is 1 if any
+check failed and 0 otherwise — a `warn` is a run that works:
+
+```json
+{
+  "schema": 9,
+  "checks": [
+    { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
+    { "name": "bazel", "level": "fail", "detail": "bazel",
+      "diagnostic": { "code": "CAMBI-E015", "level": "error",
+                      "message": "the Bazel binary `bazel` is not on PATH",
+                      "help": "install Bazel or bazelisk, or ..." } }
+  ]
+}
+```
+
+`doctor` runs the two things `status` will not: `bazel --version`, and a publish
+and fetch-back of a probe object under the store's `.probe/` prefix. That
+round trip is the check that matters before `--publish`, because a store that
+answers a read and refuses a write looks healthy until a run tries to use it.
+The probe object is left behind: no backend here can delete a key.
+
 ### Contract versions
 
 | version | change |
@@ -318,7 +344,7 @@ this document.
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 
-| 9 | `cambi status --format json`, a new document (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same will hold for `explain` and `doctor`. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
+| 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same will hold for `explain`. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did

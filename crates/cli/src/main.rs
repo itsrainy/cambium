@@ -95,6 +95,8 @@ struct Cli {
 enum Command {
     /// Where this checkout is and what index a run would load.
     Status,
+    /// Check that a run can work here, and say what to fix if it cannot.
+    Doctor,
     /// Report the targets affected by the changes between two revisions.
     Affected(cmd::affected::Args),
     /// Build, publish and prune the stored indexes.
@@ -236,6 +238,7 @@ fn main() -> ExitCode {
 
     let code = match cli.command.unwrap_or(Command::Status) {
         Command::Status => cmd::status::run(&ctx),
+        Command::Doctor => cmd::doctor::run(&ctx),
         Command::Affected(args) => cmd::affected::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Inspect(args) => cmd::inspect::run(&ctx, args),

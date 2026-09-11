@@ -542,3 +542,68 @@ fn status_does_not_need_a_bazel_binary() {
         "the pin is where the version comes from:\n{stdout}"
     );
 }
+
+/// `doctor` is what a bug report asks for, so its document is a list of graded
+/// checks and its exit code says whether a run can work at all.
+#[test]
+fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = dir.path().to_str().unwrap();
+    let (code, stdout, stderr) = run(&["-C", outside, "doctor", "--format", "json"]);
+    assert_eq!(
+        code, 1,
+        "no workspace means a run cannot work here: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor prints one document");
+    assert_eq!(v["schema"].as_u64(), Some(9));
+    let checks = v["checks"].as_array().expect("a checks array");
+    assert!(!checks.is_empty());
+    for c in checks {
+        assert!(c["name"].is_string(), "every check is named: {c}");
+        let level = c["level"].as_str().expect("every check is graded");
+        assert!(
+            ["ok", "warn", "fail"].contains(&level),
+            "unexpected level {level}"
+        );
+        // Anything not ok has to carry a code and a way out of it.
+        if level != "ok" {
+            assert!(
+                c["diagnostic"]["code"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("CAMBI-")),
+                "a finding without a code is not actionable: {c}"
+            );
+        }
+    }
+    assert!(
+        checks
+            .iter()
+            .any(|c| c["name"] == "workspace" && c["level"] == "fail"),
+        "the missing workspace should be the failure:\n{stdout}"
+    );
+}
+
+/// A store nobody configured is how a developer with no store works, and
+/// `doctor` must not grade it as broken — it is the difference between "you
+/// have not set this up" and "this is set up wrong".
+#[test]
+fn doctor_grades_an_unconfigured_store_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"x\")\n").unwrap();
+    let (_, stdout, _) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "doctor",
+        "--format",
+        "json",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let store = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "store")
+        .expect("a store check");
+    assert_eq!(store["level"], "ok", "{store}");
+    assert!(store.get("diagnostic").is_none());
+}
