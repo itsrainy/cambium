@@ -5,7 +5,7 @@ name: bench-nightly
 # enough, and cheap enough to fetch, to run every night; the rest are weekly or
 # monthly (bench-weekly.yml). Each runs under its own `.bazelversion` — that
 # cambium reads 7.x, 8.x and 9.x graphs alike is the `bazel-version-matrix` job
-# in ci.yml, over the synthetic workspace, on every pull request.
+# in nightly.yml, over the synthetic workspace, every night and on dispatch.
 #
 # Machine requirement: this needs a real Bazel build of each repo at several
 # commits, so a standard GitHub-hosted runner will not do. Point
