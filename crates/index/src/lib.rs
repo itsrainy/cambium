@@ -30,6 +30,8 @@ pub mod overlay;
 pub mod space;
 mod starlark;
 pub mod strtab;
+#[cfg(test)]
+mod testutil;
 pub mod view;
 pub mod walk;
 pub mod workspace;
