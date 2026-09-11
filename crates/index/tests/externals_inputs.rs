@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use cambium_index::externals::{
     bazelrc_bzlmod, build_repo_inputs, bzlmod_live, main_repo_patterns, read_live_module_facts,
-    read_module_facts, Pattern,
+    read_module_facts, read_module_facts_in, Mode, Pattern,
 };
 use cambium_index::{LoadGraph, RepoMapping};
 
@@ -71,6 +71,52 @@ fn a_module_file_bazel_does_not_read_derives_nothing() {
         "{:?}",
         ri.path_maps
     );
+}
+
+/// The three states [`bzlmod_live`] collapses to a bool, on the same
+/// fixture: a bazelrc that turns bzlmod off is WORKSPACE mode whatever the
+/// mapping says; bzlmod on beside a `WORKSPACE` is both worlds; bzlmod on
+/// with no `WORKSPACE` is bzlmod alone.
+#[test]
+fn the_mode_is_decided_once() {
+    let identity = RepoMapping::identity();
+    let bzlmod = RepoMapping::from_dump("{\"\":\"\",\"x\":\"x+\"}");
+    let with = |files: Vec<(&'static str, &'static str)>, m: &RepoMapping| {
+        let files = support::Files(files);
+        let mode = Mode::detect(&files, m);
+        assert_eq!(mode.bzlmod_live(), bzlmod_live(&files, m));
+        assert_eq!(
+            read_module_facts_in(&files, mode),
+            read_live_module_facts(&files, m)
+        );
+        mode
+    };
+    let module = ("MODULE.bazel", "bazel_dep(name = \"x\", version = \"1\")\n");
+    let workspace = ("WORKSPACE", "");
+    assert_eq!(
+        with(
+            vec![
+                module,
+                workspace,
+                (".bazelrc", "common --noenable_bzlmod\n")
+            ],
+            &bzlmod
+        ),
+        Mode::Workspace
+    );
+    assert_eq!(with(vec![module, workspace], &identity), Mode::Workspace);
+    assert_eq!(with(vec![module, workspace], &bzlmod), Mode::Both);
+    assert_eq!(
+        with(
+            vec![module, workspace, (".bazelrc", "build --enable_bzlmod\n")],
+            &identity
+        ),
+        Mode::Both
+    );
+    assert_eq!(with(vec![module], &identity), Mode::Bzlmod);
+    assert_eq!(with(vec![], &identity), Mode::Bzlmod);
+    assert!(with(vec![module], &identity).bzlmod_live());
+    assert!(!Mode::Workspace.bzlmod_live());
 }
 
 #[test]

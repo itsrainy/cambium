@@ -156,8 +156,8 @@
 //!   calls as [`PathMap`]s.
 //! - `inputs` — [`main_repo_patterns`] and [`build_repo_inputs`], which ties
 //!   the module facts, the path maps and the attribution pass together.
-//! - `bazelrc` — [`bzlmod_live`] and [`bazelrc_bzlmod`]: which world Bazel
-//!   reads in a tree that carries both.
+//! - `bazelrc` — [`Mode`], [`bzlmod_live`] and [`bazelrc_bzlmod`]: which
+//!   world Bazel reads in a tree that carries both, decided once.
 
 mod bazelrc;
 mod inputs;
@@ -168,7 +168,7 @@ mod path_maps;
 mod pattern;
 
 pub use crate::vocabulary::{is_toolchain_module, TOOLCHAIN_MODULES};
-pub use bazelrc::{bazelrc_bzlmod, bzlmod_live};
+pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, Mode};
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;
 pub use module_facts::{apparent_of, Dep, Extension, ModuleChange, ModuleFacts, RepoRule};
@@ -181,7 +181,12 @@ use crate::loads::{FileText, RepoMapping};
 /// [`read_module_facts`], or empty facts when [`bzlmod_live`] says Bazel does
 /// not read the file: what the externals tables must be derived from.
 pub fn read_live_module_facts(src: &dyn FileText, m: &RepoMapping) -> ModuleFacts {
-    if bzlmod_live(src, m) {
+    read_module_facts_in(src, Mode::detect(src, m))
+}
+
+/// [`read_live_module_facts`] for a [`Mode`] already decided.
+pub fn read_module_facts_in(src: &dyn FileText, mode: Mode) -> ModuleFacts {
+    if mode.bzlmod_live() {
         read_module_facts(src)
     } else {
         ModuleFacts::default()

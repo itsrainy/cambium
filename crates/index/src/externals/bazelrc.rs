@@ -24,13 +24,50 @@ use crate::loads::{FileText, RepoMapping};
 /// `--noworkspace_rc` ignores the file altogether; those fall back to the
 /// mapping.
 pub fn bzlmod_live(src: &dyn FileText, m: &RepoMapping) -> bool {
-    if let Some(explicit) = src.text(".bazelrc").as_deref().and_then(bazelrc_bzlmod) {
-        return explicit;
+    Mode::detect(src, m).bzlmod_live()
+}
+
+/// Which of Bazel's two external-dependency worlds a tree is read in.
+///
+/// Decided once per run by [`Mode::detect`] — the rule [`bzlmod_live`]
+/// documents — and passed down to whatever needs it, rather than re-derived
+/// from the presence of a `WORKSPACE` and the shape of the mapping at each
+/// step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// bzlmod is live and there is no `WORKSPACE`: `MODULE.bazel` and its
+    /// closure declare every repository.
+    Bzlmod,
+    /// bzlmod is off: `MODULE.bazel` is inert whether or not it exists, and
+    /// the `WORKSPACE` closure is the whole story.
+    Workspace,
+    /// Both, as Bazel 7 reads them under `--enable_workspace`: bzlmod is
+    /// live and a `WORKSPACE` exists too, so both closures declare
+    /// repositories and both are read.
+    Both,
+}
+
+impl Mode {
+    /// Reads the mode off a checkout; see [`bzlmod_live`] for the rule.
+    pub fn detect(src: &dyn FileText, m: &RepoMapping) -> Mode {
+        let has_workspace = ["WORKSPACE", "WORKSPACE.bazel"]
+            .iter()
+            .any(|f| src.text(f).is_some());
+        let bzlmod = match src.text(".bazelrc").as_deref().and_then(bazelrc_bzlmod) {
+            Some(explicit) => explicit,
+            None => !has_workspace || !m.is_identity(),
+        };
+        match (bzlmod, has_workspace) {
+            (false, _) => Mode::Workspace,
+            (true, false) => Mode::Bzlmod,
+            (true, true) => Mode::Both,
+        }
     }
-    let has_workspace = ["WORKSPACE", "WORKSPACE.bazel"]
-        .iter()
-        .any(|f| src.text(f).is_some());
-    !has_workspace || !m.is_identity()
+
+    /// Whether Bazel reads `MODULE.bazel` in this mode.
+    pub fn bzlmod_live(self) -> bool {
+        self != Mode::Workspace
+    }
 }
 
 /// The last `--enable_bzlmod` / `--noenable_bzlmod` a bazelrc states, on
