@@ -9,7 +9,7 @@
 //! are what the old three loops were; the rules inside them are what the
 //! old loop bodies did, each with a name and the test that pins it.
 
-use super::{Attributed, Attribution, CallId, DefId, FileId, NameArg, Repos, Sym};
+use super::{Answer, Attribution, CallId, DefId, FileId, NameArg, Repos, Sym};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The rules of the derivation. Each reads the state as it stands and adds
@@ -70,8 +70,8 @@ impl<'a> Attribution<'a> {
     /// `MODULE.bazel`.
     pub(crate) fn solve(
         &mut self,
-        fallbacks: &BTreeMap<String, Repos>,
-        seeds: &BTreeMap<(String, String), Repos>,
+        fallbacks: &BTreeMap<String, BTreeSet<String>>,
+        seeds: &BTreeMap<(String, String), BTreeSet<String>>,
         wide: &BTreeSet<String>,
     ) {
         self.seed(fallbacks, seeds, wide);
@@ -97,16 +97,22 @@ impl<'a> Attribution<'a> {
     /// name the instances of a rule and the repositories of an extension.
     fn seed(
         &mut self,
-        fallbacks: &BTreeMap<String, Repos>,
-        seeds: &BTreeMap<(String, String), Repos>,
+        fallbacks: &BTreeMap<String, BTreeSet<String>>,
+        seeds: &BTreeMap<(String, String), BTreeSet<String>>,
         wide: &BTreeSet<String>,
     ) {
-        for file in &mut self.files {
-            file.fallback = fallbacks.get(&file.path).cloned().unwrap_or_default();
-            file.wide = wide.contains(&file.path);
+        for i in 0..self.files.len() {
+            let path = self.files[i].path.clone();
+            let fallback = fallbacks
+                .get(&path)
+                .map(|s| self.interner.set(s.iter().map(String::as_str)))
+                .unwrap_or_default();
+            self.files[i].fallback = fallback;
+            self.files[i].wide = wide.contains(&path);
             for ((p, _), repos) in seeds {
-                if *p == file.path {
-                    file.seeded.extend(repos.iter().cloned());
+                if *p == path {
+                    let s = self.interner.set(repos.iter().map(String::as_str));
+                    self.files[i].seeded.union_with(&s);
                 }
             }
         }
@@ -116,7 +122,8 @@ impl<'a> Attribution<'a> {
                 self.rules[r].name.clone(),
             );
             if let Some(s) = seeds.get(&key) {
-                self.rules[r].instances.extend(s.iter().cloned());
+                let s = self.interner.set(s.iter().map(String::as_str));
+                self.rules[r].instances.union_with(&s);
             }
         }
         for e in 0..self.exts.len() {
@@ -125,7 +132,8 @@ impl<'a> Attribution<'a> {
                 self.exts[e].name.clone(),
             );
             if let Some(s) = seeds.get(&key) {
-                self.exts[e].repos.extend(s.iter().cloned());
+                let s = self.interner.set(s.iter().map(String::as_str));
+                self.exts[e].repos.union_with(&s);
             }
         }
     }
@@ -144,7 +152,7 @@ impl<'a> Attribution<'a> {
             let repos = self.exts[e].repos.clone();
             for sym in self.reachable(d) {
                 if let Sym::Rule(r) = sym {
-                    self.rules[r.idx()].instances.extend(repos.iter().cloned());
+                    self.rules[r.idx()].instances.union_with(&repos);
                 }
             }
         }
@@ -229,16 +237,6 @@ impl<'a> Attribution<'a> {
         }
     }
 
-    /// Adds `add` to a set, reporting growth.
-    fn grow(set: &mut Repos, add: Repos) -> bool {
-        if add.is_empty() {
-            return false;
-        }
-        let before = set.len();
-        set.extend(add);
-        set.len() != before
-    }
-
     fn instances(&mut self) -> bool {
         let mut changed = false;
         for c in 0..self.calls.len() {
@@ -248,7 +246,7 @@ impl<'a> Attribution<'a> {
                 continue;
             }
             let add: Repos = match &call.name {
-                NameArg::Literal(l) => [l.clone()].into_iter().collect(),
+                NameArg::Literal(l) => Repos::single(*l),
                 NameArg::Forward => match call.scope {
                     Some(d) => self.def(d).instances.clone(),
                     None => Repos::new(),
@@ -264,7 +262,7 @@ impl<'a> Attribution<'a> {
                 Sym::Rule(r) => &mut self.rules[r.idx()].instances,
                 Sym::Ext(e) => &mut self.exts[e.idx()].repos,
             };
-            changed |= Self::grow(slot, add);
+            changed |= slot.union_with(&add);
         }
         changed
     }
@@ -278,16 +276,16 @@ impl<'a> Attribution<'a> {
                 (NameArg::Literal(l), t) => {
                     // Instantiating a repository rule creates the instance
                     // *and* whatever its implementation declares by name.
-                    let mut out: Repos = [l.clone()].into_iter().collect();
+                    let mut out = Repos::single(*l);
                     if let Some(t @ (Sym::Rule(_) | Sym::Ext(_))) = t {
-                        out.extend(self.side_effects(t));
+                        out.union_with(&self.side_effects(t));
                     }
                     out
                 }
                 (NameArg::Absent, Some(t)) => self.value_of(t),
                 _ => continue,
             };
-            changed |= Self::grow(&mut self.defs[d.idx()].defines, add);
+            changed |= self.defs[d.idx()].defines.union_with(&add);
         }
         changed
     }
@@ -308,7 +306,7 @@ impl<'a> Attribution<'a> {
                     continue;
                 }
                 let a = self.at_offset(c.file, c.offset);
-                repos.extend(if a.exact {
+                repos.union_with(&if a.exact {
                     a.repos
                 } else {
                     self.file(c.file).set.clone()
@@ -318,7 +316,7 @@ impl<'a> Attribution<'a> {
         }
         let mut changed = false;
         for (d, repos) in inherited {
-            changed |= Self::grow(&mut self.defs[d.idx()].inherited, repos);
+            changed |= self.defs[d.idx()].inherited.union_with(&repos);
         }
         changed
     }
@@ -327,7 +325,7 @@ impl<'a> Attribution<'a> {
         let owns: Vec<Repos> = self.file_ids().map(|f| self.own_repos(f)).collect();
         let mut changed = false;
         for (f, o) in owns.into_iter().enumerate() {
-            changed |= Self::grow(&mut self.files[f].set, o);
+            changed |= self.files[f].set.union_with(&o);
         }
         changed
     }
@@ -345,7 +343,7 @@ impl<'a> Attribution<'a> {
         }
         let mut changed = false;
         for (x, v) in folded {
-            changed |= Self::grow(&mut self.files[x.idx()].set, v);
+            changed |= self.files[x.idx()].set.union_with(&v);
         }
         changed
     }
@@ -371,13 +369,15 @@ impl<'a> Attribution<'a> {
         if let Some(c) = u.call {
             let mut out = Repos::new();
             match self.resolve(u.file, &u.name) {
-                Some(sym) => out.extend(self.value_of(sym)),
+                Some(sym) => {
+                    out.union_with(&self.value_of(sym));
+                }
                 // A symbol the closure re-exports from elsewhere: nothing is
                 // known about what calling it does.
                 None => return self.file(u.file).set.clone(),
             }
             if let NameArg::Literal(l) = &self.call(c).name {
-                out.insert(l.clone());
+                out.insert(*l);
             }
             return out;
         }
@@ -432,7 +432,7 @@ impl<'a> Attribution<'a> {
             Sym::Ext(e) => self.ext(e).repos.clone(),
             Sym::Def(_) => Repos::new(),
         };
-        out.extend(self.side_effects(s));
+        out.union_with(&self.side_effects(s));
         out
     }
 
@@ -449,9 +449,9 @@ impl<'a> Attribution<'a> {
             let def = self.def(d);
             if def.role == Some(s) {
                 if def.dynamic {
-                    out.extend(self.fallback(def.file));
+                    out.union_with(&self.fallback(def.file));
                 } else {
-                    out.extend(def.defines.iter().cloned());
+                    out.union_with(&def.defines);
                 }
             }
         }
@@ -479,10 +479,10 @@ impl<'a> Attribution<'a> {
         }
         let mut repos = def.defines.clone();
         if !def.fwd.is_empty() {
-            repos.extend(def.instances.iter().cloned());
+            repos.union_with(&def.instances);
         }
         if repos.is_empty() {
-            repos.extend(def.inherited.iter().cloned());
+            repos.union_with(&def.inherited);
         }
         repos
     }
@@ -493,16 +493,16 @@ impl<'a> Attribution<'a> {
     /// instantiation this analysis never saw, a macro nothing calls — and the
     /// occurrence keeps the file's fallback rather than being attributed to
     /// no repository at all, which would lose an edge.
-    fn def_repos(&self, d: DefId) -> Attributed {
+    fn def_repos(&self, d: DefId) -> Answer {
         let def = self.def(d);
         if !def.live {
-            return Attributed::exact(Repos::new());
+            return Answer::exact(Repos::new());
         }
         let repos = self.raw_def_repos(d);
         if repos.is_empty() {
-            return Attributed::inexact(self.fallback(def.file));
+            return Answer::inexact(self.fallback(def.file));
         }
-        Attributed {
+        Answer {
             exact: !def.dynamic,
             repos,
         }
@@ -514,11 +514,11 @@ impl<'a> Attribution<'a> {
         let mut repos = file.seeded.clone();
         for &d in &file.defs {
             if self.def(d).live {
-                repos.extend(self.raw_def_repos(d));
+                repos.union_with(&self.raw_def_repos(d));
             }
         }
         for sym in &file.decls {
-            repos.extend(self.rule_repos(*sym));
+            repos.union_with(&self.rule_repos(*sym));
         }
         // Module-level calls with a literal name, and anything module-level
         // this analysis could not read.
@@ -529,18 +529,18 @@ impl<'a> Attribution<'a> {
         {
             match &call.name {
                 NameArg::Literal(l) => {
-                    repos.insert(l.clone());
+                    repos.insert(*l);
                 }
                 NameArg::Absent => {
                     if let Some(t) = call.callee {
-                        repos.extend(self.value_of(t));
+                        repos.union_with(&self.value_of(t));
                     }
                 }
                 _ => {}
             }
         }
         if file.module_dynamic {
-            repos.extend(self.fallback(f));
+            repos.union_with(&self.fallback(f));
         }
         repos
     }
@@ -565,34 +565,34 @@ impl<'a> Attribution<'a> {
     ///    a set this wide. Pinned by `a_module_level_label_keeps_the_old_answer`.
     ///
     /// An offset the scan never saw is answered like the module level.
-    pub(super) fn at_offset(&self, f: FileId, offset: usize) -> Attributed {
+    pub(super) fn at_offset(&self, f: FileId, offset: usize) -> Answer {
         let file = self.file(f);
         let Some(occ) = file.occ.get(&offset) else {
-            return Attributed::inexact(file.set.clone());
+            return Answer::inexact(file.set.clone());
         };
         if let Some(d) = occ.scope {
             if !self.def(d).live {
-                return Attributed::exact(Repos::new());
+                return Answer::exact(Repos::new());
             }
         }
         let mut call = occ.call;
         while let Some(c) = call {
             if let NameArg::Literal(l) = &self.call(c).named {
-                return Attributed::exact([l.clone()].into_iter().collect());
+                return Answer::exact(Repos::single(*l));
             }
             call = self.parent_call(c);
         }
         if let Some(sym) = occ.decl {
             let repos = self.rule_repos(sym);
             return if repos.is_empty() {
-                Attributed::inexact(self.fallback(f))
+                Answer::inexact(self.fallback(f))
             } else {
-                Attributed::exact(repos)
+                Answer::exact(repos)
             };
         }
         match occ.scope {
             Some(d) => self.def_repos(d),
-            None => Attributed::inexact(file.set.clone()),
+            None => Answer::inexact(file.set.clone()),
         }
     }
 
