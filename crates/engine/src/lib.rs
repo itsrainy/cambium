@@ -40,7 +40,10 @@ pub fn bazel_workspace_root(start: &std::path::Path) -> Option<std::path::PathBu
 pub use baseline::BaselineCache;
 pub use config::Config;
 pub use diag::{Code, Diagnostic, Diagnostics, Level, Location};
-pub use engine::{AffectedRequest, BaseIndex, Baseline, BaselineOrigin, Engine, RunOutcome};
+pub use engine::{
+    AffectedRequest, BaseIndex, Baseline, BaselineOrigin, Engine, PublishPolicy, PublishSource,
+    RunOutcome,
+};
 pub use error::{EngineError, Result};
 pub use inspect::{IndexQuery, QueryOptions};
 pub use plan::{PlanMode, RunPlan};

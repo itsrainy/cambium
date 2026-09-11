@@ -155,6 +155,26 @@ impl std::fmt::Debug for BaseIndex {
     }
 }
 
+/// What a publish may do with an index Bazel could not load all of.
+///
+/// The config's `baseline.publish_partial` is the standing answer; this is
+/// the per-call one (`--allow-partial`), and either being set is enough.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishPolicy {
+    pub allow_partial: bool,
+}
+
+/// An index to publish: one the store can take from disk as it is, or one
+/// still in memory that has to be written out first.
+pub enum PublishSource<'a> {
+    File {
+        path: &'a Path,
+        lineage: &'a [u8; 16],
+        commit: &'a str,
+    },
+    Memory(&'a IndexData),
+}
+
 /// A completed run: the answer, plus the head index it produced.
 pub struct RunOutcome {
     pub report: AffectedReport,
@@ -376,42 +396,73 @@ impl Engine {
         }
     }
 
-    /// Publishes the index file at `path` under every key the store layout
-    /// wants for `commit` (see [`BaselineCache::publish`]), and returns them.
+    /// Publishes an index under every key the store layout wants for its
+    /// commit (see [`BaselineCache::publish`]), and returns them.
     ///
-    /// A partial index — one whose query finished with load errors — is
-    /// refused unless `baseline.publish_partial` is set: publishing it would
-    /// hand every later run a base that silently lacks packages.
+    /// The one implementation behind every publish. A partial index — one
+    /// whose query finished with load errors — is refused unless the policy
+    /// or `baseline.publish_partial` allows it: publishing it would hand
+    /// every later run a base that silently lacks packages. An index still in
+    /// memory is written to the cache directory first and the scratch file
+    /// removed afterwards, whatever the store said.
+    pub fn publish(&self, source: PublishSource<'_>, policy: PublishPolicy) -> Result<Vec<String>> {
+        let Some(cache) = self.baselines() else {
+            return Err(EngineError::NoStore);
+        };
+        match source {
+            PublishSource::Memory(index) => {
+                let commit = index.provenance.commit.clone();
+                let dir = self.cache_dir.join("publish");
+                std::fs::create_dir_all(&dir).map_err(EngineError::io_at(&dir))?;
+                let path = dir.join(format!("{commit}.bin"));
+                cambium_index::format::write_index_with(&path, index, self.index_compression())?;
+                let names = self.publish(
+                    PublishSource::File {
+                        path: &path,
+                        lineage: &index.header.lineage,
+                        commit: &commit,
+                    },
+                    policy,
+                );
+                let _ = std::fs::remove_file(&path);
+                names
+            }
+            PublishSource::File {
+                path,
+                lineage,
+                commit,
+            } => {
+                if !(policy.allow_partial || self.cfg.baseline.publish_partial) {
+                    let f = IndexFile::open(path)?;
+                    let load = crate::inspect::PartialLoad::from(f.view());
+                    if load.partial {
+                        return Err(EngineError::PartialIndex {
+                            commit: commit.to_string(),
+                            packages_in_error: load.packages_in_error,
+                        });
+                    }
+                }
+                cache.publish(path, lineage, commit, &self.tree_of(commit))
+            }
+        }
+    }
+
+    /// Publishes the index file at `path` under the default policy: a partial
+    /// index is refused unless `baseline.publish_partial` says otherwise.
     pub fn publish_index(
         &self,
         path: &Path,
         lineage: &[u8; 16],
         commit: &str,
     ) -> Result<Vec<String>> {
-        self.publish_index_allowing_partial(path, lineage, commit, false)
-    }
-
-    fn publish_index_allowing_partial(
-        &self,
-        path: &Path,
-        lineage: &[u8; 16],
-        commit: &str,
-        allow_partial: bool,
-    ) -> Result<Vec<String>> {
-        let Some(cache) = self.baselines() else {
-            return Err(EngineError::NoStore);
-        };
-        if !(allow_partial || self.cfg.baseline.publish_partial) {
-            let f = IndexFile::open(path)?;
-            let load = crate::inspect::PartialLoad::from(f.view());
-            if load.partial {
-                return Err(EngineError::PartialIndex {
-                    commit: commit.to_string(),
-                    packages_in_error: load.packages_in_error,
-                });
-            }
-        }
-        cache.publish(path, lineage, commit, &self.tree_of(commit))
+        self.publish(
+            PublishSource::File {
+                path,
+                lineage,
+                commit,
+            },
+            PublishPolicy::default(),
+        )
     }
 
     /// Locates a usable baseline for `base` (spec 6.5): the store, then
@@ -544,37 +595,25 @@ impl Engine {
     /// an `affected` run does not even materialise one. `baseline update` is
     /// what publishes head indexes.
     pub fn publish_base_index(&self, index: &IndexData) -> Result<Vec<String>> {
-        self.publish_base_index_allowing_partial(index, false)
-    }
-
-    fn publish_base_index_allowing_partial(
-        &self,
-        index: &IndexData,
-        allow_partial: bool,
-    ) -> Result<Vec<String>> {
-        let commit = index.provenance.commit.clone();
-        let dir = self.cache_dir.join("publish");
-        std::fs::create_dir_all(&dir).map_err(EngineError::io_at(&dir))?;
-        let path = dir.join(format!("{commit}.bin"));
-        cambium_index::format::write_index_with(&path, index, self.index_compression())?;
-        let names = self.publish_index_allowing_partial(
-            &path,
-            &index.header.lineage,
-            &commit,
-            allow_partial,
-        );
-        let _ = std::fs::remove_file(&path);
-        names
+        self.publish(PublishSource::Memory(index), PublishPolicy::default())
     }
 
     /// Publishes a base index that is already a file on disk (a mapped
     /// baseline), or one held in memory.
     pub fn publish_baseline(&self, base: &Baseline, allow_partial: bool) -> Result<Vec<String>> {
+        let policy = PublishPolicy { allow_partial };
         match base {
-            Baseline::Owned(d) => self.publish_base_index_allowing_partial(d, allow_partial),
+            Baseline::Owned(d) => self.publish(PublishSource::Memory(d), policy),
             Baseline::Mapped(f) => {
                 let v = f.view();
-                self.publish_index_allowing_partial(f.path(), &v.lineage, v.commit, allow_partial)
+                self.publish(
+                    PublishSource::File {
+                        path: f.path(),
+                        lineage: &v.lineage,
+                        commit: v.commit,
+                    },
+                    policy,
+                )
             }
         }
     }
