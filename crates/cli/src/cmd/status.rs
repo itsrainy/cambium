@@ -10,35 +10,25 @@
 use anyhow::Result;
 use cambium_engine::probe;
 
-use crate::cmd::{result_event, Context};
+use crate::cmd::{emit, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
     let diagnostics = probes.diagnostics();
 
-    let Some(fmt) = ctx.format.data("cambi status")? else {
-        return Ok(crate::EXIT_OK);
-    };
-    match fmt {
-        crate::DataFormat::Text => print_human(&probes, &diagnostics),
-        crate::DataFormat::Json | crate::DataFormat::Jsonl => {
-            let doc = serde_json::json!({
-                "schema": cambium_engine::report::SCHEMA_VERSION,
-                "workspace": probes.workspace,
-                "config": probes.config,
-                "position": probes.position,
-                "index": probes.index,
-                "lineage": probes.lineage,
-                "store": probes.store,
-                "diagnostics": diagnostics,
-            });
-            if fmt == crate::DataFormat::Jsonl {
-                println!("{}", result_event(&doc)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&doc)?);
-            }
-        }
-    }
+    let doc = serde_json::json!({
+        "schema": cambium_engine::report::SCHEMA_VERSION,
+        "workspace": probes.workspace,
+        "config": probes.config,
+        "position": probes.position,
+        "index": probes.index,
+        "lineage": probes.lineage,
+        "store": probes.store,
+        "diagnostics": diagnostics,
+    });
+    emit(&doc, ctx.format.data("cambi status")?, |_| {
+        print_human(&probes, &diagnostics)
+    })?;
     // Reporting is not judging: a workspace that cannot be found, a store that
     // cannot be reached and a cold position are all things `status` says and
     // exits 0 about. `cambi doctor` is the verb with an opinion.

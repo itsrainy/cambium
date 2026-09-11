@@ -17,7 +17,8 @@ use anyhow::Result;
 use cambium_engine::{AffectedReport, Diagnostic, Explanation};
 use clap::Args as ClapArgs;
 
-use crate::cmd::{result_event, Context};
+use crate::cmd::affected::Shape;
+use crate::cmd::{emit, Context};
 
 #[derive(ClapArgs)]
 // Both this and `affected::Args` are `Args`, and clap names an argument group
@@ -54,12 +55,14 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         return crate::cmd::plan::run(
             ctx,
             &engine,
-            &crate::cmd::affected::request(&engine, &args.affected, false, false)?,
+            &crate::cmd::affected::request(&engine, &args.affected, Shape::PLAN)?,
         );
     }
-    // A label has to be looked up in the head graph — to answer "not affected"
-    // rather than "no such target" — and only a materialised run has one.
-    let req = crate::cmd::affected::request(&engine, &args.affected, true, args.label.is_some())?;
+    let req = crate::cmd::affected::request(
+        &engine,
+        &args.affected,
+        Shape::explain(args.label.as_deref()),
+    )?;
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
 
@@ -68,23 +71,13 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         Some(label) => about_label(&outcome, label)?,
     };
 
-    match fmt {
-        None => {}
-        Some(crate::DataFormat::Text) => {
-            print!(
-                "{}",
-                render(report, args.label.as_deref(), &about, ctx.render.color)
-            )
-        }
-        Some(fmt) => {
-            let doc = document(report, args.label.as_deref(), &about);
-            if fmt == crate::DataFormat::Jsonl {
-                println!("{}", result_event(&doc)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&doc)?);
-            }
-        }
-    }
+    let doc = document(report, args.label.as_deref(), &about);
+    emit(&doc, fmt, |_| {
+        print!(
+            "{}",
+            render(report, args.label.as_deref(), &about, ctx.render.color)
+        )
+    })?;
     // An unaffected label is an answer, not an error, and a global run is
     // still the answer to the question asked — `affected` is the verb whose
     // exit code carries the verdict.
