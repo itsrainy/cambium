@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::baseline::BaselineCache;
-use crate::config::{Config, StoreConfig, CONFIG_FILE};
+use crate::config::{Config, Overrides, StoreConfig, CONFIG_FILE};
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::store::ArtifactStore;
 
@@ -176,10 +176,11 @@ pub struct BazelProbe {
 }
 
 /// Resolves the Bazel binary and asks it for its version.
-pub fn bazel(root: &Path, cfg: &Config, binary_override: Option<&str>) -> BazelProbe {
-    let configured = binary_override
-        .filter(|b| !b.is_empty())
-        .or(Some(cfg.bazel.binary.as_str()).filter(|b| !b.is_empty()));
+///
+/// `cfg` is the effective configuration, so a `--bazel-binary` on the command
+/// line has already reached `bazel.binary` through the override layer.
+pub fn bazel(root: &Path, cfg: &Config) -> BazelProbe {
+    let configured = Some(cfg.bazel.binary.as_str()).filter(|b| !b.is_empty());
     let bazel = cambium_bazel::Bazel::at(root.to_path_buf(), configured);
     let binary = bazel.binary().to_path_buf();
     let mut p = BazelProbe {
@@ -249,9 +250,18 @@ pub struct ConfigProbe {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Reads `cambium.toml` and says what it found. Never fails: an unparsable
-/// file is a diagnostic, because `status` still has everything else to print.
-pub fn config(root: &Path, config_path: Option<&Path>) -> (Option<Config>, ConfigProbe) {
+/// Reads the whole configuration stack — `cambium.toml`, `cambium.local.toml`,
+/// then `over` — and says what it found. Never fails: an unparsable file is a
+/// diagnostic, because `status` still has everything else to print.
+///
+/// The same [`Config::load_layered`] a run uses, so `status`, `doctor` and
+/// `init` see the configuration a run would: a local override or a
+/// `--cache-dir` is not a thing a probe may ignore.
+pub fn config(
+    root: &Path,
+    config_path: Option<&Path>,
+    over: &Overrides,
+) -> (Option<Config>, ConfigProbe) {
     let path = config_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.join(CONFIG_FILE));
@@ -262,19 +272,18 @@ pub fn config(root: &Path, config_path: Option<&Path>) -> (Option<Config>, Confi
         parse_error: None,
         diagnostics: Vec::new(),
     };
-    match Config::load_from(&path) {
-        Ok(cfg) => {
-            p.hash = Some(hex(&cfg.hash()));
-            p.diagnostics = cfg.removed_key_diagnostics();
-            (Some(cfg), p)
+    match Config::load_layered(root, config_path, over) {
+        Ok(layered) => {
+            p.hash = Some(hex(&layered.config.hash()));
+            p.diagnostics = layered.diagnostics;
+            (Some(layered.config), p)
         }
         Err(e) => {
             p.parse_error = Some(e.to_string());
-            p.diagnostics.push(
-                Diagnostic::error(Code::E002Config, e.to_string())
-                    .at(path.display().to_string(), None)
-                    .with_help("fix the file, or point --config at another one"),
-            );
+            // Through `EngineError`, so a misplaced local key keeps its own
+            // code; the message names the file either way.
+            p.diagnostics
+                .push(crate::error::EngineError::from(e).diagnostic());
             (None, p)
         }
     }
@@ -497,6 +506,12 @@ pub struct PositionProbe {
     pub plan: Plan,
     /// The index file the fetch left in the cache, for [`index_at`].
     pub index_path: Option<PathBuf>,
+    /// Lineages the walk found and refused because they were built with
+    /// another `cambium.toml`, rule-hash version or index content revision;
+    /// each has a `CAMBI-W003` in `diagnostics`. What [`lineage`] reports as
+    /// conflicting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incompatible_lineages: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -545,6 +560,7 @@ pub fn position_at(
         max_ancestor_walk,
         plan: Plan::Cold,
         index_path: None,
+        incompatible_lineages: Vec::new(),
         diagnostics: Vec::new(),
     };
     let (Some(store), Some(head)) = (store, p.head.clone()) else {
@@ -585,11 +601,8 @@ pub fn position_at(
     // The walk can observe one fact twice — a tree key found both directly and
     // through its `commits/` pointer is fetched, and refused, twice — and a
     // reader of `status` should see each finding once.
-    for d in diags.drain() {
-        if !p.diagnostics.contains(&d) {
-            p.diagnostics.push(d);
-        }
-    }
+    diags.drain_into(&mut p.diagnostics);
+    p.incompatible_lineages = cache.refused_lineages();
     p
 }
 
@@ -697,9 +710,9 @@ pub struct LineageProbe {
     pub others: Vec<String>,
     /// Lineages a fetch proved incompatible: their `config_hash` is not this
     /// workspace's, or they were written by an engine with a different
-    /// rule-hash version or index content revision. Derived from the
-    /// `CAMBI-W003` diagnostics the walk raised, which is the only place that
-    /// difference is actually observed.
+    /// rule-hash version or index content revision. The position walk is the
+    /// only place that difference is actually observed, and it records them
+    /// beside the `CAMBI-W003` it raises for each.
     pub conflicting: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -719,12 +732,7 @@ pub fn lineage(
         .collect();
     others.sort();
     others.dedup();
-    let mut conflicting: Vec<String> = position
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == Code::W003IndexConfigMismatch)
-        .filter_map(|d| lineage_from_message(&d.message))
-        .collect();
+    let mut conflicting = position.incompatible_lineages.clone();
     conflicting.sort();
     conflicting.dedup();
     let mut p = LineageProbe {
@@ -754,6 +762,214 @@ pub fn lineage(
     p
 }
 
+// ------------------------------------------------------------------ verdict
+
+/// What `doctor` thinks of one check.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Grade {
+    /// Nothing to do.
+    Ok,
+    /// A run works, and something here will surprise someone eventually.
+    Warn,
+    /// A run cannot work until this is fixed.
+    Fail,
+}
+
+/// One of `doctor`'s checks: a probe, graded.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Check {
+    pub name: &'static str,
+    pub level: Grade,
+    /// What the check found, in a few words. Always present, `ok` included —
+    /// "bazel 7.4.1" is the useful half of a passing Bazel check.
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Diagnostic>,
+}
+
+impl Check {
+    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            level: Grade::Ok,
+            detail: detail.into(),
+            diagnostic: None,
+        }
+    }
+
+    /// A check graded by the diagnostic its probe raised: an error diagnostic
+    /// is a failure, a warning is a warning. One rule, so that a code's level
+    /// and `doctor`'s verdict can never disagree.
+    pub fn from(name: &'static str, detail: impl Into<String>, d: Diagnostic) -> Self {
+        let level = match d.level {
+            crate::diag::Level::Error => Grade::Fail,
+            crate::diag::Level::Warning => Grade::Warn,
+        };
+        Self {
+            name,
+            level,
+            detail: detail.into(),
+            diagnostic: Some(d),
+        }
+    }
+}
+
+/// Every probe, graded: `cambi doctor`'s verdict, as a pure function of what
+/// the probes found. The order is the order someone fixes things in: you
+/// cannot configure a store for a workspace that is not there.
+pub fn judge(p: &Probes) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    // ---- workspace ----
+    checks.push(match (&p.workspace.root, p.workspace.mode) {
+        (None, _) => Check::from(
+            "workspace",
+            "none found",
+            Diagnostic::error(
+                Code::E004Bazel,
+                "no Bazel workspace above the current directory",
+            )
+            .with_help("run from inside the workspace, or pass -C <dir>"),
+        ),
+        (Some(root), Some(WorkspaceMode::Ambiguous)) => Check::from(
+            "workspace",
+            format!("{} (mode undecided)", root.display()),
+            p.workspace
+                .diagnostics
+                .first()
+                .cloned()
+                .expect("an ambiguous mode always carries its diagnostic"),
+        ),
+        (Some(root), mode) => Check::ok(
+            "workspace",
+            format!(
+                "{} ({})",
+                root.display(),
+                match mode {
+                    Some(WorkspaceMode::Bzlmod) if p.workspace.inert_workspace =>
+                        "bzlmod; the WORKSPACE file is inert".to_string(),
+                    Some(WorkspaceMode::Bzlmod) => "bzlmod".to_string(),
+                    Some(WorkspaceMode::Workspace) if p.workspace.inert_module_bazel =>
+                        "WORKSPACE; the MODULE.bazel file is inert".to_string(),
+                    Some(WorkspaceMode::Workspace) => "WORKSPACE".to_string(),
+                    _ => "no marker file".to_string(),
+                }
+            ),
+        ),
+    });
+
+    // ---- bazel ----
+    if let Some(b) = &p.bazel {
+        checks.push(match (b.diagnostics.first(), &b.version) {
+            (Some(d), _) => Check::from("bazel", b.binary.clone(), d.clone()),
+            (None, Some(v)) => Check::ok("bazel", v.clone()),
+            (None, None) => Check::ok("bazel", b.binary.clone()),
+        });
+    }
+
+    // ---- config ----
+    let config_detail = format!(
+        "{}{}",
+        p.config.path.display(),
+        if p.config.exists {
+            ""
+        } else {
+            " (absent; the defaults apply)"
+        }
+    );
+    checks.push(match p.config.diagnostics.first() {
+        Some(d) => Check::from("config", config_detail, d.clone()),
+        None => Check::ok("config", config_detail),
+    });
+
+    // ---- store ----
+    checks.push(match (p.store.configured, p.store.reachable) {
+        (false, _) => Check::ok(
+            "store",
+            "none configured; every run builds its own index (not an error)",
+        ),
+        (true, Some(true)) => Check::ok(
+            "store",
+            match p.store.indexes {
+                Some(n) => format!("{}, {n} indexes", p.store.kind),
+                None => format!("{}, reachable", p.store.kind),
+            },
+        ),
+        (true, _) => Check::from(
+            "store",
+            format!("{} unreachable", p.store.kind),
+            p.store
+                .diagnostics
+                .first()
+                .cloned()
+                .unwrap_or_else(|| unreachable_diagnostic("no detail")),
+        ),
+    });
+
+    // ---- store round trip ----
+    if let Some(r) = &p.round_trip {
+        checks.push(match r.diagnostics.first() {
+            Some(d) => Check::from("store round trip", "publish and fetch back", d.clone()),
+            None => Check::ok("store round trip", format!("wrote and read {}", r.name)),
+        });
+    }
+
+    // ---- position ----
+    if let Some(pos) = &p.position {
+        let detail = match (&pos.head, pos.plan, pos.distance) {
+            (None, ..) => "HEAD could not be resolved".to_string(),
+            (Some(h), Plan::Warm, _) => format!("{} has an index", short(h)),
+            (Some(h), Plan::Splice, Some(n)) => {
+                format!("{} splices from {n} commits back", short(h))
+            }
+            (Some(h), _, _) => format!("{} would be a cold build", short(h)),
+        };
+        // A cold position is not a fault: it is what a first run looks like.
+        // Only what the walk *complained* about is graded.
+        checks.push(match pos.diagnostics.first() {
+            Some(d) => Check::from("position", detail, d.clone()),
+            None => Check::ok("position", detail),
+        });
+    }
+
+    // ---- index format, and the lineage it belongs to ----
+    if let Some(i) = &p.index {
+        checks.push(match i.diagnostics.first() {
+            Some(d) => Check::from(
+                "index",
+                format!("format version {}", i.format_version),
+                d.clone(),
+            ),
+            None => Check::ok(
+                "index",
+                format!(
+                    "format version {}, {} packages, {} rule targets",
+                    i.format_version, i.packages, i.targets
+                ),
+            ),
+        });
+    }
+    if let Some(l) = &p.lineage {
+        checks.push(match l.diagnostics.first() {
+            Some(d) => Check::from(
+                "lineage",
+                format!("{} conflicting in the store", l.conflicting.len()),
+                d.clone(),
+            ),
+            None => Check::ok(
+                "lineage",
+                match &l.current {
+                    Some(c) => format!("{}, {} others in the store", &c[..12], l.others.len()),
+                    None => "none yet; a cold build mints one".to_string(),
+                },
+            ),
+        });
+    }
+
+    checks
+}
+
 // ------------------------------------------------------------------- the lot
 
 /// What to probe. The two process- and write-bearing probes are opt-in.
@@ -762,8 +978,9 @@ pub struct Options {
     /// Where to start looking for a workspace.
     pub start: PathBuf,
     pub config_path: Option<PathBuf>,
-    pub bazel_binary: Option<String>,
-    pub cache_dir: Option<PathBuf>,
+    /// What the command line and the environment said: the layer above the
+    /// config files, exactly as a run applies it.
+    pub overrides: Overrides,
     /// Run `bazel --version`. `status` does not.
     pub run_bazel: bool,
     /// Publish and fetch back a probe object. `doctor` only.
@@ -775,8 +992,7 @@ impl Options {
         Self {
             start: start.into(),
             config_path: None,
-            bazel_binary: None,
-            cache_dir: None,
+            overrides: Overrides::default(),
             run_bazel: false,
             store_round_trip: false,
         }
@@ -802,26 +1018,23 @@ pub struct Probes {
 }
 
 impl Probes {
-    /// Every diagnostic every probe raised, in the order the sections print.
+    /// Every diagnostic every probe raised, in the order the sections print
+    /// and each one once: an index header the reader refused is filed with
+    /// the position it was found for as well as with the index itself.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let sections: [Option<&[Diagnostic]>; 8] = [
+            Some(&self.workspace.diagnostics),
+            Some(&self.config.diagnostics),
+            self.bazel.as_ref().map(|b| b.diagnostics.as_slice()),
+            Some(&self.store.diagnostics),
+            self.round_trip.as_ref().map(|r| r.diagnostics.as_slice()),
+            self.position.as_ref().map(|p| p.diagnostics.as_slice()),
+            self.index.as_ref().map(|i| i.diagnostics.as_slice()),
+            self.lineage.as_ref().map(|l| l.diagnostics.as_slice()),
+        ];
         let mut out = Vec::new();
-        out.extend(self.workspace.diagnostics.iter().cloned());
-        out.extend(self.config.diagnostics.iter().cloned());
-        if let Some(b) = &self.bazel {
-            out.extend(b.diagnostics.iter().cloned());
-        }
-        out.extend(self.store.diagnostics.iter().cloned());
-        if let Some(r) = &self.round_trip {
-            out.extend(r.diagnostics.iter().cloned());
-        }
-        if let Some(pos) = &self.position {
-            out.extend(pos.diagnostics.iter().cloned());
-        }
-        if let Some(i) = &self.index {
-            out.extend(i.diagnostics.iter().cloned());
-        }
-        if let Some(l) = &self.lineage {
-            out.extend(l.diagnostics.iter().cloned());
+        for s in sections.into_iter().flatten() {
+            crate::diag::extend_unique(&mut out, s.iter().cloned());
         }
         out
     }
@@ -836,12 +1049,10 @@ impl Probes {
 pub fn collect(opts: &Options) -> Probes {
     let ws = workspace(&opts.start);
     let root = ws.root.clone().unwrap_or_else(|| opts.start.clone());
-    let (cfg, config_probe) = config(&root, opts.config_path.as_deref());
+    let (cfg, config_probe) = config(&root, opts.config_path.as_deref(), &opts.overrides);
     let effective = cfg.clone().unwrap_or_default();
 
-    let bazel_probe = opts
-        .run_bazel
-        .then(|| bazel(&root, &effective, opts.bazel_binary.as_deref()));
+    let bazel_probe = opts.run_bazel.then(|| bazel(&root, &effective));
 
     // The store's own diagnostics (a `command` backend's failed fetch) go into
     // the store probe, not into a sink nobody drains.
@@ -850,10 +1061,12 @@ pub fn collect(opts: &Options) -> Probes {
     let mut store_probe = store(&effective, backend.as_deref());
     store_probe.diagnostics.extend(sink.drain());
 
-    let cache_dir = opts
+    // `--cache-dir` has already reached the effective config through the
+    // override layer, the same way it reaches a run.
+    let cache_dir = effective
+        .baseline
         .cache_dir
         .clone()
-        .or_else(|| effective.baseline.cache_dir.clone())
         .unwrap_or_else(crate::engine::default_cache_dir);
 
     let round_trip = match (opts.store_round_trip, backend.as_deref()) {
@@ -954,22 +1167,7 @@ fn lineage_of(key: &str) -> Option<String> {
     ok.then(|| lineage.to_string())
 }
 
-/// The lineage named by a `CAMBI-W003` message, which quotes the store key it
-/// skipped.
-fn lineage_from_message(message: &str) -> Option<String> {
-    let (_, rest) = message.split_once('`')?;
-    let (key, _) = rest.split_once('`')?;
-    lineage_of(key)
-}
-
-pub fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
+pub use crate::inspect::hex;
 
 /// The first seven hex characters, the way git abbreviates a sha.
 pub fn short(rev: &str) -> String {
@@ -1060,7 +1258,7 @@ mod tests {
     fn an_unparsable_config_is_a_diagnostic_not_a_failure() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), CONFIG_FILE, "[bazel\n");
-        let (cfg, p) = config(d.path(), None);
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
         assert!(cfg.is_none());
         assert!(p.exists && p.hash.is_none());
         assert_eq!(p.diagnostics[0].code, Code::E002Config);
@@ -1069,10 +1267,46 @@ mod tests {
     #[test]
     fn a_missing_config_is_the_defaults_and_a_hash() {
         let d = tempfile::tempdir().unwrap();
-        let (cfg, p) = config(d.path(), None);
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
         assert_eq!(cfg, Some(Config::default()));
         assert!(!p.exists);
         assert_eq!(p.hash, Some(hex(&Config::default().hash())));
+    }
+
+    /// The probes read what a run reads: the local file and the flags reach
+    /// the effective configuration, and a local file that oversteps keeps
+    /// its own code rather than being reported as a parse failure.
+    #[test]
+    fn the_config_probe_sees_the_local_file_and_the_overrides() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            crate::config::LOCAL_CONFIG_FILE,
+            "[baseline]\ncompress_indexes = false\n",
+        );
+        let over = Overrides {
+            bazel_binary: None,
+            cache_dir: Some((
+                d.path().join("cache"),
+                crate::config::Origin::Flag {
+                    name: "--cache-dir".into(),
+                },
+            )),
+        };
+        let (cfg, p) = config(d.path(), None, &over);
+        let cfg = cfg.expect("loads");
+        assert!(!cfg.baseline.compress_indexes, "the local file applied");
+        assert_eq!(cfg.baseline.cache_dir, Some(d.path().join("cache")));
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+
+        write(
+            d.path(),
+            crate::config::LOCAL_CONFIG_FILE,
+            "[invalidators]\npaths = [\"x\"]\n",
+        );
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
+        assert!(cfg.is_none());
+        assert_eq!(p.diagnostics[0].code, Code::E014LocalOverrideKey);
     }
 
     #[test]
@@ -1136,12 +1370,6 @@ mod tests {
         assert_eq!(lineage_of(&format!("indexes/{l}/ff.bin")), Some(l.clone()));
         assert_eq!(lineage_of("indexes/by-tree/ff.bin"), None);
         assert_eq!(lineage_of("commits/by-commit/ff"), None);
-        assert_eq!(
-            lineage_from_message(&format!(
-                "skipping the stored index `indexes/{l}/ff.bin`: it"
-            )),
-            Some(l)
-        );
     }
 
     #[test]
@@ -1157,6 +1385,7 @@ mod tests {
             max_ancestor_walk: 20,
             plan: Plan::Cold,
             index_path: None,
+            incompatible_lineages: vec![l.clone(), l.clone()],
             diagnostics: vec![Diagnostic::warning(
                 Code::W003IndexConfigMismatch,
                 format!("skipping the stored index `indexes/{l}/ff.bin`: it was built with ..."),
@@ -1168,6 +1397,57 @@ mod tests {
         assert_eq!(p.conflicting, vec![l.clone()]);
         assert_eq!(p.others, vec![l]);
         assert_eq!(p.diagnostics[0].code, Code::W019LineageConflict);
+    }
+
+    /// Everything absent, which is the shape outside a workspace: the grading
+    /// has to survive it, because that is exactly when someone runs `doctor`.
+    fn nowhere() -> Probes {
+        collect(&Options::new(
+            tempfile::tempdir().unwrap().path().join("nowhere"),
+        ))
+    }
+
+    #[test]
+    fn no_workspace_is_a_failure_with_a_code() {
+        let checks = judge(&nowhere());
+        let ws = &checks[0];
+        assert_eq!(ws.name, "workspace");
+        assert_eq!(ws.level, Grade::Fail);
+        assert_eq!(ws.diagnostic.as_ref().unwrap().code, Code::E004Bazel);
+        assert!(ws.diagnostic.as_ref().unwrap().help.is_some());
+    }
+
+    /// A store nobody configured is not a fault: a developer with no store
+    /// builds their own indexes and `doctor` must not tell them they are broken.
+    #[test]
+    fn an_unconfigured_store_is_ok() {
+        let checks = judge(&nowhere());
+        let store = checks
+            .iter()
+            .find(|c| c.name == "store")
+            .expect("a store check");
+        assert_eq!(store.level, Grade::Ok);
+        assert!(store.diagnostic.is_none());
+    }
+
+    #[test]
+    fn a_warning_diagnostic_grades_warn_and_an_error_grades_fail() {
+        let warn = Check::from(
+            "x",
+            "d",
+            Diagnostic::warning(Code::W017BazelVersionUnsupported, "old"),
+        );
+        assert_eq!(warn.level, Grade::Warn);
+        let fail = Check::from("x", "d", Diagnostic::error(Code::E015BazelNotFound, "gone"));
+        assert_eq!(fail.level, Grade::Fail);
+        assert!(Grade::Fail > Grade::Warn && Grade::Warn > Grade::Ok);
+    }
+
+    #[test]
+    fn every_check_says_something_even_when_it_passes() {
+        for c in judge(&nowhere()) {
+            assert!(!c.detail.is_empty(), "{} has no detail", c.name);
+        }
     }
 
     #[test]

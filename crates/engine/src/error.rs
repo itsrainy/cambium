@@ -20,6 +20,9 @@ pub enum EngineError {
     Index(#[from] cambium_index::IndexError),
     #[error(transparent)]
     Classify(#[from] cambium_classify::ClassifyError),
+    /// An index query named something the index does not have.
+    #[error(transparent)]
+    Query(#[from] crate::inspect::QueryError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
     #[error(transparent)]
@@ -51,6 +54,10 @@ pub enum EngineError {
         commit: String,
         packages_in_error: u32,
     },
+    /// `index update` was asked to bring an index forward across a range
+    /// that invalidates everything, and told not to rebuild instead.
+    #[error("the range invalidates everything ({reason}); the index cannot be brought forward")]
+    RangeInvalidated { reason: String },
 }
 
 impl EngineError {
@@ -145,6 +152,17 @@ impl EngineError {
             EngineError::Store(StoreError::Unsupported(_)) => (
                 Code::E012StoreUnsupported,
                 Some("use a store backend that supports it, or skip the operation"),
+            ),
+            EngineError::Query(_) => (
+                Code::E017IndexQuery,
+                Some(
+                    "check the spelling against the index: `cambi inspect targets <package>` \
+                     lists what a package holds",
+                ),
+            ),
+            EngineError::RangeInvalidated { .. } => (
+                Code::E018RangeInvalidated,
+                Some("drop --no-rebuild-on-global to mint a fresh lineage instead"),
             ),
             // The transparent wrappers: io, protobuf, the index format, the
             // classifier. One code, because there is no action to name that

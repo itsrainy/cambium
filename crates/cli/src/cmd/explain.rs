@@ -14,10 +14,11 @@
 //! answer was the size it was.
 
 use anyhow::Result;
-use cambium_engine::{AffectedReport, Code, Diagnostic, Explanation};
+use cambium_engine::{AffectedReport, Diagnostic, Explanation};
 use clap::Args as ClapArgs;
 
-use crate::cmd::{result_event, Context};
+use crate::cmd::affected::Shape;
+use crate::cmd::{emit, Context};
 
 #[derive(ClapArgs)]
 // Both this and `affected::Args` are `Args`, and clap names an argument group
@@ -31,17 +32,6 @@ pub struct Args {
     #[command(flatten)]
     pub affected: crate::cmd::affected::Args,
 }
-
-/// The codes that mean "this run was global", in the order the engine can
-/// raise them. The story with no label is whichever of these the run emitted.
-const GLOBAL_CAUSES: &[Code] = &[
-    Code::W004BazelrcGlobal,
-    Code::W008NoLoadClosure,
-    Code::W009WorkspaceLevelBzl,
-    Code::W013InvalidatorMatched,
-    Code::W014ExternalsGlobal,
-    Code::W015FlagUnresolved,
-];
 
 pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     // `cambi explain a..b` is a range, not a target: a label always starts
@@ -65,12 +55,14 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         return crate::cmd::plan::run(
             ctx,
             &engine,
-            &crate::cmd::affected::request(&engine, &args.affected, false, false)?,
+            &crate::cmd::affected::request(&engine, &args.affected, Shape::PLAN)?,
         );
     }
-    // A label has to be looked up in the head graph — to answer "not affected"
-    // rather than "no such target" — and only a materialised run has one.
-    let req = crate::cmd::affected::request(&engine, &args.affected, true, args.label.is_some())?;
+    let req = crate::cmd::affected::request(
+        &engine,
+        &args.affected,
+        Shape::explain(args.label.as_deref()),
+    )?;
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
 
@@ -79,23 +71,13 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         Some(label) => about_label(&outcome, label)?,
     };
 
-    match fmt {
-        None => {}
-        Some(crate::DataFormat::Text) => {
-            print!(
-                "{}",
-                render(report, args.label.as_deref(), &about, ctx.render.color)
-            )
-        }
-        Some(fmt) => {
-            let doc = document(report, args.label.as_deref(), &about);
-            if fmt == crate::DataFormat::Jsonl {
-                println!("{}", result_event(&doc)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&doc)?);
-            }
-        }
-    }
+    let doc = document(report, args.label.as_deref(), &about);
+    emit(&doc, fmt, |_| {
+        print!(
+            "{}",
+            render(report, args.label.as_deref(), &about, ctx.render.color)
+        )
+    })?;
     // An unaffected label is an answer, not an error, and a global run is
     // still the answer to the question asked — `affected` is the verb whose
     // exit code carries the verdict.
@@ -135,11 +117,7 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
         return Ok(About::Affected(Box::new(e.clone())));
     }
 
-    let at_head = outcome
-        .index
-        .as_ref()
-        .map(|i| i.view().id_of(label).is_some());
-    let at_base = base_has(outcome.base_index.as_ref(), label);
+    let cambium_engine::LabelPresence { at_head, at_base } = outcome.label_presence(label);
     match (at_head, at_base) {
         (Some(false), Some(true)) => Ok(About::NotAffected {
             note: format!("it no longer exists at {}", short(&report.head)),
@@ -161,16 +139,6 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
                 plural(report.stats.dirty_packages),
             ),
         }),
-    }
-}
-
-/// Whether the base index this run spliced onto has a node for `label`.
-fn base_has(base: Option<&cambium_engine::BaseIndex>, label: &str) -> Option<bool> {
-    match base? {
-        cambium_engine::BaseIndex::Owned(d) => Some(d.view().id_of(label).is_some()),
-        cambium_engine::BaseIndex::Mapped(path) => cambium_index::IndexFile::open(path)
-            .ok()
-            .map(|f| f.view().id_of(label).is_some()),
     }
 }
 
@@ -223,8 +191,7 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
         return format!(
             "everything is affected\n{}",
             cause(
-                report,
-                GLOBAL_CAUSES,
+                report.global_cause(),
                 report.global_reason.as_deref(),
                 color
             )
@@ -236,8 +203,7 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
             short(&report.base),
             short(&report.head),
             cause(
-                report,
-                &[Code::W012ColdRebuild],
+                report.cold_rebuild_cause(),
                 report.cold_rebuild_reason.as_deref(),
                 color
             )
@@ -261,26 +227,15 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
 }
 
 /// The diagnostic the engine already emitted for this cause, rendered with its
-/// help line, and the reason text beside it when the diagnostic does not
-/// already carry it.
-fn cause(report: &AffectedReport, codes: &[Code], reason: Option<&str>, color: bool) -> String {
-    let found: Option<&Diagnostic> = report.diagnostics.iter().find(|d| codes.contains(&d.code));
-    match found {
-        Some(d) => {
-            let mut out = format!("{}\n", crate::diag::render_human(d, color));
-            if let Some(r) = reason {
-                if !d.message.contains(r) {
-                    out.push_str(&format!("  = because: {r}\n"));
-                }
-            }
-            out
-        }
-        // A run replayed from a document, or a cause older than the codes:
-        // the reason is still the answer.
-        None => match reason {
-            Some(r) => format!("  because {r}\n"),
-            None => String::new(),
-        },
+/// help line. Its message carries the reason verbatim — the engine's own
+/// tests hold that — so the reason is printed on its own only when there is
+/// no diagnostic: a run replayed from a document, or a cause older than the
+/// codes.
+fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> String {
+    match (found, reason) {
+        (Some(d), _) => format!("{}\n", crate::diag::render_human(d, color)),
+        (None, Some(r)) => format!("  because {r}\n"),
+        (None, None) => String::new(),
     }
 }
 
@@ -347,7 +302,7 @@ fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cambium_engine::{DirectReason, Stats};
+    use cambium_engine::{Code, DirectReason, Stats};
 
     fn report() -> AffectedReport {
         AffectedReport {
@@ -429,18 +384,30 @@ mod tests {
     fn a_cold_rebuild_is_its_own_story() {
         let mut r = report();
         r.stats.cold_rebuild = true;
-        r.cold_rebuild_reason = Some("9001 dirty packages exceeds the limit of 2000".into());
-        r.diagnostics = vec![Diagnostic::warning(
-            Code::W012ColdRebuild,
-            "the run re-indexed the whole repository at head rather than splicing",
-        )
-        .with_help("raise limits.max_dirty_packages")];
+        let reason = cambium_engine::reason::cold_rebuild_reason(9001, 2000);
+        r.cold_rebuild_reason = Some(reason.clone());
+        r.diagnostics = vec![cambium_engine::reason::cold_rebuild_diagnostic(&reason)];
         let out = render(&r, None, &About::Run, false);
         assert!(out.contains("re-indexed the whole repository"), "{out}");
         assert!(out.contains("CAMBI-W012"), "{out}");
-        assert!(
-            out.contains("= because: 9001 dirty packages exceeds the limit of 2000"),
-            "the reason the diagnostic does not carry is printed beside it:\n{out}"
+        assert_eq!(
+            out.matches("9001").count(),
+            1,
+            "the reason is in the diagnostic and printed once:\n{out}"
+        );
+    }
+
+    /// A document from before the codes existed has the reason and no
+    /// diagnostic; the reason is still the answer.
+    #[test]
+    fn a_cause_without_a_diagnostic_still_prints_the_reason() {
+        let mut r = report();
+        r.global = true;
+        r.global_reason = Some("MODULE.bazel matches an invalidator".into());
+        let out = render(&r, None, &About::Run, false);
+        assert_eq!(
+            out,
+            "everything is affected\n  because MODULE.bazel matches an invalidator\n"
         );
     }
 
