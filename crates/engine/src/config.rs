@@ -12,6 +12,28 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE: &str = "cambium.toml";
 
+/// The machine-local override, beside `cambium.toml` and gitignored by
+/// convention.
+///
+/// `cambium.toml` says what the graph is and is hashed into every index; this
+/// file says what this machine is, and may therefore only set keys that are
+/// already outside that hash ([`LOCAL_ONLY_KEYS`]). Anything else would mean
+/// two checkouts of one commit producing indexes that claim to be
+/// interchangeable and are not, which is precisely what the hash exists to
+/// prevent — so a key that is not on the list is an error naming the file it
+/// belongs in.
+pub const LOCAL_CONFIG_FILE: &str = "cambium.local.toml";
+
+/// Every key `cambium.local.toml` may set. Each one is excluded from
+/// [`Config::hash`]; the test below holds that open.
+pub const LOCAL_ONLY_KEYS: &[&str] = &[
+    "bazel.binary",
+    "bazel.startup_flags",
+    "baseline.cache_dir",
+    "baseline.compress_indexes",
+    "baseline.publish_partial",
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 #[derive(Default)]
@@ -307,8 +329,226 @@ impl Default for Limits {
     }
 }
 
+/// Where an effective configuration value came from.
+///
+/// One per leaf key, which is what makes `cambi config explain` answerable:
+/// "the flag", "the local file", "the checked-in file", or "nobody set it".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    /// Nothing set it; this is the built-in value.
+    Default,
+    /// `cambium.toml` (or whatever `--config` named).
+    File { path: PathBuf },
+    /// `cambium.local.toml`.
+    LocalFile { path: PathBuf },
+    /// A command-line flag, by the spelling a caller types.
+    Flag { name: String },
+    /// An environment variable, by name.
+    Env { name: String },
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::Default => f.write_str("default"),
+            Origin::File { path } | Origin::LocalFile { path } => write!(f, "{}", path.display()),
+            Origin::Flag { name } => write!(f, "{name}"),
+            Origin::Env { name } => write!(f, "${name}"),
+        }
+    }
+}
+
+/// What the command line and the environment said, with the spelling to
+/// attribute each value to. Highest precedence of all the layers.
+#[derive(Clone, Debug, Default)]
+pub struct Overrides {
+    pub bazel_binary: Option<(String, Origin)>,
+    pub cache_dir: Option<(PathBuf, Origin)>,
+}
+
+/// The result of [`Config::load_layered`]: the effective config, and the
+/// provenance of every leaf value in it.
+#[derive(Clone, Debug)]
+pub struct Layered {
+    pub config: Config,
+    /// Leaf key (`baseline.retention_days`) to where its value came from.
+    pub origins: std::collections::BTreeMap<String, Origin>,
+    /// The `cambium.toml` that was read, whether or not it exists.
+    pub path: PathBuf,
+    pub local_path: PathBuf,
+    /// The keys `cambium.local.toml` set, in key order. Empty when there is no
+    /// local file.
+    pub local_keys: Vec<String>,
+    pub diagnostics: Vec<crate::diag::Diagnostic>,
+}
+
+impl Layered {
+    pub fn local_exists(&self) -> bool {
+        self.local_path.exists()
+    }
+}
+
+/// `cambium.local.toml`, in the shape the allowed keys make.
+///
+/// Its own type rather than a partial [`Config`]: the point of the file is
+/// that it cannot express anything else, and a struct that holds only these
+/// five fields is the cheapest way to say so in the type system. The key list
+/// is still checked by name, because a typo inside an allowed section
+/// (`bazel.binry`) has to name the key a caller wrote.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Local {
+    bazel: LocalBazel,
+    baseline: LocalBaseline,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LocalBazel {
+    binary: Option<String>,
+    startup_flags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LocalBaseline {
+    cache_dir: Option<PathBuf>,
+    compress_indexes: Option<bool>,
+    publish_partial: Option<bool>,
+}
+
+impl Local {
+    fn apply(self, cfg: &mut Config) {
+        if let Some(v) = self.bazel.binary {
+            cfg.bazel.binary = v;
+        }
+        if let Some(v) = self.bazel.startup_flags {
+            cfg.bazel.startup_flags = v;
+        }
+        if let Some(v) = self.baseline.cache_dir {
+            cfg.baseline.cache_dir = Some(v);
+        }
+        if let Some(v) = self.baseline.compress_indexes {
+            cfg.baseline.compress_indexes = v;
+        }
+        if let Some(v) = self.baseline.publish_partial {
+            cfg.baseline.publish_partial = v;
+        }
+    }
+}
+
+/// The dotted leaf keys a TOML file sets, or nothing at all when it is absent.
+///
+/// Absent is not an error here: both files are optional, and a run with
+/// neither is a run on the defaults.
+fn leaf_keys_of(path: &Path) -> Result<Vec<String>, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let value: toml::Value = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(leaf_keys(&value))
+}
+
+/// Every dotted path in a TOML value that holds something other than a table.
+///
+/// An array is a leaf: `invalidators.paths` is one value a caller sets or does
+/// not, and attributing its elements separately would say nothing useful.
+pub fn leaf_keys(value: &toml::Value) -> Vec<String> {
+    fn walk(value: &toml::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    walk(v, &path, out);
+                }
+            }
+            _ => out.push(prefix.to_string()),
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, "", &mut out);
+    out.sort();
+    out
+}
+
+/// One effective value, as `cambi config explain` prints it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExplainedValue {
+    pub key: String,
+    /// The value, in TOML's own spelling (`["a", "b"]`, `"bazelisk"`, `500`).
+    pub value: String,
+    pub origin: Origin,
+    /// What the origin reads as on one line: a path, a flag, `$VAR`, or
+    /// `default`.
+    pub origin_label: String,
+}
+
+impl Layered {
+    /// Every effective leaf value with its origin, in key order.
+    pub fn explain(&self) -> Vec<ExplainedValue> {
+        let value = self.config.to_toml_value();
+        self.origins
+            .iter()
+            .map(|(key, origin)| ExplainedValue {
+                key: key.clone(),
+                value: lookup(&value, key)
+                    .map(toml_scalar)
+                    .unwrap_or_else(|| "-".into()),
+                origin: origin.clone(),
+                origin_label: origin.to_string(),
+            })
+            .collect()
+    }
+}
+
+/// The value at a dotted key, if the serialisation has one.
+fn lookup<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    let mut cur = value;
+    for part in key.split('.') {
+        cur = cur.as_table()?.get(part)?;
+    }
+    Some(cur)
+}
+
+/// A TOML value on one line, as TOML would write it.
+fn toml_scalar(value: &toml::Value) -> String {
+    // Through a one-key document rather than `Value::to_string`, which writes
+    // a table as an inline table and a scalar as a bare `{ v = 42 }`.
+    let doc: toml::map::Map<String, toml::Value> =
+        [("v".to_string(), value.clone())].into_iter().collect();
+    match toml::to_string(&doc) {
+        Ok(s) => s
+            .trim()
+            .strip_prefix("v = ")
+            .unwrap_or(s.trim())
+            .trim()
+            .to_string(),
+        Err(_) => String::from("-"),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error(
+        "{path} sets {key}, which belongs in cambium.toml: it is part of the config hash, \
+         so it says what the graph is rather than what this machine is"
+    )]
+    LocalOverrideKey { path: PathBuf, key: String },
     #[error("reading {path}: {source}")]
     Io {
         path: PathBuf,
@@ -419,6 +659,13 @@ impl Config {
     /// compares.
     pub fn hash(&self) -> [u8; 32] {
         let mut graph_relevant = self.clone();
+        // Which binary answers, like which server answers, is a fact about a
+        // machine: one developer's `/opt/homebrew/bin/bazelisk` and CI's
+        // `tools/bazel` wrap the same release and produce the same graph. It is
+        // also one of the keys `cambium.local.toml` may set, and everything on
+        // that list has to be outside this hash or a machine-local override
+        // could silently mint a lineage.
+        graph_relevant.bazel.binary.clear();
         graph_relevant.bazel.startup_flags.clear();
         graph_relevant.baseline = Baseline::default();
         graph_relevant.git = GitConfig::default();
@@ -432,6 +679,99 @@ impl Config {
         h.update(b"\n");
         h.update(graph_relevant.to_toml().as_bytes());
         *h.finalize().as_bytes()
+    }
+
+    /// Loads the whole stack — defaults, `cambium.toml`, `cambium.local.toml`,
+    /// then the flags and environment variables in `over` — and records where
+    /// every effective value came from.
+    ///
+    /// This is what [`Engine::open`](crate::Engine::open) uses, so the local
+    /// file reaches real runs and not only `cambi config explain`.
+    pub fn load_layered(
+        root: &Path,
+        config_path: Option<&Path>,
+        over: &Overrides,
+    ) -> Result<Layered, ConfigError> {
+        let path = config_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.join(CONFIG_FILE));
+        let mut cfg = Self::load_from(&path)?;
+        let file_keys = leaf_keys_of(&path)?;
+
+        // Beside cambium.toml, wherever --config pointed: a caller who moved
+        // the contract moved its machine-local companion with it.
+        let local_path = path.parent().unwrap_or(root).join(LOCAL_CONFIG_FILE);
+        let mut diagnostics = cfg.removed_key_diagnostics();
+        let local_keys = leaf_keys_of(&local_path)?;
+        let mut local_applied = Vec::new();
+        if !local_keys.is_empty() {
+            let text = std::fs::read_to_string(&local_path).map_err(|source| ConfigError::Io {
+                path: local_path.clone(),
+                source,
+            })?;
+            // By name, and before the file is deserialised: `Local` rejects
+            // unknown fields too, but as a parse error that does not name the
+            // rule being broken.
+            for key in &local_keys {
+                if !LOCAL_ONLY_KEYS.contains(&key.as_str()) {
+                    return Err(ConfigError::LocalOverrideKey {
+                        path: local_path.clone(),
+                        key: key.clone(),
+                    });
+                }
+                local_applied.push(key.clone());
+            }
+            let local: Local = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: local_path.clone(),
+                source,
+            })?;
+            local.apply(&mut cfg);
+        }
+
+        let mut origins: Vec<(String, Origin)> = Vec::new();
+        if let Some((binary, origin)) = &over.bazel_binary {
+            cfg.bazel.binary = binary.clone();
+            origins.push(("bazel.binary".into(), origin.clone()));
+        }
+        if let Some((dir, origin)) = &over.cache_dir {
+            cfg.baseline.cache_dir = Some(dir.clone());
+            origins.push(("baseline.cache_dir".into(), origin.clone()));
+        }
+
+        let overridden: Vec<String> = origins.iter().map(|(k, _)| k.clone()).collect();
+        let mut attributed = std::collections::BTreeMap::new();
+        for (k, o) in origins {
+            attributed.insert(k, o);
+        }
+        for key in leaf_keys(&cfg.to_toml_value()) {
+            if overridden.contains(&key) {
+                continue;
+            }
+            let origin = if local_applied.contains(&key) {
+                Origin::LocalFile {
+                    path: local_path.clone(),
+                }
+            } else if file_keys.contains(&key) {
+                Origin::File { path: path.clone() }
+            } else {
+                Origin::Default
+            };
+            attributed.insert(key, origin);
+        }
+
+        Ok(Layered {
+            config: cfg,
+            origins: attributed,
+            path,
+            local_path,
+            local_keys,
+            diagnostics: std::mem::take(&mut diagnostics),
+        })
+    }
+
+    /// The canonical serialisation as a TOML value, for walking its leaves.
+    pub fn to_toml_value(&self) -> toml::Value {
+        toml::Value::try_from(self).expect("config is serialisable")
     }
 
     pub fn rules(&self) -> Rules {
@@ -604,6 +944,180 @@ retention_days = 30
             "a dead key must not mint a new lineage"
         );
         assert!(!c.to_toml().contains("max_changed_files"));
+    }
+
+    /// The whole point of the local file: every key it may set is already
+    /// outside the config hash, so a machine-local override can never make two
+    /// indexes claim to be interchangeable when they are not.
+    #[test]
+    fn every_locally_overridable_key_is_outside_the_config_hash() {
+        let base = Config::default().hash();
+        let mut variants: Vec<(&str, Config)> = Vec::new();
+        let mut c = Config::default();
+        c.bazel.binary = "/opt/bazelisk".into();
+        variants.push(("bazel.binary", c));
+        let mut c = Config::default();
+        c.bazel.startup_flags = vec!["--output_base=/tmp/x".into()];
+        variants.push(("bazel.startup_flags", c));
+        let mut c = Config::default();
+        c.baseline.cache_dir = Some(PathBuf::from("/tmp/cache"));
+        variants.push(("baseline.cache_dir", c));
+        let mut c = Config::default();
+        c.baseline.compress_indexes = false;
+        variants.push(("baseline.compress_indexes", c));
+        let mut c = Config::default();
+        c.baseline.publish_partial = true;
+        variants.push(("baseline.publish_partial", c));
+
+        for (key, cfg) in &variants {
+            assert_eq!(
+                cfg.hash(),
+                base,
+                "{key} is in cambium.local.toml's allowlist but reaches the config hash"
+            );
+        }
+        let mut covered: Vec<&str> = variants.iter().map(|(k, _)| *k).collect();
+        covered.sort();
+        let mut allowed = LOCAL_ONLY_KEYS.to_vec();
+        allowed.sort();
+        assert_eq!(
+            covered, allowed,
+            "the allowlist and this test must name the same keys"
+        );
+    }
+
+    fn layered(dir: &Path, main: &str, local: Option<&str>) -> Result<Layered, ConfigError> {
+        std::fs::write(dir.join(CONFIG_FILE), main).unwrap();
+        if let Some(l) = local {
+            std::fs::write(dir.join(LOCAL_CONFIG_FILE), l).unwrap();
+        }
+        Config::load_layered(dir, None, &Overrides::default())
+    }
+
+    #[test]
+    fn the_local_file_wins_over_the_checked_in_one_and_is_attributed() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layered(
+            d.path(),
+            "[bazel]\nbinary = \"bazel\"\n",
+            Some("[bazel]\nbinary = \"bazelisk\"\n[baseline]\npublish_partial = true\n"),
+        )
+        .unwrap();
+        assert_eq!(l.config.bazel.binary, "bazelisk");
+        assert!(l.config.baseline.publish_partial);
+        assert_eq!(
+            l.origins.get("bazel.binary"),
+            Some(&Origin::LocalFile {
+                path: d.path().join(LOCAL_CONFIG_FILE)
+            })
+        );
+        assert_eq!(
+            l.local_keys,
+            vec!["baseline.publish_partial", "bazel.binary"],
+            "leaf keys are reported in key order"
+        );
+    }
+
+    #[test]
+    fn a_flag_outranks_both_files() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(CONFIG_FILE), "[bazel]\nbinary = \"bazel\"\n").unwrap();
+        std::fs::write(
+            d.path().join(LOCAL_CONFIG_FILE),
+            "[bazel]\nbinary = \"bazelisk\"\n",
+        )
+        .unwrap();
+        let over = Overrides {
+            bazel_binary: Some((
+                "/opt/bazel".into(),
+                Origin::Flag {
+                    name: "--bazel-binary".into(),
+                },
+            )),
+            cache_dir: Some((
+                PathBuf::from("/tmp/c"),
+                Origin::Env {
+                    name: "CAMBIUM_CACHE_DIR".into(),
+                },
+            )),
+        };
+        let l = Config::load_layered(d.path(), None, &over).unwrap();
+        assert_eq!(l.config.bazel.binary, "/opt/bazel");
+        assert_eq!(l.config.baseline.cache_dir, Some(PathBuf::from("/tmp/c")));
+        assert_eq!(
+            l.origins.get("bazel.binary").map(Origin::to_string),
+            Some("--bazel-binary".to_string())
+        );
+        assert_eq!(
+            l.origins.get("baseline.cache_dir").map(Origin::to_string),
+            Some("$CAMBIUM_CACHE_DIR".to_string())
+        );
+    }
+
+    /// A key that decides what the graph is does not belong in a file one
+    /// machine has and the next does not, and saying so quietly is how an
+    /// index that disagrees with a full build gets published.
+    #[test]
+    fn a_key_outside_the_allowlist_is_refused_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        let e = layered(
+            d.path(),
+            "",
+            Some("[invalidators]\npaths = [\"MODULE.bazel\"]\n"),
+        )
+        .unwrap_err();
+        let ConfigError::LocalOverrideKey { key, path } = &e else {
+            panic!("wrong error: {e}");
+        };
+        assert_eq!(key, "invalidators.paths");
+        assert_eq!(path, &d.path().join(LOCAL_CONFIG_FILE));
+        assert!(e.to_string().contains("belongs in cambium.toml"), "{e}");
+    }
+
+    #[test]
+    fn unset_keys_are_attributed_to_the_defaults_and_set_ones_to_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layered(d.path(), "[limits]\nmax_dirty_packages = 42\n", None).unwrap();
+        assert_eq!(
+            l.origins.get("limits.max_dirty_packages"),
+            Some(&Origin::File {
+                path: d.path().join(CONFIG_FILE)
+            })
+        );
+        assert_eq!(
+            l.origins.get("baseline.retention_days"),
+            Some(&Origin::Default)
+        );
+        let explained = l.explain();
+        let row = explained
+            .iter()
+            .find(|v| v.key == "limits.max_dirty_packages")
+            .expect("every leaf key is explained");
+        assert_eq!(row.value, "42");
+        assert_eq!(
+            row.origin_label,
+            d.path().join(CONFIG_FILE).display().to_string()
+        );
+        let arrays = explained
+            .iter()
+            .find(|v| v.key == "invalidators.globs")
+            .expect("an array is one leaf");
+        assert!(arrays.value.starts_with('['), "{}", arrays.value);
+        assert_eq!(arrays.origin, Origin::Default);
+    }
+
+    #[test]
+    fn no_files_at_all_is_every_key_on_its_default() {
+        let d = tempfile::tempdir().unwrap();
+        let l = Config::load_layered(d.path(), None, &Overrides::default()).unwrap();
+        assert_eq!(l.config, Config::default());
+        assert!(!l.origins.is_empty());
+        assert!(
+            l.origins.values().all(|o| *o == Origin::Default),
+            "{:?}",
+            l.origins
+        );
+        assert!(!l.local_exists());
     }
 
     #[test]

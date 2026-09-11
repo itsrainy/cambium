@@ -35,23 +35,68 @@ impl Context {
     }
 
     pub fn config(&self) -> Result<Config> {
-        Ok(match &self.config {
-            Some(p) => Config::load_from(p)?,
-            None => match cambium_engine::engine::Engine::open(&self.root, None, None) {
-                Ok(e) => e.cfg,
-                // Outside a workspace, fall back to the config next to cwd.
-                Err(_) => Config::load(&self.root)?,
-            },
-        })
+        Ok(self.layered()?.config)
+    }
+
+    /// The whole configuration stack with the origin of every effective value:
+    /// defaults, `cambium.toml`, `cambium.local.toml`, then the flags and
+    /// environment variables this invocation carries.
+    ///
+    /// Rooted at the workspace when there is one and at the working directory
+    /// when there is not, so `cambi config explain` answers outside a
+    /// workspace too.
+    pub fn layered(&self) -> Result<cambium_engine::config::Layered> {
+        let root =
+            cambium_engine::bazel_workspace_root(&self.root).unwrap_or_else(|| self.root.clone());
+        // Through `EngineError` so a config failure keeps its own diagnostic
+        // code (`CAMBI-E014` for a misplaced local key) rather than arriving at
+        // the top level as an anonymous internal error.
+        Ok(
+            Config::load_layered(&root, self.config.as_deref(), &self.overrides())
+                .map_err(cambium_engine::EngineError::from)?,
+        )
+    }
+
+    /// What the command line and the environment said, with the spelling to
+    /// attribute each value to. `--cache-dir` and `$CAMBIUM_CACHE_DIR` reach
+    /// clap as one `Option`, so the environment is consulted here only to tell
+    /// the two origins apart — never to change the value.
+    pub fn overrides(&self) -> cambium_engine::config::Overrides {
+        use cambium_engine::config::Origin;
+        cambium_engine::config::Overrides {
+            bazel_binary: self.bazel_binary.clone().map(|b| {
+                (
+                    b,
+                    Origin::Flag {
+                        name: "--bazel-binary".into(),
+                    },
+                )
+            }),
+            cache_dir: self.cache_dir.clone().map(|d| {
+                let from_env = std::env::var_os("CAMBIUM_CACHE_DIR")
+                    .is_some_and(|v| std::path::Path::new(&v) == d);
+                let origin = if from_env {
+                    Origin::Env {
+                        name: "CAMBIUM_CACHE_DIR".into(),
+                    }
+                } else {
+                    Origin::Flag {
+                        name: "--cache-dir".into(),
+                    }
+                };
+                (d, origin)
+            }),
+        }
     }
 }
 
-/// `cambi config show|hash`. `explain` — every value and where it came from —
-/// is a later step.
+/// `cambi config show|explain|hash`.
 #[derive(clap::Subcommand)]
 pub enum ConfigArgs {
     /// Print the effective configuration and its hash.
     Show,
+    /// Print every effective value and where it came from.
+    Explain,
     /// Print the config hash alone, as hex.
     Hash,
 }
@@ -59,6 +104,7 @@ pub enum ConfigArgs {
 pub fn config(ctx: &Context, args: ConfigArgs) -> Result<u8> {
     match args {
         ConfigArgs::Show => config_show(ctx),
+        ConfigArgs::Explain => config_explain(ctx),
         ConfigArgs::Hash => {
             // One line, no formatting of its own: this exists so a script can
             // compare it against an index's, and `--format json` wraps it in
@@ -94,14 +140,62 @@ pub fn config_show(ctx: &Context) -> Result<u8> {
             print!("{}", cfg.to_toml());
             println!("\n# config_hash = {}", hex(&cfg.hash()));
         }
-        // The config has no JSON document of its own yet (`config explain` is
-        // a later step), so the JSON forms print the TOML as one string field
-        // beside the hash every index carries.
+        // `show` is the file, not the attribution: the JSON forms print the
+        // canonical TOML as one string field beside the hash every index
+        // carries, and `explain` is the document with a field per value.
         crate::DataFormat::Json | crate::DataFormat::Jsonl => {
             let doc = serde_json::json!({
                 "schema": cambium_engine::report::SCHEMA_VERSION,
                 "config_hash": hex(&cfg.hash()),
                 "toml": cfg.to_toml(),
+            });
+            if fmt == crate::DataFormat::Jsonl {
+                println!("{}", result_event(&doc)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+            }
+        }
+    }
+    Ok(crate::EXIT_OK)
+}
+
+/// `cambi config explain`: one line per leaf key, with the layer that decided
+/// it.
+///
+/// The question it answers is "why is this value this value", which on a
+/// machine with a `cambium.local.toml`, a `--cache-dir` and a checked-in
+/// `cambium.toml` is not guessable from any one of them.
+pub fn config_explain(ctx: &Context) -> Result<u8> {
+    let layered = ctx.layered()?;
+    for d in &layered.diagnostics {
+        ctx.render.warn(d);
+    }
+    let values = layered.explain();
+    let Some(fmt) = ctx.format.data("cambi config explain")? else {
+        return Ok(crate::EXIT_OK);
+    };
+    match fmt {
+        crate::DataFormat::Text => {
+            let width = values.iter().map(|v| v.key.len()).max().unwrap_or(0);
+            for v in &values {
+                println!(
+                    "{:<width$} = {}  ({})",
+                    v.key,
+                    v.value,
+                    v.origin_label,
+                    width = width
+                );
+            }
+            println!();
+            println!("# config_hash = {}", hex(&layered.config.hash()));
+        }
+        crate::DataFormat::Json | crate::DataFormat::Jsonl => {
+            let doc = serde_json::json!({
+                "schema": cambium_engine::report::SCHEMA_VERSION,
+                "config_hash": hex(&layered.config.hash()),
+                "config_file": layered.path,
+                "local_file": layered.local_exists().then(|| layered.local_path.clone()),
+                "values": values,
             });
             if fmt == crate::DataFormat::Jsonl {
                 println!("{}", result_event(&doc)?);
