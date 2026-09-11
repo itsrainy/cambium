@@ -23,6 +23,9 @@ pub struct BaselineCache<'a> {
     /// else in the store is a leftover from another lineage.
     config_hash: [u8; 32],
     diags: crate::diag::Diagnostics,
+    /// Lineages (hex) of the indexes a fetch refused for their config hash,
+    /// so the lineage probe can name them without reading the W003 text.
+    refused: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a> BaselineCache<'a> {
@@ -32,6 +35,7 @@ impl<'a> BaselineCache<'a> {
             cache_dir,
             config_hash,
             diags: crate::diag::Diagnostics::new(),
+            refused: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -39,6 +43,15 @@ impl<'a> BaselineCache<'a> {
     pub fn with_diagnostics(mut self, diags: crate::diag::Diagnostics) -> Self {
         self.diags = diags;
         self
+    }
+
+    /// The lineages of every index a fetch so far refused because it was
+    /// built with another configuration, sorted and each once.
+    pub fn refused_lineages(&self) -> Vec<String> {
+        let mut v = self.refused.borrow().clone();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// Finds an index for `commit`, whose tree is `tree`, in the store.
@@ -166,6 +179,9 @@ impl<'a> BaselineCache<'a> {
                      `cambi baseline build --publish`",
                 ),
             );
+            self.refused
+                .borrow_mut()
+                .push(crate::inspect::hex(&f.view().lineage));
             return Ok(None);
         }
         Ok(Some(dest))

@@ -214,7 +214,7 @@ pub enum StoreConfig {
     Http {
         /// Base URL; the index name is appended.
         url: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         headers: Vec<String>,
     },
     Command {
@@ -576,7 +576,12 @@ impl Config {
                     path: path.to_path_buf(),
                     source,
                 })?;
-                cfg.warn_about_removed_keys(path);
+                // Said once while the file is read, before there is an
+                // engine to report into; the diagnostics themselves are
+                // re-derived from the config once a sink exists.
+                for d in cfg.removed_key_diagnostics() {
+                    tracing::warn!(config = %path.display(), "{}", d.message);
+                }
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -587,29 +592,14 @@ impl Config {
         }
     }
 
-    /// Says so, once, for every key that a newer cambium no longer honours.
+    /// One diagnostic for every key that a newer cambium no longer honours.
     ///
     /// Refusing the file instead would be the stricter reading of
     /// `deny_unknown_fields`, but a removed limit is not a typo: the repository
     /// that set it did so deliberately, and failing every `cambi` invocation
-    /// until someone edits the file punishes the wrong person.
-    fn warn_about_removed_keys(&self, path: &Path) {
-        if let Some(n) = self.limits.max_changed_files {
-            tracing::warn!(
-                config = %path.display(),
-                value = n,
-                "limits.max_changed_files was removed and is ignored; the limit is now \
-                 limits.max_dirty_packages, which bounds the re-query rather than the diff"
-            );
-        }
-    }
-
-    /// The same findings as [`Config::warn_about_removed_keys`], as
-    /// diagnostics.
-    ///
-    /// The warning is emitted while the file is being read, before there is an
-    /// engine to report into, so the actionable half is recomputed from the
-    /// config once the sink exists. The two must say the same thing.
+    /// until someone edits the file punishes the wrong person. The log line
+    /// [`Config::load_from`] writes is derived from these, so the two cannot
+    /// disagree.
     pub fn removed_key_diagnostics(&self) -> Vec<crate::diag::Diagnostic> {
         let mut out = Vec::new();
         if let Some(n) = self.limits.max_changed_files {

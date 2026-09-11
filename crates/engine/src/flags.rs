@@ -42,6 +42,7 @@ use cambium_index::IndexRef;
 
 use crate::bazelrc::LabelFlag;
 use crate::query::PackageQuerier;
+use crate::reason::{FlagCause, GlobalReason};
 
 /// What a set of changed Starlark build settings reaches.
 #[derive(Default, Debug)]
@@ -51,7 +52,7 @@ pub struct FlagReach {
     /// Every flag that was resolved this way, as written in the rc file.
     pub flags: Vec<String>,
     /// Set when one of them could not be resolved soundly; the run is global.
-    pub global: Option<String>,
+    pub global: Option<GlobalReason>,
 }
 
 /// A label split into the parts the index is searched by.
@@ -130,19 +131,11 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
         return out;
     }
     let Some(src) = querier.load_source() else {
-        out.global = Some(reason(
-            flags,
-            "the row source cannot read Starlark, so no `.bzl` can be checked \
-             for a transition that reads it",
-        ));
+        out.global = Some(reason(&flags[0], FlagCause::NoStarlarkSource));
         return out;
     };
     if !base.bzl_closure {
-        out.global = Some(reason(
-            flags,
-            "the base index carries no static .bzl load closure to check for a \
-             transition that reads it",
-        ));
+        out.global = Some(reason(&flags[0], FlagCause::NoLoadClosure));
         return out;
     }
     let facts = cambium_index::read_module_facts(src);
@@ -153,31 +146,20 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
 
     for f in flags {
         let Some(p) = parse_label(&f.label) else {
-            out.global = Some(reason(
-                std::slice::from_ref(f),
-                "is not a label cambium parses",
-            ));
+            out.global = Some(reason(f, FlagCause::Unparsed));
             return out;
         };
         let main = mapping.is_main(p.repo);
         if let Some(path) = bzl_witness(base, src, &p.suffix) {
-            out.global = Some(reason(
-                std::slice::from_ref(f),
-                &format!(
-                    "and `{path}` in the load closure names it — a transition or other \
-                          Starlark read of the setting is not an edge in the graph"
-                ),
-            ));
+            out.global = Some(reason(f, FlagCause::ReadByBzl { path }));
             return out;
         }
         if !main {
             out.global = Some(reason(
-                std::slice::from_ref(f),
-                &format!(
-                    "and `@{}` is an external repository: the index does not cover its \
-                     graph, so what inside it reads the setting cannot be seen",
-                    p.repo
-                ),
+                f,
+                FlagCause::External {
+                    repo: p.repo.to_string(),
+                },
             ));
             return out;
         }
@@ -204,9 +186,12 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
     out
 }
 
-fn reason(flags: &[LabelFlag], why: &str) -> String {
-    let f = &flags[0];
-    format!("{} --{} changed {why}", f.key.command, f.key.name)
+fn reason(f: &LabelFlag, cause: FlagCause) -> GlobalReason {
+    GlobalReason::Flag {
+        command: f.key.command.clone(),
+        name: f.key.name.clone(),
+        cause,
+    }
 }
 
 #[cfg(test)]

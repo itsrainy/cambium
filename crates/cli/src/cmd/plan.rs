@@ -6,7 +6,7 @@
 use anyhow::Result;
 use cambium_engine::plan::{PlanMode, RunPlan};
 
-use crate::cmd::{result_event, Context};
+use crate::cmd::{emit, Context};
 
 pub fn run(
     ctx: &Context,
@@ -17,21 +17,13 @@ pub fn run(
     for d in &plan.diagnostics {
         ctx.render.warn(d);
     }
-    match ctx.format.data("cambi affected --dry-run")? {
-        None => {}
-        Some(crate::DataFormat::Text) => print_human(&plan),
-        Some(fmt) => {
-            let doc = serde_json::json!({
-                "schema": cambium_engine::report::SCHEMA_VERSION,
-                "plan": plan,
-            });
-            if fmt == crate::DataFormat::Jsonl {
-                println!("{}", result_event(&doc)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&doc)?);
-            }
-        }
-    }
+    let doc = serde_json::json!({
+        "schema": cambium_engine::report::SCHEMA_VERSION,
+        "plan": plan,
+    });
+    emit(&doc, ctx.format.data("cambi affected --dry-run")?, |_| {
+        print_human(&plan)
+    })?;
     // The same code the run itself would exit with when it already knows the
     // answer is `//...`; every other plan is a plan and exits 0.
     Ok(if plan.mode == PlanMode::Global {
