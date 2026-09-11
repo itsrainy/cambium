@@ -19,7 +19,7 @@ size, which do not fit on a laptop.
   will stay that way; only the words in this repository were swept. The
   instance carries both `cambium=bench` and the old tag value in the finder's
   filter.
-- The SG allows SSH from Rainy's current IP only. When it changes, `aws ec2
+- The SG allows SSH from one IP, the current one. When it changes, `aws ec2
   revoke-security-group-ingress` the old CIDR and
   `authorize-security-group-ingress` the new one.
 - `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
