@@ -208,18 +208,13 @@ pub fn default_cache_dir() -> PathBuf {
 }
 
 impl Engine {
-    /// Opens an engine rooted at the Bazel workspace containing `start`.
+    /// Opens an engine rooted at the Bazel workspace containing `start`, with
+    /// `bazel_binary` as the one command-line override.
     pub fn open(
         start: &Path,
         config_path: Option<&Path>,
         bazel_binary: Option<&str>,
     ) -> Result<Self> {
-        let mut bazel = Bazel::discover(start, bazel_binary)?;
-        let workspace = bazel.workspace().to_path_buf();
-        // The whole stack, so that `cambium.local.toml` reaches a real run and
-        // not only `cambi config explain`: the flag is folded in as the
-        // highest layer, which is why the binary is taken off the effective
-        // config below rather than from the parameter.
         let over = crate::config::Overrides {
             bazel_binary: bazel_binary.map(|b| {
                 (
@@ -231,7 +226,27 @@ impl Engine {
             }),
             cache_dir: None,
         };
-        let cfg = Config::load_layered(&workspace, config_path, &over)?.config;
+        Self::open_with(start, config_path, &over)
+    }
+
+    /// Opens an engine rooted at the Bazel workspace containing `start`, over
+    /// the whole configuration stack: defaults, `cambium.toml`,
+    /// `cambium.local.toml`, then `over` — the flags and environment
+    /// variables the caller carries, with the origin of each.
+    ///
+    /// The overrides are folded in as the highest layer, which is why the
+    /// binary and the cache directory are taken off the effective config
+    /// below rather than from the parameters: that is how a local file
+    /// reaches a real run and not only `cambi config explain`.
+    pub fn open_with(
+        start: &Path,
+        config_path: Option<&Path>,
+        over: &crate::config::Overrides,
+    ) -> Result<Self> {
+        let mut bazel =
+            Bazel::discover(start, over.bazel_binary.as_ref().map(|(b, _)| b.as_str()))?;
+        let workspace = bazel.workspace().to_path_buf();
+        let cfg = Config::load_layered(&workspace, config_path, over)?.config;
         if !cfg.bazel.binary.is_empty() {
             bazel = Bazel::at(workspace.clone(), Some(&cfg.bazel.binary));
         }

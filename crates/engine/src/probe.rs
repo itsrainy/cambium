@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::baseline::BaselineCache;
-use crate::config::{Config, StoreConfig, CONFIG_FILE};
+use crate::config::{Config, Overrides, StoreConfig, CONFIG_FILE};
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::store::ArtifactStore;
 
@@ -176,10 +176,11 @@ pub struct BazelProbe {
 }
 
 /// Resolves the Bazel binary and asks it for its version.
-pub fn bazel(root: &Path, cfg: &Config, binary_override: Option<&str>) -> BazelProbe {
-    let configured = binary_override
-        .filter(|b| !b.is_empty())
-        .or(Some(cfg.bazel.binary.as_str()).filter(|b| !b.is_empty()));
+///
+/// `cfg` is the effective configuration, so a `--bazel-binary` on the command
+/// line has already reached `bazel.binary` through the override layer.
+pub fn bazel(root: &Path, cfg: &Config) -> BazelProbe {
+    let configured = Some(cfg.bazel.binary.as_str()).filter(|b| !b.is_empty());
     let bazel = cambium_bazel::Bazel::at(root.to_path_buf(), configured);
     let binary = bazel.binary().to_path_buf();
     let mut p = BazelProbe {
@@ -249,9 +250,18 @@ pub struct ConfigProbe {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Reads `cambium.toml` and says what it found. Never fails: an unparsable
-/// file is a diagnostic, because `status` still has everything else to print.
-pub fn config(root: &Path, config_path: Option<&Path>) -> (Option<Config>, ConfigProbe) {
+/// Reads the whole configuration stack — `cambium.toml`, `cambium.local.toml`,
+/// then `over` — and says what it found. Never fails: an unparsable file is a
+/// diagnostic, because `status` still has everything else to print.
+///
+/// The same [`Config::load_layered`] a run uses, so `status`, `doctor` and
+/// `init` see the configuration a run would: a local override or a
+/// `--cache-dir` is not a thing a probe may ignore.
+pub fn config(
+    root: &Path,
+    config_path: Option<&Path>,
+    over: &Overrides,
+) -> (Option<Config>, ConfigProbe) {
     let path = config_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| root.join(CONFIG_FILE));
@@ -262,19 +272,18 @@ pub fn config(root: &Path, config_path: Option<&Path>) -> (Option<Config>, Confi
         parse_error: None,
         diagnostics: Vec::new(),
     };
-    match Config::load_from(&path) {
-        Ok(cfg) => {
-            p.hash = Some(hex(&cfg.hash()));
-            p.diagnostics = cfg.removed_key_diagnostics();
-            (Some(cfg), p)
+    match Config::load_layered(root, config_path, over) {
+        Ok(layered) => {
+            p.hash = Some(hex(&layered.config.hash()));
+            p.diagnostics = layered.diagnostics;
+            (Some(layered.config), p)
         }
         Err(e) => {
             p.parse_error = Some(e.to_string());
-            p.diagnostics.push(
-                Diagnostic::error(Code::E002Config, e.to_string())
-                    .at(path.display().to_string(), None)
-                    .with_help("fix the file, or point --config at another one"),
-            );
+            // Through `EngineError`, so a misplaced local key keeps its own
+            // code; the message names the file either way.
+            p.diagnostics
+                .push(crate::error::EngineError::from(e).diagnostic());
             (None, p)
         }
     }
@@ -761,8 +770,9 @@ pub struct Options {
     /// Where to start looking for a workspace.
     pub start: PathBuf,
     pub config_path: Option<PathBuf>,
-    pub bazel_binary: Option<String>,
-    pub cache_dir: Option<PathBuf>,
+    /// What the command line and the environment said: the layer above the
+    /// config files, exactly as a run applies it.
+    pub overrides: Overrides,
     /// Run `bazel --version`. `status` does not.
     pub run_bazel: bool,
     /// Publish and fetch back a probe object. `doctor` only.
@@ -774,8 +784,7 @@ impl Options {
         Self {
             start: start.into(),
             config_path: None,
-            bazel_binary: None,
-            cache_dir: None,
+            overrides: Overrides::default(),
             run_bazel: false,
             store_round_trip: false,
         }
@@ -832,12 +841,10 @@ impl Probes {
 pub fn collect(opts: &Options) -> Probes {
     let ws = workspace(&opts.start);
     let root = ws.root.clone().unwrap_or_else(|| opts.start.clone());
-    let (cfg, config_probe) = config(&root, opts.config_path.as_deref());
+    let (cfg, config_probe) = config(&root, opts.config_path.as_deref(), &opts.overrides);
     let effective = cfg.clone().unwrap_or_default();
 
-    let bazel_probe = opts
-        .run_bazel
-        .then(|| bazel(&root, &effective, opts.bazel_binary.as_deref()));
+    let bazel_probe = opts.run_bazel.then(|| bazel(&root, &effective));
 
     // The store's own diagnostics (a `command` backend's failed fetch) go into
     // the store probe, not into a sink nobody drains.
@@ -846,10 +853,12 @@ pub fn collect(opts: &Options) -> Probes {
     let mut store_probe = store(&effective, backend.as_deref());
     store_probe.diagnostics.extend(sink.drain());
 
-    let cache_dir = opts
+    // `--cache-dir` has already reached the effective config through the
+    // override layer, the same way it reaches a run.
+    let cache_dir = effective
+        .baseline
         .cache_dir
         .clone()
-        .or_else(|| effective.baseline.cache_dir.clone())
         .unwrap_or_else(crate::engine::default_cache_dir);
 
     let round_trip = match (opts.store_round_trip, backend.as_deref()) {
@@ -1048,7 +1057,7 @@ mod tests {
     fn an_unparsable_config_is_a_diagnostic_not_a_failure() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), CONFIG_FILE, "[bazel\n");
-        let (cfg, p) = config(d.path(), None);
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
         assert!(cfg.is_none());
         assert!(p.exists && p.hash.is_none());
         assert_eq!(p.diagnostics[0].code, Code::E002Config);
@@ -1057,10 +1066,46 @@ mod tests {
     #[test]
     fn a_missing_config_is_the_defaults_and_a_hash() {
         let d = tempfile::tempdir().unwrap();
-        let (cfg, p) = config(d.path(), None);
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
         assert_eq!(cfg, Some(Config::default()));
         assert!(!p.exists);
         assert_eq!(p.hash, Some(hex(&Config::default().hash())));
+    }
+
+    /// The probes read what a run reads: the local file and the flags reach
+    /// the effective configuration, and a local file that oversteps keeps
+    /// its own code rather than being reported as a parse failure.
+    #[test]
+    fn the_config_probe_sees_the_local_file_and_the_overrides() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            crate::config::LOCAL_CONFIG_FILE,
+            "[baseline]\ncompress_indexes = false\n",
+        );
+        let over = Overrides {
+            bazel_binary: None,
+            cache_dir: Some((
+                d.path().join("cache"),
+                crate::config::Origin::Flag {
+                    name: "--cache-dir".into(),
+                },
+            )),
+        };
+        let (cfg, p) = config(d.path(), None, &over);
+        let cfg = cfg.expect("loads");
+        assert!(!cfg.baseline.compress_indexes, "the local file applied");
+        assert_eq!(cfg.baseline.cache_dir, Some(d.path().join("cache")));
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+
+        write(
+            d.path(),
+            crate::config::LOCAL_CONFIG_FILE,
+            "[invalidators]\npaths = [\"x\"]\n",
+        );
+        let (cfg, p) = config(d.path(), None, &Overrides::default());
+        assert!(cfg.is_none());
+        assert_eq!(p.diagnostics[0].code, Code::E014LocalOverrideKey);
     }
 
     #[test]
