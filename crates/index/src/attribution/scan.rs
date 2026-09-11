@@ -11,8 +11,8 @@ use crate::starlark::{
 use crate::vocabulary::{names_a_repository, KEYWORDS, PURE_BUILTINS};
 
 use super::{
-    Attribution, CallId, CallSite, DefId, DefState, ExtId, ExtState, FileId, FileState, NameArg,
-    Occ, Repos, RuleId, RuleState, Sym, Use,
+    Attribution, CallId, CallSite, DefId, DefState, ExtId, ExtState, FileId, FileState, Interner,
+    NameArg, Occ, RepoId, Repos, RuleId, RuleState, Sym, Use,
 };
 
 /// The context a walk over one file carries.
@@ -27,7 +27,7 @@ struct Ctx {
 #[derive(Default)]
 struct Found {
     calls: Vec<CallSite>,
-    names: Vec<(Option<DefId>, String)>,
+    names: Vec<(Option<DefId>, RepoId)>,
     fwd: Vec<(DefId, String)>,
     uses: Vec<(usize, String, Option<CallId>)>,
     named_defs: Vec<(Option<DefId>, String)>,
@@ -50,6 +50,7 @@ impl<'a> Attribution<'a> {
             uses: Vec::new(),
             named_defs: Vec::new(),
             named: Vec::new(),
+            interner: Interner::default(),
             literal_names: BTreeSet::new(),
         };
         for (i, (path, text)) in texts.iter().enumerate() {
@@ -223,6 +224,8 @@ impl<'a> Attribution<'a> {
     /// the context it sits in.
     fn walk_file(&mut self, f: FileId) {
         let mut found = Found::default();
+        // The walk borrows `self` shared and the interner exclusively.
+        let mut interner = std::mem::take(&mut self.interner);
         {
             let file = self.file(f);
             // Top-level defs in source order are the ids `declarations`
@@ -242,17 +245,16 @@ impl<'a> Attribution<'a> {
                     }
                     _ => {}
                 }
-                self.walk_stmt(f, st, ctx, &mut found);
+                self.walk_stmt(f, st, ctx, &mut found, &mut interner);
             }
         }
+        self.interner = interner;
         for (d, p) in found.fwd {
             self.defs[d.idx()].fwd.insert(p);
         }
         for d in found.unparsed_in {
             self.defs[d.idx()].unparsed = true;
         }
-        self.literal_names
-            .extend(found.names.iter().map(|(_, l)| l.clone()));
         self.named.extend(found.names);
         for (offset, name, call) in found.uses {
             let chain = self.origin_chain(f, &name);
@@ -274,7 +276,14 @@ impl<'a> Attribution<'a> {
         self.calls.extend(found.calls);
     }
 
-    fn walk_stmt(&self, f: FileId, st: &Stmt<'a>, ctx: Ctx, found: &mut Found) {
+    fn walk_stmt(
+        &self,
+        f: FileId,
+        st: &Stmt<'a>,
+        ctx: Ctx,
+        found: &mut Found,
+        interner: &mut Interner,
+    ) {
         match st {
             Stmt::Unparsed(span) => self.unreadable(f, span, ctx, found),
             Stmt::Assign(a) => {
@@ -282,34 +291,34 @@ impl<'a> Attribution<'a> {
                 // still names a def, for liveness, when it is one.
                 if let Some(n) = a.target.as_name() {
                     found.named_defs.push((ctx.scope, n.to_string()));
-                    self.walk_expr(f, &a.value, ctx, found);
+                    self.walk_expr(f, &a.value, ctx, found, interner);
                 } else {
-                    self.walk_expr(f, &a.target, ctx, found);
-                    self.walk_expr(f, &a.value, ctx, found);
+                    self.walk_expr(f, &a.target, ctx, found, interner);
+                    self.walk_expr(f, &a.value, ctx, found, interner);
                 }
             }
             _ => {
                 for e in stmt_exprs(st) {
-                    self.walk_expr(f, e, ctx, found);
+                    self.walk_expr(f, e, ctx, found, interner);
                 }
             }
         }
         match st {
             Stmt::Def(d) => {
                 for s in &d.body {
-                    self.walk_stmt(f, s, ctx, found);
+                    self.walk_stmt(f, s, ctx, found, interner);
                 }
             }
             Stmt::If(i) => {
                 for (_, body) in &i.branches {
                     for s in body {
-                        self.walk_stmt(f, s, ctx, found);
+                        self.walk_stmt(f, s, ctx, found, interner);
                     }
                 }
             }
             Stmt::For(l) => {
                 for s in &l.body {
-                    self.walk_stmt(f, s, ctx, found);
+                    self.walk_stmt(f, s, ctx, found, interner);
                 }
             }
             _ => {}
@@ -335,7 +344,14 @@ impl<'a> Attribution<'a> {
         }
     }
 
-    fn walk_expr(&self, f: FileId, e: &Expr<'a>, ctx: Ctx, found: &mut Found) {
+    fn walk_expr(
+        &self,
+        f: FileId,
+        e: &Expr<'a>,
+        ctx: Ctx,
+        found: &mut Found,
+        interner: &mut Interner,
+    ) {
         let file = self.file(f);
         let occ = Occ {
             scope: ctx.scope,
@@ -355,7 +371,7 @@ impl<'a> Attribution<'a> {
                 }
             }
             ExprKind::Call { callee, args } => {
-                let call = self.call_site(f, callee, args, ctx, found);
+                let call = self.call_site(f, callee, args, ctx, found, interner);
                 found.occ.insert(e.span.start, occ);
                 match &callee.kind {
                     // The callee is a use of its name, as a call; and a
@@ -369,66 +385,68 @@ impl<'a> Attribution<'a> {
                             found.named_defs.push((ctx.scope, n.to_string()));
                         }
                     }
-                    ExprKind::Attr { object, .. } => self.walk_expr(f, object, ctx, found),
-                    _ => self.walk_expr(f, callee, ctx, found),
+                    ExprKind::Attr { object, .. } => {
+                        self.walk_expr(f, object, ctx, found, interner)
+                    }
+                    _ => self.walk_expr(f, callee, ctx, found, interner),
                 }
                 let inner = Ctx {
                     call: call.or(ctx.call),
                     ..ctx
                 };
                 for a in args {
-                    self.walk_expr(f, a.value(), inner, found);
+                    self.walk_expr(f, a.value(), inner, found, interner);
                 }
             }
-            ExprKind::Attr { object, .. } => self.walk_expr(f, object, ctx, found),
+            ExprKind::Attr { object, .. } => self.walk_expr(f, object, ctx, found, interner),
             ExprKind::Index { object, index } => {
-                self.walk_expr(f, object, ctx, found);
-                self.walk_expr(f, index, ctx, found);
+                self.walk_expr(f, object, ctx, found, interner);
+                self.walk_expr(f, index, ctx, found, interner);
             }
             ExprKind::Slice { object, parts } => {
-                self.walk_expr(f, object, ctx, found);
+                self.walk_expr(f, object, ctx, found, interner);
                 for p in parts.iter().flatten() {
-                    self.walk_expr(f, p, ctx, found);
+                    self.walk_expr(f, p, ctx, found, interner);
                 }
             }
             ExprKind::List(items) | ExprKind::Tuple(items) => {
                 for x in items {
-                    self.walk_expr(f, x, ctx, found);
+                    self.walk_expr(f, x, ctx, found, interner);
                 }
             }
             ExprKind::Dict(items) => {
                 for (k, v) in items {
-                    self.walk_expr(f, k, ctx, found);
-                    self.walk_expr(f, v, ctx, found);
+                    self.walk_expr(f, k, ctx, found, interner);
+                    self.walk_expr(f, v, ctx, found, interner);
                 }
             }
             ExprKind::BinOp { lhs, rhs, .. } => {
-                self.walk_expr(f, lhs, ctx, found);
-                self.walk_expr(f, rhs, ctx, found);
+                self.walk_expr(f, lhs, ctx, found, interner);
+                self.walk_expr(f, rhs, ctx, found, interner);
             }
-            ExprKind::UnOp { operand, .. } => self.walk_expr(f, operand, ctx, found),
+            ExprKind::UnOp { operand, .. } => self.walk_expr(f, operand, ctx, found, interner),
             ExprKind::Cond { then, test, orelse } => {
-                self.walk_expr(f, then, ctx, found);
-                self.walk_expr(f, test, ctx, found);
-                self.walk_expr(f, orelse, ctx, found);
+                self.walk_expr(f, then, ctx, found, interner);
+                self.walk_expr(f, test, ctx, found, interner);
+                self.walk_expr(f, orelse, ctx, found, interner);
             }
             ExprKind::Lambda { params, body } => {
                 for p in params {
                     if let Some(d) = &p.default {
-                        self.walk_expr(f, d, ctx, found);
+                        self.walk_expr(f, d, ctx, found, interner);
                     }
                 }
-                self.walk_expr(f, body, ctx, found);
+                self.walk_expr(f, body, ctx, found, interner);
             }
             ExprKind::Comprehension { element, clauses } => {
-                self.walk_expr(f, element, ctx, found);
+                self.walk_expr(f, element, ctx, found, interner);
                 for c in clauses {
                     match c {
                         Clause::For { target, iter } => {
-                            self.walk_expr(f, target, ctx, found);
-                            self.walk_expr(f, iter, ctx, found);
+                            self.walk_expr(f, target, ctx, found, interner);
+                            self.walk_expr(f, iter, ctx, found, interner);
                         }
-                        Clause::If(x) => self.walk_expr(f, x, ctx, found),
+                        Clause::If(x) => self.walk_expr(f, x, ctx, found, interner),
                     }
                 }
             }
@@ -445,6 +463,7 @@ impl<'a> Attribution<'a> {
         args: &[Arg<'a>],
         ctx: Ctx,
         found: &mut Found,
+        interner: &mut Interner,
     ) -> Option<CallId> {
         let file = self.file(f);
         let head = callee.head()?;
@@ -456,7 +475,7 @@ impl<'a> Attribution<'a> {
         }
         let scope = ctx.scope;
         let resolved = if dotted { None } else { self.resolve(f, head) };
-        let named = self.name_arg(scope, resolved, head, args);
+        let named = self.name_arg(scope, resolved, head, args, interner);
         // A method call is not an instantiation: `native.bind(name =
         // "ssl")` declares a `//external` alias, not a repository, and
         // following its `name` into the fixpoints would create a repository
@@ -469,7 +488,7 @@ impl<'a> Attribution<'a> {
         };
         if let NameArg::Literal(l) = &name {
             if names_a_repository(head) {
-                found.names.push((scope, l.clone()));
+                found.names.push((scope, *l));
             }
         }
         if let (NameArg::Forward, Some(d)) = (&name, scope) {
@@ -549,12 +568,13 @@ impl<'a> Attribution<'a> {
         callee: Option<Sym>,
         head: &str,
         args: &[Arg<'a>],
+        interner: &mut Interner,
     ) -> NameArg {
         let params = scope.map(|d| self.def(d).params.as_slice()).unwrap_or(&[]);
-        let classify = |a: &Arg<'a>| -> NameArg {
+        let mut classify = |a: &Arg<'a>| -> NameArg {
             match &a.kind {
                 ArgKind::Positional(e) | ArgKind::Keyword(_, e) => match &e.kind {
-                    ExprKind::Str(s) => NameArg::Literal(s.clone()),
+                    ExprKind::Str(s) => NameArg::Literal(interner.intern(s)),
                     ExprKind::Name(n) if params.iter().any(|p| p == n) => NameArg::Forward,
                     _ => NameArg::Dynamic,
                 },
@@ -703,7 +723,7 @@ impl<'a> Attribution<'a> {
             .named
             .iter()
             .filter(|(scope, _)| scope.map_or(true, |d| self.def(d).live))
-            .map(|(_, l)| l.clone())
+            .map(|(_, l)| self.interner.name(*l).to_string())
             .collect();
     }
 }

@@ -36,12 +36,15 @@
 //! of an occurrence, of a def, of a file and of a `.bzl`'s own row all go
 //! through them.
 
+mod repos;
 mod scan;
 mod solve;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::starlark::Module;
+
+pub(crate) use repos::{Interner, RepoId, Repos};
 
 /// An index into one of the id spaces. Each is its own type so that a def's
 /// number cannot be handed to a table of rules.
@@ -84,9 +87,6 @@ id!(
     CallId
 );
 
-/// A set of repository names.
-pub(crate) type Repos = BTreeSet<String>;
-
 /// A callable the closure defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Sym {
@@ -100,8 +100,8 @@ pub(crate) enum Sym {
 pub(crate) enum NameArg {
     /// No name argument at all: not an instantiation.
     Absent,
-    /// `name = "literal"`.
-    Literal(String),
+    /// `name = "literal"`, interned.
+    Literal(RepoId),
     /// `name = <a parameter of the enclosing def>`: a forwarding wrapper.
     Forward,
     /// A name this analysis cannot evaluate.
@@ -257,32 +257,46 @@ pub(crate) struct Attribution<'a> {
     named_defs: Vec<(FileId, Option<DefId>, String)>,
     /// Every literal `name =` with the def it was written in, before
     /// liveness decides which of them the universe keeps.
-    named: Vec<(Option<DefId>, String)>,
+    named: Vec<(Option<DefId>, RepoId)>,
+    /// Every repository name the closure mentions, by id. Built as the scan
+    /// meets literal names and grown by the seeds; the rules never see a
+    /// string.
+    interner: Interner,
     /// Literal `name =` values seen anywhere: the universe a fallback ranges
     /// over.
     pub(crate) literal_names: BTreeSet<String>,
 }
 
-/// What an occurrence is attributed to.
+/// What an occurrence is attributed to, as the rules hold it.
 #[derive(Clone, Debug)]
-pub(crate) struct Attributed {
-    pub(crate) repos: Repos,
+struct Answer {
+    repos: Repos,
     /// False when the answer *is* the file's fallback set — nothing was
     /// learned about this occurrence.
-    pub(crate) exact: bool,
+    exact: bool,
 }
 
-impl Attributed {
+impl Answer {
     fn exact(repos: Repos) -> Self {
-        Attributed { repos, exact: true }
+        Answer { repos, exact: true }
     }
 
     fn inexact(repos: Repos) -> Self {
-        Attributed {
+        Answer {
             repos,
             exact: false,
         }
     }
+}
+
+/// What an occurrence is attributed to, by name: the boundary where ids
+/// become strings again.
+#[derive(Clone, Debug)]
+pub(crate) struct Attributed {
+    pub(crate) repos: BTreeSet<String>,
+    /// False when the answer *is* the file's fallback set — nothing was
+    /// learned about this occurrence.
+    pub(crate) exact: bool,
 }
 
 impl<'a> Attribution<'a> {
@@ -312,6 +326,13 @@ impl<'a> Attribution<'a> {
 
     fn file_ids(&self) -> impl Iterator<Item = FileId> {
         (0..self.files.len()).map(FileId::new)
+    }
+
+    fn named(&self, a: Answer) -> Attributed {
+        Attributed {
+            repos: self.interner.names(&a.repos),
+            exact: a.exact,
+        }
     }
 
     /// The files read, as `(path, module)`, for the callers that walk the
@@ -355,12 +376,12 @@ impl<'a> Attribution<'a> {
     /// for it: [`Attribution::fallback`] when the file
     /// [`keeps_fallback`](Attribution::keeps_fallback), and nothing
     /// otherwise. `None` for a file this analysis never read.
-    pub(crate) fn fallback_for(&self, path: &str) -> Option<Repos> {
+    pub(crate) fn fallback_for(&self, path: &str) -> Option<BTreeSet<String>> {
         let f = *self.by_path.get(path)?;
         Some(if self.keeps_fallback(f) {
-            self.fallback(f)
+            self.interner.names(&self.file(f).fallback)
         } else {
-            Repos::new()
+            BTreeSet::new()
         })
     }
 
@@ -368,20 +389,20 @@ impl<'a> Attribution<'a> {
     /// what every use of the symbols it exports does.
     pub(crate) fn file_repos(&self, path: &str) -> Attributed {
         let Some(&f) = self.by_path.get(path) else {
-            return Attributed::inexact(Repos::new());
+            return self.named(Answer::inexact(Repos::new()));
         };
-        Attributed {
+        self.named(Answer {
             repos: self.file(f).set.clone(),
             exact: !self.file(f).module_dynamic,
-        }
+        })
     }
 
     /// The repositories an occurrence at byte `offset` of file `path` is
     /// attributed to.
     pub(crate) fn at(&self, path: &str, offset: usize) -> Attributed {
-        match self.by_path.get(path) {
+        self.named(match self.by_path.get(path) {
             Some(&f) => self.at_offset(f, offset),
-            None => Attributed::inexact(Repos::new()),
-        }
+            None => Answer::inexact(Repos::new()),
+        })
     }
 }
