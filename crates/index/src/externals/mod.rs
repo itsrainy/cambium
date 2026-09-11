@@ -43,6 +43,26 @@
 //! - **[`ModuleFacts`]** — the structured content of `MODULE.bazel`, so that a
 //!   run can diff base against head and name the repositories that moved.
 //!
+//! # How it is computed: lex, parse, facts, rules, inputs
+//!
+//! Every reader past the load scan works on one representation. A file is
+//! lexed into tokens with byte spans and block structure, parsed into a
+//! syntax tree by a parser whose failures are local to a statement
+//! (`crate::starlark`), read into typed *facts* — the defs, rules,
+//! extensions, calls, uses and literals of the closure, each with an id
+//! and each with the context it sits in — and the answer is derived from
+//! those facts by named *rules* run to a fixpoint (`crate::attribution`).
+//! [`build_repo_inputs`] is the last step: it asks the solved analysis,
+//! occurrence by occurrence, which repositories each main-repo label
+//! feeds, and writes [`RepoInputs`].
+//!
+//! A statement the parser cannot read is not dropped: it becomes an
+//! `Unparsed` node with its span, its string literals are still found off
+//! the tokens, and the scope it sits in — a def, or the file's module
+//! level — is marked as one that could not be read in full and takes the
+//! wide answer. `MODULE.bazel` records such a statement in
+//! [`ModuleFacts::unparsed`], which makes a diff that touched it global.
+//!
 //! # Attribution, and why it is conservative in the right direction
 //!
 //! A repository rule's implementation lives in a `.bzl`; the *instance* is
@@ -58,11 +78,11 @@
 //! repositories — `envoy_repo` among them, whose generated `compiler.bzl` is
 //! in eleven hundred package load closures. Every commit that touched that
 //! YAML then re-queried the whole repository. So attribution is per
-//! *occurrence*: the analysis in [`crate::attribution`] reads the closure's
-//! Starlark and asks, of each string literal, which repositories the code it
-//! sits in can create.
+//! *occurrence*: the analysis in `crate::attribution` reads the closure's
+//! syntax trees and asks, of each string literal, which repositories the
+//! code it sits in can create.
 //!
-//! Four rules, innermost first:
+//! The occurrence ladder, innermost first:
 //!
 //! 1. the nearest enclosing call with a literal `name =` — `pip_parse(name =
 //!    "base_pip3", requirements_lock = "@envoy//tools/base:requirements.txt")`
@@ -78,16 +98,21 @@
 //!    instantiate;
 //! 4. otherwise — a literal at module level — the file's own set, below.
 //!
-//! A `def` that instantiates nothing and implements no rule (apollo's
-//! `_find_cuda_config(repository_ctx)`, which only reads a file) has no answer
-//! of its own; it takes the union of what its call sites are attributed to, so
-//! a helper called from a repository rule's implementation belongs to that
-//! rule's repositories. A helper nothing in the closure calls keeps the
-//! fallback.
+//! Those are the rules `Instances` (what a callable can be asked to create),
+//! `Defines` (what a macro creates when called) and `Helper`: a `def` that
+//! instantiates nothing and implements no rule (apollo's
+//! `_find_cuda_config(repository_ctx)`, which only reads a file) has no
+//! answer of its own; it takes the union of what its call sites are
+//! attributed to, so a helper called from a repository rule's implementation
+//! belongs to that rule's repositories. A helper nothing in the closure calls
+//! keeps the fallback. And before any of them runs, `Live` decides which
+//! defs the workspace evaluation can reach at all: a BUILD-file macro that a
+//! load chain dragged into the closure is not one, and its labels are rule
+//! attributes the graph already carries, not repository inputs.
 //!
-//! The instantiation sets are two fixpoints over the closure's call graph, so
-//! a name that reaches a repository rule through three macros still lands on
-//! the right repository.
+//! The rules are fixpoints over the closure's call graph, so a name that
+//! reaches a repository rule through three macros still lands on the right
+//! repository.
 //!
 //! Over-attribution is safe (more repositories dirty, more targets reported,
 //! never fewer) and under-attribution is not, and every step above resolves an
@@ -102,14 +127,20 @@
 //!   fall back;
 //! - a rule whose instantiation is never seen, or a macro nothing calls, has
 //!   an empty answer, which is read as "nothing learned" and falls back;
-//! - a syntactic shape the reader cannot structure is simply not recorded, and
-//!   the file keeps its old answer.
+//! - a statement the parser cannot read makes its scope fall back, and its
+//!   literals are still occurrences.
 //!
-//! The fallback itself is a set, not the world: the repositories the main
-//! repository defines, plus every literal `name =` written anywhere in the
-//! closure. On a WORKSPACE-only repository the first half is empty and the
-//! second is the whole answer, which is what makes a `bazel/repositories.bzl`
-//! edit a named set rather than a global invalidation.
+//! There is one fallback, and one place that decides it: a file's fallback
+//! set is the repositories the main repository defines under the seeded
+//! subtree the file sits in, or, for a file under no seeded subtree, every
+//! repository the main repository defines plus every literal `name =`
+//! written anywhere in the closure. On a WORKSPACE-only repository the first
+//! half is empty and the second is the whole answer, which is what makes a
+//! `bazel/repositories.bzl` edit a named set rather than a global
+//! invalidation. Whether an *empty* derived answer means "nothing learned"
+//! and takes that fallback, or "nothing there" and stays empty, is decided
+//! once too: a file read in full, found to define nothing, and whose only
+//! fallback would be everything defines nothing (issue #9).
 //!
 //! # What a change to one workspace `.bzl` moves
 //!
@@ -150,12 +181,13 @@
 //!   mutable form the builder flattens and the reader restores.
 //! - `module_facts` — [`ModuleFacts`] and its parts, and [`ModuleChange`].
 //! - `module_parser` — [`scan_module`], the `MODULE.bazel` statement reader,
-//!   on top of [`crate::starlark`].
+//!   on the syntax tree of `crate::starlark`.
 //! - `module_diff` — [`diff_module`].
 //! - `path_maps` — [`scan_bzl_path_maps`]: `local_repository` and `symlink`
-//!   calls as [`PathMap`]s.
+//!   calls as [`PathMap`]s, read off the same tree.
 //! - `inputs` — [`main_repo_patterns`] and [`build_repo_inputs`], which ties
-//!   the module facts, the path maps and the attribution pass together.
+//!   the module facts, the path maps and the solved attribution
+//!   (`crate::attribution`) together.
 //! - `bazelrc` — [`Mode`], [`bzlmod_live`] and [`bazelrc_bzlmod`]: which
 //!   world Bazel reads in a tree that carries both, decided once.
 
