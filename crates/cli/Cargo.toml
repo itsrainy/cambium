@@ -28,3 +28,4 @@ toml_edit.workspace = true
 tempfile.workspace = true
 cambium-bazel.workspace = true
 cambium-synth.workspace = true
+cambium-testkit.workspace = true

@@ -11,6 +11,7 @@ members = [
     "crates/cli",
     "crates/bench",
     "crates/bench-cli",
+    "crates/testkit",
 ]
 
 [workspace.package]
@@ -29,6 +30,8 @@ cambium-classify = { path = "crates/classify" }
 cambium-engine = { path = "crates/engine" }
 cambium-synth = { path = "crates/synth" }
 cambium-bench = { path = "crates/bench" }
+# Test fixtures only: a dev-dependency of the crates whose `tests/` share them.
+cambium-testkit = { path = "crates/testkit" }
 
 anyhow = "1"
 thiserror = "2"
