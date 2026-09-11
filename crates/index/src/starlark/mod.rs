@@ -50,9 +50,6 @@
 //! [`Module::strings_in`] reads them off the tokens — so an unreadable
 //! statement can widen an answer and never narrow one.
 
-// The readers move onto the tree in the next commit.
-#![allow(dead_code, unused_imports)]
-
 pub(crate) mod ast;
 pub(crate) mod lexer;
 mod parser;

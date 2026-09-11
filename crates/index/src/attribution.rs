@@ -6,27 +6,30 @@
 //! reasoning; what follows is the shape of the analysis.
 //!
 //! One pass over every file in the workspace closure (`WORKSPACE*`,
-//! `MODULE.bazel`, and every `.bzl` they reach) collects, per file:
+//! `MODULE.bazel`, and every `.bzl` they reach) reads its
+//! [`crate::starlark::Module`] and collects, per file:
 //!
-//! - its top-level `def`s, with their parameter names and the token range of
-//!   the whole `def` statement (a top-level statement runs to the next token
-//!   in column zero, which is exactly the indentation rule Starlark uses);
+//! - its top-level `def`s, with their parameter names;
 //! - its `load()`s, alias-aware, so a symbol can be resolved to the file that
 //!   defines it;
 //! - its `X = repository_rule(implementation = _f, ...)` and
 //!   `E = module_extension(implementation = _g, ...)` assignments;
-//! - every call in it: the callee symbol, the argument spans, and how the
-//!   call names the repository it may create.
+//! - every call in it: the callee symbol, the def it is written in, the call
+//!   enclosing it, and how it names the repository it may create;
+//! - every string literal, with the same context, keyed by its byte offset,
+//!   which is how [`Attribution::at`] answers for one.
 //!
 //! Two fixpoints then run over the call graph: `instances`, the repository
 //! names a callable can be asked to create, and `defines`, the repository
 //! names a macro creates when called. Every unknown shape resolves to the
-//! file's fallback set, which is what the whole file used to get.
+//! file's fallback set, which is what the whole file used to get — and a
+//! statement the parser could not read makes the scope it sits in fall back
+//! outright.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
 
-use crate::loads::{lex, resolve_label, unescape, Lexed, Load, RepoMapping, Tok};
+use crate::loads::{resolve_label, Load, RepoMapping};
+use crate::starlark::{stmt_exprs, Arg, ArgKind, Expr, ExprKind, Module, ParamKind, Span, Stmt};
 use crate::vocabulary::{names_a_repository, KEYWORDS, PURE_BUILTINS};
 
 /// A callable the closure defines.
@@ -54,24 +57,24 @@ struct DefInfo {
     file: usize,
     name: String,
     params: Vec<String>,
-    /// Token range of the whole `def` statement, header included.
-    span: Range<usize>,
     /// Parameters this def forwards as some call's `name`.
     fwd: BTreeSet<String>,
     /// The rule / extension whose implementation this def is.
     role: Option<Sym>,
 }
 
-/// A `X = repository_rule(...)` or `E = module_extension(...)` binding. The
-/// token range of the statement lives on the file, in `decls`.
+/// A `X = repository_rule(...)` or `E = module_extension(...)` binding.
 struct RuleInfo {
     file: usize,
     name: String,
+    /// The `implementation =` argument, when it is a bare name.
+    implementation: Option<String>,
 }
 
 struct ExtInfo {
     file: usize,
     name: String,
+    implementation: Option<String>,
 }
 
 /// The fields of a call site the fixpoints read, detached from `self` so the
@@ -84,8 +87,8 @@ struct Call<'c> {
 
 struct CallSite {
     file: usize,
-    /// Token index of the call's `(`.
-    open: usize,
+    /// Byte offset of the call in its file.
+    offset: usize,
     /// The def the call is written in, if any.
     scope: Option<usize>,
     callee: Option<Sym>,
@@ -95,7 +98,15 @@ struct CallSite {
     /// The callee as written, for the name-based fallback of
     /// [`Attribution::liveness`] when it could not be resolved.
     head: String,
+    /// How the call names the repository it *instantiates*: `Absent` for a
+    /// method call, which instantiates nothing this analysis can see.
     name: NameArg,
+    /// The `name =` as written, method call or not: what a literal *beside*
+    /// it is attributed to. `native.new_local_repository(name =
+    /// "com_google_absl", build_file = "//third_party/absl:absl.BUILD")`
+    /// creates no instance the fixpoints can follow, but the label in it
+    /// still feeds `com_google_absl` and nothing else.
+    named: NameArg,
 }
 
 /// One place a file uses a symbol it imported.
@@ -105,28 +116,40 @@ struct CallSite {
 /// this use does.
 struct Use {
     file: usize,
-    tok: usize,
+    /// The byte offset of the use, an occurrence like any other.
+    offset: usize,
+    /// The name as written.
+    name: String,
+    /// The call this use is the callee of, when it is one.
+    call: Option<usize>,
     chain: Vec<usize>,
+}
+
+/// Where an occurrence sits: the def, the innermost enclosing call, and the
+/// rule or extension declaration, if any.
+#[derive(Clone, Copy, Debug)]
+struct Occ {
+    scope: Option<usize>,
+    call: Option<usize>,
+    decl: Option<Sym>,
 }
 
 /// One file of the workspace closure.
 struct FileScan<'a> {
     path: String,
-    text: &'a str,
-    toks: Vec<Lexed<'a>>,
+    module: Module<'a>,
     /// Alias -> (defining file path, original name).
     loads: BTreeMap<String, (String, String)>,
     /// Top-level names this file binds to a callable.
     syms: BTreeMap<String, Sym>,
     defs: Vec<usize>,
-    /// `(statement span, rule or extension)`, for attributing a literal that
-    /// sits inside the declaration itself — an `attrs = {...: attr.label(...)}`.
-    decls: Vec<(Range<usize>, Sym)>,
+    /// The rules and extensions declared here, for the file's own answer.
+    decls: Vec<Sym>,
     /// Whether any module-level (or otherwise unattributable) shape forces
     /// this file's module scope to the fallback set.
     module_dynamic: bool,
     fallback: BTreeSet<String>,
-    /// Whether [`FileInfo::fallback`] is the whole universe rather than the
+    /// Whether [`FileScan::fallback`] is the whole universe rather than the
     /// repositories of a seeded subtree the file sits under.
     wide: bool,
     /// Repositories `MODULE.bazel` says this file declares: the `use_repo`
@@ -134,10 +157,10 @@ struct FileScan<'a> {
     /// rule `use_repo_rule` names in it. Part of the file's own answer even
     /// when the declaration itself could not be read out of the text.
     seeded: BTreeSet<String>,
-    /// For each token, the index of the `(` of the call or bracket it sits
-    /// directly inside, or `usize::MAX`. Walking this chain is how an
-    /// occurrence finds the calls that enclose it.
-    parent: Vec<usize>,
+    /// Every string literal and every call, by byte offset, with its context.
+    occ: BTreeMap<usize, Occ>,
+    /// Defs whose body holds something the parser could not read.
+    unparsed_in: BTreeSet<usize>,
 }
 
 /// The whole workspace closure, analysed.
@@ -159,6 +182,8 @@ pub(crate) struct Attribution<'a> {
     calls: Vec<CallSite>,
     /// Every place a file uses a symbol it imported from another.
     uses: Vec<Use>,
+    /// Every def named as a value rather than called: `(file, scope, name)`.
+    named_defs: Vec<(usize, Option<usize>, String)>,
     /// For a helper def that instantiates nothing, what its callers do.
     helper: Vec<BTreeSet<String>>,
     /// Per file: everything a change to it can move. The fixpoint of
@@ -197,6 +222,27 @@ pub(crate) struct Attributed {
     pub(crate) exact: bool,
 }
 
+/// The context a walk over one file carries.
+#[derive(Clone, Copy)]
+struct Ctx {
+    scope: Option<usize>,
+    call: Option<usize>,
+    decl: Option<Sym>,
+}
+
+/// What one walk over a file found, before it is folded into the analysis.
+#[derive(Default)]
+struct Found {
+    calls: Vec<CallSite>,
+    names: Vec<(Option<usize>, String)>,
+    fwd: Vec<(usize, String)>,
+    uses: Vec<(usize, String, Option<usize>)>,
+    named_defs: Vec<(Option<usize>, String)>,
+    occ: BTreeMap<usize, Occ>,
+    module_dynamic: bool,
+    unparsed_in: BTreeSet<usize>,
+}
+
 impl<'a> Attribution<'a> {
     /// Reads the structure of every file. `texts` is `(path, text)`; the
     /// caller keeps the strings alive.
@@ -214,6 +260,7 @@ impl<'a> Attribution<'a> {
             dynamic: Vec::new(),
             calls: Vec::new(),
             uses: Vec::new(),
+            named_defs: Vec::new(),
             helper: Vec::new(),
             fileset: Vec::new(),
             refining: false,
@@ -225,8 +272,7 @@ impl<'a> Attribution<'a> {
             a.by_path.insert(path.clone(), i);
             a.files.push(FileScan {
                 path: path.clone(),
-                text,
-                toks: lex(text),
+                module: Module::parse(text),
                 loads: BTreeMap::new(),
                 syms: BTreeMap::new(),
                 defs: Vec::new(),
@@ -235,19 +281,15 @@ impl<'a> Attribution<'a> {
                 fallback: BTreeSet::new(),
                 wide: false,
                 seeded: BTreeSet::new(),
-                parent: Vec::new(),
+                occ: BTreeMap::new(),
+                unparsed_in: BTreeSet::new(),
             });
-        }
-        for f in &mut a.files {
-            f.parent = parents(&f.toks);
         }
         for i in 0..a.files.len() {
             a.declarations(i, m);
         }
         // Implementations, which need every file's symbols to resolve.
-        for i in 0..a.files.len() {
-            a.implementations(i);
-        }
+        a.implementations();
         // Twice: the first pass learns which parameters each def forwards as
         // a repository name, which the second pass needs to read a call's
         // positional first argument correctly.
@@ -255,18 +297,25 @@ impl<'a> Attribution<'a> {
             a.calls.clear();
             a.literal_names.clear();
             a.named.clear();
+            a.uses.clear();
+            a.named_defs.clear();
             for f in &mut a.files {
                 f.module_dynamic = false;
+                f.occ.clear();
+                f.unparsed_in.clear();
             }
             for i in 0..a.files.len() {
-                a.call_sites(i);
+                a.walk_file(i);
             }
-        }
-        for i in 0..a.files.len() {
-            a.collect_uses(i);
         }
         a.liveness();
         a
+    }
+
+    /// The files read, as `(path, module)`, for the callers that walk the
+    /// literals themselves.
+    pub(crate) fn modules(&self) -> impl Iterator<Item = (&str, &Module<'a>)> {
+        self.files.iter().map(|f| (f.path.as_str(), &f.module))
     }
 
     /// Computes [`Attribution::live`] and rebuilds the universe of literal
@@ -302,11 +351,9 @@ impl<'a> Attribution<'a> {
                         .map(Vec::as_slice)
                         .unwrap_or(&[])
                     {
-                        {
-                            match c.scope {
-                                Some(s) => edges[s].push(d),
-                                None => roots.push(d),
-                            }
+                        match c.scope {
+                            Some(s) => edges[s].push(d),
+                            None => roots.push(d),
                         }
                     }
                 }
@@ -315,46 +362,15 @@ impl<'a> Attribution<'a> {
         }
         // A def named as a value — `_maybe(_go_repo, ...)`, `implementation
         // = _f` on a declaration the scanner did not read — runs wherever the
-        // value is used, so it is live wherever it is named. The owning def
-        // of every token is computed once per file: asking `scope_of` per
-        // name token is tokens times defs, which on envoy's closure took the
-        // replay from a minute to many.
-        for f in 0..self.files.len() {
-            let toks = &self.files[f].toks;
-            let mut owner: Vec<Option<usize>> = vec![None; toks.len()];
-            for &d in &self.files[f].defs {
-                let span = &self.defs[d].span;
-                // Innermost wins: a nested def's span is shorter and is
-                // written after its parent in `defs`, so it overwrites.
-                for slot in &mut owner[span.start.min(toks.len())..span.end.min(toks.len())] {
-                    *slot = Some(d);
-                }
-                if span.start < toks.len() {
-                    owner[span.start] = None;
-                }
-            }
-            for i in 0..toks.len() {
-                let Tok::Name(h) = toks[i].tok else { continue };
-                if matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(b'(')))
-                    || matches!(
-                        i.checked_sub(1).map(|j| toks[j].tok),
-                        Some(Tok::Name("def"))
-                    )
-                    || matches!(
-                        i.checked_sub(1).map(|j| toks[j].tok),
-                        Some(Tok::Punct(b'.'))
-                    )
-                {
-                    continue;
-                }
-                let Some(Sym::Def(c)) = self.resolve(f, h) else {
-                    continue;
-                };
-                match owner[i] {
-                    Some(d) if d != c => edges[d].push(c),
-                    Some(_) => {}
-                    None => roots.push(c),
-                }
+        // value is used, so it is live wherever it is named.
+        for (f, scope, name) in &self.named_defs {
+            let Some(Sym::Def(c)) = self.resolve(*f, name) else {
+                continue;
+            };
+            match scope {
+                Some(d) if *d != c => edges[*d].push(c),
+                Some(_) => {}
+                None => roots.push(c),
             }
         }
         let mut stack = roots;
@@ -401,47 +417,6 @@ impl<'a> Attribution<'a> {
                 .any(|&d| self.is_live(d) && self.dynamic.get(d).copied().unwrap_or(false))
     }
 
-    /// Every use of an imported symbol in file `f`.
-    ///
-    /// This is what replaces propagating a loader's whole answer down its
-    /// `load()` edges. A `.bzl` can only reach a repository through code that
-    /// runs: its own definitions, or a symbol another file imported from it —
-    /// and the effect of *that* is bounded by where the symbol is used.
-    fn collect_uses(&mut self, f: usize) {
-        let mut out = Vec::new();
-        {
-            let file = &self.files[f];
-            for (i, t) in file.toks.iter().enumerate() {
-                let Tok::Name(n) = t.tok else { continue };
-                if !file.loads.contains_key(n) {
-                    continue;
-                }
-                // `x.n` is an attribute, and `n = ...` a keyword argument —
-                // which is also how the alias appears in the `load()` itself.
-                if matches!(
-                    i.checked_sub(1).map(|j| file.toks[j].tok),
-                    Some(Tok::Punct(b'.'))
-                ) {
-                    continue;
-                }
-                if matches!(file.toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
-                    && !matches!(file.toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'=')))
-                {
-                    continue;
-                }
-                let chain = self.origin_chain(f, n);
-                if !chain.is_empty() {
-                    out.push(Use {
-                        file: f,
-                        tok: i,
-                        chain,
-                    });
-                }
-            }
-        }
-        self.uses.extend(out);
-    }
-
     /// Every file a symbol written in `f` was resolved through.
     fn origin_chain(&self, f: usize, name: &str) -> Vec<usize> {
         let mut out = Vec::new();
@@ -467,7 +442,6 @@ impl<'a> Attribution<'a> {
     /// Top-level `def`s, `load`s and rule / extension assignments.
     fn declarations(&mut self, f: usize, m: &RepoMapping) {
         let file = &self.files[f];
-        let (text, toks) = (file.text, &file.toks);
         let pkg = crate::loads::owning_dir(&file.path);
         let mut loads = BTreeMap::new();
         let mut syms = BTreeMap::new();
@@ -477,82 +451,71 @@ impl<'a> Attribution<'a> {
         let mut new_rules: Vec<RuleInfo> = Vec::new();
         let mut new_exts: Vec<ExtInfo> = Vec::new();
 
-        for span in top_level_spans(toks) {
-            let t = &toks[span.clone()];
-            match (t.first().map(|x| x.tok), t.get(1).map(|x| x.tok)) {
+        for st in &file.module.stmts {
+            match st {
                 // `def name(params):`
-                (Some(Tok::Name("def")), Some(Tok::Name(name))) => {
-                    let Some(Tok::Open(b'(')) = t.get(2).map(|x| x.tok) else {
-                        continue;
-                    };
-                    let params = arg_spans(t, 2)
-                        .into_iter()
-                        .filter_map(|(k, r)| match k {
-                            Some(k) => Some(k),
-                            None => match t[r.clone()].first().map(|x| x.tok) {
-                                Some(Tok::Name(n)) => Some(n.to_string()),
-                                _ => None,
-                            },
-                        })
+                Stmt::Def(d) => {
+                    let params = d
+                        .params
+                        .iter()
+                        .filter(|p| p.kind == ParamKind::Normal)
+                        .map(|p| p.name.to_string())
                         .collect();
                     let id = self.defs.len() + new_defs.len();
-                    syms.insert(name.to_string(), Sym::Def(id));
+                    syms.insert(d.name.to_string(), Sym::Def(id));
                     defs.push(id);
                     new_defs.push(DefInfo {
                         file: f,
-                        name: name.to_string(),
+                        name: d.name.to_string(),
                         params,
-                        span: span.clone(),
                         fwd: BTreeSet::new(),
                         role: None,
                     });
                 }
                 // `X = repository_rule(...)` / `E = module_extension(...)`
-                (Some(Tok::Name(name)), Some(Tok::Punct(b'='))) => {
-                    let Some(Tok::Name(head)) = t.get(2).map(|x| x.tok) else {
+                Stmt::Assign(a) => {
+                    let (Some(name), ExprKind::Call { callee, args }) =
+                        (a.target.as_name(), &a.value.kind)
+                    else {
                         continue;
                     };
-                    if !matches!(t.get(3).map(|x| x.tok), Some(Tok::Open(b'('))) {
-                        continue;
-                    }
-                    match head {
-                        "repository_rule" => {
+                    let implementation = args
+                        .iter()
+                        .find(|x| x.keyword() == Some("implementation"))
+                        .and_then(|x| x.value().as_name())
+                        .map(str::to_string);
+                    match callee.as_name() {
+                        Some("repository_rule") => {
                             let id = self.rules.len() + new_rules.len();
                             syms.insert(name.to_string(), Sym::Rule(id));
-                            decls.push((span.clone(), Sym::Rule(id)));
+                            decls.push(Sym::Rule(id));
                             new_rules.push(RuleInfo {
                                 file: f,
                                 name: name.to_string(),
+                                implementation,
                             });
                         }
-                        "module_extension" => {
+                        Some("module_extension") => {
                             let id = self.exts.len() + new_exts.len();
                             syms.insert(name.to_string(), Sym::Ext(id));
-                            decls.push((span.clone(), Sym::Ext(id)));
+                            decls.push(Sym::Ext(id));
                             new_exts.push(ExtInfo {
                                 file: f,
                                 name: name.to_string(),
+                                implementation,
                             });
                         }
                         _ => {}
                     }
                 }
                 // `load("//pkg:f.bzl", "sym", alias = "sym")`
-                (Some(Tok::Name("load")), Some(Tok::Open(b'('))) => {
-                    let label = match t.get(2).map(|x| x.tok) {
-                        Some(Tok::Str(s, e)) => unescape(&text[s..e]),
-                        _ => continue,
-                    };
-                    let Some(Load::Main(p)) = resolve_label(&label, &pkg, m) else {
+                Stmt::Load(l) => {
+                    let Some(label) = l.label() else { continue };
+                    let Some(Load::Main(p)) = resolve_label(label, &pkg, m) else {
                         continue;
                     };
-                    for (k, r) in arg_spans(t, 1).into_iter().skip(1) {
-                        let Some(Tok::Str(s, e)) = t[r].first().map(|x| x.tok) else {
-                            continue;
-                        };
-                        let orig = unescape(&text[s..e]);
-                        let alias = k.unwrap_or_else(|| orig.clone());
-                        loads.insert(alias, (p.clone(), orig));
+                    for (alias, orig) in l.items() {
+                        loads.insert(alias.to_string(), (p.clone(), orig.to_string()));
                     }
                 }
                 _ => {}
@@ -570,148 +533,337 @@ impl<'a> Attribution<'a> {
 
     /// `implementation = _f` on a rule or extension declaration, which makes
     /// `_f`'s body part of that rule's or extension's definition.
-    fn implementations(&mut self, f: usize) {
-        let decls = self.files[f].decls.clone();
-        for (span, sym) in decls {
-            let toks = &self.files[f].toks;
-            let Some(imp) = arg_spans(&toks[span.clone()], 3)
-                .into_iter()
-                .find_map(|(k, r)| (k.as_deref() == Some("implementation")).then_some(r))
-            else {
-                continue;
-            };
-            let sub = &toks[span.clone()][imp];
-            let [one] = sub else { continue };
-            let Tok::Name(n) = one.tok else { continue };
-            if let Some(Sym::Def(d)) = self.resolve(f, n) {
-                self.defs[d].role = Some(sym);
+    fn implementations(&mut self) {
+        let mut roles: Vec<(usize, Sym)> = Vec::new();
+        for (r, rule) in self.rules.iter().enumerate() {
+            if let Some(n) = &rule.implementation {
+                if let Some(Sym::Def(d)) = self.resolve(rule.file, n) {
+                    roles.push((d, Sym::Rule(r)));
+                }
             }
+        }
+        for (e, ext) in self.exts.iter().enumerate() {
+            if let Some(n) = &ext.implementation {
+                if let Some(Sym::Def(d)) = self.resolve(ext.file, n) {
+                    roles.push((d, Sym::Ext(e)));
+                }
+            }
+        }
+        for (d, role) in roles {
+            self.defs[d].role = Some(role);
         }
     }
 
-    /// Every call in a file, with the def it is written in and how it names
-    /// the repository it may create.
-    fn call_sites(&mut self, f: usize) {
-        let mut found: Vec<CallSite> = Vec::new();
-        let mut names: Vec<(Option<usize>, String)> = Vec::new();
-        let mut fwd: Vec<(usize, String)> = Vec::new();
-        let mut module_dynamic = false;
+    /// One walk over a file: every call, literal, use and named def, with
+    /// the context it sits in.
+    fn walk_file(&mut self, f: usize) {
+        let mut found = Found::default();
         {
             let file = &self.files[f];
-            let toks = &file.toks;
-            for i in 0..toks.len() {
-                if !matches!(toks[i].tok, Tok::Open(b'(')) {
-                    continue;
-                }
-                // A call is `Name(`, and not `x.Name(` — a method call has no
-                // symbol this analysis can resolve, but it may still carry a
-                // literal `name =`, which is what `native.bind(name = ...)`
-                // and `maybe(rule, name = ...)` are read for.
-                let Some(Tok::Name(head)) = i.checked_sub(1).map(|j| toks[j].tok) else {
-                    continue;
+            // Top-level defs in source order are the ids `declarations`
+            // handed out in source order, and likewise the declarations.
+            let mut def_ids = file.defs.iter().copied();
+            let mut decl_syms = file.decls.iter().copied();
+            for st in &file.module.stmts {
+                let mut ctx = Ctx {
+                    scope: None,
+                    call: None,
+                    decl: None,
                 };
-                // `return (a or b)`, `if (x)`, `not (y)`: a keyword before a
-                // parenthesised expression is not a call, and reading it as
-                // one — as a symbol the closure cannot resolve — made every
-                // helper that wraps a condition in brackets unattributable.
-                if KEYWORDS.contains(&head) {
-                    continue;
-                }
-                // `def f(x)` is a declaration, not a call to `f`. Read as one
-                // it would give every def a call site, which is what decides
-                // whether a helper inherits its callers' repositories or keeps
-                // the fallback.
-                if matches!(
-                    i.checked_sub(2).map(|j| toks[j].tok),
-                    Some(Tok::Name("def"))
-                ) {
-                    continue;
-                }
-                let dotted = matches!(
-                    i.checked_sub(2).map(|j| toks[j].tok),
-                    Some(Tok::Punct(b'.'))
-                );
-                let scope = self.scope_of(f, i);
-                let callee = if dotted { None } else { self.resolve(f, head) };
-                let spans = arg_spans(toks, i);
-                // A method call is not an instantiation: `native.bind(name =
-                // "ssl")` declares a `//external` alias, not a repository, and
-                // reading its `name` would attribute the labels beside it to a
-                // repository that does not exist. Its literals fall through to
-                // the scope, which is the wide answer.
-                let name = if dotted {
-                    NameArg::Absent
-                } else {
-                    self.name_arg(scope, callee, head, toks, file.text, &spans)
-                };
-                if let NameArg::Literal(l) = &name {
-                    if names_a_repository(head) {
-                        names.push((scope, l.clone()));
+                match st {
+                    Stmt::Def(_) => ctx.scope = def_ids.next(),
+                    Stmt::Assign(a)
+                        if a.target.as_name().is_some()
+                            && matches!(
+                                &a.value.kind,
+                                ExprKind::Call { callee, .. }
+                                    if matches!(
+                                        callee.as_name(),
+                                        Some("repository_rule" | "module_extension")
+                                    )
+                            ) =>
+                    {
+                        ctx.decl = decl_syms.next();
                     }
+                    _ => {}
                 }
-                if let (NameArg::Forward, Some(d)) = (&name, scope) {
-                    if let Some(p) = self.forwarded_param(scope, toks, &spans) {
-                        fwd.push((d, p));
-                    }
-                }
-                let opaque = !dotted
-                    && callee.is_none()
-                    && !PURE_BUILTINS.contains(&head)
-                    && matches!(name, NameArg::Absent)
-                    && !spans.is_empty();
-                if opaque && scope.is_none() {
-                    module_dynamic = true;
-                    tracing::debug!(
-                        file = %file.path,
-                        call = head,
-                        "a module-level call this analysis cannot read; the file keeps the wide answer"
-                    );
-                }
-                found.push(CallSite {
-                    file: f,
-                    open: i,
-                    scope,
-                    callee,
-                    opaque,
-                    head: head.to_string(),
-                    name,
-                });
+                self.walk_stmt(f, st, ctx, &mut found);
             }
         }
-        for (d, p) in fwd {
+        for (d, p) in found.fwd {
             self.defs[d].fwd.insert(p);
         }
         self.literal_names
-            .extend(names.iter().map(|(_, l)| l.clone()));
-        self.named.extend(names);
-        self.files[f].module_dynamic |= module_dynamic;
-        self.calls.extend(found);
+            .extend(found.names.iter().map(|(_, l)| l.clone()));
+        self.named.extend(found.names);
+        for (offset, name, call) in found.uses {
+            let chain = self.origin_chain(f, &name);
+            if !chain.is_empty() {
+                self.uses.push(Use {
+                    file: f,
+                    offset,
+                    name,
+                    call,
+                    chain,
+                });
+            }
+        }
+        self.named_defs
+            .extend(found.named_defs.into_iter().map(|(s, n)| (f, s, n)));
+        let file = &mut self.files[f];
+        file.module_dynamic |= found.module_dynamic;
+        file.occ = found.occ;
+        file.unparsed_in = found.unparsed_in;
+        self.calls.extend(found.calls);
     }
 
-    /// The def a token index falls inside, if any.
-    fn scope_of(&self, f: usize, tok: usize) -> Option<usize> {
-        self.files[f]
-            .defs
-            .iter()
-            .copied()
-            .find(|d| self.defs[*d].span.contains(&tok) && self.defs[*d].span.start != tok)
+    fn walk_stmt(&self, f: usize, st: &Stmt<'a>, ctx: Ctx, found: &mut Found) {
+        match st {
+            Stmt::Unparsed(span) => self.unreadable(f, span, ctx, found),
+            Stmt::Assign(a) => {
+                // A bare name on the left of `=` is bound, not used; it
+                // still names a def, for liveness, when it is one.
+                if let Some(n) = a.target.as_name() {
+                    found.named_defs.push((ctx.scope, n.to_string()));
+                    self.walk_expr(f, &a.value, ctx, found);
+                } else {
+                    self.walk_expr(f, &a.target, ctx, found);
+                    self.walk_expr(f, &a.value, ctx, found);
+                }
+            }
+            Stmt::Load(l) => {
+                // The label and symbol names are literals, not uses.
+                for a in &l.args {
+                    self.walk_expr(f, a.value(), ctx, found);
+                }
+            }
+            _ => {
+                for e in stmt_exprs(st) {
+                    self.walk_expr(f, e, ctx, found);
+                }
+            }
+        }
+        match st {
+            Stmt::Def(d) => {
+                for s in &d.body {
+                    self.walk_stmt(f, s, ctx, found);
+                }
+            }
+            Stmt::If(i) => {
+                for (_, body) in &i.branches {
+                    for s in body {
+                        self.walk_stmt(f, s, ctx, found);
+                    }
+                }
+            }
+            Stmt::For(l) => {
+                for s in &l.body {
+                    self.walk_stmt(f, s, ctx, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Something the parser could not read: its literals are still
+    /// occurrences, and the scope it sits in can no longer be read in full.
+    fn unreadable(&self, f: usize, span: &Span, ctx: Ctx, found: &mut Found) {
+        let occ = Occ {
+            scope: ctx.scope,
+            call: ctx.call,
+            decl: ctx.decl,
+        };
+        for (s, _) in self.files[f].module.strings_in(span) {
+            found.occ.insert(s.start, occ);
+        }
+        match ctx.scope {
+            Some(d) => {
+                found.unparsed_in.insert(d);
+            }
+            None => found.module_dynamic = true,
+        }
+    }
+
+    fn walk_expr(&self, f: usize, e: &Expr<'a>, ctx: Ctx, found: &mut Found) {
+        let file = &self.files[f];
+        let occ = Occ {
+            scope: ctx.scope,
+            call: ctx.call,
+            decl: ctx.decl,
+        };
+        match &e.kind {
+            ExprKind::Str(_) => {
+                found.occ.insert(e.span.start, occ);
+            }
+            ExprKind::Unparsed => self.unreadable(f, &e.span, ctx, found),
+            ExprKind::Name(n) => {
+                found.named_defs.push((ctx.scope, n.to_string()));
+                if file.loads.contains_key(*n) {
+                    found.occ.insert(e.span.start, occ);
+                    found.uses.push((e.span.start, n.to_string(), None));
+                }
+            }
+            ExprKind::Call { callee, args } => {
+                let call = self.call_site(f, callee, args, ctx, found);
+                found.occ.insert(e.span.start, occ);
+                match &callee.kind {
+                    // The callee is a use of its name, as a call; and a
+                    // keyword is never a call, so `if (x)` is not one.
+                    ExprKind::Name(n) => {
+                        if let Some(c) = call {
+                            if file.loads.contains_key(*n) {
+                                found.uses.push((callee.span.start, n.to_string(), Some(c)));
+                            }
+                        } else if !KEYWORDS.contains(n) {
+                            found.named_defs.push((ctx.scope, n.to_string()));
+                        }
+                    }
+                    ExprKind::Attr { object, .. } => self.walk_expr(f, object, ctx, found),
+                    _ => self.walk_expr(f, callee, ctx, found),
+                }
+                let inner = Ctx {
+                    call: call.or(ctx.call),
+                    ..ctx
+                };
+                for a in args {
+                    self.walk_expr(f, a.value(), inner, found);
+                }
+            }
+            ExprKind::Attr { object, .. } => self.walk_expr(f, object, ctx, found),
+            ExprKind::Index { object, index } => {
+                self.walk_expr(f, object, ctx, found);
+                self.walk_expr(f, index, ctx, found);
+            }
+            ExprKind::Slice { object, parts } => {
+                self.walk_expr(f, object, ctx, found);
+                for p in parts.iter().flatten() {
+                    self.walk_expr(f, p, ctx, found);
+                }
+            }
+            ExprKind::List(items) | ExprKind::Tuple(items) => {
+                for x in items {
+                    self.walk_expr(f, x, ctx, found);
+                }
+            }
+            ExprKind::Dict(items) => {
+                for (k, v) in items {
+                    self.walk_expr(f, k, ctx, found);
+                    self.walk_expr(f, v, ctx, found);
+                }
+            }
+            ExprKind::BinOp { lhs, rhs, .. } => {
+                self.walk_expr(f, lhs, ctx, found);
+                self.walk_expr(f, rhs, ctx, found);
+            }
+            ExprKind::UnOp { operand, .. } => self.walk_expr(f, operand, ctx, found),
+            ExprKind::Cond { then, test, orelse } => {
+                self.walk_expr(f, then, ctx, found);
+                self.walk_expr(f, test, ctx, found);
+                self.walk_expr(f, orelse, ctx, found);
+            }
+            ExprKind::Lambda { params, body } => {
+                for p in params {
+                    if let Some(d) = &p.default {
+                        self.walk_expr(f, d, ctx, found);
+                    }
+                }
+                self.walk_expr(f, body, ctx, found);
+            }
+            ExprKind::Comprehension { element, clauses } => {
+                self.walk_expr(f, element, ctx, found);
+                for c in clauses {
+                    match c {
+                        crate::starlark::Clause::For { target, iter } => {
+                            self.walk_expr(f, target, ctx, found);
+                            self.walk_expr(f, iter, ctx, found);
+                        }
+                        crate::starlark::Clause::If(x) => self.walk_expr(f, x, ctx, found),
+                    }
+                }
+            }
+            ExprKind::Int | ExprKind::Float => {}
+        }
+    }
+
+    /// Records one call, and returns its index when it is a call site this
+    /// analysis reads: `f(...)` or `x.f(...)`, `f` not a keyword.
+    fn call_site(
+        &self,
+        f: usize,
+        callee: &Expr<'a>,
+        args: &[Arg<'a>],
+        ctx: Ctx,
+        found: &mut Found,
+    ) -> Option<usize> {
+        let file = &self.files[f];
+        let head = callee.head()?;
+        let dotted = matches!(callee.kind, ExprKind::Attr { .. });
+        // `return (a or b)`, `if (x)`, `not (y)`: a keyword before a
+        // parenthesised expression is not a call.
+        if !dotted && KEYWORDS.contains(&head) {
+            return None;
+        }
+        let scope = ctx.scope;
+        let resolved = if dotted { None } else { self.resolve(f, head) };
+        // A method call is not an instantiation: `native.bind(name =
+        // "ssl")` declares a `//external` alias, not a repository, and
+        // reading its `name` would attribute the labels beside it to a
+        // repository that does not exist. Its literals fall through to
+        // the scope, which is the wide answer.
+        let named = self.name_arg(scope, resolved, head, args);
+        let name = if dotted {
+            NameArg::Absent
+        } else {
+            named.clone()
+        };
+        if let NameArg::Literal(l) = &name {
+            if names_a_repository(head) {
+                found.names.push((scope, l.clone()));
+            }
+        }
+        if let (NameArg::Forward, Some(d)) = (&name, scope) {
+            if let Some(p) = self.forwarded_param(scope, args) {
+                found.fwd.push((d, p));
+            }
+        }
+        let opaque = !dotted
+            && resolved.is_none()
+            && !PURE_BUILTINS.contains(&head)
+            && matches!(name, NameArg::Absent)
+            && !args.is_empty();
+        if opaque && scope.is_none() {
+            found.module_dynamic = true;
+            tracing::debug!(
+                file = %file.path,
+                call = head,
+                "a module-level call this analysis cannot read; the file keeps the wide answer"
+            );
+        }
+        let id = self.calls.len() + found.calls.len();
+        found.calls.push(CallSite {
+            file: f,
+            offset: callee.span.start,
+            scope,
+            callee: resolved,
+            opaque,
+            head: head.to_string(),
+            name,
+            named,
+        });
+        Some(id)
     }
 
     /// The parameter a forwarding call passes as its name.
-    fn forwarded_param(
-        &self,
-        scope: Option<usize>,
-        toks: &[Lexed<'_>],
-        spans: &[(Option<String>, Range<usize>)],
-    ) -> Option<String> {
+    fn forwarded_param(&self, scope: Option<usize>, args: &[Arg<'a>]) -> Option<String> {
         let d = scope?;
         let params = &self.defs[d].params;
-        for (k, r) in spans {
-            if k.is_some() && k.as_deref() != Some("name") {
+        for a in args {
+            let k = a.keyword();
+            if k.is_some() && k != Some("name") {
                 continue;
             }
-            if let [one] = &toks[r.clone()] {
-                if let Tok::Name(n) = one.tok {
+            if matches!(a.kind, ArgKind::Positional(_) | ArgKind::Keyword(..)) {
+                if let Some(n) = a.value().as_name() {
                     if params.iter().any(|p| p == n) {
                         return Some(n.to_string());
                     }
@@ -730,21 +882,20 @@ impl<'a> Attribution<'a> {
         scope: Option<usize>,
         callee: Option<Sym>,
         head: &str,
-        toks: &[Lexed<'_>],
-        text: &str,
-        spans: &[(Option<String>, Range<usize>)],
+        args: &[Arg<'a>],
     ) -> NameArg {
         let params = scope
             .map(|d| self.defs[d].params.clone())
             .unwrap_or_default();
-        let classify = |r: Range<usize>| -> NameArg {
-            match &toks[r] {
-                [one] => match one.tok {
-                    Tok::Str(s, e) => NameArg::Literal(unescape(&text[s..e])),
-                    Tok::Name(n) if params.iter().any(|p| p == n) => NameArg::Forward,
+        let classify = |a: &Arg<'a>| -> NameArg {
+            match &a.kind {
+                ArgKind::Positional(e) | ArgKind::Keyword(_, e) => match &e.kind {
+                    ExprKind::Str(s) => NameArg::Literal(s.clone()),
+                    ExprKind::Name(n) if params.iter().any(|p| p == n) => NameArg::Forward,
                     _ => NameArg::Dynamic,
                 },
-                _ => NameArg::Dynamic,
+                // `*args` / `**kwargs`: whatever is in there.
+                ArgKind::Star(_) | ArgKind::StarStar(_) => NameArg::Dynamic,
             }
         };
         // The keyword the callee reads as a repository name: `name`, or a
@@ -754,14 +905,11 @@ impl<'a> Attribution<'a> {
             keys.extend(self.defs[d].fwd.iter().cloned());
         }
         for k in &keys {
-            if let Some((_, r)) = spans
-                .iter()
-                .find(|(key, _)| key.as_deref() == Some(k.as_str()))
-            {
-                return classify(r.clone());
+            if let Some(a) = args.iter().find(|a| a.keyword() == Some(k.as_str())) {
+                return classify(a);
             }
         }
-        let Some((_, first)) = spans.iter().find(|(k, _)| k.is_none()) else {
+        let Some(first) = args.iter().find(|a| a.keyword().is_none()) else {
             return NameArg::Absent;
         };
         // A positional first argument is the name when the callee is a def
@@ -773,7 +921,7 @@ impl<'a> Attribution<'a> {
             Some(Sym::Def(d)) => {
                 let p0 = self.defs[d].params.first().cloned().unwrap_or_default();
                 if p0 == "name" || self.defs[d].fwd.contains(&p0) {
-                    return classify(first.clone());
+                    return classify(first);
                 }
                 NameArg::Absent
             }
@@ -782,7 +930,7 @@ impl<'a> Attribution<'a> {
             // turn apollo's `clean_dep(dep)` into a wrapper whose every call
             // site declares a label-shaped "repository".
             _ if PURE_BUILTINS.contains(&head) => NameArg::Absent,
-            _ => match classify(first.clone()) {
+            _ => match classify(first) {
                 NameArg::Forward => NameArg::Forward,
                 _ => NameArg::Absent,
             },
@@ -868,7 +1016,8 @@ impl<'a> Attribution<'a> {
         }
 
         // A call site's scope is dynamic when it names a repository this
-        // analysis cannot evaluate, or calls something it cannot resolve.
+        // analysis cannot evaluate, or calls something it cannot resolve —
+        // or holds a statement the parser could not read at all.
         let dynamics: Vec<(usize, Option<usize>, String, bool)> = self
             .calls
             .iter()
@@ -893,6 +1042,13 @@ impl<'a> Attribution<'a> {
                     self.dynamic[d] = true
                 }
                 None => self.files[file].module_dynamic = true,
+            }
+        }
+        for f in 0..self.files.len() {
+            for &d in &self.files[f].unparsed_in {
+                if self.is_live(d) {
+                    self.dynamic[d] = true;
+                }
             }
         }
 
@@ -1042,7 +1198,7 @@ impl<'a> Attribution<'a> {
                     if c.callee != Some(Sym::Def(d)) {
                         continue;
                     }
-                    let a = self.at_tok(c.file, c.open);
+                    let a = self.at_offset(c.file, c.offset);
                     repos.extend(if a.exact {
                         a.repos
                     } else {
@@ -1098,35 +1254,21 @@ impl<'a> Attribution<'a> {
     /// into an expression — is attributed like any other occurrence, and falls
     /// back to the using file's own set when nothing was learned.
     fn use_value(&self, u: &Use) -> BTreeSet<String> {
-        let file = &self.files[u.file];
-        let name = match file.toks[u.tok].tok {
-            Tok::Name(n) => n,
-            _ => return BTreeSet::new(),
-        };
-        if matches!(
-            file.toks.get(u.tok + 1).map(|t| t.tok),
-            Some(Tok::Open(b'('))
-        ) {
+        if let Some(c) = u.call {
             let mut out = BTreeSet::new();
-            if let Some(sym) = self.resolve(u.file, name) {
+            if let Some(sym) = self.resolve(u.file, &u.name) {
                 out.extend(self.value_of(sym));
             } else {
                 // A symbol the closure re-exports from elsewhere: nothing is
                 // known about what calling it does.
                 return self.set_of(u.file);
             }
-            let open = u.tok + 1;
-            let spans = arg_spans(&file.toks, open);
-            let scope = self.scope_of(u.file, open);
-            let callee = self.resolve(u.file, name);
-            if let NameArg::Literal(l) =
-                self.name_arg(scope, callee, name, &file.toks, file.text, &spans)
-            {
-                out.insert(l);
+            if let NameArg::Literal(l) = &self.calls[c].name {
+                out.insert(l.clone());
             }
             return out;
         }
-        let a = self.at_tok(u.file, u.tok);
+        let a = self.at_offset(u.file, u.offset);
         if a.exact {
             a.repos
         } else {
@@ -1257,25 +1399,33 @@ impl<'a> Attribution<'a> {
         Attributed { repos, exact }
     }
 
-    /// The repositories an occurrence at token index `tok` of file `path` is
+    /// The repositories an occurrence at byte `offset` of file `path` is
     /// attributed to.
-    pub(crate) fn at(&self, path: &str, tok: usize) -> Attributed {
+    pub(crate) fn at(&self, path: &str, offset: usize) -> Attributed {
         let Some(&f) = self.by_path.get(path) else {
             return Attributed {
                 repos: BTreeSet::new(),
                 exact: false,
             };
         };
-        self.at_tok(f, tok)
+        self.at_offset(f, offset)
     }
 
     /// [`Attribution::at`], by file index.
-    fn at_tok(&self, f: usize, tok: usize) -> Attributed {
+    fn at_offset(&self, f: usize, offset: usize) -> Attributed {
         let file = &self.files[f];
+        // An offset the walk never saw is answered like the module level:
+        // the wide answer, nothing learned.
+        let Some(occ) = file.occ.get(&offset) else {
+            return Attributed {
+                repos: self.set_of(f),
+                exact: false,
+            };
+        };
         // Inside a def nothing in the workspace runs: a BUILD-file macro's
         // rule call names a target, not a repository, and its labels are
         // that target's attributes.
-        if let Some(d) = self.scope_of(f, tok) {
+        if let Some(d) = occ.scope {
             if !self.is_live(d) {
                 return Attributed {
                     repos: BTreeSet::new(),
@@ -1284,37 +1434,20 @@ impl<'a> Attribution<'a> {
             }
         }
         // The innermost enclosing call that names a repository outright.
-        for open in self.enclosing_calls(f, tok) {
-            if !matches!(file.toks[open].tok, Tok::Open(b'(')) {
-                continue;
-            }
-            let spans = arg_spans(&file.toks, open);
-            let scope = self.scope_of(f, open);
-            let head = match open.checked_sub(1).map(|j| file.toks[j].tok) {
-                Some(Tok::Name(h)) => h,
-                _ => continue,
-            };
-            let dotted = matches!(
-                open.checked_sub(2).map(|j| file.toks[j].tok),
-                Some(Tok::Punct(b'.'))
-            );
-            let callee = if dotted { None } else { self.resolve(f, head) };
-            if let NameArg::Literal(l) =
-                self.name_arg(scope, callee, head, &file.toks, file.text, &spans)
-            {
+        let mut call = occ.call;
+        while let Some(c) = call {
+            if let NameArg::Literal(l) = &self.calls[c].named {
                 return Attributed {
-                    repos: [l].into_iter().collect(),
+                    repos: [l.clone()].into_iter().collect(),
                     exact: true,
                 };
             }
+            call = self.parent_call(c);
         }
         // Inside a `repository_rule(...)` / `module_extension(...)`
         // declaration: an attribute default the rule itself resolves.
-        for (span, sym) in &file.decls {
-            if !span.contains(&tok) {
-                continue;
-            }
-            let repos = self.rule_repos(*sym);
+        if let Some(sym) = occ.decl {
+            let repos = self.rule_repos(sym);
             return if repos.is_empty() {
                 Attributed {
                     repos: file.fallback.clone(),
@@ -1324,7 +1457,7 @@ impl<'a> Attribution<'a> {
                 Attributed { repos, exact: true }
             };
         }
-        match self.scope_of(f, tok) {
+        match occ.scope {
             Some(d) => self.def_repos(d),
             // Module level. A constant, a docstring, an `attr.label` outside
             // any declaration: it reaches a repository only through this
@@ -1337,6 +1470,15 @@ impl<'a> Attribution<'a> {
                 exact: false,
             },
         }
+    }
+
+    /// The call a call site is written inside, if any.
+    fn parent_call(&self, c: usize) -> Option<usize> {
+        let call = &self.calls[c];
+        self.files[call.file]
+            .occ
+            .get(&call.offset)
+            .and_then(|o| o.call)
     }
 
     /// Everything a change to file `f` can move, with the universe as the
@@ -1383,7 +1525,7 @@ impl<'a> Attribution<'a> {
                 repos.extend(self.raw_def_repos(d));
             }
         }
-        for (_, sym) in &file.decls {
+        for sym in &file.decls {
             repos.extend(self.rule_repos(*sym));
         }
         // Module-level calls with a literal name, and anything module-level
@@ -1410,110 +1552,4 @@ impl<'a> Attribution<'a> {
         }
         repos
     }
-
-    /// The token indices of the brackets enclosing a token, innermost first.
-    fn enclosing_calls(&self, f: usize, tok: usize) -> Vec<usize> {
-        let parent = &self.files[f].parent;
-        let mut out = Vec::new();
-        let mut i = match parent.get(tok) {
-            Some(&p) if p != usize::MAX => p,
-            _ => return out,
-        };
-        loop {
-            out.push(i);
-            match parent.get(i) {
-                Some(&p) if p != usize::MAX => i = p,
-                _ => return out,
-            }
-        }
-    }
-}
-
-/// For each token, the `(` of the bracket it sits directly inside.
-fn parents(toks: &[Lexed<'_>]) -> Vec<usize> {
-    let mut out = vec![usize::MAX; toks.len()];
-    let mut stack: Vec<usize> = Vec::new();
-    for (i, t) in toks.iter().enumerate() {
-        match t.tok {
-            Tok::Open(_) => {
-                out[i] = stack.last().copied().unwrap_or(usize::MAX);
-                stack.push(i);
-            }
-            Tok::Close => {
-                stack.pop();
-                out[i] = stack.last().copied().unwrap_or(usize::MAX);
-            }
-            _ => out[i] = stack.last().copied().unwrap_or(usize::MAX),
-        }
-    }
-    out
-}
-
-/// The token ranges of a file's top-level statements: every token in column
-/// zero at bracket depth zero starts one, which is exactly Starlark's own
-/// rule, so a `def`'s range runs to the end of its indented body.
-pub(crate) fn top_level_spans(toks: &[Lexed<'_>]) -> Vec<Range<usize>> {
-    let mut starts = Vec::new();
-    let mut depth = 0i32;
-    for (i, t) in toks.iter().enumerate() {
-        if t.col0 && depth == 0 {
-            starts.push(i);
-        }
-        match t.tok {
-            Tok::Open(_) => depth += 1,
-            Tok::Close => depth -= 1,
-            _ => {}
-        }
-    }
-    starts.push(toks.len());
-    starts
-        .windows(2)
-        .filter(|w| w[1] > w[0])
-        .map(|w| w[0]..w[1])
-        .collect()
-}
-
-/// The `(keyword, token range)` of every argument of the call whose `(` is at
-/// `open`.
-pub(crate) fn arg_spans(
-    toks: &[Lexed<'_>],
-    open: usize,
-) -> Vec<(Option<String>, std::ops::Range<usize>)> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = open + 1;
-    let mut key: Option<String> = None;
-    let mut i = open;
-    while i < toks.len() {
-        match toks[i].tok {
-            Tok::Open(_) => depth += 1,
-            Tok::Close => {
-                depth -= 1;
-                if depth == 0 {
-                    if i > start {
-                        out.push((key.take(), start..i));
-                    }
-                    break;
-                }
-            }
-            Tok::Punct(b',') if depth == 1 => {
-                if i > start {
-                    out.push((key.take(), start..i));
-                }
-                start = i + 1;
-            }
-            Tok::Name(n)
-                if depth == 1
-                    && i == start
-                    && matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Punct(b'=')))
-                    && !matches!(toks.get(i + 2).map(|t| t.tok), Some(Tok::Punct(b'='))) =>
-            {
-                key = Some(n.to_string());
-                start = i + 2;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    out
 }

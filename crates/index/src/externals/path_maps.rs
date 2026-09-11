@@ -6,8 +6,8 @@
 //! simply not recorded, and the repository keeps the wide answer.
 
 use crate::label::Label;
-use crate::loads::{lex, unescape, Lexed, RepoMapping, Tok};
-use crate::starlark_old::{arg_spans, parse_args};
+use crate::loads::RepoMapping;
+use crate::starlark::{stmt_exprs, walk_stmts, Arg, ArgKind, Expr, ExprKind, Module};
 use crate::vocabulary::{is_local_repo_rule, PATHY_NAMES};
 
 use super::pattern::PathMap;
@@ -31,87 +31,109 @@ pub struct BzlPathMaps {
     /// `repository_ctx.symlink(<main-repo path or label>, "<dest>")`: the call
     /// says nothing about which repository it builds, so these are attributed
     /// from the position of the call, which is inside the implementation of
-    /// the rule that makes the mapping true. The token index of the call's
-    /// `(` comes back alongside so the caller can ask for that attribution.
+    /// the rule that makes the mapping true. The byte offset of the call in
+    /// the file comes back alongside so the caller can ask for that
+    /// attribution.
     pub symlinks: Vec<(usize, PathMap)>,
 }
 
 /// Reads the path mappings out of one workspace-closure `.bzl`.
 pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
-    let toks = lex(text);
+    scan_path_maps(&Module::parse(text), m)
+}
+
+/// [`scan_bzl_path_maps`] on a file already parsed.
+pub(crate) fn scan_path_maps(module: &Module<'_>, m: &RepoMapping) -> BzlPathMaps {
     let mut out = BzlPathMaps::default();
-    for i in 0..toks.len() {
-        let Tok::Name(name) = toks[i].tok else {
-            continue;
-        };
-        if !matches!(toks.get(i + 1).map(|t| t.tok), Some(Tok::Open(b'('))) {
-            continue;
+    walk_stmts(&module.stmts, &mut |st| {
+        for e in stmt_exprs(st) {
+            e.walk(&mut |x| {
+                let ExprKind::Call { callee, args } = &x.kind else {
+                    return;
+                };
+                match &callee.kind {
+                    ExprKind::Name(name) if is_local_repo_rule(name) => {
+                        let args = module.args(args);
+                        if let (Some(n), Some(d)) =
+                            (args.first("name"), args.first("path").and_then(local_dir))
+                        {
+                            out.named.push((n.to_string(), PathMap::exhaustive_dir(d)));
+                        }
+                    }
+                    // `x.symlink(...)`, on any receiver: only a
+                    // `repository_ctx` has one.
+                    ExprKind::Attr {
+                        name: "symlink", ..
+                    } => {
+                        let (Some(src), Some(dst)) =
+                            (pick(args, "target", 0), pick(args, "link_name", 1))
+                        else {
+                            return;
+                        };
+                        let (Some(src), Some(dst)) =
+                            (only_literal(src, PATHY_NAMES), only_literal(dst, &[]))
+                        else {
+                            return;
+                        };
+                        if let Some(pm) = symlink_map(&src, &dst, m) {
+                            out.symlinks.push((x.span.start, pm));
+                        }
+                    }
+                    _ => {}
+                }
+            });
         }
-        if is_local_repo_rule(name) {
-            let args = parse_args(text, &toks, i + 1);
-            if let (Some(n), Some(d)) = (args.first("name"), args.first("path").and_then(local_dir))
-            {
-                out.named.push((n.to_string(), PathMap::exhaustive_dir(d)));
-            }
-            continue;
-        }
-        // `x.symlink(...)`, on any receiver: only a `repository_ctx` has one.
-        if name != "symlink"
-            || !matches!(
-                toks.get(i.wrapping_sub(1)).map(|t| t.tok),
-                Some(Tok::Punct(b'.'))
-            )
-        {
-            continue;
-        }
-        let spans = arg_spans(&toks, i + 1);
-        let pick = |kw: &str, pos: usize| -> Option<std::ops::Range<usize>> {
-            spans
-                .iter()
-                .find(|(k, _)| k.as_deref() == Some(kw))
-                .or_else(|| spans.iter().filter(|(k, _)| k.is_none()).nth(pos))
-                .map(|(_, r)| r.clone())
-        };
-        let (Some(src), Some(dst)) = (pick("target", 0), pick("link_name", 1)) else {
-            continue;
-        };
-        let (Some(src), Some(dst)) = (
-            only_literal(text, &toks, src, PATHY_NAMES),
-            only_literal(text, &toks, dst, &[]),
-        ) else {
-            continue;
-        };
-        if let Some(pm) = symlink_map(&src, &dst, m) {
-            out.symlinks.push((i + 1, pm));
-        }
-    }
+    });
     out
 }
 
+/// The argument passed as keyword `kw`, or else the `pos`th positional one.
+fn pick<'s, 'a>(args: &'s [Arg<'a>], kw: &str, pos: usize) -> Option<&'s Expr<'a>> {
+    args.iter()
+        .find(|a| a.keyword() == Some(kw))
+        .or_else(|| {
+            args.iter()
+                .filter(|a| matches!(a.kind, ArgKind::Positional(_)))
+                .nth(pos)
+        })
+        .map(Arg::value)
+}
+
 /// The single string literal of an argument that is *nothing but* that
-/// literal, optionally wrapped in calls whose names are all in `allowed`.
-fn only_literal(
-    text: &str,
-    toks: &[Lexed<'_>],
-    span: std::ops::Range<usize>,
-    allowed: &[&str],
-) -> Option<String> {
-    let mut lit = None;
-    for t in &toks[span] {
-        match t.tok {
-            Tok::Str(a, b) => {
-                if lit.is_some() {
+/// literal, optionally wrapped in calls and attribute accesses whose names
+/// are all in `allowed`.
+fn only_literal(e: &Expr<'_>, allowed: &[&str]) -> Option<String> {
+    match &e.kind {
+        ExprKind::Str(s) => Some(s.clone()),
+        ExprKind::Name(n) if allowed.contains(n) => None,
+        ExprKind::Attr { object, name } if allowed.contains(name) => only_literal(object, allowed),
+        ExprKind::Call { callee, args } => {
+            let head = callee.head()?;
+            if !allowed.contains(&head) {
+                return None;
+            }
+            // The callee's own receiver chain must be allowed names too.
+            if let ExprKind::Attr { object, .. } = &callee.kind {
+                if !only_names(object, allowed) {
                     return None;
                 }
-                lit = Some(unescape(&text[a..b]));
             }
-            Tok::Name(n) if allowed.contains(&n) => {}
-            Tok::Open(_) | Tok::Close => {}
-            Tok::Punct(b'.') => {}
-            _ => return None,
+            let [one] = args.as_slice() else {
+                return None;
+            };
+            only_literal(one.value(), allowed)
         }
+        _ => None,
     }
-    lit
+}
+
+/// Whether an expression is nothing but names from `allowed`, joined by `.`.
+fn only_names(e: &Expr<'_>, allowed: &[&str]) -> bool {
+    match &e.kind {
+        ExprKind::Name(n) => allowed.contains(n),
+        ExprKind::Attr { object, name } => allowed.contains(name) && only_names(object, allowed),
+        _ => false,
+    }
 }
 
 /// One `symlink(source, destination)` as a path mapping, when both ends are

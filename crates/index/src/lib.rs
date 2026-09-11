@@ -29,7 +29,6 @@ pub mod lockfile;
 pub mod overlay;
 pub mod space;
 mod starlark;
-mod starlark_old;
 pub mod strtab;
 #[cfg(test)]
 mod testutil;
