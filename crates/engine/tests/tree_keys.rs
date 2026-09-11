@@ -4,11 +4,9 @@
 //! Real git, no Bazel: the index itself is hand-built, and what is under test
 //! is which key a commit resolves to.
 
-mod common;
-
 use cambium_engine::{Config, Engine};
 use cambium_index::{format, IndexBuilder, IndexData, IndexFile, PackageUpdate, TargetRow};
-use common::{commit, git, git_repo, synthetic_engine};
+use cambium_testkit::{commit_all, git, init_repo, synthetic_engine, write};
 
 fn index_for(commit: &str, config_hash: [u8; 32]) -> IndexData {
     index_in_lineage(commit, [3u8; 16], config_hash)
@@ -39,9 +37,9 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    git_repo(&root);
-    common::write(&root, "MODULE.bazel", "");
-    common::write(&root, "lib/a.cc", "one");
+    init_repo(&root);
+    write(&root, "MODULE.bazel", "");
+    write(&root, "lib/a.cc", "one");
 
     let mut cfg = Config::default();
     cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
@@ -79,7 +77,7 @@ impl Fixture {
 #[test]
 fn keys_are_lineage_then_tree_with_a_commit_pointer() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     let tree = f.engine.repo.tree_of(&a).unwrap();
     assert_ne!(tree, a);
 
@@ -106,12 +104,12 @@ fn keys_are_lineage_then_tree_with_a_commit_pointer() {
 #[test]
 fn commits_with_identical_trees_share_one_index() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     f.publish(&a);
 
     // A different sha, the same tree: an amended message, a rebase onto the
     // same parent, an empty commit.
-    let b = commit(&f.root, "one, again");
+    let b = commit_all(&f.root, "one, again");
     assert_ne!(a, b);
     assert_eq!(
         f.engine.repo.tree_of(&a).unwrap(),
@@ -132,10 +130,10 @@ fn commits_with_identical_trees_share_one_index() {
     // And a branch rebased onto a different parent, but with the same content
     // as `a`, hits too — the parent is not part of the tree.
     git(&f.root, &["checkout", "-q", "-b", "other", &a]);
-    let c = commit(&f.root, "an unrelated empty commit");
+    let c = commit_all(&f.root, "an unrelated empty commit");
     git(&f.root, &["checkout", "-q", "-b", "rebased", &c]);
     std::fs::write(f.root.join("lib/a.cc"), "one").unwrap();
-    let d = commit(&f.root, "same content, different history");
+    let d = commit_all(&f.root, "same content, different history");
     assert_eq!(
         f.engine.repo.tree_of(&d).unwrap(),
         f.engine.repo.tree_of(&a).unwrap()
@@ -156,18 +154,18 @@ fn commits_with_identical_trees_share_one_index() {
 #[test]
 fn a_squash_merge_hits_the_pre_merge_tree() {
     let f = fixture();
-    let base = commit(&f.root, "base");
+    let base = commit_all(&f.root, "base");
 
     git(&f.root, &["checkout", "-q", "-b", "pr", &base]);
     std::fs::write(f.root.join("lib/a.cc"), "two").unwrap();
-    commit(&f.root, "pr 1");
+    commit_all(&f.root, "pr 1");
     std::fs::write(f.root.join("lib/b.cc"), "new").unwrap();
-    let tip = commit(&f.root, "pr 2");
+    let tip = commit_all(&f.root, "pr 2");
     f.publish(&tip);
 
     git(&f.root, &["checkout", "-q", "main"]);
     git(&f.root, &["merge", "-q", "--squash", "pr"]);
-    let squashed = commit(&f.root, "squash: pr");
+    let squashed = commit_all(&f.root, "squash: pr");
     assert_ne!(squashed, tip);
     assert_eq!(
         f.engine.repo.tree_of(&squashed).unwrap(),
@@ -190,7 +188,7 @@ fn a_squash_merge_hits_the_pre_merge_tree() {
 #[test]
 fn a_sha_git_cannot_resolve_follows_the_pointer() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     f.publish(&a);
 
     // An engine over an empty directory: `rev-parse` fails, and the sha is
@@ -217,7 +215,7 @@ fn a_sha_git_cannot_resolve_follows_the_pointer() {
 #[test]
 fn a_stale_lineage_never_wins_over_a_compatible_one() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     let good = f.engine.cfg.hash();
     let mut stale = good;
     stale[0] ^= 0xff;
@@ -245,7 +243,7 @@ fn a_stale_lineage_never_wins_over_a_compatible_one() {
 #[test]
 fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     let names = f.publish(&a);
     let store = f.engine.store.as_ref().unwrap();
     let dir = match &f.engine.cfg.baseline.store {
@@ -277,7 +275,7 @@ fn a_blob_in_an_unreadable_format_is_skipped_not_fatal() {
 #[test]
 fn a_blob_that_will_not_decompress_is_skipped_not_fatal() {
     let f = fixture();
-    let a = commit(&f.root, "one");
+    let a = commit_all(&f.root, "one");
     let names = f.publish(&a);
     let dir = match &f.engine.cfg.baseline.store {
         cambium_engine::config::StoreConfig::Dir { path } => path.clone(),

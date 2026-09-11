@@ -14,16 +14,15 @@
 //! Real git (the engine reads both sides of the rc file with `git show`), rows
 //! and Starlark from a querier, and a Bazel binary that does not exist.
 
-mod common;
-
 use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{FixedText, WorkspaceText};
-use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
-use cambium_index::{FileText, PackageUpdate, TargetRow};
-use common::{commit, git_repo, write};
+use cambium_engine::{AffectedRequest, Config, Engine};
+use cambium_index::{PackageUpdate, TargetRow};
+use cambium_testkit::{
+    commit_all, init_repo, scratch, synthetic_engine, write, Files, Scanning, TempDir,
+};
 
 const MODULE: &str = "module(name = \"envoy\", version = \"1\")\n";
 
@@ -33,14 +32,6 @@ const DEFS: &str = "def library(**kwargs):\n    pass\n";
 const DEFS_WITH_TRANSITION: &str = "def _impl(settings, attr):\n    return settings\n\
      crypto_transition = transition(\n    implementation = _impl,\n\
      \x20   inputs = [\"@envoy//bazel:crypto\"],\n    outputs = [],\n)\n";
-
-struct Files(BTreeMap<String, String>);
-
-impl FileText for Files {
-    fn text(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
-    }
-}
 
 fn files(defs: &str) -> Files {
     let mut m = BTreeMap::new();
@@ -100,42 +91,26 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["bazel", "lib", "app", "q"];
 
-struct Scanning(Files);
+const REPO_MAPPING: &str = "{\"\":\"\",\"envoy\":\"\",\"quiche\":\"quiche+\"}";
 
-impl PackageQuerier for Scanning {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn load_source(&self) -> Option<&dyn FileText> {
-        Some(&self.0)
-    }
-
-    fn repo_mapping(&self) -> cambium_index::RepoMapping {
-        cambium_index::RepoMapping::from_dump("{\"\":\"\",\"envoy\":\"\",\"quiche\":\"quiche+\"}")
-    }
+fn scanning(defs: &str) -> Scanning {
+    Scanning::new(PACKAGES, rows)
+        .with_files(files(defs))
+        .with_repo_mapping(REPO_MAPPING)
 }
 
 /// A repository whose `.bazelrc` says `base_rc` and then `head_rc`, with the
 /// engine over it and the two shas.
-fn fixture(base_rc: &str, head_rc: &str) -> (tempfile::TempDir, Engine, String, String) {
-    let dir = tempfile::tempdir().unwrap();
+fn fixture(base_rc: &str, head_rc: &str) -> (TempDir, Engine, String, String) {
+    let dir = scratch();
     let root = dir.path().to_path_buf();
-    git_repo(&root);
+    init_repo(&root);
     write(&root, "MODULE.bazel", MODULE);
     write(&root, ".bazelrc", base_rc);
-    let base = commit(&root, "base");
+    let base = commit_all(&root, "base");
     write(&root, ".bazelrc", head_rc);
-    let head = commit(&root, "head");
-    let engine = Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(root.clone()),
-        cambium_bazel::Bazel::at(root, Some("/nonexistent/bazel")),
-    );
+    let head = commit_all(&root, "head");
+    let engine = synthetic_engine(&root, Config::default());
     (dir, engine, base, head)
 }
 
@@ -154,7 +129,7 @@ fn texts(base: &str, head: &str) -> FixedText {
 fn run(base_rc: &str, head_rc: &str, defs: &str) -> cambium_engine::AffectedReport {
     let (_d, engine, base, head) = fixture(base_rc, head_rc);
     let index = engine
-        .full_build_with(&base, &Scanning(files(defs)))
+        .full_build_with(&base, &scanning(defs))
         .unwrap();
     let req = AffectedRequest {
         materialize: true,
@@ -168,7 +143,7 @@ fn run(base_rc: &str, head_rc: &str, defs: &str) -> cambium_engine::AffectedRepo
         .compute_with_texts(
             index.view(),
             &changes,
-            &Scanning(files(defs)),
+            &scanning(defs),
             &req,
             &t as &dyn WorkspaceText,
         )

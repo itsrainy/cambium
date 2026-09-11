@@ -4,26 +4,15 @@
 //!
 //! The rows come from the synthetic source, so none of this needs Bazel.
 
-use cambium_engine::{AffectedRequest, Code, Config, DirectReason, Engine, SynthQuerier};
+use cambium_engine::{AffectedRequest, Code, DirectReason, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, Mutation};
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
+use cambium_testkit::{engine, req};
 
 fn request() -> AffectedRequest {
     AffectedRequest {
         explain: true,
-        include_manual: true,
         materialize: true,
-        no_full_build: true,
-        ..AffectedRequest::new("base", "head")
+        ..req()
     }
 }
 

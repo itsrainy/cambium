@@ -17,8 +17,9 @@ use std::collections::BTreeMap;
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{FixedText, WorkspaceText};
 use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, Config, Engine, EngineError, PackageQuerier};
+use cambium_engine::{AffectedRequest, EngineError, PackageQuerier};
 use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
+use cambium_testkit::{base, engine, req, Files, Scanning};
 
 /// `mod` is `api/`, by `local_path_override`; `opaque` is defined by an
 /// extension whose `.bzl` names `//conf:settings.yml` as an input, and no
@@ -32,14 +33,6 @@ const MODULE_BASE: &str = "module(name = \"demo\", version = \"1\")\n\
      use_repo(gen, \"opaque\")\n\
      load(\"//bazel:vendored.bzl\", \"vendored\")\n\
      vendored()\n";
-
-struct Files(BTreeMap<String, String>);
-
-impl FileText for Files {
-    fn text(&self, path: &str) -> Option<String> {
-        self.0.get(path).cloned()
-    }
-}
 
 fn files() -> Files {
     let mut m = BTreeMap::new();
@@ -117,54 +110,12 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["app", "lib", "conf", "names", "notes"];
 
-struct Scanning(Files);
+const REPO_MAPPING: &str = "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\",\"vend\":\"vend+\"}";
 
-impl PackageQuerier for Scanning {
-    fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn universe(&self) -> Result<Rows, EngineError> {
-        Ok(PACKAGES.iter().map(|p| rows(p)).collect::<Vec<_>>().into())
-    }
-
-    fn load_source(&self) -> Option<&dyn FileText> {
-        Some(&self.0)
-    }
-
-    fn repo_mapping(&self) -> cambium_index::RepoMapping {
-        cambium_index::RepoMapping::from_dump(
-            "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\",\"vend\":\"vend+\"}",
-        )
-    }
-}
-
-fn engine() -> Engine {
-    let dir = std::env::temp_dir().join("cambium-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    Engine::with_parts(
-        Config::default(),
-        cambium_diff::Repo::new(dir.clone()),
-        cambium_bazel::Bazel::at(dir, Some("/nonexistent/bazel")),
-    )
-}
-
-fn req() -> AffectedRequest {
-    AffectedRequest {
-        base: "base".into(),
-        head: "head".into(),
-        include_manual: true,
-        explain: false,
-        no_full_build: true,
-        materialize: false,
-        publish_base: false,
-        max_depth: None,
-        allow_partial: false,
-    }
-}
-
-fn base() -> IndexData {
-    engine().full_build_with("c0", &Scanning(files())).unwrap()
+fn scanning() -> Scanning {
+    Scanning::new(PACKAGES, rows)
+        .with_files(files())
+        .with_repo_mapping(REPO_MAPPING)
 }
 
 fn texts(base_module: &str, head_module: &str) -> FixedText {
@@ -190,14 +141,14 @@ fn run(
         .map(|p| Change::new(Status::Modified, *p))
         .collect();
     engine()
-        .compute_with_texts(index.view(), &changes, &Scanning(files()), &req(), texts)
+        .compute_with_texts(index.view(), &changes, &scanning(), &req(), texts)
         .unwrap()
         .report
 }
 
 #[test]
 fn the_index_records_where_a_local_path_override_lands() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let v = index.view();
     let mod_id = (0..v.num_repos())
         .find(|&r| v.repo_name(r) == "mod")
@@ -220,7 +171,7 @@ fn the_index_records_where_a_local_path_override_lands() {
 
 #[test]
 fn an_input_edit_under_a_mapped_repository_reaches_only_its_label_consumers() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["api/envoy/config/v3/x.proto"],
@@ -239,7 +190,7 @@ fn an_input_edit_under_a_mapped_repository_reaches_only_its_label_consumers() {
 
 #[test]
 fn an_input_edit_that_is_the_loaded_bzl_still_dirties_its_packages() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["api/bazel/defs.bzl"],
@@ -256,7 +207,7 @@ fn an_input_edit_that_is_the_loaded_bzl_still_dirties_its_packages() {
 
 #[test]
 fn a_module_version_bump_still_dirties_the_loading_packages() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"mod\", version = \"1.0\")",
         "bazel_dep(name = \"mod\", version = \"2.0\")",
@@ -275,7 +226,7 @@ fn a_module_version_bump_still_dirties_the_loading_packages() {
 /// A version bump *and* an input edit in one commit: the bump keeps rule (2).
 #[test]
 fn a_bump_beats_an_input_edit_in_the_same_commit() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let head = MODULE_BASE.replace(
         "bazel_dep(name = \"mod\", version = \"1.0\")",
         "bazel_dep(name = \"mod\", version = \"2.0\")",
@@ -298,7 +249,7 @@ fn a_bump_beats_an_input_edit_in_the_same_commit() {
 /// read keeps the whole-closure answer.
 #[test]
 fn a_repository_with_no_derivable_mapping_keeps_the_old_behaviour() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["conf/settings.yml"],
@@ -330,7 +281,7 @@ fn a_repository_with_no_derivable_mapping_keeps_the_old_behaviour() {
 /// re-queried.
 #[test]
 fn a_path_named_only_by_a_generated_target_reaches_only_label_consumers() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["notes/README.md"],
@@ -358,7 +309,7 @@ fn a_path_named_only_by_a_generated_target_reaches_only_label_consumers() {
 /// for that repository.
 #[test]
 fn an_input_the_rule_reads_beats_a_target_only_path_in_the_same_commit() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["conf/settings.yml", "notes/README.md"],
@@ -382,7 +333,7 @@ fn spliced_over_nothing(cold: &IndexData) -> IndexData {
         .compute_with_texts(
             cold.view(),
             &[Change::new(Status::Modified, "docs/notes.md")],
-            &Scanning(files()),
+            &scanning(),
             &AffectedRequest {
                 materialize: true,
                 ..req()
@@ -406,7 +357,7 @@ fn spliced_over_nothing(cold: &IndexData) -> IndexData {
 /// and every package that loads a `.bzl` from the repository is re-queried.
 #[test]
 fn a_splice_carries_the_externals_side_tables_a_cold_build_wrote() {
-    let cold = base();
+    let (_e, cold) = base(&scanning());
     let spliced = spliced_over_nothing(&cold);
     let (c, s) = (cold.view(), spliced.view());
     assert_eq!(s.num_repos(), c.num_repos(), "repositories");
@@ -448,7 +399,7 @@ fn a_splice_carries_the_externals_side_tables_a_cold_build_wrote() {
 /// The consequence, end to end: the sparing survives a splice.
 #[test]
 fn an_input_edit_is_still_spared_against_a_spliced_base() {
-    let cold = base();
+    let (_e, cold) = base(&scanning());
     let spliced = spliced_over_nothing(&cold);
     let r = run(
         &spliced,
@@ -469,7 +420,7 @@ fn an_input_edit_is_still_spared_against_a_spliced_base() {
 /// path kept the wide answer.
 #[test]
 fn an_input_edit_outside_an_exhaustive_mapping_does_not_re_query() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let v = index.view();
     let vend = (0..v.num_repos())
         .find(|&r| v.repo_name(r) == "vend")
@@ -494,7 +445,7 @@ fn an_input_edit_outside_an_exhaustive_mapping_does_not_re_query() {
 /// closure loads out of the repository, still fires rule (2).
 #[test]
 fn an_input_edit_inside_an_exhaustive_mapping_still_re_queries() {
-    let index = base();
+    let (_e, index) = base(&scanning());
     let r = run(
         &index,
         &["vendored/defs.bzl"],
@@ -517,7 +468,7 @@ fn an_input_edit_inside_an_exhaustive_mapping_still_re_queries() {
 fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
     use cambium_engine::externals::{analyse, reach};
     use std::collections::BTreeSet;
-    let index = base();
+    let (_e, index) = base(&scanning());
     let v = index.view();
 
     let change = |p: &str| vec![Change::new(Status::Modified, p)];
@@ -589,11 +540,11 @@ fn a_package_bazel_could_not_load_keeps_no_load_closure() {
             .map(|&p| v.package_name(p).to_string())
             .collect()
     };
-    let base = base();
+    let (_e, base) = base(&scanning());
     assert_eq!(consumers_of_defs(base.view()), vec!["app".to_string()]);
 
     let e = engine();
-    let q = AppFails(Scanning(files()));
+    let q = AppFails(scanning());
     let req = AffectedRequest {
         materialize: true,
         ..req()
