@@ -61,8 +61,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::externals::{parse_args, render_all, render_stmt, statements};
 use crate::loads::{lex, Lexed, Tok};
+use crate::starlark::{parse_args, render_all, render_stmt, statements};
 
 /// What a `WORKSPACE` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
