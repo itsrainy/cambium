@@ -19,12 +19,12 @@ size, which do not fit on a laptop.
   will stay that way; only the words in this repository were swept. The
   instance carries both `cambium=bench` and the old tag value in the finder's
   filter.
-- The SG allows SSH from Rainy's current IP only. When it changes, `aws ec2
+- The SG allows SSH from one IP, the current one. When it changes, `aws ec2
   revoke-security-group-ingress` the old CIDR and
   `authorize-security-group-ingress` the new one.
 - `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
   private: `sync` tars the working tree over ssh and runs
-  `tools/ec2/finish-bootstrap.sh` there, which rebuilds cambi, bazel-diff-rust
+  `tools/ec2/finish-bootstrap.sh` there, which rebuilds both cambium binaries, bazel-diff-rust
   and tango (`~/finish-bootstrap.log` ends with `BOOTSTRAP DONE`). Every
   hard-coded value in the two scripts is a variable at the top with the
   box's default; see the table below.
@@ -37,9 +37,10 @@ size, which do not fit on a laptop.
 - **Build both binaries.** The harness is `cambium-bench` and it measures
   cambium by running `cambi`, so a run needs both: `cargo build --release -p
   cambium-cli -p cambium-bench-cli`. `tools/bench/run-published.sh` and
-  `precheck.sh` do it and export `CAMBI` for the harness; a hand-run
-  `cambium-bench` needs `--cambi <path>`, `$CAMBI`, or a `cambi` on `PATH`,
-  and says so at once rather than an hour in.
+  `precheck.sh` do it and export `CAMBI` (the `cambi` under measurement) and
+  `CAMBIUM_BENCH` (the harness itself), each overridable in the environment;
+  a hand-run `cambium-bench` needs `--cambi <path>`, `$CAMBI`, or a `cambi` on
+  `PATH`, and says so at once rather than an hour in.
 - **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` runs
   `cambium-bench pull-results` per subject — the index at the pin, the
   recorded results, `bases/*.bin`, `heads/*.bin`, and the diff of every change
