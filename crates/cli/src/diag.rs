@@ -59,7 +59,7 @@ impl Renderer {
 /// ANSI, when colour is on: bold yellow for a `warning[CODE]` header, bold red
 /// for an `error[CODE]` one, and the message in bold. The location and the help
 /// line stay plain — a diagnostic is read, not decorated.
-fn render_human(d: &Diagnostic, color: bool) -> String {
+pub fn render_human(d: &Diagnostic, color: bool) -> String {
     let (bold, reset, tint) = if color {
         (
             "\x1b[1m",

@@ -28,8 +28,9 @@ pub struct Args {
     /// Include targets tagged `manual`.
     #[arg(long)]
     pub include_manual: bool,
-    /// For each affected target, show the shortest path back to the change.
-    #[arg(long)]
+    /// Deprecated: `cambi explain` is the verb. Kept for one release, hidden
+    /// from help, and warned about by `compat`.
+    #[arg(long, hide = true)]
     pub explain: bool,
     /// Fail instead of falling back to a cold full build.
     #[arg(long)]
@@ -57,21 +58,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     // rather than that there is no workspace.
     check_usage(&args)?;
     let engine = ctx.engine()?;
-    let (base, head) = resolve_range(&engine, &args)?;
-    let req = AffectedRequest {
-        base,
-        head,
-        include_manual: args.include_manual,
-        explain: args.explain,
-        // Only materialise a head index when the caller asked for the file;
-        // otherwise the run walks a delta overlay and never builds one.
-        materialize: args.out.is_some(),
-        no_full_build: args.no_full_build,
-        publish_base: args.publish_base,
-        // `--publish-base` follows the config's `baseline.publish_partial`.
-        allow_partial: false,
-        max_depth: args.max_depth,
-    };
+    let req = request(&engine, &args, args.explain, args.out.is_some())?;
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
     // Under --format json the diagnostics are already in the document; every
@@ -151,7 +138,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 /// stay for the scripts that use them, but giving both a range and a flag is
 /// not a deprecation to warn about: there is no reading of `cambi affected
 /// a..b --base c` that is what someone meant.
-fn check_usage(args: &Args) -> Result<()> {
+pub fn check_usage(args: &Args) -> Result<()> {
     let Some(range) = &args.range else {
         return Ok(());
     };
@@ -176,7 +163,7 @@ fn check_usage(args: &Args) -> Result<()> {
 
 /// The two revisions this run compares: the range, the old flags, or — with
 /// neither — the merge base of the default branch with HEAD.
-fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(String, String)> {
+pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(String, String)> {
     if let Some(range) = &args.range {
         return Ok(match range.split_once("..") {
             Some((base, "")) => (base.to_string(), "HEAD".to_string()),
@@ -198,6 +185,35 @@ fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(String
         ))
     })?;
     Ok((base, head))
+}
+
+/// The request both `affected` and `explain` run.
+///
+/// One construction for the two verbs: `explain` is the same computation with
+/// the explanations on, so anything that changes what a run means — a new
+/// flag, a different default — has to change it for both or for neither.
+pub fn request(
+    engine: &cambium_engine::Engine,
+    args: &Args,
+    explain: bool,
+    materialize: bool,
+) -> Result<AffectedRequest> {
+    let (base, head) = resolve_range(engine, args)?;
+    Ok(AffectedRequest {
+        base,
+        head,
+        include_manual: args.include_manual,
+        explain,
+        // Only materialise a head index when someone needs one: the caller
+        // asked for the file, or `explain` has a label to look up. Otherwise
+        // the run walks a delta overlay and never builds one.
+        materialize,
+        no_full_build: args.no_full_build,
+        publish_base: args.publish_base,
+        // `--publish-base` follows the config's `baseline.publish_partial`.
+        allow_partial: false,
+        max_depth: args.max_depth,
+    })
 }
 
 /// The report, as the one document or as the single `result` event.

@@ -107,6 +107,14 @@ pub fn rewrite(mut argv: Vec<String>) -> Rewritten {
             Some((i, "inspect")) => rewrite_inspect(&mut argv, verb, i, &mut notes),
             _ => {}
         },
+        // `--explain` on `affected` is the verb `cambi explain`. The flag
+        // still works and still behaves exactly as it did; it is hidden from
+        // help and says what to type instead.
+        "affected" => {
+            if argv.iter().any(|t| t == "--explain") {
+                notes.push(deprecated("--explain on affected is now cambi explain"));
+            }
+        }
         // Bare `cambi config` printed the configuration; that is `config show`.
         "config" if sub.is_none() => {
             argv.push("show".into());
@@ -227,6 +235,22 @@ mod tests {
         let (argv, notes) = go(&["--log", "debug", "baseline", "list"]);
         assert_eq!(argv, ["--log", "debug", "index", "list"]);
         assert_eq!(notes, ["cambi baseline list is now cambi index list"]);
+    }
+
+    #[test]
+    fn the_explain_flag_on_affected_names_the_verb_that_replaced_it() {
+        let (argv, notes) = go(&["affected", "a..b", "--explain"]);
+        assert_eq!(
+            argv,
+            ["affected", "a..b", "--explain"],
+            "the flag still works; only the advice is new"
+        );
+        assert_eq!(notes, ["--explain on affected is now cambi explain"]);
+        let (_, notes) = go(&["affected", "a..b"]);
+        assert!(notes.is_empty());
+        // The verb of the same name is not a deprecated spelling of itself.
+        let (_, notes) = go(&["explain", "//a:b"]);
+        assert!(notes.is_empty());
     }
 
     #[test]

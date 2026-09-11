@@ -101,6 +101,8 @@ enum Command {
     Doctor,
     /// Report the targets affected by the changes between two revisions.
     Affected(cmd::affected::Args),
+    /// Why a target is affected, or why the run went global.
+    Explain(cmd::explain::Args),
     /// Build, publish and prune the stored indexes.
     #[command(subcommand)]
     Index(cmd::index::Args),
@@ -243,6 +245,7 @@ fn main() -> ExitCode {
         Command::Status => cmd::status::run(&ctx),
         Command::Doctor => cmd::doctor::run(&ctx),
         Command::Affected(args) => cmd::affected::run(&ctx, args),
+        Command::Explain(args) => cmd::explain::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Inspect(args) => cmd::inspect::run(&ctx, args),
         Command::Bench(args) => cmd::bench::run(&ctx, args),
