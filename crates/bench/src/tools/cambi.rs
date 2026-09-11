@@ -105,11 +105,17 @@ impl Cambi {
     /// path that is not a runnable `cambi` fails here rather than an hour into
     /// a run.
     pub fn locate(explicit: Option<&Path>) -> Result<Self> {
+        Self::locate_from(explicit, std::env::var_os("CAMBI").map(PathBuf::from))
+    }
+
+    /// [`Cambi::locate`] with `$CAMBI` already looked up. The process
+    /// environment is shared by every test in a binary, so a test of the
+    /// environment arm hands the value in rather than setting the variable.
+    pub fn locate_from(explicit: Option<&Path>, from_env: Option<PathBuf>) -> Result<Self> {
         if let Some(p) = explicit {
             return Self::at(p).with_context(|| format!("--cambi {}", p.display()));
         }
-        if let Some(p) = std::env::var_os("CAMBI") {
-            let p = PathBuf::from(p);
+        if let Some(p) = from_env {
             return Self::at(&p).with_context(|| format!("$CAMBI={}", p.display()));
         }
         Self::at(Path::new("cambi")).context(
@@ -305,10 +311,19 @@ mod tests {
     fn the_environment_names_the_binary_when_no_flag_does() {
         let dir = tempfile::tempdir().unwrap();
         let p = fake(dir.path(), "exit 0");
-        // Not a parallel-safe variable to set, so the lookup is exercised
-        // through the same code path with an explicit path instead, and the
-        // env arm is checked for preferring the flag.
-        let c = Cambi::locate(Some(&p)).unwrap();
+        // The variable itself is never set: the process environment is
+        // shared with every other test in this binary, so the lookup's
+        // result is handed in.
+        let c = Cambi::locate_from(None, Some(p.clone())).unwrap();
+        assert_eq!(c.path(), p);
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fake(dir.path(), "exit 0");
+        let env = Some(PathBuf::from("/nonexistent/cambi"));
+        let c = Cambi::locate_from(Some(&p), env).unwrap();
         assert_eq!(c.path(), p);
     }
 
