@@ -38,8 +38,12 @@ clap = { version = "4", features = ["derive", "env"] }
 criterion = "0.5"
 fixedbitset = "0.5"
 globset = "0.4"
+# The string table's hash index (crates/index/src/strtab.rs): `HashTable`
+# only, which needs no hasher, so no default features. Kept at the version
+# rkyv's `alloc` feature already pulls in, so the tree holds one hashbrown of
+# ours; lru (via ratatui 0.29) still brings its own 0.15.
+hashbrown = { version = "0.17", default-features = false }
 memmap2 = "0.9"
-proptest = "1"
 prost = "0.13"
 prost-build = "0.13"
 protox = "0.7"
