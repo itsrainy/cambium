@@ -302,7 +302,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fixedbitset",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "memmap2",
  "rayon",
  "rkyv",
