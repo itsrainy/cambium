@@ -725,7 +725,9 @@ pub fn replay_with(
     out.indeterminate = undecidable_inputs(base, changes, head_rev, texts, drifts);
 
     let mut ext = if cfg.externals.enabled {
-        externals::analyse(base, changes, base_rev, head_rev, texts)
+        externals::analyse(base, changes, base_rev, head_rev, texts, || {
+            externals::mode_at(base, texts, base_rev)
+        })
     } else {
         externals::Externals::default()
     };

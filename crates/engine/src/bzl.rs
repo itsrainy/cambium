@@ -346,8 +346,12 @@ pub(crate) fn rescan_closure(
     }
     c.workspace = c.graph.workspace_closure(src, &mapping);
     // The workspace closure just moved, so what the main repository feeds its
-    // external repositories may have moved with it.
-    let facts = cambium_index::read_live_module_facts(src, &mapping);
+    // external repositories may have moved with it. Which world Bazel reads
+    // `MODULE.bazel` in is decided for the tree `src` reads — the head — not
+    // taken from the externals stage, whose answer is about the base: the
+    // two trees can disagree, and this closure describes the head.
+    let mode = cambium_index::Mode::detect(src, &mapping);
+    let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
     Some(c)
 }
