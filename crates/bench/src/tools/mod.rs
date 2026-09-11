@@ -33,7 +33,6 @@ use anyhow::{Context as _, Result};
 pub mod bazel_query;
 pub mod bazeldiff;
 pub mod cambi;
-pub mod cambium;
 pub mod tango;
 
 /// One tool's answer for one commit change set.

@@ -16,6 +16,7 @@ use crate::checkout::Checkout;
 use crate::classify::BazelFacts;
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle};
 use crate::state::State;
+use crate::tools::cambi::{AffectedArgs, Cambi};
 use crate::tools::{BaseWorktree, RunContext, Tool};
 
 use super::model::{
@@ -92,6 +93,7 @@ fn with_paths<'a>(
 /// One change set, with defaults for scratch and the example cap.
 pub fn compare_change_set(
     engine: &Engine,
+    cambi: &Cambi,
     checkout: &Checkout,
     change_set: &ChangeSet,
     tools: &[&dyn Tool],
@@ -107,12 +109,13 @@ pub fn compare_change_set(
             checkout.dir.join("bench-results"),
         )
     };
-    compare_change_set_with(engine, checkout, change_set, tools, &opts)
+    compare_change_set_with(engine, cambi, checkout, change_set, tools, &opts)
 }
 
 /// One change set, with the run's options.
 pub fn compare_change_set_with(
     engine: &Engine,
+    cambi: &Cambi,
     checkout: &Checkout,
     change_set: &ChangeSet,
     tools: &[&dyn Tool],
@@ -120,7 +123,7 @@ pub fn compare_change_set_with(
 ) -> Result<ChangeSetResult> {
     let mut owned = opts.clone();
     owned.make_absolute();
-    compare_one(engine, checkout, change_set, tools, &owned)
+    compare_one(engine, cambi, checkout, change_set, tools, &owned)
 }
 
 /// One change set, with options already made absolute.
@@ -130,6 +133,7 @@ pub fn compare_change_set_with(
 /// options struct again for every change set of the run.
 fn compare_one(
     engine: &Engine,
+    cambi: &Cambi,
     checkout: &Checkout,
     change_set: &ChangeSet,
     tools: &[&dyn Tool],
@@ -139,25 +143,49 @@ fn compare_one(
 
     // ---- cambium, cold then warm ----
     //
-    // The first run publishes whatever base index it had to compute, so the
-    // second one finds it in the store: that is precisely the difference the
-    // two numbers are meant to show.
+    // Twice, as a user would run it: the first run publishes whatever base
+    // index it had to compute, so the second one finds it in the store, and
+    // that is precisely the difference the two numbers are meant to show.
+    //
+    // Both are whole-process wall times — `cambi` started, its configuration
+    // read, the answer serialised to JSON — because that is what a user waits
+    // for. The engine's own `timings_ms.total` is kept beside each of them,
+    // from the document, so the two can be read against each other instead of
+    // one standing in for the other.
     checkout.checkout(&change_set.head)?;
-    let run =
-        crate::tools::cambium::Cambium::new(engine).run(&change_set.base, &change_set.head)?;
-    let (cold_wall_ms, warm_wall_ms) = (run.cold.as_millis() as u64, run.warm.as_millis() as u64);
-    let out = run.out;
+    let args = AffectedArgs {
+        include_manual: true,
+        // The classifier needs the per-target reason to explain the largest
+        // cambium-side class on a deletion change set
+        // (`cambium_extra_deleted`).
+        explain: true,
+        publish_base: true,
+        out: Some(opts.scratch.join("head-index.bin")),
+        ..AffectedArgs::new(&change_set.base, &change_set.head)
+    };
+    let cold = cambi.affected(&checkout.dir, &args)?;
+    let warm = cambi.affected(&checkout.dir, &args)?;
+    let (cold_wall_ms, warm_wall_ms) = (cold.wall_ms(), warm.wall_ms());
+    let (cold_engine_ms, warm_engine_ms) = (cold.engine_ms(), warm.engine_ms());
+    let head_index = match &warm.index {
+        Some(p) => Some(
+            cambium_index::IndexFile::open(p)
+                .with_context(|| format!("opening the head index at {}", p.display()))?,
+        ),
+        None => None,
+    };
 
-    // Keep the base this run actually spliced onto. `state_dir` is
-    // `bench-results/<subject>/`, so the archive sits beside `state.json` and
-    // the cold indexes every workload shares; `cambium-bench replay` looks for
-    // it there. Without it the only base a later replay has is the index at
-    // the pin, which is a different graph -- see `crate::replay`.
-    if let Some(base) = out.base_index.as_ref() {
+    // Keep the base this run actually spliced onto. The run published it, so
+    // this is a store read. `state_dir` is `bench-results/<subject>/`, so the
+    // archive sits beside `state.json` and the cold indexes every workload
+    // shares; `cambium-bench replay` looks for it there. Without it the only
+    // base a later replay has is the index at the pin, which is a different
+    // graph -- see `crate::replay`.
+    if let Some(base) = base_index_for_oracle(engine, &change_set.base) {
         if let Err(e) = archive_base_index(
             &opts.state_dir,
             &change_set.base,
-            base,
+            &cambium_engine::BaseIndex::Mapped(base.path().to_path_buf()),
             engine.index_compression(),
         ) {
             // A comparison that produced the right answer should not fail
@@ -166,7 +194,7 @@ fn compare_one(
         }
     }
 
-    let report = &out.report;
+    let report = &warm.report;
     let cambium_set: BTreeSet<String> = report.affected_labels().into_iter().collect();
     let cambium_depths: BTreeMap<String, u32> = report
         .affected
@@ -182,13 +210,15 @@ fn compare_one(
         global_reason: report.global_reason.clone(),
         cold_wall_ms,
         warm_wall_ms,
+        cold_engine_ms,
+        warm_engine_ms,
         dirty_packages: report.stats.dirty_packages,
         queried_targets: report.stats.queried_targets,
         changed_files: report.stats.changed_files,
         cold_rebuild: report.stats.cold_rebuild,
         universe: 0,
     };
-    let Some(index) = out.index.as_ref() else {
+    let Some(index) = head_index.as_ref() else {
         return compare_global(engine, checkout, change_set, tools, opts, report, cambium);
     };
 
@@ -639,6 +669,7 @@ pub(super) fn fresh_result(opts: &ChangesOptions, engine_id: &str) -> ChangesRes
         seed: opts.seed,
         oracle_k: opts.oracle_k,
         engine: engine_id.to_string(),
+        cambi_version: None,
         tango_change_sets: opts.tango_change_sets,
         change_sets: Vec::new(),
         summary: ChangesSummary::default(),
@@ -652,6 +683,7 @@ pub(super) fn fresh_result(opts: &ChangesOptions, engine_id: &str) -> ChangesRes
 /// comparison that silently drops the hard change sets is worse than no comparison.
 pub fn compare_change_sets(
     engine: &Engine,
+    cambi: &Cambi,
     checkout: &Checkout,
     change_sets: &[ChangeSet],
     tools: &[&dyn Tool],
@@ -685,6 +717,10 @@ pub fn compare_change_sets(
             result.bazel_version_used = Some(v);
         }
     }
+    // The binary that is about to be measured, named in the result file. Like
+    // `bazel_version_used` it is re-recorded on a resume whose earlier half
+    // predates the field.
+    result.cambi_version = Some(cambi.version().to_string());
     let done: BTreeSet<String> = result.change_sets.iter().map(|p| p.key()).collect();
 
     for (i, change_set) in change_sets.iter().enumerate() {
@@ -712,7 +748,7 @@ pub fn compare_change_sets(
             tools = running.len(),
             "comparing"
         );
-        let cmp = compare_one(engine, checkout, change_set, &running, opts)?;
+        let cmp = compare_one(engine, cambi, checkout, change_set, &running, opts)?;
         if !cmp.pass {
             tracing::warn!(%key, "change set failed the three-way comparison");
         }

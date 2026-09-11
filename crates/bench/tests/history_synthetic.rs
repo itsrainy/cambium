@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use cambium_bench::changes::{self, ChangeSetKind, ChangeSetOptions, StressCategory};
-use cambium_bench::history::{history, Driver, HistoryOptions, HistoryResult};
+use cambium_bench::history::{history, EngineDriver, HistoryOptions, HistoryResult, RowSource};
 use cambium_bench::state::State;
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
@@ -17,11 +17,7 @@ struct SynthDriver {
     graphs: Vec<SynthGraph>,
 }
 
-impl Driver for SynthDriver {
-    fn checkout(&self, _rev: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
+impl RowSource for SynthDriver {
     fn querier(&self, rev: &str) -> anyhow::Result<Box<dyn PackageQuerier + '_>> {
         let i = self
             .commits
@@ -29,6 +25,19 @@ impl Driver for SynthDriver {
             .position(|c| c == rev)
             .ok_or_else(|| anyhow::anyhow!("unknown revision {rev}"))?;
         Ok(Box::new(SynthQuerier::new(&self.graphs[i])))
+    }
+}
+
+impl Fixture {
+    /// cambium in process over the synthetic rows: no `cambi` binary, no
+    /// Bazel. A real subject's walk runs `cambi` instead
+    /// (`cambium_bench::history::CambiDriver`); what this exercises is the
+    /// walk around it.
+    fn engine_driver(&self) -> EngineDriver<'_> {
+        EngineDriver {
+            engine: &self.engine,
+            rows: &self.driver,
+        }
     }
 }
 
@@ -82,6 +91,9 @@ fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
         bazel_version: "synth".into(),
         diff_cap: 20,
         rebuild_oracle: true,
+        // No `cambi` ran: this walk is driven in process, which is the point
+        // of the fixture.
+        cambi_version: None,
     }
 }
 
@@ -89,7 +101,7 @@ fn opts(f: &Fixture, resume: bool) -> HistoryOptions {
 fn a_history_runs_and_the_rebuild_oracle_holds() {
     let f = fixture(8, "typical-pr");
     let commits = f.driver.commits.clone();
-    let r = history(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
+    let r = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, false)).unwrap();
 
     assert!(r.done);
     assert_eq!(r.commits.len(), commits.len() - 1);
@@ -137,7 +149,7 @@ fn the_rebuild_oracles_head_index_is_archived_and_reads_back() {
     let f = fixture(5, "typical-pr");
     let commits = f.driver.commits.clone();
     let o = opts(&f, false);
-    let r = history(&f.engine, &f.driver, &commits, &o).unwrap();
+    let r = history(&f.engine, &f.engine_driver(), &commits, &o).unwrap();
     assert!(r.oracle.as_ref().unwrap().ok);
 
     let at = r.head_index.as_ref().expect("the head index was archived");
@@ -162,7 +174,7 @@ fn the_rebuild_oracles_head_index_is_archived_and_reads_back() {
     ))
     .unwrap();
     assert_eq!(on_disk.head_index.as_ref(), Some(at));
-    let again = history(&f.engine, &f.driver, &commits, &opts(&f, false)).unwrap();
+    let again = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, false)).unwrap();
     assert!(again.head_index.is_none(), "an archived head was rewritten");
     assert!(at.exists());
 }
@@ -173,7 +185,7 @@ fn a_history_written_before_the_head_archive_existed_still_reads() {
     let f = fixture(4, "typical-pr");
     let commits = f.driver.commits.clone();
     let o = opts(&f, false);
-    history(&f.engine, &f.driver, &commits, &o).unwrap();
+    history(&f.engine, &f.engine_driver(), &commits, &o).unwrap();
     let path = HistoryResult::path_versioned(&f.results, &o.pin, Some("synth"));
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -189,13 +201,13 @@ fn a_history_resumes_from_its_last_published_index() {
     // Run the first half only, as a killed run would have.
     let half = &commits[..4];
     let o = opts(&f, false);
-    let partial = history(&f.engine, &f.driver, half, &o).unwrap();
+    let partial = history(&f.engine, &f.engine_driver(), half, &o).unwrap();
     assert!(partial.done);
 
     // Now a full-range run resumes: its results file says the range ended at
     // `half.last()`, which differs, so it must start over — that is the
     // conservative reading, and it must still be correct.
-    let full = history(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
+    let full = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, true)).unwrap();
     assert_eq!(full.commits.len(), commits.len() - 1);
     assert!(full.oracle.unwrap().ok);
 
@@ -208,7 +220,7 @@ fn a_history_resumes_from_its_last_published_index() {
     truncated.done = false;
     truncated.oracle = None;
     truncated.write(&path).unwrap();
-    let resumed = history(&f.engine, &f.driver, &commits, &opts(&f, true)).unwrap();
+    let resumed = history(&f.engine, &f.engine_driver(), &commits, &opts(&f, true)).unwrap();
     assert_eq!(resumed.commits.len(), commits.len() - 1);
     assert_eq!(resumed.commits[2].commit, truncated.commits[2].commit);
     assert!(

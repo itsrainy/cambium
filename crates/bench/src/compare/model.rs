@@ -147,10 +147,23 @@ pub struct CambiumRun {
     /// Why, when `global`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_reason: Option<String>,
-    /// Wall time with the base index resolved from scratch.
+    /// Whole-process wall time with the base index resolved from scratch:
+    /// what a user waits for, `cambi` starting and serialising its answer
+    /// included.
     pub cold_wall_ms: u64,
-    /// Wall time with the base index already in the store.
+    /// The same, with the base index already in the store. This is the number
+    /// a CI job pays.
     pub warm_wall_ms: u64,
+    /// The engine's own `timings_ms.total` from the cold run's document: the
+    /// wall time above minus everything the process paid around the
+    /// computation. Both are recorded because neither alone is honest — one
+    /// hides the process, the other charges the engine for it. 0 in results
+    /// written before the harness ran `cambi` as a child process.
+    #[serde(default)]
+    pub cold_engine_ms: u64,
+    /// The warm run's `timings_ms.total`.
+    #[serde(default)]
+    pub warm_engine_ms: u64,
     pub dirty_packages: usize,
     pub queried_targets: usize,
     pub changed_files: usize,
@@ -445,6 +458,13 @@ pub struct ChangesResult {
     /// resumed every one of them from the previous engine's answers.
     #[serde(default)]
     pub engine: String,
+    /// `cambi --version` of the binary this run measured, verbatim — the
+    /// version and the short sha it was built from. The harness runs `cambi`
+    /// as a child process, so a result names the binary that produced it
+    /// rather than the crate the harness was linked against. Absent from
+    /// results written before the harness shelled out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cambi_version: Option<String>,
     /// How many change sets Tango was asked to run on, when it was capped.
     /// Tango costs 30-500 s a change set, so a run that quotes its p50 has to
     /// say how many change sets that p50 is taken over.

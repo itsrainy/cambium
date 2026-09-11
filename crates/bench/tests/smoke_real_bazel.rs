@@ -24,10 +24,25 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The `cambi` the comparison measures: the one cargo built beside this test,
+/// else whatever `--cambi`/`$CAMBI`/`PATH` names. The harness runs the product
+/// binary rather than the engine, so this smoke test needs one on disk.
+fn cambi() -> Cambi {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.parent()?.join("cambi")))
+        .filter(|p| p.exists());
+    match beside {
+        Some(p) => Cambi::at(&p).expect("the cambi cargo built"),
+        None => Cambi::locate(None).expect("a cambi binary: cargo build -p cambium-cli"),
+    }
+}
+
 use cambium_bench::changes;
 use cambium_bench::checkout::SubjectsDir;
 use cambium_bench::compare::{compare_change_sets, ChangesOptions};
 use cambium_bench::manifest::RepoEntry;
+use cambium_bench::tools::cambi::Cambi;
 use cambium_bench::tools::Tool;
 
 fn bazelisk() -> Option<PathBuf> {
@@ -317,8 +332,15 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         scratch: tmp.path().join("scratch"),
         ..ChangesOptions::new("smoke", pin, results)
     };
-    let result =
-        compare_change_sets(&engine, &checkout, &selected.change_sets, &refs, &opts).unwrap();
+    let result = compare_change_sets(
+        &engine,
+        &cambi(),
+        &checkout,
+        &selected.change_sets,
+        &refs,
+        &opts,
+    )
+    .unwrap();
 
     // The rendered section, so a run of this test by hand shows the same table
     // the benchmark would write into docs/RESULTS.md.
@@ -517,7 +539,8 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
         scratch: tmp.path().join("scratch"),
         ..ChangesOptions::new("oracle", pin, tmp.path().join("results/oracle"))
     };
-    let result = compare_change_sets(&engine, &checkout, &change_sets, &[], &opts).unwrap();
+    let result =
+        compare_change_sets(&engine, &cambi(), &checkout, &change_sets, &[], &opts).unwrap();
     assert_eq!(result.change_sets.len(), 2);
 
     // `defs/defs.bzl` -> the filegroup that lists it in `srcs`. `//app:app`

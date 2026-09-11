@@ -1468,6 +1468,7 @@ mod tests {
 
     fn commit(sha: &str, total_ms: u64, global: bool, why: Option<&str>) -> CommitRecord {
         CommitRecord {
+            engine_total_ms: 0,
             commit: sha.into(),
             parent: "p".into(),
             changed_files: 3,
@@ -1508,6 +1509,7 @@ mod tests {
             ),
         ];
         let mut r = HistoryResult {
+            cambi_version: None,
             schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -1575,6 +1577,7 @@ mod tests {
             pass: true,
         };
         let mut c = ChangesResult {
+            cambi_version: None,
             schema: crate::RESULT_SCHEMA,
             repo: "bazel".into(),
             pin: "0123456789abcdef0123456789abcdef01234567".into(),
