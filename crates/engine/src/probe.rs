@@ -512,9 +512,32 @@ pub fn position(
     config_hash: [u8; 32],
     max_ancestor_walk: usize,
 ) -> PositionProbe {
+    position_at(
+        repo,
+        "HEAD",
+        store,
+        cache_dir,
+        config_hash,
+        max_ancestor_walk,
+    )
+}
+
+/// [`position`] about a revision that is not HEAD.
+///
+/// `cambi affected BASE..HEAD` loads an index for *BASE*, so the plan
+/// `affected --dry-run` prints is about that revision and not about where the
+/// working tree happens to be.
+pub fn position_at(
+    repo: &cambium_diff::Repo,
+    rev: &str,
+    store: Option<&dyn ArtifactStore>,
+    cache_dir: &Path,
+    config_hash: [u8; 32],
+    max_ancestor_walk: usize,
+) -> PositionProbe {
     let mut p = PositionProbe {
-        head: repo.rev_parse("HEAD").ok(),
-        head_tree: repo.tree_of("HEAD").ok(),
+        head: repo.rev_parse(rev).ok(),
+        head_tree: repo.tree_of(rev).ok(),
         dirty: repo.is_dirty(),
         has_index: false,
         nearest: None,

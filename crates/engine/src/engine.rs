@@ -133,14 +133,16 @@ pub enum BaselineOrigin {
 }
 
 /// A diff with the bazelrc changes it can prove irrelevant removed.
-struct ScreenedDiff<'a> {
-    changes: Vec<&'a Change>,
+///
+/// Visible to `crate::plan`, which screens a diff without running it.
+pub(crate) struct ScreenedDiff<'a> {
+    pub(crate) changes: Vec<&'a Change>,
     /// Bazelrc files whose edit was classified safe.
-    safe: usize,
+    pub(crate) safe: usize,
     /// Changed Starlark build settings, to be resolved against the index.
-    label_flags: Vec<bazelrc::LabelFlag>,
+    pub(crate) label_flags: Vec<bazelrc::LabelFlag>,
     /// Set when a bazelrc edit invalidates the whole run.
-    global_reason: Option<String>,
+    pub(crate) global_reason: Option<String>,
 }
 
 /// Which base index a run actually spliced onto.
@@ -695,7 +697,11 @@ impl Engine {
     /// the file was added, removed, or is not text, the run is global exactly as
     /// before. The screen can only ever shrink an answer that would otherwise
     /// have been `//...`.
-    fn screen_bazelrc<'a>(&self, changes: &'a [Change], req: &AffectedRequest) -> ScreenedDiff<'a> {
+    pub(crate) fn screen_bazelrc<'a>(
+        &self,
+        changes: &'a [Change],
+        req: &AffectedRequest,
+    ) -> ScreenedDiff<'a> {
         let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
         let mut safe = 0usize;
         let mut label_flags: Vec<bazelrc::LabelFlag> = Vec::new();
@@ -1194,7 +1200,7 @@ impl Engine {
     /// text of the BUILD and `.bzl` files, so this path has no Bazel process
     /// in it and no failure mode: one binary search and one CSR row per
     /// changed file.
-    fn resolve_changed_bzl(
+    pub(crate) fn resolve_changed_bzl(
         &self,
         base_view: IndexRef<'_>,
         querier: &dyn PackageQuerier,

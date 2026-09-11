@@ -32,6 +32,10 @@ pub struct Args {
     /// from help, and warned about by `compat`.
     #[arg(long, hide = true)]
     pub explain: bool,
+    /// Print the plan — which index would be loaded, what the diff classifies
+    /// as, what the run would do — and exit before any Bazel query.
+    #[arg(long)]
+    pub dry_run: bool,
     /// Fail instead of falling back to a cold full build.
     #[arg(long)]
     pub no_full_build: bool,
@@ -59,6 +63,9 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     check_usage(&args)?;
     let engine = ctx.engine()?;
     let req = request(&engine, &args, args.explain, args.out.is_some())?;
+    if args.dry_run {
+        return crate::cmd::plan::run(ctx, &engine, &req);
+    }
     let outcome = engine.affected(&req)?;
     let report = &outcome.report;
     // Under --format json the diagnostics are already in the document; every
