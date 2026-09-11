@@ -283,10 +283,9 @@ impl Consumed for IndexConsumers<'_> {
 pub struct DirtySet {
     /// Everything is affected; the other fields are meaningless.
     pub global: bool,
-    /// Why, when `global` is set, in words.
-    pub global_reason: Option<String>,
-    /// The changed path that matched an invalidator, when `global` is set:
-    /// the same fact as `global_reason`, as data rather than as a sentence.
+    /// The changed path that matched an invalidator, when `global` is set.
+    /// The only way this classifier's own answer goes global, so the reason,
+    /// as data; the engine puts it into words.
     pub invalidator: Option<String>,
     /// Packages that must be re-queried.
     pub dirty: BTreeSet<String>,
@@ -306,7 +305,6 @@ impl DirtySet {
     fn invalidated_by(path: &str) -> Self {
         Self {
             global: true,
-            global_reason: Some(format!("{path} matches an invalidator")),
             invalidator: Some(path.to_string()),
             ..Default::default()
         }
@@ -737,7 +735,6 @@ mod tests {
             Change::new(Status::Modified, "MODULE.bazel"),
         ]);
         assert!(d.global);
-        assert!(d.global_reason.unwrap().contains("MODULE.bazel"));
         assert_eq!(d.invalidator.as_deref(), Some("MODULE.bazel"));
     }
 
