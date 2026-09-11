@@ -152,7 +152,8 @@ const PACKAGES: &[&str] = &["app", "lib", "bazel", "direct", "changelogs"];
 /// root module's own name maps to the empty canonical name (so `@demo//`
 /// is the main repository), and `fmt` carries the `+` suffix Bazel 8 and 9
 /// give a canonical name.
-const REPO_MAPPING: &str = "{\"\":\"\",\"demo\":\"\",\"fmt\":\"fmt+\",\"generated\":\"generated+\"}";
+const REPO_MAPPING: &str =
+    "{\"\":\"\",\"demo\":\"\",\"fmt\":\"fmt+\",\"generated\":\"generated+\"}";
 
 fn scanning() -> Scanning {
     Scanning::new(PACKAGES, rows)

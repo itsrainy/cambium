@@ -110,7 +110,8 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["app", "lib", "conf", "names", "notes"];
 
-const REPO_MAPPING: &str = "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\",\"vend\":\"vend+\"}";
+const REPO_MAPPING: &str =
+    "{\"\":\"\",\"demo\":\"\",\"mod\":\"mod+\",\"opaque\":\"opaque+\",\"vend\":\"vend+\"}";
 
 fn scanning() -> Scanning {
     Scanning::new(PACKAGES, rows)

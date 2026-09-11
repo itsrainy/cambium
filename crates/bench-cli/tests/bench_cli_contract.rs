@@ -234,4 +234,3 @@ fn the_harness_reads_back_a_document_the_real_cambi_printed() {
     assert_eq!(doc["plan"]["mode"], "splice");
     assert_eq!(doc["plan"]["index"]["revision"], f.commits[1]);
 }
-
