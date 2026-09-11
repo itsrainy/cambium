@@ -387,15 +387,15 @@ impl Replays<'_> {
         } else {
             base_view
         };
-        let mut o = replay::replay_with(
-            replay_view,
+        let mut o = replay::replay_with(replay::ReplayInputs {
+            base: replay_view,
             cfg,
-            &want.base,
-            &want.head,
+            base_rev: &want.base,
+            head_rev: &want.head,
             changes,
             texts,
             base_kind,
-        );
+        });
         o.rederived = rederive;
         o.rederive_ms = cost;
         Some(o)

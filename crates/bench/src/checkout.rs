@@ -302,7 +302,8 @@ impl Checkout {
             .with_context(|| format!("opening {}", self.dir.display()))?;
         let env = bazelisk_env(&self.dir, bazel_version);
         if !env.is_empty() {
-            engine.bazel = engine.bazel.clone().with_env(env);
+            let bazel = engine.bazel().clone().with_env(env);
+            engine = engine.with_bazel(bazel);
         }
         Ok(engine)
     }

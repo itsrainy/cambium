@@ -108,6 +108,44 @@ pub fn commit_all(root: &Path, message: &str) -> String {
     git(root, &["rev-parse", "HEAD"])
 }
 
+/// Writes an executable `/bin/sh` script at `path` — `body` after the
+/// shebang — and returns once it can be run.
+///
+/// The returning-once-runnable part is the point. A test binary runs its
+/// tests on many threads, and a `Command` in one of them forks while this
+/// one still has the file open for writing; the child holds that descriptor
+/// until it execs, and an exec of the script in that window fails with
+/// `ETXTBSY`, "text file busy". It was seen once, as a stub `cambi` whose
+/// `--version` would not start. So the script gets a probe argument that
+/// exits before `body`, and this runs it with that argument until the exec
+/// goes through — after which no process holds the descriptor and the
+/// script never fails to start again.
+pub fn executable_script(path: &Path, body: &str) {
+    const PROBE: &str = "--cambium-testkit-probe";
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\n[ \"$1\" = {PROBE} ] && exit 0\n{body}\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut attempts = 0;
+    loop {
+        match Command::new(path).arg(PROBE).output() {
+            Ok(_) => return,
+            // ETXTBSY, by number: its `ErrorKind` is not stable on the MSRV.
+            Err(e) if e.raw_os_error() == Some(26) && attempts < 200 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => panic!("running {}: {e}", path.display()),
+        }
+    }
+}
+
 // ------------------------------------------------------------------ engines
 
 /// An engine over `root` with a Bazel that cannot run.

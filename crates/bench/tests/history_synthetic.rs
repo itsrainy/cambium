@@ -260,22 +260,22 @@ fn change_sets_are_deterministic_and_cover_the_range() {
         invalidator_paths: vec!["MODULE.bazel".into()],
         invalidator_globs: vec!["rules/**".into()],
     };
-    let adjacent = changes::adjacent(&f.engine.repo, &pin, o.history_window).unwrap();
+    let adjacent = changes::adjacent(f.engine.repo(), &pin, o.history_window).unwrap();
     assert_eq!(adjacent.len(), commits.len() - 1);
     assert_eq!(adjacent[0].base, commits[0]);
     assert_eq!(adjacent.last().unwrap().head, pin);
 
     // A linear history has no merges.
-    assert!(changes::pr_shaped(&f.engine.repo, &pin, o.history_window)
+    assert!(changes::pr_shaped(f.engine.repo(), &pin, o.history_window)
         .unwrap()
         .is_empty());
 
-    let stress = changes::stress(&f.engine.repo, &o).unwrap();
-    let again = changes::stress(&f.engine.repo, &o).unwrap();
+    let stress = changes::stress(f.engine.repo(), &o).unwrap();
+    let again = changes::stress(f.engine.repo(), &o).unwrap();
     assert_eq!(stress, again, "stress selection is deterministic");
     for p in &stress {
         assert!(p.category.is_some());
-        assert_eq!(f.engine.repo.parents(&p.head).unwrap()[0], p.base);
+        assert_eq!(f.engine.repo().parents(&p.head).unwrap()[0], p.base);
     }
     let per_category = |c: StressCategory| stress.iter().filter(|p| p.category == Some(c)).count();
     assert!(
@@ -285,7 +285,7 @@ fn change_sets_are_deterministic_and_cover_the_range() {
     assert!(per_category(StressCategory::Bzl) > 0, "{stress:?}");
 
     let set = changes::select(
-        &f.engine.repo,
+        f.engine.repo(),
         &[ChangeSetKind::Adjacent, ChangeSetKind::Stress],
         &o,
     )
@@ -318,7 +318,7 @@ fn pr_change_sets_come_from_merge_commits() {
     git(&["merge", "-q", "--no-ff", "-m", "merge pr", "pr"]);
     let merge = git(&["rev-parse", "HEAD"]);
 
-    let prs = changes::pr_shaped(&f.engine.repo, &merge, 10).unwrap();
+    let prs = changes::pr_shaped(f.engine.repo(), &merge, 10).unwrap();
     assert_eq!(prs.len(), 1);
     assert_eq!(prs[0].head, merge);
     assert_eq!(

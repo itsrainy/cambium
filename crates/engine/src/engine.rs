@@ -239,15 +239,18 @@ pub struct IndexUpdate {
     pub rebuilt_because: Option<String>,
 }
 
+/// The parts are the crate's to reach into — the stages in `run`, `plan` and
+/// `probe` are written as `impl Engine` blocks of their own — and a caller's
+/// to read through the accessors below and set through the builders.
 pub struct Engine {
-    pub cfg: Config,
-    pub repo: Repo,
-    pub bazel: Bazel,
-    pub store: Option<Box<dyn ArtifactStore>>,
+    pub(crate) cfg: Config,
+    pub(crate) repo: Repo,
+    pub(crate) bazel: Bazel,
+    pub(crate) store: Option<Box<dyn ArtifactStore>>,
     /// Where every actionable warning this run raises lands. Drained into the
     /// report at the end of [`Engine::affected`]; a caller that drives
     /// `compute` itself drains it itself.
-    pub diagnostics: crate::diag::Diagnostics,
+    pub(crate) diagnostics: crate::diag::Diagnostics,
     cache_dir: PathBuf,
 }
 
@@ -333,6 +336,51 @@ impl Engine {
     pub fn with_cache_dir(mut self, dir: PathBuf) -> Self {
         self.cache_dir = dir;
         self
+    }
+
+    /// Replaces the Bazel every query runs through: the benchmark's checkout
+    /// adds the bazelisk environment that pins a subject to one version.
+    pub fn with_bazel(mut self, bazel: Bazel) -> Self {
+        self.bazel = bazel;
+        self
+    }
+
+    /// The same engine under another configuration.
+    ///
+    /// The store is what the new configuration says, as it would be on
+    /// [`Engine::open`], and the diagnostics start over; the repository,
+    /// the Bazel and the cache directory — an explicit override included —
+    /// are kept. For a test that flips one knob between two runs.
+    pub fn with_config(self, cfg: Config) -> Self {
+        Self {
+            cache_dir: self.cache_dir,
+            ..Self::with_parts(cfg, self.repo, self.bazel)
+        }
+    }
+
+    /// The effective configuration: defaults, files and overrides folded.
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// The git repository the workspace is in.
+    pub fn repo(&self) -> &Repo {
+        &self.repo
+    }
+
+    /// The Bazel every query runs through.
+    pub fn bazel(&self) -> &Bazel {
+        &self.bazel
+    }
+
+    /// The index store `[baseline].store` configured, if any.
+    pub fn store(&self) -> Option<&dyn ArtifactStore> {
+        self.store.as_deref()
+    }
+
+    /// Where the actionable warnings land; see the field.
+    pub fn diagnostics(&self) -> &crate::diag::Diagnostics {
+        &self.diagnostics
     }
 
     pub fn workspace(&self) -> &Path {

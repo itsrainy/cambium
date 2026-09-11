@@ -124,7 +124,7 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
         report.global_reason.is_some(),
         "the reason is in the report"
     );
-    let diagnostics = e.diagnostics.drain();
+    let diagnostics = e.diagnostics().drain();
     let cause = diagnostics
         .iter()
         .find(|d| {
