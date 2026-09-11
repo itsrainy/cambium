@@ -155,7 +155,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | 1 | error |
 | 2 | global invalidation — everything is affected; stdout is `//...` |
 | 3 | Bazel failed |
-| 4 | no baseline available and `--no-full-build` was given |
+| 4 | no index available and `--no-full-build` was given |
 | 5 | the store could not be reached (as against holding no index, which is 4): a CI job can retry this one |
 
 ### Diagnostics

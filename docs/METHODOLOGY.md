@@ -224,8 +224,17 @@ cambium-bench changes  <subject>  the change-set workload across tools and oracl
 cambium-bench stages   <subject>  engine stage micro-benchmarks (synthetic subjects)
 cambium-bench sweep    <subject>  vary one parameter and report how a stage scales
 cambium-bench regress  <a> <b>    compare two result files and fail on a regression
+cambium-bench replay   <subject>  replay the static stages offline, against a stored index
+cambium-bench labels   <subject>  the label sets a change-set comparison kept
+cambium-bench watch               follow a run: one row per subject
 cambium-bench report              regenerate RESULTS.md from bench-results/
 ```
+
+`cambium-bench` with no verb, on a terminal, is the launcher: it composes a
+run from the manifest's subjects, the tools, the workloads and a size, shows
+the exact command lines it will run, and then switches to the watch screen.
+It reimplements no workload — the command lines are the ones
+`tools/bench/run-published.sh` runs.
 
 `<subject>` is a name from `subject_repos.toml` or `synth:<preset>`. Every
 workload takes `--tools`, `--oracle`, `--kind` and a size (`--commits`,

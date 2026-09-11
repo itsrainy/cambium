@@ -23,9 +23,16 @@ size, which do not fit on a laptop.
   revoke-security-group-ingress` the old CIDR and
   `authorize-security-group-ingress` the new one.
 - `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
-  private: `sync` tars the working tree over ssh and rebuilds cambi,
-  bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
-  `BOOTSTRAP DONE`).
+  private: `sync` tars the working tree over ssh and rebuilds both cambium
+  binaries, bazel-diff-rust and tango there
+  (`~/finish-bootstrap.log` ends with `BOOTSTRAP DONE`).
+- **Two binaries, and the harness has to be told where the product is.**
+  `cargo build --release -p cambium-cli -p cambium-bench-cli`.
+  `tools/bench/run-published.sh` and `tools/bench/precheck.sh` build both and
+  export `CAMBI` (the `cambi` under measurement) and `CAMBIUM_BENCH` (the
+  harness itself), each overridable in the environment. A hand-run
+  `cambium-bench` needs `--cambi <path>`, `$CAMBI`, or a `cambi` on `PATH`, and
+  says so at once rather than an hour in.
 - **The mirrors on the box are still under `~/.cache/cambium/corpus/`** (61 GB,
   all five subjects fetched and built). Do not move them: the Bazel
   `--output_base` directories under there have absolute paths baked in, and
