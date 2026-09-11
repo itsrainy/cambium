@@ -497,6 +497,12 @@ pub struct PositionProbe {
     pub plan: Plan,
     /// The index file the fetch left in the cache, for [`index_at`].
     pub index_path: Option<PathBuf>,
+    /// Lineages the walk found and refused because they were built with
+    /// another `cambium.toml`, rule-hash version or index content revision;
+    /// each has a `CAMBI-W003` in `diagnostics`. What [`lineage`] reports as
+    /// conflicting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incompatible_lineages: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -545,6 +551,7 @@ pub fn position_at(
         max_ancestor_walk,
         plan: Plan::Cold,
         index_path: None,
+        incompatible_lineages: Vec::new(),
         diagnostics: Vec::new(),
     };
     let (Some(store), Some(head)) = (store, p.head.clone()) else {
@@ -586,6 +593,7 @@ pub fn position_at(
     // through its `commits/` pointer is fetched, and refused, twice — and a
     // reader of `status` should see each finding once.
     diags.drain_into(&mut p.diagnostics);
+    p.incompatible_lineages = cache.refused_lineages();
     p
 }
 
@@ -693,9 +701,9 @@ pub struct LineageProbe {
     pub others: Vec<String>,
     /// Lineages a fetch proved incompatible: their `config_hash` is not this
     /// workspace's, or they were written by an engine with a different
-    /// rule-hash version or index content revision. Derived from the
-    /// `CAMBI-W003` diagnostics the walk raised, which is the only place that
-    /// difference is actually observed.
+    /// rule-hash version or index content revision. The position walk is the
+    /// only place that difference is actually observed, and it records them
+    /// beside the `CAMBI-W003` it raises for each.
     pub conflicting: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -715,12 +723,7 @@ pub fn lineage(
         .collect();
     others.sort();
     others.dedup();
-    let mut conflicting: Vec<String> = position
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == Code::W003IndexConfigMismatch)
-        .filter_map(|d| lineage_from_message(&d.message))
-        .collect();
+    let mut conflicting = position.incompatible_lineages.clone();
     conflicting.sort();
     conflicting.dedup();
     let mut p = LineageProbe {
@@ -947,14 +950,6 @@ fn lineage_of(key: &str) -> Option<String> {
     ok.then(|| lineage.to_string())
 }
 
-/// The lineage named by a `CAMBI-W003` message, which quotes the store key it
-/// skipped.
-fn lineage_from_message(message: &str) -> Option<String> {
-    let (_, rest) = message.split_once('`')?;
-    let (key, _) = rest.split_once('`')?;
-    lineage_of(key)
-}
-
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -1129,12 +1124,6 @@ mod tests {
         assert_eq!(lineage_of(&format!("indexes/{l}/ff.bin")), Some(l.clone()));
         assert_eq!(lineage_of("indexes/by-tree/ff.bin"), None);
         assert_eq!(lineage_of("commits/by-commit/ff"), None);
-        assert_eq!(
-            lineage_from_message(&format!(
-                "skipping the stored index `indexes/{l}/ff.bin`: it"
-            )),
-            Some(l)
-        );
     }
 
     #[test]
@@ -1150,6 +1139,7 @@ mod tests {
             max_ancestor_walk: 20,
             plan: Plan::Cold,
             index_path: None,
+            incompatible_lineages: vec![l.clone(), l.clone()],
             diagnostics: vec![Diagnostic::warning(
                 Code::W003IndexConfigMismatch,
                 format!("skipping the stored index `indexes/{l}/ff.bin`: it was built with ..."),

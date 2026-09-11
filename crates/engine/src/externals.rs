@@ -146,6 +146,8 @@ use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
 use cambium_index::IndexRef;
 
+use crate::reason::ExternalsCause;
+
 /// Workspace files whose own diff this stage interprets, rather than letting
 /// them fire an invalidator rule.
 pub const MODULE_FILE: &str = "MODULE.bazel";
@@ -184,7 +186,7 @@ impl WorkspaceText for FixedText {
 #[derive(Clone, Debug, Default)]
 pub struct Externals {
     /// Invalidate everything, for this reason.
-    pub global: Option<String>,
+    pub global: Option<ExternalsCause>,
     /// Apparent names of the repositories that moved.
     pub repos: BTreeSet<String>,
     /// The subset of [`Externals::repos`] whose *contents* may have moved in a
@@ -271,7 +273,6 @@ pub fn analyse(
         module_changed = false;
         lock_changed = false;
     }
-    {}
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*
@@ -279,14 +280,17 @@ pub fn analyse(
     for path in workspaces {
         let (b, h) = (texts.text_at(base_rev, path), texts.text_at(head_rev, path));
         let (Some(b), Some(h)) = (b, h) else {
-            out.global = Some(format!(
-                "`{path}` was added or removed, and every repository it declares with it"
-            ));
+            out.global = Some(ExternalsCause::WorkspaceAddedOrRemoved {
+                path: path.to_string(),
+            });
             return out;
         };
         match diff_workspace(&b, &h) {
-            WorkspaceChange::Global(reason) => {
-                out.global = Some(format!("`{path}`: {reason}"));
+            WorkspaceChange::Global(why) => {
+                out.global = Some(ExternalsCause::Workspace {
+                    path: path.to_string(),
+                    why,
+                });
                 return out;
             }
             WorkspaceChange::Moved { repos, bzl_paths } => {
@@ -299,10 +303,10 @@ pub fn analyse(
                         .bzl_id(p)
                         .and_then(|id| repos_of_workspace_bzl(base, id));
                     let Some(named) = named else {
-                        out.global = Some(format!(
-                            "`{path}` changes a call from `{p}`, and cambium cannot say which \
-                             repositories that file defines"
-                        ));
+                        out.global = Some(ExternalsCause::WorkspaceBzlUnattributed {
+                            path: path.to_string(),
+                            bzl: p.clone(),
+                        });
                         return out;
                     };
                     out.by_bzl += named.len();
@@ -325,8 +329,8 @@ pub fn analyse(
         let base_facts = facts_at(texts, base_rev);
         let head_facts = facts_at(texts, head_rev);
         match diff_module(&base_facts, &head_facts) {
-            ModuleChange::Global(reason) => {
-                out.global = Some(reason);
+            ModuleChange::Global(why) => {
+                out.global = Some(ExternalsCause::Module { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -358,15 +362,14 @@ pub fn analyse(
             (Some(b), Some(h)) => diff_lock(&b, &h, &facts),
             // One side has no lockfile at all: it was added or deleted, and
             // every repository in it is new or gone.
-            _ => ModuleChange::Global(
-                "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
-                 is new or gone"
-                    .into(),
-            ),
+            _ => {
+                out.global = Some(ExternalsCause::LockAddedOrRemoved);
+                return out;
+            }
         };
         match change {
-            ModuleChange::Global(reason) => {
-                out.global = Some(reason);
+            ModuleChange::Global(why) => {
+                out.global = Some(ExternalsCause::Lock { why });
                 return out;
             }
             ModuleChange::Repos(repos) => {

@@ -349,6 +349,25 @@ impl AffectedReport {
     pub fn affected_within(&self, max_depth: u32) -> impl Iterator<Item = &AffectedTarget> {
         self.affected.iter().filter(move |t| t.depth <= max_depth)
     }
+
+    /// The diagnostic that says why this run answered `//...`: the one
+    /// [`crate::reason::GlobalReason`] raised, whose message carries
+    /// `global_reason` verbatim and whose `help` names the fix. Absent on a
+    /// run that was not global, and on a document replayed from before the
+    /// codes existed.
+    pub fn global_cause(&self) -> Option<&crate::diag::Diagnostic> {
+        self.diagnostics
+            .iter()
+            .find(|d| crate::reason::GlobalReason::is_cause(d.code))
+    }
+
+    /// The diagnostic that says why this run re-indexed the whole repository
+    /// at head, when `stats.cold_rebuild`.
+    pub fn cold_rebuild_cause(&self) -> Option<&crate::diag::Diagnostic> {
+        self.diagnostics
+            .iter()
+            .find(|d| d.code == crate::diag::Code::W012ColdRebuild)
+    }
 }
 
 /// Simple stopwatch for stage timings.

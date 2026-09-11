@@ -10,7 +10,6 @@
 //! cannot say one thing and the run then do another. What genuinely needs
 //! Bazel is not guessed at: it is reported as unknown until queried.
 
-use cambium_classify::{Matchers, PackageSet};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::Diagnostic;
@@ -146,7 +145,7 @@ impl Engine {
         // The bazelrc screen needs no index: it reads the two texts out of git
         // and decides whether the edit can reach loading at all.
         let screened = self.screen_bazelrc(&changes, &req);
-        plan.global_reason = screened.global_reason;
+        plan.global_reason = screened.global.as_ref().map(ToString::to_string);
 
         let Some(path) = position.index_path.as_deref() else {
             // Nothing to splice onto, so the run indexes the repository and
@@ -177,47 +176,28 @@ impl Engine {
         let file = cambium_index::IndexFile::open(path)?;
         let view = file.view();
 
-        // The same two stages the run puts in front of the classifier, in the
-        // same order: external repositories first, so a diff they account for
-        // does not also fire the `MODULE.bazel` invalidator.
-        let mut ext = if self.cfg.externals.enabled {
-            crate::externals::analyse(
-                view,
-                &changes,
-                &req.base,
-                &req.head,
-                &crate::externals::GitText(&self.repo),
-            )
-        } else {
-            crate::externals::Externals::default()
-        };
-        let mut matchers = Matchers::compile(&self.cfg.rules())?;
-        matchers.exempt(ext.handled.clone());
-        let mut packages = PackageSet::from_index(view);
-        let mut dirty = cambium_classify::dirty_set(
-            &screened.changes,
-            &mut packages,
-            &matchers,
-            &cambium_classify::IndexConsumers(view),
-        );
-        let mut stats = crate::report::Stats::default();
-        self.resolve_changed_bzl(view, &NoQuerier, &mut dirty, &mut ext, &mut stats);
-        if let Some(reason) = ext.global.take() {
-            dirty.global = true;
-            dirty.global_reason = Some(reason);
-        }
+        // The run's own first stages, in the run's own order: external
+        // repositories first, so a diff they account for does not also fire
+        // the `MODULE.bazel` invalidator; then the dirty set, with the
+        // changed `.bzl` files resolved through the load closure.
+        let mut run = crate::run::Run::new(self, view, &NoQuerier, &req);
+        let mut ext = run.externals(&changes, &crate::externals::GitText(&self.repo));
+        let stage = run.dirty(&screened.changes, &mut ext)?;
 
-        plan.dirty_packages = Some(dirty.dirty.len());
-        if dirty.global {
-            plan.mode = PlanMode::Global;
-            plan.global_reason = dirty.global_reason;
-        } else {
-            let limit = self.cfg.limits.max_dirty_packages;
-            plan.mode = if limit > 0 && dirty.dirty.len() > limit {
-                PlanMode::ColdRebuild
-            } else {
-                PlanMode::Splice
-            };
+        plan.dirty_packages = Some(stage.dirty.dirty.len());
+        match stage.global {
+            Some(reason) => {
+                plan.mode = PlanMode::Global;
+                plan.global_reason = Some(reason.to_string());
+            }
+            None => {
+                let limit = self.cfg.limits.max_dirty_packages;
+                plan.mode = if limit > 0 && stage.dirty.dirty.len() > limit {
+                    PlanMode::ColdRebuild
+                } else {
+                    PlanMode::Splice
+                };
+            }
         }
         plan.diagnostics = drained(&self.diagnostics, diagnostics);
         Ok(plan)
