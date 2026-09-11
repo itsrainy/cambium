@@ -84,12 +84,17 @@ struct Cli {
     #[arg(long, value_enum, global = true, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
 
+    /// No verb at all is `cambi status`: the first thing someone types is the
+    /// question "where am I", and answering it with a usage screen wastes the
+    /// one command they already ran.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Where this checkout is and what index a run would load.
+    Status,
     /// Report the targets affected by the changes between two revisions.
     Affected(cmd::affected::Args),
     /// Build, publish and prune the stored indexes.
@@ -229,7 +234,8 @@ fn main() -> ExitCode {
         render.warn(d);
     }
 
-    let code = match cli.command {
+    let code = match cli.command.unwrap_or(Command::Status) {
+        Command::Status => cmd::status::run(&ctx),
         Command::Affected(args) => cmd::affected::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Inspect(args) => cmd::inspect::run(&ctx, args),

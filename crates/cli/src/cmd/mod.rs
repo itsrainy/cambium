@@ -3,6 +3,7 @@ pub mod bench;
 pub mod index;
 pub mod inspect;
 pub mod replay;
+pub mod status;
 pub mod synth;
 
 use std::path::PathBuf;
@@ -55,6 +56,18 @@ impl Context {
             Config::load_layered(&root, self.config.as_deref(), &self.overrides())
                 .map_err(cambium_engine::EngineError::from)?,
         )
+    }
+
+    /// What `status`, `doctor` and `init` probe, from this invocation's globals.
+    pub fn probe_options(&self) -> cambium_engine::probe::Options {
+        cambium_engine::probe::Options {
+            start: self.root.clone(),
+            config_path: self.config.clone(),
+            bazel_binary: self.bazel_binary.clone(),
+            cache_dir: self.cache_dir.clone(),
+            run_bazel: false,
+            store_round_trip: false,
+        }
     }
 
     /// What the command line and the environment said, with the spelling to

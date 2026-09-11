@@ -67,7 +67,9 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     // The verb tree docs/CLI.md settles on, plus the two that leave the
     // binary in a later step. `baseline` is deliberately absent: it still
     // works, and a deprecated spelling is not advertised.
-    for sub in ["affected", "index", "inspect", "config", "bench", "synth"] {
+    for sub in [
+        "status", "affected", "index", "inspect", "config", "bench", "synth",
+    ] {
         assert!(
             stdout.contains(sub),
             "`{sub}` is missing from the top-level help:\n{stdout}"
@@ -462,5 +464,81 @@ fn affected_rejects_a_range_and_the_old_flags_together() {
     assert!(
         stderr.contains("error[CAMBI-E013]") && stderr.contains("drop --base"),
         "the caller should be told which half to drop:\n{stderr}"
+    );
+}
+
+/// Typing `cambi` and nothing else is the first thing a new user does, and the
+/// question it asks is "where am I" — so it prints `status`, not a usage screen.
+/// Outside a workspace too: "there is no workspace here" is the answer, and it
+/// is not an error.
+#[test]
+fn a_bare_cambi_prints_status_even_outside_a_workspace() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = dir.path().to_str().unwrap();
+    let (code, stdout, stderr) = run(&["-C", outside]);
+    assert_eq!(code, 0, "a bare cambi must not fail: {stderr}");
+    assert!(
+        stdout.contains("no Bazel workspace found"),
+        "the workspace line should say there is none:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Usage: cambi"),
+        "a bare invocation must not answer with usage:\n{stdout}"
+    );
+    for section in ["Workspace", "Position", "Index", "Lineage", "Store"] {
+        assert!(
+            stdout.contains(section),
+            "`{section}` is missing from status:\n{stdout}"
+        );
+    }
+    // And the explicit spelling prints exactly the same thing.
+    let (code, explicit, _) = run(&["-C", outside, "status"]);
+    assert_eq!(code, 0);
+    assert_eq!(explicit, stdout, "`cambi` is `cambi status`");
+}
+
+/// `status` is a new document, and a new document still carries the shared
+/// schema version: a reader that pins it reads every document or none.
+#[test]
+fn status_json_carries_the_schema_and_a_field_per_probe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "status",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("status prints one document");
+    assert_eq!(v["schema"].as_u64(), Some(9));
+    for field in ["workspace", "config", "store", "diagnostics"] {
+        assert!(v.get(field).is_some(), "{field} is missing:\n{stdout}");
+    }
+    // The probes `status` deliberately does not run are absent, not null: it
+    // runs no Bazel and writes nothing to the store.
+    assert!(v.get("bazel").is_none(), "status must not run bazel");
+    assert!(v.get("round_trip").is_none());
+}
+
+/// Nothing in `status` may shell out to Bazel: the verb has to answer on a
+/// machine where Bazel is not installed, and instantly.
+#[test]
+fn status_does_not_need_a_bazel_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"x\")\n").unwrap();
+    std::fs::write(dir.path().join(".bazelversion"), "7.4.1\n").unwrap();
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "status",
+        "--bazel-binary",
+        "/nonexistent/bazel",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("bzlmod"), "{stdout}");
+    assert!(
+        stdout.contains("7.4.1 (.bazelversion)"),
+        "the pin is where the version comes from:\n{stdout}"
     );
 }
