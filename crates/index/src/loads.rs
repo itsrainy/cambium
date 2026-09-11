@@ -90,6 +90,8 @@ use rustc_hash::FxHashMap;
 
 use crate::data::IndexRef;
 use crate::label::{join_path, Label};
+pub(crate) use crate::starlark::lexer::unescape;
+use crate::starlark::lexer::{is_string_prefix, lex_string};
 
 /// Files whose loads make up the workspace closure, most-preferred first.
 /// All that exist are scanned: a repository can carry both.
@@ -293,7 +295,9 @@ pub(crate) struct Lexed<'a> {
 /// Tokenises far enough to find `load()` calls and nothing further: names,
 /// string literals, and bracket nesting. Comments and string contents are
 /// consumed as units, which is the whole point — a `load(` inside a comment or
-/// inside a docstring is not a load.
+/// inside a docstring is not a load. The string scanner is shared with
+/// [`crate::starlark::lexer`], the full lexer the parser reads, so the two
+/// agree about where a literal ends.
 pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -376,64 +380,6 @@ pub(crate) fn lex(text: &str) -> Vec<Lexed<'_>> {
                 });
                 i += 1;
             }
-        }
-    }
-    out
-}
-
-fn is_string_prefix(s: &[u8]) -> bool {
-    s.len() <= 2 && s.iter().all(|c| matches!(c, b'r' | b'R' | b'b' | b'B'))
-}
-
-/// Consumes a string literal starting at `i` (a quote). Returns the span of
-/// the *contents* and the index just past the literal.
-fn lex_string(b: &[u8], i: usize, raw: bool) -> (Option<(usize, usize)>, usize) {
-    let q = b[i];
-    let triple = b.len() >= i + 3 && b[i + 1] == q && b[i + 2] == q;
-    let open = if triple { 3 } else { 1 };
-    let mut j = i + open;
-    let start = j;
-    while j < b.len() {
-        if b[j] == b'\\' && !raw {
-            j += 2;
-            continue;
-        }
-        if b[j] == q {
-            if !triple {
-                return (Some((start, j)), j + 1);
-            }
-            if b.len() >= j + 3 && b[j + 1] == q && b[j + 2] == q {
-                return (Some((start, j)), j + 3);
-            }
-        }
-        // An unterminated single-quoted string ends at the newline, as in
-        // Starlark; a triple-quoted one does not.
-        if b[j] == b'\n' && !triple {
-            return (None, j);
-        }
-        j += 1;
-    }
-    (None, b.len())
-}
-
-/// Decodes the handful of escapes a label could plausibly contain. Anything
-/// else is left alone: this is a label, not arbitrary text.
-pub(crate) fn unescape(s: &str) -> String {
-    if !s.contains('\\') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some(other) => out.push(other),
-            None => break,
         }
     }
     out

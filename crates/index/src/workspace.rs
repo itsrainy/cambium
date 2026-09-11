@@ -63,7 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::label::{Label, Repo};
 use crate::loads::{lex, Lexed, Tok};
-use crate::starlark::{parse_args, render_all, render_stmt, statements};
+use crate::starlark_old::{parse_args, render_all, render_stmt, statements};
 use crate::util::diff_maps;
 use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
 

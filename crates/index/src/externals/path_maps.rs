@@ -7,7 +7,7 @@
 
 use crate::label::Label;
 use crate::loads::{lex, unescape, Lexed, RepoMapping, Tok};
-use crate::starlark::{arg_spans, parse_args};
+use crate::starlark_old::{arg_spans, parse_args};
 use crate::vocabulary::{is_local_repo_rule, PATHY_NAMES};
 
 use super::pattern::PathMap;
