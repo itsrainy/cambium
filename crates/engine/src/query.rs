@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use cambium_bazel::{convert, ConvertOptions, ParsedTarget};
 use cambium_bazel::{Bazel, BazelError, QueryOutcome};
 use cambium_index::PackageUpdate;
-use cambium_proto::blaze_query::Target;
-use prost::Message;
 use rayon::prelude::*;
 
 /// Reads BUILD files so packages can record a content hash.
@@ -344,13 +342,22 @@ pub fn query_packages(
     for p in requested {
         grouped.entry(p.clone()).or_default();
     }
-    let outcome = bazel.query_packages(requested, |slab, ranges| {
+    let outcome = bazel.query_packages(requested, group_into(&mut grouped, opts))?;
+    Ok(finish(grouped, outcome, files, Some(requested)))
+}
+
+/// The batch callback every stream reader uses: decode the batch, file each
+/// target under its package.
+fn group_into<'a>(
+    grouped: &'a mut BTreeMap<String, Vec<ParsedTarget>>,
+    opts: &'a ConvertOptions,
+) -> impl FnMut(&[u8], &[(usize, usize)]) -> Result<(), cambium_proto::ReadError> + 'a {
+    move |slab, ranges| {
         for t in decode_batch(slab, ranges, opts)? {
             grouped.entry(t.package.clone()).or_default().push(t);
         }
         Ok(())
-    })?;
-    Ok(finish(grouped, outcome, files, Some(requested)))
+    }
 }
 
 /// Queries the whole repository for a cold build (spec 6.9).
@@ -360,12 +367,7 @@ pub fn query_universe(
     files: &FileSource,
 ) -> Result<QueryResult, BazelError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    let outcome = bazel.query_universe(|slab, ranges| {
-        for t in decode_batch(slab, ranges, opts)? {
-            grouped.entry(t.package.clone()).or_default().push(t);
-        }
-        Ok(())
-    })?;
+    let outcome = bazel.query_universe(group_into(&mut grouped, opts))?;
     Ok(finish(grouped, outcome, files, None))
 }
 
@@ -387,10 +389,7 @@ fn decode_batch(
 ) -> Result<Vec<ParsedTarget>, cambium_proto::ReadError> {
     let decoded: Result<Vec<Option<ParsedTarget>>, cambium_proto::ReadError> = ranges
         .par_iter()
-        .map(|&(s, e)| {
-            let t = Target::decode(&slab[s..e])?;
-            Ok(convert(&t, opts))
-        })
+        .map(|&range| Ok(convert(&cambium_proto::decode_frame(slab, range)?, opts)))
         .collect();
     Ok(decoded?.into_iter().flatten().collect())
 }
@@ -446,12 +445,11 @@ pub fn parse_stream(
     files: &FileSource,
 ) -> Result<Vec<PackageUpdate>, cambium_proto::ReadError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    cambium_proto::read_frames(bytes, cambium_proto::DEFAULT_BATCH, |slab, ranges| {
-        for t in decode_batch(slab, ranges, opts)? {
-            grouped.entry(t.package.clone()).or_default().push(t);
-        }
-        Ok(())
-    })?;
+    cambium_proto::read_frames(
+        bytes,
+        cambium_proto::DEFAULT_BATCH,
+        group_into(&mut grouped, opts),
+    )?;
     let outcome = QueryOutcome {
         exit_code: Some(0),
         success: true,

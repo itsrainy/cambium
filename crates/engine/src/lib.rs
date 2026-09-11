@@ -45,7 +45,7 @@ pub use engine::{
     OnGlobal, PublishPolicy, PublishSource, RunOutcome,
 };
 pub use error::{EngineError, Result};
-pub use inspect::{IndexQuery, QueryOptions};
+pub use inspect::{hex, IndexQuery, QueryOptions};
 pub use plan::{PlanMode, RunPlan};
 pub use probe::Probes;
 pub use query::{BazelQuerier, PackageQuerier};

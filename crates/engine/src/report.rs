@@ -172,12 +172,15 @@ pub struct Stats {
     pub affected_targets: usize,
     pub changed_files: usize,
     pub ignored_files: usize,
-    /// A `.bzl` file changed, so Bazel was asked which packages load it.
+    /// Whether Bazel was asked which packages load a changed `.bzl`.
     ///
-    /// Always false since the static load closure replaced the `rbuildfiles`
-    /// call; kept in the contract because consumers (and the benchmark's own
-    /// history) read it, and because the method behind it still exists for the
-    /// comparison suite's oracle.
+    /// **Permanently `false`, retained for schema stability.** Contract
+    /// version 3 added it when the engine ran `rbuildfiles`; version 4
+    /// replaced that call with the index's static load closure and nothing
+    /// in the engine sets it since. It stays in the document because
+    /// consumers and the benchmark's own history read the field by name, and
+    /// removing it would be a contract break for no gain; the `rbuildfiles`
+    /// call itself survives only as the comparison suite's oracle.
     #[serde(default)]
     pub rbuildfiles_called: bool,
     /// Packages dirtied because a changed `.bzl` is in their load closure.
