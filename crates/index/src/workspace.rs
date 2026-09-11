@@ -62,8 +62,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::label::{Label, Repo};
-use crate::loads::{lex, Lexed, Tok};
-use crate::starlark::{parse_args, render_all, render_stmt, statements};
+use crate::starlark::{Arg, Expr, ExprKind, Module, Stmt};
 use crate::util::diff_maps;
 use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
 
@@ -117,24 +116,24 @@ struct Parsed {
 /// Reads one side into classified statements, plus its `load()` map from
 /// symbol to the label it came from.
 fn scan(text: &str) -> (Vec<Parsed>, BTreeMap<String, String>) {
-    let toks = lex(text);
+    let m = Module::parse(text);
     let mut out: Vec<Parsed> = Vec::new();
     let mut loaded: BTreeMap<String, String> = BTreeMap::new();
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
     let mut opaque = 0usize;
-    for st in statements(&toks) {
-        let t = st.toks();
+    for st in &m.stmts {
+        let span = st.span();
         let mut p = Parsed {
             key: Key::Opaque(opaque),
             callee: String::new(),
             path: None,
-            text: render_all(text, t),
-            short: render_stmt(text, t),
+            text: m.render_all(&span),
+            short: m.render_short(&span),
         };
-        match call_shape(t) {
+        match call_shape(st) {
             None => opaque += 1,
-            Some(callee) => {
-                let args = parse_args(text, t, 1);
+            Some((callee, args)) => {
+                let args = m.args(args);
                 p.callee = callee.to_string();
                 p.path = args.first("path").map(String::from);
                 if callee == "load" {
@@ -166,21 +165,20 @@ fn scan(text: &str) -> (Vec<Parsed>, BTreeMap<String, String>) {
     (out, loaded)
 }
 
-/// The callee of a statement that is exactly one top-level call, `f(...)`.
+/// The callee and arguments of a statement that is exactly one top-level
+/// call, `f(...)`, or a `load(...)`.
 ///
 /// An assignment, a dotted call, a comprehension, a `for` or an `if` all fail
-/// this and are opaque — as does anything trailing the call's closing bracket.
-fn call_shape<'a>(t: &[Lexed<'a>]) -> Option<&'a str> {
-    let Some(Tok::Name(n)) = t.first().map(|x| x.tok) else {
-        return None;
-    };
-    if !matches!(t.get(1).map(|x| x.tok), Some(Tok::Open(b'('))) {
-        return None;
+/// this and are opaque.
+fn call_shape<'s, 'a>(st: &'s Stmt<'a>) -> Option<(&'a str, &'s [Arg<'a>])> {
+    match st {
+        Stmt::Load(l) => Some(("load", &l.args)),
+        Stmt::Expr(Expr {
+            kind: ExprKind::Call { callee, args },
+            ..
+        }) => callee.as_name().map(|n| (n, args.as_slice())),
+        _ => None,
     }
-    if !matches!(t.last().map(|x| x.tok), Some(Tok::Close)) {
-        return None;
-    }
-    Some(n)
 }
 
 /// Diffs two `WORKSPACE` texts.

@@ -479,3 +479,37 @@ attrs = {"envoy_version": attr.label(default = "@envoy//:VERSION.txt")},
         .target_only
         .contains(&Pattern::Exact("bazel/helper.bzl".into())));
 }
+
+/// Adjacent string literals are one string — `"@envoy//tools/base:"
+/// "requirements.txt"` is the label Bazel resolves, and a `name` written
+/// the same way is the name of the repository. The token-level reader saw
+/// two literals, neither of which was a label, and a name it could not
+/// evaluate; the tree joins them, so the lock is an input of `base_pip3`
+/// and nothing else. Sound in both directions: the joined value is the
+/// only one Bazel ever sees.
+#[test]
+fn adjacent_literals_are_one_string() {
+    let files = support::Files(vec![
+        (
+            "WORKSPACE",
+            "workspace(name = \"envoy\")\n\
+             load(\"//bazel:py.bzl\", \"py\")\n\
+             py()\n",
+        ),
+        (
+            "bazel/py.bzl",
+            "def py():\n\
+             \x20   pip_parse(\n\
+             \x20       name = \"base_\" \"pip3\",\n\
+             \x20       requirements_lock = \"@envoy//tools/base:\"\n\
+             \x20                           \"requirements.txt\",\n\
+             \x20   )\n",
+        ),
+    ]);
+    let ri = support::inputs(&files, &RepoMapping::identity().with_main_alias("envoy"));
+    assert_eq!(
+        ri.repos_for("tools/base/requirements.txt"),
+        support::set(&["base_pip3"])
+    );
+    assert_eq!(ri.repos, support::set(&["base_pip3"]));
+}
