@@ -58,7 +58,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
-use crate::tools::{normalise_label, run_capture, RunContext, Tool, ToolRun};
+use crate::tools::{
+    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+};
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_TANGO";
@@ -66,12 +68,18 @@ pub const DIR_ENV: &str = "CAMBIUM_TANGO_DIR";
 
 pub const NAME: &str = "tango";
 
+/// How `tools/tango/fetch.sh` lays the installation out.
+const INSTALL: Install = Install {
+    cache_name: "tango",
+    binary: "bin/tango-cli",
+    bin_env: BIN_ENV,
+    dir_env: DIR_ENV,
+    fetch_script: "tools/tango/fetch.sh",
+};
+
 /// `~/.cache/cambium/tango`, where `tools/tango/fetch.sh` installs.
 pub fn default_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os(DIR_ENV) {
-        return PathBuf::from(d);
-    }
-    crate::util::cache_dir("tango")
+    INSTALL.dir(None)
 }
 
 /// The tag and commit `fetch.sh` recorded, as one line.
@@ -80,7 +88,7 @@ pub fn default_dir() -> PathBuf {
 /// (upstream Tango ships no CLI at all), so this is the only identity the
 /// comparison can record.
 pub fn read_version_file(dir: &Path) -> Option<String> {
-    let s = std::fs::read_to_string(dir.join("VERSION")).ok()?;
+    let s = Install::version_text(dir)?;
     let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
     for line in s.lines() {
         if let Some((k, v)) = line.trim().split_once('=') {
@@ -115,10 +123,16 @@ impl Tango {
     /// `$CAMBIUM_TANGO`, else `$CAMBIUM_TANGO_DIR/bin/tango-cli`, else
     /// `~/.cache/cambium/tango/bin/tango-cli`.
     pub fn discover() -> Result<Self> {
-        let dir = default_dir();
-        match std::env::var_os(BIN_ENV) {
+        Self::discover_with(&ToolLocations::from_env())
+    }
+
+    /// The `tango-cli` the command line named, else the one under the
+    /// installation directory.
+    pub fn discover_with(at: &ToolLocations) -> Result<Self> {
+        let dir = INSTALL.dir(at.tango_dir.as_deref());
+        match &at.tango {
             Some(bin) => Ok(Self::at(
-                PathBuf::from(bin),
+                bin.clone(),
                 read_version_file(&dir).unwrap_or_else(|| "unknown".into()),
             )),
             None => Self::discover_in(&dir),
@@ -126,18 +140,8 @@ impl Tango {
     }
 
     /// The installation under `dir`, as `tools/tango/fetch.sh` lays one out.
-    ///
-    /// The environment is read by [`discover`](Self::discover) and nowhere
-    /// else, so a test can point at a directory of its own without setting a
-    /// process-wide variable that every other test in the binary shares.
     pub fn discover_in(dir: &Path) -> Result<Self> {
-        let bin = dir.join("bin/tango-cli");
-        anyhow::ensure!(
-            bin.exists(),
-            "no tango-cli at {}; set ${BIN_ENV}, or ${DIR_ENV}, \
-             or run tools/tango/fetch.sh",
-            bin.display()
-        );
+        let bin = INSTALL.locate_in(dir)?;
         let version = read_version_file(dir).unwrap_or_else(|| "unknown".into());
         Ok(Self::at(bin, version))
     }
@@ -202,8 +206,11 @@ impl Tool for Tango {
     /// `$TMPDIR`.
     fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun> {
         std::fs::create_dir_all(&ctx.scratch)?;
-        let short = |s: &str| s.chars().take(12).collect::<String>();
-        let out = ctx.scratch_file(&format!("tango-{}-{}.json", short(base), short(head)));
+        let out = ctx.scratch_file(&format!(
+            "tango-{}-{}.json",
+            short_sha(base),
+            short_sha(head)
+        ));
         let worktrees = ctx.scratch_file("tango-worktrees");
         // Left over from a killed run, the worktrees are stale checkouts of
         // the wrong revisions; tango-cli would fail to add over them.
@@ -241,7 +248,7 @@ impl Tool for Tango {
         }
         let c = run_capture(
             &mut cmd,
-            &format!("tango-cli {}..{}", short(base), short(head)),
+            &format!("tango-cli {}..{}", short_sha(base), short_sha(head)),
         )?;
         let _ = std::fs::remove_dir_all(&worktrees);
 

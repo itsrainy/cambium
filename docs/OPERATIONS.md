@@ -23,9 +23,11 @@ size, which do not fit on a laptop.
   revoke-security-group-ingress` the old CIDR and
   `authorize-security-group-ingress` the new one.
 - `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
-  private: `sync` tars the working tree over ssh and rebuilds cambi,
-  bazel-diff-rust and tango there (`~/finish-bootstrap.log` ends with
-  `BOOTSTRAP DONE`).
+  private: `sync` tars the working tree over ssh and runs
+  `tools/ec2/finish-bootstrap.sh` there, which rebuilds cambi, bazel-diff-rust
+  and tango (`~/finish-bootstrap.log` ends with `BOOTSTRAP DONE`). Every
+  hard-coded value in the two scripts is a variable at the top with the
+  box's default; see the table below.
 - **The mirrors on the box are still under `~/.cache/cambium/corpus/`** (61 GB,
   all five subjects fetched and built). Do not move them: the Bazel
   `--output_base` directories under there have absolute paths baked in, and
@@ -38,32 +40,38 @@ size, which do not fit on a laptop.
   `precheck.sh` do it and export `CAMBI` for the harness; a hand-run
   `cambium-bench` needs `--cambi <path>`, `$CAMBI`, or a `cambi` on `PATH`,
   and says so at once rather than an hour in.
-- **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` pulls
-  each subject's `bases/*.bin` and `heads/*.bin` alongside the index and the
-  results, replays every change set, and — with `REDERIVE=1` and a local
-  mirror — also runs `cambium-bench replay <subject> --head-check`, which
-  re-derives the externals tables from the head tree's text and compares them
-  against the index the rebuild oracle cold-built at the pin. That is the
-  rebuild oracle's externals half, offline: an engine change to the externals
-  tables is checkable without Bazel or the box. A subject whose published run
-  predates the head archive has none and is silently skipped.
+- **Precheck first, and with `REDERIVE=1`.** `tools/bench/precheck.sh` runs
+  `cambium-bench pull-results` per subject — the index at the pin, the
+  recorded results, `bases/*.bin`, `heads/*.bin`, and the diff of every change
+  set, which the box's own `cambium-bench replay --write-paths` derives over
+  the mirror — into `bench-precheck/`, then `cambium-bench replay --all`.
+  With `REDERIVE=1` and a local mirror it also runs `cambium-bench replay
+  <subject> --head-check`, which re-derives the externals tables from the
+  head tree's text and compares them against the index the rebuild oracle
+  cold-built at the pin: the rebuild oracle's externals half, offline. A
+  subject whose published run predates the head archive has none and is
+  silently skipped.
 - **Smoke first.** `SMOKE=1 tools/bench/run-published.sh` does every
   subject's fetch and build, a three-commit history walk and one change set
   with every tool and both oracles, into `bench-results-smoke/`, in about
-  fifteen minutes. Run it after every sync, before the real driver: two of
-  the 2026-09-10 confirmation runs lost hours to a refusal it would have
-  shown in the first minutes.
-- The driver from the last run is at `~/run-published.sh` on the box: one
-  subject at a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla),
-  `fetch` / `build` / `history --oracle rebuild` / `changes --tools
+  fifteen minutes. Run it after every sync, before the real driver.
+- The driver is `tools/bench/run-published.sh`: it builds both binaries,
+  refuses to start unless they are built from the tree (`cambium-bench run
+  --require-sha`), and hands the plan to `cambium-bench run` — one subject at
+  a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla), `fetch` /
+  `build` / `history --oracle rebuild` / `changes --tools
   cambium,bazel-diff,tango --oracle rdeps,load` / `report`, then a final
-  `cambium-bench report`. A failing subject does not stop the rest. Run it under
-  `nohup` with a log; follow it with `cambium-bench watch` (below) and grep the
-  log for `^=== `, `FAILED`, `PUBLISHED RUN DONE`, `panic`, `recall`,
-  `unclassified`, `cambium_missing`, `No space left`. Compare each subject's
-  summary line against `docs/RESULTS.md` as it lands, before letting the run
-  continue to the next: the cheap subjects finish first, and a regression
-  they show is hours cheaper to stop there than after xla.
+  `cambium-bench report`. The plan is `crates/bench/src/plan.rs`, the same one
+  the launcher screen composes; `cambium-bench run --dry-run` prints it. A
+  failing step does not stop the rest, and a failed fetch or build skips the
+  rest of that subject. Run it under `nohup` with a log; follow it with
+  `cambium-bench watch` (below) and grep the log for `^=== `, `FAILED`,
+  `PUBLISHED RUN DONE`, `panic`, `recall`, `unclassified`, `cambium_missing`,
+  `No space left`.
+  Compare each subject's summary line against `docs/RESULTS.md` as it lands,
+  before letting the run continue to the next: the cheap subjects finish
+  first, and a regression they show is hours cheaper to stop there than after
+  xla.
 - **Following it: `cambium-bench watch`.** One row per subject, polled off
   `bench-results/<subject>/progress.json` once a second — the step, progress,
   the commit or change set in hand and the tool running on it, elapsed, an ETA
@@ -81,6 +89,47 @@ size, which do not fit on a laptop.
   xla ~3 h. Fetches and cold builds are ~free now that the caches exist.
 - When it is done: tar `bench-results/` back, regenerate and commit
   `docs/RESULTS.md`, and `launch.sh stop`.
+
+## Environment
+
+Every knob the harness and its scripts read. A per-run choice is a flag of
+`cambium-bench` with the variable as its fallback (clap `env`), so a script
+and a person at a terminal spell it the same way; the library itself reads
+none of them. Unset means the default.
+
+| variable | read by | default | meaning |
+|---|---|---|---|
+| `CAMBI` | `cambium-bench --cambi` | `cambi` on `PATH` | the product binary under measurement |
+| `CAMBIUM_SUBJECTS_DIR` | `--subjects-dir`; the scripts | `~/.cache/cambium/subjects` | mirrors, worktrees, stores, output bases (the box keeps `~/.cache/cambium/corpus`) |
+| `CAMBIUM_BAZEL_DIFF` | `--bazel-diff` | `<bazel-diff dir>/bin/bazel-diff-rust` | the bazel-diff Rust binary |
+| `CAMBIUM_BAZEL_DIFF_JAR` | `--bazel-diff-jar` | `<bazel-diff dir>/bazel-diff_deploy.jar` | the Kotlin jar, for `--tools bazel-diff-kotlin` |
+| `CAMBIUM_BAZEL_DIFF_DIR` | `--bazel-diff-dir`; `tools/bazel-diff/fetch.sh` | `~/.cache/cambium/bazel-diff` | where `fetch.sh` installed |
+| `CAMBIUM_TANGO` | `--tango` | `<tango dir>/bin/tango-cli` | the Tango driver |
+| `CAMBIUM_TANGO_DIR` | `--tango-dir`; `tools/tango/fetch.sh` | `~/.cache/cambium/tango` | where `fetch.sh` installed |
+| `CAMBIUM_REDERIVE_DUMP` | `replay --rederive-dump` | off | keep each re-derived index at `<dir>/rederived-<base>.bin` |
+| `CAMBIUM_LOG` | `--log` | `warn` | log level |
+| `AWS_REGION` | `pull-results --region`; `launch.sh` | `us-east-2` | where the box is |
+| `CAMBIUM_REQUIRE_TOOLS` | the real-tool tests | unset | `1` turns a "tool not installed" skip into a failure (CI's nightly job) |
+| `CAMBIUM_SMOKE_SCRATCH` | `crates/bench/tests/smoke_real_bazel.rs` | a fresh temp dir | keep the smoke test's subjects between runs |
+| `SUBJECTS` | `run-published.sh`, `precheck.sh` | the five subjects | which subjects, space-separated |
+| `STEPS` | `run-published.sh` | `fetch build history changes report` | which steps |
+| `SMOKE` | `run-published.sh` | `0` | `1` is the fifteen-minute pass into `bench-results-smoke/` |
+| `RESTART_CHANGES`, `RESTART_HISTORY` | `run-published.sh` | `0` | `--restart` on the workload |
+| `NO_BUILD` | `run-published.sh` | `0` | `1` skips the cargo build (the sha preflight still runs) |
+| `CAMBIUM_REPO` | `run-published.sh`, `finish-bootstrap.sh` | `~/cambium` | the checkout on the box |
+| `CAMBIUM_BENCH` | `run-published.sh`, `precheck.sh` | `target/release/cambium-bench` | the harness binary |
+| `CARGO_ENV`, `GO_BIN`, `BAZELISK` | `run-published.sh`, `finish-bootstrap.sh` | `~/.cargo/env`, `/usr/local/go/bin`, `/usr/local/bin/bazelisk` | the box's toolchains |
+| `BOOTSTRAP_LOG` | `run-published.sh`, `launch.sh` | `~/finish-bootstrap.log` | where `finish-bootstrap.sh` wrote; the driver refuses to run unless it ends in `BOOTSTRAP DONE` |
+| `CACHE` | `precheck.sh` | `bench-precheck/` | where `pull-results` puts the pulled trees |
+| `LOCAL_MIRRORS` | `precheck.sh` | `$CAMBIUM_SUBJECTS_DIR` | local mirrors to pass as `--repo` |
+| `REDERIVE`, `BASELINE`, `SAVE_BASELINE` | `precheck.sh` | `0` | `--rederive` and the head check; `--baseline` / `--save-baseline` against `<cache>/<subject>/baseline.json` |
+| `PEM` | `precheck.sh`, `launch.sh` | `~/.ssh/cambium-corpus.pem` | the ssh key |
+| `BOX_HOST` | `precheck.sh` | asked of EC2 | the box's address |
+| `BOX_REPO`, `BOX_SUBJECTS` | `precheck.sh`, `launch.sh` | `cambium`, `.cache/cambium/corpus` | the checkout and the mirrors on the box, relative to its home |
+| `PATHS_FROM_BOX` | `precheck.sh` | `1` | derive the change-set diffs on the box |
+| `SIZE`, `DISK` | `launch.sh` | `c7i.4xlarge`, `500` | the instance |
+| `KEY`, `SG_NAME`, `TAG_FILTER`, `INSTANCE_NAME`, `AMI_OWNER`, `AMI_NAME`, `BOX_USER`, `POLL_SECS` | `launch.sh` | see the script | the AWS names, and how often `sync` polls the build |
+| `TANGO_REPO`, `TANGO_TAG`, `TANGO_COMMIT`, `GO` | `tools/tango/fetch.sh` | the pinned tag | which Tango, and which Go builds it |
 
 ## Gotchas
 
