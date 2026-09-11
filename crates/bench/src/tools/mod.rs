@@ -29,6 +29,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use cambium_index::label::{Label, Repo};
 
 pub mod bazel_query;
 pub mod bazeldiff;
@@ -304,14 +305,15 @@ impl ToolRun {
 /// unchanged apart from trimming.
 pub fn normalise_label(label: &str) -> String {
     let l = label.trim();
-    let Some(rest) = l.strip_prefix('@') else {
-        return l.to_string();
-    };
-    let rest = rest.strip_prefix('@').unwrap_or(rest);
-    let Some((repo, path)) = rest.split_once("//") else {
-        // `@repo` on its own is shorthand for `@repo//:repo`; leave the
-        // shorthand alone rather than inventing a spelling.
-        return l.to_string();
+    // Deliberately not resolved through a repository mapping: the point is
+    // one spelling per module across tools that each write their own, and a
+    // canonical name is trimmed back to the module rather than looked up.
+    let (repo, path) = match Label::parse(l).map(|p| (p.repo(), p.rest())) {
+        Some((Repo::Apparent(repo), path)) | Some((Repo::Canonical(repo), path)) => (repo, path),
+        // `//pkg:t` is already the spelling; `@repo` on its own is shorthand
+        // for `@repo//:repo` and is left alone rather than inventing one; and
+        // something that is not a label at all is returned as it came.
+        _ => return l.to_string(),
     };
     if repo.is_empty() {
         return format!("//{path}");

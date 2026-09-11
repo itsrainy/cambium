@@ -66,6 +66,7 @@ use anyhow::{Context, Result};
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{self, WorkspaceText};
 use cambium_engine::Config;
+use cambium_index::label::{Label, Repo};
 use cambium_index::{walk, IndexRef};
 use serde::{Deserialize, Serialize};
 
@@ -1053,12 +1054,14 @@ fn package_routes(
     out
 }
 
+/// The repository part of a label, as written: `@@rules_cc+//x:y` ->
+/// `rules_cc+`. `None` for the main repository however it is spelled; the
+/// token is matched by shape, the way the engine's stage does, not resolved.
 fn label_repo(label: &str) -> Option<&str> {
-    let rest = label
-        .strip_prefix("@@")
-        .or_else(|| label.strip_prefix('@'))?;
-    let (repo, _) = rest.split_once("//")?;
-    (!repo.is_empty()).then_some(repo)
+    match Label::parse(label)?.repo() {
+        Repo::Apparent(r) | Repo::Canonical(r) if !r.is_empty() => Some(r),
+        _ => None,
+    }
 }
 
 /// Per-repository attribution for the human report.

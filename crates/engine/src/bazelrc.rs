@@ -55,6 +55,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cambium_index::label::{Label, Repo};
+
 /// Whether a repository path is a bazelrc, and so gets read rather than merely
 /// matched against the invalidator list.
 ///
@@ -479,16 +481,17 @@ pub fn flag_label(name: &str) -> Option<&str> {
         Some(rest) if rest.starts_with('@') || rest.starts_with("//") => rest,
         _ => name,
     };
-    let rest = if let Some(r) = label.strip_prefix("@@") {
-        r
-    } else if let Some(r) = label.strip_prefix('@') {
-        r
-    } else {
-        return label.starts_with("//").then_some(label);
-    };
-    // `@repo//pkg:name`: a repository name and then a main-repo-shaped label.
-    let (repo, after) = rest.split_once("//")?;
-    (!repo.is_empty() && !repo.contains(':') && !after.is_empty()).then_some(label)
+    // Syntactic only: whether the name has the shape of a label, not where
+    // it points. The repository is not resolved here — [`crate::flags`] does
+    // that, with the mapping — so `@repo//pkg:name` is a label whatever
+    // `repo` is, as long as it is a name and something follows the `//`.
+    let l = Label::parse(label)?;
+    match l.repo() {
+        Repo::Main => (!l.is_relative()).then_some(label),
+        Repo::Apparent(repo) | Repo::Canonical(repo) => {
+            (!repo.is_empty() && !repo.contains(':') && !l.rest().is_empty()).then_some(label)
+        }
+    }
 }
 
 /// Reads a bazelrc diff into the three things a run can act on: the count of
