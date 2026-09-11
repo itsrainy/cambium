@@ -128,9 +128,7 @@ fn texts(base: &str, head: &str) -> FixedText {
 /// Builds the base index and answers the `.bazelrc` diff over it.
 fn run(base_rc: &str, head_rc: &str, defs: &str) -> cambium_engine::AffectedReport {
     let (_d, engine, base, head) = fixture(base_rc, head_rc);
-    let index = engine
-        .full_build_with(&base, &scanning(defs))
-        .unwrap();
+    let index = engine.full_build_with(&base, &scanning(defs)).unwrap();
     let req = AffectedRequest {
         materialize: true,
         no_full_build: true,
