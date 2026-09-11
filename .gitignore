@@ -3,6 +3,8 @@
 *.bin.tmp
 # Benchmark runs.
 bench-results*/
+# Schema-5 benchmark binaries pulled off the box; never committed.
+corpus-results-box/
 # What tools/bench/precheck.sh pulls off the box to replay against, offline.
 bench-precheck/
 .claude/
