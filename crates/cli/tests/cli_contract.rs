@@ -68,7 +68,7 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     // binary in a later step. `baseline` is deliberately absent: it still
     // works, and a deprecated spelling is not advertised.
     for sub in [
-        "status", "affected", "index", "inspect", "config", "bench", "synth",
+        "init", "status", "doctor", "affected", "index", "inspect", "config", "bench", "synth",
     ] {
         assert!(
             stdout.contains(sub),
@@ -752,5 +752,81 @@ fn init_writes_the_config_and_nothing_else() {
         std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
         "target/\n",
         "init must not edit .gitignore"
+    );
+}
+
+/// The Position line, end to end: a real git history, a real directory store,
+/// and an index published for an ancestor. The rows come from the synthetic
+/// source, so Bazel never runs.
+///
+/// This is the line `status` exists for, and it is worth pinning as text: a
+/// caller reads it, and "3 commits back" is the difference between waiting and
+/// not.
+#[test]
+fn status_names_the_nearest_index_and_how_far_back_it_is() {
+    use cambium_engine::{Config, Engine, SynthQuerier};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = dir.path().join("store");
+    let cache = dir.path().join("cache");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let graph = cambium_synth::generate(&cambium_synth::GraphSpec::preset("tiny").unwrap());
+    let spec = cambium_synth::ChangeSpec {
+        seed: 3,
+        ..cambium_synth::ChangeSpec::preset("typical-pr").unwrap()
+    };
+    let emitted = cambium_synth::emit_git_history(graph, &spec, 4, &ws, true).expect("a history");
+    let mut cfg = Config::load(&ws).unwrap();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::Dir {
+        path: store_dir.clone(),
+    };
+    std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+
+    // Publish the index for the second commit, leaving HEAD cold.
+    let engine = Engine::with_parts(
+        cfg.clone(),
+        cambium_diff::Repo::new(ws.clone()),
+        cambium_bazel::Bazel::at(ws.clone(), Some("/nonexistent/bazel")),
+    )
+    .with_cache_dir(cache.clone());
+    let at = 1;
+    let index = engine
+        .full_build_with(
+            &emitted.commits[at],
+            &SynthQuerier::new(&emitted.graphs[at]),
+        )
+        .unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    let file = cache.join("published.cmbx");
+    cambium_index::format::write_index(&file, &index).unwrap();
+    let repo = cambium_diff::Repo::new(ws.clone());
+    let tree = repo.tree_of(&emitted.commits[at]).unwrap();
+    cambium_engine::BaselineCache::new(
+        &cambium_engine::store::DirStore::new(store_dir),
+        &cache,
+        cfg.hash(),
+    )
+    .publish(&file, &index.header.lineage, &emitted.commits[at], &tree)
+    .expect("publishing");
+
+    let (code, stdout, stderr) = run(&["-C", ws.to_str().unwrap(), "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    let back = emitted.commits.len() - 1 - at;
+    let head = &emitted.commits[emitted.commits.len() - 1][..7];
+    let near = &emitted.commits[at][..7];
+    let expected = format!(
+        "HEAD {head} has no index; nearest is {near}, {back} commits back (lineage {}, splice)",
+        &cambium_engine::probe::hex(&index.header.lineage)[..6]
+    );
+    assert!(
+        stdout.lines().any(|l| l.trim() == expected),
+        "the Position line should read\n  {expected}\nand status printed\n{stdout}"
+    );
+    assert!(stdout.contains("reachable, 1 indexes"), "{stdout}");
+    assert!(
+        stdout.contains("packages") && stdout.contains("format     version"),
+        "the Index section should describe the index a run would load:\n{stdout}"
     );
 }

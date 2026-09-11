@@ -227,6 +227,7 @@ name = "cambium-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cambium-bazel",
  "cambium-bench",
  "cambium-diff",
  "cambium-engine",
