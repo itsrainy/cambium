@@ -2,9 +2,10 @@
 
 This page defines the words the benchmark uses and what each measurement
 can and cannot claim. The numbers themselves live in [RESULTS.md](RESULTS.md).
-Everything here is driven by `cambi bench` (`crates/bench`); the real
+Everything here is driven by `cambium-bench` (`crates/bench-cli`, over
+`crates/bench`), which measures `cambi` by running it; the real
 subjects are described by `subject_repos.toml`, the synthetic ones by the
-presets `cambi synth presets` lists.
+presets `cambium-bench synth presets` lists.
 
 ## Concepts
 
@@ -206,19 +207,19 @@ by running containers) and every external fetchable.
 ## The commands
 
 ```
-cambi bench subjects            list, fetch, or cold-build a subject
-cambi bench history  <subject>  the history workload; rebuild oracle
-cambi bench changes  <subject>  the change-set workload across tools and oracles
-cambi bench stages   <subject>  engine stage micro-benchmarks (synthetic subjects)
-cambi bench sweep    <subject>  vary one parameter and report how a stage scales
-cambi bench regress  <a> <b>    compare two result files and fail on a regression
-cambi bench report              regenerate RESULTS.md from bench-results/
+cambium-bench subjects            list, fetch, or cold-build a subject
+cambium-bench history  <subject>  the history workload; rebuild oracle
+cambium-bench changes  <subject>  the change-set workload across tools and oracles
+cambium-bench stages   <subject>  engine stage micro-benchmarks (synthetic subjects)
+cambium-bench sweep    <subject>  vary one parameter and report how a stage scales
+cambium-bench regress  <a> <b>    compare two result files and fail on a regression
+cambium-bench report              regenerate RESULTS.md from bench-results/
 ```
 
 `<subject>` is a name from `subject_repos.toml` or `synth:<preset>`. Every
 workload takes `--tools`, `--oracle`, `--kind` and a size (`--commits`,
 `--change-sets`) so a run can be exactly as large as the question needs.
-CI's per-pull-request job is `cambi bench changes synth:small --tools
+CI's per-pull-request job is `cambium-bench changes synth:small --tools
 cambium,bazel-diff`, the same command a person runs. Tango is left out of it
 only because it costs 30-500 s a change set; the weekly job on the real
 subjects runs all three.
@@ -228,9 +229,9 @@ subjects runs all three.
 ```console
 $ tools/bazel-diff/fetch.sh          # builds bazel-diff-rust at its pin, once
 $ tools/tango/fetch.sh               # builds tango-cli at its pin, once
-$ cambi bench subjects fetch bazel   # mirror and check out the pin
-$ cambi bench subjects build bazel   # one cold `bazel query //...`
-$ cambi bench changes bazel --quick
+$ cambium-bench subjects fetch bazel   # mirror and check out the pin
+$ cambium-bench subjects build bazel   # one cold `bazel query //...`
+$ cambium-bench changes bazel --quick
 ```
 
 Both tool scripts cache their binaries under
@@ -264,12 +265,12 @@ Bazel and so can be measured at sizes no real subject reaches:
 `legacy_bazel_diff`.
 
 ```console
-$ cambi bench stages synth:medium
-$ cambi bench sweep  synth:medium --stage walk --param targets --values 1e4,1e6
-$ cambi bench regress a.json b.json --threshold 15
+$ cambium-bench stages synth:medium
+$ cambium-bench sweep  synth:medium --stage walk --param targets --values 1e4,1e6
+$ cambium-bench regress a.json b.json --threshold 15
 ```
 
-Results carry a machine fingerprint, and `bench regress` refuses to compare
+Results carry a machine fingerprint, and `cambium-bench regress` refuses to compare
 across machines rather than reporting noise.
 
 `legacy_bazel_diff` is the like-for-like stage: it emits the graph as two real
@@ -292,6 +293,14 @@ packages that dirties, and whether the dirty set exceeds
 run leaves the index at the pin behind, so all of that can be replayed against
 the real subjects offline, in milliseconds a change set.
 
+A replay is the one part of the harness that does not run `cambi`. Everywhere
+else `cambium-bench` measures the product by shelling out to the binary a user
+runs; here there is no run to measure — the point is to drive the engine's
+static stages directly against a stored index, with no Bazel, no checkout and
+no process to start — so `replay` links the engine and calls it in process. The
+stage micro-benchmarks (`stages`, `sweep`, `regress`) are white-box for the
+same reason.
+
 ```console
 $ tools/bench/precheck.sh                       # every cached subject
 $ SUBJECTS="envoy apollo" tools/bench/precheck.sh
@@ -303,9 +312,9 @@ sets ran against, and the recorded results off the benchmark box into
 release, and runs the check. Underneath it is one command:
 
 ```console
-$ cambi bench replay envoy --change-set b352846f..a6871fc6   # one change set
-$ cambi bench replay envoy --paths 'M\tbazel/repo.bzl'       # a hypothetical
-$ cambi bench replay envoy --all                             # exit 1 on divergence
+$ cambium-bench replay envoy --change-set b352846f..a6871fc6   # one change set
+$ cambium-bench replay envoy --paths 'M\tbazel/repo.bzl'       # a hypothetical
+$ cambium-bench replay envoy --all                             # exit 1 on divergence
 ```
 
 Where it can, the replay does better than the pin. A run never splices onto the
@@ -315,7 +324,7 @@ live entirely in that difference — an inert `MODULE.bazel` read in WORKSPACE
 mode was invisible against the pin and reproduced immediately against the base
 the run itself used. So the change-set driver archives each base it ran
 against at `bench-results/<subject>/bases/<base>.bin`, `precheck.sh` pulls those
-alongside the index, and `bench replay` uses a change set's own base whenever
+alongside the index, and `cambium-bench replay` uses a change set's own base whenever
 one is there — saying which it used per change set and how many in the `--all`
 summary, and dropping the drift guards below for those, because there is no
 drift left to guard against. `--index` still overrides everything. The recorded
@@ -327,7 +336,7 @@ cold-builds a fresh index at the pin with real Bazel and compares it to the
 incrementally applied one, and that fresh index is the only artefact anywhere
 that says what Bazel's graph and externals side tables *are* at the pin —
 which the run then threw away. It is archived now, at
-`bench-results/<subject>/heads/<pin>.bin`, and `cambi bench replay <subject>
+`bench-results/<subject>/heads/<pin>.bin`, and `cambium-bench replay <subject>
 --head-check --repo <git dir>` re-derives its externals tables from the head
 tree's own text with the current engine and runs the same `compare_by_label`
 the oracle runs. The node, edge and rule-hash halves are empty by construction
@@ -396,7 +405,7 @@ replay: the tables in the stored index are the old derivation's output, and the
 replay faithfully re-runs the stage over them.
 
 ```console
-$ cambi bench replay envoy --all --repo ~/.cache/cambium/corpus/envoy.git --rederive
+$ cambium-bench replay envoy --all --repo ~/.cache/cambium/corpus/envoy.git --rederive
 $ REDERIVE=1 tools/bench/precheck.sh
 ```
 
@@ -436,10 +445,10 @@ A change to cambium reruns only the workload it can affect:
 
 | change | run |
 |---|---|
-| invalidation (what goes global, what gets dirtied) | `cambi bench history <subject> --oracle rebuild` on the subjects that exercise it |
-| the walk, hashing, or the affected set | `cambi bench changes <subject> --kind pr --tools cambium --oracle rdeps` |
-| a tool driver | `cambi bench changes <subject> --tools <tool> --change-sets 5` |
-| an engine stage's cost | `cambi bench stages synth:medium` |
+| invalidation (what goes global, what gets dirtied) | `cambium-bench history <subject> --oracle rebuild` on the subjects that exercise it |
+| the walk, hashing, or the affected set | `cambium-bench changes <subject> --kind pr --tools cambium --oracle rdeps` |
+| a tool driver | `cambium-bench changes <subject> --tools <tool> --change-sets 5` |
+| an engine stage's cost | `cambium-bench stages synth:medium` |
 | any of the static stages, before any of the above | `tools/bench/precheck.sh` — offline, minutes, no Bazel |
 | a timing claim against other tools | the full run on the benchmark machine, and only then |
 

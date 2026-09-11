@@ -1,6 +1,6 @@
 //! Criterion entry points for the in-memory stages.
 //!
-//! `cambi bench run` is the operator-facing path (machine-fingerprinted JSON,
+//! `cambium-bench run` is the operator-facing path (machine-fingerprinted JSON,
 //! regression gating); this is the developer-facing one, for when you want
 //! criterion's statistics while changing an inner loop.
 

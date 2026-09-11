@@ -1,0 +1,30 @@
+[package]
+name = "cambium-bench-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "cambium-bench, the benchmark harness: subjects, workloads, replay and the report"
+
+[[bin]]
+name = "cambium-bench"
+path = "src/main.rs"
+
+[dependencies]
+cambium-bench.workspace = true
+cambium-diff.workspace = true
+cambium-engine.workspace = true
+cambium-index.workspace = true
+cambium-synth.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+cambium-bazel.workspace = true
+tempfile.workspace = true

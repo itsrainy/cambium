@@ -14,7 +14,7 @@
 # replay reads the tables the run's cambium already wrote, so such a change is
 # invisible. Compare a re-derived run only against another re-derived run.
 #
-# REDERIVE=1 also runs `bench replay --head-check` per subject: the index the
+# REDERIVE=1 also runs `cambium-bench replay --head-check` per subject: the index the
 # rebuild oracle cold-built at the pin with real Bazel, against this build's
 # derivation of the same externals tables from the head tree's text. That is
 # the one check here that compares against Bazel's truth rather than against
@@ -23,7 +23,7 @@
 # It pulls, per subject, the stored index at the pin, the base index each change
 # set actually ran against, and the recorded results from the benchmark box into
 # `bench-precheck/` (git-ignored), builds cambi in release, and runs
-# `cambi bench replay --all`, which exits 1 on divergence.
+# `cambium-bench replay --all`, which exits 1 on divergence.
 #
 # What it does on the box: `scp` of result files, and — only with
 # PATHS_FROM_BOX=1, which is the default because the change sets do not record
@@ -55,7 +55,7 @@ host() {
 
 # The pin, read off the index file the box just gave us rather than out of the
 # manifest: the two agree, and this spelling carries the Bazel-version suffix
-# (apollo's files have one), which is also the name `bench replay` looks for
+# (apollo's files have one), which is also the name `cambium-bench replay` looks for
 # the paths cache under.
 pin_of() {  # dir -> <pin>[-<bazel version>]
   local f
@@ -137,9 +137,11 @@ PY'
   fi
 }
 
-echo "=== building cambi (release) ==="
+echo "=== building cambi and cambium-bench (release) ==="
 cargo build --release --manifest-path "$ROOT/Cargo.toml" || exit 1
 CAMBI=$ROOT/target/release/cambi
+CAMBIUM_BENCH=${CAMBIUM_BENCH:-$ROOT/target/release/cambium-bench}
+export CAMBI
 
 fail=0
 for s in $SUBJECTS; do
@@ -159,7 +161,7 @@ for s in $SUBJECTS; do
   fi
   [ "${BASELINE:-0}" = 1 ] && args+=(--baseline "$CACHE/$s/baseline.json")
   [ "${SAVE_BASELINE:-0}" = 1 ] && args+=(--save-baseline "$CACHE/$s/baseline.json")
-  "$CAMBI" bench replay "${args[@]}" || fail=1
+  "$CAMBIUM_BENCH" replay "${args[@]}" || fail=1
 
   # The rebuild oracle's externals half, offline: the index Bazel cold-built
   # at the pin, against this build's derivation of the same tables from the
@@ -167,7 +169,7 @@ for s in $SUBJECTS; do
   # about a subject whose run archived no head index.
   if [ "${REDERIVE:-0}" = 1 ] && [ -d "$mirror" ] && \
      ls "$CACHE/$s"/heads/*.bin >/dev/null 2>&1; then
-    "$CAMBI" bench replay "$s" --results-dir "$CACHE" --repo "$mirror" --head-check || fail=1
+    "$CAMBIUM_BENCH" replay "$s" --results-dir "$CACHE" --repo "$mirror" --head-check || fail=1
   fi
 done
 

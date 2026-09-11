@@ -1,4 +1,4 @@
-//! `cambi bench` — the benchmark (docs/METHODOLOGY.md).
+//! `cambium-bench` — the benchmark (docs/METHODOLOGY.md).
 //!
 //! The command tree is the vocabulary: `subjects` for what a run points at,
 //! `history` and `changes` for the two workloads, `stages` and `sweep` for the
@@ -22,7 +22,7 @@ use cambium_bench::util::{cache_dir, versioned_name};
 use cambium_bench::{changes, history};
 use clap::{Args as ClapArgs, Subcommand};
 
-use crate::cmd::Context;
+use crate::Context;
 use crate::DataFormat;
 
 /// Flags every `bench` subcommand shares.
@@ -184,7 +184,7 @@ pub enum Args {
     /// No Bazel, no checkout, milliseconds a change set: the check to run
     /// before the benchmark machine is started. See
     /// `docs/METHODOLOGY.md`, "Validating an engine change before a run".
-    Replay(Box<crate::cmd::replay::Args>),
+    Replay(Box<crate::replay::Args>),
     /// Print the label sets a change-set comparison stored.
     ///
     /// `changes-<pin>.json` keeps per-class counts and at most a handful of
@@ -213,6 +213,9 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
+    /// Generated Bazel graphs and workspaces.
+    #[command(subcommand)]
+    Synth(crate::synth::Args),
     /// Regenerate docs/RESULTS.md from bench-results/.
     Report {
         /// Rewrite only this subject's section. Every subject that has results
@@ -374,7 +377,7 @@ impl Run {
         anyhow::ensure!(
             path.exists(),
             "stress change sets need the index at the pin; run \
-             `cambi bench subjects build {}` first",
+             `cambium-bench subjects build {}` first",
             self.entry.id
         );
         let data = cambium_index::IndexFile::open(&path)?.deserialize()?;
@@ -386,7 +389,7 @@ impl Run {
 
 /// Selects `run`'s change sets and records them under `<subject>/changes/`.
 ///
-/// The one selector: `bench change-sets` and `bench changes` used to have a
+/// The one selector: `cambium-bench change-sets` and `cambium-bench changes` used to have a
 /// copy each, which is how only the first of them came to pass `hub_packages`
 /// -- so a `--kind stress` comparison silently drew its change sets from an
 /// empty hub list and stressed nothing.
@@ -492,7 +495,7 @@ fn preset_of(subject: &str, what: &str) -> Result<String> {
         })
 }
 
-/// `cambi bench labels`: the stored sets of one change set, filtered.
+/// `cambium-bench labels`: the stored sets of one change set, filtered.
 ///
 /// Deliberately does not go through [`Run::open`]: nothing here runs a Bazel
 /// or opens a checkout, and refusing to show a stored file because no bazel
@@ -605,7 +608,8 @@ fn do_labels(
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match args {
         Args::Subjects { what } => do_subjects(ctx, what),
-        Args::Replay(args) => crate::cmd::replay::run(ctx, *args),
+        Args::Synth(args) => crate::synth::run(ctx, args),
+        Args::Replay(args) => crate::replay::run(ctx, *args),
         Args::History {
             subject,
             commits,
@@ -636,13 +640,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 .or(run.quick.then_some(cambium_bench::QUICK_CHANGE_SETS))
                 .unwrap_or(cambium_bench::DEFAULT_CHANGE_SETS);
             if select_only {
-                do_change_sets(
-                    &run,
-                    &kinds,
-                    cap,
-                    stress_cap,
-                    ctx.format.data("cambi bench")?,
-                )?;
+                do_change_sets(&run, &kinds, cap, stress_cap, ctx.format.data())?;
                 return Ok(crate::EXIT_OK);
             }
             do_compare(
@@ -734,7 +732,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 crate::EXIT_OK
             } else {
                 eprintln!(
-                    "cambi bench regress: {regressions} stage(s) regressed by more than {threshold}%"
+                    "cambium-bench regress: {regressions} stage(s) regressed by more than {threshold}%"
                 );
                 crate::EXIT_ERROR
             })
@@ -1006,7 +1004,7 @@ fn do_change_sets(
     };
     match output {
         DataFormat::Json => println!("{}", serde_json::to_string_pretty(&set)?),
-        DataFormat::Jsonl => println!("{}", crate::cmd::result_event(&set)?),
+        DataFormat::Jsonl => println!("{}", crate::result_event(&set)?),
         DataFormat::Text => {
             for p in &set.change_sets {
                 println!(
@@ -1104,7 +1102,7 @@ fn open_tool(name: &str) -> Result<Option<Box<dyn cambium_bench::tools::Tool>>> 
             Ok(Some(p))
         }
         Err(e) => {
-            eprintln!("cambium: bench changes: skipping {name}: {e:#}");
+            eprintln!("cambium-bench: changes: skipping {name}: {e:#}");
             Ok(None)
         }
     }
@@ -1120,7 +1118,7 @@ fn do_compare(run: &Run, args: &CompareArgs) -> Result<u8> {
         .flatten()
         .collect();
     if owned.is_empty() && !wanted.is_empty() {
-        eprintln!("cambium: bench changes: no tool is installed; nothing to compare against");
+        eprintln!("cambium-bench: changes: no tool is installed; nothing to compare against");
         return Ok(crate::EXIT_ERROR);
     }
     let tools: Vec<&dyn cambium_bench::tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
@@ -1284,7 +1282,7 @@ fn do_report(
     let results = cambium_bench::report::SubjectResults::collect(&manifest, &parent, &subjects)?;
     if results.is_empty() {
         eprintln!(
-            "cambium: bench report: no history-*.json or changes-*.json under {}",
+            "cambium-bench: report: no history-*.json or changes-*.json under {}",
             parent.display()
         );
         return Ok(crate::EXIT_ERROR);

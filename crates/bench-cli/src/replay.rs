@@ -1,7 +1,7 @@
-//! `cambi bench replay` — the engine's static stages, offline, against a
+//! `cambium-bench replay` — the engine's static stages, offline, against a
 //! published run's own artefacts.
 //!
-//! It lives under `bench` because everything it reads is a benchmark artefact:
+//! It lives in the harness because everything it reads is a benchmark artefact:
 //! the index at the pin, the recorded change sets and the recorded answers.
 //! It runs no Bazel and needs no checkout, so it is the check to run *before*
 //! the benchmark machine is started, not after.
@@ -23,7 +23,7 @@ use cambium_bench::replay::{
 use cambium_index::IndexFile;
 use clap::Args as ClapArgs;
 
-use crate::cmd::Context;
+use crate::Context;
 use crate::DataFormat;
 
 #[derive(ClapArgs, Clone)]
@@ -324,7 +324,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
     };
 
-    let Some(output) = ctx.format.data("cambi bench replay")? else {
+    let Some(output) = ctx.format.data() else {
         return Ok(if divergences.is_empty() {
             crate::EXIT_OK
         } else {
@@ -401,7 +401,7 @@ fn head_check(ctx: &Context, args: &Args, subject: &str, pin: &str, results: &Pa
     let diff = replay::head_check(file.view(), pin, &texts, args.max_listed)
         .with_context(|| format!("re-deriving the externals tables at {pin}"))?;
 
-    let Some(output) = ctx.format.data("cambi bench replay")? else {
+    let Some(output) = ctx.format.data() else {
         return Ok(crate::EXIT_OK);
     };
     match output {

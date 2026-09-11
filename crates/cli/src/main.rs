@@ -113,12 +113,6 @@ enum Command {
     /// Show the effective configuration and its hash.
     #[command(subcommand)]
     Config(cmd::ConfigArgs),
-    /// Benchmark cambium against real and synthetic subjects.
-    #[command(subcommand)]
-    Bench(cmd::bench::Args),
-    /// Generate synthetic Bazel workspaces.
-    #[command(subcommand)]
-    Synth(cmd::synth::Args),
 }
 
 /// The one output flag, declared on `cambi` itself (`docs/CLI.md`, "The
@@ -248,8 +242,6 @@ fn main() -> ExitCode {
         Command::Explain(args) => cmd::explain::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Inspect(args) => cmd::inspect::run(&ctx, args),
-        Command::Bench(args) => cmd::bench::run(&ctx, args),
-        Command::Synth(args) => cmd::synth::run(&ctx, args),
         Command::Config(args) => cmd::config(&ctx, args),
     };
 

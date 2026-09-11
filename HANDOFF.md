@@ -23,7 +23,7 @@ this run's lineage).
 It took four passes on 2026-09-10, and every earlier pass failed on something
 the pin-based replay could not see. The Findings paragraph lists what was
 found and fixed (commits `72bc80b` .. `8d7524a`); each has a unit test and
-was confirmed with `bench replay --rederive` before the next pass, envoy's
+was confirmed with `cambium-bench replay --rederive` before the next pass, envoy's
 with `--index` pointed at the base index the run itself loaded. Everything
 is pushed; keep it that way, commit and push after every green test run.
 
@@ -58,7 +58,7 @@ box, hours in. What has landed:
   three history commits and one change set with every tool and oracle, into
   `bench-results-smoke/`, in about fifteen minutes. **Run it after every
   sync, before the real driver.**
-- `bench replay --rederive` is trustworthy on WORKSPACE-mode subjects now
+- `cambium-bench replay --rederive` is trustworthy on WORKSPACE-mode subjects now
   (`fee13a7`: an unrecorded canonical name was read as a main-repository
   alias, and sourcegraph's `deps.bzl` replayed as six cold rebuilds the run
   never made). `CAMBIUM_REDERIVE_DUMP=<dir>` keeps each re-derived index for
@@ -103,7 +103,7 @@ inert `MODULE.bazel`; a repository rule declared directly in WORKSPACE).
    lists the four re-measurements asked for; if the tools-directory
    workspace `.bzl` is still at universe, the new `debug` line names the
    def and the callee that made it so.
-3. The offline rebuild oracle (`bench replay --head-check`, `dd7dc28`) has
+3. The offline rebuild oracle (`cambium-bench replay --head-check`, `dd7dc28`) has
    no archive to check yet: `heads/<pin>.bin` appears on the next history
    run. The three box-only shapes now have real-Bazel e2e tests
    (`77fbb32`), run by CI's `e2e` and `bazel-version-matrix` jobs.

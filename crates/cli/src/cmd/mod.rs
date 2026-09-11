@@ -1,14 +1,11 @@
 pub mod affected;
-pub mod bench;
 pub mod doctor;
 pub mod explain;
 pub mod index;
 pub mod init;
 pub mod inspect;
 pub mod plan;
-pub mod replay;
 pub mod status;
-pub mod synth;
 
 use std::path::PathBuf;
 

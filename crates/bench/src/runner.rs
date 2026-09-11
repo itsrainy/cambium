@@ -30,7 +30,7 @@ pub fn run(opts: &RunOptions) -> Result<BenchReport> {
     let ctx = StageContext::new(&opts.preset, opts.runs)?;
     let mut results = Vec::new();
     for stage in &stages {
-        eprintln!("cambi bench: {stage} on {}", opts.preset);
+        eprintln!("cambium-bench: {stage} on {}", opts.preset);
         results.push(run_stage(&ctx, stage)?);
     }
     let report = BenchReport::new(results);
@@ -77,7 +77,7 @@ pub fn sweep(opts: &SweepOptions) -> Result<BenchReport> {
             spec,
             runs: opts.runs,
         };
-        eprintln!("cambi bench: {} at {}={}", opts.stage, opts.param, v);
+        eprintln!("cambium-bench: {} at {}={}", opts.stage, opts.param, v);
         let mut r = run_stage(&ctx, &opts.stage)?;
         r.preset = opts.base_preset.clone();
         r.param = Some(v);
@@ -111,7 +111,7 @@ pub fn sweep(opts: &SweepOptions) -> Result<BenchReport> {
             )
         };
         std::fs::write(p, svg).with_context(|| format!("writing {}", p.display()))?;
-        eprintln!("cambi bench: wrote {}", p.display());
+        eprintln!("cambium-bench: wrote {}", p.display());
     }
     Ok(report)
 }
@@ -176,13 +176,13 @@ fn emit(report: &BenchReport, out: Option<&Path>, markdown: Option<&Path>) -> Re
                 }
             }
             std::fs::write(p, &json).with_context(|| format!("writing {}", p.display()))?;
-            eprintln!("cambi bench: wrote {}", p.display());
+            eprintln!("cambium-bench: wrote {}", p.display());
         }
         None => println!("{json}"),
     }
     if let Some(p) = markdown {
         std::fs::write(p, report.to_markdown())?;
-        eprintln!("cambi bench: wrote {}", p.display());
+        eprintln!("cambium-bench: wrote {}", p.display());
     }
     Ok(())
 }

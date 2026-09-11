@@ -3,7 +3,7 @@
 Where an `affected` run spends its time, and where an index spends its bytes.
 
 Both are engine numbers, not benchmark results: they come from
-`cambi bench stages` and `cambi inspect stats` over *generated* graphs, with no
+`cambium-bench stages` and `cambi inspect stats` over *generated* graphs, with no
 Bazel and no repository, and they exist to explain the design rather than to
 score it. What the tools actually do on real repositories is
 [RESULTS.md](RESULTS.md), and the words are [METHODOLOGY.md](METHODOLOGY.md).
@@ -12,15 +12,15 @@ Everything below is from one machine — an **Intel Xeon @ 2.10 GHz, 4 cores,
 16 GiB**, a shared cloud VM rather than a build fleet worker. The spec's
 absolute targets assume 16 cores, so treat these as a lower bound. The raw
 result files are checked in under `benchmarks/`, and double as the baseline
-`cambi bench regress` gates against. Every result records the preset, the spec
+`cambium-bench regress` gates against. Every result records the preset, the spec
 hash of the generated graph, the tool's git sha and a machine fingerprint, and
-`bench regress` refuses to compare runs from different machines rather than
+`cambium-bench regress` refuses to compare runs from different machines rather than
 reporting noise as a regression:
 
 ```console
-$ cargo build --release -p cambium-cli
-$ ./target/release/cambi bench stages synth:medium --runs 5 --out mine.json
-$ ./target/release/cambi bench regress benchmarks/inmemory-small-medium.json mine.json
+$ cargo build --release -p cambium-cli -p cambium-bench-cli
+$ ./target/release/cambium-bench stages synth:medium --runs 5 --out mine.json
+$ ./target/release/cambium-bench regress benchmarks/inmemory-small-medium.json mine.json
 ```
 
 ## Where the time actually goes
@@ -111,7 +111,7 @@ once something needs the last 20%.
 straight from the generators — no Bazel needed:
 
 ```console
-$ cambi synth build-index --spec large --out large.bin
+$ cambium-bench synth build-index --spec large --out large.bin
 $ cambi inspect stats large.bin
 ```
 

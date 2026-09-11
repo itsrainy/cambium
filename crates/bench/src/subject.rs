@@ -6,7 +6,7 @@
 //! - [`Subject::Real`] — an entry of `subject_repos.toml`: a URL, a pinned
 //!   commit, a history window, and the Bazel version it runs under.
 //! - [`Subject::Synthetic`] — a generated graph, named `synth:<preset>` on the
-//!   command line, from the presets `cambi synth presets` lists.
+//!   command line, from the presets `cambium-bench synth presets` lists.
 //!
 //! Every workload accepts either, which is only possible because a synthetic
 //! subject is *emitted as a real Bazel workspace with a git history* the first
@@ -87,7 +87,7 @@ impl Synthetic {
     /// with the shas of its first-parent history, oldest first.
     ///
     /// Idempotent: an existing directory with a git history is reused, so the
-    /// second `cambi bench changes synth:small` of the day costs nothing.
+    /// second `cambium-bench changes synth:small` of the day costs nothing.
     pub fn emit(&self, subjects: &SubjectsDir) -> Result<(PathBuf, Vec<String>)> {
         let dir = self.source_dir(subjects);
         if dir.join(".git").exists() {
@@ -157,7 +157,7 @@ impl Subject {
                 );
                 anyhow::ensure!(
                     cambium_synth::GraphSpec::preset(preset).is_some(),
-                    "unknown graph preset {preset:?}; `cambi synth presets` lists them"
+                    "unknown graph preset {preset:?}; `cambium-bench synth presets` lists them"
                 );
                 Ok(Self::Synthetic(Synthetic::new(preset)))
             }

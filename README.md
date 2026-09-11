@@ -80,7 +80,9 @@ $ cargo install --path crates/cli    # or: cargo build --release
 $ cambi --version
 ```
 
-The crate is `cambium-cli`; the binary it installs is `cambi`.
+The crate is `cambium-cli`; the binary it installs is `cambi`. The benchmark
+harness is a second binary, `cambium-bench`, from `cambium-bench-cli`; nothing
+in it is part of the contract below.
 
 No `protoc` needed — the vendored `build.proto` is compiled by `protox`, a
 pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
@@ -114,18 +116,18 @@ $ cambi inspect owner     <file> <path>...
 $ cambi inspect targets   <file> <package> [--kind rule]
 $ cambi inspect stats     <file>
 $ cambi inspect verify    <file> [--sample n] [--seed n]
-$ cambi bench subjects list|fetch|build [<subject>]
-$ cambi bench history  <subject> [--commits n] [--oracle rebuild|none]
-$ cambi bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
+$ cambium-bench subjects list|fetch|build [<subject>]
+$ cambium-bench history  <subject> [--commits n] [--oracle rebuild|none]
+$ cambium-bench changes  <subject> [--change-sets n] [--kind pr,adjacent,stress]
                    [--tools cambium,bazel-diff,tango] [--oracle rdeps,load]
-$ cambi bench stages|sweep <subject>
-$ cambi bench regress <a.json> <b.json>
-$ cambi bench report  [<subject>]
-$ cambi synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
+$ cambium-bench stages|sweep <subject>
+$ cambium-bench regress <a.json> <b.json>
+$ cambium-bench report  [<subject>]
+$ cambium-bench synth emit-bazel --spec <preset> --out <dir> [--changes <preset>]
                    [--revisions n] [--seed n] [--force]
-$ cambi synth describe    [--spec <preset>] [--seed n]
-$ cambi synth build-index [--spec <preset>] --out <file> [--seed n]
-$ cambi synth presets
+$ cambium-bench synth describe    [--spec <preset>] [--seed n]
+$ cambium-bench synth build-index [--spec <preset>] --out <file> [--seed n]
+$ cambium-bench synth presets
 $ cambi config show|explain|hash
 ```
 
@@ -203,7 +205,7 @@ and the answer may well come out differently.
 To get an index to point it at without going near Bazel:
 
 ```console
-$ cambi synth build-index --spec large --out large.bin
+$ cambium-bench synth build-index --spec large --out large.bin
 $ cambi inspect stats large.bin
 ```
 
@@ -282,7 +284,7 @@ appear there). This does not change the document's shape, so it is not a
 `SCHEMA_VERSION` bump — a consumer that already reads `affected` sees a
 subset of what it would otherwise.
 
-`cambi inspect ... --format json` and `cambi bench` results carry `schema`
+`cambi inspect ... --format json` and `cambium-bench` results carry `schema`
 on the same terms.
 
 ### `cambi status --format json`
@@ -563,17 +565,21 @@ $ cambi index build --publish && cambi index gc
 
 ## Benchmarks
 
-`cambi bench` runs cambium, bazel-diff and Tango on the same *subject* — an
+`cambium-bench` runs cambium, bazel-diff and Tango on the same *subject* — an
 open-source Bazel monorepo from `subject_repos.toml` (bazel, envoy,
 sourcegraph, apollo, xla, tensorflow), or a generated graph named
 `synth:<preset>` and emitted as a real workspace with a real history. The same
 commands run on either.
 
-Two workloads: `bench history` applies a subject's last N first-parent commits
+The harness is its own binary (`crates/bench-cli`) and drives `cambi` the way a
+user does, by running it: the benchmark measures the binary that ships, with
+the same flags, the same store and the same exit codes.
+
+Two workloads: `cambium-bench history` applies a subject's last N first-parent commits
 one at a time and ends by diffing the result against a cold rebuild, and
-`bench changes` runs every tool over `(base, head)` change sets shaped like the
+`cambium-bench changes` runs every tool over `(base, head)` change sets shaped like the
 question a CI job asks, scoring recall against a `bazel query rdeps` oracle and
-filing every disagreement under a named class. `bench stages` and `bench sweep`
+filing every disagreement under a named class. `cambium-bench stages` and `cambium-bench sweep`
 time each in-memory stage at sizes no real repository reaches.
 
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
@@ -596,10 +602,12 @@ crates/
   synth/           synthetic graph generator, mutations, Bazel repo emitter
   bench/           the benchmark: subjects, tools, oracles, workloads, report
   cli/             the `cambi` binary
+  bench-cli/       the `cambium-bench` binary, which drives `cambi`
 ```
 
 `index` and `synth` do not depend on `bazel`. `engine` is the only crate that
-depends on everything, and `cli` is thin.
+depends on everything, and `cli` is thin. `bench-cli` is thinner still: it is
+the harness's front door, and the harness measures `cambi` by running it.
 
 ## Testing
 
@@ -655,7 +663,7 @@ Three, each for a reason found by testing:
 
 Two smaller ones, neither affecting behaviour: the index header stores the
 commit as a hex string rather than a fixed 20 bytes, so that sha256
-repositories and synthetic revision ids both fit; and `bench sweep --plot`
+repositories and synthetic revision ids both fit; and `cambium-bench sweep --plot`
 writes its log-log chart with a small hand-rolled SVG writer rather than
 pulling in a plotting crate and its font stack for two dozen line segments.
 

@@ -64,12 +64,11 @@ fn the_binary_is_named_cambi() {
 #[test]
 fn the_subcommands_are_the_ones_the_readme_documents() {
     let (_, stdout, _) = run(&["--help"]);
-    // The verb tree docs/CLI.md settles on, plus the two that leave the
-    // binary in a later step. `baseline` is deliberately absent: it still
-    // works, and a deprecated spelling is not advertised.
+    // The verb tree docs/CLI.md settles on, and nothing else. `baseline` is
+    // deliberately absent: it still works, and a deprecated spelling is not
+    // advertised.
     for sub in [
-        "init", "status", "doctor", "affected", "explain", "index", "inspect", "config", "bench",
-        "synth",
+        "init", "status", "doctor", "affected", "explain", "index", "inspect", "config",
     ] {
         assert!(
             stdout.contains(sub),
@@ -82,28 +81,25 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
             .any(|l| l.trim_start().starts_with("baseline")),
         "a deprecated spelling should not be advertised as a verb:\n{stdout}"
     );
-}
-
-#[test]
-fn hermetic_output_never_tells_a_caller_to_type_cambium() {
-    // `synth emit-bazel` never touches Bazel, so it is safe to run in any CI
-    // sandbox. It prints a "try: cambi ..." suggestion, which has regressed
-    // before to name the crate (`cambium`) rather than the binary (`cambi`).
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = dir.path().join("ws");
-    let (code, stdout, stderr) = run(&[
-        "synth",
-        "emit-bazel",
-        "--spec",
-        "tiny",
-        "--out",
-        out.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0, "emit-bazel failed: {stderr}");
-    assert!(
-        !stdout.contains("cambium "),
-        "hermetic output leaked the crate name as a binary a caller would type:\n{stdout}"
-    );
+    // The harness verbs left the binary for `cambium-bench` and were never in
+    // the contract, so they are gone rather than deprecated: typing one is an
+    // ordinary unknown-subcommand error from clap.
+    for gone in ["bench", "synth"] {
+        assert!(
+            !stdout.lines().any(|l| l.trim_start().starts_with(gone)),
+            "`{gone}` belongs to cambium-bench now:\n{stdout}"
+        );
+        let (code, out, err) = run(&[gone]);
+        assert_ne!(code, 0, "`cambi {gone}` must not be an answer: {out}");
+        assert!(
+            err.contains("unrecognized subcommand") || err.contains("unexpected argument"),
+            "`cambi {gone}` should be an ordinary clap error, not a deprecation:\n{err}"
+        );
+        assert!(
+            !err.contains("CAMBI-W001"),
+            "a verb that was never in the contract is not deprecated:\n{err}"
+        );
+    }
 }
 
 #[test]
@@ -117,20 +113,17 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
     assert!(!stderr.is_empty(), "the error should say what went wrong");
 }
 
-/// Builds a synthetic index in `dir` and returns its path. `synth build-index`
-/// never shells out to Bazel or git, so everything below runs in a bare
-/// sandbox.
+/// Builds a synthetic index in `dir` and returns its path.
+///
+/// The generator never goes near Bazel or git, so everything below runs in a
+/// bare sandbox. It is built in process because the verb that used to do it
+/// (`cambium-bench synth build-index`) is `cambium-bench synth build-index` now, and a
+/// `cambi` test must not need another binary to have been built.
 fn synth_index(dir: &std::path::Path) -> std::path::PathBuf {
     let out = dir.join("synth.cmbx");
-    let (code, _, stderr) = run(&[
-        "synth",
-        "build-index",
-        "--spec",
-        "tiny",
-        "--out",
-        out.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0, "synth build-index failed: {stderr}");
+    let spec = cambium_synth::GraphSpec::preset("tiny").expect("the tiny preset");
+    let index = cambium_synth::generate(&spec).build_index("synthetic");
+    cambium_index::format::write_index(&out, &index).expect("writing the index");
     out
 }
 

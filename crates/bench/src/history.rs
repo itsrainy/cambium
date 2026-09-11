@@ -195,7 +195,7 @@ pub struct HistoryResult {
     pub oracle: Option<OracleOutcome>,
     /// Where the index the rebuild oracle cold-built at the pin was archived,
     /// `<results>/<subject>/heads/<pin sha>.bin`. That index is Bazel's truth
-    /// at the pin, and keeping it is what lets `cambi bench replay
+    /// at the pin, and keeping it is what lets `cambium-bench replay
     /// --head-check` re-derive the externals tables from the head tree's text
     /// with a later engine and compare them against it, offline. `None` when
     /// the oracle did not run, when the archive already existed, or in every
@@ -501,7 +501,7 @@ pub fn history(
         // one answers today's question and then throws away the only artefact
         // that says what Bazel's graph and externals tables *are* at the pin;
         // archived, a later engine's derivation can be checked against it on a
-        // laptop (`cambi bench replay --head-check`). `state_dir` is
+        // laptop (`cambium-bench replay --head-check`). `state_dir` is
         // `bench-results/<subject>/`, beside the change-set driver's `bases/`.
         result.head_index = archive_head_index(engine, &opts.state_dir, &to, &fresh);
         result.rebuild = Some(rebuild);
