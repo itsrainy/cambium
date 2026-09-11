@@ -168,9 +168,6 @@ mod module_parser;
 mod path_maps;
 mod pattern;
 
-#[cfg(test)]
-mod tests;
-
 pub use bazelrc::{bazelrc_bzlmod, bzlmod_live};
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;

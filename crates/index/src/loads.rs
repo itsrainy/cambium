@@ -850,6 +850,7 @@ fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::Files;
 
     /// A WORKSPACE-mode index stores no canonical names; reading them back
     /// must not turn every repository into the main one.
@@ -979,18 +980,6 @@ mod tests {
             got,
             vec!["//bazel:ext.bzl", "//bazel:repo.bzl", "//bazel:w.bzl"]
         );
-    }
-
-    /// A tiny in-memory checkout.
-    struct Files(Vec<(&'static str, &'static str)>);
-
-    impl FileText for Files {
-        fn text(&self, path: &str) -> Option<String> {
-            self.0
-                .iter()
-                .find(|(p, _)| *p == path)
-                .map(|(_, t)| t.to_string())
-        }
     }
 
     fn closure_paths(g: &LoadGraph, ids: &[u32]) -> Vec<String> {

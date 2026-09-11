@@ -417,7 +417,7 @@ fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
 /// is what keeps `https://github.com/envoyproxy/envoy` out.
 /// Each literal comes back with the index of its token, which is what the
 /// per-occurrence attribution is keyed on.
-pub(crate) fn string_literals(text: &str) -> Vec<(usize, Literal)> {
+fn string_literals(text: &str) -> Vec<(usize, Literal)> {
     let mut out = Vec::new();
     let toks = lex(text);
     for (i, t) in toks.iter().enumerate() {
@@ -468,11 +468,11 @@ pub(crate) fn string_literals(text: &str) -> Vec<(usize, Literal)> {
 
 /// One string literal of a Starlark file, or a label found inside one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Literal {
-    pub(crate) text: String,
+struct Literal {
+    text: String,
     /// `true` for a label-shaped substring of a larger literal: text the
     /// repository rule writes, not a label it resolves.
-    pub(crate) embedded: bool,
+    embedded: bool,
 }
 
 fn is_label_byte(c: u8) -> bool {
@@ -513,4 +513,24 @@ fn labels_in(s: &str) -> Vec<String> {
         i = end.max(i + 2);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::string_literals;
+
+    #[test]
+    fn a_label_inside_a_larger_literal_is_embedded() {
+        let lits = string_literals(
+            "A = \"@envoy//:VERSION.txt\"\nB = 'tools = [\"@envoy//changelogs\"]'\n",
+        );
+        let find = |text: &str| -> Vec<bool> {
+            lits.iter()
+                .filter(|(_, l)| l.text == text)
+                .map(|(_, l)| l.embedded)
+                .collect()
+        };
+        assert_eq!(find("@envoy//:VERSION.txt"), vec![false]);
+        assert_eq!(find("@envoy//changelogs"), vec![true]);
+    }
 }
