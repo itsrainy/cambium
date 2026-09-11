@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod cmd;
+mod compat;
 mod diag;
 
 /// Exit codes (spec 10).
@@ -91,20 +92,22 @@ struct Cli {
 enum Command {
     /// Report the targets affected by the changes between two revisions.
     Affected(cmd::affected::Args),
-    /// Manage baseline indexes.
-    #[command(subcommand)]
-    Baseline(cmd::baseline::Args),
-    /// Inspect and check index files.
+    /// Build, publish and prune the stored indexes.
     #[command(subcommand)]
     Index(cmd::index::Args),
+    /// Plumbing: graph questions against one index file, for checking an
+    /// answer `explain` gave.
+    #[command(subcommand)]
+    Inspect(cmd::inspect::Args),
+    /// Show the effective configuration and its hash.
+    #[command(subcommand)]
+    Config(cmd::ConfigArgs),
     /// Benchmark cambium against real and synthetic subjects.
     #[command(subcommand)]
     Bench(cmd::bench::Args),
     /// Generate synthetic Bazel workspaces.
     #[command(subcommand)]
     Synth(cmd::synth::Args),
-    /// Print the effective configuration and its hash.
-    Config,
 }
 
 /// The one output flag, declared on `cambi` itself (`docs/CLI.md`, "The
@@ -191,7 +194,11 @@ impl ColorChoice {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // The deprecated spellings are rewritten into the current ones before
+    // clap sees them (see `compat`); the diagnostics they raised are printed
+    // below, once `--quiet` and `--format` are known.
+    let compat::Rewritten { argv, notes } = compat::rewrite(std::env::args().collect());
+    let cli = Cli::parse_from(argv);
     init_logging(&cli.log);
 
     let root = match cli.workspace.clone() {
@@ -218,13 +225,17 @@ fn main() -> ExitCode {
         render,
     };
 
+    for d in &notes {
+        render.warn(d);
+    }
+
     let code = match cli.command {
         Command::Affected(args) => cmd::affected::run(&ctx, args),
-        Command::Baseline(args) => cmd::baseline::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
+        Command::Inspect(args) => cmd::inspect::run(&ctx, args),
         Command::Bench(args) => cmd::bench::run(&ctx, args),
         Command::Synth(args) => cmd::synth::run(&ctx, args),
-        Command::Config => cmd::config_show(&ctx),
+        Command::Config(args) => cmd::config(&ctx, args),
     };
 
     match code {

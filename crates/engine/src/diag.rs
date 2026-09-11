@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Code {
     // ---- warnings ----
-    /// A deprecated spelling was used and still worked. Reserved for the
-    /// verb and flag renames; nothing emits it yet.
+    /// A deprecated spelling was used and still worked: an old verb, an old
+    /// flag, or an old value for one. Raised by the CLI's `compat` rewrite.
     W001DeprecatedSpelling,
     /// `cambium.toml` sets a key this cambium no longer honours.
     W002RemovedConfigKey,
