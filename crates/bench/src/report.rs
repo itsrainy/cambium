@@ -3,8 +3,8 @@
 //! The document is written by hand *around* generated blocks: each repository
 //! owns a region delimited by `<!-- bench:<id>:begin -->` and
 //! `<!-- bench:<id>:end -->`, and a run replaces the text between its own
-//! markers and nothing else. That way prose a person wrote — caveats about a
-//! repository, why a pin was chosen, the Findings section — survives every
+//! markers and nothing else. That way prose a person wrote (caveats about a
+//! repository, why a pin was chosen, the Findings section) survives every
 //! regeneration, and two repositories' nightly jobs can update the same file
 //! without fighting.
 //!
@@ -192,8 +192,8 @@ impl SubjectResults {
     ///
     /// The two workloads write into the directory that produced them,
     /// `<id>/history/` and `<id>/changes/`, so this looks in both and nowhere
-    /// else. More than one history can be present -- a subject whose
-    /// `bazel_version` changed leaves the older file behind -- and the newest
+    /// else. More than one history can be present (a subject whose
+    /// `bazel_version` changed leaves the older file behind), and the newest
     /// by name wins for the history tables, while every change-set result is
     /// rendered.
     pub fn load(dir: &Path, id: &str) -> Result<Self> {
@@ -392,7 +392,7 @@ impl SubjectResults {
         (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / vals.len() as f64)
     }
 
-    /// Over **all** compared change sets, globals included — the headline number, so
+    /// Over **all** compared change sets, globals included, the headline number, so
     /// the one the top table carries. Results written before that series
     /// existed fall back to the incremental one.
     fn tool_cold_p50(&self, name: &str) -> Option<u64> {
@@ -459,7 +459,7 @@ pub struct TopRow {
     pub bazel_used: String,
     pub targets: u32,
     pub cold_build_s: f64,
-    /// Over non-global commits only — the commits an updater actually works
+    /// Over non-global commits only: the commits an updater actually works
     /// on; a global answers `//...` without walking anything.
     pub history_p50_ms: u64,
     pub history_p90_ms: u64,
@@ -730,7 +730,7 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
 // ---------------------------------------------------------- per-repo section
 
 /// The markdown for one repository: everything a reader needs to judge the
-/// claim, in the order they will ask for it — what was measured, whether it
+/// claim, in the order they will ask for it: what was measured, whether it
 /// was sound, then how fast.
 pub fn render_subject_section(r: &SubjectResults, bench: Option<&BenchLegacy>) -> String {
     // No heading of its own: the document hand-writes `## <id>` above each
@@ -868,7 +868,7 @@ fn render_history(rep: &HistoryResult) -> String {
     }
     s.push_str(&format!("Global commits: **{}**", u.globals));
     if h.is_empty() {
-        s.push_str(" — no commit in this range hit an invalidator.\n\n");
+        s.push_str(" (no commit in this range hit an invalidator).\n\n");
     } else {
         s.push_str("\n\n| reason | commits |\n|---|---:|\n");
         let mut v: Vec<(String, usize)> = h.into_iter().collect();
@@ -886,7 +886,7 @@ fn render_history(rep: &HistoryResult) -> String {
             if o.ok {
                 String::new()
             } else {
-                format!(" — {}", o.diff.summary())
+                format!(" ({})", o.diff.summary())
             }
         ));
     }
@@ -905,8 +905,8 @@ fn compare_bazel(c: &ChangesResult) -> String {
 
 /// What the globally invalidated change sets cost.
 ///
-/// cambium answers `//...` on them, which is sound — it is a superset of any
-/// answer — and useless: the user is told to rebuild the repository. This
+/// cambium answers `//...` on them, which is sound (it is a superset of any
+/// answer) and useless: the user is told to rebuild the repository. This
 /// table is the price of that, side by side with the precise set the tools
 /// found on the same change sets, so "cambium goes global on N% of commits" is a
 /// sentence with a number after it rather than an asterisk.
@@ -946,7 +946,7 @@ fn render_globals(rows: &[GlobalRow]) -> String {
     }
     s.push_str(
         "\nMeans over the global change sets. *cambium `//...`* is the number of \
-         rule targets `//...` names at head — the answer cambium gave — and \
+         rule targets `//...` names at head (the answer cambium gave), and \
          *its precise set* is what the tool found on the same change_set. The \
          ratio between them is the over-approximation a global hands the user; \
          the wall columns say what each tool charged to produce its answer. \
@@ -971,7 +971,7 @@ fn render_compare_section(c: &CompareSection) -> String {
     s.push_str(&format!(
         "{} change sets compared, {} passed, {} failed ({} of them \
          global, which pass by construction: `//...` contains every answer. \
-         The tools still ran on them — see **Globals** below). Worst \
+         The tools still ran on them; see **Globals** below). Worst \
          oracle recall: **{}**.\n\n",
         c.change_sets,
         c.passed,
@@ -1027,11 +1027,11 @@ fn render_compare_section(c: &CompareSection) -> String {
     s.push_str(&format!(
         "\n**Quote the `{}` rows.** They cover every change set compared, \
          including the {} where cambium fell back to `//...` and did no \
-         incremental work at all — which is what a user running cambium over \
+         incremental work at all, which is what a user running cambium over \
          this history actually waits for. The `{}` rows drop \
          those; they are the rows that belong with the precision and class \
          numbers above, because those are computed over exactly the same \
-         change sets, but read on their own they flatter cambium — an average \
+         change sets, but read on their own they flatter cambium: an average \
          over the change sets it is fast on. {} of the incremental \
          change sets \
          re-indexed the whole repository (the dirty set was too large to \
@@ -1043,7 +1043,7 @@ fn render_compare_section(c: &CompareSection) -> String {
     ));
     s.push_str(
         "cambium's *cold* is a full index build from `bazel query //...`; its \
-         *warm* is an update against the published baseline, which is what a \
+         *warm* is an update against the published index, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
          hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is \
          how many change sets each tool's distribution is taken over: Tango is \
@@ -1150,7 +1150,7 @@ fn render_compare_section(c: &CompareSection) -> String {
             "A *partial* batch is a `--keep_going` query that exited 3: Bazel \
              answered for what loaded. The oracle is a lower bound on what \
              cambium must contain, so a partial answer is still sound to check \
-             against — it just proves less. `missing labels` is the count that \
+             against; it just proves less. `missing labels` is the count that \
              gates the run, and must be zero. *external route* is the subset \
              `somepath` shows Bazel reaching only by leaving `//...` and coming \
              back (see [Externals and soundness](#externals-and-soundness)); it \
@@ -1189,7 +1189,7 @@ fn render_compare_section(c: &CompareSection) -> String {
              must contain every main-repo package Bazel names. The last column \
              gates the run and must be zero; a non-zero entry files those \
              packages under `cambium_missing_bzl_closure`. A *partial* answer \
-             is a Sky Query that exited 3 — the very failure mode the static \
+             is a Sky Query that exited 3, the very failure mode the static \
              closure removes, since `rbuildfiles` loads every external \
              subject and the closure loads none. A *repository-evaluation* \
              answer is one where Bazel named a package whose `BUILD` file has \
@@ -1219,7 +1219,7 @@ fn tool_names(c: &ChangesResult) -> Vec<String> {
 
 // --------------------------------------------------------- synthetic scaling
 
-/// The `bench legacy` sweep: the headline number, on graphs no real repository
+/// The `legacy_bazel_diff` sweep: the headline number, on graphs no real repository
 /// reaches, next to the chart the same sweep plots.
 pub fn render_bench_section(rows: &[BenchLegacy], chart: Option<&str>) -> String {
     let mut s = String::new();
@@ -1231,13 +1231,13 @@ pub fn render_bench_section(rows: &[BenchLegacy], chart: Option<&str>) -> String
          rather than a Bazel server. See [METHODOLOGY.md](METHODOLOGY.md#engine-stages).\n\n",
     );
     if rows.is_empty() {
-        s.push_str("_No `bench legacy` sweep recorded yet._\n");
+        s.push_str("_No `cambium-bench sweep --stage legacy_bazel_diff` run recorded yet._\n");
         return s;
     }
     s.push_str(&render_bench_table(rows));
     s.push_str(
         "\ncambium's column is its warm, in-memory update against the base \
-         index — the operation bazel-diff's warm column is also doing. \
+         index, the operation bazel-diff's warm column is also doing. \
          `agreed` is the label sets matching up to `select()`; any label \
          bazel-diff reports and cambium does not fails the stage outright, so \
          a row exists only because that count was zero.\n",
@@ -1272,7 +1272,7 @@ fn render_bench_table(rows: &[BenchLegacy]) -> String {
             b.cold_speedup(),
             b.speedup(),
             if b.agreed {
-                format!("{} — none missed", num(b.agreed_labels))
+                format!("{} (none missed)", num(b.agreed_labels))
             } else {
                 format!(
                     "**{} cambium-only, {} bazel-diff-only**",
@@ -1499,7 +1499,7 @@ mod tests {
     }
 
     /// A globally invalidated change set as the driver records one: cambium answered
-    /// `//...` — 24 000 rule targets — in 30 ms, and bazel-diff still ran, took
+    /// `//...` (24 000 rule targets) in 30 ms, and bazel-diff still ran, took
     /// 100 s and found 40 targets precisely.
     fn global_change_set() -> ChangeSetResult {
         ChangeSetResult {
@@ -1862,12 +1862,12 @@ mod tests {
         assert!(s.contains("1,000,000"), "{s}");
         assert!(s.contains("1000×"), "{s}");
         assert!(s.contains("2000×"), "the cold speedup is there too: {s}");
-        assert!(s.contains("12 — none missed"), "{s}");
+        assert!(s.contains("12 (none missed)"), "{s}");
         assert!(
             s.contains("![bazel-diff vs cambium, log-log](bench-legacy.svg)"),
             "{s}"
         );
-        assert!(render_bench_section(&[], None).contains("No `bench legacy` sweep"));
+        assert!(render_bench_section(&[], None).contains("No `cambium-bench sweep"));
     }
 
     #[test]

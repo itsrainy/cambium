@@ -39,7 +39,7 @@ pub enum EngineError {
     BaselineUnavailable { base: String },
     #[error(
         "{path} was built with a different cambium.toml; splicing onto it could \
-         disagree with a full build. Run `cambi baseline build` to mint a new lineage."
+         disagree with a full build. Run `cambi index build` to mint a new lineage."
     )]
     ConfigHashMismatch { path: PathBuf },
     #[error("no baseline store is configured; set [baseline].store in cambium.toml")]
@@ -120,11 +120,11 @@ impl EngineError {
             EngineError::BazelQuery { .. } => (Code::E005BazelQuery, None),
             EngineError::BaselineUnavailable { .. } => (
                 Code::E006BaselineUnavailable,
-                Some("run `cambi baseline build --publish`, or drop --no-full-build"),
+                Some("run `cambi index build --publish`, or drop --no-full-build"),
             ),
             EngineError::ConfigHashMismatch { .. } => (
                 Code::E007ConfigHashMismatch,
-                Some("mint a new lineage: `cambi baseline build --publish`"),
+                Some("mint a new lineage: `cambi index build --publish`"),
             ),
             EngineError::NoStore => (
                 Code::E008NoStore,
