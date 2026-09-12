@@ -622,6 +622,16 @@ impl<'a> Run<'a> {
         bazelrc_flags: &[String],
     ) -> AffectedReport {
         self.timings.splice = self.sw.lap();
+        // What the splice actually wrote: rows that are new or whose rule
+        // hash changed, rows it tombstoned out of a re-queried package, and
+        // rows it tombstoned because the package itself was deleted.
+        self.stats.spliced_rows = inputs.splice.changed_ids().count()
+            + inputs.splice.deleted_ids().count()
+            + inputs
+                .deleted_by_package
+                .iter()
+                .map(|(_, ids)| ids.len())
+                .sum::<usize>();
         let wopts = WalkOptions {
             include_manual: self.req.include_manual,
             explain: self.req.explain,

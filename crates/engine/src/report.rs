@@ -251,6 +251,13 @@ pub struct Stats {
     /// counted in `bazelrc_flags` but not here: nothing depends on it.
     #[serde(default)]
     pub bazelrc_flag_nodes: usize,
+    /// Target rows the splice wrote into the base index: the ones that were
+    /// new or whose rule hash changed, plus the ones it tombstoned because
+    /// they left their package or their package was deleted. Zero means the
+    /// commit changed nothing the graph models and the index at head is the
+    /// base, byte for byte.
+    #[serde(default)]
+    pub spliced_rows: usize,
 }
 
 /// One affected target, with how far from the change it sits.

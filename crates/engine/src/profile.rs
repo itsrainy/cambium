@@ -89,10 +89,29 @@ impl Revisions for WorktreeRevisions {
 
 /// What a caller wants told while the walk runs, since a profile over a real
 /// repository takes minutes and the terminal should not go quiet.
+///
+/// This is the whole of what the engine says about a run in flight: it opens
+/// and closes a phase, and reports one row per commit. Nothing here prints;
+/// the CLI renders it through `cambium_ui`, and a caller that wants nothing
+/// told passes a callback that drops it.
 #[derive(Clone, Debug)]
 pub enum Progress {
+    /// The range, known before any work starts: where the walk begins, where
+    /// it ends, and how many commits lie between.
+    Range {
+        from: String,
+        head: String,
+        commits: usize,
+    },
+    /// The detached worktree is being created at `commit`.
+    Worktree { commit: String },
+    /// It is ready. Emitted by whoever created it, which for the real walk is
+    /// the caller: the worktree outlives one `profile` call.
+    WorktreeReady { elapsed_ms: u64 },
     /// The cold build at the range's start is running.
     ColdBuild { commit: String },
+    /// It finished, with the size of the graph it found.
+    ColdBuilt { targets: u32, elapsed_ms: u64 },
     /// Step `index` of `of` is running.
     Step {
         index: usize,
@@ -105,6 +124,19 @@ pub enum Progress {
         index: usize,
         commit: String,
         reason: String,
+    },
+    /// Step `index` is over: one row, ready to print.
+    Stepped {
+        index: usize,
+        of: usize,
+        step: CommitStep,
+        subject: String,
+    },
+    /// Every step is over.
+    Walked {
+        commits: usize,
+        globals: usize,
+        elapsed_ms: u64,
     },
 }
 
@@ -136,11 +168,33 @@ pub struct ColdBuild {
     pub wall_ms: u64,
 }
 
+/// What a step did to the stored index, which is the part of a walk that is
+/// not visible from the times alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IndexWork {
+    /// The commit changed nothing the index models: the index at head is the
+    /// base, byte for byte.
+    Identical,
+    /// The base was spliced, rewriting this many target rows. The real
+    /// number, counted by the splice itself
+    /// ([`crate::report::Stats::spliced_rows`]), not an estimate from the
+    /// diff.
+    Spliced { rows_rewritten: usize },
+    /// The index was rebuilt from `//...`, because the commit went global or
+    /// because the dirty set exceeded `limits.max_dirty_packages`.
+    Rebuilt { reason: String },
+}
+
 /// One commit forward.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommitStep {
     pub commit: String,
     pub parent: String,
+    /// The commit date, `MM-DD HH:MM` in the local zone, so a row can be read
+    /// against the calendar without a second git call.
+    #[serde(default)]
+    pub date: String,
     pub changed_files: usize,
     pub dirty_packages: usize,
     pub affected: usize,
@@ -155,6 +209,16 @@ pub struct CommitStep {
     /// `limits.max_dirty_packages`. The answer is exact and the lineage
     /// survives; only the cost is a cold build's.
     pub engine_cold_rebuild: bool,
+    /// What the step did to the index.
+    #[serde(default = "IndexWork::unknown")]
+    pub index: IndexWork,
+}
+
+impl IndexWork {
+    /// A step read back from a document written before this field existed.
+    fn unknown() -> Self {
+        IndexWork::Identical
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -250,8 +314,15 @@ pub fn profile(
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Profile> {
     let head = engine.repo().rev_parse(head)?;
-    let log = engine.repo().first_parent_log(&head, commits + 1)?;
+    let meta = engine.repo().first_parent_log_meta(&head, commits + 1)?;
+    let log: Vec<String> = meta.iter().map(|c| c.sha.clone()).collect();
     let from = log.first().cloned().unwrap_or_else(|| head.clone());
+    let steps = log.len().saturating_sub(1);
+    progress(Progress::Range {
+        from: from.clone(),
+        head: head.clone(),
+        commits: steps,
+    });
 
     progress(Progress::ColdBuild {
         commit: from.clone(),
@@ -266,8 +337,12 @@ pub fn profile(
             wall_ms: sw.elapsed_ms(),
         }
     };
+    progress(Progress::ColdBuilt {
+        targets: index.view().counts().rules,
+        elapsed_ms: cold.wall_ms,
+    });
 
-    let steps = log.len().saturating_sub(1);
+    let walk_sw = Stopwatch::start();
     let mut walked = Vec::with_capacity(steps);
     for (i, pair) in log.windows(2).enumerate() {
         let (parent, commit) = (&pair[0], &pair[1]);
@@ -289,6 +364,7 @@ pub fn profile(
         let mut step = CommitStep {
             commit: commit.clone(),
             parent: parent.clone(),
+            date: meta[i + 1].date.clone(),
             changed_files: run.report.stats.changed_files,
             dirty_packages: run.report.stats.dirty_packages,
             affected: run.report.affected.len(),
@@ -297,6 +373,21 @@ pub fn profile(
             global: run.report.global,
             global_reason: run.report.global_reason.clone(),
             engine_cold_rebuild: run.report.stats.cold_rebuild,
+            index: if run.report.stats.cold_rebuild {
+                IndexWork::Rebuilt {
+                    reason: run
+                        .report
+                        .cold_rebuild_reason
+                        .clone()
+                        .unwrap_or_else(|| "the dirty set exceeded the limit".to_string()),
+                }
+            } else if run.report.stats.spliced_rows == 0 {
+                IndexWork::Identical
+            } else {
+                IndexWork::Spliced {
+                    rows_rewritten: run.report.stats.spliced_rows,
+                }
+            },
         };
         match run.index {
             Some(next) => index = next,
@@ -312,10 +403,27 @@ pub fn profile(
                 let sw = Stopwatch::start();
                 index = engine.full_build_with(commit, &*q)?;
                 step.wall_ms = sw.elapsed_ms();
+                step.index = IndexWork::Rebuilt {
+                    reason: step
+                        .global_reason
+                        .clone()
+                        .unwrap_or_else(|| "the commit invalidated everything".to_string()),
+                };
             }
         }
+        progress(Progress::Stepped {
+            index: i + 1,
+            of: steps,
+            step: step.clone(),
+            subject: meta[i + 1].subject.clone(),
+        });
         walked.push(step);
     }
+    progress(Progress::Walked {
+        commits: walked.len(),
+        globals: walked.iter().filter(|s| s.global).count(),
+        elapsed_ms: walk_sw.elapsed_ms(),
+    });
 
     let compression = engine.index_compression();
     cambium_index::format::write_index_with(out, &index, compression)?;
@@ -427,6 +535,7 @@ mod tests {
         CommitStep {
             commit: "c".into(),
             parent: "p".into(),
+            date: "09-02 09:14".into(),
             changed_files: 1,
             dirty_packages: dirty,
             affected: 4,
@@ -435,6 +544,12 @@ mod tests {
             global: global.is_some(),
             global_reason: global.map(String::from),
             engine_cold_rebuild: false,
+            index: match global {
+                Some(reason) => IndexWork::Rebuilt {
+                    reason: reason.to_string(),
+                },
+                None => IndexWork::Spliced { rows_rewritten: 12 },
+            },
         }
     }
 

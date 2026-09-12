@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use cambium_engine::profile::{profile, Progress};
+use cambium_engine::profile::{profile, IndexWork, Progress};
 use cambium_engine::{Config, Engine, PackageQuerier, Revisions, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 
@@ -60,7 +60,22 @@ fn walks_the_last_n_commits_and_describes_the_head_index() {
         assert_eq!(step.parent, commits[n - 5 + i]);
         assert_eq!(step.commit, commits[n - 4 + i]);
         assert!(step.changed_files > 0, "step {i} changed nothing");
+        assert_eq!(step.date.len(), "MM-DD HH:MM".len(), "{:?}", step.date);
+        // Nothing here goes global, so a step either spliced rows into the
+        // index or changed nothing the graph models.
+        match &step.index {
+            IndexWork::Spliced { rows_rewritten } => assert!(*rows_rewritten > 0),
+            IndexWork::Identical => {}
+            other => panic!("step {i} rebuilt the index: {other:?}"),
+        }
     }
+    assert!(
+        p.commits
+            .iter()
+            .any(|s| matches!(s.index, IndexWork::Spliced { .. })),
+        "a BUILD-file commit splices rows: {:?}",
+        p.commits.iter().map(|s| &s.index).collect::<Vec<_>>()
+    );
     assert_eq!(p.summary.commits, 4);
     assert_eq!(p.summary.globals, 0);
     assert_eq!(p.summary.rebuild_every_commits, None);
@@ -81,8 +96,28 @@ fn walks_the_last_n_commits_and_describes_the_head_index() {
         p.index.compression
     );
 
-    // Progress named the cold build and every step, in order.
-    assert!(matches!(seen.first(), Some(Progress::ColdBuild { commit }) if commit == from));
+    // Progress opened with the range, named the cold build and every step in
+    // order, and closed with the walk.
+    assert!(matches!(seen.first(), Some(Progress::Range { commits, .. }) if *commits == 4));
+    assert!(seen
+        .iter()
+        .any(|e| matches!(e, Progress::ColdBuild { commit } if commit == from)));
+    assert!(seen
+        .iter()
+        .any(|e| matches!(e, Progress::ColdBuilt { targets, .. } if *targets > 0)));
+    assert!(matches!(seen.last(), Some(Progress::Walked { commits, globals, .. })
+        if *commits == 4 && *globals == 0));
+    let rows: Vec<usize> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Progress::Stepped { index, step, .. } => {
+                assert!(!step.date.is_empty());
+                Some(*index)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [1, 2, 3, 4]);
     let steps: Vec<usize> = seen
         .iter()
         .filter_map(|e| match e {
