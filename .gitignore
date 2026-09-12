@@ -9,3 +9,5 @@ corpus-results-box/
 bench-precheck/
 .claude/
 .cambium-logs/
+# Benchmark result tarballs pulled off the box.
+bench-results*.tar.gz
