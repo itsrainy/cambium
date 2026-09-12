@@ -32,7 +32,9 @@ use serde_json::Value;
 /// `stats.repos_dirty_by_target` and the `external_repo_target` direct
 /// reason, for a repository whose generated targets name a main-repo rule
 /// target the walk reached; version 9 added `diagnostics`, the actionable
-/// warnings a run raised, each with a stable `CAMBI-W` code. The version is shared with
+/// warnings a run raised, each with a stable `CAMBI-W` code; version 9 also
+/// added `stats.spliced_rows`, the target rows the splice wrote into the base
+/// index, which is what `cambi profile` reports per commit. The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -85,6 +87,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.repos_dirty_by_module",
     "stats.repos_label_only",
     "stats.bazelrc_flag_nodes",
+    "stats.spliced_rows",
     "stats.rbuildfiles_called",
     "bazelrc_flags[]",
     "tests[]",
@@ -156,6 +159,7 @@ fn fixture() -> AffectedReport {
             repos_label_only: 15,
             external_direct_targets: 14,
             bazelrc_flag_nodes: 16,
+            spliced_rows: 264,
         },
         diagnostics: vec![cambium_engine::Diagnostic::warning(
             cambium_engine::Code::W004BazelrcGlobal,

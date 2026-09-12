@@ -105,8 +105,10 @@ fn walks_the_last_n_commits_and_describes_the_head_index() {
     assert!(seen
         .iter()
         .any(|e| matches!(e, Progress::ColdBuilt { targets, .. } if *targets > 0)));
-    assert!(matches!(seen.last(), Some(Progress::Walked { commits, globals, .. })
-        if *commits == 4 && *globals == 0));
+    assert!(
+        matches!(seen.last(), Some(Progress::Walked { commits, globals, .. })
+        if *commits == 4 && *globals == 0)
+    );
     let rows: Vec<usize> = seen
         .iter()
         .filter_map(|e| match e {

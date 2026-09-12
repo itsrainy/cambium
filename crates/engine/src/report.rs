@@ -77,7 +77,11 @@ use serde::{Deserialize, Serialize};
 /// - **9** adds `diagnostics`: the actionable warnings a run raised, each
 ///   `{code, level, message, location?, help?}` with a stable `CAMBI-W`
 ///   code. Omitted when empty, so a run with nothing to say is byte-identical
-///   to a version 8 document. See `docs/DIAGNOSTICS.md`.
+///   to a version 8 document. See `docs/DIAGNOSTICS.md`. The same version adds
+///   `stats.spliced_rows`: the target rows the splice wrote into the base
+///   index, new or rehashed plus the ones it tombstoned. Zero means the
+///   commit changed nothing the graph models, which is what `cambi profile`
+///   reports per commit as `index`. Purely additive.
 pub const SCHEMA_VERSION: u32 = 9;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
