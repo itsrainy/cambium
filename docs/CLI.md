@@ -46,7 +46,28 @@ default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
 lineage, age), whether the answer is a splice, cold rebuild or global, and
 how many packages it would re-query. `status` shows it in short form.
 
-Also takes: `--tests-only`, `--include-manual`, `--max-depth`,
+While it runs it narrates itself on stderr in the shared grammar below: an
+`index` phase (where it looked for an index, and what it found: `found at
+<sha>  (N commits behind, lineage <hex>, 2 d old)`, or `none within N
+ancestors, building cold`), a `splice` phase for the replay up to the base
+with a row in `profile`'s five columns, or `skipped (index already at base)`
+/ `skipped (cold index is at base)` when there was nothing to replay, and a
+`query` phase with the changed files, the packages they dirtied and what the
+walk reached. On a terminal the ancestor search counts itself off on the live
+line; a pipe gets one milestone line instead. The replay is a single row
+because it is a single pass: the dirty set over `ancestor..base` is the union
+of the range.
+
+On stdout: a count line (`1,284 affected targets  (96 tests)  max depth 7`),
+the labels, then the targets-by-depth distribution. `--hist columns` (the
+default) draws it as a vertical column chart, `--hist bars` as horizontal
+bars with the count after each, `--hist none` not at all. Depth is
+reverse-dependency hops from the change, 0 being a target whose own inputs
+moved. `--tests-only` draws the tests' own depths, so the chart always
+matches the list above it. A global run prints `//...`, says `everything is
+affected: <reason>` on stderr, and has no distribution to draw.
+
+Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
 `--no-full-build`, `--publish-base`, `--out`. `--explain` is kept one
 release; the verb below replaces it.
 
@@ -58,7 +79,8 @@ the run went global or cold, which file/flag did it, and a `help:` line. A
 label just narrows the same shape.
 
 `explain` shares `affected`'s computation, range and flags, but isn't a flag
-on it: output shape and audience differ.
+on it: output shape and audience differ. It narrates the same three phases on
+stderr, for the same reason `affected` does.
 
 ### `profile`
 
@@ -206,6 +228,11 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   get the same bytes without that line, with both of each phase's lines
   printed; `--format jsonl` gets one JSON object per event on stderr
   instead; `--quiet` gets nothing.
+- `affected`'s JSON gained two things with contract version 10 and version 3
+  before it, both additive: `affected[].depth`, the hops from the change at
+  which a target was first reached, and `depth_histogram`, those depths
+  counted, one bin per depth from 0 to the deepest reached. Nothing else on
+  stdout changes under `--format json`.
 - Every document carries `schema`. `affected`/`inspect` keep the existing
   `SCHEMA_VERSION`; `status`, `explain`, `doctor` start there too, since
   it's shared and one bump moves all.

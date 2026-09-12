@@ -206,7 +206,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 9, "base": "...", "head": "...", ... }
+{ "schema": 10, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -251,6 +251,7 @@ what to do about it.
 | `direct` | \[string] | labels whose own definition or inputs changed |
 | `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
 | `tests` | \[string] | the subset of `affected` that is a test |
+| `depth_histogram` | \[int], optional | how many affected targets sit at each depth, `depth_histogram[d]` for depth `d` from 0 to the deepest reached; a depth nothing reached is a zero rather than a gap. Omitted when empty, which is what a global run and an empty answer both are |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
 | `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
 | `diagnostics` | \[object], optional | the actionable warnings this run raised, each `{code, level, message, location?, help?}`; omitted when empty. See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
@@ -280,7 +281,7 @@ not also show:
 
 ```json
 {
-  "schema": 9,
+  "schema": 10,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -317,7 +318,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 9,
+  "schema": 10,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -341,7 +342,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 9,
+  "schema": 10,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -376,7 +377,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 9,
+  "schema": 10,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
