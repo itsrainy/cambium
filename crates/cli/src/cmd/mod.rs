@@ -5,6 +5,7 @@ pub mod index;
 pub mod init;
 pub mod inspect;
 pub mod plan;
+pub mod profile;
 pub mod status;
 
 use std::path::PathBuf;

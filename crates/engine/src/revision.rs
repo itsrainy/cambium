@@ -70,6 +70,13 @@ impl RevisionWorkspace {
         self.worktree.path()
     }
 
+    /// Moves the checkout to another revision. The Bazel handle from
+    /// [`Self::bazel`] keeps working: it is the directory that names the
+    /// server, not the commit in it.
+    pub fn checkout(&self, sha: &str) -> Result<()> {
+        Ok(self.worktree.checkout(sha)?)
+    }
+
     /// A Bazel handle for this checkout: same binary, same query flags, same
     /// environment as `template`, and a startup flag list whose `--output_base`
     /// has been moved aside.
