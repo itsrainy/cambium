@@ -32,7 +32,10 @@ re-queries only the dirty packages (`bazel query 'set(//a:* //b:* ...)'`),
 splices those rows into the index, derives the direct set, and walks the
 reverse edges. Every step is proportional to the change or to the answer.
 [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where the time and the bytes
-actually go.
+actually go; [docs/INDEX.md](docs/INDEX.md) is what the index *is* — the
+compressed sparse rows, how they differ from the graph Bazel keeps in its own
+head, and why reading `load()` statically is not a second Starlark
+implementation.
 
 ## Install
 
@@ -422,6 +425,7 @@ subjects at full size, which does not fit on a laptop.
 ```
 crates/
   index/           CSR graph, interning, on-disk format, mmap loader, splice
+                   (docs/INDEX.md)
   cambium-proto/   vendored build.proto, streamed_proto reader, rule hashing
   bazel/           spawning bazel: query, repo mapping, workspace detection
   diff/            git diff --name-status parsing and revision plumbing
