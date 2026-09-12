@@ -76,11 +76,22 @@ working tree, one Bazel server. Per-commit time is the engine's own
 between steps; opening the index file, which every real `affected` pays
 first, is measured once, printed beside it.
 
-Human form is two paragraphs and a per-commit table; `--format json` is the
-same document. `--out <file>` keeps the walk's final index (`REV`'s,
-`cambi index publish`-able), so a profile doubles as the first cold build;
-without it, the index goes to a deleted scratch file. The walk runs Bazel
-minutes on a large repo, reporting commits on stderr.
+While it runs it narrates itself on stderr in the shared grammar below: a
+`worktree` phase, a `cold index` phase with the target count it found, and a
+`commits` phase with one row per commit (`commit / time / affected / tests /
+index`, the commit as `sha7 MM-DD HH:MM subject`). The `index` column is what
+the commit did to the stored index: `= unchanged` when it changed nothing the
+graph models, `~ N rewritten` with the rows the splice actually wrote, or
+`rebuilt` when the commit went global.
+
+On stdout, `--report kv` (the default) is an aligned key/value block and the
+table; `--report prose` is the paragraphs that block replaced, kept one
+release, and then the same table. `--format json` is the same document as
+ever, with two fields added per commit: `date` and `index` (`{"kind":
+"identical"}`, `{"kind": "spliced", "rows_rewritten": N}` or `{"kind":
+"rebuilt", "reason": "..."}`). `--out <file>` keeps the walk's final index
+(`REV`'s, `cambi index publish`-able), so a profile doubles as the first cold
+build; without it, the index goes to a deleted scratch file.
 
 ### `index`
 
@@ -178,8 +189,23 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   expression, `affected` only), `null` (exit code only). `--output` stays an
   alias one release. No field selection: `--format json`/`jq` are the whole
   story.
-- Results to stdout; progress/diagnostics to stderr, empty on success under
-  `--quiet` or a non-TTY stdout. Colour only on a TTY, never under `NO_COLOR`.
+- Results to stdout; progress and diagnostics to stderr, and nothing at all
+  on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
+  loses the live line, not the run. Colour only when stderr is a TTY, never
+  under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under `--color
+  always` or `CLICOLOR_FORCE`.
+- A long run narrates itself on stderr in one grammar, the same for every
+  verb that has one (`profile` is the first on it): a
+  header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per
+  stage (`  <name> <dots> <result>  <time>`, or `skipped (<reason>)`), and
+  rows inside a phase in fixed columns that never reach past 96 of them. On a
+  terminal there is also one live bottom line, `<spinner> <what it is doing>
+  <m:ss>`, erased before anything else is printed so it never interleaves
+  with a row, and a phase that has printed no rows has its result written
+  back over its own start line. A pipe, a CI log (`CI` set) and `TERM=dumb`
+  get the same bytes without that line, with both of each phase's lines
+  printed; `--format jsonl` gets one JSON object per event on stderr
+  instead; `--quiet` gets nothing.
 - Every document carries `schema`. `affected`/`inspect` keep the existing
   `SCHEMA_VERSION`; `status`, `explain`, `doctor` start there too, since
   it's shared and one bump moves all.

@@ -237,12 +237,22 @@ fn main() -> ExitCode {
         quiet: cli.quiet,
         color: cli.color.resolve(),
     };
+    let ui = cambium_ui::OutputMode::detect(
+        cli.quiet,
+        cli.format == Format::Jsonl,
+        match cli.color {
+            ColorChoice::Auto => cambium_ui::ColorChoice::Auto,
+            ColorChoice::Always => cambium_ui::ColorChoice::Always,
+            ColorChoice::Never => cambium_ui::ColorChoice::Never,
+        },
+    );
     let ctx = cmd::Context {
         root,
         config: cli.config.clone(),
         overrides,
         format: cli.format,
         render,
+        ui,
     };
 
     for d in &notes {

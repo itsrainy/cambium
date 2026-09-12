@@ -30,7 +30,7 @@ pub mod report;
 mod event;
 mod mode;
 mod paint;
-mod row;
+pub mod row;
 mod sink;
 
 pub use event::{Align, Cell, Column, Event, Level, Style, Width};

@@ -15,6 +15,7 @@ path = "src/main.rs"
 cambium-diff.workspace = true
 cambium-engine.workspace = true
 cambium-index.workspace = true
+cambium-ui.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true }
