@@ -10,6 +10,7 @@ use cambium_index::{IndexBuilder, IndexData, IndexFile, IndexRef};
 use crate::baseline::BaselineCache;
 use crate::config::Config;
 use crate::error::{EngineError, Result};
+use crate::progress::Progress;
 use crate::query::{BazelQuerier, FileSource, PackageQuerier};
 use crate::report::{AffectedReport, Stopwatch};
 use crate::revision::{worktrees_dir, RevisionQuerier, RevisionWorkspace};
@@ -102,6 +103,26 @@ impl Baseline {
             Baseline::Mapped(f) => BaseIndex::Mapped(f.path().to_path_buf()),
             Baseline::Owned(d) => BaseIndex::Owned(d),
         }
+    }
+}
+
+impl Baseline {
+    /// The index's lineage as hex, for a line that says which family of
+    /// indexes this run is splicing onto.
+    pub fn lineage_hex(&self) -> String {
+        crate::inspect::hex(&self.view().lineage)
+    }
+
+    /// How long ago the index was built, in seconds, from the provenance it
+    /// carries. `None` when the clock disagrees with it (a machine whose time
+    /// moved, an index published from the future).
+    pub fn age_secs(&self) -> Option<u64> {
+        let created = self.view().created_unix;
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+            .and_then(|now| now.checked_sub(created))
     }
 }
 
@@ -584,8 +605,14 @@ impl Engine {
         &self,
         base: &str,
         req: &AffectedRequest,
+        on: &mut dyn FnMut(Progress),
     ) -> Result<(Baseline, BaselineOrigin)> {
+        let sw = Stopwatch::start();
+        on(Progress::IndexLookup {
+            base: base.to_string(),
+        });
         if let Some(found) = self.fetch_mapped(base)? {
+            narrate_found_at_base(&found.0, base, sw.elapsed_ms(), on);
             return Ok(found);
         }
         // The replay's head is `base`, so its querier is the one built for
@@ -599,7 +626,7 @@ impl Engine {
         // `base` itself: on a checkout at head, building it means a detached
         // worktree and a second Bazel server, which is seconds of work that a
         // fetched baseline never needs.
-        self.replay_or_build(base, req, &self.bazel_querier(base)?)
+        self.replay_or_build(base, req, &self.bazel_querier(base)?, on, sw)
     }
 
     /// As [`Engine::resolve_baseline`], with the row source for the replay step
@@ -611,10 +638,29 @@ impl Engine {
         req: &AffectedRequest,
         querier: &dyn PackageQuerier,
     ) -> Result<(Baseline, BaselineOrigin)> {
+        self.resolve_baseline_with_progress(base, req, querier, &mut crate::progress::quiet)
+    }
+
+    /// As [`Engine::resolve_baseline_with`], narrating the search: where it
+    /// looked, every ancestor it checked and came up empty on, and what it
+    /// finally found. This is the half of a run that takes the time on a
+    /// repository with no index at the base.
+    pub fn resolve_baseline_with_progress(
+        &self,
+        base: &str,
+        req: &AffectedRequest,
+        querier: &dyn PackageQuerier,
+        on: &mut dyn FnMut(Progress),
+    ) -> Result<(Baseline, BaselineOrigin)> {
+        let sw = Stopwatch::start();
+        on(Progress::IndexLookup {
+            base: base.to_string(),
+        });
         if let Some(found) = self.fetch_mapped(base)? {
+            narrate_found_at_base(&found.0, base, sw.elapsed_ms(), on);
             return Ok(found);
         }
-        self.replay_or_build(base, req, querier)
+        self.replay_or_build(base, req, querier, on, sw)
     }
 
     /// The store's index for `base`, mapped and checked against the config.
@@ -635,10 +681,23 @@ impl Engine {
         base: &str,
         req: &AffectedRequest,
         querier: &dyn PackageQuerier,
+        on: &mut dyn FnMut(Progress),
+        search: Stopwatch,
     ) -> Result<(Baseline, BaselineOrigin)> {
         let max = self.cfg.baseline.max_ancestor_walk;
+        on(Progress::SearchStart {
+            base: base.to_string(),
+            ancestors: max,
+        });
+        let mut checked = 0usize;
         for anc in self.repo.first_parent_ancestors(base, max)? {
+            checked += 1;
             let Some(path) = self.fetch_baseline(&anc)? else {
+                on(Progress::AncestorChecked {
+                    checked,
+                    of: max,
+                    sha: anc.clone(),
+                });
                 continue;
             };
             let f = IndexFile::open(&path)?;
@@ -647,6 +706,16 @@ impl Engine {
                 ancestor = %anc,
                 "no baseline at base; bringing an ancestor forward"
             );
+            let found = Baseline::Mapped(f);
+            on(Progress::IndexFound {
+                sha: anc.clone(),
+                // The ancestors are walked nearest first, so the one that
+                // answered is `base~checked`.
+                behind: checked as u32,
+                lineage: found.lineage_hex(),
+                age_secs: found.age_secs(),
+                elapsed_ms: search.elapsed_ms(),
+            });
             // One replay from the nearest ancestor that has an index, not one
             // per commit: the dirty set over the whole range is the union, and
             // re-querying a package twice would buy nothing.
@@ -658,18 +727,75 @@ impl Engine {
                 ..req.clone()
             };
             let changes = self.repo.diff(&anc, base)?;
-            let out = self.compute(f.view(), &changes, querier, &inner)?;
+            on(Progress::SpliceStart {
+                from: anc.clone(),
+                to: base.to_string(),
+                commits: checked,
+            });
+            let splice = Stopwatch::start();
+            let out = self.compute(found.view(), &changes, querier, &inner)?;
             return match out.index {
-                Some(idx) => Ok((
-                    Baseline::Owned(Box::new(idx)),
-                    BaselineOrigin::Replayed { from: anc },
-                )),
+                Some(idx) => {
+                    let elapsed_ms = splice.elapsed_ms();
+                    let r = &out.report;
+                    on(Progress::SpliceStep {
+                        step: Box::new(crate::profile::CommitStep {
+                            commit: base.to_string(),
+                            parent: anc.clone(),
+                            date: self.commit_date(base),
+                            changed_files: r.stats.changed_files,
+                            dirty_packages: r.stats.dirty_packages,
+                            affected: r.affected.len(),
+                            tests: r.tests.len(),
+                            wall_ms: elapsed_ms,
+                            global: false,
+                            global_reason: None,
+                            engine_cold_rebuild: r.stats.cold_rebuild,
+                            index: crate::profile::IndexWork::Spliced {
+                                rows_rewritten: r.stats.spliced_rows,
+                            },
+                        }),
+                    });
+                    on(Progress::SpliceDone {
+                        at: base.to_string(),
+                        rows_rewritten: r.stats.spliced_rows,
+                        elapsed_ms,
+                    });
+                    Ok((
+                        Baseline::Owned(Box::new(idx)),
+                        BaselineOrigin::Replayed { from: anc },
+                    ))
+                }
                 // The ancestor..base range invalidated everything, so the
                 // ancestor's index cannot be brought forward.
-                None => self.cold_baseline(base, req, querier),
+                None => {
+                    on(Progress::SpliceSkipped {
+                        reason: out
+                            .report
+                            .global_reason
+                            .clone()
+                            .unwrap_or_else(|| "the range invalidated everything".into()),
+                    });
+                    self.cold_baseline(base, req, querier, on)
+                }
             };
         }
-        self.cold_baseline(base, req, querier)
+        on(Progress::IndexAbsent {
+            searched: checked,
+            elapsed_ms: search.elapsed_ms(),
+        });
+        self.cold_baseline(base, req, querier, on)
+    }
+
+    /// The commit date as a row prints it, or an empty cell when git cannot
+    /// say (a synthetic revision in the tests).
+    fn commit_date(&self, rev: &str) -> String {
+        self.repo
+            .first_parent_log_meta(rev, 1)
+            .ok()
+            .and_then(|m| m.into_iter().next())
+            .map(|m| m.date)
+            .unwrap_or_default()
     }
 
     fn cold_baseline(
@@ -677,16 +803,26 @@ impl Engine {
         base: &str,
         req: &AffectedRequest,
         querier: &dyn PackageQuerier,
+        on: &mut dyn FnMut(Progress),
     ) -> Result<(Baseline, BaselineOrigin)> {
         if req.no_full_build {
             return Err(EngineError::BaselineUnavailable {
                 base: base.to_string(),
             });
         }
-        Ok((
-            Baseline::Owned(Box::new(self.full_build_with(base, querier)?)),
-            BaselineOrigin::ColdBuild,
-        ))
+        on(Progress::ColdBuild {
+            commit: base.to_string(),
+        });
+        let sw = Stopwatch::start();
+        let index = self.full_build_with(base, querier)?;
+        on(Progress::ColdBuilt {
+            targets: index.view().num_nodes(),
+            elapsed_ms: sw.elapsed_ms(),
+        });
+        on(Progress::SpliceSkipped {
+            reason: "cold index is at base".into(),
+        });
+        Ok((Baseline::Owned(Box::new(index)), BaselineOrigin::ColdBuild))
     }
 
     /// How this run writes indexes it publishes or caches: a zstd frame
@@ -746,6 +882,17 @@ impl Engine {
 
     /// Answers "what is affected between base and head".
     pub fn affected(&self, req: &AffectedRequest) -> Result<RunOutcome> {
+        self.affected_narrated(req, &mut crate::progress::quiet)
+    }
+
+    /// As [`Engine::affected`], telling `on` what it is doing while it does
+    /// it. Nothing here prints: the CLI renders the events through
+    /// `cambium_ui`, and `affected` itself passes a callback that drops them.
+    pub fn affected_narrated(
+        &self,
+        req: &AffectedRequest,
+        on: &mut dyn FnMut(Progress),
+    ) -> Result<RunOutcome> {
         let mut sw = Stopwatch::start();
         let total = Stopwatch::start();
         let base = self
@@ -762,7 +909,7 @@ impl Engine {
             ..req.clone()
         };
 
-        let (base_index, origin) = self.resolve_baseline(&base, &req)?;
+        let (base_index, origin) = self.resolve_baseline(&base, &req, on)?;
         if req.publish_base {
             match &origin {
                 BaselineOrigin::Fetched => {
@@ -797,7 +944,22 @@ impl Engine {
         }
         let load_ms = sw.lap();
 
+        on(Progress::QueryStart);
+        let query = Stopwatch::start();
         let mut out = self.run_incremental(base_index.view(), &req)?;
+        let r = &out.report;
+        match (&r.global, &r.global_reason) {
+            (true, reason) => on(Progress::Global {
+                reason: reason.clone().unwrap_or_else(|| "global".into()),
+            }),
+            _ => on(Progress::QueryDone {
+                changed_files: r.stats.changed_files,
+                packages: r.stats.dirty_packages,
+                affected: r.affected.len(),
+                tests: r.tests.len(),
+                elapsed_ms: query.elapsed_ms(),
+            }),
+        }
         out.report.timings_ms.load += load_ms;
         out.report.timings_ms.total = total.elapsed_ms();
         // The view is dead by here, so the baseline can be given away whole:
@@ -896,6 +1058,26 @@ impl Engine {
     ) -> Result<RunOutcome> {
         crate::run::compute(self, base_view, changes, querier, req, texts)
     }
+}
+
+/// The index was in the store under the base itself: there is nothing to
+/// replay, so the splice phase says so rather than going quiet.
+fn narrate_found_at_base(
+    found: &Baseline,
+    base: &str,
+    elapsed_ms: u64,
+    on: &mut dyn FnMut(Progress),
+) {
+    on(Progress::IndexFound {
+        sha: base.to_string(),
+        behind: 0,
+        lineage: found.lineage_hex(),
+        age_secs: found.age_secs(),
+        elapsed_ms,
+    });
+    on(Progress::SpliceSkipped {
+        reason: "index already at base".into(),
+    });
 }
 
 pub use crate::bzl::main_alias_mapping;
