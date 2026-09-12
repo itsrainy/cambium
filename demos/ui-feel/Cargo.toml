@@ -1,0 +1,20 @@
+[package]
+name = "ui-feel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+
+[[bin]]
+name = "ui-feel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# Only the fullscreen `full` demo needs a TUI framework now.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+rasciigraph = "0.3"
+textplots = "0.8"
+rand = "0.8"
+rand_chacha = "0.3"

@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# `demos/` holds standalone crates for trying out terminal output shapes.
+# They are built by hand, never by a workspace-wide `cargo build`.
+exclude = ["demos"]
 members = [
     "crates/index",
     "crates/synth",
