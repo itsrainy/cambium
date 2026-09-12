@@ -63,7 +63,9 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         &args.affected,
         Shape::explain(args.label.as_deref()),
     )?;
-    let outcome = engine.affected(&req)?;
+    // The same computation `affected` runs is the same three phases on
+    // stderr, drawn by the same renderer.
+    let outcome = crate::cmd::affected::narrate(ctx, &engine, &req, "explain")?;
     let report = &outcome.report;
 
     let about = match &args.label {
