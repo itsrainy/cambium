@@ -296,7 +296,7 @@ impl Class {
                  affected: the tool's miss, not cambium's extra"
             }
             Class::CambiumMissing => {
-                "**fails**: the oracle or a tool reached something cambium did not — \
+                "**fails**: the oracle or a tool reached something cambium did not: \
                  unsoundness"
             }
             Class::CambiumMissingBzlClosure => {

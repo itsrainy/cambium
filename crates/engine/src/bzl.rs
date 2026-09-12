@@ -286,7 +286,7 @@ impl Witness<'_> {
                     )
                     .at(root.to_string(), None)
                     .with_help(
-                        "the answer is safe; rebuild the lineage with `cambi baseline build` to \
+                        "the answer is safe; rebuild the lineage with `cambi index build` to \
                          make it cheap again",
                     ),
                 );

@@ -32,7 +32,7 @@ Global commits: **1**
 
 #### Three-way comparison
 
-1 change sets compared, 1 passed, 0 failed (0 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them — see **Globals** below). Worst oracle recall: **100.0%**.
+1 change sets compared, 1 passed, 0 failed (0 of them global, which pass by construction: `//...` contains every answer. The tools still ran on them; see **Globals** below). Worst oracle recall: **100.0%**.
 
 | Bazel | tool | change sets | passed | precision | min recall |
 |---|---|---:|---:|---:|---:|
@@ -47,9 +47,9 @@ Global commits: **1**
 | `7.4.1` | **cambium** | all change sets | 1 | 4200 ms / 4200 ms | 180 ms / 180 ms | 3900 ms / 3900 ms | 95 ms / 95 ms |
 | `7.4.1` | **cambium** | incremental | 1 | 4200 ms / 4200 ms | 180 ms / 180 ms | 3900 ms / 3900 ms | 95 ms / 95 ms |
 
-**Quote the `all change sets` rows.** They cover every change set compared, including the 0 where cambium fell back to `//...` and did no incremental work at all — which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium — an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
+**Quote the `all change sets` rows.** They cover every change set compared, including the 0 where cambium fell back to `//...` and did no incremental work at all, which is what a user running cambium over this history actually waits for. The `incremental` rows drop those; they are the rows that belong with the precision and class numbers above, because those are computed over exactly the same change sets, but read on their own they flatter cambium: an average over the change sets it is fast on. 0 of the incremental change sets re-indexed the whole repository (the dirty set was too large to splice), so their *warm* is a cold number under a warm label.
 
-cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published baseline, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
+cambium's *cold* is a full index build from `bazel query //...`; its *warm* is an update against the published index, which is what a CI job actually pays. bazel-diff's warm reuses the base revision's hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is how many change sets each tool's distribution is taken over: Tango is often capped (it costs 30-500 s a change set) while cambium and bazel-diff run on all of them.
 
 *cold* and *warm* are whole-process walls: for cambium that includes `cambi` starting and serialising its JSON answer. *engine cold* and *engine warm* are the engine's own `timings_ms.total` from the same runs, the wall without the process around it; they are `n/a` for the other tools, which report no such split, and for results recorded before the harness ran `cambi` as a child process.
 
@@ -75,7 +75,7 @@ No compared change set was globally invalidated.
 | `bazeldiff_extra_line_shift` | 0 | no | an unchanged rule whose `BUILD` file changed around it: only its line number moved, and cambium's rule hash excludes `generator_location` |
 | `tool_extra_source_directory` | 0 | no | the target consumes a directory as a source file (`//pkg:.`) and a changed path lies under it; the tool hashes the directory's contents, Bazel's graph has no such edge and the reverse-dependency oracle did not reach the label |
 | `tool_missing` | 0 | no | the tool missed a target the reverse-dependency oracle confirms is affected: the tool's miss, not cambium's extra |
-| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not — unsoundness |
+| `cambium_missing` | 0 | **yes** | **fails**: the oracle or a tool reached something cambium did not: unsoundness |
 | `cambium_missing_bzl_closure` | 0 | **yes** | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty |
 | `unclassified` | 0 | **yes** | **fails**: no predicate explains the disagreement; needs a new class or a fix |
 
@@ -97,7 +97,7 @@ These are cambium's *own* explanations for the extra labels (`affected --explain
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1 | 2 | 0 | 1 | 2 | 0 | 0 | 0 | 0 |
 
-A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against — it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
+A *partial* batch is a `--keep_going` query that exited 3: Bazel answered for what loaded. The oracle is a lower bound on what cambium must contain, so a partial answer is still sound to check against; it just proves less. `missing labels` is the count that gates the run, and must be zero. *external route* is the subset `somepath` shows Bazel reaching only by leaving `//...` and coming back (see [Externals and soundness](#externals-and-soundness)); it is a label on a failure, not an excuse for one. *deleted-file consumers* is the other half of the check: a file that is gone at head has no label to query, so its consumers come from the base index and must appear in cambium's answer by label or by package. The last column is the `@repo//...` half of the difference, which cambium does not index by construction and which recall therefore ignores.
 
 #### `.bzl` load-closure oracle
 

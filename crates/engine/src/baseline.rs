@@ -176,7 +176,7 @@ impl<'a> BaselineCache<'a> {
                 )
                 .with_help(
                     "expected right after a cambium.toml edit; mint a new lineage with \
-                     `cambi baseline build --publish`",
+                     `cambi index build --publish`",
                 ),
             );
             self.refused

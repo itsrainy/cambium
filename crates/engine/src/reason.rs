@@ -272,7 +272,7 @@ impl GlobalReason {
                     ),
                 )
                 .with_help(
-                    "rebuild the lineage with `cambi baseline build` from a checkout the row \
+                    "rebuild the lineage with `cambi index build` from a checkout the row \
                      source can read",
                 );
                 match paths.first() {
