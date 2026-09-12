@@ -98,12 +98,9 @@ fn the_search_for_an_index_says_where_it_looked_and_what_it_found() {
     let req = f.request(&base, &base);
     let mut seen: Vec<Progress> = Vec::new();
     f.engine
-        .resolve_baseline_with_progress(
-            &base,
-            &req,
-            &SynthQuerier::new(&f.graphs[2]),
-            &mut |p| seen.push(p),
-        )
+        .resolve_baseline_with_progress(&base, &req, &SynthQuerier::new(&f.graphs[2]), &mut |p| {
+            seen.push(p)
+        })
         .unwrap();
 
     assert!(matches!(seen[0], Progress::IndexLookup { .. }), "{seen:#?}");

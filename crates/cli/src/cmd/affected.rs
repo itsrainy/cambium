@@ -1,11 +1,34 @@
 //! `cambi affected`.
+//!
+//! The answer is on stdout and everything about getting it is on stderr,
+//! rendered through [`cambium_ui`] like every other verb: an `index` phase
+//! that says where it looked for an index and what it found, a `splice` phase
+//! for the replay up to the base (or the reason there was none), and a
+//! `query` phase for the diff and the reverse walk. Stdout is the count line,
+//! the labels, and the targets-by-depth histogram underneath them.
+
+use std::io::IsTerminal as _;
 
 use anyhow::Result;
+use cambium_engine::progress::Progress;
 use cambium_engine::AffectedRequest;
+use cambium_ui::report::{group, human_ms};
+use cambium_ui::{hist, Align, Cell, Column, Event, Level, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
 use crate::cmd::{emit_json, Context};
 use crate::Format;
+
+/// How the targets-by-depth distribution is drawn under the answer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Hist {
+    /// A vertical column chart, each count above its own column.
+    Columns,
+    /// One horizontal block bar per depth, with the count after it.
+    Bars,
+    /// No histogram at all.
+    None,
+}
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -48,6 +71,9 @@ pub struct Args {
     /// change (0 = the direct set).
     #[arg(long)]
     pub max_depth: Option<u32>,
+    /// How the targets-by-depth distribution is drawn under the answer.
+    #[arg(long, value_enum, default_value_t = Hist::Columns)]
+    pub hist: Hist,
     /// Write the head index produced by this run to this file. (The report
     /// itself goes to stdout; `--write-index` is the old spelling.)
     #[arg(long = "out", alias = "write-index", value_name = "FILE")]
@@ -65,7 +91,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     if args.dry_run {
         return crate::cmd::plan::run(ctx, &engine, &req);
     }
-    let outcome = engine.affected(&req)?;
+    let outcome = narrate(ctx, &engine, &req, "affected")?;
     let report = &outcome.report;
     ctx.render.report(&report.diagnostics)?;
 
@@ -101,15 +127,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                         eprintln!("cambium: everything is affected: {r}");
                     }
                 }
+                // No list and no histogram: nothing was walked, so there is
+                // no distribution to draw.
             } else {
-                let items: Vec<&str> = if args.tests_only {
-                    report.tests.iter().map(String::as_str).collect()
-                } else {
-                    report.affected.iter().map(|t| t.label.as_str()).collect()
-                };
-                for l in items {
-                    println!("{l}");
-                }
+                print_answer(report, args.tests_only, args.hist);
                 if args.explain {
                     print_explanations(report, args.tests_only);
                 }
@@ -241,6 +262,353 @@ pub fn request(
     })
 }
 
+/// Runs `affected`, narrating it on stderr through the shared renderer.
+///
+/// `explain` calls this too: it is the same computation, so it is the same
+/// three phases, and the two verbs cannot drift apart about what a run is
+/// doing while it does it.
+pub fn narrate(
+    ctx: &Context,
+    engine: &cambium_engine::Engine,
+    req: &AffectedRequest,
+    verb: &str,
+) -> Result<cambium_engine::RunOutcome> {
+    let mut sink = cambium_ui::boxed(ctx.ui);
+    let repo = engine
+        .workspace()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    sink.emit(Event::Header {
+        verb: verb.to_string(),
+        repo,
+        range: format!("{}..{}", short(&req.base), short(&req.head)),
+        note: commits_in_range(engine, req),
+    });
+    let mut render = Narrator {
+        sink: sink.as_mut(),
+        rows_open: false,
+    };
+    let out = engine.affected_narrated(req, &mut |p| render.on(p));
+    sink.emit(Event::Done);
+    Ok(out?)
+}
+
+/// `N commits`, or nothing to say when git will not count them (a synthetic
+/// revision, a shallow clone).
+fn commits_in_range(engine: &cambium_engine::Engine, req: &AffectedRequest) -> String {
+    let range = format!("{}..{}", req.base, req.head);
+    let Ok(out) = engine.repo().git(&["rev-list", "--count", &range]) else {
+        return String::new();
+    };
+    match out.trim().parse::<u64>() {
+        Ok(n) => format!("{} commit{}", group(n), if n == 1 { "" } else { "s" }),
+        Err(_) => String::new(),
+    }
+}
+
+/// The columns of the splice row, the same five a profile row uses so the two
+/// verbs lay a commit out alike.
+fn splice_columns() -> Vec<Column> {
+    vec![
+        Column::flex("range"),
+        Column::fixed("time", 9, Align::Right),
+        Column::fixed("affected", 8, Align::Right),
+        Column::fixed("tests", 6, Align::Right),
+        Column::fixed("index", 17, Align::Left),
+    ]
+}
+
+/// Turns the run's progress into the grammar the sink draws.
+struct Narrator<'a> {
+    sink: &'a mut dyn Sink,
+    /// The splice phase has printed its row header.
+    rows_open: bool,
+}
+
+impl Narrator<'_> {
+    fn on(&mut self, p: Progress) {
+        match p {
+            Progress::IndexLookup { base } => {
+                self.sink.emit(Event::PhaseStart {
+                    name: "index".into(),
+                    detail: Some(format!("looking for {}", short(&base))),
+                });
+                self.sink
+                    .emit(Event::Current(format!("looking for {}", short(&base))));
+            }
+            Progress::SearchStart { base, ancestors } => {
+                // The live line is about to count these off; a pipe gets the
+                // one line that says the search happened at all.
+                self.sink.emit(Event::Milestone(format!(
+                    "none at {}, searching {ancestors} ancestors",
+                    short(&base)
+                )));
+                self.sink.emit(Event::Current(format!(
+                    "none at {}, searching {ancestors} ancestors",
+                    short(&base)
+                )));
+            }
+            Progress::AncestorChecked { checked, of, .. } => {
+                // Live only: `Current` is dropped by every sink without a
+                // live line, which is exactly what a CI log wants.
+                self.sink.emit(Event::Current(format!(
+                    "searching {of} ancestors … {checked} checked"
+                )));
+            }
+            Progress::IndexFound {
+                sha,
+                behind,
+                lineage,
+                age_secs,
+                elapsed_ms,
+            } => {
+                let mut about = vec![format!("lineage {}", short(&lineage))];
+                if behind > 0 {
+                    about.insert(0, format!("{} behind", plural_hops(behind)));
+                }
+                if let Some(age) = age_secs {
+                    about.push(format!("{} old", human_age(age)));
+                }
+                self.sink.emit(Event::PhaseEnd {
+                    name: "index".into(),
+                    result: format!("found at {}  ({})", short(&sha), about.join(", ")),
+                    elapsed_ms,
+                });
+            }
+            Progress::IndexAbsent {
+                searched,
+                elapsed_ms,
+            } => self.sink.emit(Event::PhaseEnd {
+                name: "index".into(),
+                result: format!("none within {searched} ancestors, building cold"),
+                elapsed_ms,
+            }),
+            Progress::ColdBuild { commit } => {
+                self.sink.emit(Event::PhaseStart {
+                    name: "cold index".into(),
+                    detail: Some(format!("bazel query //... at {}", short(&commit))),
+                });
+                self.sink
+                    .emit(Event::Current(format!("indexing {}", short(&commit))));
+            }
+            Progress::ColdBuilt {
+                targets,
+                elapsed_ms,
+            } => self.sink.emit(Event::PhaseEnd {
+                name: "cold index".into(),
+                result: format!("{} targets", group(targets as u64)),
+                elapsed_ms,
+            }),
+            Progress::SpliceStart { from, to, commits } => {
+                self.sink.emit(Event::PhaseStart {
+                    name: "splice".into(),
+                    detail: Some(format!(
+                        "{commits} commit{}  {}..{}",
+                        if commits == 1 { "" } else { "s" },
+                        short(&from),
+                        short(&to)
+                    )),
+                });
+                self.sink.emit(Event::Current(format!(
+                    "replaying {}..{}",
+                    short(&from),
+                    short(&to)
+                )));
+            }
+            Progress::SpliceStep { step } => {
+                if !self.rows_open {
+                    self.rows_open = true;
+                    self.sink.emit(Event::RowHeader(splice_columns()));
+                }
+                self.sink.emit(Event::Row(vec![
+                    Cell::Commit {
+                        sha: step.commit.clone(),
+                        date: step.date.clone(),
+                        subject: format!(
+                            "{} file{}, {} package{}",
+                            step.changed_files,
+                            if step.changed_files == 1 { "" } else { "s" },
+                            step.dirty_packages,
+                            if step.dirty_packages == 1 { "" } else { "s" },
+                        ),
+                    },
+                    Cell::text(human_ms(step.wall_ms)),
+                    Cell::text(group(step.affected as u64)),
+                    Cell::text(group(step.tests as u64)),
+                    index_cell(&step.index),
+                ]));
+            }
+            Progress::SpliceDone {
+                at,
+                rows_rewritten,
+                elapsed_ms,
+            } => self.sink.emit(Event::PhaseEnd {
+                name: "splice".into(),
+                result: format!(
+                    "{} row{} rewritten, index now at {}",
+                    group(rows_rewritten as u64),
+                    if rows_rewritten == 1 { "" } else { "s" },
+                    short(&at)
+                ),
+                elapsed_ms,
+            }),
+            Progress::SpliceSkipped { reason } => self.sink.emit(Event::PhaseSkipped {
+                name: "splice".into(),
+                reason,
+            }),
+            Progress::QueryStart => {
+                self.sink.emit(Event::PhaseStart {
+                    name: "query".into(),
+                    detail: Some("reading the diff".into()),
+                });
+                self.sink
+                    .emit(Event::Current("walking reverse dependencies".into()));
+            }
+            Progress::QueryDone {
+                changed_files,
+                packages,
+                affected,
+                tests,
+                elapsed_ms,
+            } => self.sink.emit(Event::PhaseEnd {
+                name: "query".into(),
+                result: format!(
+                    "{} changed file{}, {} package{} \u{2192} {} affected ({} tests)",
+                    changed_files,
+                    if changed_files == 1 { "" } else { "s" },
+                    packages,
+                    if packages == 1 { "" } else { "s" },
+                    group(affected as u64),
+                    group(tests as u64),
+                ),
+                elapsed_ms,
+            }),
+            Progress::Global { reason } => {
+                self.sink.emit(Event::Log(
+                    Level::Warning,
+                    format!("everything is affected: {reason}"),
+                ));
+                self.sink.emit(Event::PhaseEnd {
+                    name: "query".into(),
+                    result: "the whole repository".into(),
+                    elapsed_ms: 0,
+                });
+            }
+        }
+    }
+}
+
+/// What the splice did to the index, in the same cell `cambi profile` prints.
+fn index_cell(work: &cambium_engine::profile::IndexWork) -> Cell {
+    use cambium_engine::profile::IndexWork;
+    match work {
+        IndexWork::Identical => Cell::styled("= unchanged", Style::Dim),
+        IndexWork::Spliced { rows_rewritten } => {
+            Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
+        }
+        IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
+    }
+}
+
+/// An age in the coarsest unit that still says something: `40 min`, `4 h`,
+/// `2 d`. An index is minutes to weeks old and nobody reads the seconds.
+fn human_age(secs: u64) -> String {
+    match secs {
+        0..=119 => format!("{secs} s"),
+        120..=7_199 => format!("{} min", secs / 60),
+        7_200..=172_799 => format!("{} h", secs / 3_600),
+        _ => format!("{} d", secs / 86_400),
+    }
+}
+
+fn plural_hops(n: u32) -> String {
+    format!("{n} commit{}", if n == 1 { "" } else { "s" })
+}
+
+/// Stdout: the count line, the labels, and the distribution underneath.
+fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_kind: Hist) {
+    let items: Vec<&str> = if tests_only {
+        report.tests.iter().map(String::as_str).collect()
+    } else {
+        report.affected.iter().map(|t| t.label.as_str()).collect()
+    };
+    let paint = Paint::new(std::io::stdout().is_terminal());
+    let depth = match report.max_depth() {
+        Some(d) => format!("  max depth {d}"),
+        None => String::new(),
+    };
+    println!(
+        "{}  ({} tests){}",
+        paint.bold(&format!(
+            "{} affected target{}",
+            group(items.len() as u64),
+            if items.len() == 1 { "" } else { "s" }
+        )),
+        group(report.tests.len() as u64),
+        depth,
+    );
+    println!();
+    for l in &items {
+        println!("{l}");
+    }
+    // `--tests-only` prints a list of tests, so its histogram is the tests'
+    // depths and not the whole answer's: a distribution that did not match
+    // the list above it would be worse than none.
+    let counts = depth_counts(report, tests_only);
+    if hist_kind == Hist::None || counts.is_empty() {
+        return;
+    }
+    let labels: Vec<String> = (0..counts.len()).map(|d| d.to_string()).collect();
+    println!();
+    match hist_kind {
+        Hist::Bars => {
+            for line in hist::bars(&counts, &labels, 30) {
+                println!("{line}");
+            }
+        }
+        Hist::Columns => {
+            for line in hist::columns(&counts, &labels) {
+                println!("{line}");
+            }
+        }
+        Hist::None => unreachable!(),
+    }
+    println!(
+        "  {}",
+        paint.dim(&format!(
+            "targets by depth 0..{}",
+            counts.len().saturating_sub(1)
+        ))
+    );
+}
+
+/// The distribution drawn under the list: the report's own histogram, or the
+/// tests' depths counted the same way when the list is tests alone.
+fn depth_counts(report: &cambium_engine::AffectedReport, tests_only: bool) -> Vec<u64> {
+    if !tests_only {
+        return report.depth_histogram.iter().map(|&c| c as u64).collect();
+    }
+    let Some(max) = report
+        .affected
+        .iter()
+        .filter(|t| t.test)
+        .map(|t| t.depth)
+        .max()
+    else {
+        return Vec::new();
+    };
+    let mut out = vec![0u64; max as usize + 1];
+    for t in report.affected.iter().filter(|t| t.test) {
+        out[t.depth as usize] += 1;
+    }
+    out
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(10)]
+}
+
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {
     let Some(explanations) = &report.explanations else {
         return;
@@ -266,7 +634,193 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
 
 #[cfg(test)]
 mod tests {
+    use cambium_engine::profile::{CommitStep, IndexWork};
+    use cambium_engine::report::{AffectedReport, AffectedTarget};
+    use cambium_ui::{ColorChoice, Kind, OutputMode};
     use clap::Parser;
+
+    /// A sink writing into a buffer this test can read back.
+    #[derive(Clone)]
+    struct Buf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn plain_mode() -> OutputMode {
+        let _ = ColorChoice::Never;
+        OutputMode {
+            kind: Kind::Plain,
+            live: false,
+            colour: false,
+            width: 96,
+        }
+    }
+
+    /// Drives the narrator over a scripted run and returns what stderr saw.
+    fn narrate_to_text(events: Vec<super::Progress>) -> String {
+        let buf = Buf(Default::default());
+        let mut sink = cambium_ui::Plain::to_writer(buf.clone(), plain_mode());
+        {
+            let mut n = super::Narrator {
+                sink: &mut sink,
+                rows_open: false,
+            };
+            for e in events {
+                n.on(e);
+            }
+        }
+        let bytes = buf.0.borrow().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn the_index_phase_says_how_far_back_it_found_one_and_how_old_it_is() {
+        let text = narrate_to_text(vec![
+            super::Progress::IndexLookup {
+                base: "3f2a9c1abc".into(),
+            },
+            super::Progress::SearchStart {
+                base: "3f2a9c1abc".into(),
+                ancestors: 50,
+            },
+            super::Progress::AncestorChecked {
+                checked: 1,
+                of: 50,
+                sha: "aaaa".into(),
+            },
+            super::Progress::IndexFound {
+                sha: "dbaed12def".into(),
+                behind: 24,
+                lineage: "0123456789abcdef".into(),
+                age_secs: Some(2 * 86_400),
+                elapsed_ms: 31,
+            },
+        ]);
+        assert!(text.contains("found at dbaed12def"), "{text}");
+        assert!(text.contains("24 commits behind"), "{text}");
+        assert!(text.contains("2 d old"), "{text}");
+        // The per-ancestor ticking is the live line's; a pipe gets the one
+        // milestone instead.
+        assert!(
+            text.contains("none at 3f2a9c1abc, searching 50 ancestors"),
+            "{text}"
+        );
+        assert!(!text.contains("1 checked"), "{text}");
+    }
+
+    #[test]
+    fn a_skipped_splice_says_why_and_the_query_says_what_it_read() {
+        let text = narrate_to_text(vec![
+            super::Progress::SpliceSkipped {
+                reason: "index already at base".into(),
+            },
+            super::Progress::QueryStart,
+            super::Progress::QueryDone {
+                changed_files: 12,
+                packages: 4,
+                affected: 1_284,
+                tests: 96,
+                elapsed_ms: 40,
+            },
+        ]);
+        assert!(text.contains("skipped (index already at base)"), "{text}");
+        assert!(
+            text.contains("12 changed files, 4 packages")
+                && text.contains("1,284 affected (96 tests)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_splice_row_is_the_replay_and_what_it_rewrote() {
+        let text = narrate_to_text(vec![
+            super::Progress::SpliceStart {
+                from: "dbaed12def".into(),
+                to: "3f2a9c1abc".into(),
+                commits: 24,
+            },
+            super::Progress::SpliceStep {
+                step: Box::new(CommitStep {
+                    commit: "3f2a9c1abc".into(),
+                    parent: "dbaed12def".into(),
+                    date: "09-02 09:14".into(),
+                    changed_files: 312,
+                    dirty_packages: 41,
+                    affected: 2_100,
+                    tests: 180,
+                    wall_ms: 1_800,
+                    global: false,
+                    global_reason: None,
+                    engine_cold_rebuild: false,
+                    index: IndexWork::Spliced {
+                        rows_rewritten: 2_625,
+                    },
+                }),
+            },
+            super::Progress::SpliceDone {
+                at: "3f2a9c1abc".into(),
+                rows_rewritten: 2_625,
+                elapsed_ms: 1_800,
+            },
+        ]);
+        assert!(text.contains("312 files, 41 packages"), "{text}");
+        assert!(text.contains("~  2625 rewritten"), "{text}");
+        assert!(
+            text.contains("2,625 rows rewritten, index now at 3f2a9c1abc"),
+            "{text}"
+        );
+    }
+
+    fn report_with_depths(depths: &[(u32, bool)]) -> AffectedReport {
+        let mut r = AffectedReport {
+            affected: depths
+                .iter()
+                .enumerate()
+                .map(|(i, &(depth, test))| AffectedTarget {
+                    label: format!("//pkg{i}:t"),
+                    depth,
+                    test,
+                })
+                .collect(),
+            ..AffectedReport::default()
+        };
+        let max = depths.iter().map(|d| d.0).max().unwrap();
+        let mut hist = vec![0u32; max as usize + 1];
+        for (d, _) in depths {
+            hist[*d as usize] += 1;
+        }
+        r.depth_histogram = hist;
+        r.tests = r
+            .affected
+            .iter()
+            .filter(|t| t.test)
+            .map(|t| t.label.clone())
+            .collect();
+        r
+    }
+
+    #[test]
+    fn the_max_depth_line_reads_off_the_histogram() {
+        let r = report_with_depths(&[(0, false), (1, true), (3, false)]);
+        assert_eq!(r.max_depth(), Some(3), "the deepest bin is the max depth");
+        assert_eq!(super::depth_counts(&r, false), vec![1, 1, 0, 1]);
+    }
+
+    /// `--tests-only` lists tests, so the distribution under the list has to
+    /// be the tests' depths and not the whole answer's.
+    #[test]
+    fn tests_only_draws_the_tests_own_depths() {
+        let r = report_with_depths(&[(0, false), (1, true), (1, true), (3, false)]);
+        assert_eq!(super::depth_counts(&r, false), vec![1, 2, 0, 1]);
+        assert_eq!(super::depth_counts(&r, true), vec![0, 2]);
+    }
 
     /// Parses `cambi affected <args>` the way `main` would.
     fn parse(args: &[&str]) -> super::Args {
