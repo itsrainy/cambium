@@ -1,6 +1,8 @@
 //! The four sinks. Every verb writes events; only this file writes bytes.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::event::{Cell, Column, Event, Level};
@@ -54,7 +56,9 @@ struct Text<W: Write> {
     /// result can still be written over it.
     rewritable: bool,
     current: String,
-    start: Instant,
+    /// When the live line's current text was set. The elapsed beside it is
+    /// how long *this* step has been running, not how long the process has.
+    current_since: Instant,
     frame: usize,
 }
 
@@ -69,7 +73,7 @@ impl<W: Write> Text<W> {
             shown: false,
             rewritable: false,
             current: String::new(),
-            start: Instant::now(),
+            current_since: Instant::now(),
             frame: 0,
         }
     }
@@ -148,7 +152,7 @@ impl<W: Write> Text<W> {
             return;
         }
         self.frame += 1;
-        let secs = self.start.elapsed().as_secs();
+        let secs = self.current_since.elapsed().as_secs();
         let text = row::fit(
             &self.current,
             self.width.saturating_sub(16),
@@ -210,6 +214,9 @@ impl<W: Write> Text<W> {
                 }
             }
             Event::Current(what) => {
+                if what != self.current {
+                    self.current_since = Instant::now();
+                }
                 self.current = what;
                 self.tick_line();
             }
@@ -229,28 +236,98 @@ impl<W: Write> Text<W> {
     }
 }
 
+/// How often the live line redraws itself while the run is busy elsewhere.
+const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often the ticker looks up to see whether the run is over.
+const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// A terminal: one live bottom line, and a finished phase written back over
 /// its own start line as long as it has printed no rows.
-pub struct Stream<W: Write = std::io::Stderr>(Text<W>);
+///
+/// The line redraws itself. A verb that spends two minutes inside one Bazel
+/// query emits nothing for two minutes, and a spinner that only moves when
+/// an event arrives would sit frozen through exactly the wait it exists to
+/// cover, so the sink owns a thread that ticks it every [`TICK`]. The thread
+/// and `emit` share the writer through one mutex, so a tick can never land
+/// in the middle of a row.
+pub struct Stream<W: Write + Send + 'static = std::io::Stderr> {
+    text: Arc<Mutex<Text<W>>>,
+    stop: Arc<AtomicBool>,
+    ticker: Option<std::thread::JoinHandle<()>>,
+}
 
 impl Stream<std::io::Stderr> {
     pub fn to_stderr(mode: OutputMode) -> Self {
-        Self(Text::new(std::io::stderr(), mode, true))
+        Self::to_writer(std::io::stderr(), mode)
     }
 }
 
-impl<W: Write> Stream<W> {
+impl<W: Write + Send + 'static> Stream<W> {
     pub fn to_writer(w: W, mode: OutputMode) -> Self {
-        Self(Text::new(w, mode, true))
+        let text = Arc::new(Mutex::new(Text::new(w, mode, true)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let text = Arc::clone(&text);
+            let stop = Arc::clone(&stop);
+            std::thread::Builder::new()
+                .name("cambium-ui-live".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Slept in slices, so the end of a run waits for the
+                        // thread to notice rather than for a whole tick.
+                        for _ in 0..(TICK.as_millis() / SLICE.as_millis()) {
+                            std::thread::sleep(SLICE);
+                            if stop.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
+                        // A poisoned lock means a printing thread panicked;
+                        // the run is over either way, so the ticker leaves
+                        // rather than panicking in turn.
+                        let Ok(mut text) = text.lock() else { break };
+                        text.tick_line();
+                    }
+                })
+                .ok()
+        };
+        Self { text, stop, ticker }
+    }
+
+    /// Stops the ticker and takes the live line off the screen. Idempotent,
+    /// and safe from `Drop`: a process that exits mid-run leaves no half
+    /// written line behind and never panics on the way out.
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+        if let Ok(mut text) = self.text.lock() {
+            text.erase();
+            let _ = text.w.flush();
+        }
     }
 }
 
-impl<W: Write> Sink for Stream<W> {
+impl<W: Write + Send + 'static> Sink for Stream<W> {
     fn emit(&mut self, event: Event) {
-        self.0.emit(event)
+        let done = matches!(event, Event::Done);
+        if let Ok(mut text) = self.text.lock() {
+            text.emit(event);
+        }
+        if done {
+            self.finish();
+        }
     }
     fn tick(&mut self) {
-        self.0.tick_line()
+        if let Ok(mut text) = self.text.lock() {
+            text.tick_line();
+        }
+    }
+}
+
+impl<W: Write + Send + 'static> Drop for Stream<W> {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -441,21 +518,30 @@ mod tests {
         ]
     }
 
-    fn drain(mut sink: impl Sink, out: std::rc::Rc<std::cell::RefCell<Vec<u8>>>) -> String {
+    fn drain(mut sink: impl Sink, out: Arc<Mutex<Vec<u8>>>) -> String {
         for e in script() {
             sink.emit(e);
         }
         drop(sink);
-        String::from_utf8(out.borrow().clone()).expect("utf-8")
+        read(&out)
     }
 
-    /// A writer the test can read back after the sink has dropped it.
+    fn buffer() -> Arc<Mutex<Vec<u8>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn read(out: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(out.lock().unwrap().clone()).expect("utf-8")
+    }
+
+    /// A writer the test can read back after the sink has dropped it, and
+    /// that the live line's own thread can write to.
     #[derive(Clone)]
-    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    struct Shared(Arc<Mutex<Vec<u8>>>);
 
     impl Write for Shared {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
+            self.0.lock().unwrap().extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -477,9 +563,9 @@ mod tests {
 
     #[test]
     fn a_pipe_and_a_terminal_print_the_same_rows_byte_for_byte() {
-        let a = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let a = buffer();
         let stream = drain(Stream::to_writer(Shared(a.clone()), mode(false)), a);
-        let b = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let b = buffer();
         let plain = drain(Plain::to_writer(Shared(b.clone()), mode(false)), b);
 
         let stream_rows = rows_of(&stream);
@@ -499,7 +585,7 @@ mod tests {
 
     #[test]
     fn a_finished_phase_is_rewritten_in_place_only_when_it_printed_no_rows() {
-        let a = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let a = buffer();
         let stream = drain(Stream::to_writer(Shared(a.clone()), mode(false)), a);
         // `worktree` printed nothing in between, so its result goes back over
         // its own line; `commits` printed rows, so its result is a new line.
@@ -507,7 +593,7 @@ mod tests {
         assert!(stream.contains("worktree ..........."));
         assert!(stream.contains("30 walked, 1 global"));
 
-        let b = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let b = buffer();
         let plain = drain(Plain::to_writer(Shared(b.clone()), mode(false)), b);
         assert!(
             !plain.contains('\x1b'),
@@ -517,7 +603,7 @@ mod tests {
 
     #[test]
     fn jsonl_is_one_object_an_event_and_a_row_is_keyed_by_its_columns() {
-        let b = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let b = buffer();
         let text = drain(Jsonl::to_writer(Shared(b.clone())), b);
         let docs: Vec<serde_json::Value> = text
             .lines()
@@ -532,9 +618,82 @@ mod tests {
         assert_eq!(row["index"], "~  2625 rewritten");
     }
 
+    /// Frames of the live line, in order: what was written between one erase
+    /// and the next.
+    fn spinner_frames(text: &str) -> Vec<String> {
+        text.split("\r\x1b[2K")
+            .skip(1)
+            .filter(|f| SPINNER.iter().any(|c| f.starts_with(*c)))
+            .map(|f| f.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_live_line_redraws_itself_while_the_run_says_nothing() {
+        let out = buffer();
+        let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
+        sink.emit(Event::Current("bazel query //...".into()));
+        // Nothing is emitted from here on: a long query is exactly the case
+        // the spinner exists for.
+        std::thread::sleep(std::time::Duration::from_millis(1_300));
+        let frames = spinner_frames(&read(&out));
+        assert!(
+            frames.len() >= 5,
+            "the line should have redrawn itself about a dozen times: {frames:?}"
+        );
+        let distinct: std::collections::BTreeSet<char> =
+            frames.iter().filter_map(|f| f.chars().next()).collect();
+        assert!(distinct.len() > 1, "the spinner turns: {distinct:?}");
+        assert!(
+            frames.first().unwrap().ends_with("0:00"),
+            "{:?}",
+            frames.first()
+        );
+        assert!(
+            frames.last().unwrap().ends_with("0:01"),
+            "the elapsed counts up: {:?}",
+            frames.last()
+        );
+        // Done takes the line off the screen and stops the thread.
+        sink.emit(Event::Done);
+        let after = read(&out).len();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(read(&out).len(), after, "the ticker stopped at Done");
+    }
+
+    #[test]
+    fn the_elapsed_is_this_step_s_own_not_the_run_s() {
+        let out = buffer();
+        let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
+        sink.emit(Event::Current("first step".into()));
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        // A new step resets the clock, so its line starts again at 0:00.
+        sink.emit(Event::Current("second step".into()));
+        let frames = spinner_frames(&read(&out));
+        let last = frames.last().expect("a frame").clone();
+        assert!(last.contains("second step"), "{last}");
+        assert!(last.ends_with("0:00"), "a new step starts at zero: {last}");
+        sink.emit(Event::Done);
+    }
+
+    #[test]
+    fn dropping_a_stream_mid_run_leaves_no_line_behind_and_does_not_panic() {
+        let out = buffer();
+        {
+            let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
+            sink.emit(Event::Current("half way through".into()));
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        let text = read(&out);
+        assert!(text.ends_with("\r\x1b[2K"), "the line was erased: {text:?}");
+        let before = text.len();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(read(&out).len(), before, "the ticker stopped with the sink");
+    }
+
     #[test]
     fn colour_reaches_the_row_but_never_the_layout() {
-        let a = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let a = buffer();
         let painted = drain(Plain::to_writer(Shared(a.clone()), mode(true)), a);
         assert!(painted.contains("\x1b[36m"), "the index cell is cyan");
         assert!(painted.contains("\x1b[1mcambium\x1b[0m"));

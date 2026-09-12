@@ -224,7 +224,11 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   terminal there is also one live bottom line, `<spinner> <what it is doing>
   <m:ss>`, erased before anything else is printed so it never interleaves
   with a row, and a phase that has printed no rows has its result written
-  back over its own start line. A pipe, a CI log (`CI` set) and `TERM=dumb`
+  back over its own start line. The line redraws itself about ten times a
+  second whether or not the run has anything new to say, so a minute inside
+  one Bazel query still turns and still counts; the elapsed beside it is how
+  long the step on the line has been running, not the whole process. A pipe,
+  a CI log (`CI` set) and `TERM=dumb`
   get the same bytes without that line, with both of each phase's lines
   printed; `--format jsonl` gets one JSON object per event on stderr
   instead; `--quiet` gets nothing.
