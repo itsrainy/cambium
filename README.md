@@ -34,6 +34,79 @@ reverse edges. Every step is proportional to the change or to the answer.
 [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) is where the time and the bytes
 actually go.
 
+### Where the invariant stops
+
+The invariant is a statement about Bazel's *loading phase*, and it holds there
+because loading-phase Starlark is hermetic: a `.bzl` cannot read a file, the
+environment or the clock, so however convoluted its macros are, the edges it
+produces are a function of the package's inputs. cambium never reads a rule
+implementation; it re-queries the dirty package with real Bazel and hashes
+what comes back, so an adversarial `.bzl` costs nothing. The counterexamples
+live at the edges of that phase, and each one is either modelled or escalated
+to a cold rebuild. The line between the two is the contract, so it is drawn
+here.
+
+**Modelled** — cambium answers exactly, at incremental cost:
+
+- A new `BUILD` file that carves a sub-package out of its parent, or a
+  deleted one that returns its files: both packages are re-queried
+  (`crates/classify`), which is what keeps every `glob()` honest.
+- A `bazel_dep` version bump, an override, or a lockfile that moved on its
+  own: the `MODULE.bazel` and `MODULE.bazel.lock` diffs name the repositories
+  that moved, and every main-repo rule naming a label in them is reached
+  through the graph.
+- A repository rule that reads the main repository (`local_path_override`,
+  `local_repository`, a `repository_ctx.symlink` of a literal path): the index
+  records which main-repo paths feed which repository.
+- `select()`: every branch's inputs are edges, so which branch a configuration
+  picks cannot matter.
+- A source file whose *contents* changed: its consumers are direct, and
+  nothing is re-queried. Loading-phase edges depend on file names, never on
+  file contents, because `glob()` is the only filesystem access there is.
+
+**Escalated** — the run reports `cold_rebuild_reason` and queries `//...`
+once. The answer is still exact; only the cost is not incremental:
+
+- `.bazelrc` edits outside the allowlist of flags known not to reach loading
+  or analysis (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
+  `--platforms`, `--extra_toolchains` and every `--incompatible_*` flag.
+- `register_toolchains` / `register_execution_platforms` in `MODULE.bazel`,
+  and any `MODULE.bazel` or `WORKSPACE` statement the readers cannot classify
+  by shape.
+- `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs.
+  The default globs are `tools/toolchains/**` and `platforms/**`; a repository
+  that keeps toolchain or platform declarations elsewhere should add those
+  directories, because toolchain resolution happens in analysis and has no
+  edge in the query graph for the reverse walk to follow.
+
+**Not modelled** — the honest list, each with its status:
+
+- **A `toolchain()` or `platform()` declared outside the invalidator globs.**
+  Adding a better-matching toolchain in an unrelated package changes what
+  every consumer builds with, and nothing reaches it. Today the globs are the
+  only answer. The planned fix needs no configuration: the splice already
+  reports every rule id it added, changed or tombstoned, so a run can
+  escalate when any of them has rule class `toolchain`, `platform` or
+  `toolchain_type`, wherever the package is. The globs then stay as the
+  answer for `.bzl` edits in those directories.
+- **`.bazelignore`.** Adding a directory to it deletes packages with no
+  `BUILD` diff. It should be a default invalidator path and is not yet.
+- **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
+  and later). A bare `cc_library` then comes from `@rules_cc` through a load
+  the BUILD file never writes, so the stored closure has no edge for it and a
+  `rules_cc` version bump does not dirty the packages that use it. Until the
+  closure records the implied load, the sound answer is to treat a version
+  bump of an autoload provider as global on Bazel 8 or later.
+- **Symlinked directories inside a package.** `glob()` walks into them, and a
+  change to the link target is a diff somewhere else. Unmodelled, alongside
+  the source-directory limitation in
+  [docs/METHODOLOGY.md](docs/METHODOLOGY.md#disagreement-taxonomy).
+- **Analysis-phase edges in general** — aspects' private attributes,
+  transitions, exec-platform choice. cambium is exact at the unconfigured
+  target graph, which over-approximates the configured one everywhere except
+  aspect-private attributes, which `bazel query` cannot see. That gap is the
+  same on a cold build and an incremental one.
+
 ## Install
 
 ```console

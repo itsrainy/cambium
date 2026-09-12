@@ -180,6 +180,10 @@ from every tool's answer so that only rule targets are compared.
 - **Configured builds.** All three tools work on the unconfigured target
   graph. `select()` branches are kept, which is the source of cambium's
   largest over-approximation class.
+- **The edge of the invariant.** Toolchain and platform declarations outside
+  the invalidator globs, `.bazelignore`, autoloaded native rules and
+  symlinked directories are not modelled; the README's "Where the invariant
+  stops" section is the authoritative list, with each case's status.
 
 ## Disagreement taxonomy
 
