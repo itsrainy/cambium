@@ -82,7 +82,14 @@ use serde::{Deserialize, Serialize};
 ///   index, new or rehashed plus the ones it tombstoned. Zero means the
 ///   commit changed nothing the graph models, which is what `cambi profile`
 ///   reports per commit as `index`. Purely additive.
-pub const SCHEMA_VERSION: u32 = 9;
+/// - **10** adds `depth_histogram`: the number of affected targets at each
+///   reverse-dependency depth, index 0 first, so a consumer gets the shape of
+///   the answer without counting `affected[].depth` itself. Its length is one
+///   more than the deepest target reached, and it is omitted (as an empty
+///   list) on a global run, where nothing was walked. Purely additive; the
+///   per-target `depth` it summarises has been in the document since
+///   version 3.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -302,6 +309,13 @@ pub struct AffectedReport {
     pub affected: Vec<AffectedTarget>,
     /// The labels of the affected targets that are tests, sorted.
     pub tests: Vec<String>,
+    /// How many affected targets sit at each depth, `depth_histogram[d]` for
+    /// depth `d`, starting at 0. A depth inside the range that nothing
+    /// reached is a zero rather than a gap, so the list can be drawn as a
+    /// histogram straight through. Empty when nothing was affected, and on a
+    /// global run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depth_histogram: Vec<u32>,
     pub timings_ms: Timings,
     pub stats: Stats,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,6 +341,7 @@ impl Default for AffectedReport {
             direct: Vec::new(),
             affected: Vec::new(),
             tests: Vec::new(),
+            depth_histogram: Vec::new(),
             timings_ms: Timings::default(),
             stats: Stats::default(),
             explanations: None,
@@ -357,6 +372,11 @@ impl AffectedReport {
     /// The affected labels, in the order they are reported (sorted).
     pub fn affected_labels(&self) -> Vec<String> {
         self.affected.iter().map(|t| t.label.clone()).collect()
+    }
+
+    /// The deepest an affected target sits, or `None` when none were.
+    pub fn max_depth(&self) -> Option<u32> {
+        (self.depth_histogram.len() as u32).checked_sub(1)
     }
 
     /// Affected labels no deeper than `max_depth` hops from the change.

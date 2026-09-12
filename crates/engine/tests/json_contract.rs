@@ -34,7 +34,9 @@ use serde_json::Value;
 /// target the walk reached; version 9 added `diagnostics`, the actionable
 /// warnings a run raised, each with a stable `CAMBI-W` code; version 9 also
 /// added `stats.spliced_rows`, the target rows the splice wrote into the base
-/// index, which is what `cambi profile` reports per commit. The version is shared with
+/// index, which is what `cambi profile` reports per commit; version 10 added
+/// `depth_histogram`, the affected count at each reverse-dependency depth.
+/// The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
 ///
@@ -90,6 +92,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.spliced_rows",
     "stats.rbuildfiles_called",
     "bazelrc_flags[]",
+    "depth_histogram[]",
     "tests[]",
     "timings_ms.dirty",
     "timings_ms.direct",
@@ -125,6 +128,7 @@ fn fixture() -> AffectedReport {
             },
         ],
         tests: vec!["//app:main_test".into()],
+        depth_histogram: vec![1, 1],
         timings_ms: Timings {
             load: 1,
             dirty: 2,
