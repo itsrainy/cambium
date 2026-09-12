@@ -531,4 +531,28 @@ fn affected_targets_carry_their_depth() {
         "--max-depth 1 is the depth<=1 prefix"
     );
     assert!(capped.affected.iter().all(|a| a.depth <= 1));
+
+    // Schema 10: the histogram is those same depths, counted, with no gaps.
+    let hist = &full.depth_histogram;
+    assert_eq!(
+        hist.len() as u32,
+        full.affected.iter().map(|a| a.depth).max().unwrap() + 1,
+        "one bin per depth up to the deepest target"
+    );
+    assert_eq!(
+        hist.iter().sum::<u32>() as usize,
+        full.affected.len(),
+        "every affected target is counted once"
+    );
+    for (depth, count) in hist.iter().enumerate() {
+        assert_eq!(
+            *count as usize,
+            full.affected
+                .iter()
+                .filter(|a| a.depth as usize == depth)
+                .count()
+        );
+    }
+    assert_eq!(full.max_depth(), Some(hist.len() as u32 - 1));
+    assert_eq!(capped.depth_histogram.len(), 2, "--max-depth truncates it");
 }

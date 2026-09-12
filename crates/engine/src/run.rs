@@ -654,6 +654,8 @@ impl<'a> Run<'a> {
         self.stats.direct_targets = direct.len();
         self.stats.affected_targets = result.affected.len();
         self.timings.walk = self.sw.lap();
+        let affected = direct::affected_targets(view, &result);
+        let depths = depth_histogram(&affected);
 
         AffectedReport {
             schema: SCHEMA_VERSION,
@@ -665,8 +667,9 @@ impl<'a> Run<'a> {
             dirty_packages: dirty.dirty.iter().cloned().collect(),
             bazelrc_flags: bazelrc_flags.to_vec(),
             direct: cambium_index::view::labels_sorted(view, &direct),
-            affected: direct::affected_targets(view, &result),
+            affected,
             tests: cambium_index::view::labels_sorted(view, &result.tests),
+            depth_histogram: depths,
             timings_ms: std::mem::take(&mut self.timings),
             stats: std::mem::take(&mut self.stats),
             explanations: self
@@ -698,6 +701,23 @@ impl<'a> Run<'a> {
             base_index: None,
         }
     }
+}
+
+/// How many affected targets sit at each depth, densely, index 0 first.
+///
+/// The walk already labelled every target with the layer it was first
+/// reached in, so this is a count rather than a second traversal; a depth
+/// nothing reached is a zero and not a gap, so the list draws as a histogram
+/// with no holes in it.
+fn depth_histogram(affected: &[crate::report::AffectedTarget]) -> Vec<u32> {
+    let Some(max) = affected.iter().map(|t| t.depth).max() else {
+        return Vec::new();
+    };
+    let mut out = vec![0u32; max as usize + 1];
+    for t in affected {
+        out[t.depth as usize] += 1;
+    }
+    out
 }
 
 /// A deleted `BUILD` does not always delete the package.
