@@ -11,6 +11,7 @@ members = [
     "crates/diff",
     "crates/classify",
     "crates/engine",
+    "crates/ui",
     "crates/cli",
     "crates/bench",
     "crates/bench-cli",
@@ -31,6 +32,7 @@ cambium-bazel = { path = "crates/bazel" }
 cambium-diff = { path = "crates/diff" }
 cambium-classify = { path = "crates/classify" }
 cambium-engine = { path = "crates/engine" }
+cambium-ui = { path = "crates/ui" }
 cambium-synth = { path = "crates/synth" }
 cambium-bench = { path = "crates/bench" }
 # Test fixtures only: a dev-dependency of the crates whose `tests/` share them.
