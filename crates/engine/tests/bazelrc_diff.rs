@@ -24,6 +24,11 @@ fn repo_with(base_rc: &str, head_rc: &str) -> (tempfile::TempDir, Engine, String
 }
 
 fn run(engine: &Engine, base: &str, head: &str, graph: &SynthGraph) -> RunOutcome {
+    run_path(engine, base, head, graph, ".bazelrc")
+}
+
+/// As [`run`], with the one modified path named.
+fn run_path(engine: &Engine, base: &str, head: &str, graph: &SynthGraph, path: &str) -> RunOutcome {
     let index = engine
         .full_build_with(base, &SynthQuerier::new(graph))
         .unwrap();
@@ -34,7 +39,7 @@ fn run(engine: &Engine, base: &str, head: &str, graph: &SynthGraph) -> RunOutcom
     };
     let changes = vec![cambium_diff::Change::new(
         cambium_diff::Status::Modified,
-        ".bazelrc",
+        path,
     )];
     engine
         .compute(index.view(), &changes, &SynthQuerier::new(graph), &req)
@@ -89,6 +94,51 @@ fn an_added_import_is_global() {
     assert!(r.global);
     let reason = r.global_reason.clone().unwrap();
     assert!(reason.contains("import"), "{reason}");
+}
+
+/// A file named `.bazelrc` that the root rc never imports belongs to some
+/// nested workspace — envoy keeps one under `bazel/tests/external/` — and
+/// Bazel never reads it for this one. Its edit is a source change, however
+/// unsafe its flags look.
+#[test]
+fn a_nested_workspaces_bazelrc_is_not_this_workspaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    init_repo(&root);
+    write(&root, ".bazelrc", "build --jobs=8\n");
+    write(&root, "tests/fixture/.bazelrc", "build --define=x=1\n");
+    let base = commit_all(&root, "base");
+    write(&root, "tests/fixture/.bazelrc", "build --define=x=2\n");
+    let head = commit_all(&root, "head");
+    let engine = synthetic_engine(&root, Config::default());
+    let r = run_path(&engine, &base, &head, &graph(), "tests/fixture/.bazelrc").report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.bazelrc_safe_diffs, 0, "it was not screened at all");
+}
+
+/// And the converse: a file of any name that the root rc imports is an rc
+/// file, and an unsafe flag in it is global.
+#[test]
+fn an_imported_rc_of_any_name_is_screened() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    init_repo(&root);
+    write(&root, ".bazelrc", "import %workspace%/tools/shared.rc\n");
+    write(&root, "tools/shared.rc", "build --define=x=1\n");
+    let base = commit_all(&root, "base");
+    write(&root, "tools/shared.rc", "build --define=x=2\n");
+    let head = commit_all(&root, "head");
+    let engine = synthetic_engine(&root, Config::default());
+    let r = run_path(&engine, &base, &head, &graph(), "tools/shared.rc").report;
+    assert!(r.global, "an imported rc file's --define is global");
+    assert!(
+        r.global_reason
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("tools/shared.rc:"),
+        "{:?}",
+        r.global_reason
+    );
 }
 
 /// Real evidence, opt-in: classify every `.bazelrc` edit in the envoy subject

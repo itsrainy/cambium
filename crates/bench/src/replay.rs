@@ -830,10 +830,14 @@ fn undecidable_inputs(
     // whether every flag it changed is one that cannot reach loading. There is
     // no text here, and the outcomes are opposite extremes — a global run, or
     // the file dropped from the diff entirely — so the replay declines.
-    if let Some(c) = changes
-        .iter()
-        .find(|c| cambium_engine::bazelrc::is_bazelrc_path(&c.path))
-    {
+    // By name, not by the engine's import-graph reachability: that needs the
+    // root rc's text too, and declining a fixture rc's change set is the
+    // conservative side of the replay's own rule.
+    let looks_like_rc = |path: &str| {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        base.ends_with(".bazelrc") || base == "bazel.rc"
+    };
+    if let Some(c) = changes.iter().find(|c| looks_like_rc(&c.path)) {
         notes.push(format!(
             "the change set edits {}, and whether a bazelrc edit goes global depends on which \
              flags it changed, which needs the file at both revisions",

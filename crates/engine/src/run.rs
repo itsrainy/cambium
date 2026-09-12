@@ -57,8 +57,23 @@ impl Engine {
         let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
         let mut safe = 0usize;
         let mut label_flags: Vec<bazelrc::LabelFlag> = Vec::new();
+        // Which files are rc files is a property of the root rc's import
+        // graph, at either end of the range: a file imported only at head is
+        // a file that just became one. Anything else named `.bazelrc` is a
+        // nested workspace's, and an ordinary source change.
+        let rcs: std::collections::BTreeSet<String> = [&req.base, &req.head]
+            .into_iter()
+            .flat_map(|rev| {
+                let read = |p: &str| {
+                    self.repo
+                        .read_at(rev, p)
+                        .and_then(|b| String::from_utf8(b).ok())
+                };
+                bazelrc::reachable(self.workspace(), &self.cfg.bazel.startup_flags, &read)
+            })
+            .collect();
         for c in changes {
-            if !bazelrc::is_bazelrc_path(&c.path) {
+            if !rcs.contains(&c.path) {
                 kept.push(c);
                 continue;
             }
