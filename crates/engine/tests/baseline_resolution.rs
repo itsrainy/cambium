@@ -84,6 +84,94 @@ impl Fixture {
     }
 }
 
+/// The search for an index is the slow half of a run on a repository whose
+/// base has none, so it narrates itself: where it looked, every ancestor it
+/// checked and came up empty on, how far back the one it found sits, and what
+/// the replay to the base then cost.
+#[test]
+fn the_search_for_an_index_says_where_it_looked_and_what_it_found() {
+    use cambium_engine::progress::Progress;
+
+    let f = fixture(4);
+    f.publish_at(0);
+    let base = f.commits[2].clone();
+    let req = f.request(&base, &base);
+    let mut seen: Vec<Progress> = Vec::new();
+    f.engine
+        .resolve_baseline_with_progress(
+            &base,
+            &req,
+            &SynthQuerier::new(&f.graphs[2]),
+            &mut |p| seen.push(p),
+        )
+        .unwrap();
+
+    assert!(matches!(seen[0], Progress::IndexLookup { .. }), "{seen:#?}");
+    assert!(
+        matches!(seen[1], Progress::SearchStart { ref base, .. } if *base == f.commits[2]),
+        "{seen:#?}"
+    );
+    // One tick per ancestor that had nothing: commit 1 here, since 0 is
+    // published.
+    let ticks: Vec<&Progress> = seen
+        .iter()
+        .filter(|p| matches!(p, Progress::AncestorChecked { .. }))
+        .collect();
+    assert_eq!(ticks.len(), 1, "{seen:#?}");
+    let found = seen
+        .iter()
+        .find_map(|p| match p {
+            Progress::IndexFound { sha, behind, .. } => Some((sha.clone(), *behind)),
+            _ => None,
+        })
+        .expect("the ancestor's index was found");
+    assert_eq!(found, (f.commits[0].clone(), 2), "base~2, nearest first");
+    let step = seen
+        .iter()
+        .find_map(|p| match p {
+            Progress::SpliceStep { step } => Some(step.clone()),
+            _ => None,
+        })
+        .expect("the replay reports a row");
+    assert_eq!(step.commit, base);
+    assert_eq!(step.parent, f.commits[0]);
+    assert!(
+        matches!(seen.last(), Some(Progress::SpliceDone { at, .. }) if *at == base),
+        "{seen:#?}"
+    );
+}
+
+/// With the index already at the base there is nothing to search and nothing
+/// to replay, and the run says both rather than going quiet.
+#[test]
+fn an_index_at_the_base_is_found_at_distance_zero_and_skips_the_splice() {
+    use cambium_engine::progress::Progress;
+
+    let f = fixture(3);
+    f.publish_at(0);
+    let req = f.request(&f.commits[0], &f.commits[1]);
+    let mut seen: Vec<Progress> = Vec::new();
+    f.engine
+        .resolve_baseline_with_progress(
+            &f.commits[0],
+            &req,
+            &SynthQuerier::new(&f.graphs[0]),
+            &mut |p| seen.push(p),
+        )
+        .unwrap();
+    assert!(
+        matches!(seen[1], Progress::IndexFound { behind: 0, .. }),
+        "{seen:#?}"
+    );
+    assert!(
+        matches!(&seen[2], Progress::SpliceSkipped { reason } if reason.contains("already at base")),
+        "{seen:#?}"
+    );
+    assert!(!seen
+        .iter()
+        .any(|p| matches!(p, Progress::SearchStart { .. })));
+}
+
 #[test]
 fn a_published_baseline_is_used_as_is() {
     let f = fixture(3);

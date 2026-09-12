@@ -21,6 +21,7 @@ pub mod inspect;
 pub mod plan;
 pub mod probe;
 pub mod profile;
+pub mod progress;
 pub mod query;
 pub mod reason;
 pub mod report;
