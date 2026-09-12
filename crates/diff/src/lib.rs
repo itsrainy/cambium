@@ -56,6 +56,15 @@ impl Change {
     }
 }
 
+/// A commit as a reader would see it in a row: the object id, the commit
+/// date in `MM-DD HH:MM`, and the first line of the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitMeta {
+    pub sha: String,
+    pub date: String,
+    pub subject: String,
+}
+
 /// A repository we run git commands in.
 #[derive(Clone, Debug)]
 pub struct Repo {
@@ -115,6 +124,41 @@ impl Repo {
             ],
         )?;
         let mut v: Vec<String> = out.lines().map(|s| s.to_string()).collect();
+        v.reverse();
+        Ok(v)
+    }
+
+    /// The same history with the date and subject of each commit, for a
+    /// caller that reports a commit to a person rather than only walking it.
+    ///
+    /// One `git log` rather than two calls per commit: a thirty-commit
+    /// profile would otherwise pay sixty process starts to print sixty
+    /// fields. The date is the commit date in the local zone, `MM-DD HH:MM`,
+    /// which is the precision a row has space for.
+    pub fn first_parent_log_meta(&self, rev: &str, max: usize) -> Result<Vec<CommitMeta>> {
+        let out = run(
+            &self.root,
+            &[
+                "log",
+                "--first-parent",
+                &format!("--max-count={max}"),
+                "--date=format:%m-%d %H:%M",
+                "--format=%H%x1f%cd%x1f%s",
+                rev,
+            ],
+        )?;
+        let mut v: Vec<CommitMeta> = out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let mut f = line.split('\u{1f}');
+                CommitMeta {
+                    sha: f.next().unwrap_or_default().to_string(),
+                    date: f.next().unwrap_or_default().to_string(),
+                    subject: f.next().unwrap_or_default().to_string(),
+                }
+            })
+            .collect();
         v.reverse();
         Ok(v)
     }
@@ -372,6 +416,15 @@ mod tests {
         assert_eq!(tree.len(), 40);
         assert_ne!(tree, head);
         assert_eq!(repo.first_parent_log("HEAD", 10).unwrap().len(), 2);
+        // Oldest first, like the log it mirrors, and carrying what a row
+        // prints about a commit.
+        let meta = repo.first_parent_log_meta("HEAD", 10).unwrap();
+        assert_eq!(
+            meta.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+        assert_eq!(meta[1].sha, head);
+        assert_eq!(meta[0].date.len(), "MM-DD HH:MM".len(), "{:?}", meta[0]);
         assert_eq!(repo.parents("HEAD").unwrap(), vec![anc[0].clone()]);
         assert_eq!(repo.read_at("HEAD~1", "lib/a.cc").unwrap(), b"one");
         assert!(repo.read_at("HEAD~1", "lib/b.cc").is_none());
