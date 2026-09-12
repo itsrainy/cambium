@@ -57,16 +57,72 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_index::label::{Label, Repo};
 
-/// Whether a repository path is a bazelrc, and so gets read rather than merely
-/// matched against the invalidator list.
+/// The rc files Bazel reads for this workspace, as repository-relative paths:
+/// `.bazelrc` at the root, any file in the repository a `--bazelrc=` startup
+/// flag names, and everything those reach through `import` / `try-import`.
 ///
-/// Bazel reads `.bazelrc` from the workspace root, but repositories routinely
-/// keep more of them (`user.bazelrc`, `ci.bazelrc`, `tools/bazel.rc`) and
-/// `import` between them. The parser is the same for all of them; only the
-/// import graph differs, and any import change is global anyway.
-pub fn is_bazelrc_path(path: &str) -> bool {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    base.ends_with(".bazelrc") || base == "bazel.rc"
+/// Only these are screened as rc files. A repository routinely holds other
+/// files with the name — a nested test workspace's `.bazelrc`, a fixture — and
+/// Bazel never reads them for this workspace, so an edit to one is an ordinary
+/// source change, not a global invalidation. envoy's
+/// `bazel/tests/external/.bazelrc` is the case that made this a rule: it moved
+/// twice in twenty commits and each time cost a whole rebuild for nothing.
+///
+/// `read` returns a file's text at the revision being asked about, or `None`
+/// when it does not exist there; an import that cannot be read is simply not
+/// followed. Import targets are `%workspace%`-relative or absolute in Bazel;
+/// an absolute path under `root` is mapped into the repository and any other
+/// absolute path is outside it and ignored. A bare relative path is taken as
+/// repository-relative, which is the only reading under which it could name a
+/// file in the diff.
+pub fn reachable(
+    root: &std::path::Path,
+    startup_flags: &[String],
+    read: &dyn Fn(&str) -> Option<String>,
+) -> BTreeSet<String> {
+    let mut queue: Vec<String> = vec![".bazelrc".to_string()];
+    for f in startup_flags {
+        if let Some(p) = f.strip_prefix("--bazelrc=") {
+            if let Some(rel) = repo_relative(root, p) {
+                queue.push(rel);
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    while let Some(path) = queue.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(text) = read(&path) else { continue };
+        for import in parse(&text).imports {
+            let target = import
+                .split_once(' ')
+                .map(|(_, t)| t)
+                .unwrap_or(import.as_str());
+            if let Some(rel) = repo_relative(root, target) {
+                queue.push(rel);
+            }
+        }
+    }
+    seen
+}
+
+/// An rc path as Bazel would write it, as a repository-relative path, or
+/// `None` when it names a file outside the repository.
+fn repo_relative(root: &std::path::Path, target: &str) -> Option<String> {
+    let rel = if let Some(rest) = target.strip_prefix("%workspace%/") {
+        rest.to_string()
+    } else if target.starts_with('/') {
+        std::path::Path::new(target)
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        target.to_string()
+    };
+    let rel = rel.trim_start_matches("./").to_string();
+    (!rel.is_empty()).then_some(rel)
 }
 
 /// A changed flag whose name is a label: a Starlark build setting
@@ -810,17 +866,36 @@ mod tests {
     }
 
     #[test]
-    fn bazelrc_paths() {
-        for p in [
+    fn only_rc_files_the_root_reaches_are_rc_files() {
+        let root = std::path::Path::new("/repo");
+        let files: BTreeMap<&str, &str> = [
+            (".bazelrc", "import %workspace%/ci.bazelrc\ntry-import /repo/user.bazelrc\ntry-import /elsewhere/x.bazelrc\n"),
+            ("ci.bazelrc", "import %workspace%/tools/shared.rc\n"),
+            ("tools/shared.rc", "build --jobs=8\n"),
+            ("tests/fixture/.bazelrc", "build --define=x=1\n"),
+        ]
+        .into_iter()
+        .collect();
+        let read = |p: &str| files.get(p).map(|t| t.to_string());
+        let flags = vec![
+            "--bazelrc=/repo/extra.bazelrc".to_string(),
+            "--host_jvm_args=-Xmx1g".to_string(),
+        ];
+        let got = reachable(root, &flags, &read);
+        let want: BTreeSet<String> = [
             ".bazelrc",
+            "ci.bazelrc",
             "user.bazelrc",
-            "tools/ci.bazelrc",
-            "tools/bazel.rc",
-        ] {
-            assert!(is_bazelrc_path(p), "{p}");
-        }
-        for p in ["BUILD", "src/.bazelversion", "foo/bar.bzl"] {
-            assert!(!is_bazelrc_path(p), "{p}");
-        }
+            "tools/shared.rc",
+            "extra.bazelrc",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(got, want);
+        assert!(
+            !got.contains("tests/fixture/.bazelrc"),
+            "a nested workspace's rc is not this workspace's"
+        );
     }
 }
