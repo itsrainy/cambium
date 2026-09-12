@@ -30,13 +30,14 @@ cambi status                # one screen: where am I, what index would a run use
 cambi doctor                # can a run work here; what is wrong and how to fix it
 cambi affected [BASE..HEAD] # the product
 cambi explain [LABEL]       # why is this target affected; or, why did the run go global
+cambi profile [REV]         # what cambium costs and saves here, measured over the last N commits
 cambi index {build, update, publish, list, show, gc}     # the stored indexes
 cambi inspect {target, package, deps, rdeps, path, owner, consumers, targets,
                 stats, externals, verify}
 cambi config {show, explain, hash}
 ```
 
-Eight verbs. Top-level `--help` fits on one screen, and every verb's first
+Nine verbs. Top-level `--help` fits on one screen, and every verb's first
 help line says what someone would use it for.
 
 ### `affected`
@@ -67,6 +68,33 @@ The two scopes share one document shape; a label narrows it.
 `explain` runs the same computation `affected` does, so it takes the same
 range and the same flags. It is not a flag on `affected` because it has its
 own output shape and its own audience.
+
+### `profile`
+
+The numbers someone puts in the proposal to adopt the tool, measured on
+their own repository rather than read off the benchmark corpus: how many
+targets the graph has, how long a cold index takes to build and how many
+bytes it is on disk, how long an incremental answer takes on a typical
+commit, and how often a commit invalidates the whole graph.
+
+It is the benchmark's history workload run in one process: a cold build at
+the start of the last `--commits N` first-parent commits (30 by default),
+one incremental step per commit forward to `REV` (HEAD by default), and a
+cold rebuild wherever a commit went global, counted as that commit's cost.
+The steps run in one detached worktree under the cache directory with one
+Bazel server, never in the working tree, so the profile describes committed
+history and a half-edited checkout cannot leak into it. The per-commit time
+is the engine's — the same `timings_ms.total` `affected` reports — with the
+index held in memory between steps; the cost of opening the index file,
+which every real `affected` pays first, is measured once and printed beside
+it.
+
+The human form is two paragraphs and a per-commit table; `--format json` is
+the same document. `--out <file>` keeps the index the walk ends with, which
+is the index for `REV` and can be `cambi index publish`ed, so a profile
+doubles as the first cold build. Without it the index goes to a scratch
+file that is deleted. The walk runs Bazel for minutes on a large
+repository, and says on stderr which commit it is on.
 
 ### `index`
 

@@ -70,7 +70,7 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     // deliberately absent: it still works, and a deprecated spelling is not
     // advertised.
     for sub in [
-        "init", "status", "doctor", "affected", "explain", "index", "inspect", "config",
+        "init", "status", "doctor", "affected", "explain", "profile", "index", "inspect", "config",
     ] {
         assert!(
             stdout.contains(sub),

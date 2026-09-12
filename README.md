@@ -50,8 +50,8 @@ pure-Rust protobuf compiler. Bazel itself is needed at runtime, not to build.
 
 ## Five minutes
 
-`cambi` has eight verbs: `init`, `status`, `doctor`, `affected`, `explain`,
-`index`, `inspect`, `config`. [docs/CLI.md](docs/CLI.md) is the reference for
+`cambi` has nine verbs: `init`, `status`, `doctor`, `affected`, `explain`,
+`profile`, `index`, `inspect`, `config`. [docs/CLI.md](docs/CLI.md) is the reference for
 all of them, their flags and their output rules; this is the path through.
 
 ```console
@@ -337,6 +337,15 @@ tell the answer is `//...`, which is also exit code 2.
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached — the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`. Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 | 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival. The same holds for `explain`, below. Also at 9: `diagnostics` on the affected report: the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty. Purely additive — a run with nothing to say prints what version 8 printed. Also at 9: `cambi explain --format json` and `cambi affected --dry-run --format json`, two more new documents on the same terms. The CLI gained exit code 5 (the store could not be reached) and the global `--format`, with `--output` kept as an alias |
+
+Also at 9, on the same terms: `cambi profile --format json`, the document
+behind the sentences `profile` prints — `index` (targets, tests, packages,
+external repositories, `bytes_on_disk`, `compression`, `load_ms`), `cold`
+(the cold build's commit and `wall_ms`), one `commits[]` entry per step
+(`changed_files`, `dirty_packages`, `affected`, `tests`, `wall_ms`, `global`,
+`global_reason`, `engine_cold_rebuild`) and `summary` (`mean_ms`, `p50_ms`,
+`p90_ms`, `max_ms`, `globals`, `rebuild_every_commits`, `global_reasons`,
+`engine_cold_rebuilds`, `mean_affected`, `zero_dirty_fraction`).
 
 The version is shared by every document, so a bump made for one of them moves
 all of them. The affected report did not change shape between 1 and 2; it did

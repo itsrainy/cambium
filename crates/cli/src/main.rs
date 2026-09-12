@@ -110,6 +110,9 @@ enum Command {
     Affected(cmd::affected::Args),
     /// Why a target is affected, or why the run went global.
     Explain(cmd::explain::Args),
+    /// What cambium costs and saves here: graph size, cold build, and the
+    /// last N commits' incremental times and rebuilds.
+    Profile(cmd::profile::Args),
     /// Build, publish and prune the stored indexes.
     #[command(subcommand)]
     Index(cmd::index::Args),
@@ -252,6 +255,7 @@ fn main() -> ExitCode {
         Command::Doctor => cmd::doctor::run(&ctx),
         Command::Affected(args) => cmd::affected::run(&ctx, args),
         Command::Explain(args) => cmd::explain::run(&ctx, args),
+        Command::Profile(args) => cmd::profile::run(&ctx, args),
         Command::Index(args) => cmd::index::run(&ctx, args),
         Command::Inspect(args) => cmd::inspect::run(&ctx, args),
         Command::Config(args) => cmd::config(&ctx, args),
