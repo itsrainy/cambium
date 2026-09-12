@@ -160,10 +160,18 @@ pub struct CommitStep {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Summary {
     pub commits: usize,
+    /// Over every step, rebuilds included: what the walk cost per commit.
     pub mean_ms: u64,
     pub p50_ms: u64,
     pub p90_ms: u64,
     pub max_ms: u64,
+    /// Over the steps that were answered incrementally — no global, no
+    /// engine re-query of `//...` — which is the number a commit usually
+    /// costs. A handful of rebuilds otherwise put the mean minutes away from
+    /// the median.
+    pub incremental: Latency,
+    /// Over the steps a cold build answered, global or engine re-query.
+    pub rebuild: Latency,
     /// Commits that invalidated everything and cost a cold build.
     pub globals: usize,
     /// `commits / globals`: how many commits, on average, between one whole
@@ -176,6 +184,35 @@ pub struct Summary {
     pub mean_affected: f64,
     /// Fraction of commits whose diff dirtied no package.
     pub zero_dirty_fraction: f64,
+}
+
+/// Latency over one class of steps.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Latency {
+    pub commits: usize,
+    pub mean_ms: u64,
+    pub p50_ms: u64,
+    pub p90_ms: u64,
+    pub max_ms: u64,
+}
+
+impl Latency {
+    fn over(walls: impl Iterator<Item = u64>) -> Self {
+        let mut walls: Vec<u64> = walls.collect();
+        walls.sort_unstable();
+        let n = walls.len();
+        Self {
+            commits: n,
+            mean_ms: if n == 0 {
+                0
+            } else {
+                walls.iter().sum::<u64>() / n as u64
+            },
+            p50_ms: percentile(&walls, 0.5),
+            p90_ms: percentile(&walls, 0.9),
+            max_ms: walls.last().copied().unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -329,8 +366,8 @@ fn describe(
 }
 
 pub fn summarise(steps: &[CommitStep]) -> Summary {
-    let mut walls: Vec<u64> = steps.iter().map(|s| s.wall_ms).collect();
-    walls.sort_unstable();
+    let all = Latency::over(steps.iter().map(|s| s.wall_ms));
+    let rebuilt = |s: &&CommitStep| s.global || s.engine_cold_rebuild;
     let n = steps.len();
     let globals = steps.iter().filter(|s| s.global).count();
     let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
@@ -346,14 +383,12 @@ pub fn summarise(steps: &[CommitStep]) -> Summary {
     global_reasons.sort_by(|a, b| b.count.cmp(&a.count).then(a.reason.cmp(&b.reason)));
     Summary {
         commits: n,
-        mean_ms: if n == 0 {
-            0
-        } else {
-            walls.iter().sum::<u64>() / n as u64
-        },
-        p50_ms: percentile(&walls, 0.5),
-        p90_ms: percentile(&walls, 0.9),
-        max_ms: walls.last().copied().unwrap_or(0),
+        mean_ms: all.mean_ms,
+        p50_ms: all.p50_ms,
+        p90_ms: all.p90_ms,
+        max_ms: all.max_ms,
+        incremental: Latency::over(steps.iter().filter(|s| !rebuilt(s)).map(|s| s.wall_ms)),
+        rebuild: Latency::over(steps.iter().filter(rebuilt).map(|s| s.wall_ms)),
         globals,
         rebuild_every_commits: (globals > 0).then(|| n as f64 / globals as f64),
         global_reasons,
@@ -432,6 +467,11 @@ mod tests {
         assert_eq!(s.p50_ms, 30);
         assert_eq!(s.max_ms, 4000);
         assert_eq!(s.mean_ms, (10 + 20 + 30 + 4000 + 40 + 50) / 6);
+        assert_eq!(s.incremental.commits, 3);
+        assert_eq!(s.incremental.mean_ms, 30);
+        assert_eq!(s.incremental.max_ms, 50);
+        assert_eq!(s.rebuild.commits, 3);
+        assert_eq!(s.rebuild.max_ms, 4000);
         // A global with no dirty packages is not a source-only commit.
         assert!((s.zero_dirty_fraction - 1.0 / 6.0).abs() < 1e-9);
 

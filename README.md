@@ -344,7 +344,9 @@ external repositories, `bytes_on_disk`, `compression`, `load_ms`), `cold`
 (the cold build's commit and `wall_ms`), one `commits[]` entry per step
 (`changed_files`, `dirty_packages`, `affected`, `tests`, `wall_ms`, `global`,
 `global_reason`, `engine_cold_rebuild`) and `summary` (`mean_ms`, `p50_ms`,
-`p90_ms`, `max_ms`, `globals`, `rebuild_every_commits`, `global_reasons`,
+`p90_ms`, `max_ms` over every step; `incremental` and `rebuild`, the same
+four plus `commits` over the steps answered incrementally and the steps a
+cold build answered; `globals`, `rebuild_every_commits`, `global_reasons`,
 `engine_cold_rebuilds`, `mean_affected`, `zero_dirty_fraction`).
 
 The version is shared by every document, so a bump made for one of them moves

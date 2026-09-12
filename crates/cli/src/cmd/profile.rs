@@ -122,18 +122,30 @@ fn print_human(p: &Profile, workspace: &std::path::Path, kept: Option<&std::path
         return;
     }
     println!();
-    println!(
-        "Based on the last {} commit{}, cambium takes {} on average to calculate the changed \
-         targets for a commit (p50 {}, p90 {}, max {}), answering with {:.0} targets on \
-         average.",
-        s.commits,
-        plural(s.commits),
-        human_ms(s.mean_ms),
-        human_ms(s.p50_ms),
-        human_ms(s.p90_ms),
-        human_ms(s.max_ms),
-        s.mean_affected,
-    );
+    let inc = &s.incremental;
+    if inc.commits == 0 {
+        println!(
+            "Based on the last {} commit{}, every one invalidated the whole graph, so there is \
+             no incremental time to report.",
+            s.commits,
+            plural(s.commits),
+        );
+    } else {
+        println!(
+            "Based on the last {} commit{}, cambium takes {} on average to calculate the changed \
+             targets for a commit (p50 {}, p90 {}, max {} over the {} commit{} answered \
+             incrementally), answering with {:.0} targets on average.",
+            s.commits,
+            plural(s.commits),
+            human_ms(inc.mean_ms),
+            human_ms(inc.p50_ms),
+            human_ms(inc.p90_ms),
+            human_ms(inc.max_ms),
+            inc.commits,
+            plural(inc.commits),
+            s.mean_affected,
+        );
+    }
     match s.rebuild_every_commits {
         None => println!(
             "The entire graph never had to be rebuilt in those {} commit{}.",
@@ -148,10 +160,11 @@ fn print_human(p: &Profile, workspace: &std::path::Path, kept: Option<&std::path
                 .collect();
             println!(
                 "The entire graph had to be rebuilt {} time{}, once every {:.1} commits on \
-                 average ({}).",
+                 average, at {} per rebuild ({}).",
                 s.globals,
                 plural(s.globals),
                 every,
+                human_ms(s.rebuild.mean_ms),
                 reasons.join("; "),
             );
         }
