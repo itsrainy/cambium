@@ -114,7 +114,12 @@ the comparison's needs disagree.
   its default, and targets excluded by a platform constraint are not in the
   answer. cambium and bazel-diff work from the loading phase, so a
   configuration-only difference is a real disagreement between the two shapes
-  and not a harness artefact.
+  and not a harness artefact. It also means the subject has to *analyse* on
+  the box, not just load: toolchains resolve during analysis. On a Mac with no
+  JDK, bazel's own repository fails at `@rules_java//toolchains:local_jdk`
+  before a single target is hashed, and the harness records that as a tool
+  failure for the change set. The benchmark box installs a JDK for this
+  reason (see `tools/ec2/bootstrap.sh`); cambium and bazel-diff never notice.
 * **Verbose output.** `-verbose` is off. The parser tolerates it anyway (it
   takes the first token of each line), but the explanations are large and the
   harness has no use for them.
