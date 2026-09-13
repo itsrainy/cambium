@@ -495,10 +495,23 @@ impl Engine {
             b.set_partial(e.count, e.packages.clone());
         }
         b.apply_packages(&u.updates);
+        // Where `//...` stopped. Walked from the same checkout the rows came
+        // from, and recorded whatever the externals stage is configured to do:
+        // a phantom package is a wrong answer, not an optimisation.
+        let boundaries = q
+            .workspace()
+            .map(cambium_index::repo_boundaries)
+            .unwrap_or_default();
+        b.set_repo_boundaries(boundaries.clone());
         let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
-        if let Some(c) =
-            crate::bzl::rescan_closure(q, None, &packages, &BTreeSet::new(), &BTreeSet::new())
-        {
+        if let Some(c) = crate::bzl::rescan_closure(
+            q,
+            None,
+            &packages,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &boundaries,
+        ) {
             b.set_bzl_closure(c);
         }
         Ok(b.finish(commit))

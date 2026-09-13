@@ -208,6 +208,10 @@ impl PackageQuerier for RevisionQuerier {
     fn workspace(&self) -> Option<&Path> {
         self.querier.workspace()
     }
+
+    fn external_rules(&self) -> Option<String> {
+        self.querier.external_rules()
+    }
 }
 
 /// Where a run keeps its per-revision worktrees.

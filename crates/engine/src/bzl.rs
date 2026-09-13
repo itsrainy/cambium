@@ -319,6 +319,7 @@ pub(crate) fn rescan_closure(
     packages: &[String],
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
+    boundaries: &[String],
 ) -> Option<cambium_index::BzlClosure> {
     if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
         return prior;
@@ -353,7 +354,48 @@ pub(crate) fn rescan_closure(
     let mode = cambium_index::Mode::detect(src, &mapping);
     let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
+    map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     Some(c)
+}
+
+/// Records which external repository each nested repository's directory is,
+/// where the workspace files do not say.
+///
+/// A directory `//...` stops at is a repository built entirely from that
+/// directory, which is exactly the claim
+/// [`cambium_index::externals::PathMap::exhaustive_dir`] records, and the
+/// engine reads it back to route a change inside the directory to the
+/// repository. `local_path_override` and a literal `local_repository` already
+/// produce one; a repository rule that computes its own path does not, and
+/// tensorflow declares `third_party/xla` with one. In the WORKSPACE world
+/// Bazel will print the attributes it ran that rule with, so the cold build
+/// asks it.
+///
+/// Bzlmod has no `//external:*` to query and needs none: an override's path is
+/// in `MODULE.bazel`, which is read statically. A query that fails leaves the
+/// boundaries unmapped, and a change inside one is then global rather than
+/// wrong.
+fn map_nested_repositories(
+    querier: &dyn PackageQuerier,
+    mode: cambium_index::Mode,
+    boundaries: &[String],
+    inputs: &mut cambium_index::externals::RepoInputs,
+) {
+    if boundaries.is_empty() || mode.bzlmod_live() {
+        return;
+    }
+    let Some(text) = querier.external_rules() else {
+        return;
+    };
+    for (repo, dir) in cambium_index::externals::external_dir_repos(&text, boundaries) {
+        tracing::debug!(repo = %repo, dir = %dir, "a nested repository is an external repository");
+        inputs.path_maps.entry(repo.clone()).or_default().insert(
+            cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
+        );
+        // Without an id in the repository table the mapping has nowhere to be
+        // written, and the routing would find nothing.
+        inputs.repos.insert(repo);
+    }
 }
 
 /// The querier's mapping plus the main repository's own apparent name, taken
