@@ -249,9 +249,10 @@ pub struct IndexBuilder<'a> {
     bzl_unread: bool,
 
     /// Directories of the checkout that are Bazel repositories of their own
-    /// (`cambium_index::repo_boundaries`). Carried across a splice from the
-    /// base, and refreshed by whoever has a checkout to walk.
-    boundaries: Vec<String>,
+    /// (`cambium_index::repo_boundaries`), each with whether `.bazelignore`
+    /// names it. Carried across a splice from the base, and refreshed by
+    /// whoever has a checkout to walk.
+    boundaries: Vec<crate::Boundary>,
 
     lineage: [u8; 16],
     bazel_version: String,
@@ -329,7 +330,7 @@ impl<'a> IndexBuilder<'a> {
             pairs: Vec::new(),
             bzl: None,
             bzl_unread: v.bzl_closure,
-            boundaries: v.repo_boundaries().map(str::to_string).collect(),
+            boundaries: v.boundaries().collect(),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -342,9 +343,9 @@ impl<'a> IndexBuilder<'a> {
     /// Records the repository boundaries of the checkout these rows describe.
     /// Sorted and de-duplicated here so the payload stays a function of the
     /// tree rather than of the walk order.
-    pub fn set_repo_boundaries(&mut self, mut dirs: Vec<String>) {
+    pub fn set_repo_boundaries(&mut self, mut dirs: Vec<crate::Boundary>) {
         dirs.sort();
-        dirs.dedup();
+        dirs.dedup_by(|a, b| a.dir == b.dir);
         self.boundaries = dirs;
     }
 
@@ -761,9 +762,11 @@ impl<'a> IndexBuilder<'a> {
         self.read_base_bzl();
         let mut repo_boundary_bytes = Vec::new();
         let mut repo_boundary_offsets = vec![0u32];
-        for d in &self.boundaries {
-            repo_boundary_bytes.extend_from_slice(d.as_bytes());
+        let mut repo_boundary_ignored = Vec::with_capacity(self.boundaries.len());
+        for b in &self.boundaries {
+            repo_boundary_bytes.extend_from_slice(b.dir.as_bytes());
             repo_boundary_offsets.push(repo_boundary_bytes.len() as u32);
+            repo_boundary_ignored.push(b.bazelignored);
         }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
@@ -861,6 +864,7 @@ impl<'a> IndexBuilder<'a> {
             repo_map_ranges: bzl.repo_map_ranges,
             repo_boundary_bytes,
             repo_boundary_offsets,
+            repo_boundary_ignored,
         }
     }
 }

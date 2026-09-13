@@ -989,7 +989,10 @@ mod tests {
     #[test]
     fn the_boundary_set_comes_off_the_index() {
         let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
-        b.set_repo_boundaries(vec!["third_party/xla".into()]);
+        b.set_repo_boundaries(vec![cambium_index::Boundary {
+            dir: "third_party/xla".into(),
+            bazelignored: false,
+        }]);
         b.apply_packages(&[cambium_index::PackageUpdate {
             package: "lib".into(),
             build_hash: [1; 32],

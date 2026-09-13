@@ -624,13 +624,20 @@ fn owned_bytes_round_trip() {
     assert!(format::OwnedIndexBytes::new(&broken).is_err());
 }
 
+fn bnd(dir: &str, bazelignored: bool) -> cambium_index::Boundary {
+    cambium_index::Boundary {
+        dir: dir.to_string(),
+        bazelignored,
+    }
+}
+
 #[test]
 fn repository_boundaries_round_trip_and_survive_a_splice() {
     let mut b = IndexBuilder::new(new_lineage());
     b.set_repo_boundaries(vec![
-        "third_party/xla".into(),
-        "api".into(),
-        "third_party/xla".into(),
+        bnd("third_party/xla", false),
+        bnd("api", true),
+        bnd("third_party/xla", false),
     ]);
     b.apply_packages(&[pkg("a", vec![rule("a", "a", &[], &[])])]);
     let d = b.finish("deadbeef");
@@ -649,6 +656,14 @@ fn repository_boundaries_round_trip_and_survive_a_splice() {
         f.view().repo_boundaries().collect::<Vec<_>>(),
         vec!["api", "third_party/xla"]
     );
+    // Which of them `.bazelignore` names travels with the list.
+    assert_eq!(
+        f.view().boundaries().collect::<Vec<_>>(),
+        vec![bnd("api", true), bnd("third_party/xla", false)]
+    );
+    assert!(f.view().boundary_is_bazelignored("api"));
+    assert!(!f.view().boundary_is_bazelignored("third_party/xla"));
+    assert!(!f.view().boundary_is_bazelignored("nowhere"));
 
     // A splice that never looks at the tree keeps the base's answer.
     let mut b = IndexBuilder::from_view(f.view());
@@ -675,20 +690,24 @@ fn walks_the_tree_for_nested_repositories() {
         ("third_party/xla", "WORKSPACE"),
         ("third_party/xla/nested", "REPO.bazel"),
         ("api", "MODULE.bazel"),
-        ("ignored_dir", "WORKSPACE"),
+        ("ignored_repo", "WORKSPACE"),
+        ("ignored_plain/sub", "WORKSPACE"),
         ("src/lib", "BUILD"),
     ] {
         std::fs::create_dir_all(root.join(d)).unwrap();
         std::fs::write(root.join(d).join(marker), "").unwrap();
     }
     std::fs::write(root.join("WORKSPACE"), "").unwrap();
-    std::fs::write(root.join(".bazelignore"), "ignored_dir\n").unwrap();
+    // An ignored directory that is a repository of its own is a boundary and
+    // says so; one that is not stays skipped, and neither is descended into.
+    std::fs::write(root.join(".bazelignore"), "ignored_repo\nignored_plain\n").unwrap();
     assert_eq!(
         repo_boundaries(root),
         vec![
-            "api".to_string(),
-            "third_party/xla".to_string(),
-            "third_party/xla/nested".to_string()
+            bnd("api", false),
+            bnd("ignored_repo", true),
+            bnd("third_party/xla", false),
+            bnd("third_party/xla/nested", false),
         ]
     );
 }
