@@ -1045,7 +1045,8 @@ fn render_compare_section(c: &CompareSection) -> String {
         "cambium's *cold* is a full index build from `bazel query //...`; its \
          *warm* is an update against the published index, which is what a \
          CI job actually pays. bazel-diff's warm reuses the base revision's \
-         hashes; Tango has no warm mode, so its cell is `n/a`. *change sets* is \
+         hashes; Tango and target-determinator have no warm mode, so their \
+         cell is `n/a`. *change sets* is \
          how many change sets each tool's distribution is taken over: Tango is \
          often capped (it costs 30-500 s a change set) while cambium and \
          bazel-diff run on all of them.\n\n",

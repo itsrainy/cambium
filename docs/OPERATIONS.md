@@ -7,7 +7,8 @@ Methodology is in [METHODOLOGY.md](METHODOLOGY.md), numbers in
 Nothing here is needed on a laptop: `cambium-bench changes synth:small`
 emits its own subject with no setup. A real subject needs
 `tools/bazel-diff/fetch.sh`, `tools/tango/fetch.sh` and `cambium-bench
-subjects fetch <id>` first. This file covers the five real subjects at
+subjects fetch <id>` first (plus `tools/target-determinator/fetch.sh` for a
+run that names that foil). This file covers the five real subjects at
 full size, which don't fit on a laptop.
 
 ## The box
@@ -23,7 +24,8 @@ full size, which don't fit on a laptop.
 - `tools/ec2/launch.sh {launch,sync,ssh,start,stop,terminate}`. The repo is
   private: `sync` tars the working tree over ssh and runs
   `tools/ec2/finish-bootstrap.sh` there, which rebuilds both cambium
-  binaries, bazel-diff-rust and tango (`~/finish-bootstrap.log` ends with
+  binaries, bazel-diff-rust, tango and target-determinator
+  (`~/finish-bootstrap.log` ends with
   `BOOTSTRAP DONE`). Every hard-coded value in the two scripts is a
   variable at the top with the box's default; see the table below.
 - **The mirrors on the box are still under `~/.cache/cambium/corpus/`** (61
@@ -101,6 +103,8 @@ none of them. Unset means the default.
 | `CAMBIUM_BAZEL_DIFF_DIR` | `--bazel-diff-dir`; `tools/bazel-diff/fetch.sh` | `~/.cache/cambium/bazel-diff` | where `fetch.sh` installed |
 | `CAMBIUM_TANGO` | `--tango` | `<tango dir>/bin/tango-cli` | the Tango driver |
 | `CAMBIUM_TANGO_DIR` | `--tango-dir`; `tools/tango/fetch.sh` | `~/.cache/cambium/tango` | where `fetch.sh` installed |
+| `CAMBIUM_TARGET_DETERMINATOR` | `--target-determinator` | `<td dir>/bin/target-determinator` | the target-determinator binary |
+| `CAMBIUM_TARGET_DETERMINATOR_DIR` | `--target-determinator-dir`; `tools/target-determinator/fetch.sh` | `~/.cache/cambium/target-determinator` | where `fetch.sh` installed |
 | `CAMBIUM_REDERIVE_DUMP` | `replay --rederive-dump` | off | keep each re-derived index at `<dir>/rederived-<base>.bin` |
 | `CAMBIUM_LOG` | `--log` | `warn` | log level |
 | `AWS_REGION` | `pull-results --region`; `launch.sh` | `us-east-2` | where the box is |
@@ -125,6 +129,7 @@ none of them. Unset means the default.
 | `SIZE`, `DISK` | `launch.sh` | `c7i.4xlarge`, `500` | the instance |
 | `KEY`, `SG_NAME`, `TAG_FILTER`, `INSTANCE_NAME`, `AMI_OWNER`, `AMI_NAME`, `BOX_USER`, `POLL_SECS` | `launch.sh` | see the script | AWS names, and how often `sync` polls the build |
 | `TANGO_REPO`, `TANGO_TAG`, `TANGO_COMMIT`, `GO` | `tools/tango/fetch.sh` | the pinned tag | which Tango, and which Go builds it |
+| `TD_REPO`, `TD_TAG`, `TD_COMMIT`, `GO`, `BAZEL` | `tools/target-determinator/fetch.sh` | the pinned tag | which target-determinator, and which Go and Bazel build it (Bazel generates its protos) |
 
 ## Gotchas
 
@@ -151,7 +156,13 @@ none of them. Unset means the default.
   driver scripts and logs under the repo (ignored) or on the box. The
   engine's own index cache sits in `/tmp/cambium-cache/` on the box, same
   risk.
-- Tango, bazel-diff and cambium must never share an `--output_base`.
+- Tango, bazel-diff, target-determinator and cambium must never share an
+  `--output_base`.
+- target-determinator checks the base revision out *in place* in whatever
+  working directory it is given. The harness never gives it cambium's
+  checkout: it gets `<subject>/scratch/target-determinator-head`, a worktree
+  kept between change sets so its Bazel server is warm. Deleting that
+  directory between change sets costs a full checkout and a cold server.
 - macOS x86_64 cannot fetch some subjects' externals (toolchains_llvm,
   GraalVM, Docker-generated RBE configs): local tool timings are inflated
   and not publishable; bazelisk for the suite is

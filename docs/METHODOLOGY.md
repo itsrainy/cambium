@@ -31,8 +31,9 @@ and every workload accepts either.
 
 **Tool.** Anything that answers "which targets could be affected by this
 change": cambium, [bazel-diff](https://github.com/Tinder/bazel-diff) (the
-Rust port, `bazel-diff-rust`), and [Tango](https://github.com/uber/tango).
-Cambium is one of three in a comparison, not the thing being served;
+Rust port, `bazel-diff-rust`), [Tango](https://github.com/uber/tango) and
+[target-determinator](https://github.com/bazel-contrib/target-determinator).
+Cambium is one of four in a comparison, not the thing being served;
 invocation detail is in [Tools](#tools).
 
 **Oracle.** An independent check named by what it proves. No oracle proves
@@ -105,6 +106,7 @@ defined per tool:
 | cambium | the base index is not in the store and is built with one `bazel query //...` | the base index is in the store; only the changed packages are queried |
 | bazel-diff | first run, no hash cache | second run on the same pair, its hash cache present |
 | Tango | every run; Tango has no cache | (none) |
+| target-determinator | every run; its result cache is turned off | (none) |
 
 Every cambium time is a *whole-process* wall time, the `cambi` child
 process from start to JSON serialisation. The engine's own
@@ -147,8 +149,19 @@ How each tool is invoked, for fairness:
   small driver (`tools/tango`) running its library on a `(base, head)` pair
   and printing the impacted set, patched only to pass `--keep_going` to its
   Bazel queries, for the same reason.
+- **target-determinator** v0.34.0: upstream's own binary (`tools/target-determinator`),
+  run from a head worktree of its own with the base revision as its one
+  positional argument. It is the only foil that works from the *configured*
+  graph (one `bazel cquery` per revision, hashing configured targets) rather
+  than from the loading phase, so a difference that is only a configuration
+  difference is a real disagreement between shapes and not a harness
+  artefact. Two of its defaults are overridden: a failed base query is a
+  failure (`-before-query-error-behavior fatal`) rather than an answer of
+  "everything is affected", and its cross-run result cache is off
+  (`-nocache_results`) so a change set's cost does not depend on which change
+  sets ran before it. It reports no distance, so it has no depth column.
 
-All three see the same checkout, the subject's Bazel version, repository
+All four see the same checkout, the subject's Bazel version, repository
 cache, and stdin closed with `CI=1` set. Labels are compared after
 canonicalising external repository names, with file targets dropped so
 only rule targets are compared.
@@ -156,7 +169,8 @@ only rule targets are compared.
 ## What is not measured
 
 - **Precision has no oracle.** Bazel has no query for "and nothing else
-  could change"; bazel-diff and Tango are foils, and the taxonomy is our
+  could change"; bazel-diff, Tango and target-determinator are foils, and
+  the taxonomy is our
   explanation of each difference, so "agreement" is weaker than "recall".
 - **External repository contents.** cambium's graph stops at the main
   repository's edge. A dependency changing *by declaration* (a version
@@ -235,21 +249,26 @@ workload takes `--tools`, `--oracle`, `--kind` and a size (`--commits`,
 `--change-sets`). The nightly job, `cambium-bench changes synth:small
 --tools cambium,bazel-diff`, is the same command a person runs; Tango is
 left out only for its 30-500 s per change set, and the weekly job on real
-subjects runs all three.
+subjects runs all three. target-determinator is a fourth foil and is never
+in the default list: it is named explicitly
+(`--tools cambium,bazel-diff,tango,target-determinator`) by a run that wants
+it.
 
 ## Running it
 
 ```console
 $ tools/bazel-diff/fetch.sh          # builds bazel-diff-rust at its pin, once
 $ tools/tango/fetch.sh               # builds tango-cli at its pin, once
+$ tools/target-determinator/fetch.sh # builds target-determinator at its pin, once
 $ cambium-bench subjects fetch bazel   # mirror and check out the pin
 $ cambium-bench subjects build bazel   # one cold `bazel query //...`
 $ cambium-bench changes bazel --quick
 ```
 
-Both tool scripts cache their binaries under
-`~/.cache/cambium/{bazel-diff,tango}` (override with
-`$CAMBIUM_BAZEL_DIFF_DIR` / `$CAMBIUM_TANGO_DIR`); a run uses whichever is
+The tool scripts cache their binaries under
+`~/.cache/cambium/{bazel-diff,tango,target-determinator}` (override with
+`$CAMBIUM_BAZEL_DIFF_DIR` / `$CAMBIUM_TANGO_DIR` /
+`$CAMBIUM_TARGET_DETERMINATOR_DIR`); a run uses whichever is
 installed and says so when one is missing, rather than refusing to
 compare the other. Mirrors, worktrees, per-subject stores, emitted
 synthetic workspaces and a *shared* Bazel `repository_cache` and
