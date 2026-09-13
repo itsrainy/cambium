@@ -180,7 +180,7 @@ fn hub_labels(index: &std::path::Path) -> Vec<String> {
 fn json_documents_carry_the_current_schema_version() {
     // The version is shared by every document, so one reader that pins it is
     // enough to catch a bump made for one document and forgotten in another.
-    const SCHEMA: u64 = 10;
+    const SCHEMA: u64 = 11;
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
     let hub = hub_labels(&index).first().expect("a hub").clone();
@@ -507,7 +507,7 @@ fn status_json_carries_the_schema_and_a_field_per_probe() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("status prints one document");
-    assert_eq!(v["schema"].as_u64(), Some(10));
+    assert_eq!(v["schema"].as_u64(), Some(11));
     for field in ["workspace", "config", "store", "diagnostics"] {
         assert!(v.get(field).is_some(), "{field} is missing:\n{stdout}");
     }
@@ -551,7 +551,7 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
         "no workspace means a run cannot work here: {stderr}"
     );
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor prints one document");
-    assert_eq!(v["schema"].as_u64(), Some(10));
+    assert_eq!(v["schema"].as_u64(), Some(11));
     let checks = v["checks"].as_array().expect("a checks array");
     assert!(!checks.is_empty());
     for c in checks {
@@ -897,7 +897,7 @@ fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let doc: serde_json::Value = serde_json::from_str(&stdout).expect("one document");
-    assert_eq!(doc["schema"], 10);
+    assert_eq!(doc["schema"], 11);
     assert_eq!(doc["plan"]["mode"], "splice");
     assert_eq!(doc["plan"]["index"]["revision"], f.commits[1]);
     assert!(

@@ -58,13 +58,17 @@ line; a pipe gets one milestone line instead. The replay is a single row
 because it is a single pass: the dirty set over `ancestor..base` is the union
 of the range.
 
-On stdout: a count line (`1,284 affected targets  (96 tests)  max depth 7`),
-the labels, then the targets-by-depth distribution. `--hist columns` (the
-default) draws it as a vertical column chart, `--hist bars` as horizontal
-bars with the count after each, `--hist none` not at all. Depth is
-reverse-dependency hops from the change, 0 being a target whose own inputs
-moved. `--tests-only` draws the tests' own depths, so the chart always
-matches the list above it. A global run prints `//...`, says `everything is
+On stdout: a count line (`1,284 affected targets  (96 tests)  max depth 7
+(3 package hops)`), the labels, then two distributions: targets by depth and
+targets by package hops. `--hist columns` (the default) draws them as
+vertical column charts, `--hist bars` as horizontal bars with the count after
+each, `--hist none` not at all. Depth is reverse-dependency hops from the
+change, 0 being a target whose own inputs moved. Package hops are the same
+walk counted in package boundaries crossed: a hop inside one package is free,
+so a target nine hops down a chain in one package is one package hop away.
+The two charts have different axes, which is why they are not one chart.
+`--tests-only` draws the tests' own distances, so the charts always match the
+list above them. A global run prints `//...`, says `everything is
 affected: <reason>` on stderr, and has no distribution to draw.
 
 Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
@@ -73,8 +77,9 @@ release; the verb below replaces it.
 
 ### `explain`
 
-With a label: the shortest path back to the change and the direct reason at
-the end, in the `reason` shape the JSON contract defines. With no label: why
+With a label: the shortest path back to the change, its length in hops and in
+package boundaries crossed, and the direct reason at the end, in the `reason`
+shape the JSON contract defines. With no label: why
 the run went global or cold, which file/flag did it, and a `help:` line. A
 label just narrows the same shape.
 
@@ -235,8 +240,10 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
 - `affected`'s JSON gained two things with contract version 10 and version 3
   before it, both additive: `affected[].depth`, the hops from the change at
   which a target was first reached, and `depth_histogram`, those depths
-  counted, one bin per depth from 0 to the deepest reached. Nothing else on
-  stdout changes under `--format json`.
+  counted, one bin per depth from 0 to the deepest reached. Version 11 adds
+  the same pair in package boundaries crossed, `affected[].package_depth`
+  and `package_depth_histogram`, a target's never exceeding its `depth`.
+  Nothing else on stdout changes under `--format json`.
 - Every document carries `schema`. `affected`/`inspect` keep the existing
   `SCHEMA_VERSION`; `status`, `explain`, `doctor` start there too, since
   it's shared and one bump moves all.

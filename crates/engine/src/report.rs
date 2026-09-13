@@ -89,7 +89,12 @@ use serde::{Deserialize, Serialize};
 ///   list) on a global run, where nothing was walked. Purely additive; the
 ///   per-target `depth` it summarises has been in the document since
 ///   version 3.
-pub const SCHEMA_VERSION: u32 = 10;
+/// - **11** adds `affected[].package_depth` and `package_depth_histogram`:
+///   the same walk measured in package boundaries crossed instead of hops,
+///   an edge inside one package being free. A target's `package_depth` never
+///   exceeds its `depth`. The histogram has the shape of `depth_histogram`
+///   and is empty in the same cases. Purely additive.
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -279,6 +284,11 @@ pub struct AffectedTarget {
     /// target's own inputs changed. A hop through a tombstoned (deleted)
     /// dependency counts, so a consumer of a deleted target sits at depth 1.
     pub depth: u32,
+    /// Package boundaries crossed on the way from the nearest direct-set
+    /// member: 0 means the change and the target share a package. A hop
+    /// inside one package is free, so this is at most `depth`.
+    #[serde(default)]
+    pub package_depth: u32,
     /// Whether the target is a test rule.
     pub test: bool,
 }
@@ -316,6 +326,10 @@ pub struct AffectedReport {
     /// global run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depth_histogram: Vec<u32>,
+    /// `depth_histogram` for `package_depth`: how many affected targets sit
+    /// at each count of package boundaries crossed, index 0 first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_depth_histogram: Vec<u32>,
     pub timings_ms: Timings,
     pub stats: Stats,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -342,6 +356,7 @@ impl Default for AffectedReport {
             affected: Vec::new(),
             tests: Vec::new(),
             depth_histogram: Vec::new(),
+            package_depth_histogram: Vec::new(),
             timings_ms: Timings::default(),
             stats: Stats::default(),
             explanations: None,
@@ -377,6 +392,12 @@ impl AffectedReport {
     /// The deepest an affected target sits, or `None` when none were.
     pub fn max_depth(&self) -> Option<u32> {
         (self.depth_histogram.len() as u32).checked_sub(1)
+    }
+
+    /// The most package boundaries any affected target sits behind; `None`
+    /// when nothing was walked.
+    pub fn max_package_depth(&self) -> Option<u32> {
+        (self.package_depth_histogram.len() as u32).checked_sub(1)
     }
 
     /// Affected labels no deeper than `max_depth` hops from the change.

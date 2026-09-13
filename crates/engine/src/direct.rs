@@ -326,6 +326,7 @@ pub(crate) fn affected_targets<V: GraphView + ?Sized>(
         .map(|&id| AffectedTarget {
             label: view.label(id).to_string(),
             depth: result.depth_of(id).unwrap_or(0),
+            package_depth: result.package_depth_of(id).unwrap_or(0),
             test: view.is_test(id),
         })
         .collect();

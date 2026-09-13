@@ -169,7 +169,7 @@ fn render(report: &AffectedReport, label: Option<&str>, about: &About, color: bo
     match (label, about) {
         (Some(l), About::Affected(e)) => {
             out.push_str(&format!("{l} is affected\n"));
-            out.push_str(&format!("  {}\n", e.path.join(" <- ")));
+            out.push_str(&format!("  {}\n", super::affected::path_line(&e.path)));
             out.push_str(&format!("  because {}\n", e.reason.describe()));
         }
         (Some(l), About::NotAffected { note }) => {
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(
             render(&report(), Some("//foo:bar"), &about, false),
             "//foo:bar is affected\n  \
-             //foo:bar <- //lib:core <- //lib:base\n  \
+             //foo:bar <- //lib:core <- //lib:base  (2 hops, 1 package boundary)\n  \
              because source file lib/base.cc changed\n"
         );
     }

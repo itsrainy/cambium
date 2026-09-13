@@ -655,7 +655,8 @@ impl<'a> Run<'a> {
         self.stats.affected_targets = result.affected.len();
         self.timings.walk = self.sw.lap();
         let affected = direct::affected_targets(view, &result);
-        let depths = depth_histogram(&affected);
+        let depths = histogram(&affected, |t| t.depth);
+        let package_depths = histogram(&affected, |t| t.package_depth);
 
         AffectedReport {
             schema: SCHEMA_VERSION,
@@ -670,6 +671,7 @@ impl<'a> Run<'a> {
             affected,
             tests: cambium_index::view::labels_sorted(view, &result.tests),
             depth_histogram: depths,
+            package_depth_histogram: package_depths,
             timings_ms: std::mem::take(&mut self.timings),
             stats: std::mem::take(&mut self.stats),
             explanations: self
@@ -703,19 +705,23 @@ impl<'a> Run<'a> {
     }
 }
 
-/// How many affected targets sit at each depth, densely, index 0 first.
+/// How many affected targets sit at each distance, densely, index 0 first,
+/// for whichever distance `of` reads off a target.
 ///
 /// The walk already labelled every target with the layer it was first
-/// reached in, so this is a count rather than a second traversal; a depth
+/// reached in, so this is a count rather than a second traversal; a distance
 /// nothing reached is a zero and not a gap, so the list draws as a histogram
 /// with no holes in it.
-fn depth_histogram(affected: &[crate::report::AffectedTarget]) -> Vec<u32> {
-    let Some(max) = affected.iter().map(|t| t.depth).max() else {
+fn histogram(
+    affected: &[crate::report::AffectedTarget],
+    of: impl Fn(&crate::report::AffectedTarget) -> u32,
+) -> Vec<u32> {
+    let Some(max) = affected.iter().map(&of).max() else {
         return Vec::new();
     };
     let mut out = vec![0u32; max as usize + 1];
     for t in affected {
-        out[t.depth as usize] += 1;
+        out[of(t) as usize] += 1;
     }
     out
 }
