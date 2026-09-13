@@ -101,7 +101,8 @@ pub enum Args {
         /// pr, adjacent, or stress. Comma-separated; default: all three.
         #[arg(long = "kind", value_delimiter = ',')]
         kinds: Vec<String>,
-        /// cambium, bazel-diff, tango. Comma-separated; default: all three.
+        /// cambium, bazel-diff, tango, target-determinator. Comma-separated;
+        /// default: cambium, bazel-diff and tango.
         /// cambium always runs — it is what the others are being compared
         /// against — so naming it alone measures cambium with no foils.
         #[arg(long = "tools", value_delimiter = ',')]
@@ -310,7 +311,8 @@ pub struct RunArgs {
     /// The fifteen-minute pass before the eight-hour one: `--size small`.
     #[arg(long, conflicts_with = "size")]
     pub smoke: bool,
-    /// The foils `changes` compares against. Default: bazel-diff and tango.
+    /// The foils `changes` compares against: bazel-diff, tango,
+    /// target-determinator. Default: bazel-diff and tango.
     #[arg(long = "tools", value_delimiter = ',')]
     pub tools: Vec<String>,
     /// Continue the results already in the results directory. Without this
