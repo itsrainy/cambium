@@ -88,6 +88,18 @@ impl Worktree {
         self.borrowed
     }
 
+    /// Leaves the directory registered and on disk when this handle drops,
+    /// for a caller that wants the next run to reuse it.
+    ///
+    /// A worktree of a repository the size of tensorflow costs a full checkout
+    /// to add and a cold Bazel server to use, so a caller that runs a tool
+    /// once per change set pays both per change set unless it keeps the one it
+    /// made. [`Worktree::create`] reuses a directory that is already a
+    /// worktree, so keeping it is all the next run needs.
+    pub fn keep(mut self) {
+        self.borrowed = true;
+    }
+
     /// Moves this worktree to another revision.
     pub fn checkout(&self, sha: &str) -> Result<()> {
         git(
