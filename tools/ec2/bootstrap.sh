@@ -30,7 +30,8 @@ curl -fsSL -o /usr/local/bin/bazelisk \
 chmod +x /usr/local/bin/bazelisk
 ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
 
-# Go from upstream: uber/tango's go.mod asks for 1.25 and Ubuntu ships 1.22.
+# Go from upstream: uber/tango's go.mod asks for 1.25 (and
+# target-determinator's for 1.24) where Ubuntu ships 1.22.
 GO_VER=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
 curl -fsSL "https://go.dev/dl/${GO_VER}.linux-amd64.tar.gz" | tar -C /usr/local -xz
 ln -sf /usr/local/go/bin/go /usr/local/bin/go

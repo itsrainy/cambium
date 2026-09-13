@@ -76,7 +76,7 @@ case "${1:-launch}" in
     HOST=$(aws ec2 describe-instances --region "$R" --instance-ids "$ID" --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
     echo "running: ssh -i $PEM $BOX_USER@$HOST"
     echo "machine bootstrap: tools/ec2/launch.sh ssh tail -f /var/log/cambium-bootstrap.log (ends with MACHINE READY)"
-    echo "then: tools/ec2/launch.sh sync   # copies this tree and builds cambi, bazel-diff-rust, tango" ;;
+    echo "then: tools/ec2/launch.sh sync   # copies this tree and builds cambi and the foils" ;;
   sync)
     # The repository is private; the box gets the working tree, not a clone.
     need_instance
