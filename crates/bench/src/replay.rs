@@ -962,7 +962,7 @@ fn dirty_packages(
         .map_err(|e| format!("invalidator rules do not compile: {e}"))?;
     matchers.exempt(ext.handled.clone());
     let mut packages = cambium_classify::PackageSet::from_index(base);
-    let dirty = cambium_classify::dirty_set(
+    let mut dirty = cambium_classify::dirty_set(
         changes,
         &mut packages,
         &matchers,
@@ -984,9 +984,14 @@ fn dirty_packages(
 
     // A change inside a nested Bazel repository, routed the way the engine
     // routes it: to the repository that directory is, where the index says
-    // which, and otherwise to a global invalidation that names the directory.
-    // A replay that ignored `nested` would report fewer targets than the
-    // engine does, which is the one direction a precheck must not drift in.
+    // which; nowhere, when the directory is bazelignored and nothing maps it
+    // (Bazel does not read it and no repository rule names it); and otherwise
+    // to a global invalidation that names the directory. A replay that
+    // ignored `nested` would report fewer targets than the engine does, which
+    // is the one direction a precheck must not drift in; one that escalated
+    // the ignored case would report a global the engine does not, which is
+    // the drift that hid nothing but cost three envoy change sets a false
+    // divergence.
     for (dir, paths) in &dirty.nested {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
         let mapped = cfg
@@ -998,6 +1003,9 @@ fn dirty_packages(
             Some(repo) => {
                 ext.by_input += 1;
                 externals::dirty_by_input(base, ext, repo, &paths);
+            }
+            None if base.boundary_is_bazelignored(dir) => {
+                dirty.ignored += paths.len();
             }
             None => {
                 global = true;
