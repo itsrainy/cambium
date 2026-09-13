@@ -5,6 +5,17 @@
 //! affected". It is pure: no Bazel, no git, no filesystem. That makes it cheap
 //! to test exhaustively, which matters because a mistake here is an
 //! under-approximation — the one class of bug the design does not tolerate.
+//!
+//! One thing it is not pure about, and cannot be: which directories of the
+//! tree are Bazel repositories of their own. `bazel query //...` stops at a
+//! subdirectory carrying a WORKSPACE or a MODULE.bazel, so the index has no
+//! package under one, and a path there is not this repository's to classify.
+//! The index records those directories at build time and
+//! [`PackageSet::with_boundaries`] carries them in, which is what stops a
+//! changed `third_party/xla/service/BUILD` from minting a package name Bazel
+//! will never load. Such a path becomes [`Classification::Nested`] and lands
+//! in [`DirtySet::nested`]; what to do about the repository it names is the
+//! engine's question.
 
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
@@ -96,13 +107,48 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ClassifyError> {
 /// deletions overlaid (spec 6.1).
 pub struct PackageSet {
     packages: FxHashSet<String>,
+    /// Directories that are Bazel repositories of their own, each with a
+    /// trailing `/`. See [`PackageSet::boundary_of`].
+    boundaries: Vec<String>,
 }
 
 impl PackageSet {
     pub fn new(packages: impl IntoIterator<Item = String>) -> Self {
         Self {
             packages: packages.into_iter().collect(),
+            boundaries: Vec::new(),
         }
+    }
+
+    /// The directories below the root that are Bazel repositories of their
+    /// own, as `cambium_index::repo_boundaries` found them: repo-relative and
+    /// without a trailing slash.
+    pub fn with_boundaries(mut self, dirs: impl IntoIterator<Item = String>) -> Self {
+        let mut v: Vec<String> = dirs
+            .into_iter()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("{}/", d.trim_end_matches('/')))
+            .collect();
+        v.sort();
+        v.dedup();
+        self.boundaries = v;
+        self
+    }
+
+    /// The nested repository `path` sits in, if any: the *outermost* one,
+    /// which is where `//...` stopped, returned without its trailing slash.
+    ///
+    /// A path under a boundary belongs to some other repository's build, not
+    /// to this one. The main repository has no package there, can never gain
+    /// one from a changed path, and owns none of the files: tensorflow's
+    /// `third_party/xla` is the repository `@xla`, and reading
+    /// `third_party/xla/service/BUILD` as a main-repo BUILD file mints four
+    /// hundred packages Bazel will not load.
+    pub fn boundary_of(&self, path: &str) -> Option<&str> {
+        self.boundaries
+            .iter()
+            .find(|b| path.starts_with(b.as_str()) || path == &b[..b.len() - 1])
+            .map(|b| &b[..b.len() - 1])
     }
 
     /// Live packages recorded in an index.
@@ -113,7 +159,11 @@ impl PackageSet {
                 packages.insert(index.package_name(p).to_string());
             }
         }
-        Self { packages }
+        Self {
+            packages,
+            boundaries: Vec::new(),
+        }
+        .with_boundaries(index.repo_boundaries().map(str::to_string))
     }
 
     pub fn contains(&self, pkg: &str) -> bool {
@@ -128,7 +178,13 @@ impl PackageSet {
         self.packages.is_empty()
     }
 
+    /// Records a package, unless the path is inside a nested repository: a
+    /// directory `//...` never descended into has no main-repo package, and
+    /// minting one from a changed path is what made the phantoms.
     pub fn insert(&mut self, pkg: String) {
+        if self.boundary_of(&pkg).is_some() {
+            return;
+        }
         self.packages.insert(pkg);
     }
 
@@ -144,6 +200,9 @@ impl PackageSet {
     /// first that is a package. O(depth) hash lookups — no binary search per
     /// component.
     pub fn owner_of(&self, path: &str) -> Option<&str> {
+        if self.boundary_of(path).is_some() {
+            return None;
+        }
         let mut end = path.rfind('/');
         loop {
             // `None` is the root package, which is the last candidate rather
@@ -213,12 +272,22 @@ pub enum Classification {
     IgnoredSource(String),
     /// Not part of the build graph: no package owns it.
     Ignored,
+    /// Inside the named nested repository, which is a Bazel repository of its
+    /// own. No main-repo package owns it and none can be minted from it; what
+    /// it moves is that repository, which is the engine's question, not this
+    /// module's.
+    Nested(String),
 }
 
 pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classification {
     // Invalidators win over everything, including ignores (spec 9).
     if m.is_invalidator(path) {
         return Classification::Invalidator;
+    }
+    // Before anything reads the path as a package: a nested repository's files
+    // are not this repository's, whatever they are called.
+    if let Some(dir) = packages.boundary_of(path) {
+        return Classification::Nested(dir.to_string());
     }
     if is_build_file(path) {
         return Classification::Build(dirname(path).to_string());
@@ -298,6 +367,11 @@ pub struct DirtySet {
     pub changed_bzl: BTreeSet<String>,
     /// Paths that were ignored, for `--explain`.
     pub ignored: usize,
+    /// Changed paths inside a nested Bazel repository, by the boundary
+    /// directory they sit under. Nothing here dirties a main-repo package,
+    /// because there is none; the engine routes each directory to the
+    /// external repository it is, or gives up and says so.
+    pub nested: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl DirtySet {
@@ -331,6 +405,13 @@ pub fn dirty_set(
             return DirtySet::invalidated_by(&c.path);
         }
         if !is_build_file(&c.path) {
+            continue;
+        }
+        // A BUILD file inside a nested repository defines a package of *that*
+        // repository. Pass two records it; pass one must not mint a main-repo
+        // package name from it, nor touch the parent package, which is in a
+        // different repository and cannot gain or lose files to it.
+        if packages.boundary_of(&c.path).is_some() {
             continue;
         }
         let pkg = dirname(&c.path).to_string();
@@ -384,7 +465,7 @@ pub fn dirty_set(
     // Pass two: everything else.
     for c in changes {
         let c = c.borrow();
-        if is_build_file(&c.path) {
+        if is_build_file(&c.path) && packages.boundary_of(&c.path).is_none() {
             continue;
         }
         match classify(&c.path, packages, m) {
@@ -461,6 +542,7 @@ pub fn dirty_set(
                 }
             },
             Classification::Ignored => out.ignored += 1,
+            Classification::Nested(dir) => out.nested.entry(dir).or_default().push(c.path.clone()),
         }
     }
 
@@ -832,5 +914,98 @@ mod tests {
         );
         assert_eq!(d.dirty.iter().next().unwrap(), "docs");
         assert!(d.direct_files.is_empty());
+    }
+    fn nested() -> PackageSet {
+        PackageSet::new(["", "lib", "third_party"].into_iter().map(String::from))
+            .with_boundaries(["third_party/xla".to_string()])
+    }
+
+    #[test]
+    fn a_nested_repository_owns_its_own_paths() {
+        let p = nested();
+        assert_eq!(
+            p.boundary_of("third_party/xla/BUILD"),
+            Some("third_party/xla")
+        );
+        assert_eq!(p.boundary_of("third_party/xla"), Some("third_party/xla"));
+        assert_eq!(p.boundary_of("third_party/xla_other/a.cc"), None);
+        // No main-repo package owns anything in there, not even the parent's.
+        assert_eq!(p.owner_of("third_party/xla/service/a.cc"), None);
+        assert_eq!(p.owner_of("third_party/other/a.cc"), Some("third_party"));
+    }
+
+    #[test]
+    fn classifies_paths_inside_a_nested_repository() {
+        let p = nested();
+        let m = matchers();
+        for path in [
+            "third_party/xla/service/BUILD",
+            "third_party/xla/service/a.cc",
+            "third_party/xla/service/notes.md",
+        ] {
+            assert_eq!(
+                classify(path, &p, &m),
+                Classification::Nested("third_party/xla".into()),
+                "{path}"
+            );
+        }
+        // An invalidator still wins, as it does over every other reading: the
+        // configured globs are a claim about this repository's build that
+        // nothing below can take back. `matchers` makes any
+        // `third_party/**/*.bzl` one.
+        assert_eq!(
+            classify("third_party/xla/xla.bzl", &p, &m),
+            Classification::Invalidator
+        );
+    }
+
+    #[test]
+    fn a_nested_build_file_mints_no_package() {
+        let m = Matchers::compile(&Rules::default()).unwrap();
+        let mut p = nested();
+        let d = dirty_set(
+            &[
+                Change::new(Status::Added, "third_party/xla/service/BUILD"),
+                Change::new(Status::Modified, "third_party/xla/BUILD"),
+                Change::new(Status::Deleted, "third_party/xla/old/BUILD"),
+                Change::new(Status::Modified, "third_party/xla/service/a.cc"),
+            ],
+            &mut p,
+            &m,
+            &NoConsumers,
+        );
+        assert!(d.dirty.is_empty(), "{:?}", d.dirty);
+        assert!(d.deleted_packages.is_empty());
+        assert!(d.direct_files.is_empty());
+        assert!(!p.contains("third_party/xla/service"));
+        assert_eq!(
+            d.nested.get("third_party/xla").map(Vec::len),
+            Some(4),
+            "{:?}",
+            d.nested
+        );
+    }
+
+    #[test]
+    fn the_boundary_set_comes_off_the_index() {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        b.set_repo_boundaries(vec!["third_party/xla".into()]);
+        b.apply_packages(&[cambium_index::PackageUpdate {
+            package: "lib".into(),
+            build_hash: [1; 32],
+            bzl_hash: [0; 32],
+            targets: vec![cambium_index::TargetRow::rule(
+                "//lib:a",
+                "cc_library",
+                vec![],
+            )],
+        }]);
+        let d = b.finish("head");
+        let p = PackageSet::from_index(d.view());
+        assert!(p.contains("lib"));
+        assert_eq!(
+            p.boundary_of("third_party/xla/a.cc"),
+            Some("third_party/xla")
+        );
     }
 }
