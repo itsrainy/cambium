@@ -586,6 +586,23 @@ pub fn rederive_externals(
     closure.workspace.sort_unstable();
     closure.workspace.dedup();
     closure.inputs = inputs;
+    // One thing the offline walk cannot re-derive: which repository a nested
+    // repository's directory is. That answer came from `bazel query
+    // '//external:*'` at index time (see `cambium_index::externals`), and a
+    // replay has no Bazel. Dropping it would turn every change inside such a
+    // directory global, which is not what the engine being prechecked does, so
+    // the stored mapping for each boundary is carried across unchanged.
+    for dir in base.repo_boundaries() {
+        let from = format!("{dir}/");
+        for r in 0..base.num_repos() {
+            let maps = base.repo_path_maps(r);
+            if let Some(m) = maps.into_iter().find(|m| m.exhaustive && m.from == from) {
+                let name = base.repo_name(r).to_string();
+                closure.inputs.repos.insert(name.clone());
+                closure.inputs.path_maps.entry(name).or_default().insert(m);
+            }
+        }
+    }
     builder.set_bzl_closure(closure);
     Ok(builder.finish(rev))
 }
@@ -964,6 +981,37 @@ fn dirty_packages(
         .invalidator
         .as_ref()
         .map(|path| cambium_engine::GlobalReason::Invalidator { path: path.clone() }.to_string());
+
+    // A change inside a nested Bazel repository, routed the way the engine
+    // routes it: to the repository that directory is, where the index says
+    // which, and otherwise to a global invalidation that names the directory.
+    // A replay that ignored `nested` would report fewer targets than the
+    // engine does, which is the one direction a precheck must not drift in.
+    for (dir, paths) in &dirty.nested {
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mapped = cfg
+            .externals
+            .enabled
+            .then(|| externals::repo_rooted_at(base, dir))
+            .flatten();
+        match mapped {
+            Some(repo) => {
+                ext.by_input += 1;
+                externals::dirty_by_input(base, ext, repo, &paths);
+            }
+            None => {
+                global = true;
+                reason = Some(
+                    cambium_engine::GlobalReason::Externals(
+                        cambium_engine::ExternalsCause::NestedRepositoryUnmapped {
+                            dir: dir.clone(),
+                        },
+                    )
+                    .to_string(),
+                );
+            }
+        }
+    }
 
     // Changed `.bzl` files, from the static closure. The engine escalates when
     // the index carries no closure or when a changed `.bzl` is loaded outside

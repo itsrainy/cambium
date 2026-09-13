@@ -52,7 +52,7 @@ pub use plan::{PlanMode, RunPlan};
 pub use probe::Probes;
 pub use profile::{Profile, Revisions, WorktreeRevisions};
 pub use query::{BazelQuerier, PackageQuerier};
-pub use reason::GlobalReason;
+pub use reason::{ExternalsCause, GlobalReason};
 pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
 pub use revision::{RevisionQuerier, RevisionWorkspace};
 pub use synthq::SynthQuerier;
