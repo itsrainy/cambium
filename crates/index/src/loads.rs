@@ -745,6 +745,73 @@ pub fn starlark_files(root: &std::path::Path) -> Vec<String> {
     out
 }
 
+/// The marker files that make a directory a Bazel repository of its own.
+/// A subdirectory carrying any of them is a repository boundary: Bazel's
+/// `//...` stops at it, and nothing under it belongs to the main repository.
+pub const REPO_MARKERS: &[&str] = &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"];
+
+/// Every directory below `root` that is itself a Bazel repository, as
+/// repo-relative paths without a trailing slash, sorted.
+///
+/// tensorflow's `third_party/xla` carries a `WORKSPACE`, so `bazel query
+/// //...` never loads a package under it and the index has none. Without that
+/// list the classifier reads `third_party/xla/service/BUILD` as a main-repo
+/// BUILD file, mints the package name from the path, and every neighbouring
+/// source is attributed to a package Bazel cannot load: four hundred package
+/// queries that all come back empty, four hundred tombstones, and an answer of
+/// zero affected targets.
+///
+/// The root itself is never a boundary: its markers are what make it the main
+/// repository. A boundary inside another boundary is still listed, so that a
+/// reader can pick whichever end of the nesting it needs; the outermost is the
+/// one `//...` actually stops at.
+///
+/// Skips the same things [`starlark_files`] skips, and for the same reasons:
+/// `.git`, the directories `.bazelignore` names, and anything behind a symlink,
+/// which is what keeps the `bazel-out` and `bazel-<repo>` convenience links out
+/// of the walk.
+pub fn repo_boundaries(root: &std::path::Path) -> Vec<String> {
+    let ignored = read_bazelignore(root);
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        let here = if dir.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&dir)
+        };
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            let rel = if dir.is_empty() {
+                name.clone()
+            } else {
+                format!("{dir}/{name}")
+            };
+            if name == ".git" || name.starts_with("bazel-") || ignored.contains(&rel) {
+                continue;
+            }
+            if REPO_MARKERS
+                .iter()
+                .any(|m| root.join(&rel).join(m).exists())
+            {
+                out.push(rel.clone());
+            }
+            stack.push(rel);
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The directory paths `.bazelignore` names, without a trailing slash. The
 /// file is a plain list of repo-relative directories, one per line; it
 /// supports no globs, and blank lines are ignored.

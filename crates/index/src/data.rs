@@ -295,6 +295,17 @@ pub struct IndexData {
     pub repo_map_bytes: Vec<u8>,
     pub repo_map_offsets: Vec<u32>,
     pub repo_map_ranges: Vec<u32>,
+
+    // ---- repository boundaries in the main repository's tree (format 9) ----
+    //
+    // Directories below the root that carry a `WORKSPACE`, `WORKSPACE.bazel`,
+    // `MODULE.bazel` or `REPO.bazel` of their own. Bazel's `//...` stops at
+    // them, so the index has no package under one, and the classifier needs
+    // the list to keep from minting package names there out of changed paths.
+    // Sorted, repo-relative, no trailing slash. An empty table means the
+    // build never looked, which is how every index written before this reads.
+    pub repo_boundary_bytes: Vec<u8>,
+    pub repo_boundary_offsets: Vec<u32>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -367,6 +378,9 @@ pub struct IndexRef<'a> {
     pub repo_maps: StrTabRef<'a>,
     /// Repo id -> its run in [`IndexRef::repo_maps`]; length `num_repos + 1`.
     pub repo_map_ranges: &'a [u32],
+    /// Directories of the main repository's tree that are Bazel repositories
+    /// of their own, sorted, without a trailing slash.
+    pub repo_boundaries: StrTabRef<'a>,
 }
 
 impl<'a> IndexRef<'a> {
@@ -385,6 +399,7 @@ impl<'a> IndexRef<'a> {
             ("repo_canonical", self.repo_canonical),
             ("repo_input_patterns", self.repo_input_patterns),
             ("repo_maps", self.repo_maps),
+            ("repo_boundaries", self.repo_boundaries),
         ] {
             t.validate(what)?;
         }
@@ -698,6 +713,14 @@ impl<'a> IndexRef<'a> {
             .collect()
     }
 
+    /// The directories of this tree that are Bazel repositories of their own,
+    /// and which `//...` therefore never loaded a package under. Sorted, and
+    /// without a trailing slash. Empty for an index built before the walk
+    /// existed, or by a build with no checkout to walk.
+    pub fn repo_boundaries(&self) -> impl Iterator<Item = &'a str> + '_ {
+        (0..self.repo_boundaries.len() as u32).map(|i| self.repo_boundaries.get(i))
+    }
+
     /// The repositories a workspace-closure `.bzl` can define.
     #[inline]
     pub fn bzl_repos_of(&self, id: u32) -> &'a [u32] {
@@ -841,6 +864,10 @@ macro_rules! index_view {
                 offsets: $u32s(&$d.repo_map_offsets),
             },
             repo_map_ranges: $u32s(&$d.repo_map_ranges),
+            repo_boundaries: StrTabRef {
+                bytes: &$d.repo_boundary_bytes,
+                offsets: $u32s(&$d.repo_boundary_offsets),
+            },
         }
     };
 }

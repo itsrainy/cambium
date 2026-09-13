@@ -623,3 +623,72 @@ fn owned_bytes_round_trip() {
     broken.truncate(off + 8);
     assert!(format::OwnedIndexBytes::new(&broken).is_err());
 }
+
+#[test]
+fn repository_boundaries_round_trip_and_survive_a_splice() {
+    let mut b = IndexBuilder::new(new_lineage());
+    b.set_repo_boundaries(vec![
+        "third_party/xla".into(),
+        "api".into(),
+        "third_party/xla".into(),
+    ]);
+    b.apply_packages(&[pkg("a", vec![rule("a", "a", &[], &[])])]);
+    let d = b.finish("deadbeef");
+    assert_eq!(
+        d.view().repo_boundaries().collect::<Vec<_>>(),
+        vec!["api", "third_party/xla"]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(index_file_name(&d.header.lineage, "deadbeef"));
+    format::write_index(&path, &d).unwrap();
+    let f = IndexFile::open(&path).unwrap();
+    assert_eq!(
+        f.view().repo_boundaries().collect::<Vec<_>>(),
+        vec!["api", "third_party/xla"]
+    );
+
+    // A splice that never looks at the tree keeps the base's answer.
+    let mut b = IndexBuilder::from_view(f.view());
+    b.apply_packages(&[pkg("e", vec![rule("e", "e", &[], &[])])]);
+    assert_eq!(
+        b.finish("f00d")
+            .view()
+            .repo_boundaries()
+            .collect::<Vec<_>>(),
+        vec!["api", "third_party/xla"]
+    );
+}
+
+#[test]
+fn an_index_with_no_boundaries_reads_as_empty() {
+    assert_eq!(sample().view().repo_boundaries().count(), 0);
+}
+
+#[test]
+fn walks_the_tree_for_nested_repositories() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (d, marker) in [
+        ("third_party/xla", "WORKSPACE"),
+        ("third_party/xla/nested", "REPO.bazel"),
+        ("api", "MODULE.bazel"),
+        ("ignored_dir", "WORKSPACE"),
+        ("src/lib", "BUILD"),
+    ] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+        std::fs::write(root.join(d).join(marker), "").unwrap();
+    }
+    std::fs::write(root.join("WORKSPACE"), "").unwrap();
+    std::fs::write(root.join(".bazelignore"), "ignored_dir\n").unwrap();
+    assert_eq!(
+        repo_boundaries(root),
+        vec![
+            "api".to_string(),
+            "third_party/xla".to_string(),
+            "third_party/xla/nested".to_string()
+        ]
+    );
+}
