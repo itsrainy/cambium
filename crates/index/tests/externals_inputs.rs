@@ -324,7 +324,7 @@ fn a_label_written_in_workspace_is_a_repository_input() {
 }
 
 /// `Label("//third_party/gpus/%s.tpl" % name)` inside a repository rule's
-/// implementation: the directory before the placeholder is an input of
+/// implementation: the literal text before the placeholder is an input of
 /// every repository the rule instantiates, as a prefix.
 #[test]
 fn a_format_string_label_is_a_prefix_input() {
@@ -335,6 +335,18 @@ fn a_format_string_label_is_a_prefix_input() {
     assert_eq!(
         main_repo_patterns("//third_party/gpus:{}.tpl", &RepoMapping::identity()),
         vec![Pattern::Prefix("third_party/gpus/".into())]
+    );
+    // tensorflow's `Label("//third_party/systemlibs%s.tpl" % tpl)`, where the
+    // placeholder carries the `:`. The prefix stops at the literal text, not
+    // at the directory above it: `third_party/` would claim the vendored
+    // `third_party/xla` as an input of a configure repository.
+    assert_eq!(
+        main_repo_patterns("//third_party/systemlibs%s.tpl", &RepoMapping::identity()),
+        vec![Pattern::Prefix("third_party/systemlibs".into())]
+    );
+    assert_eq!(
+        main_repo_patterns("//third_party/gpus:cuda_%s.tpl", &RepoMapping::identity()),
+        vec![Pattern::Prefix("third_party/gpus/cuda_".into())]
     );
     assert!(main_repo_patterns("//%s:foo", &RepoMapping::identity()).is_empty());
     let files = support::Files(vec![
