@@ -95,7 +95,10 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// (`pkg_ext_*`), which the per-`.bzl` table had no row for (issue #4), and
 /// to 8 when repository-rule inputs gained `repo_input_target_only`, which
 /// tells a path the rule reads apart from a label it merely writes into a
-/// generated BUILD file (issue #3).
+/// generated BUILD file (issue #3), and to 9 when it gained the repository
+/// boundaries of the main repository's own tree (`repo_boundary_*`), the
+/// directories carrying a `WORKSPACE` or `MODULE.bazel` of their own that
+/// `//...` never descends into (see [`crate::repo_boundaries`]).
 ///
 /// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
 /// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
@@ -109,7 +112,7 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 9;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means

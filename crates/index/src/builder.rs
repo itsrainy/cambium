@@ -248,6 +248,11 @@ pub struct IndexBuilder<'a> {
     bzl: Option<BzlClosure>,
     bzl_unread: bool,
 
+    /// Directories of the checkout that are Bazel repositories of their own
+    /// (`cambium_index::repo_boundaries`). Carried across a splice from the
+    /// base, and refreshed by whoever has a checkout to walk.
+    boundaries: Vec<String>,
+
     lineage: [u8; 16],
     bazel_version: String,
     config_hash: [u8; 32],
@@ -273,6 +278,7 @@ impl<'a> IndexBuilder<'a> {
             pairs: Vec::new(),
             bzl: None,
             bzl_unread: false,
+            boundaries: Vec::new(),
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
@@ -323,6 +329,7 @@ impl<'a> IndexBuilder<'a> {
             pairs: Vec::new(),
             bzl: None,
             bzl_unread: v.bzl_closure,
+            boundaries: v.repo_boundaries().map(str::to_string).collect(),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -330,6 +337,15 @@ impl<'a> IndexBuilder<'a> {
             packages_in_error: v.packages_in_error,
             error_packages: v.error_packages.to_vec(),
         }
+    }
+
+    /// Records the repository boundaries of the checkout these rows describe.
+    /// Sorted and de-duplicated here so the payload stays a function of the
+    /// tree rather than of the walk order.
+    pub fn set_repo_boundaries(&mut self, mut dirs: Vec<String>) {
+        dirs.sort();
+        dirs.dedup();
+        self.boundaries = dirs;
     }
 
     pub fn set_bazel_version(&mut self, v: impl Into<String>) {
@@ -743,6 +759,12 @@ impl<'a> IndexBuilder<'a> {
         }
 
         self.read_base_bzl();
+        let mut repo_boundary_bytes = Vec::new();
+        let mut repo_boundary_offsets = vec![0u32];
+        for d in &self.boundaries {
+            repo_boundary_bytes.extend_from_slice(d.as_bytes());
+            repo_boundary_offsets.push(repo_boundary_bytes.len() as u32);
+        }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
         let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
@@ -837,6 +859,8 @@ impl<'a> IndexBuilder<'a> {
             repo_map_bytes: bzl.repo_map_bytes,
             repo_map_offsets: bzl.repo_map_offsets,
             repo_map_ranges: bzl.repo_map_ranges,
+            repo_boundary_bytes,
+            repo_boundary_offsets,
         }
     }
 }

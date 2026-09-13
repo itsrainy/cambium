@@ -55,7 +55,7 @@ pub use format::{
     parse_index_key, temp_suffix, Compression, IndexError, IndexFile, OwnedIndexBytes,
     CONTENT_REVISION, DEFAULT_ZSTD_LEVEL, FORMAT_VERSION, ZSTD_MAGIC,
 };
-pub use loads::{FileText, Load, LoadGraph, PackageClosure, RepoMapping};
+pub use loads::{repo_boundaries, FileText, Load, LoadGraph, PackageClosure, RepoMapping};
 pub use lockfile::diff_lock;
 pub use overlay::{Overlay, OverlaySize};
 pub use strtab::{Interner, StrTabRef};
