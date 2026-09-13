@@ -126,7 +126,7 @@ none of them. Unset means the default.
 | `BOX_HOST` | `precheck.sh` | asked of EC2 | the box's address |
 | `BOX_REPO`, `BOX_SUBJECTS` | `precheck.sh`, `launch.sh` | `cambium`, `.cache/cambium/corpus` | checkout and mirrors on the box, relative to its home |
 | `PATHS_FROM_BOX` | `precheck.sh` | `1` | derive change-set diffs on the box |
-| `SIZE`, `DISK` | `launch.sh` | `c7i.4xlarge`, `500` | the instance |
+| `SIZE`, `DISK` | `launch.sh` | `c7i.4xlarge`, `500` | the instance; `SIZE=... launch.sh resize` changes an existing one in place, keeping its volume |
 | `KEY`, `SG_NAME`, `TAG_FILTER`, `INSTANCE_NAME`, `AMI_OWNER`, `AMI_NAME`, `BOX_USER`, `POLL_SECS` | `launch.sh` | see the script | AWS names, and how often `sync` polls the build |
 | `TANGO_REPO`, `TANGO_TAG`, `TANGO_COMMIT`, `GO` | `tools/tango/fetch.sh` | the pinned tag | which Tango, and which Go builds it |
 | `TD_REPO`, `TD_TAG`, `TD_COMMIT`, `GO`, `BAZEL` | `tools/target-determinator/fetch.sh` | the pinned tag | which target-determinator, and which Go and Bazel build it (Bazel generates its protos) |
