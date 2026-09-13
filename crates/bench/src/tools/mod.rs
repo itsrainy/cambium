@@ -1,9 +1,10 @@
 //! What a "tool" is, and how the suite runs one.
 //!
-//! The three-way comparison is not specific to bazel-diff. It asks: given a
+//! The comparison is not specific to bazel-diff. It asks: given a
 //! `(base, head)` change set, which targets does *tool X* say are affected, and how
 //! long did it take to say it? Anything that can answer that — bazel-diff's
-//! Rust binary, its Kotlin jar, Uber's Tango, a shell script — plugs in here
+//! Rust binary, its Kotlin jar, Uber's Tango, bazel-contrib's
+//! target-determinator, a shell script — plugs in here
 //! by implementing [`Tool`], and [`crate::compare`] compares whatever it
 //! is handed against cambium and against the `rdeps` oracle without knowing
 //! which tool it is talking to.
@@ -35,6 +36,7 @@ pub mod bazel_query;
 pub mod bazeldiff;
 pub mod cambi;
 pub mod tango;
+pub mod target_determinator;
 
 // ------------------------------------------------------------ finding them
 
@@ -57,6 +59,11 @@ pub struct ToolLocations {
     pub tango: Option<PathBuf>,
     /// Where `tools/tango/fetch.sh` installed (`$CAMBIUM_TANGO_DIR`).
     pub tango_dir: Option<PathBuf>,
+    /// `target-determinator` (`$CAMBIUM_TARGET_DETERMINATOR`).
+    pub target_determinator: Option<PathBuf>,
+    /// Where `tools/target-determinator/fetch.sh` installed
+    /// (`$CAMBIUM_TARGET_DETERMINATOR_DIR`).
+    pub target_determinator_dir: Option<PathBuf>,
 }
 
 impl ToolLocations {
@@ -70,6 +77,8 @@ impl ToolLocations {
             bazel_diff_dir: var(bazeldiff::DIR_ENV),
             tango: var(tango::BIN_ENV),
             tango_dir: var(tango::DIR_ENV),
+            target_determinator: var(target_determinator::BIN_ENV),
+            target_determinator_dir: var(target_determinator::DIR_ENV),
         }
     }
 }
@@ -123,6 +132,28 @@ impl Install {
         let s = s.trim();
         (!s.is_empty()).then(|| s.to_string())
     }
+
+    /// A `key=value` per line `VERSION` file, rendered as `tag` plus the
+    /// short `commit`, or just the tag when there is no commit.
+    ///
+    /// Both Go foils are pinned by tag and commit and neither can be asked its
+    /// own version (upstream Tango ships no CLI at all; a `go build` of
+    /// target-determinator leaves the version unstamped), so the file the
+    /// fetch script wrote is the only identity the comparison can record.
+    pub fn tag_and_commit(dir: &Path) -> Option<String> {
+        let s = Self::version_text(dir)?;
+        let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
+        for line in s.lines() {
+            if let Some((k, v)) = line.trim().split_once('=') {
+                fields.insert(k, v);
+            }
+        }
+        let tag = fields.get("tag").copied()?;
+        Some(match fields.get("commit") {
+            Some(c) => format!("{tag} {}", &c[..c.len().min(7)]),
+            None => tag.to_string(),
+        })
+    }
 }
 
 /// The first twelve characters of a sha, for a scratch file name.
@@ -135,12 +166,16 @@ pub fn short_sha(s: &str) -> String {
 /// The tool names a `--tools` list asks for, before any is looked for on
 /// disk.
 ///
-/// The list is exact when given; otherwise the default is both foils — a
+/// The list is exact when given; otherwise the default is two foils — a
 /// bazel-diff and Tango — because a comparison against one tool only tells
 /// you which of the two disagrees with cambium, not which of the three is the
-/// odd one out. cambium is not a foil: it is what the foils are compared
-/// against and runs on every change set whether or not it is named, so naming
-/// it alone is how a run measures cambium with no tool to disagree with it.
+/// odd one out. target-determinator is the third foil and is named
+/// explicitly rather than run by default: a published run is already eight
+/// hours, and its shape (one `cquery` per revision, no warm half) is the one
+/// a reader reaches for last. cambium is not a foil: it is what the foils are
+/// compared against and runs on every change set whether or not it is named,
+/// so naming it alone is how a run measures cambium with no tool to disagree
+/// with it.
 pub fn wanted(names: &[String]) -> Result<Vec<String>> {
     let names: Vec<&str> = match names.is_empty() {
         true => vec!["bazel-diff", "tango"],
@@ -157,9 +192,11 @@ pub fn wanted(names: &[String]) -> Result<Vec<String>> {
                 out.push(bazeldiff::Implementation::Kotlin.name().to_string())
             }
             "tango" => out.push(tango::NAME.to_string()),
+            "target-determinator" | "td" => out.push(target_determinator::NAME.to_string()),
             "none" | "" => {}
             other => anyhow::bail!(
-                "unknown tool {other:?}: cambium, bazel-diff, bazel-diff-kotlin, tango"
+                "unknown tool {other:?}: cambium, bazel-diff, bazel-diff-kotlin, tango, \
+                 target-determinator"
             ),
         }
     }
@@ -176,6 +213,9 @@ pub fn open(name: &str, at: &ToolLocations) -> Result<Option<Box<dyn Tool>>> {
     use bazeldiff::{BazelDiff, Implementation};
     let found: Result<Box<dyn Tool>> = match name {
         "tango" => tango::Tango::discover_with(at).map(|t| Box::new(t) as _),
+        "target-determinator" | "td" => {
+            target_determinator::TargetDeterminator::discover_with(at).map(|t| Box::new(t) as _)
+        }
         "bazel-diff-rust" | "rust" => {
             BazelDiff::discover_with(Implementation::Rust, at).map(|b| Box::new(b) as _)
         }
@@ -183,7 +223,10 @@ pub fn open(name: &str, at: &ToolLocations) -> Result<Option<Box<dyn Tool>>> {
             BazelDiff::discover_with(Implementation::Kotlin, at).map(|b| Box::new(b) as _)
         }
         other => {
-            anyhow::bail!("unknown tool {other:?}: bazel-diff-rust, bazel-diff-kotlin, tango")
+            anyhow::bail!(
+                "unknown tool {other:?}: bazel-diff-rust, bazel-diff-kotlin, tango, \
+                 target-determinator"
+            )
         }
     };
     match found {
@@ -523,7 +566,7 @@ pub struct BaseWorktree {
 ///
 /// A tracked `cambium.toml` is left alone — the checkout already has the right
 /// version of it.
-fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
+pub(crate) fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
     let src = repo_worktree.join(cambium_engine::config::CONFIG_FILE);
     if !src.exists() {
         return Ok(());

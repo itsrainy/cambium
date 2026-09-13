@@ -88,18 +88,7 @@ pub fn default_dir() -> PathBuf {
 /// (upstream Tango ships no CLI at all), so this is the only identity the
 /// comparison can record.
 pub fn read_version_file(dir: &Path) -> Option<String> {
-    let s = Install::version_text(dir)?;
-    let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
-    for line in s.lines() {
-        if let Some((k, v)) = line.trim().split_once('=') {
-            fields.insert(k, v);
-        }
-    }
-    let tag = fields.get("tag").copied()?;
-    Some(match fields.get("commit") {
-        Some(c) => format!("{tag} {}", &c[..c.len().min(7)]),
-        None => tag.to_string(),
-    })
+    Install::tag_and_commit(dir)
 }
 
 /// A located `tango-cli`.
