@@ -71,6 +71,16 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR", env = cambium_bench::tools::tango::DIR_ENV)]
     tango_dir: Option<PathBuf>,
 
+    /// The target-determinator binary; default: under
+    /// --target-determinator-dir.
+    #[arg(long, global = true, value_name = "PATH", env = cambium_bench::tools::target_determinator::BIN_ENV)]
+    target_determinator: Option<PathBuf>,
+
+    /// Where tools/target-determinator/fetch.sh installed (default:
+    /// ~/.cache/cambium/target-determinator).
+    #[arg(long, global = true, value_name = "DIR", env = cambium_bench::tools::target_determinator::DIR_ENV)]
+    target_determinator_dir: Option<PathBuf>,
+
     /// Bazel binary to use; overrides the subject's own.
     #[arg(long, global = true)]
     bazel_binary: Option<String>,
@@ -202,6 +212,8 @@ fn main() -> ExitCode {
             bazel_diff_dir: cli.bazel_diff_dir.clone(),
             tango: cli.tango.clone(),
             tango_dir: cli.tango_dir.clone(),
+            target_determinator: cli.target_determinator.clone(),
+            target_determinator_dir: cli.target_determinator_dir.clone(),
         },
     };
     let outcome = match cli.command {
