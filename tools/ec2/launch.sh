@@ -6,6 +6,7 @@
 #   SIZE=c7i.8xlarge DISK=1000 tools/ec2/launch.sh
 #   tools/ec2/launch.sh sync           copy this working tree over and build on the box
 #   tools/ec2/launch.sh stop|start|terminate|ssh
+#   SIZE=c7i.2xlarge tools/ec2/launch.sh resize   change the instance type in place (stops it first)
 #
 # Provisioning, and nothing else: what a run needs off the box once it
 # exists is `cambium-bench pull-results`.
@@ -58,6 +59,17 @@ case "${1:-launch}" in
   stop|start|terminate)
     need_instance
     aws ec2 "$1-instances" --region "$R" --instance-ids "$ID" --query "*[0].[InstanceId,CurrentState.Name]" --output text ;;
+  resize)
+    # In place, so the fetched mirrors and the Bazel caches on the volume
+    # survive: a smaller box for a one-subject run costs a stop and a start,
+    # not a bootstrap. The instance must be stopped to change type.
+    need_instance
+    if [ "$STATE" != "stopped" ]; then
+      aws ec2 stop-instances --region "$R" --instance-ids "$ID" --query "*[0].[InstanceId,CurrentState.Name]" --output text
+      aws ec2 wait instance-stopped --region "$R" --instance-ids "$ID"
+    fi
+    aws ec2 modify-instance-attribute --region "$R" --instance-id "$ID" --instance-type "{\"Value\":\"$SIZE\"}"
+    echo "resized $ID to $SIZE (stopped); tools/ec2/launch.sh start" ;;
   launch)
     EXISTING=$(find_instance)
     if [ -n "$EXISTING" ]; then echo "already exists: $EXISTING"; exit 0; fi
