@@ -21,36 +21,53 @@
 //! has already evaluated the rule, will print the attributes it ran with.
 //!
 //! So the cold build asks, and this is the parser. It is deliberately narrow:
-//! a rule's `path` attribute counts only when it is one of the directories the
-//! boundary walk already found, which is the claim the mapping is about. A
-//! `path` that is absolute, that points outside the tree, or that names a
+//! an attribute counts only when its value is exactly one of the directories
+//! the boundary walk already found, which is the claim the mapping is about. A
+//! value that is absolute, that points outside the tree, or that names a
 //! directory which is not a repository of its own says nothing about any
 //! boundary and is dropped rather than guessed at.
+//!
+//! The attribute is not required to be called `path`. envoy declares
+//! `@envoy_api` with a rule of its own:
+//!
+//! ```text
+//! _default_envoy_api(name = "envoy_api", reldir = "api")
+//! ```
+//!
+//! whose implementation symlinks `ctx.path(ctx.attr.envoy_root).dirname
+//! .get_child(ctx.attr.reldir)`, so the directory is named by `reldir` and a
+//! parser that reads only `path` learns nothing. Any *string* attribute whose
+//! value is a boundary directory is therefore taken as naming it, `name`
+//! excepted: a repository called `api` is not thereby the directory `api`.
+//! A coincidental match can only claim that a repository is built from a
+//! directory that is a repository of its own, which over-approximates what
+//! that directory's changes move and never under-approximates.
 
 use std::collections::BTreeMap;
 
 /// Repository name -> the main-repo directory it is, for every rule in
-/// `--output=build` output whose `path` attribute is exactly one of
-/// `boundaries` (repo-relative, no trailing slash).
+/// `--output=build` output carrying a string attribute whose value is exactly
+/// one of `boundaries` (repo-relative, no trailing slash).
 ///
 /// The output is a sequence of `kind(\n  attr = value,\n ...)` blocks with
 /// one attribute per line, so a line reader is enough and no Starlark parse is
-/// needed. A block whose `name` or `path` is missing, is not a plain string
-/// literal, or whose `path` is not a boundary contributes nothing.
+/// needed. A block whose `name` is missing or is not a plain string literal,
+/// or which names no boundary, contributes nothing. `path` wins when a block
+/// names a boundary twice; otherwise the first such attribute does.
 pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut name: Option<String> = None;
     let mut path: Option<String> = None;
+    let mut other: Option<String> = None;
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with(')') {
-            if let (Some(n), Some(p)) = (name.take(), path.take()) {
-                if boundaries.contains(&p) {
-                    out.insert(n, p);
-                }
+            if let (Some(n), Some(p)) = (name.take(), path.take().or(other.take())) {
+                out.insert(n, p);
             }
             name = None;
             path = None;
+            other = None;
             continue;
         }
         if t.ends_with('(') && !line.starts_with(' ') {
@@ -58,6 +75,7 @@ pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String,
             // not carried into it.
             name = None;
             path = None;
+            other = None;
             continue;
         }
         let Some((key, value)) = t.split_once(" = ") else {
@@ -66,12 +84,25 @@ pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String,
         let Some(v) = string_literal(value) else {
             continue;
         };
-        match key {
-            // `generator_name` is what a macro-generated rule carries; the
-            // repository's own name is `name`, and only that.
-            "name" => name = Some(v),
-            "path" => path = Some(v.trim_end_matches('/').to_string()),
-            _ => {}
+        // `generator_name` is what a macro-generated rule carries; the
+        // repository's own name is `name`, and only that. Neither the name nor
+        // the bookkeeping attributes say anything about a directory, whatever
+        // they happen to spell.
+        if key == "name" {
+            name = Some(v);
+            continue;
+        }
+        if key == "repo_mapping" || key.starts_with("generator_") {
+            continue;
+        }
+        let dir = v.trim_start_matches("./").trim_end_matches('/').to_string();
+        if !boundaries.contains(&dir) {
+            continue;
+        }
+        if key == "path" {
+            path = Some(dir);
+        } else if other.is_none() {
+            other = Some(dir);
         }
     }
     out
@@ -132,6 +163,40 @@ local_repository(
         assert_eq!(m.get("xla").map(String::as_str), Some("third_party/xla"));
         assert_eq!(m.get("tsl").map(String::as_str), Some("third_party/tsl"));
         assert_eq!(m.len(), 2);
+    }
+
+    /// envoy names the directory `reldir`, not `path`, and a repository whose
+    /// *name* happens to be a boundary directory is not that directory.
+    #[test]
+    fn any_attribute_but_the_name_can_name_the_directory() {
+        let text = concat!(
+            "_default_envoy_api(\n",
+            "  name = \"envoy_api\",\n",
+            "  envoy_root = \"@envoy//:VERSION.txt\",\n",
+            "  reldir = \"api\",\n",
+            ")\n",
+            "local_repository(\n",
+            "  name = \"api\",\n",
+            "  urls = [\"https://example.test/api.tar.gz\"],\n",
+            ")\n",
+        );
+        let m = external_dir_repos(text, &["api".to_string()]);
+        assert_eq!(m.get("envoy_api").map(String::as_str), Some("api"));
+        assert_eq!(m.len(), 1);
+    }
+
+    /// A rule's bookkeeping attributes are not directory claims either.
+    #[test]
+    fn the_generator_attributes_are_not_a_directory_claim() {
+        let text = concat!(
+            "tf_vendored(\n",
+            "  name = \"x\",\n",
+            "  generator_name = \"api\",\n",
+            "  generator_function = \"api\",\n",
+            "  repo_mapping = \"api\",\n",
+            ")\n",
+        );
+        assert!(external_dir_repos(text, &["api".to_string()]).is_empty());
     }
 
     #[test]
