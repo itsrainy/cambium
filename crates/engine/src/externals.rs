@@ -434,21 +434,7 @@ pub fn analyse(
         .collect::<BTreeSet<_>>()
         .len();
     for (repo, paths) in by_input {
-        let name = base.repo_name(repo).to_string();
-        for p in &paths {
-            out.name(p, std::iter::once(&name));
-        }
-        if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, &paths) {
-            out.load_repos.insert(name.clone());
-        } else {
-            out.label_only += 1;
-            tracing::debug!(
-                repo = %name,
-                ?paths,
-                "an input-path edit cannot be one of the .bzl files loaded from this repository"
-            );
-        }
-        out.repos.insert(name);
+        dirty_by_input(base, &mut out, repo, &paths);
     }
     for (repo, paths) in by_target {
         let name = base.repo_name(repo).to_string();
@@ -466,6 +452,48 @@ pub fn analyse(
     }
 
     out
+}
+
+/// Marks repository `repo` dirty because main-repo `paths` it is built from
+/// moved: rule (1) always, and rule (2) only if one of those paths, translated
+/// into the repository, could be a `.bzl` a main-repo package loads from there.
+///
+/// The one place an *input path* dirties a repository. The routing of a change
+/// inside a nested repository (`crate::run`) comes here too, so that a
+/// `third_party/xla` edit is seeded exactly the way a `local_path_override`
+/// directory's edit already was.
+pub fn dirty_by_input(base: IndexRef<'_>, out: &mut Externals, repo: u32, paths: &[&str]) {
+    let name = base.repo_name(repo).to_string();
+    for p in paths {
+        out.name(p, std::iter::once(&name));
+    }
+    if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, paths) {
+        out.load_repos.insert(name.clone());
+    } else {
+        out.label_only += 1;
+        tracing::debug!(
+            repo = %name,
+            ?paths,
+            "an input-path edit cannot be one of the .bzl files loaded from this repository"
+        );
+    }
+    out.repos.insert(name);
+}
+
+/// The repository whose whole content is the main-repo directory `dir`, if the
+/// index derived such a mapping for one. `dir` has no trailing slash.
+///
+/// This is how a nested repository's directory becomes a repository name: the
+/// exhaustive path map a `local_path_override`, a `local_repository`, or the
+/// `//external:*` scan recorded is exactly the claim "this repository *is*
+/// that directory", read back the other way round.
+pub fn repo_rooted_at(base: IndexRef<'_>, dir: &str) -> Option<u32> {
+    let want = format!("{dir}/");
+    (0..base.num_repos()).find(|&r| {
+        base.repo_path_maps(r)
+            .iter()
+            .any(|m| m.exhaustive && m.from == want)
+    })
 }
 
 /// Whether any of `paths`, translated into repository `repo`, could be one of
