@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::externals::{Externals, WorkspaceText};
 use crate::flags::FlagReach;
 use crate::query::{PackageQuerier, Rows};
-use crate::reason::{self, BazelrcCause, GlobalReason};
+use crate::reason::{self, BazelrcCause, ExternalsCause, GlobalReason};
 use crate::report::{AffectedReport, Stats, Stopwatch, Timings, SCHEMA_VERSION};
 
 /// A diff with the bazelrc changes it can prove irrelevant removed.
@@ -322,6 +322,41 @@ impl<'a> Run<'a> {
             global = Some(reason);
         }
 
+        // Changes inside a nested Bazel repository. `//...` stopped at its
+        // directory, so the graph has no node for anything in there and no
+        // package to re-query: the only route to the targets that depend on
+        // it is the repository it is. Each boundary that received changes is
+        // matched against the repositories the index knows are rooted at a
+        // main-repo directory, and seeded exactly as an input-path edit to a
+        // `local_path_override` directory is. A boundary nothing maps — and
+        // every boundary at all when the externals stage is off, since
+        // nothing would then act on the repository — is a global
+        // invalidation that says which directory did it.
+        for (dir, paths) in &dirty.nested {
+            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let mapped = self
+                .engine
+                .config()
+                .externals
+                .enabled
+                .then(|| crate::externals::repo_rooted_at(self.base, dir))
+                .flatten();
+            match mapped {
+                Some(repo) => {
+                    tracing::debug!(
+                        dir,
+                        repo = self.base.repo_name(repo),
+                        paths = paths.len(),
+                        "a change inside a nested repository moved the repository it is"
+                    );
+                    ext.by_input += 1;
+                    crate::externals::dirty_by_input(self.base, ext, repo, &paths);
+                }
+                None => ext.escalate(ExternalsCause::NestedRepositoryUnmapped { dir: dir.clone() }),
+            }
+        }
+        self.stats.repos_dirty_by_input = ext.by_input;
+
         let resolved = bzl::resolve_changed(bzl::BzlStage {
             base_view: self.base,
             querier: self.querier,
@@ -468,6 +503,15 @@ impl<'a> Run<'a> {
         if let Some(e) = &queried.rows.partial {
             builder.set_partial(e.count, e.packages.clone());
         }
+        // A nested repository can appear or vanish in any commit, so the
+        // boundary list is re-walked from the checkout these rows came from
+        // rather than carried forward from the base.
+        let boundaries = self
+            .querier
+            .workspace()
+            .map(cambium_index::repo_boundaries)
+            .unwrap_or_default();
+        builder.set_repo_boundaries(boundaries.clone());
         // Only the materialised path: an overlay is never published, and the
         // run that produced it read the closure it needed out of the base.
         if self.req.materialize {
@@ -499,6 +543,7 @@ impl<'a> Run<'a> {
                 &scanned,
                 &dirty.changed_bzl,
                 &gone,
+                &boundaries,
             ) {
                 builder.set_bzl_closure(c);
             }

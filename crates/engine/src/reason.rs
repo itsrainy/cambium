@@ -108,6 +108,11 @@ pub enum ExternalsCause {
     LockAddedOrRemoved,
     /// The lockfile diff has a change it cannot localise.
     Lock { why: String },
+    /// A changed file sits inside a directory that is a Bazel repository of
+    /// its own, and nothing says which external repository that directory is.
+    /// The main repository's graph has no node for anything in there, so the
+    /// only sound answer is everything.
+    NestedRepositoryUnmapped { dir: String },
 }
 
 impl fmt::Display for ExternalsCause {
@@ -124,6 +129,11 @@ impl fmt::Display for ExternalsCause {
                  repositories that file defines"
             ),
             ExternalsCause::Module { why } | ExternalsCause::Lock { why } => f.write_str(why),
+            ExternalsCause::NestedRepositoryUnmapped { dir } => write!(
+                f,
+                "`{dir}` is a Bazel repository of its own, so `//...` never loaded anything \
+                 in it, and cambium cannot say which external repository it is"
+            ),
             ExternalsCause::LockAddedOrRemoved => f.write_str(
                 "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
                  is new or gone",
