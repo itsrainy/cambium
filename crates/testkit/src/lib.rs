@@ -267,6 +267,8 @@ pub struct Scanning {
     files: Option<Files>,
     repo_mapping: Option<RepoMapping>,
     enumerates_tree: bool,
+    workspace: Option<PathBuf>,
+    external_rules: Option<String>,
 }
 
 impl Scanning {
@@ -278,6 +280,8 @@ impl Scanning {
             files: None,
             repo_mapping: None,
             enumerates_tree: false,
+            workspace: None,
+            external_rules: None,
         }
     }
 
@@ -290,6 +294,20 @@ impl Scanning {
     /// The repository mapping, as `bazel mod dump_repo_mapping ""` prints it.
     pub fn with_repo_mapping(mut self, dump: &str) -> Self {
         self.repo_mapping = Some(RepoMapping::from_dump(dump));
+        self
+    }
+
+    /// A real directory to answer `workspace()` with, for the reads the
+    /// engine does against the checkout itself: the repository-boundary walk
+    /// is the one that matters here, and it needs a tree on disk.
+    pub fn with_workspace(mut self, root: impl Into<PathBuf>) -> Self {
+        self.workspace = Some(root.into());
+        self
+    }
+
+    /// What `bazel query '//external:*' --output=build` would have printed.
+    pub fn with_external_rules(mut self, text: impl Into<String>) -> Self {
+        self.external_rules = Some(text.into());
         self
     }
 
@@ -335,6 +353,14 @@ impl PackageQuerier for Scanning {
         } else {
             None
         }
+    }
+
+    fn workspace(&self) -> Option<&Path> {
+        self.workspace.as_deref()
+    }
+
+    fn external_rules(&self) -> Option<String> {
+        self.external_rules.clone()
     }
 }
 

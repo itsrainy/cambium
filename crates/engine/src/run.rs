@@ -328,11 +328,25 @@ impl<'a> Run<'a> {
         // it is the repository it is. Each boundary that received changes is
         // matched against the repositories the index knows are rooted at a
         // main-repo directory, and seeded exactly as an input-path edit to a
-        // `local_path_override` directory is. A boundary nothing maps — and
-        // every boundary at all when the externals stage is off, since
-        // nothing would then act on the repository — is a global
-        // invalidation that says which directory did it.
-        for (dir, paths) in &dirty.nested {
+        // `local_path_override` directory is.
+        //
+        // A boundary nothing maps — and every boundary at all when the
+        // externals stage is off, since nothing would then act on the
+        // repository — is a global invalidation that says which directory did
+        // it, *unless* `.bazelignore` names the directory. An ignored
+        // directory is one Bazel never reads: it loads no package there, no
+        // glob reaches into it, and the only way anything in the graph can
+        // depend on it is through a repository rule naming it, which is the
+        // mapping that was just looked for and not found. Nothing can depend
+        // on it, so a change there moves nothing and counts as ignored. The
+        // distinction is not academic: envoy's `docs/` and `mobile/` are both
+        // `.bazelignore`d and carry a `MODULE.bazel` of their own, so without
+        // it every documentation edit would be a whole-repository answer, for
+        // no soundness gained. A boundary Bazel *does* read and nothing maps
+        // stays global: there the graph really does have a hole where the
+        // directory's targets should be.
+        let nested = std::mem::take(&mut dirty.nested);
+        for (dir, paths) in &nested {
             let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
             let mapped = self
                 .engine
@@ -351,6 +365,14 @@ impl<'a> Run<'a> {
                     );
                     ext.by_input += 1;
                     crate::externals::dirty_by_input(self.base, ext, repo, &paths);
+                }
+                None if self.base.boundary_is_bazelignored(dir) => {
+                    tracing::debug!(
+                        dir,
+                        paths = paths.len(),
+                        "a change inside an ignored nested repository nothing maps moves nothing"
+                    );
+                    dirty.ignored += paths.len();
                 }
                 None => ext.escalate(ExternalsCause::NestedRepositoryUnmapped { dir: dir.clone() }),
             }
@@ -543,7 +565,7 @@ impl<'a> Run<'a> {
                 &scanned,
                 &dirty.changed_bzl,
                 &gone,
-                &boundaries,
+                &crate::bzl::dirs(&boundaries),
             ) {
                 builder.set_bzl_closure(c);
             }
