@@ -54,9 +54,15 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     // `rest` is `pkg:name` or `pkg`, without the leading `//`. A format
     // placeholder cuts the label short: `Label("//third_party/gpus/%s.tpl" %
     // name)` is how a configure rule reaches every template it writes into
-    // its repository, and the directory before the placeholder is what can be
-    // said about it. That directory is the input, as a prefix — wider than
-    // the files the rule reads, never narrower. xla's
+    // its repository, and the literal text before the placeholder is what can
+    // be said about it. Whatever the placeholder becomes, the label starts
+    // with that text, and so does the path once `:` is read as `/`. That text
+    // is the input, as a string prefix (wider than the files the rule reads,
+    // never narrower). Cutting further back, to the directory, once turned
+    // tensorflow's `//third_party/systemlibs%s.tpl` into `third_party/`, which
+    // every edit under the vendored `third_party/xla` then matched, and a
+    // configure repository nothing had touched re-queried its four hundred
+    // loading packages on each of those commits. xla's
     // `rocm/build_defs.bzl.tpl` went through exactly this and was an input of
     // nothing. Whitespace or any other byte a label cannot carry means this
     // was never a label: text scraped out of a URL.
@@ -65,14 +71,14 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
         if head.is_empty() || !head.bytes().all(is_label_byte) {
             return Vec::new();
         }
-        let dir = match head.rsplit_once(['/', ':']) {
-            Some((d, _)) => d,
-            None => return Vec::new(),
+        // A label whose package is itself the placeholder says nothing.
+        let Some((dir, _)) = head.rsplit_once(['/', ':']) else {
+            return Vec::new();
         };
         if dir.is_empty() || dir.starts_with("__") {
             return Vec::new();
         }
-        return vec![Pattern::Prefix(format!("{dir}/"))];
+        return vec![Pattern::Prefix(head.replace(':', "/"))];
     }
     if !rest.bytes().all(is_label_byte) {
         return Vec::new();
