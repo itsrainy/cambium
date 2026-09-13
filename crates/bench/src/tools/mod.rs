@@ -358,6 +358,18 @@ pub fn normalise_label(label: &str) -> String {
         // something that is not a label at all is returned as it came.
         _ => return l.to_string(),
     };
+    // `//a/b` is Bazel's shorthand for `//a/b:b`, and target-determinator
+    // prints it that way for every target named after its package. Every
+    // other tool writes the colon, and a set comparison reads the two
+    // spellings as two targets, so the shorthand is expanded here.
+    let path = match path.split_once(':') {
+        Some(_) => path.to_string(),
+        None => match path.rsplit_once('/') {
+            Some((_, last)) if !last.is_empty() => format!("{path}:{last}"),
+            _ if !path.is_empty() => format!("{path}:{path}"),
+            _ => path.to_string(),
+        },
+    };
     if repo.is_empty() {
         return format!("//{path}");
     }
@@ -662,6 +674,20 @@ mod tests {
     #[test]
     fn labels_that_are_not_repository_qualified_are_left_alone() {
         assert_eq!(normalise_label("//external:foo"), "//external:foo");
+        // target-determinator's shorthand for a target named after its package.
+        assert_eq!(
+            normalise_label("//tools/protoprint"),
+            "//tools/protoprint:protoprint"
+        );
+        assert_eq!(
+            normalise_label("//test/config_test"),
+            "//test/config_test:config_test"
+        );
+        assert_eq!(
+            normalise_label("@envoy_api//envoy/api"),
+            "@envoy_api//envoy/api:api"
+        );
+        assert_eq!(normalise_label("@@rules_cc+//cc"), "@rules_cc//cc:cc");
         assert_eq!(normalise_label("@repo"), "@repo");
         assert_eq!(normalise_label("not a label"), "not a label");
     }
