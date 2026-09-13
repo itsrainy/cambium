@@ -353,9 +353,12 @@ pub fn normalise_label(label: &str) -> String {
     // canonical name is trimmed back to the module rather than looked up.
     let (repo, path) = match Label::parse(l).map(|p| (p.repo(), p.rest())) {
         Some((Repo::Apparent(repo), path)) | Some((Repo::Canonical(repo), path)) => (repo, path),
-        // `//pkg:t` is already the spelling; `@repo` on its own is shorthand
-        // for `@repo//:repo` and is left alone rather than inventing one; and
-        // something that is not a label at all is returned as it came.
+        // A relative `:name` has no repository to spell; `//pkg:t` only needs
+        // the shorthand check below.
+        Some((Repo::Main, path)) if l.starts_with("//") => ("", path),
+        // `@repo` on its own is shorthand for `@repo//:repo` and is left
+        // alone rather than inventing one; a relative label and something
+        // that is not a label at all are returned as they came.
         _ => return l.to_string(),
     };
     // `//a/b` is Bazel's shorthand for `//a/b:b`, and target-determinator
