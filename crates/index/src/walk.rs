@@ -34,6 +34,12 @@ pub struct WalkResult {
     /// counts as a hop, tombstones included: a target reached through a
     /// deleted dependency is one hop further than the deletion itself.
     pub depth: Vec<u32>,
+    /// `package_depth[v]` is the number of package boundaries the walk
+    /// crossed to first reach `v`: an edge inside one package is free, an
+    /// edge into another package costs one. 0 for a seed and for anything
+    /// reached without leaving the seed's package, `NO_ID` for a node the
+    /// walk never visited. Bounded by `depth[v]`, and usually far below it.
+    pub package_depth: Vec<u32>,
 }
 
 impl WalkResult {
@@ -58,6 +64,12 @@ impl WalkResult {
     /// Hops from the nearest seed, for a visited node.
     pub fn depth_of(&self, id: u32) -> Option<u32> {
         let d = *self.depth.get(id as usize)?;
+        (d != NO_ID).then_some(d)
+    }
+
+    /// Package boundaries between the nearest seed and a visited node.
+    pub fn package_depth_of(&self, id: u32) -> Option<u32> {
+        let d = *self.package_depth.get(id as usize)?;
         (d != NO_ID).then_some(d)
     }
 }
@@ -166,6 +178,8 @@ fn bfs<V: GraphView + ?Sized, R: Rows + ?Sized>(
         }
     }
 
+    let package_depth = package_bfs(view, rows, direct, &visited, n);
+
     let mut affected = Vec::new();
     let mut tests = Vec::new();
     for id in visited.ones() {
@@ -188,7 +202,59 @@ fn bfs<V: GraphView + ?Sized, R: Rows + ?Sized>(
         tests,
         parent,
         depth,
+        package_depth,
     }
+}
+
+/// The package part of a label, repository included: `@x//a/b:c` -> `@x//a/b`.
+/// Two nodes are in the same package when this compares equal.
+fn package_key(label: &str) -> &str {
+    match label.rfind(':') {
+        Some(i) => &label[..i],
+        None => label,
+    }
+}
+
+/// The second distance: a 0-1 breadth-first walk over the nodes the first one
+/// visited, where an edge that stays inside a package costs nothing and one
+/// that leaves it costs one. Staying inside `visited` keeps `max_depth` and
+/// the seed set the same for both distances, so the two numbers on a target
+/// describe the same walk.
+fn package_bfs<V: GraphView + ?Sized, R: Rows + ?Sized>(
+    view: &V,
+    rows: &R,
+    direct: &[u32],
+    visited: &FixedBitSet,
+    n: usize,
+) -> Vec<u32> {
+    let mut dist = vec![NO_ID; n];
+    let mut queue: VecDeque<u32> = VecDeque::with_capacity(direct.len().max(16));
+    let mut scratch: Vec<u32> = Vec::new();
+    for &d in direct {
+        if (d as usize) < n && dist[d as usize] != 0 {
+            dist[d as usize] = 0;
+            queue.push_back(d);
+        }
+    }
+    while let Some(u) = queue.pop_front() {
+        let du = dist[u as usize];
+        let pu = package_key(view.label(u));
+        for &v in rows.row(u, &mut scratch) {
+            if (v as usize) >= n || !visited.contains(v as usize) {
+                continue;
+            }
+            let dv = du + u32::from(package_key(view.label(v)) != pu);
+            if dv < dist[v as usize] {
+                dist[v as usize] = dv;
+                if dv == du {
+                    queue.push_front(v);
+                } else {
+                    queue.push_back(v);
+                }
+            }
+        }
+    }
+    dist
 }
 
 /// Sorts ids by label. Output ordering is part of the contract: same inputs,

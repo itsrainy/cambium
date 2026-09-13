@@ -35,7 +35,9 @@ use serde_json::Value;
 /// warnings a run raised, each with a stable `CAMBI-W` code; version 9 also
 /// added `stats.spliced_rows`, the target rows the splice wrote into the base
 /// index, which is what `cambi profile` reports per commit; version 10 added
-/// `depth_histogram`, the affected count at each reverse-dependency depth.
+/// `depth_histogram`, the affected count at each reverse-dependency depth;
+/// version 11 added `affected[].package_depth` and
+/// `package_depth_histogram`, the same walk in package boundaries crossed.
 /// The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
@@ -45,6 +47,7 @@ use serde_json::Value;
 /// populates every one of them.
 const AFFECTED_SCHEMA: &[&str] = &[
     "affected[].depth",
+    "affected[].package_depth",
     "diagnostics[].code",
     "diagnostics[].level",
     "diagnostics[].message",
@@ -93,6 +96,7 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.rbuildfiles_called",
     "bazelrc_flags[]",
     "depth_histogram[]",
+    "package_depth_histogram[]",
     "tests[]",
     "timings_ms.dirty",
     "timings_ms.direct",
@@ -119,16 +123,19 @@ fn fixture() -> AffectedReport {
             AffectedTarget {
                 label: "//app:main".into(),
                 depth: 1,
+                package_depth: 1,
                 test: false,
             },
             AffectedTarget {
                 label: "//lib/core:core".into(),
                 depth: 0,
+                package_depth: 0,
                 test: false,
             },
         ],
         tests: vec!["//app:main_test".into()],
         depth_histogram: vec![1, 1],
+        package_depth_histogram: vec![1, 1],
         timings_ms: Timings {
             load: 1,
             dirty: 2,

@@ -555,4 +555,19 @@ fn affected_targets_carry_their_depth() {
     }
     assert_eq!(full.max_depth(), Some(hist.len() as u32 - 1));
     assert_eq!(capped.depth_histogram.len(), 2, "--max-depth truncates it");
+
+    // Schema 11: the same walk counted in package boundaries. A hop inside a
+    // package is free, so no target is further in packages than in hops.
+    assert!(full.affected.iter().all(|a| a.package_depth <= a.depth));
+    let phist = &full.package_depth_histogram;
+    assert_eq!(
+        phist.len() as u32,
+        full.affected.iter().map(|a| a.package_depth).max().unwrap() + 1
+    );
+    assert_eq!(phist.iter().sum::<u32>() as usize, full.affected.len());
+    assert_eq!(full.max_package_depth(), Some(phist.len() as u32 - 1));
+    assert!(
+        full.max_package_depth() <= full.max_depth(),
+        "package hops never exceed target hops"
+    );
 }

@@ -534,9 +534,10 @@ fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_
         report.affected.iter().map(|t| t.label.as_str()).collect()
     };
     let paint = Paint::new(std::io::stdout().is_terminal());
-    let depth = match report.max_depth() {
-        Some(d) => format!("  max depth {d}"),
-        None => String::new(),
+    let depth = match (report.max_depth(), report.max_package_depth()) {
+        (Some(d), Some(p)) => format!("  max depth {d}  ({p} package hops)"),
+        (Some(d), None) => format!("  max depth {d}"),
+        _ => String::new(),
     };
     println!(
         "{}  ({} tests){}",
@@ -552,23 +553,36 @@ fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_
     for l in &items {
         println!("{l}");
     }
-    // `--tests-only` prints a list of tests, so its histogram is the tests'
-    // depths and not the whole answer's: a distribution that did not match
-    // the list above it would be worse than none.
-    let counts = depth_counts(report, tests_only);
-    if hist_kind == Hist::None || counts.is_empty() {
+    if hist_kind == Hist::None {
+        return;
+    }
+    // `--tests-only` prints a list of tests, so its histograms are the tests'
+    // distances and not the whole answer's: a distribution that did not match
+    // the list above it would be worse than none. Two charts, because the
+    // two distances have different axes: a target nine hops down one package
+    // is one package hop away.
+    let by_depth = depth_counts(report, tests_only);
+    draw_hist(&paint, hist_kind, &by_depth, "targets by depth");
+    let by_package = package_depth_counts(report, tests_only);
+    draw_hist(&paint, hist_kind, &by_package, "targets by package hops");
+}
+
+/// One chart with its caption under it, or nothing when there is nothing in
+/// it.
+fn draw_hist(paint: &Paint, kind: Hist, counts: &[u64], what: &str) {
+    if counts.is_empty() {
         return;
     }
     let labels: Vec<String> = (0..counts.len()).map(|d| d.to_string()).collect();
     println!();
-    match hist_kind {
+    match kind {
         Hist::Bars => {
-            for line in hist::bars(&counts, &labels, 30) {
+            for line in hist::bars(counts, &labels, 30) {
                 println!("{line}");
             }
         }
         Hist::Columns => {
-            for line in hist::columns(&counts, &labels) {
+            for line in hist::columns(counts, &labels) {
                 println!("{line}");
             }
         }
@@ -576,33 +590,74 @@ fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_
     }
     println!(
         "  {}",
-        paint.dim(&format!(
-            "targets by depth 0..{}",
-            counts.len().saturating_sub(1)
-        ))
+        paint.dim(&format!("{what} 0..{}", counts.len().saturating_sub(1)))
     );
 }
 
 /// The distribution drawn under the list: the report's own histogram, or the
 /// tests' depths counted the same way when the list is tests alone.
 fn depth_counts(report: &cambium_engine::AffectedReport, tests_only: bool) -> Vec<u64> {
+    counts(report, tests_only, &report.depth_histogram, |t| t.depth)
+}
+
+/// The same for package hops.
+fn package_depth_counts(report: &cambium_engine::AffectedReport, tests_only: bool) -> Vec<u64> {
+    counts(report, tests_only, &report.package_depth_histogram, |t| {
+        t.package_depth
+    })
+}
+
+fn counts(
+    report: &cambium_engine::AffectedReport,
+    tests_only: bool,
+    whole: &[u32],
+    of: impl Fn(&cambium_engine::report::AffectedTarget) -> u32,
+) -> Vec<u64> {
     if !tests_only {
-        return report.depth_histogram.iter().map(|&c| c as u64).collect();
+        return whole.iter().map(|&c| c as u64).collect();
     }
-    let Some(max) = report
-        .affected
-        .iter()
-        .filter(|t| t.test)
-        .map(|t| t.depth)
-        .max()
-    else {
+    let tests = || report.affected.iter().filter(|t| t.test);
+    let Some(max) = tests().map(&of).max() else {
         return Vec::new();
     };
     let mut out = vec![0u64; max as usize + 1];
-    for t in report.affected.iter().filter(|t| t.test) {
-        out[t.depth as usize] += 1;
+    for t in tests() {
+        out[of(t) as usize] += 1;
     }
     out
+}
+
+/// The path back to the change with its two lengths after it: hops, and how
+/// many of those hops left a package. `//a:x <- //a:y <- //b:z  (2 hops, 1
+/// package boundary)`. A direct target is its own path and gets no lengths.
+pub fn path_line(path: &[String]) -> String {
+    let hops = path.len().saturating_sub(1);
+    if hops == 0 {
+        return path.join(" <- ");
+    }
+    let boundaries = path
+        .windows(2)
+        .filter(|w| package_of(&w[0]) != package_of(&w[1]))
+        .count();
+    format!(
+        "{}  ({} {}, {} package {})",
+        path.join(" <- "),
+        hops,
+        if hops == 1 { "hop" } else { "hops" },
+        boundaries,
+        if boundaries == 1 {
+            "boundary"
+        } else {
+            "boundaries"
+        }
+    )
+}
+
+fn package_of(label: &str) -> &str {
+    match label.rfind(':') {
+        Some(i) => &label[..i],
+        None => label,
+    }
 }
 
 fn short(sha: &str) -> &str {
@@ -626,7 +681,7 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
         eprintln!(
             "{}\n  {}\n  because {}",
             e.target,
-            e.path.join(" <- "),
+            path_line(&e.path),
             e.reason.describe()
         );
     }
@@ -778,6 +833,8 @@ mod tests {
         );
     }
 
+    /// Every target sits at `depth` hops and half as many package hops,
+    /// rounded down, as if each package were two targets deep.
     fn report_with_depths(depths: &[(u32, bool)]) -> AffectedReport {
         let mut r = AffectedReport {
             affected: depths
@@ -786,17 +843,22 @@ mod tests {
                 .map(|(i, &(depth, test))| AffectedTarget {
                     label: format!("//pkg{i}:t"),
                     depth,
+                    package_depth: depth / 2,
                     test,
                 })
                 .collect(),
             ..AffectedReport::default()
         };
-        let max = depths.iter().map(|d| d.0).max().unwrap();
-        let mut hist = vec![0u32; max as usize + 1];
-        for (d, _) in depths {
-            hist[*d as usize] += 1;
-        }
-        r.depth_histogram = hist;
+        let hist = |of: fn(&AffectedTarget) -> u32| {
+            let max = r.affected.iter().map(of).max().unwrap();
+            let mut h = vec![0u32; max as usize + 1];
+            for t in &r.affected {
+                h[of(t) as usize] += 1;
+            }
+            h
+        };
+        r.depth_histogram = hist(|t| t.depth);
+        r.package_depth_histogram = hist(|t| t.package_depth);
         r.tests = r
             .affected
             .iter()
@@ -811,6 +873,26 @@ mod tests {
         let r = report_with_depths(&[(0, false), (1, true), (3, false)]);
         assert_eq!(r.max_depth(), Some(3), "the deepest bin is the max depth");
         assert_eq!(super::depth_counts(&r, false), vec![1, 1, 0, 1]);
+        assert_eq!(r.max_package_depth(), Some(1));
+        assert_eq!(super::package_depth_counts(&r, false), vec![2, 1]);
+    }
+
+    #[test]
+    fn the_path_line_counts_hops_and_the_package_boundaries_among_them() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::path_line(&p(&["//a:x"])), "//a:x");
+        assert_eq!(
+            super::path_line(&p(&["//a:x", "//a:y", "//b:z"])),
+            "//a:x <- //a:y <- //b:z  (2 hops, 1 package boundary)"
+        );
+        assert_eq!(
+            super::path_line(&p(&["//a:x", "//b:y"])),
+            "//a:x <- //b:y  (1 hop, 1 package boundary)"
+        );
+        assert_eq!(
+            super::path_line(&p(&["//a:x", "//a:y"])),
+            "//a:x <- //a:y  (1 hop, 0 package boundaries)"
+        );
     }
 
     /// `--tests-only` lists tests, so the distribution under the list has to
@@ -820,6 +902,8 @@ mod tests {
         let r = report_with_depths(&[(0, false), (1, true), (1, true), (3, false)]);
         assert_eq!(super::depth_counts(&r, false), vec![1, 2, 0, 1]);
         assert_eq!(super::depth_counts(&r, true), vec![0, 2]);
+        assert_eq!(super::package_depth_counts(&r, false), vec![3, 1]);
+        assert_eq!(super::package_depth_counts(&r, true), vec![2]);
     }
 
     /// Parses `cambi affected <args>` the way `main` would.

@@ -452,6 +452,16 @@ fn walk_records_depth_and_honours_max_depth() {
     assert_eq!(r.depth_of(m["//c:c"]), Some(2));
     assert_eq!(r.depth_of(m["//c:c_test"]), Some(3));
     assert_eq!(r.depth_of(m["//a:a.src"]), None, "never visited");
+    // Package boundaries: a -> b -> c each cross one; c -> c_test stays home.
+    assert_eq!(r.package_depth_of(m["//a:a"]), Some(0));
+    assert_eq!(r.package_depth_of(m["//b:b"]), Some(1));
+    assert_eq!(r.package_depth_of(m["//c:c"]), Some(2));
+    assert_eq!(
+        r.package_depth_of(m["//c:c_test"]),
+        Some(2),
+        "same package as //c:c"
+    );
+    assert_eq!(r.package_depth_of(m["//a:a.src"]), None, "never visited");
 
     let r = walk(
         v,
@@ -462,6 +472,11 @@ fn walk_records_depth_and_honours_max_depth() {
         },
     );
     assert_eq!(view::labels_sorted(&v, &r.affected), vec!["//a:a", "//b:b"]);
+    assert_eq!(
+        r.package_depth_of(m["//c:c"]),
+        None,
+        "max_depth bounds both distances"
+    );
     let r = walk(
         v,
         &[m["//a:a"]],
