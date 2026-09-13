@@ -465,7 +465,8 @@ Every section, default and store backend is in
 
 ## Benchmarks
 
-`cambium-bench` runs cambium, bazel-diff and Tango on the same *subject*: an
+`cambium-bench` runs cambium, bazel-diff, Tango and target-determinator on
+the same *subject*: an
 open-source Bazel monorepo from `subject_repos.toml`, or a generated graph
 named `synth:<preset>` emitted as a real workspace with a real history. Its
 own binary, it drives `cambi` the way a user does, by running it, so the
