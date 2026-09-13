@@ -510,7 +510,7 @@ impl Engine {
             &packages,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &boundaries,
+            &crate::bzl::dirs(&boundaries),
         ) {
             b.set_bzl_closure(c);
         }

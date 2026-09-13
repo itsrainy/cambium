@@ -306,6 +306,11 @@ pub struct IndexData {
     // build never looked, which is how every index written before this reads.
     pub repo_boundary_bytes: Vec<u8>,
     pub repo_boundary_offsets: Vec<u32>,
+    // `repo_boundary_ignored` (format 10) marks, per boundary, one that
+    // `.bazelignore` names: Bazel does not read the directory at all, so a
+    // change there that no repository claims moves nothing, where the same
+    // change under a boundary Bazel does read is a hole in the graph.
+    pub repo_boundary_ignored: Vec<bool>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -381,6 +386,8 @@ pub struct IndexRef<'a> {
     /// Directories of the main repository's tree that are Bazel repositories
     /// of their own, sorted, without a trailing slash.
     pub repo_boundaries: StrTabRef<'a>,
+    /// Per boundary, whether `.bazelignore` names its directory.
+    pub repo_boundary_ignored: &'a [bool],
 }
 
 impl<'a> IndexRef<'a> {
@@ -721,6 +728,23 @@ impl<'a> IndexRef<'a> {
         (0..self.repo_boundaries.len() as u32).map(|i| self.repo_boundaries.get(i))
     }
 
+    /// The same directories, each with whether `.bazelignore` names it.
+    pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
+        let flags = self.repo_boundary_ignored;
+        (0..self.repo_boundaries.len()).map(move |i| crate::Boundary {
+            dir: self.repo_boundaries.get(i as u32).to_string(),
+            bazelignored: flags.get(i).copied().unwrap_or(false),
+        })
+    }
+
+    /// Whether the boundary at `dir` is one `.bazelignore` names. False for a
+    /// directory that is no boundary at all, which has no answer to give.
+    pub fn boundary_is_bazelignored(&self, dir: &str) -> bool {
+        (0..self.repo_boundaries.len())
+            .find(|i| self.repo_boundaries.get(*i as u32) == dir)
+            .is_some_and(|i| self.repo_boundary_ignored.get(i).copied().unwrap_or(false))
+    }
+
     /// The repositories a workspace-closure `.bzl` can define.
     #[inline]
     pub fn bzl_repos_of(&self, id: u32) -> &'a [u32] {
@@ -868,6 +892,7 @@ macro_rules! index_view {
                 bytes: &$d.repo_boundary_bytes,
                 offsets: $u32s(&$d.repo_boundary_offsets),
             },
+            repo_boundary_ignored: &$d.repo_boundary_ignored,
         }
     };
 }

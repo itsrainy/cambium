@@ -398,6 +398,12 @@ fn map_nested_repositories(
     }
 }
 
+/// Just the directories of a boundary list, which is what the parsers below
+/// and the `//external:*` matcher take.
+pub fn dirs(boundaries: &[cambium_index::Boundary]) -> Vec<String> {
+    boundaries.iter().map(|b| b.dir.clone()).collect()
+}
+
 /// The querier's mapping plus the main repository's own apparent name, taken
 /// from `module(name = ...)` and, in WORKSPACE mode, `workspace(name = ...)`.
 pub fn main_alias_mapping(

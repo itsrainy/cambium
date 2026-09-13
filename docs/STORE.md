@@ -132,6 +132,13 @@ Three separate things, not interchangeable:
   and without the list a change there was read as a main-repo path and
   minted packages Bazel will not load (tensorflow's `third_party/xla`,
   which is the repository `@xla`).
+  **10**: a flag per boundary (`repo_boundary_ignored`) saying whether
+  `.bazelignore` names the directory. A `.bazelignore`d directory carrying a
+  repository marker is now a boundary too (envoy ignores `api/`, which is
+  `@envoy_api`), and the flag is what lets the engine tell a boundary Bazel
+  reads but no repository rule claims (a hole in the graph, so everything is
+  affected) from one Bazel never reads (nothing can depend on it, so the
+  change is ignored).
   At each bump, an empty table in an older index would otherwise misread as
   "no mapping needed" rather than "never looked".
 

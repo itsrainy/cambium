@@ -750,6 +750,18 @@ pub fn starlark_files(root: &std::path::Path) -> Vec<String> {
 /// `//...` stops at it, and nothing under it belongs to the main repository.
 pub const REPO_MARKERS: &[&str] = &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"];
 
+/// A directory below the root that is a Bazel repository of its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Boundary {
+    /// Repo-relative, without a trailing slash.
+    pub dir: String,
+    /// Whether `.bazelignore` names the directory, so Bazel does not read it
+    /// at all. The engine needs the distinction: a boundary no repository
+    /// rule maps is a hole in the graph if Bazel reads it, and nothing at all
+    /// if Bazel does not.
+    pub bazelignored: bool,
+}
+
 /// Every directory below `root` that is itself a Bazel repository, as
 /// repo-relative paths without a trailing slash, sorted.
 ///
@@ -766,11 +778,18 @@ pub const REPO_MARKERS: &[&str] = &["WORKSPACE", "WORKSPACE.bazel", "MODULE.baze
 /// reader can pick whichever end of the nesting it needs; the outermost is the
 /// one `//...` actually stops at.
 ///
+/// A directory `.bazelignore` names is *also* a boundary when it carries a
+/// marker, and is recorded as such: envoy ignores `api/`, which is the
+/// repository `@envoy_api` and holds the protos half the tree is built from,
+/// and reading its files as sources of the root package drops every target
+/// that depends on them. An ignored directory with no marker is skipped as
+/// before, and an ignored directory is never descended into.
+///
 /// Skips the same things [`starlark_files`] skips, and for the same reasons:
-/// `.git`, the directories `.bazelignore` names, and anything behind a symlink,
-/// which is what keeps the `bazel-out` and `bazel-<repo>` convenience links out
-/// of the walk.
-pub fn repo_boundaries(root: &std::path::Path) -> Vec<String> {
+/// `.git`, the directories `.bazelignore` names that are not repositories of
+/// their own, and anything behind a symlink, which is what keeps the
+/// `bazel-out` and `bazel-<repo>` convenience links out of the walk.
+pub fn repo_boundaries(root: &std::path::Path) -> Vec<Boundary> {
     let ignored = read_bazelignore(root);
     let mut out = Vec::new();
     let mut stack = vec![String::new()];
@@ -796,16 +815,27 @@ pub fn repo_boundaries(root: &std::path::Path) -> Vec<String> {
             } else {
                 format!("{dir}/{name}")
             };
-            if name == ".git" || name.starts_with("bazel-") || ignored.contains(&rel) {
+            if name == ".git" || name.starts_with("bazel-") {
                 continue;
             }
+            let bazelignored = ignored.contains(&rel);
             if REPO_MARKERS
                 .iter()
                 .any(|m| root.join(&rel).join(m).exists())
             {
-                out.push(rel.clone());
+                out.push(Boundary {
+                    dir: rel.clone(),
+                    bazelignored,
+                });
             }
-            stack.push(rel);
+            // An ignored directory is not descended into whether or not it is
+            // a boundary: Bazel does not read it, and a repository nested
+            // inside one is reached through that repository, not through this
+            // walk. A boundary Bazel does read is still descended into, so a
+            // reader can pick whichever end of the nesting it needs.
+            if !bazelignored {
+                stack.push(rel);
+            }
         }
     }
     out.sort();
