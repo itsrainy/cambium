@@ -128,6 +128,6 @@ pin = "01990a8ef1f82e62ffffc77ac0d1adc78dc5ee69"
 history_window = 300
 bazel = "bazelisk"
 extra_query_flags = []
-invalidators = ["third_party/**", "tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]
+invalidators = ["tensorflow/workspace*.bzl", "tensorflow/tensorflow.bzl"]
 skip = true
 notes = "largest public Bazel graph; stretch target, monthly or on demand; hours, very large fetch"
