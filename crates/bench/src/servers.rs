@@ -3,7 +3,8 @@
 //! Every workspace directory a workload runs Bazel in has a server of its own:
 //! the subject's checkout (under the configured output base, and again under
 //! the one Bazel derives when a tool drops that flag), the base worktree
-//! bazel-diff reads, and Tango's base and head worktrees. Bazel keeps an idle
+//! bazel-diff reads, Tango's base and head worktrees, and the head worktree
+//! target-determinator is handed. Bazel keeps an idle
 //! server for three hours and each holds a gigabyte or more, so a run over
 //! several subjects that leaves them all up runs a 32 GB machine out of memory
 //! before its last subject. A workload stops its subject's servers when it
