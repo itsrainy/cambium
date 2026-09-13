@@ -817,6 +817,42 @@ impl Bazel {
         Ok((parse_buildfile_labels(&out), false))
     }
 
+    /// `bazel query '//external:*' --output=build`, which prints every
+    /// repository the WORKSPACE evaluation declared, rule kind and attributes
+    /// and all.
+    ///
+    /// The one way to learn that tensorflow's `tf_vendored(name = "xla", path
+    /// = "third_party/xla")` puts `@xla` at `third_party/xla`: the rule is a
+    /// custom `repository_rule` whose implementation symlinks a path it
+    /// computes, so no static scan of the `.bzl` can say where it lands, but
+    /// Bazel has already run it and will say so.
+    ///
+    /// Best-effort, like [`Bazel::repo_mapping_dump`]: the query is meaningless
+    /// under bzlmod, deprecated, and can fail for reasons that have nothing to
+    /// do with the caller. Anything that goes wrong is a debug line and
+    /// `None`, and the caller is left knowing no less than it did before.
+    pub fn external_rules(&self) -> Option<String> {
+        let mut cmd = self.command("query");
+        cmd.arg("//external:*").arg("--output=build");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        match self.runner.output(&mut cmd) {
+            Ok(o) if o.exit.success => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(o) => {
+                tracing::debug!(
+                    status = %o.exit,
+                    "bazel query //external:* did not succeed; nested repositories stay unmapped"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "bazel query //external:* could not run");
+                None
+            }
+        }
+    }
+
     /// The root module's repository mapping as Bazel prints it, for
     /// `cambium_index::RepoMapping::from_dump` to parse.
     ///

@@ -125,6 +125,13 @@ Three separate things, not interchangeable:
   it direct stopped the eleven hundred packages under
   `@envoy_repo//:compiler.bzl` re-querying on every changelog edit (issue
   #3).
+  **9**: the repository boundaries of the main repository's own tree
+  (`repo_boundary_*`), the directories below the root carrying a
+  `WORKSPACE`, `WORKSPACE.bazel`, `MODULE.bazel` or `REPO.bazel` of their
+  own. `//...` stops at them, so no package under one is ever in the index,
+  and without the list a change there was read as a main-repo path and
+  minted packages Bazel will not load (tensorflow's `third_party/xla`,
+  which is the repository `@xla`).
   At each bump, an empty table in an older index would otherwise misread as
   "no mapping needed" rather than "never looked".
 

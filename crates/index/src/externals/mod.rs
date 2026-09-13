@@ -190,8 +190,13 @@
 //!   (`crate::attribution`) together.
 //! - `bazelrc` — [`Mode`], [`bzlmod_live`] and [`bazelrc_bzlmod`]: which
 //!   world Bazel reads in a tree that carries both, decided once.
+//! - `external_query` — [`external_dir_repos`]: which repository a nested
+//!   repository's directory is, read off `bazel query '//external:*'` in the
+//!   WORKSPACE world, where a custom repository rule can put a repository at a
+//!   directory no static scan can name.
 
 mod bazelrc;
+mod external_query;
 mod inputs;
 mod module_diff;
 mod module_facts;
@@ -201,6 +206,7 @@ mod pattern;
 
 pub use crate::vocabulary::{is_toolchain_module, TOOLCHAIN_MODULES};
 pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, Mode};
+pub use external_query::external_dir_repos;
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;
 pub use module_facts::{apparent_of, Dep, Extension, ModuleChange, ModuleFacts, RepoRule};

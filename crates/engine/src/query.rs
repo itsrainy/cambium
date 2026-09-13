@@ -117,6 +117,19 @@ pub trait PackageQuerier {
         self.workspace().map(cambium_index::loads::starlark_files)
     }
 
+    /// `bazel query '//external:*' --output=build` over the checkout these
+    /// rows describe, for [`cambium_index::externals::external_dir_repos`] to
+    /// read the nested repositories' names out of.
+    ///
+    /// Only a cold build in the WORKSPACE world asks, and only to learn which
+    /// repository a directory `//...` stopped at is. `None` — no Bazel behind
+    /// this querier, or the query failed — leaves those directories unmapped,
+    /// which is a global invalidation when one of them changes, not a wrong
+    /// answer.
+    fn external_rules(&self) -> Option<String> {
+        None
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a
@@ -204,6 +217,10 @@ impl PackageQuerier for BazelQuerier {
             });
         }
         Ok(q.updates.into())
+    }
+
+    fn external_rules(&self) -> Option<String> {
+        self.bazel.external_rules()
     }
 
     fn universe(&self) -> Result<Rows, crate::error::EngineError> {
