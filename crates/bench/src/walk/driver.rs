@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use cambium_engine::Engine;
 use cambium_index::IndexFile;
 
-use crate::history::{cold_build, Driver};
+use super::cambi::{cold_build, Driver};
 use crate::oracles::rebuild::compare_by_label;
 use crate::oracles::rdeps::RdepsResult;
 use crate::state::{HistoryState, State};
@@ -229,7 +229,7 @@ impl Runner<'_> {
 
     fn begin(&mut self, steps: usize, from: &str, to: &str) -> Result<()> {
         if let Some(p) = self.progress() {
-            p.step(crate::progress::Step::History);
+            p.step(crate::progress::Step::Walk);
             p.total(steps);
             if let Some(last) = self.result.steps.last() {
                 p.item(self.result.steps.len(), &last.head);
@@ -406,7 +406,7 @@ impl Runner<'_> {
         let fresh = IndexFile::open(&fresh_path)?;
         let diff = compare_by_label(applied.view(), fresh.view(), self.opts.diff_cap);
         let ok = diff.is_empty();
-        self.result.head_index = crate::history::archive_head_index(
+        self.result.head_index = super::cambi::archive_head_index(
             self.engine,
             &self.opts.state_dir,
             to,

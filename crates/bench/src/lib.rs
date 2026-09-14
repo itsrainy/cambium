@@ -48,15 +48,11 @@
 //! [`legacy`] is the like-for-like bazel-diff stage that puts both tools on
 //! one synthetic graph with Bazel replaced by a shim that replays a recorded query.
 
-pub mod changes;
 pub mod checkout;
 pub mod classify;
-pub mod compare;
 pub mod env;
 pub mod harness;
-pub mod history;
 pub mod labels;
-pub mod legacy;
 pub mod manifest;
 pub mod oracles;
 pub mod plan;
@@ -66,11 +62,9 @@ pub mod remote;
 pub mod replay;
 pub mod report;
 pub mod run;
-pub mod runner;
 pub mod schema;
 pub mod servers;
 pub mod session;
-pub mod stages;
 pub mod state;
 pub mod subject;
 pub mod tools;

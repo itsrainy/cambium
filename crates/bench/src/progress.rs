@@ -36,6 +36,7 @@ pub enum Step {
     Build,
     History,
     Changes,
+    Walk,
     Done,
     Failed,
 }
@@ -47,6 +48,7 @@ impl Step {
             Step::Build => "build",
             Step::History => "history",
             Step::Changes => "changes",
+            Step::Walk => "walk",
             Step::Done => "done",
             Step::Failed => "failed",
         }

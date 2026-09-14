@@ -13,6 +13,26 @@ use serde::de::DeserializeOwned;
 /// The `q`th percentile of an already-sorted sample, by nearest rank. Empty is
 /// 0: a distribution over no runs has no shape, and the reports say `n/a`
 /// beside it rather than reading the number.
+/// Makes a path absolute without requiring it to exist.
+///
+/// A child process (a peer, Bazel) runs with its own working directory, so a
+/// relative `--results-dir` resolves somewhere else in each. `canonicalize`
+/// is used where it can be (it also resolves the macOS `/var` -> `/private/var`
+/// symlink, keeping paths comparable across processes) and falls back to
+/// joining the current directory for a path that does not exist yet.
+pub fn absolute(p: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p),
+        Err(_) => p.to_path_buf(),
+    }
+}
+
 pub fn percentile(sorted: &[u64], q: f64) -> u64 {
     if sorted.is_empty() {
         return 0;

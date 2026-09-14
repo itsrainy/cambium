@@ -19,7 +19,8 @@ use cambium_index::IndexFile;
 use crate::checkout::Checkout;
 use crate::classify::BazelFacts;
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle, RdepsResult};
-use crate::tools::{BaseWorktree, Tool, ToolRun};
+use crate::tools::{BaseWorktree, RunContext, Tool, ToolRun};
+use crate::util::absolute;
 
 use super::driver::{LiveChecks, StepContext};
 use super::model::ToolStep;
@@ -93,7 +94,7 @@ impl LiveChecks for BazelChecks<'_> {
                 return self.tools.iter().map(|p| failed(p, &e)).collect();
             }
         };
-        let ctx_run = crate::compare::run_context(self.engine, self.scratch, base_wt.path());
+        let ctx_run = run_context(self.engine, self.scratch, base_wt.path());
         let index = ctx.head_index.and_then(|p| IndexFile::open(p).ok());
         let labels_dir =
             crate::labels::change_set_dir(self.results_dir, &ctx.step.parent, &ctx.step.head);
@@ -142,5 +143,18 @@ fn failed(p: &&dyn Tool, _e: &anyhow::Error) -> ToolStep {
         recall_vs_oracle: None,
         tightness_vs_oracle: None,
         failed: true,
+    }
+}
+
+/// The run context a peer is handed for one step: this run's Bazel, its
+/// startup flags and environment, the scratch directory, and the base
+/// worktree the peer diffs against.
+pub fn run_context(engine: &Engine, scratch: &Path, base_worktree: &Path) -> RunContext {
+    RunContext {
+        bazel_binary: engine.bazel().binary().to_path_buf(),
+        startup_flags: engine.bazel().startup_flags().to_vec(),
+        env: engine.bazel().env().to_vec(),
+        scratch: absolute(scratch),
+        base_worktree: absolute(base_worktree),
     }
 }

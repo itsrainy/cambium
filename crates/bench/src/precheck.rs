@@ -15,8 +15,6 @@ use cambium_engine::externals::WorkspaceText;
 use cambium_index::{IndexFile, IndexRef};
 use serde::Serialize;
 
-use crate::compare::ChangesResult;
-use crate::history::HistoryResult;
 use crate::oracles::rebuild::GraphDiff;
 use crate::replay::{
     self, BaseKind, Divergence, PathEntry, PathsCache, RecordedAnswer, RederiveCache,
@@ -118,24 +116,18 @@ pub fn index_path(run: &SubjectRun<'_>, req: &ReplayRequest) -> PathBuf {
 
 /// Every recorded answer under one subject: the change sets always, the
 /// history commits when asked. Both files go through the schema gate.
-pub fn load_recorded(run: &SubjectRun<'_>, history: bool) -> Result<Vec<RecordedAnswer>> {
-    let mut out = Vec::new();
-    let changes = run.changes_result_path();
-    if changes.exists() {
-        out.extend(replay::recorded_from_changes(&ChangesResult::read(
-            &changes,
-        )?));
-    }
-    if history {
-        let h = run.history_result_path();
-        if h.exists() {
-            out.extend(replay::recorded_from_history(&HistoryResult::read(&h)?));
-        }
-    }
+pub fn load_recorded(run: &SubjectRun<'_>, _history: bool) -> Result<Vec<RecordedAnswer>> {
+    let walk = run.walk_result_path();
+    anyhow::ensure!(
+        walk.exists(),
+        "no walk result under {}: nothing to replay against",
+        run.results.display()
+    );
+    let out = replay::recorded_from_walk(&crate::walk::WalkResult::read(&walk)?);
     anyhow::ensure!(
         !out.is_empty(),
-        "no recorded results under {}: nothing to replay against",
-        run.results.display()
+        "the walk at {} recorded no steps",
+        walk.display()
     );
     Ok(out)
 }
@@ -440,20 +432,20 @@ pub fn head_check_subject(
 /// repository cannot diff (a pin that has since been garbage-collected) is
 /// left out, as the shell loop it replaces left it out.
 pub fn write_paths_cache(run: &SubjectRun<'_>, repo: &Path, out: Option<&Path>) -> Result<PathBuf> {
-    let sets_path = run.change_sets_path();
-    let sets = crate::changes::ChangeSetSet::read(&sets_path)
-        .with_context(|| format!("reading {}", sets_path.display()))?;
+    let walk_path = run.walk_result_path();
+    let walk = crate::walk::WalkResult::read(&walk_path)
+        .with_context(|| format!("reading {}", walk_path.display()))?;
     let repo = cambium_diff::Repo::new(repo.to_path_buf());
     let mut entries = Vec::new();
-    for cs in &sets.change_sets {
-        match repo.diff(&cs.base, &cs.head) {
+    for st in &walk.steps {
+        match repo.diff(&st.parent, &st.head) {
             Ok(changes) => entries.push(PathEntry {
-                base: cs.base.clone(),
-                head: cs.head.clone(),
+                base: st.parent.clone(),
+                head: st.head.clone(),
                 changes: changes.iter().map(name_status).collect(),
             }),
             Err(e) => {
-                tracing::warn!(base = %cs.base, head = %cs.head, error = %e, "cannot diff; left out of the paths cache");
+                tracing::warn!(base = %st.parent, head = %st.head, error = %e, "cannot diff; left out of the paths cache");
             }
         }
     }

@@ -473,7 +473,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
     };
     let results = plan.results();
     std::fs::create_dir_all(&results)?;
-    let results = cambium_bench::compare::absolute(&results);
+    let results = cambium_bench::util::absolute(&results);
     let subjects: Vec<String> = plan
         .subjects
         .iter()
@@ -893,10 +893,10 @@ mod tests {
         assert!(c.confirming && c.existing.is_empty());
         assert!(c.help().contains("y to start"));
 
-        std::fs::create_dir_all(results.join("bazel/history")).unwrap();
-        std::fs::write(results.join("bazel/history/history-abc.json"), "{}").unwrap();
+        std::fs::create_dir_all(results.join("bazel/walk")).unwrap();
+        std::fs::write(results.join("bazel/walk/walk-abc.json"), "{}").unwrap();
         c.review();
-        assert_eq!(c.existing, ["bazel: history"]);
+        assert_eq!(c.existing, ["bazel: walk"]);
         assert!(c.help().contains("r resume") && c.help().contains("f move"));
         assert!(text(&c).iter().any(|l| l.contains("already holds results")));
     }
@@ -934,18 +934,14 @@ mod tests {
         c.toggle();
         assert_eq!(c.plan().tools, ["tango"], "bazel-diff was turned off");
         c.next_pane(1);
-        c.move_by(1);
         c.toggle();
         assert_eq!(
             c.plan().steps,
-            [
-                StepKind::Fetch,
-                StepKind::Build,
-                StepKind::History,
-                StepKind::Report
-            ],
-            "changes was turned off; the preparation and the report stay"
+            [StepKind::Fetch, StepKind::Build, StepKind::Report],
+            "the walk was turned off; the preparation and the report stay"
         );
+        // Turn the walk back on so the command line below has a run to show.
+        c.toggle();
         c.next_pane(1);
         c.move_by(-5);
         c.toggle();
@@ -955,7 +951,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("cambium-bench --log info history bazel")),
+                .any(|l| l.contains("cambium-bench --log info walk bazel")),
             "{lines:?}"
         );
     }

@@ -76,7 +76,7 @@ fn no_verb_without_a_terminal_prints_the_help_and_fails() {
 fn watch_once_reads_a_results_tree_it_did_not_produce() {
     let dir = tempfile::tempdir().unwrap();
     let subject = dir.path().join("envoy");
-    std::fs::create_dir_all(subject.join("history")).unwrap();
+    std::fs::create_dir_all(subject.join("walk")).unwrap();
     let (code, stdout, _) = run(
         Path::new(BENCH),
         &[
@@ -107,75 +107,28 @@ fn watch_once_reads_a_results_tree_it_did_not_produce() {
     assert_eq!(doc["subjects"][0]["subject"], "envoy");
 }
 
-/// The verbs that left `cambi`. `subjects`, `history` and `changes` are what
+/// The verbs that left `cambi`. `subjects` and `walk` are what
 /// `tools/bench/run-published.sh` drives; `replay` is what
 /// `tools/bench/precheck.sh` drives.
 #[test]
 fn the_verbs_are_the_ones_that_left_cambi() {
     let (_, stdout, _) = run(Path::new(BENCH), &["--help"]);
-    for sub in [
-        "subjects", "history", "changes", "stages", "sweep", "regress", "replay", "labels",
-        "report", "synth",
-    ] {
+    for sub in ["subjects", "walk", "replay", "labels", "report", "watch", "run"] {
         assert!(
             stdout.contains(sub),
             "`{sub}` is missing from the top-level help:\n{stdout}"
         );
     }
+    // The retired micro-benchmark and per-workload verbs are gone.
+    for sub in ["stages", "sweep", "regress", "synth", "history", "changes"] {
+        assert!(
+            !stdout.contains(&format!("  {sub}")),
+            "`{sub}` should have left the harness:\n{stdout}"
+        );
+    }
 }
 
-/// `synth emit-bazel` never touches Bazel, so it is safe in any CI sandbox. It
-/// prints a "try: cambi ..." suggestion, which has regressed before to name a
-/// crate (`cambium`, now also `cambium-bench`) rather than the binary a caller
-/// types.
-#[test]
-fn hermetic_output_never_tells_a_caller_to_type_a_crate_name() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = dir.path().join("ws");
-    let (code, stdout, stderr) = run(
-        Path::new(BENCH),
-        &[
-            "synth",
-            "emit-bazel",
-            "--spec",
-            "tiny",
-            "--out",
-            out.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(code, 0, "emit-bazel failed: {stderr}");
-    assert!(
-        stdout.contains("try: cambi -C"),
-        "the suggestion should name the product binary:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("cambium "),
-        "hermetic output leaked a crate name as a binary a caller would type:\n{stdout}"
-    );
-}
 
-/// `synth build-index` is the cheap index the `inspect` verbs are pointed at,
-/// and it moved here with the rest of the generator.
-#[test]
-fn synth_build_index_writes_an_index_the_engine_can_open() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = dir.path().join("i.cmbx");
-    let (code, stdout, stderr) = run(
-        Path::new(BENCH),
-        &[
-            "synth",
-            "build-index",
-            "--spec",
-            "tiny",
-            "--out",
-            out.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("nodes:"), "{stdout}");
-    let f = cambium_index::IndexFile::open(&out).expect("a readable index");
-    assert!(!f.view().commit.is_empty());
-}
 
 /// The harness locates `cambi` the way the scripts hand it over, and records
 /// the version string it found.

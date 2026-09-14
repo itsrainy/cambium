@@ -1,10 +1,9 @@
 //! `cambium-bench` — the benchmark (docs/METHODOLOGY.md).
 //!
 //! The command tree is the vocabulary: `subjects` for what a run points at,
-//! `history` and `changes` for the two workloads, `stages` and `sweep` for the
-//! engine micro-benchmarks underneath them, `regress` to gate one result file
-//! against another, `report` to regenerate `docs/RESULTS.md`, and `run` for
-//! the whole published sequence.
+//! `walk` for the one workload, `replay` for the offline engine check,
+//! `report` to regenerate `docs/RESULTS.md`, and `run` for the whole
+//! sequence.
 //!
 //! Every subcommand takes a `<subject>` — a name from `subject_repos.toml`, or
 //! `synth:<preset>` — and every one of them is idempotent and resumable: what
@@ -20,7 +19,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use cambium_bench::plan::{Plan, Size, StepKind};
 use cambium_bench::run as verbs;
-use cambium_bench::run::{CompareRequest, HistoryRequest, Labels, LabelsQuery, Selection};
+use cambium_bench::run::{Labels, LabelsQuery};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::Context;
@@ -62,79 +61,6 @@ pub enum Args {
     Subjects {
         #[command(subcommand)]
         what: SubjectArgs,
-    },
-    /// The history workload: the last N first-parent commits, applied one at a
-    /// time to an index built at the start of the window.
-    ///
-    /// cambium-only: the other tools keep no state between runs, so there is
-    /// no state to carry. It yields the per-commit cost, the global rate, the
-    /// cold-rebuild rate, and the rebuild oracle.
-    History {
-        /// A name from subject_repos.toml, or synth:<preset>.
-        subject: String,
-        /// First-parent commits before the pin. Defaults to the subject's
-        /// history window.
-        #[arg(long)]
-        commits: Option<usize>,
-        /// `rebuild`, or `none` to skip it. Only ever right when the cold
-        /// build is what will not finish.
-        #[arg(long = "oracle", value_delimiter = ',', default_value = "rebuild")]
-        oracles: Vec<String>,
-        /// Continue the history already recorded for this pin. A recorded
-        /// history is otherwise refused: pass this or --restart.
-        #[arg(long, conflicts_with = "restart")]
-        resume: bool,
-        /// Discard the history already recorded for this pin and walk again.
-        #[arg(long)]
-        restart: bool,
-        #[command(flatten)]
-        common: Common,
-    },
-    /// The change-set workload: every tool on each `(base, head)` change set,
-    /// scored by the oracles and the disagreement taxonomy.
-    Changes {
-        /// A name from subject_repos.toml, or synth:<preset>.
-        subject: String,
-        /// How many change sets to compare.
-        #[arg(long = "change-sets")]
-        change_sets: Option<usize>,
-        /// pr, adjacent, or stress. Comma-separated; default: all three.
-        #[arg(long = "kind", value_delimiter = ',')]
-        kinds: Vec<String>,
-        /// cambium, bazel-diff, tango, target-determinator. Comma-separated;
-        /// default: cambium, bazel-diff and tango.
-        /// cambium always runs — it is what the others are being compared
-        /// against — so naming it alone measures cambium with no foils.
-        #[arg(long = "tools", value_delimiter = ',')]
-        tools: Vec<String>,
-        /// rdeps, load, or none. Comma-separated; default: both.
-        #[arg(long = "oracle", value_delimiter = ',', default_value = "rdeps,load")]
-        oracles: Vec<String>,
-        /// Cap on the source labels the rdeps oracle queries per change set.
-        /// 0, the default, is the full oracle: every changed file. A positive
-        /// value is an escape hatch for a subject whose change sets are too
-        /// large to query whole, and weakens the check.
-        #[arg(long, default_value_t = 0)]
-        oracle_sample: usize,
-        /// A change-set JSON to run, instead of selecting one.
-        #[arg(long = "change-set-file")]
-        change_set_file: Option<PathBuf>,
-        /// Stress change sets per category when selecting.
-        #[arg(long, default_value_t = 20)]
-        stress_cap: usize,
-        /// Print the selected change sets and stop.
-        #[arg(long)]
-        select_only: bool,
-        /// Continue the comparison already recorded for this pin. A recorded
-        /// comparison is otherwise refused: pass this or --restart.
-        #[arg(long, conflicts_with = "restart")]
-        resume: bool,
-        /// Discard the comparison already recorded for this pin and compare
-        /// every change set again.
-        #[arg(long)]
-        restart: bool,
-        #[command(flatten)]
-        common: Common,
     },
     /// The walk: one first-parent traversal to the pin, the index carried
     /// step to step, every tool scored against the rdeps oracle for recall
@@ -186,59 +112,6 @@ pub enum Args {
     /// rest of that subject. The launcher (no verb, on a terminal) composes
     /// the same plan on a screen.
     Run(RunArgs),
-    /// Engine stage micro-benchmarks, over a synthetic subject.
-    Stages {
-        /// synth:<preset>. A real subject has no generated graph to time
-        /// stages over.
-        subject: String,
-        /// Stages to run; defaults to every in-memory stage.
-        #[arg(long = "stage", value_delimiter = ',')]
-        stages: Vec<String>,
-        #[arg(long, default_value_t = 5)]
-        runs: usize,
-        /// Where to write the JSON. Defaults to
-        /// bench-results/<subject>/stages/<ts>.json.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Also write a markdown summary table here.
-        #[arg(long)]
-        markdown: Option<PathBuf>,
-        /// Print the results instead of writing a file.
-        #[arg(long)]
-        stdout: bool,
-        #[command(flatten)]
-        common: Common,
-    },
-    /// Vary one parameter and report how a stage scales.
-    Sweep {
-        /// synth:<preset>: the graph the sweep varies from.
-        subject: String,
-        #[arg(long)]
-        stage: String,
-        #[arg(long, default_value = "targets")]
-        param: String,
-        #[arg(long, value_delimiter = ',')]
-        values: Vec<String>,
-        #[arg(long, default_value_t = 3)]
-        runs: usize,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Write an SVG of ms against the parameter, on log-log axes.
-        #[arg(long)]
-        plot: Option<PathBuf>,
-        #[command(flatten)]
-        common: Common,
-    },
-    /// Compare two stage result files and fail on a regression.
-    Regress {
-        /// The baseline result file.
-        baseline: PathBuf,
-        /// The result file to gate.
-        current: PathBuf,
-        /// Percentage a stage may slow down before it counts as a regression.
-        #[arg(long, default_value_t = 15.0)]
-        threshold: f64,
-    },
     /// Replay the engine's static stages offline, against a stored index and
     /// a published run's own answers.
     ///
@@ -281,9 +154,6 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
-    /// Generated Bazel graphs and workspaces.
-    #[command(subcommand)]
-    Synth(crate::synth::Args),
     /// Follow a run: one row per subject, polled off bench-results/.
     ///
     /// A pure reader. It holds nothing open on the run, so it works on a run
@@ -418,83 +288,10 @@ pub struct PullArgs {
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match args {
         Args::Subjects { what } => do_subjects(ctx, what),
-        Args::Synth(args) => crate::synth::run(ctx, args),
         Args::Replay(args) => crate::replay::run(ctx, *args),
         Args::Watch(args) => crate::watch::run(ctx, args),
         Args::Run(args) => do_run(ctx, &args),
         Args::PullResults(args) => do_pull(ctx, &args),
-        Args::History {
-            subject,
-            commits,
-            oracles,
-            resume,
-            restart,
-            common,
-        } => {
-            let session = ctx.session(&common)?;
-            let run = session.run_subject(&subject)?;
-            let (path, result) = verbs::run_history(
-                &run,
-                &HistoryRequest {
-                    commits,
-                    oracles,
-                    on_existing: verbs::OnExisting::from_flags(resume, restart),
-                },
-            )?;
-            println!("{}", path.display());
-            if let Some(o) = &result.oracle {
-                if !o.ok {
-                    anyhow::bail!("history oracle failed: {}", o.diff.summary());
-                }
-            }
-            Ok(crate::EXIT_OK)
-        }
-        Args::Changes {
-            subject,
-            change_sets,
-            kinds,
-            tools,
-            oracles,
-            oracle_sample,
-            change_set_file,
-            stress_cap,
-            select_only,
-            resume,
-            restart,
-            common,
-        } => {
-            let session = ctx.session(&common)?;
-            let run = session.run_subject(&subject)?;
-            let selection = Selection {
-                kinds,
-                cap: verbs::change_set_cap(&session, change_sets),
-                stress_cap,
-            };
-            if select_only {
-                let (_, set) = verbs::select_change_sets(&run, &selection)?;
-                print_change_sets(&set, ctx.format.data())?;
-                return Ok(crate::EXIT_OK);
-            }
-            let compared = verbs::compare(
-                &run,
-                &CompareRequest {
-                    change_set_file,
-                    selection,
-                    oracle_sample,
-                    oracles,
-                    tools,
-                    on_existing: verbs::OnExisting::from_flags(resume, restart),
-                },
-                &ctx.tools,
-            )?;
-            println!("{}", verbs::compare_summary(&compared.result));
-            println!("{}", compared.path.display());
-            Ok(if compared.result.summary.pass {
-                crate::EXIT_OK
-            } else {
-                crate::EXIT_ERROR
-            })
-        }
         Args::Walk {
             subject,
             tier,
@@ -558,79 +355,6 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             )?;
             print_labels(&answer);
             Ok(crate::EXIT_OK)
-        }
-        Args::Stages {
-            subject,
-            stages,
-            runs,
-            out,
-            markdown,
-            stdout,
-            common,
-        } => {
-            let session = ctx.session(&common)?;
-            let preset = verbs::preset_of(&subject, "stages")?;
-            let dir = verbs::stage_dir(&session, &subject, "stages")?;
-            let opts = cambium_bench::runner::RunOptions {
-                preset,
-                stages,
-                runs,
-                out: if stdout {
-                    None
-                } else {
-                    Some(out.unwrap_or_else(|| dir.join(timestamped())))
-                },
-                markdown,
-            };
-            cambium_bench::runner::run(&opts)?;
-            Ok(crate::EXIT_OK)
-        }
-        Args::Sweep {
-            subject,
-            stage,
-            param,
-            values,
-            runs,
-            out,
-            plot,
-            common,
-        } => {
-            let session = ctx.session(&common)?;
-            let preset = verbs::preset_of(&subject, "sweep")?;
-            let dir = verbs::stage_dir(&session, &subject, "sweep")?;
-            let values = values
-                .iter()
-                .map(|v| cambium_bench::util::parse_size(v))
-                .collect::<Result<Vec<u64>>>()?;
-            anyhow::ensure!(!values.is_empty(), "--values is required");
-            let plot = plot.or_else(|| {
-                (stage == cambium_bench::legacy::STAGE).then(|| dir.join("bench-legacy.svg"))
-            });
-            cambium_bench::runner::sweep(&cambium_bench::runner::SweepOptions {
-                stage,
-                param,
-                values,
-                runs,
-                out: Some(out.unwrap_or_else(|| dir.join(timestamped()))),
-                plot,
-                base_preset: preset,
-            })?;
-            Ok(crate::EXIT_OK)
-        }
-        Args::Regress {
-            baseline,
-            current,
-            threshold,
-        } => {
-            let regressions = cambium_bench::runner::compare_files(&baseline, &current, threshold)?;
-            Ok(if regressions == 0 {
-                crate::EXIT_OK
-            } else {
-                eprintln!(
-                    "cambium-bench regress: {regressions} stage(s) regressed by more than {threshold}%"
-                );
-                crate::EXIT_ERROR
-            })
         }
         Args::Report {
             subject,
@@ -696,29 +420,6 @@ fn do_subjects(ctx: &Context, what: SubjectArgs) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
     }
-}
-
-fn print_change_sets(
-    set: &cambium_bench::changes::ChangeSetSet,
-    output: Option<DataFormat>,
-) -> Result<()> {
-    match output {
-        None => {}
-        Some(DataFormat::Json) => println!("{}", serde_json::to_string_pretty(set)?),
-        Some(DataFormat::Jsonl) => println!("{}", crate::result_event(set)?),
-        Some(DataFormat::Text) => {
-            for p in &set.change_sets {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    p.kind.name(),
-                    p.category.map_or("-", |c| c.name()),
-                    p.base,
-                    p.head
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 fn print_labels(answer: &Labels) {
@@ -953,7 +654,7 @@ mod tests {
             &ctx,
             &RunArgs {
                 subjects: vec!["envoy".into()],
-                steps: vec!["changes".into(), "report".into()],
+                steps: vec!["walk".into(), "report".into()],
                 smoke: true,
                 resume: true,
                 ..args()
@@ -962,7 +663,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.subjects, ["envoy"]);
         assert_eq!(plan.size, Size::Small);
-        assert_eq!(plan.steps, [StepKind::Changes, StepKind::Report]);
+        assert_eq!(plan.steps, [StepKind::Walk, StepKind::Report]);
         assert!(plan.resume);
         let lines: Vec<String> = plan.steps().iter().map(|s| s.command_line()).collect();
         assert_eq!(lines.len(), 3, "{lines:?}");

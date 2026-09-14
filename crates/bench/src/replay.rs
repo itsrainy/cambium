@@ -1166,36 +1166,21 @@ impl RecordedAnswer {
     }
 }
 
-/// Every change set of a `changes-<pin>.json`.
-pub fn recorded_from_changes(r: &crate::compare::ChangesResult) -> Vec<RecordedAnswer> {
-    r.change_sets
-        .iter()
-        .map(|c| RecordedAnswer {
-            base: c.base.clone(),
-            head: c.head.clone(),
-            global: c.cambium.global,
-            dirty_packages: c.cambium.dirty_packages,
-            cold_rebuild: c.cambium.cold_rebuild,
-            affected: (!c.cambium.global).then_some(c.cambium.affected),
-        })
-        .collect()
-}
-
-/// Every commit of a `history-<pin>.json`.
+/// Every step of a `walk-<pin>.json`.
 ///
-/// A history commit's base is the index the previous commit left behind, not
-/// the pin, so these diverge for reasons that are not the engine's; the CLI
-/// says so and keeps them off the default gate.
-pub fn recorded_from_history(r: &crate::history::HistoryResult) -> Vec<RecordedAnswer> {
-    r.commits
+/// A step's base is the index the previous step left behind, not the pin, so
+/// these diverge for reasons that are not the engine's; the CLI says so and
+/// keeps them off the default gate.
+pub fn recorded_from_walk(r: &crate::walk::WalkResult) -> Vec<RecordedAnswer> {
+    r.steps
         .iter()
-        .map(|c| RecordedAnswer {
-            base: c.parent.clone(),
-            head: c.commit.clone(),
-            global: c.global,
-            dirty_packages: c.dirty_packages,
-            cold_rebuild: c.engine_cold_rebuild,
-            affected: (!c.global).then_some(c.affected),
+        .map(|st| RecordedAnswer {
+            base: st.parent.clone(),
+            head: st.head.clone(),
+            global: st.global,
+            dirty_packages: st.dirty_packages,
+            cold_rebuild: st.cambium.cold_rebuild,
+            affected: (!st.global).then_some(st.cambium.affected),
         })
         .collect()
 }

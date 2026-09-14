@@ -8,16 +8,13 @@
 //! | file | schema | written by | read by |
 //! |---|---|---|---|
 //! | `bench-results/<subject>/state.json` | [`RESULT_SCHEMA`] | every workload | the next run, `watch` |
-//! | `bench-results/<subject>/history/history-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `history` | `report`, `replay`, `watch` |
-//! | `bench-results/<subject>/changes/changes-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `changes` | `report`, `replay`, `watch` |
-//! | `bench-results/<subject>/changes/change-sets-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `changes` | `changes` (resume), `replay --write-paths` |
-//! | `bench-results/<subject>/changes/labels/<base>..<head>/*.zst` | none | `changes` | `labels` |
+//! | `bench-results/<subject>/walk/walk-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `walk` | `report`, `replay`, `watch` |
+//! | `bench-results/<subject>/walk/labels/<base>..<head>/*.zst` | none | `walk` | `labels` |
 //! | `bench-results/<subject>/progress.json` | [`PROGRESS_SCHEMA`] | every workload | `watch` |
-//! | `bench-results/<subject>/index-<sha>[-<ver>].bin`, `bases/<sha>.bin`, `heads/<pin>.bin` | the index format | `subjects build`, `changes`, `history` | `replay` |
+//! | `bench-results/<subject>/index-<sha>[-<ver>].bin`, `bases/<sha>.bin`, `heads/<pin>.bin` | the index format | `subjects build`, `walk` | `replay` |
 //! | `paths-<pin>[-<ver>].json` | [`REPLAY_SCHEMA`] | `replay --write-paths` | `replay` |
 //! | a `--save-baseline` file | [`REPLAY_SCHEMA`] | `replay` | `replay --baseline` |
 //! | the `watch --format json` snapshot | [`WATCH_SCHEMA`] | `watch` | anything |
-//! | `bench-results/<subject>/stages/*.json`, `sweep/*.json` | [`RESULT_SCHEMA`] | `stages`, `sweep` | `regress`, `report` |
 //!
 //! Only the result files are gated on read ([`crate::util::read_result`]):
 //! an older result must be refused rather than half-read, where an older
@@ -50,9 +47,8 @@ mod tests {
             + include_str!("harness.rs")
             + include_str!("labels.rs")
             + include_str!("state.rs")
-            + include_str!("changes.rs")
-            + include_str!("compare/model.rs")
-            + include_str!("history.rs");
+            + include_str!("walk/model.rs")
+            + include_str!("walk/driver.rs");
         let declared: Vec<&str> = src
             .lines()
             .filter_map(|l| l.trim().strip_prefix("pub const "))
