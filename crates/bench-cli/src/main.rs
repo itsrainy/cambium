@@ -271,6 +271,7 @@ mod tests {
             "subjects",
             "history",
             "changes",
+            "walk",
             "stages",
             "sweep",
             "regress",
