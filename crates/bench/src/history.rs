@@ -10,7 +10,7 @@
 //! in process over a synthetic row source, which is how the walk is tested
 //! with no Bazel and no product binary anywhere.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,8 @@ pub trait Driver {
 /// of it.
 pub struct Step {
     pub report: AffectedReport,
+    /// The affected set, whole: what the JSON keeps only the count of.
+    pub labels: BTreeSet<String>,
     /// Wall time for the step itself, not counting the publish that follows
     /// it: the publish is an upload, and a history quoting it as the cost of
     /// an update would be quoting the network.
@@ -77,19 +79,18 @@ impl Driver for CambiDriver<'_> {
         // `cambi affected`, not `cambi index update`: the two do the same work
         // — `update` is `affected` with its head index kept — and only
         // `affected` prints the document the per-commit record is made of.
+        // The same request as the change-set comparison's, so the two
+        // workloads' walls measure one invocation.
         let run = self.cambi.affected(
             &self.checkout.dir,
-            &crate::tools::cambi::AffectedArgs {
-                include_manual: true,
-                out: Some(out.to_path_buf()),
-                ..crate::tools::cambi::AffectedArgs::new(base, head)
-            },
+            &crate::tools::cambi::AffectedArgs::harness(base, head, out),
         )?;
         let wrote_index = run.index.is_some();
         if publish && wrote_index {
             self.cambi.index_publish(&self.checkout.dir, out)?;
         }
         Ok(Step {
+            labels: run.report.affected_labels().into_iter().collect(),
             report: run.report,
             wall: run.wall,
             wrote_index,
@@ -163,8 +164,8 @@ impl Driver for EngineDriver<'_> {
         let req = AffectedRequest {
             base: base.to_string(),
             head: head.to_string(),
-            include_manual: true,
-            explain: false,
+            include_manual: crate::tools::cambi::INCLUDE_MANUAL,
+            explain: true,
             no_full_build: true,
             materialize: true,
             publish_base: false,
@@ -188,6 +189,7 @@ impl Driver for EngineDriver<'_> {
             self.publish_file(out)?;
         }
         Ok(Step {
+            labels: out_run.report.affected_labels().into_iter().collect(),
             report: out_run.report,
             wall,
             wrote_index,
@@ -673,6 +675,15 @@ impl Walk<'_> {
                 return Err(e);
             }
         };
+        // The set itself, beside the JSON that keeps only its count, under
+        // the same layout the change-set comparison uses, so a step's answer
+        // can be examined after the fact. See [`crate::labels`].
+        if !step.report.global {
+            let labels_dir =
+                crate::labels::change_set_dir(&self.opts.results_dir, parent, commit);
+            std::fs::create_dir_all(&labels_dir)?;
+            crate::labels::write_set(&labels_dir, crate::tools::cambi::NAME, &step.labels)?;
+        }
         // Whole-process wall time: what someone bringing their index forward
         // one commit waits for. The engine's own total travels beside it,
         // from the document, so the process overhead is visible rather than

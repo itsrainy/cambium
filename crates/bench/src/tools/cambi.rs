@@ -34,6 +34,13 @@ pub const NAME: &str = "cambium";
 /// not a failure.
 const EXIT_GLOBAL: i32 = 2;
 
+/// Whether every harness invocation passes `--include-manual`.
+///
+/// One constant, because the harness measures one flag set: the walk, the
+/// change-set comparison and the offline replay's lower bound all read it,
+/// so a number from any of them is an answer to the same question.
+pub const INCLUDE_MANUAL: bool = true;
+
 /// The `cambi` binary under measurement.
 #[derive(Clone, Debug)]
 pub struct Cambi {
@@ -94,6 +101,21 @@ impl AffectedArgs {
             base: base.to_string(),
             head: head.to_string(),
             ..Default::default()
+        }
+    }
+
+    /// The one flag set the harness measures with: `--include-manual`
+    /// ([`INCLUDE_MANUAL`]), `--explain` (the classifier needs the per-target
+    /// reason), `--publish-base` (so the next step finds its base in the
+    /// store) and `--out` at `out`. Every workload builds its request here,
+    /// so a wall time from one is comparable with a wall time from another.
+    pub fn harness(base: &str, head: &str, out: &Path) -> Self {
+        Self {
+            include_manual: INCLUDE_MANUAL,
+            explain: true,
+            publish_base: true,
+            out: Some(out.to_path_buf()),
+            ..Self::new(base, head)
         }
     }
 }

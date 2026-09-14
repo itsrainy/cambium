@@ -239,9 +239,9 @@ fn compare_one(
     })
 }
 
-/// cambium's two runs over one change set, and what they left behind.
+/// cambium's run over one change set, and what it left behind.
 struct CambiumRuns {
-    /// The second run: its document is the one the comparison reads.
+    /// The run: its document is the one the comparison reads.
     warm: crate::tools::cambi::AffectedRun,
     /// The record both runs' walls and counts go into.
     cambium: CambiumRun,
@@ -249,17 +249,14 @@ struct CambiumRuns {
     head_index: Option<cambium_index::IndexFile>,
 }
 
-/// cambium, cold then warm.
+/// cambium, once.
 ///
-/// Twice, as a user would run it: the first run publishes whatever base index
-/// it had to compute, so the second one finds it in the store, and that is
-/// precisely the difference the two numbers are meant to show.
-///
-/// Both are whole-process wall times — `cambi` started, its configuration
-/// read, the answer serialised to JSON — because that is what a user waits
-/// for. The engine's own `timings_ms.total` is kept beside each of them, from
-/// the document, so the two can be read against each other instead of one
-/// standing in for the other.
+/// One whole-process wall time — `cambi` started, its configuration read,
+/// the answer serialised to JSON — because that is what a user waits for. The
+/// engine's own `timings_ms.total` is kept beside it, from the document, so
+/// the two can be read against each other. The record's `cold`/`warm` pair
+/// holds the same run twice until the schema drops the distinction: the
+/// second run the comparison used to make measured nothing the walk pays.
 fn run_cambium(
     cambi: &Cambi,
     checkout: &Checkout,
@@ -271,17 +268,11 @@ fn run_cambium(
         p.tool(Some(crate::tools::cambi::NAME));
     }
     checkout.checkout(&change_set.head)?;
-    let args = AffectedArgs {
-        include_manual: true,
-        // The classifier needs the per-target reason to explain the largest
-        // cambium-side class on a deletion change set
-        // (`cambium_extra_deleted`).
-        explain: true,
-        publish_base: true,
-        out: Some(opts.scratch.join("head-index.bin")),
-        ..AffectedArgs::new(&change_set.base, &change_set.head)
-    };
-    let cold = cambi.affected(&checkout.dir, &args)?;
+    let args = AffectedArgs::harness(
+        &change_set.base,
+        &change_set.head,
+        &opts.scratch.join("head-index.bin"),
+    );
     let warm = cambi.affected(&checkout.dir, &args)?;
     // What the last `cambi` document said a person should act on, on the
     // progress file: in a log these scroll away, and they are the half of a
@@ -303,9 +294,9 @@ fn run_cambium(
         tests: report.tests.len(),
         global: report.global,
         global_reason: report.global_reason.clone(),
-        cold_wall_ms: cold.wall_ms(),
+        cold_wall_ms: warm.wall_ms(),
         warm_wall_ms: warm.wall_ms(),
-        cold_engine_ms: cold.engine_ms(),
+        cold_engine_ms: warm.engine_ms(),
         warm_engine_ms: warm.engine_ms(),
         dirty_packages: report.stats.dirty_packages,
         queried_targets: report.stats.queried_targets,
