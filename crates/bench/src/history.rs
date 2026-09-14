@@ -802,7 +802,7 @@ impl Walk<'_> {
 ///
 /// A history that answered correctly must not fail because a diagnostic copy
 /// could not be written, so a failure is a warning and a `None`.
-fn archive_head_index(
+pub fn archive_head_index(
     engine: &Engine,
     state_dir: &Path,
     pin: &str,
