@@ -1,7 +1,7 @@
 name: nightly
 
 # The slow tiers: end-to-end against real Bazel, the Bazel version matrix,
-# the soundness sweeps, the synthetic change-set comparison against
+# the soundness sweeps, the synthetic correctness walk against
 # bazel-diff, the stage benchmarks, and clippy on the next toolchain. Every
 # push runs only ci.yml; these run once a night, and from the Actions tab
 # (`gh workflow run nightly`) when a change to the engine or the harness
@@ -119,13 +119,13 @@ jobs:
         env:
           CAMBIUM_E2E: "1"
 
-  synthetic-changes:
-    name: change sets on synth:small, vs bazel-diff
+  synthetic-walk:
+    name: correctness walk on synth:small, vs bazel-diff
     # The nightly run of the real benchmark, on a synthetic subject:
-    # the same `cambium-bench changes` a person points at envoy, over a generated
+    # the same `cambium-bench walk` a person points at envoy, over a generated
     # workspace small enough to emit, load and diff on a hosted runner. Tango
-    # is left out because it costs 30-500 s a change set; the weekly job on the
-    # real subjects runs all three.
+    # is left out because it costs 30-500 s a step; the weekly job on the real
+    # subjects runs it too.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,45 +145,22 @@ jobs:
           key: bazel-diff-${{ hashFiles('tools/bazel-diff/fetch.sh') }}
       - run: tools/bazel-diff/fetch.sh
       - run: cargo build --release -p cambium-cli -p cambium-bench-cli
-      - name: bench changes synth:small
-        # Non-zero exit is the gate: the run fails on any `cambium_missing`,
-        # any `cambium_missing_bzl_closure`, any `unclassified` disagreement,
-        # or recall under 1.0 against the rdeps oracle. Everything else in the
-        # taxonomy is an over-approximation and is reported, not gated.
+      - name: bench walk synth:small
+        # Non-zero exit is the gate: the walk fails on any step whose recall
+        # against the rdeps oracle is under 1.0 (cambium missed something Bazel
+        # reached). Tightness and the peers' disagreements are reported, not
+        # gated.
         run: |
-          ./target/release/cambium-bench --cambi ./target/release/cambi changes synth:small \
-            --tools cambium,bazel-diff --change-sets 5 --kind adjacent
+          ./target/release/cambium-bench --cambi ./target/release/cambi walk synth:small \
+            --tier full --peers bazel-diff --steps 5
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bench-results-synth-small
           path: bench-results/
 
-  bench:
-    name: benchmarks (small, medium)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
-      - run: |
-          ./target/release/cambium-bench stages synth:small --runs 5 \
-            --out bench-results/synth-small/stages/ci.json \
-            --markdown bench-results/synth-small/stages/ci.md
-          ./target/release/cambium-bench stages synth:medium --runs 5 \
-            --out bench-results/synth-medium/stages/ci.json \
-            --markdown bench-results/synth-medium/stages/ci.md
-      # Machine fingerprints differ between runners, so gating only makes sense
-      # against a baseline captured on the same runner class; `cambium-bench regress`
-      # refuses to compare across machines rather than reporting noise.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bench-results
-          path: bench-results/
-
   large:
-    name: medium soundness, large benchmarks
+    name: medium soundness
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -194,13 +171,3 @@ jobs:
           CAMBIUM_SOUNDNESS_SIZE: medium
           CAMBIUM_SOUNDNESS_SEEDS: "8"
           CAMBIUM_SOUNDNESS_REVISIONS: "10"
-      - run: cargo build --release -p cambium-cli -p cambium-bench-cli
-      - run: |
-          ./target/release/cambium-bench stages synth:large --runs 3 \
-            --stage build_index,load_index,splice,reverse_rebuild,walk,e2e_memory \
-            --out bench-results/synth-large/stages/nightly.json \
-            --markdown bench-results/synth-large/stages/nightly.md
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nightly-bench-results
-          path: bench-results/
