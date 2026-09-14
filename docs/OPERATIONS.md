@@ -4,11 +4,11 @@ How to run the expensive subjects, and what has already bitten someone.
 Methodology is in [METHODOLOGY.md](METHODOLOGY.md), numbers in
 [RESULTS.md](RESULTS.md); what's in flight lives in the issue tracker.
 
-Nothing here is needed on a laptop: `cambium-bench changes synth:small`
-emits its own subject with no setup. A real subject needs
+Nothing here is needed on a laptop: `cambium-bench walk synth:small --tier
+correctness` emits its own subject with no setup. A real subject needs
 `tools/bazel-diff/fetch.sh`, `tools/tango/fetch.sh` and `cambium-bench
 subjects fetch <id>` first (plus `tools/target-determinator/fetch.sh` for a
-run that names that foil). This file covers the five real subjects at
+run that names that peer). This file covers the five real subjects at
 full size, which don't fit on a laptop.
 
 ## The box
@@ -52,16 +52,16 @@ full size, which don't fit on a laptop.
   externals half, offline). A subject whose published run predates the
   head archive is silently skipped.
 - **Smoke first.** `SMOKE=1 tools/bench/run-published.sh` does every
-  subject's fetch and build, a three-commit history walk, and one change
-  set with every tool and both oracles, into `bench-results-smoke/`, in
-  about fifteen minutes. Run it after every sync, before the real driver.
+  subject's fetch and build, then a three-step correctness walk against the
+  rdeps oracle, into `bench-results-smoke/`, in about fifteen minutes. Run
+  it after every sync, before the real driver.
 - The driver is `tools/bench/run-published.sh`: builds both binaries,
   refuses to start unless built from the tree (`cambium-bench run
   --require-sha`), and hands the plan to `cambium-bench run`, one subject
   at a time, cheapest first (bazel, sourcegraph, apollo, envoy, xla):
-  `fetch` / `build` / `history --oracle rebuild` / `changes --tools
-  cambium,bazel-diff,tango --oracle rdeps,load` / `report`, then a final
-  `cambium-bench report`. The plan is `crates/bench/src/plan.rs`, also
+  `fetch` / `build` / `walk --tier full --peers bazel-diff,tango` /
+  `report`, then a final `cambium-bench report`. The plan is
+  `crates/bench/src/plan.rs`, also
   composed by the launcher screen; `cambium-bench run --dry-run` prints
   it. A failing step doesn't stop the rest; a failed fetch or build skips
   the rest of that subject. Run under `nohup` with a log; follow with
@@ -111,7 +111,7 @@ none of them. Unset means the default.
 | `CAMBIUM_REQUIRE_TOOLS` | the real-tool tests | unset | `1` fails (not skips) a "tool not installed" (CI nightly) |
 | `CAMBIUM_SMOKE_SCRATCH` | `crates/bench/tests/smoke_real_bazel.rs` | fresh temp dir | keep smoke test subjects between runs |
 | `SUBJECTS` | `run-published.sh`, `precheck.sh` | the five subjects | which subjects, space-separated |
-| `STEPS` | `run-published.sh` | `fetch build history changes report` | which steps |
+| `STEPS` | `run-published.sh` | `fetch build walk report` | which steps |
 | `SMOKE` | `run-published.sh` | `0` | `1` is the fifteen-minute pass into `bench-results-smoke/` |
 | `RESUME`, `FRESH` | `run-published.sh` | `0` | `--resume` continues existing results; `--fresh` moves the directory aside first. Neither: a directory holding results is refused |
 | `NO_BUILD` | `run-published.sh` | `0` | `1` skips the cargo build (sha preflight still runs) |
@@ -140,18 +140,18 @@ none of them. Unset means the default.
   redirect `store.path` and `--cache-dir` to force a cold build, or check
   `cambi inspect externals` against the expected change before trusting
   the number.
-- `changes-<pin>.json` keeps per-class counts and at most 20 example
-  labels per tool, not enough for a change set where a tool named 990
-  targets cambium lacked. Full sets live beside it, one directory per
-  change set: `bench-results/<subject>/changes/labels/<base>..<head>/`
-  holds `cambium.txt.zst`, one `<tool>.txt.zst` each, `oracle.txt.zst`
-  (when the rdeps oracle ran), and `classes.tsv.zst` (`tool`, `side`,
-  `class`, `label` for *every* disagreement). Read with `cambium-bench
-  labels <subject> --change-set <base>..<head>` (abbreviated revisions
-  fine), narrowed with `--tool`, `--class`, `--side`, or `--diff` for
+- `walk-<pin>.json` keeps per-tool summaries and a capped handful of
+  example labels, not enough for a step where a peer named 990 targets
+  cambium lacked. Full sets live beside it, one directory per step:
+  `bench-results/<subject>/walk/labels/<parent>..<head>/` holds
+  `cambium.txt.zst`, one `<peer>.txt.zst` each, `oracle.txt.zst` (when the
+  rdeps oracle ran), and `classes.tsv.zst` (`tool`, `side`, `class`,
+  `label` for *every* disagreement). Read with `cambium-bench labels
+  <subject> --change-set <parent>..<head>` (abbreviated revisions fine),
+  narrowed with `--tool`, `--class`, `--side`, or `--diff` for
   only-tool/only-cambium/both counts; needs no Bazel or checkout, so it
-  works on results tarred off the box. Globally invalidated change sets
-  store nothing: cambium answered `//...` and nothing was compared.
+  works on results tarred off the box. Globally invalidated steps store
+  nothing: cambium answered `//...` and nothing was compared.
 - The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
   driver scripts and logs under the repo (ignored) or on the box. The
   engine's own index cache sits in `/tmp/cambium-cache/` on the box, same
@@ -161,13 +161,13 @@ none of them. Unset means the default.
 - target-determinator checks the base revision out *in place* in whatever
   working directory it is given. The harness never gives it cambium's
   checkout: it gets `<subject>/scratch/target-determinator-head`, a worktree
-  kept between change sets so its Bazel server is warm. Deleting that
-  directory between change sets costs a full checkout and a cold server.
+  kept between steps so its Bazel server is warm. Deleting that
+  directory between steps costs a full checkout and a cold server.
 - macOS x86_64 cannot fetch some subjects' externals (toolchains_llvm,
   GraalVM, Docker-generated RBE configs): local tool timings are inflated
   and not publishable; bazelisk for the suite is
   `~/.cache/cambium/bin/bazelisk`.
-- A killed change-set run leaves tango worktrees registered on the subject
+- A killed walk leaves tango worktrees registered on the subject
   mirror; tango-cli recovers them on the next run (and says so on stderr),
   `git -C <mirror>.git worktree prune` is the manual fix. An `is not a
   working tree` line is *not* that failure (see the apollo item above).
@@ -179,7 +179,7 @@ none of them. Unset means the default.
   discards one. `watch` shows such a subject as `stale`. `WARN skipping an
   index this build cannot read` is the store's side of the same check, and
   benign.
-- Each workload stops its subject's Bazel servers when it ends
+- The walk stops its subject's Bazel servers when it ends
   (`crates/bench/src/servers.rs`); a revision worktree's server stops with
   the worktree. Before both existed, idle servers piled up to 35 JVMs and
   29.6 GB and the OOM killer took a run with its tmux session;
@@ -224,14 +224,14 @@ none of them. Unset means the default.
 What a healthy run reports that is not a regression. Anything not on this
 list is.
 
-- envoy fails 3 change sets on recall by design: `external_route`, the
+- envoy fails 3 steps on recall by design: `external_route`, the
   documented round trip through `@quiche` (METHODOLOGY.md, RESULTS.md).
-  The diagnosis lists at most 25 of a set's missing labels as probed
+  The diagnosis lists at most 25 of a step's missing labels as probed
   (`MAX_ROUTE_PROBES`); the rest are the same quic targets past the cap,
   not a second cause.
-- History replays of envoy and sourcegraph differ from the recorded run by
-  a few packages on a handful of commits: pin-versus-base drift, not an
-  engine change. Change-set replays are exact, and one that isn't is a
-  finding.
+- Replays of envoy and sourcegraph steps against the pin differ from the
+  recorded run by a few packages on a handful of steps: pin-versus-parent
+  drift, not an engine change. A replay against a step's archived parent is
+  exact, and one that isn't is a finding.
 - `WARN skipping an index this build cannot read`: see the gotcha above,
   benign.

@@ -472,13 +472,24 @@ named `synth:<preset>` emitted as a real workspace with a real history. Its
 own binary, it drives `cambi` the way a user does, by running it, so the
 benchmark measures the binary that ships.
 
+There is one workload, the *walk*: a first-parent walk from the start of a
+history window to the pin, cold-building an index at the start and carrying
+it one step per commit forward, the shape a CI incremental run has. Each
+step is scored against the reverse-dependency oracle for recall (did a tool
+miss anything) and tightness (how much wider than the truth), at the
+per-step wall CI pays. cambium is one row in those tables; the oracle is
+the only ground truth, and the peers are the explanation layer, not the
+yardstick. Two tiers share the walk: `correctness` (no peers, the oracle on
+a sample) is what every engine change pays for, and `full` (the oracle on
+every step, the peers on a stratified sample) is the box run.
+
 `cambium-bench run` is the whole thing from flags (per subject the fetch, the
-cold build, both workloads and the report), as `tools/bench/run-published.sh`
+cold build, the walk and the report), as `tools/bench/run-published.sh`
 runs it on the benchmark box; with no verb, on a terminal, it composes the same
 plan on a screen. Before that box is started,
 `cambium-bench pull-results` copies a finished run's results off it and
 `cambium-bench replay` reruns the engine's static stages over every recorded
-change set offline, in milliseconds each, against the answers the run
+step offline, in milliseconds each, against the answers the run
 recorded; the diffs it reads are written on the box by `cambium-bench replay
 --write-paths`.
 
@@ -498,7 +509,7 @@ crates/
   classify/        path -> package, invalidator rules, dirty-set computation
   engine/          a run: load, dirty, query, splice, direct set, walk
   synth/           synthetic graph generator, mutations, Bazel repo emitter
-  bench/           the benchmark: subjects, tools, oracles, workloads, report
+  bench/           the benchmark: subjects, tools, oracles, the walk, report
   cli/             the `cambi` binary
   bench-cli/       the `cambium-bench` binary, which drives `cambi`
   testkit/         the fixtures the crates' tests share; never shipped
@@ -572,11 +583,9 @@ Three, each for a reason found by testing:
   forward edges, so every in-edge of a file node comes from a rule: the
   reverse row *is* the consumer list, and a second copy would be redundant.
 
-Two smaller ones, neither affecting behaviour: the index header stores the
+One smaller one, not affecting behaviour: the index header stores the
 commit as a hex string rather than a fixed 20 bytes, so sha256 repositories
-and synthetic revision ids both fit; and `cambium-bench sweep --plot` writes
-its log-log chart with a small hand-rolled SVG writer rather than pulling in a
-plotting crate and its font stack for two dozen line segments.
+and synthetic revision ids both fit.
 
 One deferral that looks like a soundness question:
 `Packages::bzl_closure_hash` exists in the format but is written as zero. The
@@ -599,8 +608,10 @@ from the dirty-set step. It used to be `rbuildfiles`, which needs Sky Query
 machine that cannot fetch one it exits 3 with a partial answer, and that
 partial answer can be missing exactly the package that loads the changed file,
 so the run had to invalidate everything. That fired on 5 of 150 `bazel/bazel`
-commits. The benchmark still makes the call, as the `load` oracle over the
-static closure (`crates/bench/src/oracles/load.rs`).
+commits. A `load` oracle over the static closure lives at
+`crates/bench/src/oracles/load.rs`; the walk's rebuild oracle at the pin
+already catches a closure that drifted, and wiring the `load` oracle into the
+per-step checks is a follow-up.
 
 ## License
 

@@ -1,6 +1,6 @@
-//! The label sets a change-set comparison actually compared, kept on disk.
+//! The label sets a walk step actually compared, kept on disk.
 //!
-//! `changes-<pin>.json` records per-class *counts* and a capped handful of
+//! `walk-<pin>.json` records per-step *counts* and a capped handful of
 //! example labels, and that cap is a schema commitment: the file is read by
 //! the report and by published tooling, so it cannot grow to hold thousands
 //! of labels. But the counts are also where an investigation starts and
@@ -13,7 +13,7 @@
 //! per change set:
 //!
 //! ```text
-//! <results>/<subject>/changes/labels/<base>..<head>/
+//! <results>/<subject>/walk/labels/<parent>..<head>/
 //!     cambium.txt.zst        what cambium reported
 //!     <tool>.txt.zst         what each tool reported
 //!     oracle.txt.zst         what the rdeps oracle reached, when it ran
