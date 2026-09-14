@@ -23,7 +23,6 @@ use cambium_bench::run::{Labels, LabelsQuery};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::Context;
-use crate::DataFormat;
 
 /// Flags every `bench` subcommand shares.
 #[derive(ClapArgs, Clone, Default)]
@@ -105,8 +104,8 @@ pub enum Args {
         common: Common,
     },
     /// The whole run, as `tools/bench/run-published.sh` runs it: per subject
-    /// the fetch, the cold build, the two workloads and the report, then one
-    /// report over every subject. Each step is a child `cambium-bench`.
+    /// the fetch, the cold build, the walk and the report, then one report
+    /// over every subject. Each step is a child `cambium-bench`.
     ///
     /// A failed step never stops the run; a failed fetch or build skips the
     /// rest of that subject. The launcher (no verb, on a terminal) composes
@@ -367,10 +366,6 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
     }
-}
-
-fn timestamped() -> String {
-    format!("{}.json", cambium_bench::util::now_unix())
 }
 
 fn do_subjects(ctx: &Context, what: SubjectArgs) -> Result<u8> {

@@ -288,19 +288,6 @@ impl Plan {
         out
     }
 
-    /// The `--tools` value: cambium first and always, since naming it alone is
-    /// how a run measures cambium with no foil.
-    fn tool_flag(&self) -> String {
-        let mut names: Vec<&str> = vec![crate::tools::cambi::NAME];
-        names.extend(
-            self.tools
-                .iter()
-                .map(String::as_str)
-                .filter(|t| *t != crate::tools::cambi::NAME),
-        );
-        names.join(",")
-    }
-
     /// The `--peers` value: the configured tools without cambium.
     fn peer_flag(&self) -> String {
         self.tools
