@@ -125,9 +125,9 @@ pub enum Args {
     /// Read-only on the box. A subject already under --cache is pulled again
     /// only when the box's result files differ from the cached ones.
     PullResults(PullArgs),
-    /// Print the label sets a change-set comparison stored.
+    /// Print the label sets a walk step stored.
     ///
-    /// `changes-<pin>.json` keeps per-class counts and at most a handful of
+    /// `walk-<pin>.json` keeps per-class counts and at most a handful of
     /// example labels; the sets themselves are written whole beside it. This
     /// reads them back — offline, no Bazel, no checkout.
     Labels {
@@ -211,7 +211,7 @@ pub struct RunArgs {
     /// does not skip.
     #[arg(long = "subject", value_name = "S", value_delimiter = ',')]
     pub subjects: Vec<String>,
-    /// Which steps to take: fetch, build, history, changes, report.
+    /// Which steps to take: fetch, build, walk, report.
     /// Comma-separated; default: all of them.
     #[arg(long = "steps", value_delimiter = ',')]
     pub steps: Vec<String>,
@@ -477,7 +477,7 @@ pub fn plan_of(ctx: &Context, args: &RunArgs) -> Result<Plan> {
             .iter()
             .map(|s| {
                 StepKind::parse(s.trim()).ok_or_else(|| {
-                    anyhow::anyhow!("unknown step {s:?}: fetch, build, history, changes, report")
+                    anyhow::anyhow!("unknown step {s:?}: fetch, build, walk, report")
                 })
             })
             .collect::<Result<Vec<_>>>()?,

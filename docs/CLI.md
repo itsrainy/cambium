@@ -94,9 +94,10 @@ not the benchmark corpus: target count, cold build time and disk size,
 incremental answer time on a typical commit, how often a commit invalidates
 the whole graph.
 
-It's the benchmark's history workload in one process: a cold build at the
-last `--commits N` first-parent commits (30 default), one incremental step
-per commit to `REV` (HEAD default), a cold rebuild wherever a commit went
+It's an incremental walk over the repo's own history in one process: a cold
+build at the last `--commits N` first-parent commits (30 default), one
+incremental step per commit to `REV` (HEAD default), a cold rebuild wherever
+a commit went
 global, counted as its cost. Steps run in a detached worktree, never the
 working tree, one Bazel server. Per-commit time is the engine's own
 (`timings_ms.total`, as `affected` reports it), index held in memory
@@ -295,33 +296,33 @@ error from clap.
 
 ## The benchmark tools
 
-The harness (`subjects`, `history`, `changes`, `run`, offline `replay` and
-the `pull-results` feeding it, `labels`, `watch`, `report`, stage
-micro-benchmarks, subject manifest, `synth` generator) is its own binary,
-`cambium-bench` (`crates/bench-cli`), built from the `bench`/`synth`
-crates. It drives `cambi` by shelling out: `cambi index
-build`/`update`/`publish`, and `cambi affected --format json`, read via the
-engine's own report types. `replay` and the stage micro-benchmarks
-(`stages`, `sweep`, `regress`) link the engine directly instead, being
-white-box: one replays static stages against a stored index with no
-product run to measure, the others time a single in-memory stage. Its
-verbs:
+The harness (`subjects`, `walk`, `run`, offline `replay` and the
+`pull-results` feeding it, `labels`, `watch`, `report`, the subject
+manifest, and the synthetic generator that `crates/synth` still provides as
+a test fixture) is its own binary, `cambium-bench` (`crates/bench-cli`),
+built from the `bench`/`synth` crates. It drives `cambi` by shelling out:
+`cambi index build`/`update`/`publish`, and `cambi affected --format json`,
+read via the engine's own report types. `replay` links the engine directly
+instead, being white-box: it replays the static stages against a stored
+index with no product run to measure. Its verbs:
 
 ```
 cambium-bench                 # no verb, on a terminal: the launcher
 cambium-bench subjects {list, fetch, build}
-cambium-bench history  <subject>     # the history workload
-cambium-bench changes  <subject>     # the change-set workload, across tools
+cambium-bench walk     <subject>     # the walk: one workload, one tier
 cambium-bench run                    # the whole plan from flags
-cambium-bench stages|sweep|regress   # engine stage micro-benchmarks
 cambium-bench replay   <subject>     # the static stages, offline
 cambium-bench pull-results           # copy a run's results off the box
-cambium-bench labels   <subject>     # the label sets a comparison kept
+cambium-bench labels   <subject>     # the label sets a step kept
 cambium-bench watch                  # follow a run
 cambium-bench report                 # regenerate docs/RESULTS.md
 ```
 
-What each workload measures and may claim is
+The verbs `history`, `changes`, `stages`, `sweep`, `regress` and `synth`
+were removed with issue #14: one workload (the walk) replaced the two, and
+the in-memory stage micro-benchmarks were retired. `synth:<preset>` is
+still a walk target, and the launcher still offers the presets, but there
+is no `synth` verb. What the walk measures and may claim is
 [METHODOLOGY.md](METHODOLOGY.md). The live matrix is that binary's front
 door, not a `cambi` verb, following the output rules here voluntarily.
 
@@ -338,23 +339,22 @@ finished, or copied elsewhere. `--once` prints the table as text and exits;
 at, subjects}`).
 
 `cambium-bench` with no verb, on a terminal, is the launcher composing a
-run: the manifest's subjects, synthetic presets, tools, workloads, and a
-size (small/medium/large, large being the published run), exact command
-lines shown before anything runs. On confirm it spawns those lines
-(ordinary `cambium-bench history ...` / `changes ...`) as child processes,
-switching to the watch screen with stderr tail in the footer; `q` asks
-before killing a child. It reimplements no workload. `cambium-bench run` is
-the same plan from flags (`--subject`, `--steps`, `--smoke`, `--resume`,
-`--fresh`, `--require-sha`), what `tools/bench/run-published.sh` calls,
-defined once in `crates/bench/src/plan.rs`. In a pipe, no verb is the usual
-usage error.
+run: the manifest's subjects, the synthetic presets, the peers, and a size
+(small/medium/large, large being the box run at `--tier full`), exact
+command lines shown before anything runs. On confirm it spawns those lines
+(ordinary `cambium-bench walk ...`) as child processes, switching to the
+watch screen with stderr tail in the footer; `q` asks before killing a
+child. It reimplements no workload. `cambium-bench run` is the same plan
+from flags (`--subject`, `--steps`, `--smoke`, `--resume`, `--fresh`,
+`--require-sha`), what `tools/bench/run-published.sh` calls, defined once in
+`crates/bench/src/plan.rs`. In a pipe, no verb is the usual usage error.
 
 Recorded results are never continued or discarded unasked. Over a results
 directory already holding results, `run` refuses unless given `--resume` or
 `--fresh` (moves it aside to `<dir>-<timestamp>`), the launcher's review
-asking via `r`/`f`. `history`/`changes` alone refuse a result recorded for
-the pin unless given `--resume` or `--restart`; a `--resume` that can't
-continue (another build's result, range) fails, not restarts.
+asking via `r`/`f`. `walk` alone refuses a result recorded for the pin
+unless given `--resume` or `--restart`; a `--resume` that can't continue
+(another build's result, range) fails, not restarts.
 
 `cambium-bench pull-results` copies a subject's results off the box for
 offline replay: the index at the pin, recorded results, archived base/head

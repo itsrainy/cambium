@@ -24,8 +24,8 @@
 //!   killed run resumable.
 //!
 //! Beside the workloads sits [`labels`], which is not part of a run's
-//! result: it is the label sets a change-set comparison compared, written
-//! whole beside `changes-<pin>.json` so a disagreement can be examined after
+//! result: it is the label sets a walk step compared, written whole beside
+//! `walk-<pin>.json` so a disagreement can be examined after
 //! the fact rather than through the twenty examples the JSON has room for.
 //!
 //! Beside them sits [`progress`], which is not a result either: it is the one

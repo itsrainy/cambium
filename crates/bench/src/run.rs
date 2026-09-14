@@ -353,7 +353,7 @@ pub enum Labels {
 /// `labels`: the stored sets of one change set, filtered. Offline: nothing
 /// here runs a Bazel or opens a checkout.
 pub fn read_labels(run: &SubjectRun<'_>, q: &LabelsQuery) -> Result<Labels> {
-    let dir = labels::resolve(&run.workload_path("changes"), &q.change_set)?;
+    let dir = labels::resolve(&run.workload_path("walk"), &q.change_set)?;
     if q.diff {
         return Ok(Labels::Diff(labels::diff(&dir)?));
     }

@@ -2,26 +2,28 @@
 
 Where an `affected` run spends its time, and where an index spends its bytes.
 
-Both are engine numbers, not benchmark results: they come from
-`cambium-bench stages` and `cambi inspect stats` over *generated* graphs,
+Both are engine numbers, not benchmark results: they came from the engine's
+in-memory stage timings and `cambi inspect stats` over *generated* graphs,
 with no Bazel and no repository, existing to explain the design rather than
 score it. What the tools do on real repositories is
 [RESULTS.md](RESULTS.md); the methodology is [METHODOLOGY.md](METHODOLOGY.md).
 
+> The in-harness micro-benchmark verbs (`stages`, `sweep`, `regress`) and
+> the `synth build-index` helper that produced these numbers were retired
+> with issue #14, when the harness collapsed to the single walk workload.
+> The design explanation below (where a run spends its time, where an index
+> spends its bytes) is still true and useful, so these numbers stand as a
+> historical snapshot. A criterion bench could regenerate the stage timings
+> later if a cost claim needs fresh ones; nothing in the harness produces or
+> gates them today.
+
 Everything below is from one machine (an **Intel Xeon @ 2.10 GHz, 4 cores,
 16 GiB**), a shared cloud VM rather than a build fleet worker. The spec's
-absolute targets assume 16 cores, so treat these as a lower bound. Raw
-result files are checked in under `benchmarks/`, doubling as the reference
-`cambium-bench regress` gates against. Every result records the preset, the
-spec hash of the generated graph, the tool's git sha and a machine
-fingerprint; `cambium-bench regress` refuses to compare runs from different
-machines rather than reporting noise as a regression:
-
-```console
-$ cargo build --release -p cambium-cli -p cambium-bench-cli
-$ ./target/release/cambium-bench stages synth:medium --runs 5 --out mine.json
-$ ./target/release/cambium-bench regress benchmarks/inmemory-small-medium.json mine.json
-```
+absolute targets assume 16 cores, so treat these as a lower bound. The raw
+result files that produced these tables remain checked in under
+`benchmarks/`, each recording the preset, the spec hash of the generated
+graph, the tool's git sha and a machine fingerprint; they are a frozen
+record now, no longer regenerated or gated against.
 
 ## Where the time actually goes
 
@@ -106,13 +108,9 @@ treatment would remove it, worth doing once something needs the last 20%.
 
 ## What an index spends its bytes on
 
-`cambi inspect stats` accounts for every byte in the file. Two indexes built
-straight from the generators, no Bazel needed:
-
-```console
-$ cambium-bench synth build-index --spec large --out large.bin
-$ cambi inspect stats large.bin
-```
+`cambi inspect stats` accounts for every byte in the file. The two indexes
+below were built straight from the generators, with no Bazel needed, and
+`cambi inspect stats <index>.bin` produced the accounting:
 
 | component | `large` (258.6 MiB) | `xl` (1.03 GiB) |
 |---|---:|---:|
