@@ -136,6 +136,48 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
+    /// The walk: one first-parent traversal to the pin, the index carried
+    /// step to step, every tool scored against the rdeps oracle for recall
+    /// and tightness. Two tiers share it: `correctness` (no peers, the oracle
+    /// on a sample) is what every engine change pays for; `full` (the oracle
+    /// on every step, the peers on a stratified sample) is the box run.
+    Walk {
+        /// A name from subject_repos.toml, or synth:<preset>.
+        subject: String,
+        /// correctness or full.
+        #[arg(long, default_value = "full")]
+        tier: String,
+        /// First-parent steps before the pin. Defaults to the subject's
+        /// history window.
+        #[arg(long)]
+        steps: Option<usize>,
+        /// The peers to run alongside cambium: bazel-diff, tango,
+        /// target-determinator, or `none`. Comma-separated; default: the
+        /// tier's own (peers on `full`, none on `correctness`).
+        #[arg(long = "peers", value_delimiter = ',')]
+        peers: Vec<String>,
+        /// Run the rdeps oracle on this many sampled steps; 0 is every step.
+        #[arg(long)]
+        oracle_sample: Option<usize>,
+        /// Run the peers on this many sampled steps.
+        #[arg(long)]
+        peer_sample: Option<usize>,
+        /// The sampler's minimum per tag.
+        #[arg(long)]
+        per_tag: Option<usize>,
+        /// Cold-build and compare every N steps, on top of the pin; 0 is only
+        /// at the pin.
+        #[arg(long)]
+        rebuild_every: Option<usize>,
+        /// Continue the walk already recorded for this pin.
+        #[arg(long)]
+        resume: bool,
+        /// Discard the walk already recorded for this pin and walk again.
+        #[arg(long)]
+        restart: bool,
+        #[command(flatten)]
+        common: Common,
+    },
     /// The whole run, as `tools/bench/run-published.sh` runs it: per subject
     /// the fetch, the cold build, the two workloads and the report, then one
     /// report over every subject. Each step is a child `cambium-bench`.
@@ -448,6 +490,46 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             println!("{}", verbs::compare_summary(&compared.result));
             println!("{}", compared.path.display());
             Ok(if compared.result.summary.pass {
+                crate::EXIT_OK
+            } else {
+                crate::EXIT_ERROR
+            })
+        }
+        Args::Walk {
+            subject,
+            tier,
+            steps,
+            peers,
+            oracle_sample,
+            peer_sample,
+            per_tag,
+            rebuild_every,
+            resume,
+            restart,
+            common,
+        } => {
+            let session = ctx.session(&common)?;
+            let run = session.run_subject(&subject)?;
+            let walked = verbs::run_walk(
+                &run,
+                &verbs::WalkRequest {
+                    tier,
+                    steps,
+                    peers,
+                    overrides: cambium_bench::walk::Overrides {
+                        oracle_sample,
+                        peer_sample,
+                        per_tag,
+                        rebuild_every,
+                        peers: None,
+                    },
+                    on_existing: verbs::OnExisting::from_flags(resume, restart),
+                },
+                &ctx.tools,
+            )?;
+            println!("{}", verbs::walk_summary(&walked.result));
+            println!("{}", walked.path.display());
+            Ok(if walked.result.summary.pass {
                 crate::EXIT_OK
             } else {
                 crate::EXIT_ERROR

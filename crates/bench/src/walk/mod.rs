@@ -25,6 +25,7 @@
 //! `driver` once the loop is ported off [`crate::history`].
 
 pub mod driver;
+pub mod live;
 pub mod model;
 pub mod sampling;
 pub mod steps;
@@ -33,5 +34,6 @@ pub mod tier;
 pub use model::{StepRecord, WalkResult, WalkSummary};
 pub use sampling::{sample, Coverage, Sample};
 pub use steps::{steps, tag_steps, Probes, Step, Tag};
-pub use driver::{walk, LiveChecks, NoLiveChecks, StepContext, WalkOptions};
+pub use driver::{score, walk, LiveChecks, NoLiveChecks, StepContext, WalkOptions};
+pub use live::BazelChecks;
 pub use tier::{Overrides, Schedule, Tier};

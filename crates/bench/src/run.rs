@@ -458,6 +458,156 @@ pub fn compare(
     })
 }
 
+// -------------------------------------------------------------------- walk
+
+/// What `walk` was asked to do.
+#[derive(Clone, Debug, Default)]
+pub struct WalkRequest {
+    pub tier: String,
+    /// `--steps`; the subject's window when absent.
+    pub steps: Option<usize>,
+    /// `--peers`, as typed; empty is the tier's default, `none` turns them
+    /// off.
+    pub peers: Vec<String>,
+    pub overrides: crate::walk::Overrides,
+    pub on_existing: OnExisting,
+}
+
+/// What a walk answered with.
+#[derive(Clone, Debug)]
+pub struct Walked {
+    pub result: crate::walk::WalkResult,
+    pub path: PathBuf,
+}
+
+/// The one walk: cambium and, per the tier's schedule, the rdeps oracle and
+/// the peers, over a first-parent window to the pin.
+pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocations) -> Result<Walked> {
+    let tier = crate::walk::Tier::parse(&req.tier)
+        .ok_or_else(|| anyhow::anyhow!("unknown tier {:?}: correctness, full", req.tier))?;
+    let schedule = tier.schedule(&req.overrides);
+
+    // The peers are the named tools, cambium excluded (it is the driver, not
+    // a peer). `--peers none` and a schedule with peers off both mean none.
+    let peers_off = req.peers.iter().any(|p| p == "none") || !schedule.peers;
+    let wanted = if peers_off { Vec::new() } else { tools::wanted(&req.peers)? };
+    let owned: Vec<Box<dyn tools::Tool>> = wanted
+        .iter()
+        .map(|n| tools::open(n, locations))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let tool_refs: Vec<&dyn tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
+
+    let checkout = run.checkout()?;
+    let engine = checkout.engine(&run.entry, run.version())?;
+    let _servers = crate::servers::StopOnDrop::subject(
+        &checkout.dir,
+        &run.results.join("scratch"),
+        engine.bazel().startup_flags(),
+    );
+    let cambi = run.cambi(&checkout)?;
+
+    let range = req
+        .steps
+        .or(run.session.quick.then_some(crate::QUICK_COMMITS))
+        .unwrap_or(run.entry.history_window);
+    let (paths, globs) = run.entry.invalidator_rules();
+    let probes = crate::walk::Probes {
+        // Best effort: three of the four content tags need no index, and a
+        // fresh subject has none. Missing hubs cost the `hub` tag its steps
+        // and nothing else.
+        hub_packages: run.hub_packages().unwrap_or_default(),
+        invalidator_paths: paths,
+        invalidator_globs: globs,
+    };
+    let (commits, steps) = crate::walk::steps(&checkout.repo, &run.entry.pin, range, &probes)?;
+    anyhow::ensure!(steps.len() >= 1, "a walk needs at least one step");
+
+    let oracle_sample = if schedule.oracle_every_step {
+        crate::walk::Sample::all(&steps)
+    } else {
+        crate::walk::sample(&steps, run.session.seed, schedule.per_tag, Some(schedule.oracle_sample))
+    };
+    let peer_sample = if peers_off {
+        crate::walk::Sample::default()
+    } else {
+        match schedule.peer_sample {
+            Some(n) => crate::walk::sample(&steps, run.session.seed, schedule.per_tag, Some(n)),
+            None => crate::walk::Sample::all(&steps),
+        }
+    };
+
+    let results = run.workload("walk")?;
+    let bazel_used = engine.bazel().version();
+    let environment = crate::env::Environment {
+        machine: crate::harness::Machine::detect(),
+        bazel_version_used: bazel_used.lines().next().unwrap_or("").trim().to_string(),
+        cambi_version: cambi.version().to_string(),
+        tool_sha: crate::util::tool_sha().to_string(),
+        engine_id: String::new(),
+        config_hash: cambium_engine::inspect::hex(&engine.config().hash()),
+        output_bases: Default::default(),
+    };
+    let progress = run.progress("walk", Step::History, Some(cambi.version().to_string()));
+    let opts = crate::walk::WalkOptions {
+        repo_id: run.entry.id.clone(),
+        pin: run.entry.pin.clone(),
+        results_dir: results.clone(),
+        state_dir: run.results.clone(),
+        bazel_version: run.version().unwrap_or_default().to_string(),
+        schedule,
+        oracle_sample,
+        peer_sample,
+        environment,
+        publish: true,
+        resume: req.on_existing == OnExisting::Resume,
+        diff_cap: 50,
+        progress: Some(progress),
+    };
+    let path = crate::walk::WalkResult::path(&results, &run.entry.pin, run.version());
+    refuse_existing(&path, "walk", req.on_existing, || {
+        crate::walk::WalkResult::read(&path).ok().map(|w| w.steps.len())
+    })?;
+
+    let driver = history::CambiDriver {
+        checkout: &checkout,
+        cambi: &cambi,
+    };
+    let live = crate::walk::BazelChecks {
+        engine: &engine,
+        checkout: &checkout,
+        tools: &tool_refs,
+        results_dir: &results,
+        scratch: &run.results.join("scratch"),
+        oracle_k: 0,
+        seed: run.session.seed,
+    };
+    tracing::info!(
+        tier = tier.name(),
+        steps = steps.len(),
+        peers = tool_refs.len(),
+        oracle_steps = opts.oracle_sample.len(),
+        "walking"
+    );
+    let result = crate::walk::walk(&engine, &driver, &live, &commits, &steps, &opts)?;
+    Ok(Walked { result, path })
+}
+
+/// A one-line summary of a walk, for the terminal.
+pub fn walk_summary(r: &crate::walk::WalkResult) -> String {
+    let s = &r.summary;
+    format!(
+        "{} steps, {} with the oracle, worst recall {:.4}, walk p50 {} ms; {}",
+        s.steps,
+        s.steps_with_oracle,
+        s.soundness.worst_recall,
+        s.cost.cambium_walk.p50_ms,
+        if s.pass { "PASS" } else { "FAIL" }
+    )
+}
+
 /// The change sets to compare: an explicit file, else the one a previous run
 /// wrote for this pin, else a fresh selection with the requested kinds.
 fn load_change_sets(run: &SubjectRun<'_>, req: &CompareRequest) -> Result<ChangeSetSet> {
