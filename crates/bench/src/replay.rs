@@ -777,31 +777,54 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
             .extend(undeclared_repositories(base_rev, texts, &ext.repos));
     }
 
-    let dirty = match dirty_packages(base, cfg, changes, &mut ext) {
-        Ok(d) => d,
-        Err(reason) => {
+    // The engine's own dirty stage, over an engine that has no checkout and
+    // no Bazel: the routing here is the product's, not a copy of it.
+    let engine = offline_engine(cfg);
+    let req = cambium_engine::AffectedRequest {
+        include_manual: crate::tools::cambi::INCLUDE_MANUAL,
+        explain: false,
+        ..cambium_engine::AffectedRequest::new(base_rev, head_rev)
+    };
+    let stage = match cambium_engine::dirty_stage(&engine, base, &req, changes, &mut ext) {
+        Ok(s) => s,
+        Err(e) => {
+            // The one failure the stage has is a configuration whose rules do
+            // not compile, which is global with that reason.
             out.global = true;
-            out.global_reason = Some(reason);
+            out.global_reason = Some(e.to_string());
             return out;
         }
     };
-    let mut by_package = dirty.by_package;
-
-    out.repos = attribute_repos(base, changes, &ext);
-    let mut external_nodes: Vec<u32> = Vec::new();
-    if !dirty.global && !ext.repos.is_empty() {
-        let r = externals::reach(base, &ext.repos, &ext.load_repos);
-        external_nodes = r.nodes;
-        let routes = package_routes(base, &ext.load_repos);
-        for p in r.packages {
-            let rule = routes
+    let dirty = Dirty {
+        global: stage.global.is_some() || stage.dirty.global,
+        reason: stage.global.as_ref().map(|r| r.to_string()),
+    };
+    // What each package is dirty *by*, as a diagnostic over the engine's
+    // answer: a `.bzl` in its load closure, one of the two external routes,
+    // or a changed file of its own.
+    let routes = package_routes(base, &ext.load_repos);
+    let reached: BTreeSet<String> = if !dirty.global && !ext.repos.is_empty() {
+        externals::reach(base, &ext.repos, &ext.load_repos).packages
+    } else {
+        BTreeSet::new()
+    };
+    let mut by_package: BTreeMap<String, PackageRule> = BTreeMap::new();
+    for p in &stage.dirty.dirty {
+        let rule = if stage.bzl_dirty.contains(p) {
+            PackageRule::BzlClosure
+        } else if reached.contains(p) {
+            routes
                 .get(p.as_str())
                 .copied()
-                .unwrap_or(PackageRule::ExternalBzlClosure);
-            by_package.entry(p).or_insert(rule);
-        }
+                .unwrap_or(PackageRule::ExternalBzlClosure)
+        } else {
+            PackageRule::ChangedFile
+        };
+        by_package.insert(p.clone(), rule);
     }
+    let external_nodes: Vec<u32> = stage.external_nodes.iter().map(|(id, _)| *id).collect();
 
+    out.repos = attribute_repos(base, changes, &ext);
     out.global = dirty.global;
     out.global_reason = dirty.reason;
     out.external_direct_targets = external_nodes.len();
@@ -941,142 +964,27 @@ fn undeclared_repositories(
     ))
 }
 
-/// What the dirty-set stage concluded, before the external reach is added.
-struct DirtySet {
-    by_package: BTreeMap<String, PackageRule>,
+/// What the dirty stage concluded, in the two fields the comparison reads.
+struct Dirty {
     global: bool,
     reason: Option<String>,
 }
 
-/// The dirty-set stage: the invalidators, the changed files' packages, and
-/// the changed `.bzl` files through the static closure — including the
-/// workspace-level ones, whose repositories join `ext`. `Err` is a
-/// configuration that does not compile, which is global with that reason.
-fn dirty_packages(
-    base: IndexRef<'_>,
-    cfg: &Config,
-    changes: &[Change],
-    ext: &mut externals::Externals,
-) -> Result<DirtySet, String> {
-    let mut matchers = cambium_classify::Matchers::compile(&cfg.rules())
-        .map_err(|e| format!("invalidator rules do not compile: {e}"))?;
-    matchers.exempt(ext.handled.clone());
-    let mut packages = cambium_classify::PackageSet::from_index(base);
-    let mut dirty = cambium_classify::dirty_set(
-        changes,
-        &mut packages,
-        &matchers,
-        &cambium_classify::IndexConsumers(base),
-    );
-
-    let mut by_package: BTreeMap<String, PackageRule> = BTreeMap::new();
-    for p in &dirty.dirty {
-        by_package.insert(p.clone(), PackageRule::ChangedFile);
-    }
-
-    let mut global = dirty.global;
-    // The classifier hands back the matching path; the engine's typed
-    // reason puts it into the words the report and the histogram carry.
-    let mut reason = dirty
-        .invalidator
-        .as_ref()
-        .map(|path| cambium_engine::GlobalReason::Invalidator { path: path.clone() }.to_string());
-
-    // A change inside a nested Bazel repository, routed the way the engine
-    // routes it: to the repository that directory is, where the index says
-    // which; nowhere, when the directory is bazelignored and nothing maps it
-    // (Bazel does not read it and no repository rule names it); and otherwise
-    // to a global invalidation that names the directory. A replay that
-    // ignored `nested` would report fewer targets than the engine does, which
-    // is the one direction a precheck must not drift in; one that escalated
-    // the ignored case would report a global the engine does not, which is
-    // the drift that hid nothing but cost three envoy change sets a false
-    // divergence.
-    for (dir, paths) in &dirty.nested {
-        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        let mapped = cfg
-            .externals
-            .enabled
-            .then(|| externals::repo_rooted_at(base, dir))
-            .flatten();
-        match mapped {
-            Some(repo) => {
-                ext.by_input += 1;
-                externals::dirty_by_input(base, ext, repo, &paths);
-            }
-            None if base.boundary_is_bazelignored(dir) => {
-                dirty.ignored += paths.len();
-            }
-            None => {
-                global = true;
-                reason = Some(
-                    cambium_engine::GlobalReason::Externals(
-                        cambium_engine::ExternalsCause::NestedRepositoryUnmapped {
-                            dir: dir.clone(),
-                        },
-                    )
-                    .to_string(),
-                );
-            }
-        }
-    }
-
-    // Changed `.bzl` files, from the static closure. The engine escalates when
-    // the index carries no closure or when a changed `.bzl` is loaded outside
-    // any package and no repository owns it; both are reproduced here.
-    if !global && !dirty.changed_bzl.is_empty() {
-        if !base.bzl_closure {
-            global = true;
-            reason = Some("the base index carries no static .bzl load closure".into());
-        } else {
-            for path in &dirty.changed_bzl {
-                let Some(id) = base.bzl_id(path) else {
-                    continue;
-                };
-                // A workspace-level `.bzl` can define repository rules, whose
-                // output is not in the index at all. The index says which
-                // repositories each one defines, and the rule's implementation
-                // moving means anything it writes into them can have moved —
-                // so they join `load_repos`, not just `repos`. Missing this
-                // was worth about eleven hundred packages a change set on
-                // envoy, where every dirty repository arrives this way.
-                if base.bzl_in_workspace(id) && cfg.externals.enabled {
-                    match externals::repos_of_workspace_bzl(base, id) {
-                        Some(repos) => {
-                            ext.by_bzl += repos.len();
-                            ext.load_repos.extend(repos.iter().cloned());
-                            ext.repos.extend(repos);
-                        }
-                        None => {
-                            global = true;
-                            reason = Some(format!(
-                                "a changed .bzl is loaded outside any package and no repository \
-                                 owns it: {path}"
-                            ));
-                        }
-                    }
-                }
-                for &p in base.bzl_consumers(id) {
-                    if base.package_tombstoned(p) {
-                        continue;
-                    }
-                    by_package
-                        .entry(base.package_name(p).to_string())
-                        .or_insert(PackageRule::BzlClosure);
-                }
-            }
-        }
-    }
-
-    if let Some(cause) = &ext.cause {
-        global = true;
-        reason = Some(cause.to_string());
-    }
-    Ok(DirtySet {
-        by_package,
-        global,
-        reason,
-    })
+/// An engine over `cfg` with no checkout and no Bazel, for the dirty stage.
+///
+/// The replay never runs Bazel and never fetches, so the store the subject's
+/// configuration names is not opened either: a replay must not reach for a
+/// bucket. What the engine contributes is its rules, its limits and its
+/// diagnostics sink.
+fn offline_engine(cfg: &Config) -> cambium_engine::Engine {
+    let mut cfg = cfg.clone();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::None;
+    let nowhere = std::path::PathBuf::from("/nonexistent/cambium-replay");
+    cambium_engine::Engine::with_parts(
+        cfg,
+        cambium_diff::Repo::new(nowhere.clone()),
+        cambium_bazel::Bazel::at(nowhere, Some("/nonexistent/bazel")),
+    )
 }
 
 /// Which of the two rule (2) routes reaches each package.
@@ -1226,7 +1134,7 @@ fn lower_bound(base: IndexRef<'_>, changes: &[Change], external_nodes: &[u32]) -
         base,
         &seeds,
         &cambium_index::WalkOptions {
-            include_manual: false,
+            include_manual: crate::tools::cambi::INCLUDE_MANUAL,
             explain: false,
             max_depth: None,
         },
