@@ -1,8 +1,16 @@
 #!/bin/bash
-# Check an engine change against the real corpus, offline, in minutes.
+# Tier 1: check an engine change against the real corpus before the box run.
+#
+# Two halves. The offline half replays each subject's recorded run against a
+# stored index in minutes and needs no Bazel. The live half is a short
+# correctness walk (`walk --tier correctness`) that fetches the subject and
+# runs Bazel and cambi against the rdeps oracle; it is the slow part and
+# requires Bazel installed. WALK=0 runs the offline half alone.
 #
 #   tools/bench/precheck.sh                      # every cached subject
 #   SUBJECTS="envoy apollo" tools/bench/precheck.sh
+#   WALK=0 tools/bench/precheck.sh               # offline replay only, no Bazel
+#   WALK_STEPS=40 tools/bench/precheck.sh        # a longer correctness walk
 #   SAVE_BASELINE=1 tools/bench/precheck.sh      # record today's answers
 #   BASELINE=1 tools/bench/precheck.sh           # gate against that record
 #   REDERIVE=1 tools/bench/precheck.sh           # also re-derive the externals
@@ -35,6 +43,10 @@ LOCAL_MIRRORS=${LOCAL_MIRRORS:-${CAMBIUM_SUBJECTS_DIR:-$HOME/.cache/cambium/subj
 REDERIVE=${REDERIVE:-0}
 BASELINE=${BASELINE:-0}
 SAVE_BASELINE=${SAVE_BASELINE:-0}
+# Tier 1's live correctness walk. On by default (needs Bazel and cambi and a
+# subject checkout); WALK=0 for an offline-only engine change.
+WALK=${WALK:-1}
+WALK_STEPS=${WALK_STEPS:-20}
 # How to reach the box; the defaults are `cambium-bench pull-results`'s own.
 PEM=${PEM:-$HOME/.ssh/cambium-corpus.pem}
 export AWS_REGION=${AWS_REGION:-us-east-2}
@@ -74,6 +86,14 @@ for s in $SUBJECTS; do
   # head index.
   if [ "$REDERIVE" = 1 ] && [ -d "$mirror" ]; then
     "$CAMBIUM_BENCH" replay "$s" --results-dir "$CACHE" --repo "$mirror" --head-check || fail=1
+  fi
+
+  # Tier 1's live half: a short correctness walk against the rdeps oracle.
+  # Unlike the replay above it fetches the subject and runs Bazel and cambi,
+  # so it is the slow part and needs Bazel installed. WALK=0 skips it (an
+  # engine change touching only the offline stages does not need it).
+  if [ "$WALK" = 1 ]; then
+    "$CAMBIUM_BENCH" walk "$s" --tier correctness --steps "$WALK_STEPS" --restart || fail=1
   fi
 done
 
