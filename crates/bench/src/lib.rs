@@ -89,10 +89,11 @@ pub mod watch;
 /// `cambium_engine::report::SCHEMA_VERSION`, which meant a benchmark field could
 /// not be renamed without claiming the `cambi affected` JSON had changed.
 /// Bumped to 6 by the rename to the methodology's vocabulary — `pairs` became
-/// `change_sets`, `producers` became `tools`, and the files moved from
-/// `corpus-results/<id>/` to `bench-results/<subject>/<workload>/` — so a
-/// result file written before it is not readable here.
-pub const RESULT_SCHEMA: u32 = 6;
+/// `change_sets`, `producers` became `tools` — and to 7 by the one-walk
+/// redesign (issue #14), which replaced the `history`/`changes` result shapes
+/// with `walk-<pin>.json`. Old schema-6 files are not migrated; they stay in
+/// place and this cambium refuses to read them.
+pub const RESULT_SCHEMA: u32 = 7;
 
 /// How many first-parent commits a history workload covers when nobody says.
 ///

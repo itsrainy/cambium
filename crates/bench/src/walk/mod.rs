@@ -24,6 +24,7 @@
 //! the pure arithmetic that rolls it up. The driver that runs it lives in
 //! `driver` once the loop is ported off [`crate::history`].
 
+pub mod driver;
 pub mod model;
 pub mod sampling;
 pub mod steps;
@@ -32,4 +33,5 @@ pub mod tier;
 pub use model::{StepRecord, WalkResult, WalkSummary};
 pub use sampling::{sample, Coverage, Sample};
 pub use steps::{steps, tag_steps, Probes, Step, Tag};
+pub use driver::{walk, LiveChecks, NoLiveChecks, StepContext, WalkOptions};
 pub use tier::{Overrides, Schedule, Tier};

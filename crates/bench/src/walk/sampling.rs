@@ -4,9 +4,11 @@
 //! Two populations are drawn this way. In the correctness tier the live
 //! `rdeps` oracle runs on a sample of the steps; in the full tier the peers
 //! run on a sample. Both want the same thing: every tag represented, the
-//! choice a pure function of the seed and the steps, and a bigger sample a
-//! superset of a smaller one at the same seed, so a run that grew its sample
-//! did not throw its earlier steps away.
+//! choice a pure function of the seed and the steps, and a bigger total a
+//! superset of a smaller one at the same seed and per-tag minimum, so a run
+//! that raised `--steps` or its sample did not throw earlier steps away.
+//! (Raising the per-tag minimum against a binding total can trade one step
+//! for another, since the minima are filled before the cap.)
 //!
 //! The rank of a step is a hash of the seed and its head sha, so which steps
 //! are chosen does not depend on how many steps the window holds: `--steps
@@ -103,8 +105,9 @@ fn rank(seed: u64, head: &str) -> u64 {
 /// Draws the sample: at least `per_tag` steps of every tag the window
 /// holds, then the lowest-ranked remaining steps up to `total`.
 ///
-/// Pure in `(steps, seed, per_tag, total)`. Raising `total` or `per_tag`
-/// only ever adds steps.
+/// Pure in `(steps, seed, per_tag, total)`. Raising `total` at a fixed
+/// per-tag minimum only adds steps; so does raising `per_tag` when no total
+/// cap binds.
 pub fn sample(steps: &[Step], seed: u64, per_tag: usize, total: Option<usize>) -> Sample {
     let mut order: Vec<usize> = (0..steps.len()).collect();
     order.sort_by_key(|&i| (rank(seed, &steps[i].head), i));
@@ -195,15 +198,17 @@ mod tests {
     }
 
     #[test]
-    fn a_bigger_sample_is_a_superset_of_a_smaller_one() {
+    fn a_bigger_total_is_a_superset_at_the_same_seed_and_per_tag() {
         let w = window();
         let small = sample(&w, 3, 2, Some(10));
         let big = sample(&w, 3, 2, Some(40));
         assert!(small.chosen.is_subset(&big.chosen));
-        let more_per_tag = sample(&w, 3, 4, Some(10));
-        assert!(small.chosen.is_subset(&more_per_tag.chosen));
+        // Raising per_tag with no binding cap only adds steps.
+        let base = sample(&w, 3, 2, None);
+        let more = sample(&w, 3, 4, None);
+        assert!(base.chosen.is_subset(&more.chosen));
         // No cap is every step.
-        assert_eq!(sample(&w, 3, 2, None).len(), w.len());
+        assert_eq!(base.len(), w.len());
     }
 
     /// The rank is by sha, so a step keeps its place when the window grows:
