@@ -160,19 +160,71 @@ pub(crate) struct Run<'a> {
 }
 
 /// The dirty set with everything the query and the direct set need from it.
-pub(crate) struct DirtyStage {
-    pub(crate) dirty: DirtySet,
+///
+/// Public because it is also the answer [`dirty_stage`] hands an offline
+/// caller: the benchmark's replay holds a recorded run against it, and the
+/// fields are what that comparison reads.
+pub struct DirtyStage {
+    pub dirty: DirtySet,
     /// The package layout at head, for resolving changed files to labels.
-    pub(crate) packages: PackageSet,
+    pub packages: PackageSet,
     /// Packages dirtied through a changed `.bzl` in their load closure.
-    pub(crate) bzl_dirty: BTreeSet<String>,
+    pub bzl_dirty: BTreeSet<String>,
     /// Leaf nodes of the external repositories that moved, as `(id, label)`.
-    pub(crate) external_nodes: Vec<(u32, String)>,
+    pub external_nodes: Vec<(u32, String)>,
     /// How many packages each moved repository contributed, for the overflow
     /// log.
-    pub(crate) packages_by_repo: BTreeMap<String, usize>,
+    pub packages_by_repo: BTreeMap<String, usize>,
     /// Set when the answer is `//...`; the other fields are then irrelevant.
-    pub(crate) global: Option<GlobalReason>,
+    pub global: Option<GlobalReason>,
+}
+
+/// The dirty stage alone, over inputs that need no Bazel and no checkout.
+///
+/// This is [`Run::dirty`] as [`compute`] runs it -- the classifier over the
+/// diff, nested repositories, the changed `.bzl` files through the load
+/// closure, the external repositories' reach -- with a querier that refuses
+/// to be asked. The dirty stage never queries; `query()` is the stage that
+/// does, and it is not run here. What the caller gets is therefore the
+/// engine's own routing, not a copy of it: the benchmark's offline replay
+/// used to reproduce this stage by hand and drifted from it twice in a day.
+///
+/// `ext` is the externals stage's answer over the same diff
+/// ([`crate::externals::analyse`]); the bazelrc screen and the flag resolve
+/// that precede this stage in [`compute`] both read the working tree, which
+/// an offline caller does not have, so `changes` is handed over unscreened.
+///
+/// Diagnostics the stage emits land on `engine`'s own sink, exactly as in a
+/// run.
+pub fn dirty_stage(
+    engine: &Engine,
+    base: IndexRef<'_>,
+    req: &AffectedRequest,
+    changes: &[Change],
+    ext: &mut Externals,
+) -> Result<DirtyStage> {
+    struct Refuses;
+    impl PackageQuerier for Refuses {
+        fn query(&self, packages: &[String]) -> Result<Rows> {
+            Err(crate::error::EngineError::BazelQuery {
+                what: format!("{} packages", packages.len()),
+                code: None,
+                stderr: "the offline dirty stage does not query".into(),
+            })
+        }
+        fn universe(&self) -> Result<Rows> {
+            Err(crate::error::EngineError::BazelQuery {
+                what: "//...".into(),
+                code: None,
+                stderr: "the offline dirty stage does not query".into(),
+            })
+        }
+    }
+    let refuses = Refuses;
+    let mut run = Run::new(engine, base, &refuses, req);
+    run.stats.changed_files = changes.len();
+    let changes: Vec<&Change> = changes.iter().collect();
+    run.dirty(&changes, ext)
 }
 
 /// What the query stage read back.
