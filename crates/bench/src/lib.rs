@@ -52,6 +52,7 @@ pub mod changes;
 pub mod checkout;
 pub mod classify;
 pub mod compare;
+pub mod env;
 pub mod harness;
 pub mod history;
 pub mod labels;
@@ -74,6 +75,7 @@ pub mod state;
 pub mod subject;
 pub mod tools;
 pub mod util;
+pub mod walk;
 pub mod watch;
 
 // No root re-exports. Every one of these types is named by the module it
