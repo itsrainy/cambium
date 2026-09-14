@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compare::{ChangeSetResult, ChangesResult};
-use crate::history::HistoryResult;
+use crate::walk::{StepRecord, WalkResult};
 use crate::progress::Progress;
 use crate::state::State;
 use crate::util::{duration, parse_rfc3339, percentile, rfc3339_now};
@@ -160,8 +159,7 @@ fn subject_dirs(results_dir: &Path) -> Vec<String> {
         }
         let looks_like_one = Progress::path(&e.path()).is_file()
             || State::path(&e.path()).is_file()
-            || e.path().join("history").is_dir()
-            || e.path().join("changes").is_dir();
+            || e.path().join("walk").is_dir();
         if looks_like_one {
             if let Some(name) = e.file_name().to_str() {
                 out.push(name.to_string());
@@ -208,13 +206,13 @@ fn read_subject(results_dir: &Path, subject: &str, engine: Option<&String>) -> S
     } else if let Some(s) = &state {
         // No progress file: an older run, or one whose subject was only ever
         // fetched. The state file's own stamps are what is left.
-        row.step = match (s.history.as_ref().map(|h| h.done), s.compared.is_empty()) {
-            (Some(true), false) => "done".into(),
+        row.step = match s.history.as_ref().map(|h| h.done) {
+            Some(true) => "done".into(),
             _ => "idle".into(),
         };
         row.elapsed_secs = s
             .steps
-            .get("changes.started")
+            .get("walk.started")
             .or_else(|| s.steps.get("history.started"))
             .and_then(|t| since(t));
     }
@@ -228,48 +226,26 @@ fn read_subject(results_dir: &Path, subject: &str, engine: Option<&String>) -> S
         }
     }
 
-    // The workload's own numbers, from whichever result file the subject's
-    // current workload writes. An idle subject shows its comparison when it
-    // has one — that is where recall and the pass count live — and its history
-    // otherwise, so a finished subject's row is not blank.
-    let history = read_history(&dir, &row.pin);
-    let changes = read_changes(&dir, &row.pin);
-    let show_changes = match row.step.as_str() {
-        "history" => false,
-        "changes" => true,
-        _ => changes.is_some(),
-    };
-    if let Some(h) = history.filter(|_| !show_changes) {
+    // The walk's own numbers, from `walk/walk-<pin>.json`.
+    if let Some(w) = read_walk(&dir, &row.pin) {
         if row.workload.is_empty() {
-            row.workload = "history".into();
+            row.workload = "walk".into();
         }
-        row.globals = Some(h.summary.globals);
-        row.recorded = Some(h.summary.commits);
-        row.p50_ms = (h.summary.commits > 0).then_some(h.summary.p50_total_ms);
+        let sum = &w.summary;
+        row.globals = Some(sum.globals);
+        row.recorded = Some(sum.steps);
+        row.passed = Some(
+            w.steps.iter().filter(|st| st.pass).count(),
+        );
+        row.compared = Some(sum.steps_with_oracle);
+        row.min_recall = (sum.steps_with_oracle > 0).then_some(sum.soundness.worst_recall);
+        row.p50_ms = (sum.steps > 0).then_some(sum.cost.cambium_walk.p50_ms);
         if row.of == 0 {
-            row.of = h.commits.len();
-            row.index = h.commits.len();
+            row.of = w.steps.len();
+            row.index = w.steps.len();
         }
-    }
-    if let Some(c) = &changes {
-        if show_changes {
-            if row.workload.is_empty() {
-                row.workload = "changes".into();
-            }
-            row.globals = Some(c.summary.globals);
-            row.recorded = Some(c.summary.change_sets);
-            row.passed = Some(c.summary.passed);
-            row.compared = Some(c.summary.change_sets);
-            row.min_recall = (c.summary.change_sets > 0).then_some(c.summary.min_recall);
-            row.p50_ms = change_set_p50(&c.change_sets);
-            if row.of == 0 {
-                row.of = c.change_sets.len();
-                row.index = c.change_sets.len();
-            }
-        }
-        // The expanded view is the comparison's, whichever workload is
-        // running: it is the table someone opens a row to read.
-        row.change_sets = c.change_sets.iter().map(change_set_row).collect();
+        // The expanded view is the per-step table someone opens a row to read.
+        row.change_sets = w.steps.iter().map(step_row).collect();
     }
     row.eta_secs = eta(&row);
     row
@@ -290,54 +266,41 @@ fn eta(row: &SubjectSnapshot) -> Option<u64> {
 
 /// The p50 of what a compared change set cost: every tool's walls plus
 /// cambium's two, which is the work one change set of the loop does.
-fn change_set_p50(change_sets: &[ChangeSetResult]) -> Option<u64> {
-    if change_sets.is_empty() {
+fn step_p50(steps: &[StepRecord]) -> Option<u64> {
+    if steps.is_empty() {
         return None;
     }
-    let mut totals: Vec<u64> = change_sets.iter().map(change_set_ms).collect();
+    let mut totals: Vec<u64> = steps.iter().map(|s| s.wall_ms).collect();
     totals.sort_unstable();
     Some(percentile(&totals, 0.5))
 }
 
-fn change_set_ms(c: &ChangeSetResult) -> u64 {
-    let tools: u64 = c
+fn step_row(st: &StepRecord) -> ChangeSetRow {
+    let tool_ms: Vec<(String, u64)> =
+        st.tools.iter().map(|t| (t.name.clone(), t.wall_ms)).collect();
+    // The per-step "classes" line now carries the recall of each tool that the
+    // oracle scored, low first, since a recall below 1.0 is the thing to see.
+    let mut recalls: Vec<(String, usize)> = st
         .tools
         .iter()
-        .map(|t| t.cold_wall_ms + t.warm_wall_ms.unwrap_or(0))
-        .sum();
-    c.cambium.cold_wall_ms + c.cambium.warm_wall_ms + tools
-}
-
-fn change_set_row(c: &ChangeSetResult) -> ChangeSetRow {
-    let mut tool_ms: Vec<(String, u64)> = vec![(
-        crate::tools::cambi::NAME.to_string(),
-        c.cambium.warm_wall_ms,
-    )];
-    tool_ms.extend(c.tools.iter().map(|t| (t.name.clone(), t.cold_wall_ms)));
-    let mut classes: Vec<(String, usize)> = c
-        .tools
-        .iter()
-        .flat_map(|t| t.counts.iter())
-        .filter(|(_, n)| **n > 0)
-        .fold(
-            std::collections::BTreeMap::<String, usize>::new(),
-            |mut acc, (class, n)| {
-                *acc.entry(class.name().to_string()).or_default() += n;
-                acc
-            },
-        )
-        .into_iter()
+        .filter_map(|t| t.recall_vs_oracle.map(|r| (t.name.clone(), (r * 1000.0) as usize)))
         .collect();
-    classes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    recalls.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let tags = st
+        .tags
+        .iter()
+        .map(|t| t.name())
+        .collect::<Vec<_>>()
+        .join(",");
     ChangeSetRow {
-        kind: c.kind.name().to_string(),
-        change_set: format!("{}..{}", short(&c.base), short(&c.head)),
-        changed_files: c.cambium.changed_files,
-        dirty_packages: c.cambium.dirty_packages,
+        kind: tags,
+        change_set: format!("{}..{}", short(&st.parent), short(&st.head)),
+        changed_files: st.changed_files,
+        dirty_packages: st.dirty_packages,
         tool_ms,
-        classes,
-        global: c.global,
-        pass: c.pass,
+        classes: recalls,
+        global: st.global,
+        pass: st.pass,
     }
 }
 
@@ -348,27 +311,15 @@ fn render_diagnostic(d: &cambium_engine::diag::Diagnostic) -> String {
     }
 }
 
-/// The newest readable `history-*.json` under `<subject>/history/`, preferring
-/// the one for `pin`.
-fn read_history(subject_dir: &Path, pin: &str) -> Option<HistoryResult> {
-    let dir = subject_dir.join("history");
-    let path = newest(&dir, "history-", pin)?;
-    match HistoryResult::read(&path) {
+/// The newest readable `walk-*.json` under `<subject>/walk/`, preferring the
+/// one for `pin`.
+fn read_walk(subject_dir: &Path, pin: &str) -> Option<WalkResult> {
+    let dir = subject_dir.join("walk");
+    let path = newest(&dir, "walk-", pin)?;
+    match WalkResult::read(&path) {
         Ok(r) => Some(r),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = format!("{e:#}"), "unreadable history result");
-            None
-        }
-    }
-}
-
-fn read_changes(subject_dir: &Path, pin: &str) -> Option<ChangesResult> {
-    let dir = subject_dir.join("changes");
-    let path = newest(&dir, "changes-", pin)?;
-    match ChangesResult::read(&path) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = format!("{e:#}"), "unreadable changes result");
+            tracing::warn!(path = %path.display(), error = format!("{e:#}"), "unreadable walk result");
             None
         }
     }
@@ -604,56 +555,12 @@ fn pass_cell(r: &SubjectSnapshot) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::path::Path;
 
     use super::*;
-    use crate::changes::ChangeSetKind;
-    use crate::classify::Class;
-    use crate::compare::{CambiumRun, ChangesOptions, ToolComparison};
-    use crate::history::{ColdBuild, CommitRecord, Summary};
     use crate::progress::{Reporter, Step, ToolProgress};
-
-    /// A results tree as a run leaves one. Built from the real result types
-    /// rather than from checked-in JSON, so a field that moves cannot leave a
-    /// stale fixture passing.
-    fn fixture(root: &Path) {
-        // A finished subject: a history walked and every change set compared.
-        let bazel = root.join("bazel");
-        history_file(&bazel, "pin1", 50, 1);
-        changes_file(&bazel, "pin1", 50, 50, 1.0);
-        let mut p = progress("bazel", "pin1", "changes", Step::Done, 50, 50);
-        p.current = String::new();
-        p.started_at = crate::util::rfc3339(1_000_000);
-        p.step_started_at = crate::util::rfc3339(1_001_400);
-        p.write(&bazel).unwrap();
-
-        // A subject mid-history, with a tool running and something to say.
-        let envoy = root.join("envoy");
-        history_file(&envoy, "pin2", 12, 4);
-        let mut p = progress("envoy", "pin2", "history", Step::History, 12, 50);
-        p.current = "c3f9a1b2c3d4e5f6".into();
-        p.tool = Some(ToolProgress {
-            name: "cambium".into(),
-            started_at: crate::util::rfc3339_now(),
-        });
-        p.last_error = Some("bazel query exit 3 (partial universe, accepted)".into());
-        p.diagnostics = vec![cambium_engine::diag::Diagnostic::warning(
-            cambium_engine::diag::Code::W004BazelrcGlobal,
-            ".bazelrc changed and the run went global",
-        )];
-        p.write(&envoy).unwrap();
-
-        // A subject that has been fetched and nothing more.
-        let apollo = root.join("apollo");
-        std::fs::create_dir_all(&apollo).unwrap();
-        let mut st = State::fresh("apollo", "pin3");
-        st.fetched = true;
-        st.save(&apollo).unwrap();
-
-        // And a directory that is not a subject at all.
-        std::fs::create_dir_all(root.join("scratch")).unwrap();
-    }
+    use crate::walk::model::*;
+    use crate::walk::{sampling::Sample, steps::Step as WalkStep, Tag, Tier};
 
     fn progress(
         subject: &str,
@@ -681,138 +588,129 @@ mod tests {
         }
     }
 
-    fn cold(commit: &str) -> ColdBuild {
-        ColdBuild {
-            commit: commit.into(),
-            wall_ms: 60_000,
-            index_bytes: 1024,
-            nodes: 10,
-            edges: 20,
-            packages: 3,
-            rules: 7,
-            tests: 1,
-            lineage: "abcdef".into(),
-            partial: Default::default(),
-            stats: serde_json::json!({}),
-        }
-    }
-
-    fn history_file(subject_dir: &Path, pin: &str, commits: usize, globals: usize) {
-        let records: Vec<CommitRecord> = (0..commits)
-            .map(|i| CommitRecord {
-                commit: format!("{i:040}"),
-                parent: format!("{:040}", i.saturating_sub(1)),
-                changed_files: 3,
-                ignored_files: 0,
-                dirty_packages: 2,
+    /// A walk result with `steps` steps, `globals` of them global, and the
+    /// last `steps - passed` failing (a missing recall).
+    fn walk_file(subject_dir: &Path, pin: &str, steps: usize, globals: usize, passed: usize) {
+        let mut recs = Vec::new();
+        for i in 0..steps {
+            let global = i < globals;
+            let pass = i < passed;
+            let oracle = crate::oracles::rdeps::RdepsResult {
+                oracle_labels: 10,
+                matched: if pass { 10 } else { 8 },
+                missing: if pass { vec![] } else { vec!["//x:y".into()] },
+                oracle_set: ["//a:b".to_string()].into_iter().collect(),
+                ..Default::default()
+            };
+            recs.push(StepRecord {
+                parent: format!("base{i:036}"),
+                head: format!("head{i:036}"),
+                tags: vec![Tag::Adjacent],
+                changed_files: 7,
+                dirty_packages: 3,
                 queried_targets: 9,
-                dirty_ms: 1,
-                query_ms: 2,
-                splice_ms: 3,
-                direct_ms: 4,
-                walk_ms: 5,
-                total_ms: 2_000,
-                engine_total_ms: 1_800,
-                direct: 1,
-                affected: 4,
-                tests: 1,
-                rbuildfiles_called: false,
-                bzl_closure_hits: 0,
-                global: i < globals,
+                timings: StepTimings::default(),
+                wall_ms: 2_000,
+                carried_index: true,
+                rebuild_step: false,
+                global,
                 global_reason: None,
-                cold_rebuild: false,
-                engine_cold_rebuild: false,
-                index_nodes: 10,
-                index_edges: 20,
-            })
+                index: IndexCounts { nodes: 10, edges: 20, lineage: String::new() },
+                cambium: CambiumAnswer { direct: 1, affected: 40, tests: 1, cold_rebuild: false },
+                oracle: (!global).then(|| oracle),
+                tools: vec![
+                    ToolStep {
+                        name: "cambium".into(),
+                        version: "cambi".into(),
+                        labels: 40,
+                        wall_ms: 2_000,
+                        recall_vs_oracle: (!global).then_some(if pass { 1.0 } else { 0.8 }),
+                        tightness_vs_oracle: (!global).then_some(0.25),
+                        failed: false,
+                    },
+                    ToolStep {
+                        name: "bazel-diff".into(),
+                        version: "v46".into(),
+                        labels: 38,
+                        wall_ms: 11_200,
+                        recall_vs_oracle: (!global).then_some(1.0),
+                        tightness_vs_oracle: (!global).then_some(0.5),
+                        failed: false,
+                    },
+                ],
+                pass,
+            });
+        }
+        let steps_vec: Vec<WalkStep> = recs
+            .iter()
+            .map(|r| WalkStep { parent: r.parent.clone(), head: r.head.clone(), tags: r.tags.clone() })
             .collect();
-        let mut r = crate::history::HistoryResult {
+        let sample = Sample::all(&steps_vec);
+        let mut r = WalkResult {
             schema: crate::RESULT_SCHEMA,
             repo: "r".into(),
             pin: pin.into(),
             from: format!("{:040}", 0),
             to: pin.into(),
-            bazel_version: String::new(),
-            bazel_version_used: "bazel 7.4.1".into(),
-            tool_sha: "abc".into(),
-            cambi_version: None,
-            engine: String::new(),
+            tier: Tier::Full,
+            schedule: Tier::Full.defaults(),
+            oracle_sample: sample.clone(),
+            peer_sample: sample,
+            environment: crate::env::Environment {
+                machine: crate::harness::Machine::detect(),
+                bazel_version_used: "bazel 7.4.1".into(),
+                cambi_version: "cambi".into(),
+                tool_sha: "abc".into(),
+                engine_id: String::new(),
+                config_hash: String::new(),
+                output_bases: Default::default(),
+            },
             started_unix: 0,
-            cold: cold(pin),
-            commits: records,
-            rebuild: None,
-            oracle: None,
+            index_build_ms: 60_000,
+            steps: recs,
+            rebuild_oracle: None,
             head_index: None,
-            summary: Summary::default(),
+            summary: WalkSummary::default(),
             done: false,
         };
         r.summarise();
-        r.write(&crate::history::HistoryResult::path(
-            &subject_dir.join("history"),
-            pin,
-        ))
-        .unwrap();
+        r.write(&WalkResult::path(&subject_dir.join("walk"), pin, None)).unwrap();
     }
 
-    fn changes_file(subject_dir: &Path, pin: &str, compared: usize, passed: usize, recall: f64) {
-        let change_sets: Vec<ChangeSetResult> = (0..compared)
-            .map(|i| {
-                let pass = i < passed;
-                let mut counts = BTreeMap::new();
-                counts.insert(Class::CambiumExtraSelect, 2);
-                if !pass {
-                    counts.insert(Class::CambiumMissing, 1);
-                }
-                ChangeSetResult {
-                    schema: crate::RESULT_SCHEMA,
-                    base: format!("base{i:036}"),
-                    head: format!("head{i:036}"),
-                    kind: ChangeSetKind::Pr,
-                    category: None,
-                    cambium: CambiumRun {
-                        changed_files: 7,
-                        dirty_packages: 3,
-                        affected: 40,
-                        cold_wall_ms: 900,
-                        warm_wall_ms: 400,
-                        ..Default::default()
-                    },
-                    tools: vec![ToolComparison {
-                        labels: 38,
-                        cold_wall_ms: 11_200,
-                        counts,
-                        pass,
-                        ..ToolComparison::new("bazel-diff-rust", "v46.1.0")
-                    }],
-                    oracle: None,
-                    load_oracle: None,
-                    recall: if pass { 1.0 } else { recall },
-                    global: false,
-                    pass,
-                }
-            })
-            .collect();
-        let mut r = ChangesResult {
-            schema: crate::RESULT_SCHEMA,
-            repo: "r".into(),
-            pin: pin.into(),
-            bazel_version: None,
-            bazel_version_used: None,
-            seed: 0,
-            oracle_k: 0,
-            engine: String::new(),
-            cambi_version: None,
-            tango_change_sets: None,
-            change_sets,
-            summary: Default::default(),
-        };
-        r.summarise();
-        r.write(&ChangesOptions::path(
-            &subject_dir.join("changes"),
-            pin,
-            None,
-        ))
-        .unwrap();
+    /// A results tree as a run leaves one.
+    fn fixture(root: &Path) {
+        // A finished subject: every step walked and passing.
+        let bazel = root.join("bazel");
+        walk_file(&bazel, "pin1", 50, 1, 50);
+        let mut p = progress("bazel", "pin1", "walk", Step::Done, 50, 50);
+        p.started_at = crate::util::rfc3339(1_000_000);
+        p.step_started_at = crate::util::rfc3339(1_001_400);
+        p.write(&bazel).unwrap();
+
+        // A subject mid-walk, with a tool running and something to say.
+        let envoy = root.join("envoy");
+        walk_file(&envoy, "pin2", 12, 4, 12);
+        let mut p = progress("envoy", "pin2", "walk", Step::Walk, 12, 50);
+        p.current = "c3f9a1b2c3d4e5f6".into();
+        p.tool = Some(ToolProgress {
+            name: "cambium".into(),
+            started_at: crate::util::rfc3339_now(),
+        });
+        p.last_error = Some("bazel query exit 3 (partial universe, accepted)".into());
+        p.diagnostics = vec![cambium_engine::diag::Diagnostic::warning(
+            cambium_engine::diag::Code::W004BazelrcGlobal,
+            ".bazelrc changed and the run went global",
+        )];
+        p.write(&envoy).unwrap();
+
+        // A subject that has been fetched and nothing more.
+        let apollo = root.join("apollo");
+        std::fs::create_dir_all(&apollo).unwrap();
+        let mut st = State::fresh("apollo", "pin3");
+        st.fetched = true;
+        st.save(&apollo).unwrap();
+
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
     }
 
     #[test]
@@ -821,41 +719,23 @@ mod tests {
         fixture(dir.path());
         let s = snapshot(dir.path(), &[]);
         assert_eq!(
-            s.subjects
-                .iter()
-                .map(|r| r.subject.as_str())
-                .collect::<Vec<_>>(),
+            s.subjects.iter().map(|r| r.subject.as_str()).collect::<Vec<_>>(),
             ["apollo", "bazel", "envoy"],
             "scratch/ is not a subject"
         );
-        let text = render(&s).join("\n");
-
-        // A finished subject: its elapsed is what the run took, not how long
-        // ago it was, and its ETA is nothing.
-        assert!(text.contains("bazel    done      changes 50/50"), "{text}");
-        assert!(
-            text.contains("23m20s"),
-            "the finished run's own duration\n{text}"
-        );
-        // Every number the header promises.
-        assert!(text.contains("50/50"), "{text}");
-        assert!(text.contains("100.0%"), "min recall\n{text}");
-        // A running subject: the commit, the tool on it, and an ETA from the
-        // p50 of the commits that are done (38 left at 2 s).
-        assert!(text.contains("envoy    history   history 12/50"), "{text}");
+        let text = render(&s).join("
+");
+        assert!(text.contains("bazel    done      walk 50/50"), "{text}");
+        assert!(text.contains("23m20s"), "the finished run's own duration\n{text}");
+        assert!(text.contains("100.0%"), "worst recall\n{text}");
+        assert!(text.contains("envoy    walk      walk 12/50"), "{text}");
         assert!(text.contains("c3f9a1b cambium"), "{text}");
         let envoy = s.subjects.iter().find(|r| r.subject == "envoy").unwrap();
         assert_eq!(envoy.p50_ms, Some(2_000));
         assert_eq!(envoy.eta_secs, Some(76));
         assert_eq!(envoy.globals, Some(4));
-        // A subject with nothing but a fetch is still a row.
         assert!(text.contains("apollo   idle"), "{text}");
-
-        // The footers, once each, naming the subject.
-        assert!(
-            text.contains("errors\n  envoy    bazel query exit 3"),
-            "{text}"
-        );
+        assert!(text.contains("errors\n  envoy    bazel query exit 3"), "{text}");
         assert!(
             text.contains("CAMBI-W004 .bazelrc changed and the run went global"),
             "{text}"
@@ -869,7 +749,7 @@ mod tests {
         let s = snapshot(dir.path(), &["envoy".into(), "xla".into()]);
         assert_eq!(s.subjects.len(), 2);
         assert_eq!(s.subjects[1].subject, "xla");
-        assert_eq!(s.subjects[1].step, "idle", "a subject with no results yet");
+        assert_eq!(s.subjects[1].step, "idle");
         assert!(s.subjects[1].eta_secs.is_none());
     }
 
@@ -886,26 +766,22 @@ mod tests {
     }
 
     #[test]
-    fn a_row_expands_into_its_change_sets() {
+    fn a_row_expands_into_its_steps() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         let s = snapshot(dir.path(), &["bazel".into()]);
         let rows = &s.subjects[0].change_sets;
         assert_eq!(rows.len(), 50);
         let text = render_change_sets(&s.subjects[0]).join("\n");
-        assert!(text.contains("bazel — 50 change sets"), "{text}");
-        assert!(text.contains("pr         base000..head000"), "{text}");
-        assert!(text.contains("cambium 400 bazel-diff-rust 11200"), "{text}");
-        assert!(text.contains("cambium_extra_select=2"), "{text}");
+        assert!(text.contains("bazel — 50"), "{text}");
+        assert!(text.contains("base000..head000"), "{text}");
+        assert!(text.contains("cambium 2000 bazel-diff 11200"), "{text}");
 
-        // A subject with no comparison has an empty table rather than none.
         let s = snapshot(dir.path(), &["apollo".into()]);
         let text = render_change_sets(&s.subjects[0]).join("\n");
         assert!(text.contains("(no change sets compared yet)"), "{text}");
     }
 
-    /// The whole point of reading files: a tree copied off the benchmark box
-    /// renders without the run, and a failed step keeps its error.
     #[test]
     fn a_copied_tree_renders_and_a_failure_is_visible() {
         let dir = tempfile::tempdir().unwrap();
@@ -915,7 +791,7 @@ mod tests {
         let from = dir.path().join("envoy");
         let to = copy.join("envoy");
         copy_tree(&from, &to);
-        let r = Reporter::new(&to, "changes", "envoy", "pin2", Step::Changes, None);
+        let r = Reporter::new(&to, "walk", "envoy", "pin2", Step::Walk, None);
         r.item(7, "base..head");
         r.failed("tango: worktree is locked");
 
@@ -923,19 +799,16 @@ mod tests {
         assert_eq!(s.subjects.len(), 1);
         let row = &s.subjects[0];
         assert_eq!(row.step, "failed");
-        assert!(row.eta_secs.is_none(), "a failed run has no ETA");
+        assert!(row.eta_secs.is_none());
         let text = render(&s).join("\n");
         assert!(text.contains("tango: worktree is locked"), "{text}");
     }
 
-    /// Results another engine build wrote are not this run's, however
-    /// finished they look.
     #[test]
     fn a_row_another_build_wrote_is_stale_not_done() {
         let dir = tempfile::tempdir().unwrap();
         let apollo = dir.path().join("apollo");
-        history_file(&apollo, "pin3", 5, 0);
-        changes_file(&apollo, "pin3", 5, 5, 1.0);
+        walk_file(&apollo, "pin3", 5, 0, 5);
         let mut st = State::fresh("apollo", "pin3");
         st.engine = "f8/old".into();
         st.history = Some(crate::state::HistoryState {
@@ -945,20 +818,16 @@ mod tests {
             last_completed: None,
             done: true,
         });
-        st.compared.insert("a..b".into());
         st.save(&apollo).unwrap();
         let names = vec!["apollo".to_string()];
 
         assert_eq!(snapshot(dir.path(), &names).subjects[0].step, "done");
-        let other = BTreeMap::from([("apollo".to_string(), "f8/new".to_string())]);
+        let other = std::collections::BTreeMap::from([("apollo".to_string(), "f8/new".to_string())]);
         let row = &snapshot_with(dir.path(), &names, &other).subjects[0];
         assert_eq!(row.step, "stale");
         assert!(row.eta_secs.is_none());
-        let same = BTreeMap::from([("apollo".to_string(), "f8/old".to_string())]);
-        assert_eq!(
-            snapshot_with(dir.path(), &names, &same).subjects[0].step,
-            "done"
-        );
+        let same = std::collections::BTreeMap::from([("apollo".to_string(), "f8/old".to_string())]);
+        assert_eq!(snapshot_with(dir.path(), &names, &same).subjects[0].step, "done");
     }
 
     fn copy_tree(from: &Path, to: &Path) {
@@ -973,26 +842,23 @@ mod tests {
         }
     }
 
-    /// An unreadable result file is a row with no numbers, not a panic and not
-    /// a refusal: the file may be from another schema, and the run it belongs
-    /// to is still worth following.
     #[test]
     fn a_result_file_from_another_schema_costs_its_numbers_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let subject = dir.path().join("bazel");
-        std::fs::create_dir_all(subject.join("changes")).unwrap();
+        std::fs::create_dir_all(subject.join("walk")).unwrap();
         std::fs::write(
-            subject.join("changes/changes-pin1.json"),
+            subject.join("walk/walk-pin1.json"),
             r#"{"schema": 1, "repo": "bazel"}"#,
         )
         .unwrap();
-        progress("bazel", "pin1", "changes", Step::Changes, 3, 10)
+        progress("bazel", "pin1", "walk", Step::Walk, 3, 10)
             .write(&subject)
             .unwrap();
         let s = snapshot(dir.path(), &[]);
         assert_eq!(s.subjects.len(), 1);
-        assert_eq!(s.subjects[0].step, "changes");
+        assert_eq!(s.subjects[0].step, "walk");
         assert!(s.subjects[0].min_recall.is_none());
-        assert!(render(&s).iter().any(|l| l.contains("changes 3/10")));
+        assert!(render(&s).iter().any(|l| l.contains("walk 3/10")));
     }
 }

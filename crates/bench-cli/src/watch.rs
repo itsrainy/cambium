@@ -89,7 +89,7 @@ impl Supervisor for Observer {}
 
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     anyhow::ensure!(args.interval > 0.0, "--interval must be positive");
-    let results_dir = cambium_bench::compare::absolute(&args.results_dir);
+    let results_dir = cambium_bench::util::absolute(&args.results_dir);
     anyhow::ensure!(
         results_dir.is_dir(),
         "no results directory at {}; pass --results-dir",

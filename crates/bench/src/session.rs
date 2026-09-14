@@ -26,7 +26,7 @@ use anyhow::Result;
 use cambium_engine::Config;
 
 use crate::checkout::{Checkout, SubjectsDir};
-use crate::compare::absolute;
+use crate::util::absolute;
 use crate::manifest::{Manifest, RepoEntry};
 use crate::progress::{Reporter, Step};
 use crate::state::State;
@@ -309,6 +309,15 @@ impl SubjectRun<'_> {
         )
     }
 
+    /// The walk result: `walk/walk-<pin>.json`.
+    pub fn walk_result_path(&self) -> PathBuf {
+        self.result_path(
+            &self.workload_path("walk"),
+            &format!("walk-{}", self.entry.pin),
+            "json",
+        )
+    }
+
     /// The cached per-change-set diffs a replay away from the box reads:
     /// `paths-<pin>.json`, beside the index.
     pub fn paths_cache_path(&self) -> PathBuf {
@@ -331,7 +340,7 @@ impl SubjectRun<'_> {
             self.entry.id
         );
         let data = cambium_index::IndexFile::open(&path)?.deserialize()?;
-        let pkgs = crate::changes::hub_packages(data.view());
+        let pkgs = crate::walk::steps::hub_packages(data.view());
         tracing::info!(hubs = pkgs.len(), "hub packages from the index");
         Ok(pkgs)
     }

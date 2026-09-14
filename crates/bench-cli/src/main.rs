@@ -17,7 +17,6 @@ use clap::{Parser, ValueEnum};
 mod bench;
 mod launcher;
 mod replay;
-mod synth;
 mod watch;
 
 pub const EXIT_OK: u8 = 0;
@@ -269,16 +268,10 @@ mod tests {
         let names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
         for v in [
             "subjects",
-            "history",
-            "changes",
             "walk",
-            "stages",
-            "sweep",
-            "regress",
             "replay",
             "labels",
             "report",
-            "synth",
             "watch",
             "run",
             "pull-results",

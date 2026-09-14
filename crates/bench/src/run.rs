@@ -12,9 +12,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-use crate::changes::{self, ChangeSetKind, ChangeSetSet};
-use crate::compare::ChangesResult;
-use crate::history::{self, HistoryResult};
 use crate::labels::{self, ClassRow, SetDiff};
 use crate::progress::Step;
 use crate::report;
@@ -173,291 +170,6 @@ fn refuse_existing(
     )
 }
 
-// ----------------------------------------------------------------- history
-
-/// What `history` was asked to do.
-#[derive(Clone, Debug, Default)]
-pub struct HistoryRequest {
-    /// `--commits`; the subject's window (or `--quick`'s) when absent.
-    pub commits: Option<usize>,
-    /// `--oracle`: `rebuild`, or `none`.
-    pub oracles: Vec<String>,
-    pub on_existing: OnExisting,
-}
-
-/// The history workload. Answers with the result and where it was written;
-/// a failed rebuild oracle is in the result, not an error, so the binary can
-/// print the path before it fails.
-pub fn run_history(run: &SubjectRun<'_>, req: &HistoryRequest) -> Result<(PathBuf, HistoryResult)> {
-    let rebuild_oracle = parse_history_oracles(&req.oracles)?;
-    let commits = req
-        .commits
-        .or(run.session.quick.then_some(crate::QUICK_COMMITS));
-    let results = run.workload("history")?;
-    let path = HistoryResult::path_versioned(&results, &run.entry.pin, run.version());
-    refuse_existing(&path, "history", req.on_existing, || {
-        HistoryResult::read(&path).ok().map(|h| h.commits.len())
-    })?;
-    let checkout = run.checkout()?;
-    let engine = checkout.engine(&run.entry, run.version())?;
-    let _servers = crate::servers::StopOnDrop::subject(
-        &checkout.dir,
-        &run.results.join("scratch"),
-        engine.bazel().startup_flags(),
-    );
-    let cambi = run.cambi(&checkout)?;
-    let range = commits.unwrap_or(run.entry.history_window);
-    let commits = changes::range_commits(&checkout.repo, &run.entry.pin, range)?;
-    tracing::info!(
-        commits = commits.len(),
-        from = %commits.first().cloned().unwrap_or_default(),
-        to = %run.entry.pin,
-        "running the history"
-    );
-    let progress = run.progress("history", Step::History, Some(cambi.version().to_string()));
-    let opts = history::HistoryOptions {
-        repo_id: run.entry.id.clone(),
-        pin: run.entry.pin.clone(),
-        results_dir: results.clone(),
-        state_dir: run.results.clone(),
-        publish: true,
-        resume: req.on_existing == OnExisting::Resume,
-        bazel_version: run.version().unwrap_or_default().to_string(),
-        diff_cap: 50,
-        rebuild_oracle,
-        cambi_version: Some(cambi.version().to_string()),
-        progress: Some(progress.clone()),
-    };
-    let driver = history::CambiDriver {
-        checkout: &checkout,
-        cambi: &cambi,
-    };
-    let result = history::history(&engine, &driver, &commits, &opts)?;
-    tracing::info!(
-        commits = result.summary.commits,
-        p50_ms = result.summary.p50_total_ms,
-        p90_ms = result.summary.p90_total_ms,
-        globals = result.summary.globals,
-        cold_rebuilds = result.summary.engine_cold_rebuilds,
-        oracle_ok = result.oracle.as_ref().map(|o| o.ok).unwrap_or(false),
-        partial = result.cold.partial.partial,
-        packages_in_error = result.cold.partial.packages_in_error,
-        path = %path.display(),
-        "history done"
-    );
-    Ok((path, result))
-}
-
-/// `rebuild`, or `none`.
-pub fn parse_history_oracles(oracles: &[String]) -> Result<bool> {
-    let mut on = false;
-    for o in oracles {
-        match o.trim() {
-            "rebuild" => on = true,
-            "none" | "" => {}
-            other => anyhow::bail!("unknown history oracle {other:?}: rebuild, none"),
-        }
-    }
-    Ok(on)
-}
-
-// -------------------------------------------------------------- change sets
-
-/// How `changes` selects its change sets.
-#[derive(Clone, Debug, Default)]
-pub struct Selection {
-    /// `--kind`; every kind when empty.
-    pub kinds: Vec<String>,
-    /// How many change sets in total.
-    pub cap: usize,
-    /// Stress change sets per category.
-    pub stress_cap: usize,
-}
-
-/// Selects the change sets and records them under `<subject>/changes/`.
-///
-/// The one selector for both `--select-only` and a comparison, so both draw
-/// the stress change sets from the same hub list.
-pub fn select_change_sets(
-    run: &SubjectRun<'_>,
-    sel: &Selection,
-) -> Result<(PathBuf, ChangeSetSet)> {
-    let explicit = !sel.kinds.is_empty();
-    let kinds = parse_kinds(&sel.kinds)?;
-    let checkout = run.checkout()?;
-    let (paths, globs) = run.entry.invalidator_rules();
-    let opts = changes::ChangeSetOptions {
-        repo_id: run.entry.id.clone(),
-        pin: run.entry.pin.clone(),
-        history_window: run.entry.history_window,
-        seed: run.session.seed,
-        cap: sel.stress_cap,
-        total_cap: Some(sel.cap),
-        // Only when a stress change set is actually wanted: the hubs cost an
-        // index open, and every other kind ignores them.
-        //
-        // Best effort when `stress` came from the default set of kinds rather
-        // than from a `--kind stress` the person typed: three of the four
-        // stress categories need no index at all, and refusing to select any
-        // of them because `subjects build` has not run yet would make the
-        // default `changes` unrunnable on a fresh subject. Asking for stress
-        // explicitly and silently getting no hub change sets is the other
-        // failure, so that one is an error.
-        hub_packages: match kinds.contains(&ChangeSetKind::Stress) {
-            false => Vec::new(),
-            true if !explicit => run.hub_packages().unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = format!("{e:#}"),
-                    "no hub packages; the stress selection covers every category but `hub`"
-                );
-                Vec::new()
-            }),
-            true => run.hub_packages()?,
-        },
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
-    let set = changes::select(&checkout.repo, &kinds, &opts)?;
-    run.workload("changes")?;
-    let path = run.change_sets_path();
-    set.write(&path)?;
-    tracing::info!(change_sets = set.change_sets.len(), path = %path.display(), "selected the change sets");
-    Ok((path, set))
-}
-
-/// `pr`, `adjacent`, `stress`; all three when nothing is named.
-pub fn parse_kinds(kinds: &[String]) -> Result<Vec<ChangeSetKind>> {
-    if kinds.is_empty() {
-        return Ok(vec![
-            ChangeSetKind::Pr,
-            ChangeSetKind::Adjacent,
-            ChangeSetKind::Stress,
-        ]);
-    }
-    kinds
-        .iter()
-        .map(|k| {
-            ChangeSetKind::parse(k).ok_or_else(|| {
-                anyhow::anyhow!("unknown change-set kind {k:?}: pr, adjacent, stress")
-            })
-        })
-        .collect()
-}
-
-/// The size `changes` runs at: `--change-sets`, else `--quick`'s, else the
-/// default.
-pub fn change_set_cap(session: &Session, explicit: Option<usize>) -> usize {
-    explicit
-        .or(session.quick.then_some(crate::QUICK_CHANGE_SETS))
-        .unwrap_or(crate::DEFAULT_CHANGE_SETS)
-}
-
-// ----------------------------------------------------------------- compare
-
-/// What `changes` was asked to do.
-#[derive(Clone, Debug, Default)]
-pub struct CompareRequest {
-    /// `--change-set-file`: a selection to run instead of making one.
-    pub change_set_file: Option<PathBuf>,
-    pub selection: Selection,
-    /// `--oracle-sample`.
-    pub oracle_sample: usize,
-    /// `--oracle`: `rdeps`, `load`, `none`.
-    pub oracles: Vec<String>,
-    /// `--tools`, as typed.
-    pub tools: Vec<String>,
-    pub on_existing: OnExisting,
-}
-
-/// What a comparison answered with.
-#[derive(Clone, Debug)]
-pub struct Compared {
-    pub result: ChangesResult,
-    pub path: PathBuf,
-}
-
-/// The change-set workload: every tool on every change set, scored by the
-/// oracles. Errors when no named tool is installed — a run that compares
-/// against nothing has measured nothing.
-pub fn compare(
-    run: &SubjectRun<'_>,
-    req: &CompareRequest,
-    locations: &ToolLocations,
-) -> Result<Compared> {
-    let wanted = tools::wanted(&req.tools)?;
-    let owned: Vec<Box<dyn tools::Tool>> = wanted
-        .iter()
-        .map(|n| tools::open(n, locations))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    anyhow::ensure!(
-        !owned.is_empty() || wanted.is_empty(),
-        "changes: no tool is installed; nothing to compare against"
-    );
-    let tool_refs: Vec<&dyn tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
-
-    let checkout = run.checkout()?;
-    let set = load_change_sets(run, req)?;
-    let change_sets: Vec<_> = set
-        .change_sets
-        .iter()
-        .take(req.selection.cap.max(1))
-        .cloned()
-        .collect();
-    anyhow::ensure!(!change_sets.is_empty(), "no change sets to compare");
-
-    let engine = checkout.engine(&run.entry, run.version())?;
-    let _servers = crate::servers::StopOnDrop::subject(
-        &checkout.dir,
-        &run.results.join("scratch"),
-        engine.bazel().startup_flags(),
-    );
-    let (rdeps, load) = parse_change_oracles(&req.oracles)?;
-    let results = run.workload("changes")?;
-    let cambi = run.cambi(&checkout)?;
-    let progress = run.progress("changes", Step::Changes, Some(cambi.version().to_string()));
-    let opts = crate::compare::ChangesOptions {
-        bazel_version: run.version().map(str::to_string),
-        progress: Some(progress),
-        rdeps_oracle: rdeps,
-        oracle_k: req.oracle_sample,
-        load_oracle: load,
-        seed: run.session.seed,
-        resume: req.on_existing == OnExisting::Resume,
-        scratch: run.results.join("scratch"),
-        state_dir: run.results.clone(),
-        tango_change_sets: run.session.quick.then_some(crate::QUICK_TANGO_CHANGE_SETS),
-        ..crate::compare::ChangesOptions::new(run.entry.id.clone(), run.entry.pin.clone(), results)
-    };
-    let output = opts.output_path();
-    refuse_existing(&output, "comparison", req.on_existing, || {
-        ChangesResult::read(&output)
-            .ok()
-            .map(|c| c.change_sets.len())
-    })?;
-    tracing::info!(
-        change_sets = change_sets.len(),
-        tools = tool_refs.len(),
-        oracle_k = opts.oracle_k,
-        tango_change_sets = opts.tango_change_sets.unwrap_or(change_sets.len()),
-        "comparing"
-    );
-    let result = crate::compare::compare_change_sets(
-        &engine,
-        &cambi,
-        &checkout,
-        &change_sets,
-        &tool_refs,
-        &opts,
-    )?;
-    Ok(Compared {
-        result,
-        path: opts.output_path(),
-    })
-}
-
 // -------------------------------------------------------------------- walk
 
 /// What `walk` was asked to do.
@@ -550,7 +262,7 @@ pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocatio
         config_hash: cambium_engine::inspect::hex(&engine.config().hash()),
         output_bases: Default::default(),
     };
-    let progress = run.progress("walk", Step::History, Some(cambi.version().to_string()));
+    let progress = run.progress("walk", Step::Walk, Some(cambi.version().to_string()));
     let opts = crate::walk::WalkOptions {
         repo_id: run.entry.id.clone(),
         pin: run.entry.pin.clone(),
@@ -571,7 +283,7 @@ pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocatio
         crate::walk::WalkResult::read(&path).ok().map(|w| w.steps.len())
     })?;
 
-    let driver = history::CambiDriver {
+    let driver = crate::walk::CambiDriver {
         checkout: &checkout,
         cambi: &cambi,
     };
@@ -610,89 +322,6 @@ pub fn walk_summary(r: &crate::walk::WalkResult) -> String {
 
 /// The change sets to compare: an explicit file, else the one a previous run
 /// wrote for this pin, else a fresh selection with the requested kinds.
-fn load_change_sets(run: &SubjectRun<'_>, req: &CompareRequest) -> Result<ChangeSetSet> {
-    if let Some(p) = &req.change_set_file {
-        return ChangeSetSet::read(p).with_context(|| format!("reading {}", p.display()));
-    }
-    let default = run.change_sets_path();
-    if req.selection.kinds.is_empty() && default.exists() {
-        tracing::info!(path = %default.display(), "using the recorded change sets");
-        return ChangeSetSet::read(&default);
-    }
-    Ok(select_change_sets(run, &req.selection)?.1)
-}
-
-/// `rdeps` and `load`, in any order, or `none`.
-pub fn parse_change_oracles(oracles: &[String]) -> Result<(bool, bool)> {
-    let (mut rdeps, mut load) = (false, false);
-    for o in oracles {
-        match o.trim() {
-            "rdeps" => rdeps = true,
-            "load" => load = true,
-            "none" | "" => {}
-            other => anyhow::bail!("unknown oracle {other:?}: rdeps, load, none"),
-        }
-    }
-    Ok((rdeps, load))
-}
-
-/// The table a person reads before opening the JSON.
-pub fn compare_summary(result: &ChangesResult) -> String {
-    use std::fmt::Write as _;
-    let s = &result.summary;
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "\n{} {}  change sets {}  passed {}  global {}  min recall {:.1}%",
-        result.repo,
-        &result.pin[..result.pin.len().min(12)],
-        s.change_sets,
-        s.passed,
-        s.globals,
-        s.min_recall * 100.0
-    );
-    let _ = writeln!(
-        out,
-        "{:<20} {:>10} {:>12} {:>12}",
-        "tool", "precision", "cold p50", "warm p50"
-    );
-    for (name, p) in &s.mean_precision {
-        let cold = s.tool_cold.get(name).map(|w| w.p50_ms).unwrap_or(0);
-        let warm = s
-            .tool_warm
-            .get(name)
-            .map(|w| format!("{} ms", w.p50_ms))
-            .unwrap_or_else(|| "—".into());
-        let _ = writeln!(
-            out,
-            "{name:<20} {:>9.1}% {:>9} ms {warm:>12}",
-            p * 100.0,
-            cold
-        );
-    }
-    let _ = writeln!(
-        out,
-        "{:<20} {:>10} {:>9} ms {:>9} ms",
-        "cambium", "—", s.cambium_cold.p50_ms, s.cambium_warm.p50_ms
-    );
-    let failing: Vec<_> = s
-        .by_class
-        .iter()
-        .filter(|(_, n)| **n > 0)
-        .map(|(k, n)| format!("{k}={n}"))
-        .collect();
-    let _ = write!(
-        out,
-        "disagreements: {}",
-        if failing.is_empty() {
-            "none".to_string()
-        } else {
-            failing.join(" ")
-        }
-    );
-    out
-}
-
 // ------------------------------------------------------------------ labels
 
 /// What `labels` asks about one change set's stored sets.
@@ -801,7 +430,7 @@ pub fn regenerate_report(
     let results = report::SubjectResults::collect(&session.manifest, parent, &session.subjects)?;
     anyhow::ensure!(
         !results.is_empty(),
-        "report: no history-*.json or changes-*.json under {}",
+        "report: no walk-*.json under {}",
         parent.display()
     );
     let only = subject.map(crate::session::subject_dir_name);
@@ -812,127 +441,54 @@ pub fn regenerate_report(
             parent.display()
         );
     }
-    let bench = report::BenchLegacy::read(&session.root.join("docs/benchmarks/sweep-legacy.json"));
     for r in &results {
         if only.as_ref().is_some_and(|id| &r.id != id) {
             continue;
         }
-        report::update_doc(&doc, &r.id, &report::render_subject_section(r, None))?;
+        report::update_doc(&doc, &r.id, &report::render_subject_section(r))?;
     }
     report::update_doc(&doc, "top", &report::render_top_table(&results))?;
-    report::update_doc(
-        &doc,
-        "synthetic",
-        &report::render_bench_section(&bench, Some("bench-legacy.svg")),
-    )?;
     tracing::info!(doc = %doc.display(), subjects = results.len(), "report written");
     Ok((doc, results.len()))
-}
-
-// ---------------------------------------------------------- stage benches
-
-/// `bench-results/<subject>/<workload>/` for a stage benchmark, which needs
-/// no checkout and no manifest entry: a synthetic preset is enough.
-pub fn stage_dir(session: &Session, subject: &str, workload: &str) -> Result<PathBuf> {
-    let dir = session
-        .results_root
-        .join(crate::session::subject_dir_name(subject))
-        .join(workload);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-/// The preset name behind a `synth:<preset>` subject, for the stage
-/// benchmarks — which time a generated graph directly and never go near a
-/// workspace.
-pub fn preset_of(subject: &str, what: &str) -> Result<String> {
-    subject
-        .strip_prefix(crate::subject::SYNTH_PREFIX)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "`cambium-bench {what} {subject}`: {what} runs on a synthetic subject \
-                 (synth:<preset>); a real subject has no generated graph to \
-                 measure a stage over"
-            )
-        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::walk::Tier;
 
     #[test]
-    fn the_oracle_lists_parse() {
-        assert!(parse_history_oracles(&["rebuild".into()]).unwrap());
-        assert!(!parse_history_oracles(&["none".into()]).unwrap());
-        assert!(parse_history_oracles(&["x".into()]).is_err());
-        assert_eq!(
-            parse_change_oracles(&["load".into(), "rdeps".into()]).unwrap(),
-            (true, true)
-        );
-        assert_eq!(
-            parse_change_oracles(&["none".into()]).unwrap(),
-            (false, false)
-        );
-        assert!(parse_change_oracles(&["bogus".into()]).is_err());
-    }
-
-    #[test]
-    fn the_kinds_default_to_all_three() {
-        assert_eq!(parse_kinds(&[]).unwrap().len(), 3);
-        assert_eq!(
-            parse_kinds(&["stress".into()]).unwrap(),
-            [ChangeSetKind::Stress]
-        );
-        assert!(parse_kinds(&["nope".into()]).is_err());
-        assert!(preset_of("synth:small", "stages").unwrap() == "small");
-        assert!(preset_of("bazel", "stages").is_err());
-    }
-
-    #[test]
-    fn the_summary_names_every_tool_and_the_disagreements() {
-        use crate::compare::{ChangesSummary, WallStats};
-        let mut summary = ChangesSummary {
-            change_sets: 3,
-            passed: 2,
-            min_recall: 0.5,
-            ..Default::default()
-        };
-        summary.mean_precision.insert("tango".into(), 0.75);
-        summary.tool_cold.insert(
-            "tango".into(),
-            WallStats {
-                p50_ms: 1200,
-                ..Default::default()
-            },
-        );
-        summary
-            .by_class
-            .insert(crate::classify::Class::CambiumMissing, 4);
-        let result = ChangesResult {
-            cambi_version: None,
+    fn a_walk_summary_names_the_recall_and_the_verdict() {
+        let mut r = crate::walk::WalkResult {
             schema: crate::RESULT_SCHEMA,
-            repo: "bazel".into(),
+            repo: "envoy".into(),
             pin: "0123456789abcdef".into(),
-            bazel_version: None,
-            bazel_version_used: None,
-            seed: 0,
-            oracle_k: 0,
-            engine: String::new(),
-            tango_change_sets: None,
-            change_sets: Vec::new(),
-            summary,
+            from: "a".into(),
+            to: "0123456789abcdef".into(),
+            tier: Tier::Correctness,
+            schedule: Tier::Correctness.defaults(),
+            oracle_sample: Default::default(),
+            peer_sample: Default::default(),
+            environment: crate::env::Environment {
+                machine: crate::harness::Machine::detect(),
+                bazel_version_used: String::new(),
+                cambi_version: String::new(),
+                tool_sha: String::new(),
+                engine_id: String::new(),
+                config_hash: String::new(),
+                output_bases: Default::default(),
+            },
+            started_unix: 0,
+            index_build_ms: 0,
+            steps: Vec::new(),
+            rebuild_oracle: None,
+            head_index: None,
+            summary: Default::default(),
+            done: true,
         };
-        let s = compare_summary(&result);
-        assert!(
-            s.contains("bazel 0123456789ab  change sets 3  passed 2"),
-            "{s}"
-        );
-        assert!(
-            s.contains("tango                     75.0%      1200 ms            —"),
-            "{s}"
-        );
-        assert!(s.ends_with("disagreements: cambium_missing=4"), "{s}");
+        r.summarise();
+        let s = walk_summary(&r);
+        assert!(s.contains("worst recall"), "{s}");
+        assert!(s.contains("PASS"), "{s}");
     }
 }

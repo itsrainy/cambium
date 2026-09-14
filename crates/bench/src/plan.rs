@@ -76,29 +76,26 @@ impl Size {
 pub enum StepKind {
     Fetch,
     Build,
-    History,
-    Changes,
+    Walk,
     Report,
 }
 
 impl StepKind {
-    pub const ALL: [StepKind; 5] = [
+    pub const ALL: [StepKind; 4] = [
         StepKind::Fetch,
         StepKind::Build,
-        StepKind::History,
-        StepKind::Changes,
+        StepKind::Walk,
         StepKind::Report,
     ];
 
-    /// The two workloads, which the launcher lets a person pick.
-    pub const WORKLOADS: [StepKind; 2] = [StepKind::History, StepKind::Changes];
+    /// The one workload, which the launcher lets a person pick.
+    pub const WORKLOADS: [StepKind; 1] = [StepKind::Walk];
 
     pub fn name(self) -> &'static str {
         match self {
             StepKind::Fetch => "fetch",
             StepKind::Build => "build",
-            StepKind::History => "history",
-            StepKind::Changes => "changes",
+            StepKind::Walk => "walk",
             StepKind::Report => "report",
         }
     }
@@ -179,7 +176,7 @@ impl Plan {
         let mut out = Vec::new();
         for s in &self.subjects {
             let dir = root.join(crate::session::subject_dir_name(s));
-            let found: Vec<&str> = [StepKind::History, StepKind::Changes]
+            let found: Vec<&str> = [StepKind::Walk]
                 .into_iter()
                 .filter(|k| self.wants(*k) && has_result(&dir.join(k.name()), k.name()))
                 .map(|k| k.name())
@@ -253,41 +250,27 @@ impl Plan {
                 a.extend(&dir);
                 out.push(step(StepKind::Build, a));
             }
-            if self.wants(StepKind::History) {
-                let mut a = vec!["--log", "info", "history", s, "--oracle", "rebuild"];
+            if self.wants(StepKind::Walk) {
+                let tier = match self.size {
+                    Size::Large => "full",
+                    _ => "correctness",
+                };
+                // Peers only: cambium is the walk's driver, not a peer.
+                let peers = self.peer_flag();
+                let mut a = vec!["--log", "info", "walk", s, "--tier", tier];
+                if !peers.is_empty() {
+                    a.extend(["--peers", &peers]);
+                }
                 a.extend(&dir);
                 match self.size {
-                    Size::Small => a.extend(["--commits", "3"]),
-                    Size::Medium => a.push("--quick"),
+                    Size::Small => a.extend(["--steps", "3"]),
+                    Size::Medium => a.extend(["--steps", "50"]),
                     Size::Large => {}
                 }
                 if let Some(flag) = self.on_existing_flag() {
                     a.push(flag);
                 }
-                out.push(step(StepKind::History, a));
-            }
-            if self.wants(StepKind::Changes) {
-                let tools = self.tool_flag();
-                let mut a = vec![
-                    "--log",
-                    "info",
-                    "changes",
-                    s,
-                    "--tools",
-                    &tools,
-                    "--oracle",
-                    "rdeps,load",
-                ];
-                a.extend(&dir);
-                match self.size {
-                    Size::Small => a.extend(["--change-sets", "1"]),
-                    Size::Medium => a.push("--quick"),
-                    Size::Large => {}
-                }
-                if let Some(flag) = self.on_existing_flag() {
-                    a.push(flag);
-                }
-                out.push(step(StepKind::Changes, a));
+                out.push(step(StepKind::Walk, a));
             }
             if self.wants(StepKind::Report) {
                 let mut a = vec!["report", s];
@@ -316,6 +299,16 @@ impl Plan {
                 .filter(|t| *t != crate::tools::cambi::NAME),
         );
         names.join(",")
+    }
+
+    /// The `--peers` value: the configured tools without cambium.
+    fn peer_flag(&self) -> String {
+        self.tools
+            .iter()
+            .map(String::as_str)
+            .filter(|t| *t != crate::tools::cambi::NAME)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     pub fn is_runnable(&self) -> bool {
@@ -502,8 +495,7 @@ mod tests {
             [
                 "cambium-bench --log info subjects fetch bazel --results-dir bench-results",
                 "cambium-bench --log info subjects build bazel --results-dir bench-results",
-                "cambium-bench --log info history bazel --oracle rebuild --results-dir bench-results",
-                "cambium-bench --log info changes bazel --tools cambium,bazel-diff,tango --oracle rdeps,load --results-dir bench-results",
+                "cambium-bench --log info walk bazel --tier full --peers bazel-diff,tango --results-dir bench-results",
                 "cambium-bench report bazel --results-dir bench-results",
                 "cambium-bench report --results-dir bench-results",
             ]
@@ -518,33 +510,33 @@ mod tests {
                 .all(|l| l.contains("--results-dir bench-results-smoke")),
             "{got:?}"
         );
-        assert!(got[2].ends_with("--commits 3 --restart"), "{}", got[2]);
-        assert!(got[3].ends_with("--change-sets 1 --restart"), "{}", got[3]);
+        assert!(got[2].contains("--tier correctness"), "{}", got[2]);
+        assert!(got[2].ends_with("--steps 3 --restart"), "{}", got[2]);
     }
 
     #[test]
     fn the_laptop_size_is_the_quick_sugar_and_nothing_else() {
         let got = lines(&plan(Size::Medium));
-        assert!(got[2].ends_with("--quick"), "{}", got[2]);
-        assert!(got[3].ends_with("--quick"), "{}", got[3]);
+        assert!(got[2].contains("--tier correctness"), "{}", got[2]);
+        assert!(got[2].ends_with("--steps 50"), "{}", got[2]);
         assert!(got[0].contains("bench-results"), "{}", got[0]);
     }
 
     #[test]
     fn resume_and_step_filters_narrow_the_run() {
         let p = Plan {
-            steps: vec![StepKind::Changes, StepKind::Report],
+            steps: vec![StepKind::Walk, StepKind::Report],
             resume: true,
             ..plan(Size::Large)
         };
         let got = lines(&p);
         assert_eq!(got.len(), 3, "{got:?}");
         assert!(
-            got[0].contains(" changes bazel ") && got[0].ends_with("--resume"),
+            got[0].contains(" walk bazel ") && got[0].ends_with("--resume"),
             "{}",
             got[0]
         );
-        assert!(!got.iter().any(|l| l.contains(" history ")), "{got:?}");
+        assert!(!got.iter().any(|l| l.contains(" build ")), "{got:?}");
         // A smoke run starts over whatever it is told.
         let smoke = lines(&Plan {
             resume: true,
@@ -574,13 +566,13 @@ mod tests {
     fn a_run_over_recorded_results_refuses_resumes_or_moves_them_aside() {
         let dir = tempfile::tempdir().unwrap();
         let results = dir.path().join("bench-results");
-        std::fs::create_dir_all(results.join("bazel/changes")).unwrap();
-        std::fs::write(results.join("bazel/changes/changes-abc.json"), "{}").unwrap();
+        std::fs::create_dir_all(results.join("bazel/walk")).unwrap();
+        std::fs::write(results.join("bazel/walk/walk-abc.json"), "{}").unwrap();
         let p = Plan {
             results_dir: Some(results.clone()),
             ..plan(Size::Large)
         };
-        assert_eq!(p.existing_results(), ["bazel: changes"]);
+        assert_eq!(p.existing_results(), ["bazel: walk"]);
         let err = p.refuse_existing().unwrap_err().to_string();
         assert!(err.contains("--resume") && err.contains("--fresh"), "{err}");
         assert!(Plan {
@@ -589,18 +581,18 @@ mod tests {
         }
         .refuse_existing()
         .is_ok());
-        let history_only = Plan {
-            steps: vec![StepKind::History],
+        let build_only = Plan {
+            steps: vec![StepKind::Build],
             ..p.clone()
         };
         assert!(
-            history_only.existing_results().is_empty(),
+            build_only.existing_results().is_empty(),
             "only the workloads the plan runs count"
         );
 
         let moved = p.move_results_aside().unwrap().expect("something to move");
         assert!(!results.exists());
-        assert!(moved.join("bazel/changes/changes-abc.json").exists());
+        assert!(moved.join("bazel/walk/walk-abc.json").exists());
         assert!(p.refuse_existing().is_ok());
         assert_eq!(
             p.move_results_aside().unwrap(),
@@ -615,16 +607,16 @@ mod tests {
             steps: vec![
                 StepKind::Fetch,
                 StepKind::Build,
-                StepKind::Changes,
+                StepKind::Walk,
                 StepKind::Report,
             ],
             tools: vec![],
             ..plan(Size::Medium)
         };
         let got = lines(&p);
-        assert!(!got.iter().any(|l| l.contains(" history ")), "{got:?}");
-        // Naming no foil measures cambium alone, which is a run, not an error.
-        assert!(got[2].contains("--tools cambium "), "{}", got[2]);
+        assert!(!got.iter().any(|l| l.contains(" build ") && l.contains(" walk ")), "{got:?}");
+        // No peers named: the walk runs cambium alone, with no --peers flag.
+        assert!(got[2].contains(" walk ") && !got[2].contains("--peers"), "{}", got[2]);
     }
 
     #[test]
@@ -647,7 +639,7 @@ mod tests {
     fn a_failed_gate_skips_the_rest_of_its_subject_only() {
         let p = Plan::published(vec!["a".into(), "b".into()]);
         let mut q = Queue::new(&p);
-        assert_eq!(q.total, 11);
+        assert_eq!(q.total, 9);
         let fetch_a = q.pop().unwrap();
         assert_eq!(
             (fetch_a.kind, fetch_a.subject.as_deref()),
@@ -664,10 +656,10 @@ mod tests {
         assert_eq!(build_b.kind, StepKind::Build);
         // A failed workload does not skip the report that follows it.
         q.finished(&build_b, true);
-        let hist = q.pop().unwrap();
-        q.finished(&hist, false);
-        assert_eq!(q.pop().unwrap().kind, StepKind::Changes);
-        q.pop();
+        let walk = q.pop().unwrap();
+        assert_eq!(walk.kind, StepKind::Walk);
+        q.finished(&walk, false);
+        assert_eq!(q.pop().unwrap().kind, StepKind::Report);
         let last = q.pop().unwrap();
         assert_eq!((last.kind, last.subject), (StepKind::Report, None));
         assert!(q.pop().is_none());
@@ -690,7 +682,7 @@ mod tests {
             .to_string();
         assert!(e.contains("REFUSING") && e.contains("abc1234"), "{e}");
         assert!(require_sha("cambi 0.1.0 (abc1234)", "").is_err());
-        assert!(StepKind::parse("changes") == Some(StepKind::Changes));
+        assert!(StepKind::parse("walk") == Some(StepKind::Walk));
         assert!(Size::parse("smoke") == Some(Size::Small));
         assert!(Size::parse("large") == Some(Size::Large));
         assert!(Size::parse("published") == Some(Size::Large));

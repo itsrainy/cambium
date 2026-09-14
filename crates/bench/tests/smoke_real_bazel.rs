@@ -1,5 +1,4 @@
-//! End-to-end three-way comparison against a *real* Bazel, on a repository
-//! this test writes.
+//! End-to-end walk against a *real* Bazel, on a repository this test writes.
 //!
 //! Ignored by default, and deliberately so: it wants bazelisk on disk, it
 //! downloads a Bazel release the first time, and each change set costs two
@@ -39,12 +38,12 @@ fn cambi() -> Cambi {
     }
 }
 
-use cambium_bench::changes;
 use cambium_bench::checkout::SubjectsDir;
-use cambium_bench::compare::{compare_change_sets, ChangesOptions};
+use cambium_bench::env::Environment;
 use cambium_bench::manifest::RepoEntry;
 use cambium_bench::tools::cambi::Cambi;
 use cambium_bench::tools::Tool;
+use cambium_bench::walk;
 
 fn bazelisk() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("HOME")?).join(".cache/cambium/bin/bazelisk");
@@ -279,84 +278,81 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     }
     let refs: Vec<&dyn Tool> = tools.iter().map(|p| p.as_ref()).collect();
 
-    let results = tmp.path().join("results/smoke");
-    let selected = changes::select(
+    let results = tmp.path().join("results/smoke/walk");
+    let (commits, steps) = walk::steps(
         &checkout.repo,
-        &[changes::ChangeSetKind::Adjacent],
-        &changes::ChangeSetOptions {
-            repo_id: entry.id.clone(),
-            pin: pin.clone(),
-            history_window: shas.len(),
-            seed: 0,
-            cap: 20,
-            total_cap: None,
-            hub_packages: Vec::new(),
-            invalidator_paths: Vec::new(),
-            invalidator_globs: Vec::new(),
-        },
+        &pin,
+        shas.len(),
+        &walk::Probes::default(),
     )
     .unwrap();
-    assert!(
-        selected.change_sets.len() >= 3,
-        "{:?}",
-        selected.change_sets
-    );
+    assert!(steps.len() >= 3, "{steps:?}");
 
-    let opts = ChangesOptions {
-        // 0 is the full oracle: every changed path in the change set.
-        oracle_k: 0,
-        resume: false,
-        scratch: tmp.path().join("scratch"),
-        ..ChangesOptions::new("smoke", pin, results)
+    let cambi = cambi();
+    let driver = walk::CambiDriver {
+        checkout: &checkout,
+        cambi: &cambi,
     };
-    let result = compare_change_sets(
-        &engine,
-        &cambi(),
-        &checkout,
-        &selected.change_sets,
-        &refs,
-        &opts,
-    )
-    .unwrap();
+    let scratch = tmp.path().join("scratch");
+    let live = walk::BazelChecks {
+        engine: &engine,
+        checkout: &checkout,
+        tools: &refs,
+        results_dir: &results,
+        scratch: &scratch,
+        oracle_k: 0,
+        seed: 0,
+    };
+    let opts = walk::WalkOptions {
+        repo_id: "smoke".into(),
+        pin: pin.clone(),
+        results_dir: results.clone(),
+        state_dir: tmp.path().join("results/smoke"),
+        bazel_version: version.clone().unwrap_or_default(),
+        schedule: walk::Tier::Full.defaults(),
+        oracle_sample: walk::Sample::all(&steps),
+        peer_sample: walk::Sample::all(&steps),
+        environment: Environment {
+            machine: cambium_bench::harness::Machine::detect(),
+            bazel_version_used: version.clone().unwrap_or_default(),
+            cambi_version: cambi.version().to_string(),
+            tool_sha: String::new(),
+            engine_id: String::new(),
+            config_hash: String::new(),
+            output_bases: Default::default(),
+        },
+        publish: true,
+        resume: false,
+        diff_cap: 50,
+        progress: None,
+    };
+    let result = walk::walk(&engine, &driver, &live, &commits, &steps, &opts).unwrap();
 
     // The rendered section, so a run of this test by hand shows the same table
     // the benchmark would write into docs/RESULTS.md.
     println!(
         "{}",
         cambium_bench::report::render_subject_section(
-            &cambium_bench::report::SubjectResults::new("bazel")
-                .with_compares(vec![result.clone()]),
-            None,
+            &cambium_bench::report::SubjectResults {
+                id: "smoke".into(),
+                walk: Some(result.clone()),
+            },
         )
     );
 
-    for change_set in &result.change_sets {
-        for p in &change_set.tools {
-            assert!(p.error.is_none(), "{} failed: {:?}", p.name, p.error);
+    for st in &result.steps {
+        for t in &st.tools {
+            assert!(!t.failed, "{} failed on {}..{}", t.name, st.parent, st.head);
         }
     }
     assert!(
-        result.summary.min_recall >= 1.0,
-        "cambium missed something Bazel's rdeps reached: {:#?}",
-        result
-            .change_sets
-            .iter()
-            .filter_map(|p| p.oracle.as_ref())
-            .filter(|o| !o.ok())
-            .collect::<Vec<_>>()
-    );
-    let failures: usize = cambium_bench::classify::Class::ALL
-        .iter()
-        .filter(|c| c.is_failure())
-        .filter_map(|c| result.summary.by_class.get(c))
-        .sum();
-    assert_eq!(
-        failures, 0,
-        "unexplained disagreements: {:#?}",
-        result.summary.by_class
+        result.summary.soundness.worst_recall >= 1.0,
+        "cambium missed something Bazel's rdeps reached at {}",
+        result.summary.soundness.worst_step
     );
     assert!(result.summary.pass, "{:#?}", result.summary);
 }
+
 
 /// A second workspace, written for the oracle alone: `defs/defs.bzl` is both a
 /// macro other packages load *and* a source of a filegroup in its own package.
@@ -493,37 +489,64 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
     checkout.write_config(&entry, version.as_deref()).unwrap();
     let engine = checkout.engine(&entry, version.as_deref()).unwrap();
 
-    let change_sets = vec![
-        changes::ChangeSet {
-            base: shas[0].clone(),
-            head: shas[1].clone(),
-            kind: changes::ChangeSetKind::Adjacent,
-            category: None,
-            pr_number: None,
-        },
-        changes::ChangeSet {
-            base: shas[1].clone(),
-            head: shas[2].clone(),
-            kind: changes::ChangeSetKind::Adjacent,
-            category: None,
-            pr_number: None,
-        },
-    ];
-    let opts = ChangesOptions {
-        // 0 is the full oracle: every changed path in the change set.
-        oracle_k: 0,
-        resume: false,
-        scratch: tmp.path().join("scratch"),
-        ..ChangesOptions::new("oracle", pin, tmp.path().join("results/oracle"))
+    let (commits, steps) = walk::steps(
+        &checkout.repo,
+        &pin,
+        shas.len(),
+        &walk::Probes::default(),
+    )
+    .unwrap();
+    assert!(steps.len() >= 2, "{steps:?}");
+    let cambi = cambi();
+    let driver = walk::CambiDriver {
+        checkout: &checkout,
+        cambi: &cambi,
     };
-    let result =
-        compare_change_sets(&engine, &cambi(), &checkout, &change_sets, &[], &opts).unwrap();
-    assert_eq!(result.change_sets.len(), 2);
+    let scratch = tmp.path().join("scratch");
+    let results = tmp.path().join("results/oracle/walk");
+    // No peers; the oracle on every step is what this test reads.
+    let live = walk::BazelChecks {
+        engine: &engine,
+        checkout: &checkout,
+        tools: &[],
+        results_dir: &results,
+        scratch: &scratch,
+        oracle_k: 0,
+        seed: 0,
+    };
+    let opts = walk::WalkOptions {
+        repo_id: "oracle".into(),
+        pin: pin.clone(),
+        results_dir: results.clone(),
+        state_dir: tmp.path().join("results/oracle"),
+        bazel_version: version.clone().unwrap_or_default(),
+        schedule: walk::Tier::Correctness.schedule(&walk::Overrides {
+            oracle_sample: Some(0), // every step
+            ..Default::default()
+        }),
+        oracle_sample: walk::Sample::all(&steps),
+        peer_sample: walk::Sample::default(),
+        environment: Environment {
+            machine: cambium_bench::harness::Machine::detect(),
+            bazel_version_used: version.clone().unwrap_or_default(),
+            cambi_version: cambi.version().to_string(),
+            tool_sha: String::new(),
+            engine_id: String::new(),
+            config_hash: String::new(),
+            output_bases: Default::default(),
+        },
+        publish: true,
+        resume: false,
+        diff_cap: 50,
+        progress: None,
+    };
+    let result = walk::walk(&engine, &driver, &live, &commits, &steps, &opts).unwrap();
+    assert!(result.steps.len() >= 2);
 
     // `defs/defs.bzl` -> the filegroup that lists it in `srcs`. `//app:app`
     // reaches the file through a `load()`, which is not a `deps` edge, so
     // `rdeps` does not name it and cambium over-approximates by including it.
-    let bzl = result.change_sets[0]
+    let bzl = result.steps[0]
         .oracle
         .as_ref()
         .expect("an oracle ran");
@@ -539,7 +562,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
 
     // `lib/lib.txt` -> the genrule that reads it, and the app that consumes
     // its output.
-    let src_set = result.change_sets[1]
+    let src_set = result.steps[1]
         .oracle
         .as_ref()
         .expect("an oracle ran");

@@ -6,7 +6,7 @@
 //! smoke test; here [`NoLiveChecks`] stands in and the rebuild oracle is the
 //! proof.
 
-use cambium_bench::history::{EngineDriver, RowSource};
+use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_bench::walk::{self, NoLiveChecks, Tier, WalkOptions};
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
