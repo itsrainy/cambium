@@ -27,6 +27,7 @@
 pub mod driver;
 pub mod live;
 pub mod model;
+pub mod report;
 pub mod sampling;
 pub mod steps;
 pub mod tier;
