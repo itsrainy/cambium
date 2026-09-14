@@ -8,15 +8,15 @@
 #
 #   tools/bench/run-published.sh
 #   SUBJECTS="envoy" tools/bench/run-published.sh
-#   SUBJECTS="apollo" STEPS="changes report" tools/bench/run-published.sh
+#   SUBJECTS="apollo" STEPS="walk report" tools/bench/run-published.sh
 #   FRESH=1 tools/bench/run-published.sh
-#   SUBJECTS="sourcegraph" STEPS=changes RESUME=1 tools/bench/run-published.sh
+#   SUBJECTS="sourcegraph" STEPS=walk RESUME=1 tools/bench/run-published.sh
 #   SMOKE=1 tools/bench/run-published.sh
 #
 # SMOKE=1 is the fifteen-minute pass to run before the eight-hour one: every
-# subject's fetch and build, a three-commit history walk with the rebuild
-# oracle, and one change set with every tool and both oracles, into
-# bench-results-smoke/ so the real run neither resumes nor overwrites it.
+# subject's fetch and build, then a three-step correctness walk against the
+# rdeps oracle, into bench-results-smoke/ so the real run neither resumes nor
+# overwrites it.
 #
 # A results directory that already holds results is refused, never silently
 # continued. RESUME=1 continues them, and each workload refuses one it cannot
@@ -45,7 +45,7 @@ NO_BUILD=${NO_BUILD:-0}
 
 # ---- the run's knobs, each a flag of `cambium-bench run` ----
 SUBJECTS=${SUBJECTS:-"bazel sourcegraph apollo envoy xla"}
-STEPS=${STEPS:-"fetch build history changes report"}
+STEPS=${STEPS:-"fetch build walk report"}
 RESUME=${RESUME:-0}
 FRESH=${FRESH:-0}
 SMOKE=${SMOKE:-0}
