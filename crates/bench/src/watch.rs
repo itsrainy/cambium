@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::walk::{StepRecord, WalkResult};
 use crate::progress::Progress;
 use crate::state::State;
-use crate::util::{duration, parse_rfc3339, percentile, rfc3339_now};
+use crate::util::{duration, parse_rfc3339, rfc3339_now};
 
 /// The snapshot document's version, carried by `--once --format json`.
 pub const WATCH_SCHEMA: u32 = 1;
@@ -264,16 +264,6 @@ fn eta(row: &SubjectSnapshot) -> Option<u64> {
     Some(remaining as u64 * p50 / 1000)
 }
 
-/// The p50 of what a compared change set cost: every tool's walls plus
-/// cambium's two, which is the work one change set of the loop does.
-fn step_p50(steps: &[StepRecord]) -> Option<u64> {
-    if steps.is_empty() {
-        return None;
-    }
-    let mut totals: Vec<u64> = steps.iter().map(|s| s.wall_ms).collect();
-    totals.sort_unstable();
-    Some(percentile(&totals, 0.5))
-}
 
 fn step_row(st: &StepRecord) -> ChangeSetRow {
     let tool_ms: Vec<(String, u64)> =
