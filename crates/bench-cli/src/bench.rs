@@ -103,6 +103,14 @@ pub enum Args {
         #[command(flatten)]
         common: Common,
     },
+    /// Measure one Skyframe prototype strategy on a subject, or compare the
+    /// result files several of them left behind.
+    ///
+    /// Every strategy answers the same question on the same sampled steps and
+    /// is scored against the same rdeps oracle, so the rows of `skyframe
+    /// compare` are comparable. `cambi` is the built-in control.
+    /// See docs/SKYFRAME_PROTOTYPES.md.
+    Skyframe(SkyframeArgs),
     /// The whole run, as `tools/bench/run-published.sh` runs it: per subject
     /// the fetch, the cold build, the walk and the report, then one report
     /// over every subject. Each step is a child `cambium-bench`.
@@ -284,6 +292,34 @@ pub struct PullArgs {
     pub manifest: Option<PathBuf>,
 }
 
+/// `cambium-bench skyframe`.
+#[derive(ClapArgs, Clone)]
+pub struct SkyframeArgs {
+    /// `compare <files>`; without it, a measurement run.
+    #[command(subcommand)]
+    pub what: Option<SkyframeCmd>,
+    /// A name from subject_repos.toml, or synth:<preset>.
+    #[arg(long)]
+    pub subject: Option<String>,
+    /// Which strategy to measure. Default: the cambi control.
+    #[arg(long, default_value = "cambi")]
+    pub strategy: String,
+    /// How many sampled steps to measure.
+    #[arg(long, default_value_t = cambium_bench::skyframe::DEFAULT_STEPS)]
+    pub steps: usize,
+    #[command(flatten)]
+    pub common: Common,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum SkyframeCmd {
+    /// Print one markdown table over the named result files.
+    Compare {
+        /// bench-results/skyframe/*.json
+        files: Vec<PathBuf>,
+    },
+}
+
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     match args {
         Args::Subjects { what } => do_subjects(ctx, what),
@@ -331,6 +367,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 crate::EXIT_ERROR
             })
         }
+        Args::Skyframe(args) => do_skyframe(ctx, args),
         Args::Labels {
             subject,
             change_set,
@@ -586,6 +623,36 @@ fn do_pull(ctx: &Context, args: &PullArgs) -> Result<u8> {
         }
     }
     Ok(failed)
+}
+
+/// `skyframe`: measure one strategy, or compare what several of them wrote.
+fn do_skyframe(ctx: &Context, args: SkyframeArgs) -> Result<u8> {
+    if let Some(SkyframeCmd::Compare { files }) = &args.what {
+        anyhow::ensure!(!files.is_empty(), "name the result files to compare");
+        print!("{}", cambium_bench::skyframe::compare_files(files)?);
+        return Ok(crate::EXIT_OK);
+    }
+    let subject = args
+        .subject
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("--subject <id> names the subject to measure"))?;
+    let session = ctx.session(&args.common)?;
+    let run = session.run_subject(&subject)?;
+    let measured = cambium_bench::skyframe::run_skyframe(
+        &run,
+        &cambium_bench::skyframe::SkyframeRequest {
+            strategy: args.strategy.clone(),
+            steps: args.steps,
+            seed: args.common.seed,
+        },
+    )?;
+    print!("{}", cambium_bench::skyframe::compare(&[measured.result.clone()]));
+    println!("{}", measured.path.display());
+    Ok(if measured.result.steps.iter().all(|s| s.sound()) {
+        crate::EXIT_OK
+    } else {
+        crate::EXIT_ERROR
+    })
 }
 
 #[cfg(test)]
