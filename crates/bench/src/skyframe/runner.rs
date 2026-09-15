@@ -92,7 +92,12 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
     );
     for s in &chosen {
         let tags: Vec<&str> = s.tags.iter().map(|t| t.name()).collect();
-        println!("  {}..{}  [{}]", short(&s.parent), short(&s.head), tags.join(","));
+        println!(
+            "  {}..{}  [{}]",
+            short(&s.parent),
+            short(&s.head),
+            tags.join(",")
+        );
     }
 
     let mut strategy = open(&req.strategy, &cambi, &run.results)?;
@@ -138,12 +143,19 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
             .prepare(&cx)
             .with_context(|| format!("{} prepare at {}", strategy.name(), step.parent))?;
         checkout.checkout(&step.head)?;
-        let answer = strategy
-            .answer(&cx)
-            .with_context(|| format!("{} answer {}..{}", strategy.name(), step.parent, step.head))?;
+        let answer = strategy.answer(&cx).with_context(|| {
+            format!("{} answer {}..{}", strategy.name(), step.parent, step.head)
+        })?;
 
-        let (oracle_size, missed, extra) =
-            oracle(run, &engine, &cambi, &checkout, step, &changed, &answer.targets)?;
+        let (oracle_size, missed, extra) = oracle(
+            run,
+            &engine,
+            &cambi,
+            &checkout,
+            step,
+            &changed,
+            &answer.targets,
+        )?;
         let m = StepMeasurement {
             subject: run.entry.id.clone(),
             parent: step.parent.clone(),
@@ -247,6 +259,7 @@ fn open<'a>(
             cambi,
             index_dir: results.join("skyframe-index"),
         })),
+        "skyframe-oracle" => Ok(Box::new(super::oracle::SkyframeOracle::default())),
         other => anyhow::bail!(
             "unknown strategy {other:?}; this cambium has {}",
             super::strategies().join(", ")

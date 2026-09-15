@@ -17,8 +17,8 @@ use cambium_engine::Engine;
 use cambium_index::IndexFile;
 
 use super::cambi::{cold_build, Driver};
-use crate::oracles::rebuild::compare_by_label;
 use crate::oracles::rdeps::RdepsResult;
+use crate::oracles::rebuild::compare_by_label;
 use crate::state::{HistoryState, State};
 use crate::util::now_unix;
 
@@ -254,10 +254,12 @@ impl Runner<'_> {
             p.tool(Some(crate::tools::cambi::NAME));
         }
         self.driver.checkout(&step.head)?;
-        let run = match self
-            .driver
-            .update(&step.parent, &step.head, &self.index_path, self.opts.publish)
-        {
+        let run = match self.driver.update(
+            &step.parent,
+            &step.head,
+            &self.index_path,
+            self.opts.publish,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 if let Some(p) = self.progress() {
@@ -406,12 +408,8 @@ impl Runner<'_> {
         let fresh = IndexFile::open(&fresh_path)?;
         let diff = compare_by_label(applied.view(), fresh.view(), self.opts.diff_cap);
         let ok = diff.is_empty();
-        self.result.head_index = super::cambi::archive_head_index(
-            self.engine,
-            &self.opts.state_dir,
-            to,
-            &fresh_path,
-        );
+        self.result.head_index =
+            super::cambi::archive_head_index(self.engine, &self.opts.state_dir, to, &fresh_path);
         self.result.rebuild_oracle = Some(RebuildOracle {
             ok,
             summary: if ok { String::new() } else { diff.summary() },
@@ -460,7 +458,10 @@ fn score_cambium(
 /// Recall is `|answer ∩ oracle| / |oracle|`; tightness is `|oracle| /
 /// |answer|`. Both `None` when the oracle did not run; tightness `None` on an
 /// empty answer, which has no ratio.
-pub fn score(labels: &BTreeSet<String>, oracle: Option<&RdepsResult>) -> (Option<f64>, Option<f64>) {
+pub fn score(
+    labels: &BTreeSet<String>,
+    oracle: Option<&RdepsResult>,
+) -> (Option<f64>, Option<f64>) {
     let Some(o) = oracle else {
         return (None, None);
     };

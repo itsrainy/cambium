@@ -6,8 +6,8 @@
 //! smoke test; here [`NoLiveChecks`] stands in and the rebuild oracle is the
 //! proof.
 
-use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_bench::walk::{self, NoLiveChecks, Tier, WalkOptions};
+use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 use cambium_testkit::synthetic_engine;
@@ -107,17 +107,32 @@ fn steps(f: &Fixture) -> (Vec<String>, Vec<walk::Step>) {
 fn a_walk_runs_and_the_rebuild_oracle_holds() {
     let f = fixture(8, "typical-pr");
     let (commits, s) = steps(&f);
-    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
 
     assert!(r.done);
     assert_eq!(r.steps.len(), commits.len() - 1);
     assert_eq!(r.tier, Tier::Correctness);
     let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
-    assert!(ro.ok, "applied index differs from a rebuild: {}", ro.summary);
+    assert!(
+        ro.ok,
+        "applied index differs from a rebuild: {}",
+        ro.summary
+    );
     assert!(r.head_index.is_some(), "the pin's index was archived");
     assert!(r.summary.pass);
     // Every step scored cambium as a tool row, even with no oracle.
-    assert!(r.steps.iter().all(|st| st.tools.first().map(|t| t.name.as_str()) == Some("cambium")));
+    assert!(r
+        .steps
+        .iter()
+        .all(|st| st.tools.first().map(|t| t.name.as_str()) == Some("cambium")));
     assert!(r.steps.iter().any(|st| st.dirty_packages > 0));
     // The first step's parent is the cold-build commit; each step carries on.
     assert_eq!(r.steps[0].parent, commits[0]);
@@ -125,11 +140,17 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
 
     // Every step's index was published, so a resume could find it.
     for c in &commits {
-        assert!(f.engine.fetch_baseline(c).unwrap().is_some(), "no index for {c}");
+        assert!(
+            f.engine.fetch_baseline(c).unwrap().is_some(),
+            "no index for {c}"
+        );
     }
-    let on_disk =
-        walk::WalkResult::read(&walk::WalkResult::path(&f.results.join("walk"), &opts(&f).pin, Some("synth")))
-            .unwrap();
+    let on_disk = walk::WalkResult::read(&walk::WalkResult::path(
+        &f.results.join("walk"),
+        &opts(&f).pin,
+        Some("synth"),
+    ))
+    .unwrap();
     assert_eq!(on_disk.steps.len(), r.steps.len());
     assert!(on_disk.done);
 }
@@ -138,7 +159,15 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
 fn a_walk_resumes_from_its_last_published_index() {
     let f = fixture(6, "typical-pr");
     let (commits, s) = steps(&f);
-    let full = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    let full = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
     assert!(full.done);
 
     // Truncate to three steps and mark it unfinished, then resume.
@@ -151,17 +180,36 @@ fn a_walk_resumes_from_its_last_published_index() {
 
     let mut o = opts(&f);
     o.resume = true;
-    let resumed = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let resumed = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &o,
+    )
+    .unwrap();
     assert_eq!(resumed.steps.len(), commits.len() - 1);
     assert_eq!(resumed.steps[2].head, truncated.steps[2].head);
-    assert!(resumed.rebuild_oracle.unwrap().ok, "a resumed walk still equals a rebuild");
+    assert!(
+        resumed.rebuild_oracle.unwrap().ok,
+        "a resumed walk still equals a rebuild"
+    );
 }
 
 #[test]
 fn schema_seven_refuses_a_schema_six_walk_file() {
     let f = fixture(4, "typical-pr");
     let (commits, s) = steps(&f);
-    walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
     let path = walk::WalkResult::path(&f.results.join("walk"), &opts(&f).pin, Some("synth"));
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

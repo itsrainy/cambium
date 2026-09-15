@@ -167,7 +167,11 @@ mod tests {
     fn window() -> Vec<Step> {
         (0..100)
             .map(|n| {
-                let mut tags = vec![if n % 33 == 32 { Tag::Merge } else { Tag::Adjacent }];
+                let mut tags = vec![if n % 33 == 32 {
+                    Tag::Merge
+                } else {
+                    Tag::Adjacent
+                }];
                 if n % 10 == 0 {
                     tags.push(Tag::Bzl);
                 }
@@ -194,7 +198,11 @@ mod tests {
         assert_eq!(a.coverage[&Tag::Invalidator].deficit(), 1);
         assert_eq!(a.coverage[&Tag::Hub].present, 0);
         assert_eq!(a.coverage[&Tag::Hub].deficit(), 2);
-        assert_ne!(sample(&w, 8, 2, Some(20)).chosen, a.chosen, "the seed matters");
+        assert_ne!(
+            sample(&w, 8, 2, Some(20)).chosen,
+            a.chosen,
+            "the seed matters"
+        );
     }
 
     #[test]
@@ -219,11 +227,18 @@ mod tests {
         let w = window();
         let short = sample(&w[60..], 5, 0, Some(8));
         let long = sample(&w, 5, 0, Some(8));
-        let short_heads: BTreeSet<&str> =
-            short.chosen.iter().map(|&i| w[60 + i].head.as_str()).collect();
+        let short_heads: BTreeSet<&str> = short
+            .chosen
+            .iter()
+            .map(|&i| w[60 + i].head.as_str())
+            .collect();
         for &i in &long.chosen {
             if i >= 60 {
-                assert!(short_heads.contains(w[i].head.as_str()), "{} moved", w[i].head);
+                assert!(
+                    short_heads.contains(w[i].head.as_str()),
+                    "{} moved",
+                    w[i].head
+                );
             }
         }
     }
