@@ -1,0 +1,330 @@
+{
+  "strategy": "warm-query-cold",
+  "subject": "bazel",
+  "bazel_version": "bazel 9.2.0",
+  "started": 1789448515,
+  "steps": [
+    {
+      "subject": "bazel",
+      "parent": "3206c3be59fda238ed911b149b8a16d3be760d73",
+      "head": "1b057109227453d4eeaa21106a139afa64c837a3",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 8146,
+      "answer_wall_ms": 10980,
+      "answer_size": 16,
+      "oracle_size": 16,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1021",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "2",
+        "answer.same_server": "false",
+        "answer.server_pid": "86022",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "523",
+        "prepare.partial": "false",
+        "prepare.server_pid": "85954",
+        "prepare.universe_labels": "3911"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "4968c1aab7154e42716a0e2809535cddfd76454b",
+      "head": "1ec21d9228a9b0aad0acfbf812f62e13f6addb88",
+      "tags": [
+        "bzl",
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3778,
+      "answer_wall_ms": 11729,
+      "answer_size": 371,
+      "oracle_size": 371,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1068",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "2",
+        "answer.same_server": "false",
+        "answer.server_pid": "86313",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "492",
+        "prepare.partial": "false",
+        "prepare.server_pid": "86022",
+        "prepare.universe_labels": "4095"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "d94db52c5a1265ceac4531c962fc548e2f718c93",
+      "head": "93d657610677baef395991e46517915317fa7cbc",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 318,
+      "answer_wall_ms": 32699,
+      "answer_size": 1873,
+      "oracle_size": 1873,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1069",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "5",
+        "answer.same_server": "false",
+        "answer.server_pid": "89241",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "86313",
+        "prepare.universe_labels": "4097"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "a671c5e78f4a78196341cf3a487f62ff4101be4f",
+      "head": "0c00d0300128d2b3e202f64a01015ae8cf761290",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 2149,
+      "answer_wall_ms": 10490,
+      "answer_size": 0,
+      "oracle_size": 0,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1069",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "1",
+        "answer.same_server": "false",
+        "answer.server_pid": "96188",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "89241",
+        "prepare.universe_labels": "4097"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "3896432c5717de8346bf2097c3eaa9fd7d85bb30",
+      "head": "2b02b19763951ced70316be1a094dadc89d0c4db",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 883,
+      "answer_wall_ms": 20656,
+      "answer_size": 1376,
+      "oracle_size": 1376,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1070",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "7",
+        "answer.same_server": "false",
+        "answer.server_pid": "96395",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "96188",
+        "prepare.universe_labels": "4104"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "9bafb5c6238dbc240f711f1c2616ccee7523ebb0",
+      "head": "ef4496f78a9c4c81306cceff7ecbff8cf486c26d",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 1369,
+      "answer_wall_ms": 16880,
+      "answer_size": 1977,
+      "oracle_size": 1977,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1070",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "4",
+        "answer.same_server": "false",
+        "answer.server_pid": "96547",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "96395",
+        "prepare.universe_labels": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "cb8de5c6bfcf0cee4b3fddebb7e1f4ebf1f6f862",
+      "head": "cdf41559d74641e3e603ae9fdd386e752e34bbdc",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 485,
+      "answer_wall_ms": 11114,
+      "answer_size": 939,
+      "oracle_size": 939,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1070",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "2",
+        "answer.same_server": "false",
+        "answer.server_pid": "96739",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "96547",
+        "prepare.universe_labels": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "ffd441add449806a811906705735f89297f82386",
+      "head": "8b5e5664059b14585c0f8cf4a90afd3d3c2a4b86",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 412,
+      "answer_wall_ms": 10663,
+      "answer_size": 998,
+      "oracle_size": 998,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "993",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "5",
+        "answer.same_server": "false",
+        "answer.server_pid": "97925",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "96739",
+        "prepare.universe_labels": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "3edf2950e89742507c29aa4f00045419d4cbcdf1",
+      "head": "69074f52ef42731a080d386febf534e556cf368e",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 447,
+      "answer_wall_ms": 9133,
+      "answer_size": 751,
+      "oracle_size": 751,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "0",
+        "answer.packages_loaded": "1044",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "1",
+        "answer.same_server": "false",
+        "answer.server_pid": "99927",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "97925",
+        "prepare.universe_labels": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "2893383aa3a3b1f0936d6158dad7a4256e004c5f",
+      "head": "0fc10749b389f45ea74a5b8db2d74a00c049b59d",
+      "tags": [
+        "build_add_delete",
+        "adjacent"
+      ],
+      "prepare_wall_ms": 730,
+      "answer_wall_ms": 10975,
+      "answer_size": 2647,
+      "oracle_size": 761,
+      "missed": [],
+      "extra": 1886,
+      "state_bytes": 0,
+      "notes": {
+        "answer.batches": "1",
+        "answer.cold": "true",
+        "answer.package_wildcards": "144",
+        "answer.packages_loaded": "1070",
+        "answer.partial": "true",
+        "answer.rbuildfiles_roots": "0",
+        "answer.roots": "11",
+        "answer.same_server": "false",
+        "answer.server_pid": "2289",
+        "answer.unnamed_deletes": "0",
+        "answer.workspace_level": "0",
+        "prepare.packages_loaded": "0",
+        "prepare.partial": "false",
+        "prepare.server_pid": "99927",
+        "prepare.universe_labels": "4109"
+      }
+    }
+  ]
+}
