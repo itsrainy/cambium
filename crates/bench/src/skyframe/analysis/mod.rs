@@ -177,7 +177,10 @@ impl Strategy for AnalysisStrategy {
             // server, and seeds the head graph with every key that appeared
             // or disappeared as well as with the changed paths.
             let cap = capture(cx, cx.scratch, "head")?;
-            notes.insert("head_analysis_ms".into(), cap.analysis.as_millis().to_string());
+            notes.insert(
+                "head_analysis_ms".into(),
+                cap.analysis.as_millis().to_string(),
+            );
             notes.insert("head_dump_ms".into(), cap.dump_wall.as_millis().to_string());
             notes.insert("head_parse_ms".into(), cap.parse.as_millis().to_string());
             notes.insert("head_dump_bytes".into(), cap.dump_bytes.to_string());
