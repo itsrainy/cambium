@@ -1,0 +1,313 @@
+{
+  "strategy": "skyframe-index-requery",
+  "subject": "bazel",
+  "bazel_version": "bazel 9.2.0",
+  "started": 1789447904,
+  "steps": [
+    {
+      "subject": "bazel",
+      "parent": "3206c3be59fda238ed911b149b8a16d3be760d73",
+      "head": "1b057109227453d4eeaa21106a139afa64c837a3",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 12843,
+      "answer_wall_ms": 36,
+      "answer_size": 16,
+      "oracle_size": 16,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 460266,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "30",
+        "answer.unknown_seeds": "0",
+        "prepare.dump_blocks": "17212",
+        "prepare.dump_bytes": "5776788",
+        "prepare.dump_ms": "559",
+        "prepare.edges": "24712",
+        "prepare.nodes": "16686",
+        "prepare.parse_ms": "124",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "12134",
+        "prepare.query_targets": "24147",
+        "prepare.rules": "3911"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "4968c1aab7154e42716a0e2809535cddfd76454b",
+      "head": "1ec21d9228a9b0aad0acfbf812f62e13f6addb88",
+      "tags": [
+        "bzl",
+        "adjacent"
+      ],
+      "prepare_wall_ms": 4214,
+      "answer_wall_ms": 38,
+      "answer_size": 371,
+      "oracle_size": 371,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 629285,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "31",
+        "answer.unknown_seeds": "2",
+        "prepare.dump_blocks": "28354",
+        "prepare.dump_bytes": "8557861",
+        "prepare.dump_ms": "778",
+        "prepare.edges": "26603",
+        "prepare.nodes": "27780",
+        "prepare.parse_ms": "172",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "3217",
+        "prepare.query_targets": "24397",
+        "prepare.rules": "4095"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "d94db52c5a1265ceac4531c962fc548e2f718c93",
+      "head": "93d657610677baef395991e46517915317fa7cbc",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3389,
+      "answer_wall_ms": 152,
+      "answer_size": 1873,
+      "oracle_size": 1873,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 978991,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "134",
+        "answer.unknown_seeds": "5",
+        "prepare.dump_blocks": "49344",
+        "prepare.dump_bytes": "20214944",
+        "prepare.dump_ms": "1408",
+        "prepare.edges": "68400",
+        "prepare.nodes": "48770",
+        "prepare.parse_ms": "358",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1567",
+        "prepare.query_targets": "24414",
+        "prepare.rules": "4097"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "a671c5e78f4a78196341cf3a487f62ff4101be4f",
+      "head": "0c00d0300128d2b3e202f64a01015ae8cf761290",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3996,
+      "answer_wall_ms": 73,
+      "answer_size": 0,
+      "oracle_size": 0,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 639664,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "66",
+        "answer.unknown_seeds": "1",
+        "prepare.dump_blocks": "29109",
+        "prepare.dump_bytes": "8738787",
+        "prepare.dump_ms": "785",
+        "prepare.edges": "26610",
+        "prepare.nodes": "28535",
+        "prepare.parse_ms": "222",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "2935",
+        "prepare.query_targets": "24414",
+        "prepare.rules": "4097"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "3896432c5717de8346bf2097c3eaa9fd7d85bb30",
+      "head": "2b02b19763951ced70316be1a094dadc89d0c4db",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 2370,
+      "answer_wall_ms": 77,
+      "answer_size": 1376,
+      "oracle_size": 1376,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 988258,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "62",
+        "answer.unknown_seeds": "7",
+        "prepare.dump_blocks": "50109",
+        "prepare.dump_bytes": "20399616",
+        "prepare.dump_ms": "915",
+        "prepare.edges": "68421",
+        "prepare.nodes": "49534",
+        "prepare.parse_ms": "264",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1118",
+        "prepare.query_targets": "24436",
+        "prepare.rules": "4104"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "9bafb5c6238dbc240f711f1c2616ccee7523ebb0",
+      "head": "ef4496f78a9c4c81306cceff7ecbff8cf486c26d",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 2971,
+      "answer_wall_ms": 67,
+      "answer_size": 1977,
+      "oracle_size": 1977,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 652150,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "52",
+        "answer.unknown_seeds": "4",
+        "prepare.dump_blocks": "30081",
+        "prepare.dump_bytes": "9017583",
+        "prepare.dump_ms": "664",
+        "prepare.edges": "27134",
+        "prepare.nodes": "29506",
+        "prepare.parse_ms": "450",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1601",
+        "prepare.query_targets": "24454",
+        "prepare.rules": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "cb8de5c6bfcf0cee4b3fddebb7e1f4ebf1f6f862",
+      "head": "cdf41559d74641e3e603ae9fdd386e752e34bbdc",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 4213,
+      "answer_wall_ms": 74,
+      "answer_size": 939,
+      "oracle_size": 939,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 988798,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "61",
+        "answer.unknown_seeds": "2",
+        "prepare.dump_blocks": "50109",
+        "prepare.dump_bytes": "20399705",
+        "prepare.dump_ms": "1689",
+        "prepare.edges": "68422",
+        "prepare.nodes": "49534",
+        "prepare.parse_ms": "782",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1524",
+        "prepare.query_targets": "24454",
+        "prepare.rules": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "ffd441add449806a811906705735f89297f82386",
+      "head": "8b5e5664059b14585c0f8cf4a90afd3d3c2a4b86",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3761,
+      "answer_wall_ms": 79,
+      "answer_size": 998,
+      "oracle_size": 998,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 988798,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "65",
+        "answer.unknown_seeds": "5",
+        "prepare.dump_blocks": "50109",
+        "prepare.dump_bytes": "20399705",
+        "prepare.dump_ms": "1598",
+        "prepare.edges": "68422",
+        "prepare.nodes": "49534",
+        "prepare.parse_ms": "602",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1394",
+        "prepare.query_targets": "24454",
+        "prepare.rules": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "3edf2950e89742507c29aa4f00045419d4cbcdf1",
+      "head": "69074f52ef42731a080d386febf534e556cf368e",
+      "tags": [
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3538,
+      "answer_wall_ms": 83,
+      "answer_size": 751,
+      "oracle_size": 751,
+      "missed": [],
+      "extra": 0,
+      "state_bytes": 988798,
+      "notes": {
+        "answer.dirty_packages": "0",
+        "answer.load_ms": "66",
+        "answer.unknown_seeds": "1",
+        "prepare.dump_blocks": "50109",
+        "prepare.dump_bytes": "20399705",
+        "prepare.dump_ms": "1519",
+        "prepare.edges": "68422",
+        "prepare.nodes": "49534",
+        "prepare.parse_ms": "506",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1356",
+        "prepare.query_targets": "24454",
+        "prepare.rules": "4107"
+      }
+    },
+    {
+      "subject": "bazel",
+      "parent": "2893383aa3a3b1f0936d6158dad7a4256e004c5f",
+      "head": "0fc10749b389f45ea74a5b8db2d74a00c049b59d",
+      "tags": [
+        "build_add_delete",
+        "adjacent"
+      ],
+      "prepare_wall_ms": 3592,
+      "answer_wall_ms": 2687,
+      "answer_size": 3279,
+      "oracle_size": 761,
+      "missed": [],
+      "extra": 2518,
+      "state_bytes": 949193,
+      "notes": {
+        "answer.dirty_packages": "10",
+        "answer.load_ms": "61",
+        "answer.requeried": "10",
+        "answer.requery_ms": "2586",
+        "answer.requery_rules": "198",
+        "answer.unknown_seeds": "143",
+        "prepare.dump_blocks": "48018",
+        "prepare.dump_bytes": "19283585",
+        "prepare.dump_ms": "1490",
+        "prepare.edges": "65632",
+        "prepare.nodes": "47443",
+        "prepare.parse_ms": "591",
+        "prepare.query_load_errors": "0",
+        "prepare.query_ms": "1359",
+        "prepare.query_targets": "24467",
+        "prepare.rules": "4109"
+      }
+    }
+  ]
+}
