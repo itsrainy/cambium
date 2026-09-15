@@ -243,6 +243,8 @@ fn open<'a>(
     results: &std::path::Path,
 ) -> Result<Box<dyn Strategy + 'a>> {
     match name {
+        super::analysis::NAME => Ok(Box::new(super::AnalysisStrategy::new(false))),
+        super::analysis::WARM_NAME => Ok(Box::new(super::AnalysisStrategy::new(true))),
         "cambi" => Ok(Box::new(CambiStrategy {
             cambi,
             index_dir: results.join("skyframe-index"),
