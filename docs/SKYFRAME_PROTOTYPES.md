@@ -59,6 +59,18 @@ cambium-bench skyframe compare bench-results/skyframe/*.json
 wall, median answer wall, median answer size, recall (steps with nothing missed
 over steps), median extra, median state bytes.
 
+The control row on the `bazel` subject (Bazel 9.2.0, three steps, seed 0) is
+committed as [benchmarks/skyframe-cambi-bazel.json](benchmarks/skyframe-cambi-bazel.json);
+`bench-results/` itself is not tracked. It reads:
+
+| strategy | subject | steps | prepare p50 ms | answer p50 ms | answer p50 | recall | extra p50 | state p50 bytes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cambi | bazel | 3 | 40250 | 1850 | 751 | 3/3 | 0 | 669636 |
+
+Two of the three steps reproduce the oracle exactly; the third (a step that
+adds or deletes a BUILD file, 152 changed paths) answers 1342 targets over an
+oracle of 761.
+
 ## The four planned strategies
 
 - **skyframe-oracle**: diff two `bazel dump --skyframe=deps` dumps taken on a
