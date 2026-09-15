@@ -106,6 +106,14 @@ impl Strategy for AnalysisStrategy {
     }
 
     fn prepare(&mut self, cx: &StepContext<'_>) -> Result<Prepared> {
+        // A clean server per step. Two reasons, both learned on the `bazel`
+        // subject: a server that has analysed `//...` at several revisions and
+        // dumped 285 MB of keys each time dies partway through the next dump
+        // ("Server terminated abruptly"), and a prepare that inherits the
+        // previous step's warm analysis is not the cold cost the harness is
+        // there to measure. The warm variant still shares one server between
+        // its own prepare and answer, which is the thing it measures.
+        cx.bazel.shutdown();
         let started = Instant::now();
         let cap = capture(cx, cx.scratch, "parent")?;
         let mut notes = BTreeMap::new();
@@ -127,6 +135,13 @@ impl Strategy for AnalysisStrategy {
         notes.insert("config_checksums".into(), all.len().to_string());
         notes.insert("labels_multi_config".into(), multi.to_string());
         notes.insert("configured_labels".into(), by_label.len().to_string());
+        // Coverage: how much of the main repository analysis actually
+        // reached. A target whose analysis failed (on this subject, everything
+        // downstream of a GraalVM distribution that will not fetch on macOS)
+        // has no node at all, and no reverse walk can reach what is not
+        // there.
+        let main_labels = by_label.keys().filter(|l| l.starts_with("//")).count();
+        notes.insert("main_repo_labels".into(), main_labels.to_string());
 
         let graph_path = cx.scratch.join("analysis-graph.zst");
         let state_bytes = cap.graph.write(&graph_path)?;
@@ -309,6 +324,11 @@ fn analyse(cx: &StepContext<'_>, universe: &str) -> Result<Option<u64>> {
     let mut cmd = cx.bazel.command("build");
     cmd.arg("--nobuild")
         .arg("--keep_going")
+        // Without it, a `test_suite` is expanded into its members and never
+        // gets a CONFIGURED_TARGET of its own, so every test_suite in the
+        // repository is missing from the tier while the `rdeps` oracle
+        // reaches them all.
+        .arg("--noexpand_test_suites")
         .arg(universe)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
