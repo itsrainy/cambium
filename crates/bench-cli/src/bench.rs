@@ -646,7 +646,10 @@ fn do_skyframe(ctx: &Context, args: SkyframeArgs) -> Result<u8> {
             seed: args.common.seed,
         },
     )?;
-    print!("{}", cambium_bench::skyframe::compare(&[measured.result.clone()]));
+    print!(
+        "{}",
+        cambium_bench::skyframe::compare(std::slice::from_ref(&measured.result))
+    );
     println!("{}", measured.path.display());
     Ok(if measured.result.steps.iter().all(|s| s.sound()) {
         crate::EXIT_OK
