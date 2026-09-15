@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::walk::steps::{Step, Tag};
 
+pub mod dump;
 pub mod runner;
 
 pub use runner::{compare_files, run_skyframe, Measured, SkyframeRequest};
