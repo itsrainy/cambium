@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::walk::steps::{Step, Tag};
 
 pub mod runner;
+pub mod skyindex;
 
 pub use runner::{compare_files, run_skyframe, Measured, SkyframeRequest};
 
@@ -380,7 +381,7 @@ impl Strategy for CambiStrategy<'_> {
 /// Builds the strategy a name asks for. A prototype branch adds its arm here
 /// and nothing else in this file changes.
 pub fn strategies() -> &'static [&'static str] {
-    &["cambi"]
+    &["cambi", "skyframe-index", "skyframe-index-requery"]
 }
 
 #[cfg(test)]
