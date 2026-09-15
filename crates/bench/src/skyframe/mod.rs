@@ -37,8 +37,10 @@ use serde::{Deserialize, Serialize};
 use crate::walk::steps::{Step, Tag};
 
 pub mod runner;
+pub mod warm;
 
 pub use runner::{compare_files, run_skyframe, Measured, SkyframeRequest};
+pub use warm::WarmQueryStrategy;
 
 /// How many steps a run measures when nobody says.
 pub const DEFAULT_STEPS: usize = 10;
@@ -379,8 +381,20 @@ impl Strategy for CambiStrategy<'_> {
 
 /// Builds the strategy a name asks for. A prototype branch adds its arm here
 /// and nothing else in this file changes.
+/// A `warm-query` name is a base plus zero or more variant words
+/// ([`warm::Options::from_name`]), so the list names the base and the words
+/// rather than every combination.
 pub fn strategies() -> &'static [&'static str] {
-    &["cambi"]
+    &[
+        "cambi",
+        "warm-query",
+        "warm-query-cold",
+        "warm-query-scope",
+        "warm-query-infer",
+        "warm-query-nokeepgoing",
+        "warm-query-ordered",
+        "warm-query-rbuildfiles",
+    ]
 }
 
 #[cfg(test)]

@@ -247,6 +247,10 @@ fn open<'a>(
             cambi,
             index_dir: results.join("skyframe-index"),
         })),
+        other if super::warm::Options::from_name(other).is_some() => {
+            let opts = super::warm::Options::from_name(other).expect("checked just above");
+            Ok(Box::new(super::WarmQueryStrategy::new(other, opts)))
+        }
         other => anyhow::bail!(
             "unknown strategy {other:?}; this cambium has {}",
             super::strategies().join(", ")
