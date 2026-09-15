@@ -269,6 +269,7 @@ mod tests {
         for v in [
             "subjects",
             "walk",
+            "skyframe",
             "replay",
             "labels",
             "report",
