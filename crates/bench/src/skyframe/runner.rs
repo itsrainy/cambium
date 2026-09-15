@@ -247,6 +247,8 @@ fn open<'a>(
             cambi,
             index_dir: results.join("skyframe-index"),
         })),
+        "skyframe-index" => Ok(Box::new(super::skyindex::SkyIndexStrategy::plain())),
+        "skyframe-index-requery" => Ok(Box::new(super::skyindex::SkyIndexStrategy::requery())),
         other => anyhow::bail!(
             "unknown strategy {other:?}; this cambium has {}",
             super::strategies().join(", ")
