@@ -198,9 +198,10 @@ pub fn parse_key(line: &str) -> Option<NodeKey> {
                 .unwrap_or_else(|| payload.to_string());
             NodeKey::simple(kind, label)
         }
-        NodeKind::BuildConfiguration => {
-            NodeKey::simple(kind, between(payload, "[", "]").unwrap_or_else(|| payload.into()))
-        }
+        NodeKind::BuildConfiguration => NodeKey::simple(
+            kind,
+            between(payload, "[", "]").unwrap_or_else(|| payload.into()),
+        ),
         // `<GlobsKey packageRoot = /abs, packageIdentifier = pkg, globRequests = [...]>`.
         // Two GLOBS keys for one package differ only in the request list, and
         // a seeder can only ever name the package, so the package is the node.
@@ -462,17 +463,16 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
 
     #[test]
     fn a_platform_key_reduces_to_its_label() {
-        let k = parse_key(
-            "PLATFORM:Key[label=//:default_host_platform, flagAliasMappings={a=//x:y}]",
-        )
-        .unwrap();
+        let k =
+            parse_key("PLATFORM:Key[label=//:default_host_platform, flagAliasMappings={a=//x:y}]")
+                .unwrap();
         assert_eq!(k.id, "//:default_host_platform");
     }
 
     #[test]
     fn a_bzl_load_key_reduces_to_its_label() {
-        let k =
-            parse_key("BZL_LOAD:KeyForBuild{label=//tools:defs.bzl, isBuildPrelude=false}").unwrap();
+        let k = parse_key("BZL_LOAD:KeyForBuild{label=//tools:defs.bzl, isBuildPrelude=false}")
+            .unwrap();
         assert_eq!(k.id, "//tools:defs.bzl");
         let prelude =
             parse_key("BZL_LOAD:KeyForBuild{label=//tools:prelude_bazel, isBuildPrelude=true}")
@@ -496,8 +496,14 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
         // Two resolutions differing only in the requested toolchain types are
         // two nodes; nothing here reduces them, because nothing seeds them by
         // name either.
-        let a = parse_key("TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=K[1], toolchainTypes=[jdk]}").unwrap();
-        let b = parse_key("TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=K[1], toolchainTypes=[cpp]}").unwrap();
+        let a = parse_key(
+            "TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=K[1], toolchainTypes=[jdk]}",
+        )
+        .unwrap();
+        let b = parse_key(
+            "TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=K[1], toolchainTypes=[cpp]}",
+        )
+        .unwrap();
         assert_ne!(a, b);
     }
 
@@ -505,7 +511,10 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
     fn groups_are_flattened_into_plain_edges() {
         let d = parsed();
         let foo = d
-            .get(&NodeKey::configured_target("//src/main:foo", Some("f3f51bf1")))
+            .get(&NodeKey::configured_target(
+                "//src/main:foo",
+                Some("f3f51bf1"),
+            ))
             .unwrap();
         // The source file target's one dependent is the rule.
         let src = d
@@ -513,7 +522,9 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
             .unwrap();
         assert_eq!(d.rdeps[src as usize], vec![foo]);
         // And so is the package's, through the same flattening.
-        let pkg = d.get(&NodeKey::simple(NodeKind::Package, "src/main")).unwrap();
+        let pkg = d
+            .get(&NodeKey::simple(NodeKind::Package, "src/main"))
+            .unwrap();
         assert_eq!(d.rdeps[pkg as usize], vec![foo]);
         assert_eq!(d.unparsed, 0);
     }
@@ -522,7 +533,10 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
     fn a_file_state_is_reached_only_through_its_file() {
         let d = parsed();
         let state = d
-            .get(&NodeKey::simple(NodeKind::FileState, "/w\u{1}src/main/BUILD"))
+            .get(&NodeKey::simple(
+                NodeKind::FileState,
+                "/w\u{1}src/main/BUILD",
+            ))
             .unwrap();
         let file = d
             .get(&NodeKey::simple(NodeKind::File, "/w\u{1}src/main/BUILD"))
@@ -538,7 +552,9 @@ TOOLCHAIN_RESOLUTION:ToolchainContextKey{configurationKey=BuildConfigurationKey[
         let d = parsed();
         // `PACKAGE:src/main` appears once as a dependency and once as a
         // header.
-        let pkg = d.get(&NodeKey::simple(NodeKind::Package, "src/main")).unwrap();
+        let pkg = d
+            .get(&NodeKey::simple(NodeKind::Package, "src/main"))
+            .unwrap();
         assert_eq!(
             d.nodes
                 .iter()

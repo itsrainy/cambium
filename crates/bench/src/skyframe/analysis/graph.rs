@@ -129,17 +129,15 @@ impl Graph {
             .iter()
             .map(|&i| &self.nodes[i as usize])
             .filter(|n| {
-                n.kind == NodeKind::ConfiguredTarget
-                    && n.config.is_some()
-                    && n.is_main_repo_label()
+                n.kind == NodeKind::ConfiguredTarget && n.config.is_some() && n.is_main_repo_label()
             })
             .map(|n| n.id.clone())
             .collect()
     }
 
     pub fn write(&self, path: &Path) -> Result<u64> {
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        let file =
+            std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
         let mut w = zstd::Encoder::new(file, 3)?.auto_finish();
         writeln!(w, "{MAGIC}")?;
         writeln!(w, "{}", self.nodes.len())?;
@@ -236,9 +234,9 @@ pub fn seeds(
     let mut out: BTreeSet<u32> = BTreeSet::new();
     let mut by_route: BTreeMap<String, usize> = BTreeMap::new();
     let hit = |out: &mut BTreeSet<u32>,
-                   by_route: &mut BTreeMap<String, usize>,
-                   route: &str,
-                   key: NodeKey| {
+               by_route: &mut BTreeMap<String, usize>,
+               route: &str,
+               key: NodeKey| {
         if let Some(i) = graph.get(&key) {
             if out.insert(i) {
                 *by_route.entry(route.to_string()).or_default() += 1;
@@ -329,9 +327,7 @@ pub fn source_label(path: &str, packages: &[&str]) -> Option<String> {
     }
     // The root package, if the dump named it, is the fallback for anything
     // else; `packages` holds it as the empty string.
-    packages
-        .contains(&"")
-        .then(|| format!("//:{path}"))
+    packages.contains(&"").then(|| format!("//:{path}"))
 }
 
 #[cfg(test)]
