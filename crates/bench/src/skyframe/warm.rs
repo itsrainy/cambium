@@ -127,8 +127,14 @@ impl Options {
         if self.infer_universe_scope {
             flags.push("--infer_universe_scope".to_string());
         }
-        // No `--noshow_progress`: the progress line is where "N packages
-        // loaded" comes from, and that number is the point of the measurement.
+        // The progress line is where "N packages loaded" comes from, and that
+        // number is the point of the measurement, so it is turned back *on*
+        // here: the suite's shared bazelrc passes `--noshow_progress` and a
+        // command line beats an rc file. Without these two flags every step
+        // records 0 packages re-loaded, which reads like a perfectly
+        // incremental server and is really a missing measurement.
+        flags.push("--show_progress".to_string());
+        flags.push("--show_loading_progress".to_string());
         flags.push("--ui_event_filters=-info".to_string());
         flags
     }
@@ -469,8 +475,10 @@ mod tests {
         assert!(flags.iter().any(|f| f == "--order_output=no"));
         assert!(flags.iter().any(|f| f == "--keep_going"));
         assert!(!flags.iter().any(|f| f.starts_with("--universe_scope")));
-        // The progress line carries the packages-loaded count, so it stays on.
-        assert!(!flags.iter().any(|f| f == "--noshow_progress"));
+        // The progress line carries the packages-loaded count, and the
+        // suite's bazelrc turns it off, so the query turns it back on.
+        assert!(flags.iter().any(|f| f == "--show_progress"));
+        assert!(flags.iter().any(|f| f == "--show_loading_progress"));
     }
 
     #[test]
