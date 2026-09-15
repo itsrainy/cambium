@@ -64,7 +64,8 @@ impl Driver for CambiDriver<'_> {
     }
 
     fn build(&self, rev: &str, out: &Path, publish: bool) -> Result<Duration> {
-        self.cambi.index_build(&self.checkout.dir, rev, out, publish)
+        self.cambi
+            .index_build(&self.checkout.dir, rev, out, publish)
     }
 
     fn update(&self, base: &str, head: &str, out: &Path, publish: bool) -> Result<Update> {

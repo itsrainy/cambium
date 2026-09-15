@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::walk::steps::{Step, Tag};
 
 pub mod dump;
+pub mod oracle;
 pub mod runner;
 
 pub use runner::{compare_files, run_skyframe, Measured, SkyframeRequest};
@@ -239,8 +240,7 @@ impl RunResult {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_slice(&data)?)
     }
 }
@@ -381,7 +381,7 @@ impl Strategy for CambiStrategy<'_> {
 /// Builds the strategy a name asks for. A prototype branch adds its arm here
 /// and nothing else in this file changes.
 pub fn strategies() -> &'static [&'static str] {
-    &["cambi"]
+    &["cambi", "skyframe-oracle"]
 }
 
 #[cfg(test)]

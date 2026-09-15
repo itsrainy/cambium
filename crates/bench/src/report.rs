@@ -243,7 +243,10 @@ pub fn render_subject_section(r: &SubjectResults) -> String {
 
 /// `bazel 7.4.1` -> `7.4.1`; anything else is left alone.
 fn tidy_version(v: &str) -> String {
-    v.trim().strip_prefix("bazel ").unwrap_or(v.trim()).to_string()
+    v.trim()
+        .strip_prefix("bazel ")
+        .unwrap_or(v.trim())
+        .to_string()
 }
 
 // ------------------------------------------------------------- the regions
@@ -422,7 +425,10 @@ mod tests {
             started_unix: 0,
             index_build_ms: 12000,
             steps: vec![rec],
-            rebuild_oracle: Some(RebuildOracle { ok: true, summary: String::new() }),
+            rebuild_oracle: Some(RebuildOracle {
+                ok: true,
+                summary: String::new(),
+            }),
             head_index: None,
             summary: WalkSummary::default(),
             done: true,

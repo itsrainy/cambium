@@ -601,9 +601,17 @@ mod tests {
             ..plan(Size::Medium)
         };
         let got = lines(&p);
-        assert!(!got.iter().any(|l| l.contains(" build ") && l.contains(" walk ")), "{got:?}");
+        assert!(
+            !got.iter()
+                .any(|l| l.contains(" build ") && l.contains(" walk ")),
+            "{got:?}"
+        );
         // No peers named: the walk runs cambium alone, with no --peers flag.
-        assert!(got[2].contains(" walk ") && !got[2].contains("--peers"), "{}", got[2]);
+        assert!(
+            got[2].contains(" walk ") && !got[2].contains("--peers"),
+            "{}",
+            got[2]
+        );
     }
 
     #[test]
