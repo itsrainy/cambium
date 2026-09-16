@@ -46,6 +46,7 @@ pub(crate) fn build_layer(
     q: &dyn PackageQuerier,
     onto: Option<SkyLayer>,
     filter: &str,
+    requeried: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<Option<SkyLayer>> {
     if !q.can_dump_loading_layer() {
         tracing::debug!(
@@ -60,7 +61,13 @@ pub(crate) fn build_layer(
     let (text, paths) = q.dump_loading_layer(filter)?;
     let bytes = text.len();
     let mut layer = onto.unwrap_or_default();
-    let blocks = layer.apply_dump(&text, &paths);
+    let blocks = match requeried {
+        // A cold build's dump is the whole loading phase of a server that has
+        // just loaded the whole repository: every row in it is the truth.
+        None => layer.apply_dump(&text, &paths),
+        // A refresh may only speak for what the run asked Bazel to load.
+        Some(pkgs) => layer.apply_refresh(&text, &paths, pkgs),
+    };
     tracing::debug!(
         blocks,
         bytes,

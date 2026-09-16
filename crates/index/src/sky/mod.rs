@@ -508,14 +508,40 @@ impl SkyLayer {
     /// Adds every block of one dump, replacing the dependency row of any node
     /// the dump names.
     ///
-    /// Replacing rather than merging is what makes a *filtered* dump a refresh:
-    /// the incremental run re-dumps only the keys of the packages it
-    /// re-queried, and a glob that no longer reaches a directory must lose that
-    /// edge, not keep it. A node the dump does not name keeps the row it had,
-    /// which is the whole reason the filtered dump is cheap.
+    /// This is a cold build's apply: the dump is the whole loading phase of a
+    /// server that has just loaded the whole repository, so every row in it is
+    /// the truth about that commit. [`SkyLayer::apply_refresh`] is the
+    /// incremental one, and it is more careful.
     ///
     /// Returns how many blocks the dump held, kept or not.
     pub fn apply_dump(&mut self, text: &str, paths: &Paths) -> usize {
+        self.apply(text, paths, None)
+    }
+
+    /// Adds every block of a *refresh* dump: the rows of the packages this run
+    /// re-queried are replaced, and every other row is merged into.
+    ///
+    /// The distinction is the difference between a layer that drifts and one
+    /// that does not. A refresh dump comes from a server that has loaded some
+    /// of the repository, and a node can appear there with fewer dependencies
+    /// than it has at that commit. Replacing wholesale then *loses* edges: a
+    /// 40-step walk on the `bazel` subject ended with two packages missing the
+    /// edge to their own glob node, which is an add under those packages that
+    /// would no longer re-query them. Merging cannot lose an edge; the worst
+    /// it keeps is one that has gone, which over-approximates and is what the
+    /// rebuild oracle counts as extra rather than failing on.
+    ///
+    /// The exception is the packages the run asked Bazel to load, by name, and
+    /// their glob nodes. There the dump is authoritative: a glob that no
+    /// longer reaches a directory has to lose that edge, or a later commit
+    /// would re-query a package for a file it no longer globs.
+    pub fn apply_refresh(&mut self, text: &str, paths: &Paths, requeried: &BTreeSet<String>) -> usize {
+        self.apply(text, paths, Some(requeried))
+    }
+
+    /// `requeried` is `None` for a cold build (replace every row), or the
+    /// packages a refresh may speak for.
+    fn apply(&mut self, text: &str, paths: &Paths, requeried: Option<&BTreeSet<String>>) -> usize {
         // The sink borrows the text while `self` is borrowed mutably, so the
         // blocks are collected first. A full dump of the largest subject is a
         // few tens of megabytes of text.
@@ -528,6 +554,10 @@ impl SkyLayer {
             let Some(node) = self.normalise(&key, paths) else {
                 continue;
             };
+            let replace = match requeried {
+                None => true,
+                Some(pkgs) => authoritative(&node, pkgs),
+            };
             let id = self.intern(node);
             let mut row: Vec<u32> = Vec::with_capacity(deps.len());
             for dep in deps {
@@ -535,6 +565,9 @@ impl SkyLayer {
                     continue;
                 };
                 row.push(self.intern(d));
+            }
+            if !replace {
+                row.extend_from_slice(&self.fwd[id as usize]);
             }
             row.sort_unstable();
             row.dedup();
@@ -949,6 +982,42 @@ impl<'a> SkyRef<'a> {
 /// repository. External ones carry their repository: `@@rules_java//java`.
 fn is_main_package(text: &str) -> bool {
     !text.starts_with('@') && !text.contains("//")
+}
+
+/// Whether a refresh may replace this node's row outright, rather than merging
+/// into it: the run asked Bazel for this package by name, so what came back is
+/// the truth about it.
+fn authoritative(node: &SkyNode, requeried: &BTreeSet<String>) -> bool {
+    match node.kind {
+        Kind::Package => requeried.contains(&node.text),
+        // A glob key names its package in its own text, in either major's
+        // spelling.
+        Kind::Glob => requeried.iter().any(|p| {
+            glob_names_package(&node.text, p)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a glob key is `package`'s. Bazel 8/9 write
+/// `packageIdentifier = pkg,`; Bazel 7 writes `packageName=pkg `.
+fn glob_names_package(text: &str, package: &str) -> bool {
+    for prefix in ["packageIdentifier = ", "packageName="] {
+        let Some(i) = text.find(prefix) else { continue };
+        let rest = &text[i + prefix.len()..];
+        if let Some(tail) = rest.strip_prefix(package) {
+            // The next character must not be one a package name can hold, or
+            // `a` would claim `ab`'s glob.
+            if !tail
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "/._+-".contains(c))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether a `BZL_LOAD` key is one the module system asked for, rather than a
