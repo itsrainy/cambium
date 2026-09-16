@@ -48,9 +48,14 @@
 //! read the file before it went away — and each such consumer must be in
 //! cambium's answer, or its package must be (a rule deleted along with its
 //! source is not in anyone's answer at head, and asking for the label itself
-//! would fail a change set for being right). The base index is not always in
-//! hand; when it is not, the deleted half is skipped and
-//! [`RdepsResult::deleted_checked`] says so.
+//! would fail a change set for being right). "Its package" is the affected
+//! set's packages *or* cambium's `dirty_packages`, which is the only spelling
+//! a wholly-deleted package has: the BUILD file is gone, every rule in it is
+//! tombstoned, and no affected label carries the package name. That escape
+//! hatch is offered only to a consumer that no longer exists at head; one
+//! that survives in another package must still appear by label, however dirty
+//! its package is. The base index is not always in hand; when it is not, the
+//! deleted half is skipped and [`RdepsResult::deleted_checked`] says so.
 //!
 //! ## The escape hatch
 //!
@@ -357,6 +362,7 @@ impl RdepsOracle {
             result.deleted_checked = true;
             let deleted_missing = deleted_consumers(
                 base,
+                inputs.head,
                 &deleted,
                 inputs.cambium,
                 inputs.dirty_packages,
@@ -452,8 +458,16 @@ pub fn package_of_label(label: &str) -> Option<&str> {
 /// affected labels alone would fail every wholly-deleted package. That was the
 /// whole of sourcegraph's and apollo's change-set failures on the 2026-09-08
 /// published run.
+///
+/// The package spelling is an escape hatch for a rule that cannot be named at
+/// head, so it is only offered to a consumer that is *gone* at head (absent
+/// from the head index, or tombstoned in it). A consumer that survives in
+/// another package must still appear by label, however dirty its package is:
+/// otherwise a deletion anywhere would excuse a missed reverse edge
+/// everywhere.
 fn deleted_consumers(
     base: IndexRef<'_>,
+    head: IndexRef<'_>,
     deleted: &[&String],
     cambium: &BTreeSet<String>,
     dirty_packages: &BTreeSet<String>,
@@ -490,9 +504,21 @@ fn deleted_consumers(
         .into_iter()
         .filter(|l| {
             !cambium.contains(l)
-                && !package_of_label(l).is_some_and(|p| cambium_packages.contains(p))
+                && !(gone_at_head(head, l)
+                    && package_of_label(l).is_some_and(|p| cambium_packages.contains(p)))
         })
         .collect()
+}
+
+/// Is this rule absent from head, or tombstoned there?
+///
+/// The condition on the package-spelling escape hatch: only a rule that no
+/// longer exists may be credited to its package rather than to itself.
+fn gone_at_head(head: IndexRef<'_>, label: &str) -> bool {
+    match head.id_of(label) {
+        Some(id) => head.is_tombstone(id),
+        None => true,
+    }
 }
 
 /// A label outside the main repository, in either spelling Bazel uses.
@@ -919,6 +945,106 @@ mod tests {
         assert_eq!(r.missing_external, vec!["//external:y", "@quiche//:x"]);
         assert_eq!(r.recall(), 1.0, "the external half is not counted");
         assert!(r.ok());
+    }
+
+    /// The wholly-deleted package: `lib/BUILD` and `lib/gone.cc` go away
+    /// together, `//lib:core` consumed the file from inside the package, and
+    /// `//app:bin` consumed it from outside and survives.
+    fn base_index_with_a_deleted_package() -> cambium_index::IndexData {
+        let mut b = IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[
+            PackageUpdate {
+                package: "lib".into(),
+                targets: vec![
+                    TargetRow::rule("//lib:core", "cc_library", vec!["//lib:gone.cc".into()]),
+                    TargetRow::source_file("//lib:gone.cc"),
+                ],
+                ..Default::default()
+            },
+            PackageUpdate {
+                package: "app".into(),
+                targets: vec![TargetRow::rule(
+                    "//app:bin",
+                    "cc_binary",
+                    vec!["//lib:gone.cc".into()],
+                )],
+                ..Default::default()
+            },
+        ]);
+        b.finish("base")
+    }
+
+    /// Head after that deletion: `app` is still a package, `lib` is not.
+    fn head_index_without_the_deleted_package() -> cambium_index::IndexData {
+        let mut b = IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[PackageUpdate {
+            package: "app".into(),
+            targets: vec![TargetRow::rule("//app:bin", "cc_binary", vec![])],
+            ..Default::default()
+        }]);
+        b.finish("head")
+    }
+
+    /// A package deleted outright is accounted for by the dirty set alone,
+    /// and only for the rules that went with it.
+    ///
+    /// This is the bazel `//third_party/py/{concurrent,dataclasses,mock}`
+    /// shape and sourcegraph's `//internal/search/smartsearch`: the BUILD
+    /// file is gone, every rule in the package is tombstoned, and cambium's
+    /// answer carries the package name nowhere but `dirty_packages`. The
+    /// consumer that lives in another package and survives at head is *not*
+    /// excused by its package being dirty: a deletion anywhere must not
+    /// excuse a missed reverse edge everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_wholly_deleted_package_is_satisfied_by_the_dirty_set_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        // Neither `lib/BUILD` nor `lib/gone.cc` is on disk at head.
+        let bazel = stub_bazel(ws, "");
+        let head = head_index_without_the_deleted_package();
+        let base = base_index_with_a_deleted_package();
+        let changed = set(&["lib/BUILD", "lib/gone.cc"]);
+        let run = |cambium: &BTreeSet<String>, dirty: &BTreeSet<String>| {
+            RdepsOracle::default()
+                .run(
+                    &bazel,
+                    &OracleInputs {
+                        head: head.view(),
+                        base: Some(base.view()),
+                        changed: &changed,
+                        cambium,
+                        dirty_packages: dirty,
+                    },
+                )
+                .unwrap()
+        };
+        let none = BTreeSet::new();
+
+        // Both consumers are unaccounted for with nothing in hand.
+        let r = run(&none, &none);
+        assert!(r.deleted_checked);
+        assert_eq!(r.deleted_consumers, 2);
+        assert_eq!(r.deleted_missing, vec!["//app:bin", "//lib:core"]);
+
+        // The dirty package accounts for the tombstoned rule inside it, and
+        // for nothing else: `//app:bin` still has to appear by label.
+        let r = run(&none, &set(&["lib"]));
+        assert_eq!(r.deleted_missing, vec!["//app:bin"]);
+        assert!(!r.ok());
+
+        // Nor does `app` being dirty excuse it: the rule is alive at head, so
+        // the package spelling is not its escape hatch.
+        let r = run(&none, &set(&["lib", "app"]));
+        assert_eq!(r.deleted_missing, vec!["//app:bin"]);
+        assert!(!r.ok());
+
+        // The label does, and then the change set is sound.
+        let r = run(&set(&["//app:bin"]), &set(&["lib"]));
+        assert!(r.deleted_missing.is_empty());
+        assert!(r.missing.is_empty(), "{:?}", r.missing);
+        assert!(r.ok());
+        assert_eq!(r.recall(), 1.0);
     }
 
     fn base_index_with_a_consumed_source() -> cambium_index::IndexData {

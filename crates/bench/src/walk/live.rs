@@ -9,7 +9,6 @@
 //! explanation layer, their label sets written beside the step for the
 //! `labels` verb.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -65,11 +64,9 @@ impl LiveChecks for BazelChecks<'_> {
             return Ok(None);
         };
         let index = IndexFile::open(index_path)?;
-        let changed = BazelFacts::changed_paths(&self.checkout.dir, &ctx.step.parent, &ctx.step.head)?;
+        let changed =
+            BazelFacts::changed_paths(&self.checkout.dir, &ctx.step.parent, &ctx.step.head)?;
         let base = self.base_index(&ctx.step.parent);
-        // The dirty packages are cambium's own; the oracle only reads them to
-        // credit a deleted file's package. An empty set is honest here.
-        let dirty: BTreeSet<String> = BTreeSet::new();
         let out = RdepsOracle::new(self.oracle_k, self.seed).run(
             self.engine.bazel(),
             &OracleInputs {
@@ -77,7 +74,9 @@ impl LiveChecks for BazelChecks<'_> {
                 base: base.as_ref().map(|f| f.view()),
                 changed: &changed,
                 cambium: ctx.cambium_set,
-                dirty_packages: &dirty,
+                // cambium's own dirty set: the only spelling a wholly-deleted
+                // package has, since every rule in it is tombstoned.
+                dirty_packages: ctx.dirty_packages,
             },
         )?;
         Ok(Some(out))
@@ -87,10 +86,14 @@ impl LiveChecks for BazelChecks<'_> {
         if !ctx.want_peers || self.tools.is_empty() {
             return Vec::new();
         }
-        let base_wt = match BaseWorktree::create(&self.checkout.dir, &ctx.step.parent, self.scratch) {
+        let base_wt = match BaseWorktree::create(&self.checkout.dir, &ctx.step.parent, self.scratch)
+        {
             Ok(w) => w,
             Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "no base worktree; peers skipped this step");
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "no base worktree; peers skipped this step"
+                );
                 return self.tools.iter().map(|p| failed(p, &e)).collect();
             }
         };
@@ -103,7 +106,12 @@ impl LiveChecks for BazelChecks<'_> {
         self.tools
             .iter()
             .map(|p| {
-                match p.affected(&self.checkout.dir, &ctx.step.parent, &ctx.step.head, &ctx_run) {
+                match p.affected(
+                    &self.checkout.dir,
+                    &ctx.step.parent,
+                    &ctx.step.head,
+                    &ctx_run,
+                ) {
                     Ok(mut run) => {
                         if let Some(i) = &index {
                             run.restrict_to_rules(i.view());
@@ -112,7 +120,11 @@ impl LiveChecks for BazelChecks<'_> {
                         step_of(p, &run, oracle)
                     }
                     Err(e) => {
-                        tracing::warn!(tool = p.name(), error = format!("{e:#}"), "peer failed on this step");
+                        tracing::warn!(
+                            tool = p.name(),
+                            error = format!("{e:#}"),
+                            "peer failed on this step"
+                        );
                         failed(p, &e)
                     }
                 }
