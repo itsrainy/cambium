@@ -92,7 +92,12 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
     );
     for s in &chosen {
         let tags: Vec<&str> = s.tags.iter().map(|t| t.name()).collect();
-        println!("  {}..{}  [{}]", short(&s.parent), short(&s.head), tags.join(","));
+        println!(
+            "  {}..{}  [{}]",
+            short(&s.parent),
+            short(&s.head),
+            tags.join(",")
+        );
     }
 
     let mut strategy = open(&req.strategy, &cambi, &run.results)?;
@@ -138,12 +143,20 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
             .prepare(&cx)
             .with_context(|| format!("{} prepare at {}", strategy.name(), step.parent))?;
         checkout.checkout(&step.head)?;
-        let answer = strategy
-            .answer(&cx)
-            .with_context(|| format!("{} answer {}..{}", strategy.name(), step.parent, step.head))?;
+        let answer = strategy.answer(&cx).with_context(|| {
+            format!("{} answer {}..{}", strategy.name(), step.parent, step.head)
+        })?;
 
-        let (oracle_size, missed, extra) =
-            oracle(run, &engine, &cambi, &checkout, step, &changed, &answer.targets)?;
+        let (oracle_size, missed, extra) = oracle(
+            run,
+            &engine,
+            &cambi,
+            &checkout,
+            step,
+            &changed,
+            &answer.targets,
+            &answer.dirty_packages,
+        )?;
         let m = StepMeasurement {
             subject: run.entry.id.clone(),
             parent: step.parent.clone(),
@@ -202,6 +215,7 @@ fn oracle(
     step: &crate::walk::Step,
     changed: &[super::ChangedPath],
     answer: &BTreeSet<String>,
+    dirty: &BTreeSet<String>,
 ) -> Result<(usize, Vec<String>, usize)> {
     let head_index = run.index_path(&step.head);
     if !head_index.exists() {
@@ -219,7 +233,6 @@ fn oracle(
         .flatten()
         .and_then(|p| IndexFile::open(&p).ok());
     let changed_set: BTreeSet<String> = changed.iter().map(|c| c.path.clone()).collect();
-    let dirty: BTreeSet<String> = BTreeSet::new();
     let out = RdepsOracle::new(0, run.session.seed).run(
         engine.bazel(),
         &OracleInputs {
@@ -227,7 +240,7 @@ fn oracle(
             base: base.as_ref().map(|f| f.view()),
             changed: &changed_set,
             cambium: answer,
-            dirty_packages: &dirty,
+            dirty_packages: dirty,
         },
     )?;
     // `score` over the oracle's own set, so `missed` and `extra` are two
