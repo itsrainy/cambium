@@ -102,21 +102,29 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// when each boundary gained a flag saying whether `.bazelignore` names its
 /// directory (`repo_boundary_ignored`), which is what tells a boundary Bazel
 /// reads but nothing maps (a hole in the graph) from one Bazel never reads
-/// (nothing at all).
+/// (nothing at all), and to 11 when it gained the Skyframe loading layer
+/// (`sky_*`; see [`crate::sky`]): Bazel's own loading-phase graph, read back
+/// from `bazel dump --skyframe=deps` and stored as reverse edges. It answers
+/// "which packages did this changed path move" from the edges Bazel itself
+/// recorded, and three models of that question went with the bump — the
+/// classifier's sub-package carving rule, its glob rule, and the package half
+/// of the static `.bzl` load closure (`bzl_load_*`, `bzl_consumer_*`).
 ///
 /// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
 /// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
-/// no reader has consulted it since the static `.bzl` closure (format 4) began
-/// answering "did this package's loads move?" from `bzl_consumers`; it is 32
-/// bytes per package of write-only payload. Removing it moves the layout, so
-/// it has to wait for a bump that is happening anyway rather than cause one.
+/// no reader has consulted it since format 4; it is 32 bytes per package of
+/// write-only payload. Removing it moves the layout, so it has to wait for a
+/// bump that is happening anyway rather than cause one. Format 11 is such a
+/// bump and did not take it: the layer is a large enough change on its own
+/// that folding an unrelated column removal into it would make a bisect over
+/// a bad index harder than it needs to be.
 ///
 /// Compression is outside this version. A file holds either the layout
 /// verbatim or one zstd frame containing it (see the module docs); this
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means

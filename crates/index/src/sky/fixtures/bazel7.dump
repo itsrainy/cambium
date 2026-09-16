@@ -1,0 +1,532 @@
+FILE_STATE:[/ws]/[MODULE.bazel]
+
+FILE:[/ws]/[tools/build_rules/WORKSPACE]
+
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+PACKAGE_LOOKUP:tools/build_rules
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools/build_rules]
+
+  Group 5:
+    FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[tools/build_rules/BUILD]
+
+FILE:[/ws]/[a/WORKSPACE]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/WORKSPACE]
+
+FILE:[/ws]/[BUILD.bazel]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD.bazel]
+
+FILE:[/ws]/[a/sub/WORKSPACE]
+
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/WORKSPACE]
+
+FILE:[/ws]/[a/BUILD]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD]
+
+PACKAGE:a
+
+  Group 1:
+    PACKAGE_LOOKUP:a
+
+  Group 2:
+    PRECOMPUTED:autoload_symbols
+
+  Group 3:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 4:
+    WORKSPACE_NAME:com.google.devtools.build.lib.skyframe.WorkspaceNameValue$$Lambda/0x000000080069ca10@1dcd20f2
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+  Group 6:
+    FILE:[/ws]/[a/BUILD]
+
+  Group 7:
+    PRECOMPUTED:default_visibility
+
+  Group 8:
+    PRECOMPUTED:config_setting_visibility_policy
+
+  Group 9:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 10:
+    REPO_FILE:@@
+
+  Group 11:
+    BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+
+  Group 12:
+    BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+
+  Group 13:
+    GLOB:<GlobDescriptor packageName=a packageRoot=/ws subdir= pattern=*.txt globberOperation=FILES>
+
+  Group 14:
+    PACKAGE_LOOKUP:a/sub
+
+PACKAGE:external
+
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    EXTERNAL_PACKAGE:com.google.devtools.build.lib.skyframe.ExternalPackageFunction$$Lambda/0x00000008002dcea8@5494e0e4
+
+FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+DIRECTORY_LISTING:[/ws]/[a]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+FILE:[/ws]/[a/sub/WORKSPACE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/WORKSPACE.bazel]
+
+FILE_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[WORKSPACE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[WORKSPACE.bazel]
+
+DIRECTORY_LISTING:[/ws]/[]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[]
+
+FILE_STATE:[/ws]/[WORKSPACE.bzlmod]
+
+FILE:[/ws]/[a]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a]
+
+FILE_STATE:[/ws]/[a/sub/BUILD]
+
+FILE:[/ws]/[a/WORKSPACE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/WORKSPACE.bazel]
+
+FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+FILE:[/ws]/[]
+
+  Group 1:
+    FILE_STATE:[/ws]/[]
+
+FILE_STATE:[/ws]/[a/rules.bzl]
+
+FILE:[/ws]/[tools/BUILD]
+
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE:[/ws]/[tools/WORKSPACE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE_STATE:[/ws]/[BUILD.bazel]
+
+FILE_STATE:[/ws]/[a/sub/WORKSPACE]
+
+FILE_STATE:[/ws]/[WORKSPACE]
+
+FILE:[/ws]/[MODULE.bazel.lock]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+FILE_STATE:[/ws]/[a/sub/WORKSPACE.bazel]
+
+FILE_STATE:[/ws]/[a/helper.bzl]
+
+DIRECTORY_LISTING_STATE:[/ws]/[]
+
+FILE:[/ws]/[a/sub/BUILD]
+
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD]
+
+FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+FILE_STATE:[/ws]/[a/WORKSPACE.bazel]
+
+IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:vendor_directory
+
+  Group 3:
+    FILE:[/ws]/[.bazelignore]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[a/rules.bzl]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/rules.bzl]
+
+DIRECTORY_LISTING:[/ws]/[a/sub]
+
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[tools/build_rules/BUILD]
+
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+FILE_STATE:[/ws]/[REPO.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+FILE:[/ws]/[tools/BUILD.bazel]
+
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE_STATE:[/ws]/[.bazelignore]
+
+FILE:[/ws]/[tools]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[tools]
+
+FILE:[/ws]/[WORKSPACE]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[WORKSPACE]
+
+FILE:[/ws]/[a/helper.bzl]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/helper.bzl]
+
+FILE:[/ws]/[a/sub/BUILD.bazel]
+
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:tools/build_rules
+
+  Group 4:
+    PRECOMPUTED:starlark_semantics
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/helper.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+GLOB:<GlobDescriptor packageName=a packageRoot=/ws subdir= pattern=*.txt globberOperation=FILES>
+
+  Group 1:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 2:
+    DIRECTORY_LISTING:[/ws]/[a]
+
+FILE_STATE:[/ws]/[BUILD]
+
+FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+FILE:[/ws]/[REPO.bazel]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[REPO.bazel]
+
+BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/rules.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+  Group 7:
+    BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+
+FILE:[/ws]/[MODULE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel]
+
+FILE_STATE:[/ws]/[a/WORKSPACE]
+
+FILE:[/ws]/[.bazelignore]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.bazelignore]
+
+PACKAGE_LOOKUP:tools
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools]
+
+  Group 5:
+    FILE:[/ws]/[tools/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[tools/BUILD]
+
+FILE_STATE:[/ws]/[a/BUILD]
+
+PACKAGE_LOOKUP:
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[]
+
+  Group 5:
+    FILE:[/ws]/[BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[BUILD]
+
+FILE_STATE:[/ws]/[tools]
+
+FILE:[/ws]/[a/sub]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[tools/build_rules/WORKSPACE.bazel]
+
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+FILE:[/ws]/[WORKSPACE.bzlmod]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[WORKSPACE.bzlmod]
+
+PACKAGE_LOOKUP:a
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a]
+
+  Group 5:
+    FILE:[/ws]/[a/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[a]
+
+FILE:[/ws]/[tools/WORKSPACE]
+
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE:[/ws]/[BUILD]
+
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD]
+
+FILE:[/ws]/[a/BUILD.bazel]
+
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+FILE_STATE:[/ws]/[]
+
+PACKAGE_LOOKUP:a/sub
+
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_PACKAGE_PREFIXES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a/sub]
+
+  Group 5:
+    FILE:[/ws]/[a/sub/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[a/sub/BUILD]
+
+FILE:[/ws]/[tools/build_rules]
+
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE_STATE:[/ws]/[WORKSPACE.bazel]
