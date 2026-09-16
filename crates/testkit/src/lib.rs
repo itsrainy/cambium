@@ -362,6 +362,30 @@ impl PackageQuerier for Scanning {
     fn external_rules(&self) -> Option<String> {
         self.external_rules.clone()
     }
+
+    /// A querier with a tree behind it can produce a loading layer, from the
+    /// dump that tree would have made (see [`crate::sky`]). One without a
+    /// tree cannot, and the index it builds carries no layer — which is the
+    /// shape the tests of that very case want.
+    fn can_dump_loading_layer(&self) -> bool {
+        self.files.is_some()
+    }
+
+    fn dump_loading_layer(
+        &self,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        let files = self.files.as_ref().ok_or_else(|| EngineError::BazelQuery {
+            what: "dump --skyframe=deps".into(),
+            code: None,
+            stderr: "this querier has no tree".into(),
+        })?;
+        let packages: Vec<String> = self.packages.iter().map(|p| p.to_string()).collect();
+        let tree = cambium_synth::sky::InMemory(&files.0);
+        Ok((
+            cambium_synth::sky::dump(&packages, &tree),
+            cambium_synth::sky::paths(),
+        ))
+    }
 }
 
 /// A querier that reads a toy BUILD syntax out of a directory: one rule per
@@ -456,6 +480,20 @@ impl PackageQuerier for DirQuerier {
 
     fn workspace(&self) -> Option<&Path> {
         Some(&self.root)
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        let tree = cambium_synth::sky::OnDisk(self.root.clone());
+        Ok((
+            cambium_synth::sky::dump(&self.packages(), &tree),
+            cambium_synth::sky::paths(),
+        ))
     }
 }
 

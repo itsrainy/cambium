@@ -212,6 +212,16 @@ impl PackageQuerier for RevisionQuerier {
     fn external_rules(&self) -> Option<String> {
         self.querier.external_rules()
     }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        self.querier.can_dump_loading_layer()
+    }
+
+    fn dump_loading_layer(
+        &self,
+    ) -> std::result::Result<(String, cambium_index::sky::Paths), EngineError> {
+        self.querier.dump_loading_layer()
+    }
 }
 
 /// Where a run keeps its per-revision worktrees.

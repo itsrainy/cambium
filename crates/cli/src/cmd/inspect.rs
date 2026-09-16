@@ -379,6 +379,20 @@ fn print_stats(s: &inspect::IndexStats) {
         "bzl closure:     {} .bzl files ({} reachable from MODULE.bazel/WORKSPACE)",
         c.bzl_files, c.bzl_workspace_files
     );
+    if c.sky_layer {
+        println!(
+            "loading layer:   {} nodes, {} edges",
+            c.sky_nodes, c.sky_edges
+        );
+        for (kind, n) in &c.sky_by_kind {
+            println!("  {kind:<24} {n:>10}");
+        }
+    } else {
+        // Said out loud rather than printed as zeros: an index with no layer
+        // is one no incremental run can be answered from, and the operator
+        // reading this is the one who has to rebuild it.
+        println!("loading layer:   none (this index was built without a skyframe dump)");
+    }
     println!();
     println!(
         "in-degree:       max {} ({})",
@@ -397,7 +411,7 @@ fn print_stats(s: &inspect::IndexStats) {
     println!();
     let b = &s.bytes;
     println!("bytes:           {} total", human(b.file_total));
-    let rows: [(&str, i64); 12] = [
+    let rows: [(&str, i64); 13] = [
         ("label table", b.label_table as i64),
         ("label sort index", b.label_sorted as i64),
         ("rule class table", b.rule_class_table as i64),
@@ -410,6 +424,7 @@ fn print_stats(s: &inspect::IndexStats) {
         ("node columns", b.node_columns as i64),
         ("package table", b.package_table as i64),
         ("bzl load closure", b.bzl_closure as i64),
+        ("loading layer", b.sky_layer as i64),
     ];
     for (name, v) in rows {
         println!(

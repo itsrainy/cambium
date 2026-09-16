@@ -94,7 +94,17 @@ use serde::{Deserialize, Serialize};
 ///   an edge inside one package being free. A target's `package_depth` never
 ///   exceeds its `depth`. The histogram has the shape of `depth_histogram`
 ///   and is empty in the same cases. Purely additive.
-pub const SCHEMA_VERSION: u32 = 11;
+/// - **12** retires the witness fields (`stats.bzl_witnessed_dead`,
+///   `bzl_witnessed_loaded`, `bzl_witness_packages`,
+///   `bzl_witness_unavailable`) with the witness itself, and adds
+///   `stats.sky_seeds`, `sky_unknown_seeds`, `sky_visited` and
+///   `sky_new_packages`. Which packages a change moved is answered by a
+///   reverse walk over the Skyframe loading layer the index now carries
+///   (`cambium_index::sky`) rather than by a statically parsed `.bzl` load
+///   closure and three modelled rules, so there is no stored closure left for
+///   a witness to find incomplete. `stats.bzl_closure_hits` keeps its name and
+///   its meaning: dirty packages a changed Starlark file reached.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -199,28 +209,31 @@ pub struct Stats {
     /// call itself survives only as the comparison suite's oracle.
     #[serde(default)]
     pub rbuildfiles_called: bool,
-    /// Packages dirtied because a changed `.bzl` is in their load closure.
+    /// Dirty packages a changed Starlark file reached, through the loading
+    /// layer's `BZL_LOAD` edges. Their rules are direct whatever their hashes
+    /// say. Named as it was when a static load closure answered the same
+    /// question, because the benchmark's own history reads the field by name.
     #[serde(default)]
     pub bzl_closure_hits: usize,
-    /// Changed `.bzl` files the base index's load closure had no node for,
-    /// where a scan of the head checkout confirmed that no `load()` names
-    /// them: dead files, safely ignored.
+    /// Skyframe keys the changed paths moved: one `FILE_STATE` per path, plus
+    /// a `DIRECTORY_LISTING_STATE` per ancestor directory of an add or a
+    /// delete.
     #[serde(default)]
-    pub bzl_witnessed_dead: usize,
-    /// Changed `.bzl` files the closure had no node for that *are* loaded at
-    /// head. The stored closure was incomplete; the witness followed the
-    /// loaders instead of dropping the file.
+    pub sky_seeds: usize,
+    /// Of those, the keys the stored layer has no node for. Normal, and the
+    /// usual reason a changed path costs nothing: Bazel's loading phase never
+    /// looked at it.
     #[serde(default)]
-    pub bzl_witnessed_loaded: usize,
-    /// Packages the witness dirtied, through a BUILD loader or through the
-    /// consumers of a loading `.bzl`.
+    pub sky_unknown_seeds: usize,
+    /// Nodes the reverse walk over the layer visited.
     #[serde(default)]
-    pub bzl_witness_packages: usize,
-    /// Changed `.bzl` files unknown to the closure that could not be
-    /// witnessed, because the row source has no checkout to enumerate. The
-    /// file is still ignored, as it always was; this says so out loud.
+    pub sky_visited: usize,
+    /// Dirty directories the walk reached through a `PACKAGE_LOOKUP` with no
+    /// `PACKAGE` node behind it: a package this change may have created, or a
+    /// directory that holds none. Re-queried either way; the second kind
+    /// comes back empty and tombstones nothing.
     #[serde(default)]
-    pub bzl_witness_unavailable: usize,
+    pub sky_new_packages: usize,
     /// Changed bazelrc files read and found irrelevant to loading: every
     /// changed flag was on the allowlist, so the edit invalidated nothing
     /// instead of invalidating everything.

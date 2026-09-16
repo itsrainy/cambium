@@ -117,6 +117,31 @@ pub trait PackageQuerier {
         self.workspace().map(cambium_index::loads::starlark_files)
     }
 
+    /// Whether this row source can produce a Skyframe loading-layer dump.
+    ///
+    /// False for a source with no Bazel behind it (the synthetic querier, a
+    /// canned one in a test), and the engine then builds an index with no
+    /// layer — which the next run refuses to answer a change from, rather
+    /// than reading an absent layer as "nothing is dirty".
+    fn can_dump_loading_layer(&self) -> bool {
+        false
+    }
+
+    /// `bazel dump --skyframe=deps` over the loading-phase kinds, on the
+    /// server these rows came from, with the paths needed to keep this
+    /// machine's own directories out of the stored keys.
+    ///
+    /// Only ever called when [`PackageQuerier::can_dump_loading_layer`] is
+    /// true, and an error here fails the run: see
+    /// [`cambium_bazel::Bazel::dump_skyframe`].
+    fn dump_loading_layer(&self) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+        Err(crate::error::EngineError::BazelQuery {
+            what: "dump --skyframe=deps".into(),
+            code: None,
+            stderr: "this row source has no Bazel server to dump".into(),
+        })
+    }
+
     /// `bazel query '//external:*' --output=build` over the checkout these
     /// rows describe, for [`cambium_index::externals::external_dir_repos`] to
     /// read the nested repositories' names out of.
@@ -221,6 +246,28 @@ impl PackageQuerier for BazelQuerier {
 
     fn external_rules(&self) -> Option<String> {
         self.bazel.external_rules()
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+    ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+        let text = self
+            .bazel
+            .dump_skyframe(cambium_index::sky::SKYKEY_FILTER)
+            .map_err(|e| crate::error::EngineError::BazelQuery {
+                what: "dump --skyframe=deps".into(),
+                code: None,
+                stderr: e.to_string(),
+            })?;
+        let paths = cambium_index::sky::Paths::new(
+            self.bazel.workspace().to_string_lossy(),
+            self.bazel.output_base().unwrap_or_default(),
+        );
+        Ok((text, paths))
     }
 
     fn universe(&self) -> Result<Rows, crate::error::EngineError> {

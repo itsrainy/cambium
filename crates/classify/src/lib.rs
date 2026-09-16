@@ -1,10 +1,27 @@
 //! Path classification and the dirty set (spec 6.1, 6.2).
 //!
-//! This is where a list of changed paths becomes "these packages must be
-//! re-queried, these files mark their consumers direct, or everything is
-//! affected". It is pure: no Bazel, no git, no filesystem. That makes it cheap
-//! to test exhaustively, which matters because a mistake here is an
-//! under-approximation — the one class of bug the design does not tolerate.
+//! This is where a list of changed paths becomes "this file marks its
+//! consumers direct", "no package owns this", or "everything is affected". It
+//! is pure: no Bazel, no git, no filesystem.
+//!
+//! # What this no longer decides
+//!
+//! *Which packages must be re-queried* used to be answered here too, from
+//! three models of Bazel's loading phase: a new `BUILD` file carves a
+//! sub-package out of its parent, so dirty both; an added or deleted file may
+//! enter or leave a `glob`, so dirty its package; a changed `.bzl` dirties the
+//! packages a statically parsed load closure says load it. All three are gone.
+//! The index carries Bazel's own loading-phase graph
+//! (`cambium_index::sky`), and the engine's dirty stage walks it: a changed
+//! path becomes the Skyframe keys it moved, and every `PACKAGE` or
+//! `PACKAGE_LOOKUP` node the reverse walk reaches is a dirty package. That is
+//! the same question answered from the edges Bazel recorded rather than from a
+//! restatement of the rules Bazel applies.
+//!
+//! What is left here is the part that is genuinely about paths: which package
+//! owns a path at head (so a changed file can be resolved to a source label),
+//! which paths invalidate everything, which are inside a nested repository,
+//! and which are not in the graph at all.
 //!
 //! One thing it is not pure about, and cannot be: which directories of the
 //! tree are Bazel repositories of their own. `bazel query //...` stops at a
@@ -226,16 +243,16 @@ pub fn is_build_file(path: &str) -> bool {
 /// definitions. `.bzl` only: `.bazelrc` and friends are invalidators.
 ///
 /// This is about *shape*, not about blast radius, and it is not the same
-/// question the invalidator globs answer. A `.bzl` file is handled precisely:
-/// the index's static load closure says which packages load it, and only those
-/// are dirtied. The default globs then name a few directories —
-/// `tools/toolchains/**`, `platforms/**` — where a `.bzl` edit is treated as
-/// global anyway, because the files there define toolchains whose reach the
-/// load closure does not model: a toolchain swap changes what every action
-/// in the repository runs without any BUILD file loading the `.bzl` that did
-/// it. So a path can be both, and the invalidator wins; that is a deliberate
-/// over-approximation over a small, hand-named set of directories, not a
-/// statement about `.bzl` files in general.
+/// question the invalidator globs answer. What a changed `.bzl` reaches is the
+/// loading layer's business — its `BZL_LOAD` node, and the `BZL_LOAD ->
+/// BZL_LOAD` edges above it. The default invalidator globs then name a few
+/// directories (`tools/toolchains/**`, `platforms/**`) where a `.bzl` edit is
+/// treated as global anyway, because the files there define toolchains whose
+/// reach is not a loading-phase edge at all: a toolchain swap changes what
+/// every action in the repository runs without any `BUILD` file loading the
+/// `.bzl` that did it. So a path can be both, and the invalidator wins; that
+/// is a deliberate over-approximation over a small, hand-named set of
+/// directories, not a statement about `.bzl` files in general.
 pub fn is_bzl_file(path: &str) -> bool {
     path.ends_with(".bzl")
 }
@@ -261,8 +278,8 @@ pub enum Classification {
     Invalidator,
     /// A BUILD file, defining the named package.
     Build(String),
-    /// A `.bzl` file. Which packages it reaches is answered from the index's
-    /// static load closure (`cambium_index::loads`), not from a path.
+    /// A `.bzl` file. Which packages it reaches is answered by the loading
+    /// layer's reverse walk (`cambium_index::sky`), not from a path.
     Bzl(String),
     /// A file owned by the named package.
     Source(String),
@@ -357,14 +374,23 @@ pub struct DirtySet {
     /// as data; the engine puts it into words.
     pub invalidator: Option<String>,
     /// Packages that must be re-queried.
+    ///
+    /// The classifier no longer puts anything here. The engine's dirty stage
+    /// fills it from the loading layer's reverse walk and from the external
+    /// repositories that moved; the field stays on this struct because it is
+    /// what those stages accumulate into and what the query stage reads.
     pub dirty: BTreeSet<String>,
-    /// Packages that no longer have a BUILD file.
+    /// Packages whose BUILD file the diff deleted.
+    ///
+    /// Still read from the diff, because it is a fact about a path and not
+    /// about the graph: the loading layer answers "which packages moved", and
+    /// a package that moved by ceasing to exist has to be tombstoned rather
+    /// than re-queried. Whether it really ceased to exist is settled against
+    /// the head checkout, not here (`run::keep_surviving_packages`).
     pub deleted_packages: BTreeSet<String>,
-    /// Paths whose content changed but whose package structure did not.
+    /// Paths whose content changed, to be resolved to source labels and
+    /// marked direct through the rule layer's file rows.
     pub direct_files: BTreeSet<String>,
-    /// `.bzl` paths that changed, to be resolved against the index's static
-    /// load closure.
-    pub changed_bzl: BTreeSet<String>,
     /// Paths that were ignored, for `--explain`.
     pub ignored: usize,
     /// Changed paths inside a nested Bazel repository, by the boundary
@@ -385,11 +411,15 @@ impl DirtySet {
     }
 }
 
-/// Applies spec 6.2 to a diff.
+/// Applies spec 6.2 to a diff: the path-shaped half of it.
 ///
 /// `packages` must be the package set from the base index; this function
 /// overlays the diff's BUILD file additions and deletions itself, because a
-/// path's owner depends on which BUILD files exist at `head`.
+/// path's owner depends on which BUILD files exist at `head`, and the source
+/// label a changed file resolves to depends on its owner.
+///
+/// It names no dirty package. Which packages a change moved is the loading
+/// layer's answer, in `cambium_engine`'s dirty stage.
 pub fn dirty_set(
     changes: &[impl Borrow<Change>],
     packages: &mut PackageSet,
@@ -416,42 +446,32 @@ pub fn dirty_set(
         }
         let pkg = dirname(&c.path).to_string();
         match c.status {
-            Status::Added => {
-                // A new package steals files from its parent, so both change.
-                if !packages.contains(&pkg) {
-                    if let Some(parent) = parent_package(&pkg, packages) {
-                        out.dirty.insert(parent);
-                    }
-                }
-                packages.insert(pkg.clone());
-                out.dirty.insert(pkg);
-            }
+            // The package layout at head. That a new `BUILD` file carves a
+            // sub-package out of its parent, and a deleted one hands the files
+            // back, is not stated here any more: the layer has
+            // `PACKAGE:parent -> PACKAGE_LOOKUP:parent/sub` for exactly that
+            // reason, and the reverse walk follows it. What is still needed is
+            // *ownership*, because a changed file's source label depends on
+            // which package owns it at head.
+            Status::Added => packages.insert(pkg),
             Status::Deleted => {
-                // Its files fall back to the parent package, so both change.
                 packages.remove(&pkg);
-                if let Some(parent) = parent_package(&pkg, packages) {
-                    out.dirty.insert(parent);
-                }
-                out.deleted_packages.insert(pkg.clone());
-                out.dirty.insert(pkg);
+                out.deleted_packages.insert(pkg);
             }
-            // A modified BUILD file dirties only its own package: the package
-            // boundaries did not move.
-            //
-            // It is also a changed *source file*. That is not a technicality:
-            // `filegroup(name = "srcs", srcs = glob(["**"]))` — the shape every
-            // package in `bazel/bazel` uses to feed the distfile — has the
-            // BUILD file itself among its inputs, and its rule proto does not
-            // move when the BUILD file's text does. Re-querying the package
-            // therefore finds nothing changed, and without this the filegroup
-            // and everything above it (`//src:srcs`, `//:bazel-srcs`, the
-            // distribution tarball) are missed. The first run against a real subject
-            // bazel/bazel caught it: both bazel-diff and Tango reported
+            // A modified BUILD file is also a changed *source file*. That is
+            // not a technicality: `filegroup(name = "srcs", srcs =
+            // glob(["**"]))` — the shape every package in `bazel/bazel` uses to
+            // feed the distfile — has the BUILD file itself among its inputs,
+            // and its rule proto does not move when the BUILD file's text
+            // does. Re-querying the package therefore finds nothing changed,
+            // and without this the filegroup and everything above it
+            // (`//src:srcs`, `//:bazel-srcs`, the distribution tarball) are
+            // missed. The first run against a real subject caught it: both
+            // bazel-diff and Tango reported
             // `//src/main/java/com/google/devtools/build/lib:srcs` and
             // `//src:srcs` on a BUILD-only commit and cambium did not.
             Status::Modified | Status::TypeChanged => {
-                packages.insert(pkg.clone());
-                out.dirty.insert(pkg.clone());
+                packages.insert(pkg);
                 out.direct_files.insert(c.path.clone());
             }
         }
@@ -471,93 +491,58 @@ pub fn dirty_set(
         match classify(&c.path, packages, m) {
             Classification::Invalidator => return DirtySet::invalidated_by(&c.path),
             Classification::Build(_) => unreachable!("handled in pass one"),
-            Classification::Bzl(p) => {
-                out.changed_bzl.insert(p);
-                // A `.bzl` is a load-closure input *and* an ordinary file in
-                // its package. `filegroup(name = "srcs", srcs = glob(["**"]))`
-                // and the hand-written `bzl_srcs` / `embedded_tools` lists
-                // `bazel/bazel` keeps in `tools/build_defs/repo/BUILD` name the
-                // `.bzl` as a source, so `//tools/build_defs/repo:utils.bzl` is
-                // a genuine input of a dozen targets whose rule protos do not
-                // move when the file's text does — exactly the case the
-                // modified-BUILD arm above exists for.
-                //
-                // The load closure cannot stand in for this. It answers "which
-                // packages *load* this file", and the packages that merely
-                // *consume* it are a different, overlapping set; and even for a
-                // package in both, being dirty only means "re-query me", which
-                // finds the filegroup's rule byte-identical. So the file has to
-                // reach its consumers the way every other changed source does.
-                //
-                // This is on top of, never instead of, the closure walk and
-                // whatever the external-repository stage makes of the same
-                // file: a `.bzl` in the `MODULE.bazel` workspace closure gets
-                // both answers.
-                //
-                // A `.bzl` no package owns — one above every BUILD file — has
-                // no source label, so the load closure is all there is.
-                if let Some(pkg) = packages.owner_of(&c.path) {
-                    match c.status {
-                        Status::Modified | Status::TypeChanged => {
-                            out.direct_files.insert(c.path.clone());
-                        }
-                        // An added or deleted `.bzl` can enter or leave a
-                        // `glob`, so the package's edges may have moved.
-                        Status::Added | Status::Deleted => {
-                            out.dirty.insert(pkg.to_string());
-                        }
-                    }
-                }
-            }
-            Classification::Source(pkg) => match c.status {
-                // Content-only edits cannot change the graph, only mark the
-                // file's consumers direct (spec section 2).
-                Status::Modified | Status::TypeChanged => {
+            // A `.bzl` is a Starlark input *and* an ordinary file in its
+            // package. `filegroup(name = "srcs", srcs = glob(["**"]))` and the
+            // hand-written `bzl_srcs` / `embedded_tools` lists `bazel/bazel`
+            // keeps in `tools/build_defs/repo/BUILD` name the `.bzl` as a
+            // source, so `//tools/build_defs/repo:utils.bzl` is a genuine input
+            // of a dozen targets whose rule protos do not move when the file's
+            // text does — exactly the case the modified-BUILD arm above exists
+            // for.
+            //
+            // The loading layer does not stand in for this and is not asked
+            // to. It answers "which packages did this file's `BZL_LOAD` node
+            // reach", and the packages that merely *consume* the file as a
+            // source are a different, overlapping set; even for a package in
+            // both, being dirty means "re-query me", which finds the
+            // filegroup's rule byte-identical. So the file reaches its
+            // consumers the way every other changed source does, on top of
+            // whatever the layer and the external-repository stage make of it.
+            Classification::Bzl(_) => {
+                if packages.owner_of(&c.path).is_some()
+                    && matches!(c.status, Status::Modified | Status::TypeChanged)
+                {
                     out.direct_files.insert(c.path.clone());
                 }
-                // An added or removed file may enter or leave a glob, so the
-                // package's edges may have changed.
-                Status::Added | Status::Deleted => {
-                    out.dirty.insert(pkg);
+            }
+            // Content-only edits mark the file's consumers direct (spec
+            // section 2). An add or a delete moves no file row that exists at
+            // base; what it moves is the package's own edges, and the loading
+            // layer is what says whether it did.
+            Classification::Source(_) => {
+                if matches!(c.status, Status::Modified | Status::TypeChanged) {
+                    out.direct_files.insert(c.path.clone());
                 }
-            },
-            // A path an ignore glob claims is not input. The claim holds
-            // only where the graph agrees.
-            Classification::IgnoredSource(pkg) => match c.status {
-                Status::Modified | Status::TypeChanged => {
+            }
+            // A path an ignore glob claims is not input. The claim holds only
+            // where the graph agrees: `bazel/bazel` feeds its distribution
+            // tarball from `glob(["**"])`, so `CHANGELOG.md` really is an
+            // input of `//:changelog-file`.
+            Classification::IgnoredSource(pkg) => {
+                if matches!(c.status, Status::Modified | Status::TypeChanged) {
                     if consumed.is_consumed(&pkg, &c.path) {
                         out.direct_files.insert(c.path.clone());
                     } else {
                         out.ignored += 1;
                     }
                 }
-                // The index cannot answer for a file that does not exist at
-                // base, and a file entering or leaving a `glob(["**"])`
-                // changes the package's edges either way, so an add or a
-                // delete re-queries the package however the glob reads. That
-                // costs one package query on a docs-only commit that adds a
-                // file; the alternative is missing the filegroup.
-                Status::Added | Status::Deleted => {
-                    out.dirty.insert(pkg);
-                }
-            },
+            }
             Classification::Ignored => out.ignored += 1,
             Classification::Nested(dir) => out.nested.entry(dir).or_default().push(c.path.clone()),
         }
     }
 
     out
-}
-
-/// The package that owns `pkg`'s directory once `pkg` itself is not a package.
-fn parent_package(pkg: &str, packages: &PackageSet) -> Option<String> {
-    let mut cur = label::parent_package(pkg)?;
-    loop {
-        if packages.contains(cur) {
-            return Some(cur.to_string());
-        }
-        cur = label::parent_package(cur)?;
-    }
 }
 
 #[cfg(test)]
@@ -670,20 +655,20 @@ mod tests {
         assert_eq!(d.direct_files.iter().next().unwrap(), "lib/core/a.cc");
     }
 
+    /// An added file names no package here any more. Whether it entered a
+    /// `glob` is a question about the directory listing Bazel read, and the
+    /// loading layer is what holds that edge.
     #[test]
-    fn added_source_dirties_the_package() {
+    fn an_added_source_names_no_package_and_no_file() {
         let d = run(vec![Change::new(Status::Added, "lib/core/new.cc")]);
-        assert_eq!(d.dirty.iter().next().unwrap(), "lib/core");
+        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
 
     #[test]
-    fn modified_build_dirties_only_its_package() {
+    fn a_modified_build_file_is_also_a_changed_source_file() {
         let d = run(vec![Change::new(Status::Modified, "lib/core/BUILD.bazel")]);
-        assert_eq!(
-            d.dirty.iter().cloned().collect::<Vec<_>>(),
-            vec!["lib/core"]
-        );
+        assert!(d.dirty.is_empty(), "the layer names the dirty package");
         assert!(
             d.direct_files.contains("lib/core/BUILD.bazel"),
             "a BUILD file is also a source file: a glob(['**']) filegroup consumes it"
@@ -692,27 +677,28 @@ mod tests {
 
     #[test]
     fn modified_bzl_is_also_a_changed_source_file() {
-        // The load closure gets it (`changed_bzl`) *and* the file->target map
-        // gets it (`direct_files`), because a filegroup can list the `.bzl`
-        // among its `srcs` without its own rule proto moving.
+        // The file->target map gets it, because a filegroup can list the
+        // `.bzl` among its `srcs` without its own rule proto moving. What the
+        // file *loads* is the layer's answer, not this function's.
         let d = run(vec![Change::new(Status::Modified, "lib/core/rules.bzl")]);
-        assert!(d.changed_bzl.contains("lib/core/rules.bzl"));
         assert!(
             d.direct_files.contains("lib/core/rules.bzl"),
             "a .bzl consumed as a source must reach its consumers"
         );
+        assert!(d.dirty.is_empty());
     }
 
     #[test]
-    fn added_bzl_dirties_its_package() {
+    fn an_added_bzl_names_no_package() {
         let d = run(vec![Change::new(Status::Added, "lib/core/new.bzl")]);
-        assert!(d.changed_bzl.contains("lib/core/new.bzl"));
-        assert!(d.dirty.contains("lib/core"), "it may have entered a glob");
+        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
 
+    /// A `.bzl` above every BUILD file has no source label, so nothing here
+    /// has anything to say about it at all.
     #[test]
-    fn a_bzl_no_package_owns_is_left_to_the_load_closure() {
+    fn a_bzl_no_package_owns_is_left_to_the_layer() {
         let mut p = PackageSet::new(["lib".to_string()]);
         let d = dirty_set(
             &[Change::new(Status::Modified, "vendor/x.bzl")],
@@ -720,7 +706,6 @@ mod tests {
             &matchers(),
             &NoConsumers,
         );
-        assert!(d.changed_bzl.contains("vendor/x.bzl"));
         assert!(d.direct_files.is_empty());
         assert!(d.dirty.is_empty());
     }
@@ -744,25 +729,34 @@ mod tests {
         assert!(d.direct_files.contains("MODULE.bazel"));
     }
 
+    /// A new `BUILD` file enters the package layout so later paths resolve to
+    /// the right owner. It dirties nothing here: the layer's
+    /// `PACKAGE:lib/core -> PACKAGE_LOOKUP:lib/core/sub` edge is what says the
+    /// parent moved, and the engine walks it.
     #[test]
-    fn new_package_dirties_parent_and_itself() {
-        let d = run(vec![
-            Change::new(Status::Added, "lib/core/sub/BUILD.bazel"),
-            Change::new(Status::Added, "lib/core/sub/x.cc"),
-        ]);
-        assert_eq!(
-            d.dirty.iter().cloned().collect::<Vec<_>>(),
-            vec!["lib/core", "lib/core/sub"]
+    fn a_new_package_enters_the_layout_and_dirties_nothing() {
+        let mut p = packages();
+        let d = dirty_set(
+            &[
+                Change::new(Status::Added, "lib/core/sub/BUILD.bazel"),
+                Change::new(Status::Added, "lib/core/sub/x.cc"),
+            ],
+            &mut p,
+            &matchers(),
+            &NoConsumers,
         );
+        assert!(d.dirty.is_empty(), "{:?}", d.dirty);
+        assert!(p.contains("lib/core/sub"));
+        assert_eq!(p.owner_of("lib/core/sub/x.cc"), Some("lib/core/sub"));
     }
 
+    /// A deleted `BUILD` file is still named here, because a package that
+    /// moved by ceasing to exist has to be tombstoned rather than re-queried,
+    /// and which package that is, is a fact about the path.
     #[test]
-    fn deleted_package_dirties_parent_and_itself() {
+    fn a_deleted_build_file_names_the_package_it_deleted() {
         let d = run(vec![Change::new(Status::Deleted, "lib/core/BUILD.bazel")]);
-        assert_eq!(
-            d.dirty.iter().cloned().collect::<Vec<_>>(),
-            vec!["lib", "lib/core"]
-        );
+        assert!(d.dirty.is_empty());
         assert_eq!(
             d.deleted_packages.iter().cloned().collect::<Vec<_>>(),
             vec!["lib/core"]
@@ -776,38 +770,25 @@ mod tests {
             Change::new(Status::Added, "lib/core/BUILD.bazel"),
         ]);
         assert!(d.deleted_packages.is_empty());
-        assert!(d.dirty.contains("lib/core"));
     }
 
-    #[test]
-    fn file_moving_into_a_new_package_dirties_both() {
-        // A rename arrives as delete + add.
-        let d = run(vec![
-            Change::new(Status::Deleted, "lib/core/x.cc"),
-            Change::new(Status::Added, "app/x.cc"),
-        ]);
-        assert_eq!(
-            d.dirty.iter().cloned().collect::<Vec<_>>(),
-            vec!["app", "lib/core"]
-        );
-    }
-
+    /// What the package layout is still for: once `lib/core` is not a package,
+    /// `lib/core/a.cc` is `//lib`'s file, and that is the label its content
+    /// change has to resolve to.
     #[test]
     fn files_under_a_deleted_package_move_to_the_parent() {
-        let d = run(vec![
-            Change::new(Status::Deleted, "lib/core/BUILD.bazel"),
-            Change::new(Status::Modified, "lib/core/a.cc"),
-        ]);
-        // a.cc now belongs to //lib, and only its content changed.
+        let mut p = packages();
+        let d = dirty_set(
+            &[
+                Change::new(Status::Deleted, "lib/core/BUILD.bazel"),
+                Change::new(Status::Modified, "lib/core/a.cc"),
+            ],
+            &mut p,
+            &matchers(),
+            &NoConsumers,
+        );
         assert!(d.direct_files.contains("lib/core/a.cc"));
-        assert!(d.dirty.contains("lib"));
-    }
-
-    #[test]
-    fn bzl_changes_are_collected_for_the_load_closure() {
-        let d = run(vec![Change::new(Status::Modified, "lib/util.bzl")]);
-        assert!(d.dirty.is_empty());
-        assert_eq!(d.changed_bzl.iter().next().unwrap(), "lib/util.bzl");
+        assert_eq!(p.owner_of("lib/core/a.cc"), Some("lib"));
     }
 
     #[test]
@@ -899,7 +880,7 @@ mod tests {
     /// whatever the ignore glob says, and the base index cannot answer for a
     /// path that does not exist there yet.
     #[test]
-    fn an_added_ignored_file_dirties_its_package() {
+    fn an_added_ignored_file_names_no_package() {
         let m = Matchers::compile(&Rules {
             ignore_globs: vec!["docs/**".into()],
             ..Default::default()
@@ -912,7 +893,7 @@ mod tests {
             &m,
             &NoConsumers,
         );
-        assert_eq!(d.dirty.iter().next().unwrap(), "docs");
+        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
     fn nested() -> PackageSet {
