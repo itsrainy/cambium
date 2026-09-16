@@ -224,8 +224,24 @@ fn head_check(
                     diff.counts.externals_mismatch - diff.externals_mismatch.len()
                 );
             }
+            if diff.counts.sky_mismatch > 0 {
+                println!(
+                    "{subject}: head check at {pin}: {} loading layer mismatches",
+                    diff.counts.sky_mismatch
+                );
+                for line in &diff.sky_mismatch {
+                    println!("    {line}");
+                }
+                if diff.counts.sky_mismatch > diff.sky_mismatch.len() {
+                    println!(
+                        "    ... {} more",
+                        diff.counts.sky_mismatch - diff.sky_mismatch.len()
+                    );
+                }
+            }
             let mut d = diff.clone();
             d.counts.externals_mismatch = 0;
+            d.counts.sky_mismatch = 0;
             if !d.is_empty() {
                 println!(
                     "    the graph itself differs, which a re-derivation cannot cause: {}",

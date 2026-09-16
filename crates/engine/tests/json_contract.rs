@@ -25,8 +25,7 @@ use serde_json::Value;
 /// `stats.bazelrc_safe_diffs`, `stats.cold_rebuild` and the optional
 /// `cold_rebuild_reason`, the four `stats.repos_*` / `stats.external_direct_targets`
 /// counters and the `external_repo` direct reason; version 7 added the four
-/// `stats.bzl_witness*` counters, which say what the engine did about a
-/// changed `.bzl` the base index's load closure had no node for, plus
+/// `stats.bzl_witness*` counters, retired again in version 12, plus
 /// `stats.bazelrc_flag_nodes`, the `bazelrc_flags` list and the
 /// `starlark_flag` direct reason; version 8 added
 /// `stats.repos_dirty_by_target` and the `external_repo_target` direct
@@ -37,7 +36,11 @@ use serde_json::Value;
 /// index, which is what `cambi profile` reports per commit; version 10 added
 /// `depth_histogram`, the affected count at each reverse-dependency depth;
 /// version 11 added `affected[].package_depth` and
-/// `package_depth_histogram`, the same walk in package boundaries crossed.
+/// `package_depth_histogram`, the same walk in package boundaries crossed;
+/// version 12 replaced the four `stats.bzl_witness*` counters with
+/// `stats.sky_seeds`, `sky_unknown_seeds`, `sky_visited` and
+/// `sky_new_packages`, which describe the reverse walk over the Skyframe
+/// loading layer that now answers which packages a change moved.
 /// The version is shared with
 /// the other documents, and `index stats` changed shape at version 2 and again
 /// at 3.
@@ -73,10 +76,10 @@ const AFFECTED_SCHEMA: &[&str] = &[
     "stats.base_nodes",
     "stats.bazelrc_safe_diffs",
     "stats.bzl_closure_hits",
-    "stats.bzl_witness_packages",
-    "stats.bzl_witness_unavailable",
-    "stats.bzl_witnessed_dead",
-    "stats.bzl_witnessed_loaded",
+    "stats.sky_new_packages",
+    "stats.sky_seeds",
+    "stats.sky_unknown_seeds",
+    "stats.sky_visited",
     "stats.changed_files",
     "stats.cold_rebuild",
     "stats.direct_targets",
@@ -157,10 +160,10 @@ fn fixture() -> AffectedReport {
             ignored_files: 9,
             rbuildfiles_called: false,
             bzl_closure_hits: 10,
-            bzl_witnessed_dead: 16,
-            bzl_witnessed_loaded: 17,
-            bzl_witness_packages: 18,
-            bzl_witness_unavailable: 19,
+            sky_seeds: 16,
+            sky_unknown_seeds: 17,
+            sky_visited: 18,
+            sky_new_packages: 19,
             bazelrc_safe_diffs: 11,
             cold_rebuild: true,
             repos_dirty_by_input: 11,

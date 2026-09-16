@@ -514,6 +514,12 @@ impl Engine {
         ) {
             b.set_bzl_closure(c);
         }
+        // The loading layer, on the server the universe query has just loaded
+        // the whole repository into. It has to be this server: a fresh one has
+        // an empty Skyframe graph and would dump nothing.
+        if let Some(l) = crate::sky::build_layer(q, None)? {
+            b.set_sky_layer(l);
+        }
         Ok(b.finish(commit))
     }
 

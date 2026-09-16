@@ -13,7 +13,7 @@
 
 use cambium_diff::{Change, Status};
 use cambium_index::{IndexData, PackageUpdate, TargetRow};
-use cambium_testkit::{base, engine, req, Scanning};
+use cambium_testkit::{base, engine, req, Files, Scanning};
 
 /// ```text
 /// //:LICENSE, //:root_group     (the root package)
@@ -49,8 +49,20 @@ fn rows(pkg: &str) -> PackageUpdate {
 
 const PACKAGES: &[&str] = &["", "app", "lib", "far"];
 
+/// The tree behind the rows, so the querier can produce a loading layer: the
+/// root package carries both spellings of its BUILD file, because the two
+/// tests edit one each.
+fn files() -> Files {
+    Files(
+        ["BUILD", "BUILD.bazel", "app/BUILD", "lib/BUILD", "far/BUILD"]
+            .into_iter()
+            .map(|p| (p.to_string(), String::new()))
+            .collect(),
+    )
+}
+
 fn synth() -> Scanning {
-    Scanning::new(PACKAGES, rows)
+    Scanning::new(PACKAGES, rows).with_files(files())
 }
 
 fn run(index: &IndexData, path: &str) -> cambium_engine::AffectedReport {

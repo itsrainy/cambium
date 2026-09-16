@@ -853,6 +853,62 @@ impl Bazel {
         }
     }
 
+    /// `bazel dump --skyframe=deps`, filtered to a set of key kinds.
+    ///
+    /// This is Bazel's own loading-phase graph, on the server this handle has
+    /// just loaded the repository into, and it is what
+    /// `cambium_index::sky` stores. It has to run on the *same* server as the
+    /// query that loaded the packages: a fresh server has an empty Skyframe
+    /// graph and would dump nothing at all.
+    ///
+    /// `filter` is a comma-separated list of regexes matching the `KIND:`
+    /// prefix, a `-` prefix excluding. Failure is an error with Bazel's own
+    /// stderr in it, never an empty answer: an index without a layer is one
+    /// no later run can be answered from, so the caller has to be told rather
+    /// than handed an index that silently says nothing is dirty.
+    pub fn dump_skyframe(&self, filter: &str) -> Result<String> {
+        // No `HYGIENE` here: `dump` is a debugging command and rejects the
+        // progress flags every other invocation passes (`ERROR:
+        // --noshow_loading_progress :: Unrecognized option`), which is a hard
+        // exit rather than a warning.
+        let mut cmd = self.command("dump");
+        cmd.arg("--skyframe=deps")
+            .arg(format!("--skykey_filter={filter}"));
+        let out = self.runner.output(&mut cmd)?;
+        if !out.exit.success {
+            return Err(BazelError::Failed {
+                args: format!("dump --skyframe=deps --skykey_filter={filter}"),
+                status: out.exit.to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// The server's output base, where external repositories are checked out.
+    ///
+    /// Only used to keep the machine's own paths out of the stored loading
+    /// layer, so an answer that cannot be had costs a few machine-specific
+    /// strings in the payload and nothing else.
+    pub fn output_base(&self) -> Option<String> {
+        let mut cmd = self.command("info");
+        cmd.arg("output_base");
+        match self.runner.output(&mut cmd) {
+            Ok(o) if o.exit.success => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            }
+            Ok(o) => {
+                tracing::debug!(status = %o.exit, "bazel info output_base did not succeed");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "could not run bazel info output_base");
+                None
+            }
+        }
+    }
+
     /// The root module's repository mapping as Bazel prints it, for
     /// `cambium_index::RepoMapping::from_dump` to parse.
     ///

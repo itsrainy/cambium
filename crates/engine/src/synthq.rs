@@ -25,6 +25,29 @@ impl<'a> SynthQuerier<'a> {
     }
 }
 
+impl SynthQuerier<'_> {
+    /// Every path of the synthetic workspace: the Starlark files, and the
+    /// source files each live target names. A `glob` sees the second kind, so
+    /// the loading layer needs them to have directory listings.
+    fn tree_paths(&self) -> Vec<String> {
+        let mut out = self.starlark_files().unwrap_or_default();
+        for p in &self.graph.packages {
+            if !p.alive {
+                continue;
+            }
+            for &tid in &p.targets {
+                let t = &self.graph.targets[tid as usize];
+                for &slot in &t.srcs {
+                    out.push(self.graph.src_path(tid, slot));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 impl PackageQuerier for SynthQuerier<'_> {
     fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         Ok(packages
@@ -74,6 +97,32 @@ impl PackageQuerier for SynthQuerier<'_> {
         out.sort();
         out.dedup();
         Some(out)
+    }
+
+    /// The loading layer a Bazel run over this synthetic workspace would have
+    /// left behind (`cambium_synth::sky`). The synthetic world is a model
+    /// either way; what matters is that the engine reads it the same way it
+    /// reads a real dump, through the same parser and the same walk.
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(&self) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        let packages: Vec<String> = self
+            .graph
+            .packages
+            .iter()
+            .filter(|p| p.alive)
+            .map(|p| p.path.clone())
+            .collect();
+        let tree = cambium_synth::sky::Listed {
+            paths: self.tree_paths(),
+            text: &self.files,
+        };
+        Ok((
+            cambium_synth::sky::dump(&packages, &tree),
+            cambium_synth::sky::paths(),
+        ))
     }
 
     fn version(&self) -> String {

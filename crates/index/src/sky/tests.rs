@@ -94,6 +94,21 @@ fn a_bzl_loaded_only_by_another_bzl_reaches_the_packages_behind_it() {
     for (name, t) in tables() {
         let w = walk_of(view(&t), &[("a/helper.bzl", false)]);
         assert!(w.packages.contains("a"), "{name}: {w:?}");
+        // And it is a package the *Starlark* half reached, which is what
+        // marks its rules direct: a rule implementation can change without
+        // any rule proto moving.
+        assert!(w.bzl_packages.contains("a"), "{name}: {w:?}");
+    }
+}
+
+/// The counterpart: a `BUILD` edit reaches the package without going through
+/// any `BZL_LOAD`, so its rules are judged on their hashes as before.
+#[test]
+fn a_build_edit_is_not_a_starlark_reach() {
+    for (name, t) in tables() {
+        let w = walk_of(view(&t), &[("a/BUILD", false)]);
+        assert!(w.packages.contains("a"), "{name}: {w:?}");
+        assert!(w.bzl_packages.is_empty(), "{name}: {w:?}");
     }
 }
 

@@ -27,6 +27,7 @@ pub mod reason;
 pub mod report;
 pub mod revision;
 mod run;
+mod sky;
 pub mod store;
 pub mod synthq;
 

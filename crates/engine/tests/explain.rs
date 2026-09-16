@@ -131,7 +131,7 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
             matches!(
                 d.code,
                 Code::W004BazelrcGlobal
-                    | Code::W008NoLoadClosure
+                    | Code::W008NoLoadingLayer
                     | Code::W009WorkspaceLevelBzl
                     | Code::W013InvalidatorMatched
                     | Code::W014ExternalsGlobal

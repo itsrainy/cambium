@@ -57,7 +57,7 @@ pub mod dump;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::csr::{Csr, CsrRef};
+use crate::csr::CsrRef;
 use crate::strtab::StrTabRef;
 
 /// A Skyframe node kind the layer keeps. The discriminants are stored.
@@ -628,40 +628,109 @@ impl<'a> SkyRef<'a> {
         if !self.present {
             return out;
         }
-        let mut seen = vec![false; self.len()];
-        let mut queue: VecDeque<u32> = VecDeque::new();
+        let mut start: Vec<u32> = Vec::with_capacity(seeds.len());
         for (kind, text) in seeds {
             match self.id_of(*kind, text) {
-                Some(id) => {
-                    if !seen[id as usize] {
-                        seen[id as usize] = true;
-                        queue.push_back(id);
-                    }
-                }
+                Some(id) => start.push(id),
                 // Normal, and counted rather than guessed at: a path Bazel's
                 // loading phase never looked at has no node, and reaches
                 // nothing through this layer.
                 None => out.unknown_seeds += 1,
             }
         }
-        while let Some(id) = queue.pop_front() {
+        let mut via_bzl: Vec<u32> = Vec::new();
+        self.reach(&start, |id, kind, text| {
             out.visited += 1;
-            let kind = self.kind_of(id);
+            if kind == Kind::BzlLoad {
+                via_bzl.push(id);
+            }
             if kind.is_package() {
-                let text = self.text(id);
                 // A package of some *other* repository: `@@rules_cc+//pkg`.
                 // Nothing in a main-repository diff re-queries it, and the
-                // externals stage is what routes a change that moved it.
-                if is_main_package(text) {
-                    if kind == Kind::Package {
-                        out.packages.insert(text.to_string());
-                    } else {
-                        out.lookups.insert(text.to_string());
-                    }
-                } else {
+                // externals stage is what routes a change that moved one.
+                if !is_main_package(text) {
                     out.external_packages += 1;
+                } else if kind == Kind::Package {
+                    out.packages.insert(text.to_string());
+                } else {
+                    out.lookups.insert(text.to_string());
                 }
             }
+        });
+
+        // Which of those packages a changed Starlark file reached, as against
+        // a changed `BUILD` file or a moved directory listing.
+        //
+        // The distinction is load-bearing rather than a statistic. A `.bzl`
+        // edit that changes a rule's *implementation* leaves every rule proto
+        // in the loading packages byte-identical, so re-querying the package
+        // finds every rule hash unchanged; the only thing that catches it is
+        // marking the package's rules direct outright. Knowing which packages
+        // those are is what keeps that from meaning "every dirty package".
+        //
+        // A second walk rather than a bit carried through the first: the bit
+        // is monotone but a node can be reached before the predecessor that
+        // would have set it, and re-walking from the `BZL_LOAD` nodes already
+        // found costs one more pass over a graph the first walk just paged in.
+        self.reach(&via_bzl, |_, kind, text| {
+            if kind == Kind::Package && is_main_package(text) {
+                out.bzl_packages.insert(text.to_string());
+            }
+        });
+        out
+    }
+
+    /// Whether the Starlark file at `path` is in the workspace load closure:
+    /// `MODULE.bazel`, `WORKSPACE` or a module extension reaches it, so it can
+    /// define repository rules whose output is not in the rule layer at all.
+    ///
+    /// Bazel says so in the `BZL_LOAD` key itself. A file loaded by a `BUILD`
+    /// file has `KeyForBuild`; one the module system loads has `KeyForBzlmod`,
+    /// `KeyForBzlmodBootstrap` (Bazel 8/9) or `KeyForWorkspace` (Bazel 7). A
+    /// file loaded only by another workspace-level `.bzl` gets its own
+    /// `KeyForBuild` node with a workspace-level one above it, so the question
+    /// is transitive and the `BZL_LOAD -> BZL_LOAD` edges answer it.
+    ///
+    /// This replaces the witness that used to re-scan the head checkout when
+    /// the statically parsed load closure had no node for a changed file. The
+    /// closure could be short — an unresolvable load label, a package
+    /// tombstoned as partial — and had no way to know it was. These edges
+    /// exist because Bazel followed them.
+    pub fn bzl_is_workspace_level(&self, path: &str) -> bool {
+        let Some(file) = self.id_of(Kind::File, path) else {
+            return false;
+        };
+        let mut seen = vec![false; self.len()];
+        let mut stack = vec![file];
+        seen[file as usize] = true;
+        while let Some(id) = stack.pop() {
+            for &up in self.rdeps.row(id) {
+                if seen[up as usize] || self.kind_of(up) != Kind::BzlLoad {
+                    continue;
+                }
+                if is_workspace_bzl_key(self.text(up)) {
+                    return true;
+                }
+                seen[up as usize] = true;
+                stack.push(up);
+            }
+        }
+        false
+    }
+
+    /// Breadth-first over reverse edges from `start`, calling `visit` once per
+    /// node reached, `start` included.
+    fn reach(&self, start: &[u32], mut visit: impl FnMut(u32, Kind, &'a str)) {
+        let mut seen = vec![false; self.len()];
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        for &id in start {
+            if !seen[id as usize] {
+                seen[id as usize] = true;
+                queue.push_back(id);
+            }
+        }
+        while let Some(id) = queue.pop_front() {
+            visit(id, self.kind_of(id), self.text(id));
             for &up in self.rdeps.row(id) {
                 if !seen[up as usize] {
                     seen[up as usize] = true;
@@ -669,7 +738,6 @@ impl<'a> SkyRef<'a> {
                 }
             }
         }
-        out
     }
 }
 
@@ -677,6 +745,13 @@ impl<'a> SkyRef<'a> {
 /// repository. External ones carry their repository: `@@rules_java//java`.
 fn is_main_package(text: &str) -> bool {
     !text.starts_with('@') && !text.contains("//")
+}
+
+/// Whether a `BZL_LOAD` key is one the module system asked for, rather than a
+/// `BUILD` file. Verified spellings: `KeyForBzlmod` and
+/// `KeyForBzlmodBootstrap` on Bazel 8/9, `KeyForWorkspace` on Bazel 7.
+fn is_workspace_bzl_key(text: &str) -> bool {
+    text.starts_with("KeyForBzlmod") || text.starts_with("KeyForWorkspace")
 }
 
 /// What one reverse walk reached.
@@ -689,6 +764,10 @@ pub struct SkyWalk {
     /// held one. Both are re-queried; the second comes back empty and
     /// tombstones nothing, because there was nothing there.
     pub lookups: BTreeSet<String>,
+    /// Of `packages`, the ones a changed Starlark file reached through
+    /// `BZL_LOAD` edges. Their rules are marked direct outright, because a
+    /// rule implementation can change without any rule proto moving.
+    pub bzl_packages: BTreeSet<String>,
     /// Packages of another repository the walk reached, counted for the
     /// report. The external stage is what acts on those.
     pub external_packages: usize,
