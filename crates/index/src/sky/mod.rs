@@ -417,16 +417,17 @@ impl SkyLayer {
         let mut total = 0usize;
         let mut healthy = 0usize;
         for (id, node) in self.nodes.iter().enumerate() {
-            if node.kind != Kind::Package || !is_main_package(&node.text) {
+            if node.kind != Kind::Package
+                || !is_main_package(&node.text)
+                || is_synthetic_package(&node.text)
+            {
                 continue;
             }
             total += 1;
-            if self.fwd[id].iter().any(|&d| {
-                matches!(
-                    self.nodes[d as usize].kind,
-                    Kind::BzlLoad | Kind::Glob | Kind::PackageLookup
-                )
-            }) {
+            if self.fwd[id]
+                .iter()
+                .any(|&d| is_loading_dep(self.nodes[d as usize].kind))
+            {
                 healthy += 1;
             }
         }
@@ -457,11 +458,10 @@ impl SkyLayer {
         if lookups > 32 && packages * 32 < lookups {
             return false;
         }
-        // One package with no loading dependency is allowed outright: Bazel 7
-        // synthesises `//external` from the workspace file alone, and in a
-        // repository with only a handful of packages that one would otherwise
-        // sink the ratio.
-        with_deps * 100 >= packages * 90 || with_deps + 1 >= packages
+        // No allowance is needed for `//external` any more: it is not counted
+        // (see `is_synthetic_package`), and every package that is counted has
+        // a lookup, a glob, a load or its own `BUILD` file.
+        with_deps * 100 >= packages * 90
     }
 
     /// Whether any `BZL_LOAD` node has a `FILE` of this workspace under it.
@@ -704,7 +704,7 @@ impl SkyLayer {
                 healthy |= match node.kind {
                     Kind::PackageLookup => node.text == pkg,
                     Kind::Glob => glob_names_package(&node.text, &pkg),
-                    Kind::BzlLoad => true,
+                    Kind::BzlLoad | Kind::File => true,
                     _ => false,
                 };
                 if healthy {
@@ -718,6 +718,14 @@ impl SkyLayer {
         requeried
             .iter()
             .filter(|p| {
+                // `//external` is judged by nobody: it is synthesised from the
+                // workspace file, depends on nothing the layer keeps, and
+                // nothing seeds into it. A WORKSPACE edit re-queries it, and
+                // on sourcegraph that was two packages of which one could
+                // never pass, which failed the run.
+                if is_synthetic_package(p) {
+                    return false;
+                }
                 // Only a package the layer already knows can be *missing*: a
                 // package this run is the first to see has no old row to
                 // leave standing, and the walk names it for itself.
@@ -1173,6 +1181,37 @@ impl<'a> SkyRef<'a> {
 /// repository. External ones carry their repository: `@@rules_java//java`.
 fn is_main_package(text: &str) -> bool {
     !text.starts_with('@') && !text.contains("//")
+}
+
+/// Whether this package is one Bazel synthesises rather than one a `BUILD`
+/// file declares.
+///
+/// `//external` in the WORKSPACE world is the only one. Bazel builds it from
+/// the workspace file alone, and its `PACKAGE` node's whole dependency list is
+/// `PRECOMPUTED:starlark_semantics` and `EXTERNAL_PACKAGE:...` -- two kinds the
+/// layer drops, because everything depends on them. So it has no lookup, no
+/// glob, no load and no file of its own, nothing in the layer can seed into
+/// it, and it can never satisfy a health test written for real packages.
+/// Checked against a real 7.4.1 dump: of 644 packages it is the only one with
+/// none of those dependencies, and it does not exist under bzlmod at all.
+///
+/// It is not exempt from being *refreshed* -- a WORKSPACE edit re-queries it
+/// and its rows are replaced like anyone's -- only from being *judged*.
+fn is_synthetic_package(text: &str) -> bool {
+    text == "external"
+}
+
+/// Whether a dependency of a `PACKAGE` node is one a changed path travels.
+///
+/// The three the walk arrives through, plus the package's own `BUILD` file.
+/// Every real package in a real dump has all four: the thinnest of apollo's
+/// 644 has eleven dependencies and they include a `PACKAGE_LOOKUP`, a
+/// `BZL_LOAD` and a `FILE`.
+fn is_loading_dep(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::BzlLoad | Kind::Glob | Kind::PackageLookup | Kind::File
+    )
 }
 
 /// Whether a refresh may replace this node's row outright, rather than merging
