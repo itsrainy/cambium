@@ -13,9 +13,9 @@ Every warning and error carries a stable code, assigned once and never reused; r
 | `CAMBI-W005` | dirty packages failed to load under `--keep_going` and were tombstoned, as a cold build would | Usually broken on this machine; fix if it should load. Consumers count as affected regardless |
 | `CAMBI-W006` | `bazel query //...` finished with errors: index is partial | Fix load errors, or accept partiality (`--allow-partial` / `baseline.publish_partial`) |
 | `CAMBI-W007` | a store fetch failed with stderr output and was read as absent | Check credentials and the bucket in `[baseline].store` |
-| `CAMBI-W008` | the base index has no static `.bzl` load closure, so a changed `.bzl` couldn't resolve; run went global | `cambi index build` from a checkout the source can read |
-| `CAMBI-W009` | a changed `.bzl` loads outside any package (`WORKSPACE` or module closure); run went global | Expected for workspace-level `.bzl`; else rebuild the index |
-| `CAMBI-W010` | a changed `.bzl` is loaded at head but has no node in the stored load closure | Incomplete closure; the witness followed its loaders, so the answer is safe but slow. Rebuild the lineage |
+| `CAMBI-W008` | the base index carries no Skyframe loading layer, so which packages the change moved can't be answered; run went global | `cambi index build` against a Bazel that can run `dump --skyframe=deps` |
+| `CAMBI-W009` | a changed `.bzl` is one the module system loads (`WORKSPACE` or the module closure) and the index can't name the repositories it defines; run went global | Expected for a workspace-level `.bzl`; else rebuild the index |
+| `CAMBI-W010` | retired with the static `.bzl` load closure's witness. The loading layer's `BZL_LOAD` edges are Bazel's own, so there's no stored closure left to be incomplete | Nothing; the code is not reused |
 | `CAMBI-W011` | the base index this run computed couldn't be published | Answer unaffected; check store's writable |
 | `CAMBI-W012` | dirty set exceeded `limits.max_dirty_packages`; run re-indexed at head | Still exact, just slower. Raise the limit, or 0 to never cold-rebuild |
 | `CAMBI-W013` | a changed path matched an invalidator, so everything is affected | If it can't move the graph, drop it from `[invalidators]`, or add to `[ignore].globs` |

@@ -148,6 +148,10 @@ impl Kind {
 /// layer names no absolute path of the machine that built it.
 pub const WORKSPACE: u32 = 0;
 
+/// Not a root id: the answer for a key under a root that is not the
+/// workspace, which the layer drops.
+const NOT_MINE: u32 = u32::MAX;
+
 /// The placeholder an unrooted key's embedded workspace path becomes.
 pub const WORKSPACE_MARK: &str = "<workspace>";
 /// The placeholder an unrooted key's embedded output base becomes.
@@ -198,8 +202,6 @@ pub struct SkyNode {
 /// CSR the walk reads is computed once, at [`SkyLayer::finish`].
 #[derive(Clone, Debug, Default)]
 pub struct SkyLayer {
-    roots: Vec<String>,
-    root_ids: HashMap<String, u32>,
     nodes: Vec<SkyNode>,
     ids: HashMap<SkyNode, u32>,
     fwd: Vec<Vec<u32>>,
@@ -207,10 +209,7 @@ pub struct SkyLayer {
 
 impl SkyLayer {
     pub fn new() -> Self {
-        Self {
-            roots: vec![String::new()],
-            ..Default::default()
-        }
+        Self::default()
     }
 
     pub fn num_nodes(&self) -> usize {
@@ -234,58 +233,109 @@ impl SkyLayer {
             return None;
         }
         let mut out = Self::new();
-        out.roots = v.roots.iter().map(str::to_string).collect();
-        if out.roots.is_empty() {
-            out.roots.push(String::new());
+        // A node under a root this build does not keep is dropped on the way
+        // in, with the edges through it. Only the workspace root is
+        // representable now, so a stored node under another one comes from an
+        // index an earlier build of this format wrote, and carrying it forward
+        // would mean writing a root id the root table has no entry for.
+        let mut remap = vec![u32::MAX; v.len()];
+        for id in 0..v.len() as u32 {
+            if v.root[id as usize] != WORKSPACE {
+                continue;
+            }
+            remap[id as usize] = out.nodes.len() as u32;
+            out.nodes.push(v.node(id));
         }
-        for (i, r) in out.roots.iter().enumerate() {
-            out.root_ids.insert(r.clone(), i as u32);
-        }
-        out.nodes = (0..v.len() as u32).map(|i| v.node(i)).collect();
         for (i, n) in out.nodes.iter().enumerate() {
             out.ids.insert(n.clone(), i as u32);
         }
         out.fwd = vec![Vec::new(); out.nodes.len()];
         for to in 0..v.len() as u32 {
+            if remap[to as usize] == u32::MAX {
+                continue;
+            }
             for &from in v.rdeps.row(to) {
-                out.fwd[from as usize].push(to);
+                if remap[from as usize] != u32::MAX {
+                    out.fwd[remap[from as usize] as usize].push(remap[to as usize]);
+                }
             }
         }
         Some(out)
     }
 
+    /// The root id a dump key's root names.
+    ///
+    /// Only the workspace gets one. Everything else answers `NOT_MINE`, which
+    /// is not a root id and never reaches a node: see [`SkyLayer::normalise`].
+    /// The root column and the root table stay in the format because a rooted
+    /// key is `[root]/[rel]` and reading one has to say which root it was, not
+    /// because there is more than one to be.
     fn root_id(&mut self, root: &str, paths: &Paths) -> u32 {
         let root = root.trim_end_matches('/');
         if !paths.workspace.is_empty() && root == paths.workspace {
-            return WORKSPACE;
+            WORKSPACE
+        } else {
+            NOT_MINE
         }
-        let stored = erase(root, paths);
-        if let Some(&id) = self.root_ids.get(&stored) {
-            return id;
-        }
-        let id = self.roots.len() as u32;
-        self.roots.push(stored.clone());
-        self.root_ids.insert(stored, id);
-        id
     }
 
-    /// The node a dump key names, or `None` for a kind the layer drops.
+    /// The node a dump key names, or `None` for a key the layer drops.
+    ///
+    /// Dropped are the kinds that carry no loading-phase dependency a changed
+    /// path can travel, and the keys that belong to *another repository*: a
+    /// file under an external root, and the `PACKAGE`, `PACKAGE_LOOKUP`,
+    /// `GLOB` and ignore nodes of a repository that is not the main one.
+    ///
+    /// Those are all sinks for this walk. Nothing in the loading phase depends
+    /// on another repository's `PACKAGE` node, so a reverse walk that reached
+    /// one would stop there, and the engine acts on a moved external
+    /// repository through the externals stage rather than by re-querying a
+    /// package it cannot query. Keeping them cost two things and bought
+    /// nothing: the payload carried this machine's output base, and the layer
+    /// *accumulated*, because a server along a walk loads repositories a cold
+    /// build at the pin does not, so the incremental layer and the cold one
+    /// stopped being comparable. The rebuild oracle is what found that, with
+    /// four stale `@@bazel_ci_rules+...` packages after five steps.
+    ///
+    /// `BZL_LOAD` is kept whatever repository it names, and that is not an
+    /// inconsistency. An external `.bzl` can be a main-repository *file*: a
+    /// `local_path_override` on a module whose sources are in this tree (which
+    /// is how tensorflow declares `third_party/xla`) gives a
+    /// `BZL_LOAD:KeyForBuild{label=@@xla//:x.bzl}` hanging off
+    /// `FILE:[<workspace>]/[third_party/xla/x.bzl]`, with main-repository
+    /// packages above it. Dropping it would cut a chain that starts and ends
+    /// in this repository.
     fn normalise(&mut self, key: &str, paths: &Paths) -> Option<SkyNode> {
         let (kind_str, rest) = dump::kind_of(key)?;
         let kind = Kind::from_dump(kind_str)?;
         if kind.is_rooted() {
             let (root, rel) = dump::split_rooted(rest)?;
             let root = self.root_id(root, paths);
+            if root != WORKSPACE {
+                return None;
+            }
             return Some(SkyNode {
                 kind,
                 root,
                 text: rel.to_string(),
             });
         }
-        Some(SkyNode {
+        let text = erase(rest, paths);
+        let mine = match kind {
+            Kind::Package | Kind::PackageLookup => is_main_package(&text),
+            // `IGNORED_SUBDIRECTORIES:@@` is the main repository's ignore
+            // list; `IGNORED_PACKAGE_PREFIXES:@@rules_java_builtin` is
+            // another repository's.
+            Kind::Ignored => text == "@@",
+            // A glob key embeds its package root, which the workspace
+            // placeholder marks.
+            Kind::Glob => text.contains(WORKSPACE_MARK),
+            _ => true,
+        };
+        mine.then_some(SkyNode {
             kind,
             root: WORKSPACE,
-            text: erase(rest, paths),
+            text,
         })
     }
 
@@ -371,22 +421,7 @@ impl SkyLayer {
     /// search, and the reverse edges as a CSR over that order.
     pub fn finish(self) -> SkyTables {
         let n = self.nodes.len();
-        // Roots first. A root id is part of every node's sort key, so leaving
-        // the root table in encounter order would make the stored node order
-        // depend on the order the dump's blocks arrived in. The workspace keeps
-        // id 0; the rest go in name order.
-        let mut root_order: Vec<u32> = (1..self.roots.len() as u32).collect();
-        root_order.sort_unstable_by(|&a, &b| self.roots[a as usize].cmp(&self.roots[b as usize]));
-        let mut root_remap = vec![WORKSPACE; self.roots.len()];
-        let mut roots = vec![self.roots[WORKSPACE as usize].clone()];
-        for (new, &old) in root_order.iter().enumerate() {
-            root_remap[old as usize] = new as u32 + 1;
-            roots.push(self.roots[old as usize].clone());
-        }
-        let mut nodes = self.nodes;
-        for node in &mut nodes {
-            node.root = root_remap[node.root as usize];
-        }
+        let nodes = self.nodes;
 
         // Sort the nodes rather than the ids: the stored order *is* the id
         // space, so the payload is a function of the layer's content and not
@@ -402,10 +437,10 @@ impl SkyLayer {
             present: true,
             ..SkyTables::empty()
         };
-        for r in &roots {
-            t.root_bytes.extend_from_slice(r.as_bytes());
-            t.root_offsets.push(t.root_bytes.len() as u32);
-        }
+        // One root, the workspace, written as the empty string. The table and
+        // the per-node column stay because a rooted key is `[root]/[rel]` and
+        // reading one back has to say which root it was.
+        t.root_offsets.push(0);
         t.kind = Vec::with_capacity(n);
         t.root = Vec::with_capacity(n);
         for &old in &order {
@@ -579,6 +614,19 @@ impl<'a> SkyRef<'a> {
             kind: self.kind_of(id),
             root: self.root[id as usize],
             text: self.text(id).to_string(),
+        }
+    }
+
+    /// The name of the root a node sits under, or `<unknown root N>` for a
+    /// root id the table has no entry for. Only an index an earlier build of
+    /// this format wrote can carry one, and a reader that panicked on it would
+    /// turn a stale artifact into a crash.
+    pub fn root_name(&self, id: u32) -> std::borrow::Cow<'a, str> {
+        let r = self.root[id as usize];
+        if (r as usize) < self.roots.len() {
+            std::borrow::Cow::Borrowed(self.roots.get(r))
+        } else {
+            std::borrow::Cow::Owned(format!("<unknown root {r}>"))
         }
     }
 

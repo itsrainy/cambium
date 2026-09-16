@@ -300,6 +300,14 @@ fn a_deleted_build_file_dirties_the_parent_and_tombstones_the_package() {
         "{:?}",
         out.report.dirty_packages
     );
+    // And the package that went away is named too. Every rule in it is
+    // tombstoned, so none can appear in the affected set, and `dirty_packages`
+    // is the only place the run says it accounted for the package at all.
+    assert!(
+        out.report.dirty_packages.contains(&"lib/sub".to_string()),
+        "{:?}",
+        out.report.dirty_packages
+    );
 }
 
 /// A file added where a `glob` can see it dirties the package, through the

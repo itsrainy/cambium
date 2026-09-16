@@ -32,7 +32,7 @@ them a `.bzl` that 42 packages load.
 
 | stage | delta overlay | materialised | proportional to |
 |---|---:|---:|---|
-| dirty set | 40 | 40 | changed files (plus one `rbuildfiles` call) |
+| dirty set | 40 | 40 | changed files, and the loading layer the walk touches |
 | query | 4 | 4 | targets in dirty packages, synthetic here; a real Bazel query dominates |
 | splice | **24** | **~1200** | the change / **the whole graph** |
 | direct set | 1 | 1 | dirty targets and changed files |
@@ -79,6 +79,47 @@ The two must answer identically, enforced rather than assumed: every
 scenario in the property tests and every revision of the soundness sweep
 computes the answer both ways and requires the affected, direct and test
 sets, and the `explain` paths, to match.
+
+## What the loading-phase dump costs
+
+Which packages a changed path moved is answered by a reverse walk over the
+Skyframe loading layer the index carries (`crates/index/src/sky`), and that
+layer is `bazel dump --skyframe=deps` taken on the server that just loaded the
+repository. Two dumps a lineage step: one after the cold build's `//...:*`
+query, one after the splice query, on that run's own server.
+
+Measured on the `bazel` subject (Bazel 9.2.0, 572 packages loaded), with the
+filter the engine uses (`^(PACKAGE|GLOB|FILE|DIRECTORY_LISTING|BZL_LOAD|IGNORED_)`):
+
+| | wall | stdout | blocks |
+|---|---:|---:|---:|
+| the universe query that fills Skyframe | 7.7 s | | |
+| the dump after it | **0.37 s** | **8.2 MB** | 17741 |
+
+The dump is 4.6% of the load it reads, and it is text this machine parses
+rather than work Bazel does twice: the graph is already in the server, and
+`dump` walks it. The incremental dump is smaller in proportion to what that
+run loaded, because a server only holds the packages it was asked for, which
+is why the second dump needs no package filter.
+
+What it costs to *keep* is one more section of the index. On the same
+subject, `cambi inspect stats` over the head index the walk's rebuild oracle
+built:
+
+| | nodes | edges | bytes |
+|---|---:|---:|---:|
+| target graph | 24805 | 82217 | 3.8 MiB |
+| loading layer | 16070 | 27030 | 1.1 MiB |
+
+That is 22% of the uncompressed index, and it compresses with the rest (the
+file is 777 KiB on disk). Per kind the layer is 4620 `FILE`, 4563
+`FILE_STATE`, 1520 `PACKAGE_LOOKUP`, 1491 `DIRECTORY_LISTING` and as many
+`DIRECTORY_LISTING_STATE`, 1255 `BZL_LOAD`, 573 `PACKAGE`, 556 `GLOB` and one
+ignore node.
+
+It buys the deletion of three models of Bazel's loading phase and the
+`.bzl`-closure witness that re-read every Starlark file of the head checkout
+whenever the stored closure came up short.
 
 Costs elsewhere:
 

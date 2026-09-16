@@ -200,8 +200,14 @@ fn an_external_package_is_never_a_dirty_main_repo_package() {
     assert!(!is_main_package("@foo//bar"));
 }
 
+/// The workspace root is erased, and a file under any other root is dropped.
+///
+/// A file in the output base is another repository's, and nothing a
+/// main-repository diff can name; keeping such keys put this machine's own
+/// directories in the payload and let the layer accumulate rows a cold build
+/// at the same commit would not have. The rebuild oracle is what found that.
 #[test]
-fn the_workspace_root_is_erased_and_other_roots_are_kept() {
+fn the_workspace_root_is_erased_and_other_roots_are_dropped() {
     let mut l = SkyLayer::new();
     l.apply_dump(
         "FILE_STATE:[/ws]/[a/x]\n\nFILE_STATE:[/elsewhere]/[b/y]\n",
@@ -214,10 +220,48 @@ fn the_workspace_root_is_erased_and_other_roots_are_kept() {
         v.id_of(Kind::FileState, "a/x").map(|i| v.root[i as usize]),
         Some(WORKSPACE)
     );
-    // A key under another root is kept, and is not confusable with the
-    // workspace's own: the seed lookup only ever names root 0.
     assert!(v.id_of(Kind::FileState, "b/y").is_none());
-    assert_eq!(v.len(), 2);
+    assert_eq!(v.len(), 1);
+}
+
+/// Another repository's packages, globs and ignore list are dropped with it.
+/// A reverse walk that reached one would stop there anyway, and the engine
+/// acts on a moved external repository through the externals stage.
+///
+/// `BZL_LOAD` is the exception, and deliberately: an external `.bzl` can be a
+/// main-repository *file* (a `local_path_override` on a module whose sources
+/// are in this tree), with main-repository packages above it.
+#[test]
+fn another_repositorys_packages_are_dropped_and_its_bzl_loads_are_not() {
+    let mut l = SkyLayer::new();
+    l.apply_dump(
+        "PACKAGE:a\n\nPACKAGE:@@ext//pkg\n\nPACKAGE_LOOKUP:@@ext//pkg\n\n\
+         IGNORED_SUBDIRECTORIES:@@\n\nIGNORED_PACKAGE_PREFIXES:@@rules_java_builtin\n\n\
+         GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a>\n\n\
+         GLOBS:<GlobsKey packageRoot = /ob/external/ext, packageIdentifier = pkg>\n\n\
+         BZL_LOAD:KeyForBuild{label=@@ext//:x.bzl, isBuildPrelude=false}\n",
+        &Paths::new("/ws", "/ob"),
+    );
+    let t = l.finish();
+    let v = view(&t);
+    assert!(v.id_of(Kind::Package, "a").is_some());
+    assert!(v.id_of(Kind::Package, "@@ext//pkg").is_none());
+    assert!(v.id_of(Kind::PackageLookup, "@@ext//pkg").is_none());
+    assert!(v.id_of(Kind::Ignored, "@@").is_some());
+    assert!(v.id_of(Kind::Ignored, "@@rules_java_builtin").is_none());
+    let globs: Vec<&str> = (0..v.len() as u32)
+        .filter(|&i| v.kind_of(i) == Kind::Glob)
+        .map(|i| v.text(i))
+        .collect();
+    assert_eq!(globs.len(), 1, "{globs:?}");
+    assert!(globs[0].contains(WORKSPACE_MARK), "{globs:?}");
+    assert_eq!(
+        (0..v.len() as u32)
+            .filter(|&i| v.kind_of(i) == Kind::BzlLoad)
+            .count(),
+        1,
+        "an external .bzl can be a main-repository file"
+    );
 }
 
 #[test]
