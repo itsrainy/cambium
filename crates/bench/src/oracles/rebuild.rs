@@ -246,10 +246,50 @@ fn compare_sky(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d: &mut
             })
             .collect()
     }
+    /// The nodes a changed path in this repository can reach: everything
+    /// backwards from a file or directory state of the workspace itself.
+    ///
+    /// Comparing anything else would measure how much of the world each run's
+    /// server happened to load rather than what the index knows. A cold
+    /// `//...` build evaluates far more than an incremental run does: on the
+    /// `bazel` subject it leaves about five hundred `BZL_LOAD` nodes of other
+    /// repositories behind, some two thousand rows once their edges are
+    /// counted, and no main-repository diff can reach any of them.
+    fn reachable(v: cambium_index::sky::SkyRef<'_>) -> Vec<bool> {
+        use cambium_index::sky::Kind;
+        let mut seen = vec![false; v.len()];
+        let mut stack: Vec<u32> = Vec::new();
+        for id in 0..v.len() as u32 {
+            let seed = matches!(v.kind_of(id), Kind::FileState | Kind::DirectoryListingState)
+                && v.root[id as usize] == cambium_index::sky::WORKSPACE;
+            if seed && !seen[id as usize] {
+                seen[id as usize] = true;
+                stack.push(id);
+            }
+        }
+        while let Some(id) = stack.pop() {
+            for &up in v.rdeps.row(id) {
+                if !seen[up as usize] {
+                    seen[up as usize] = true;
+                    stack.push(up);
+                }
+            }
+        }
+        seen
+    }
     let (na, nb) = (names(applied.sky), names(rebuilt.sky));
+    let (ka, kb) = (reachable(applied.sky), reachable(rebuilt.sky));
     let (sa, sb): (BTreeSet<&str>, BTreeSet<&str>) = (
-        na.iter().map(String::as_str).collect(),
-        nb.iter().map(String::as_str).collect(),
+        na.iter()
+            .enumerate()
+            .filter(|(i, _)| ka[*i])
+            .map(|(_, s)| s.as_str())
+            .collect(),
+        nb.iter()
+            .enumerate()
+            .filter(|(i, _)| kb[*i])
+            .map(|(_, s)| s.as_str())
+            .collect(),
     );
     let mut extra = |s: String| {
         d.counts.sky_extra += 1;
@@ -264,16 +304,25 @@ fn compare_sky(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d: &mut
         missing(format!("node only in rebuilt: {n}"));
     }
 
-    fn edges<'a>(v: cambium_index::sky::SkyRef<'_>, names: &'a [String]) -> BTreeSet<(&'a str, &'a str)> {
+    fn edges<'a>(
+        v: cambium_index::sky::SkyRef<'_>,
+        names: &'a [String],
+        keep: &[bool],
+    ) -> BTreeSet<(&'a str, &'a str)> {
         let mut out = BTreeSet::new();
         for to in 0..v.len() as u32 {
+            if !keep[to as usize] {
+                continue;
+            }
             for &from in v.rdeps.row(to) {
-                out.insert((names[from as usize].as_str(), names[to as usize].as_str()));
+                if keep[from as usize] {
+                    out.insert((names[from as usize].as_str(), names[to as usize].as_str()));
+                }
             }
         }
         out
     }
-    let (ea, eb) = (edges(applied.sky, &na), edges(rebuilt.sky, &nb));
+    let (ea, eb) = (edges(applied.sky, &na, &ka), edges(rebuilt.sky, &nb, &kb));
     for (from, to) in ea.difference(&eb) {
         extra(format!("edge only in applied: {from} -> {to}"));
     }
@@ -552,14 +601,16 @@ FILE:[/ws]/[lib/sub/BUILD]
         assert_eq!(d.counts.rule_hash_mismatch, 0);
         assert_eq!(d.counts.edges_only_in_applied, 0);
         assert_eq!(d.counts.externals_mismatch, 0);
-        assert_eq!(d.counts.sky_mismatch, 1, "{:?}", d.sky_mismatch);
+        // Two rows: the edge the short layer lacks, and the package node
+        // itself, which without that edge nothing can reach any more.
+        assert_eq!(d.counts.sky_mismatch, 2, "{:?}", d.sky_mismatch);
         assert!(
-            d.sky_mismatch[0].contains("PACKAGE_LOOKUP")
-                && d.sky_mismatch[0].contains("only in rebuilt"),
+            d.sky_mismatch.iter().any(|l| l.contains("PACKAGE_LOOKUP")
+                && l.contains("only in rebuilt")),
             "{d:?}"
         );
         assert!(!d.is_empty());
-        assert!(d.summary().contains("loading layer rows missing: 1"));
+        assert!(d.summary().contains("loading layer rows missing: 2"));
 
         // The other way round is an over-approximation: a row the applied
         // index kept and a cold build never wrote is inert, so it is counted
@@ -567,7 +618,7 @@ FILE:[/ws]/[lib/sub/BUILD]
         // names and cannot remove a node, so this is what a long walk leaves.
         let d = compare_by_label(b.view(), a.view(), 10);
         assert_eq!(d.counts.sky_mismatch, 0, "{:?}", d.sky_mismatch);
-        assert_eq!(d.counts.sky_extra, 1, "{:?}", d.sky_extra);
+        assert_eq!(d.counts.sky_extra, 2, "{:?}", d.sky_extra);
         assert!(d.sky_extra[0].contains("only in applied"), "{d:?}");
         assert!(d.is_empty(), "{d:?}");
 
