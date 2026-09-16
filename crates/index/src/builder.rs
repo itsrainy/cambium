@@ -248,6 +248,13 @@ pub struct IndexBuilder<'a> {
     bzl: Option<BzlClosure>,
     bzl_unread: bool,
 
+    /// The Skyframe loading layer this generation will write, once known.
+    /// Carried the same lazy way as the `.bzl` closure above, and for the same
+    /// reason: inverting the stored reverse edges is O(edges), and only a run
+    /// that materialises an index pays for it.
+    sky: Option<crate::sky::SkyLayer>,
+    sky_unread: bool,
+
     /// Directories of the checkout that are Bazel repositories of their own
     /// (`cambium_index::repo_boundaries`), each with whether `.bazelignore`
     /// names it. Carried across a splice from the base, and refreshed by
@@ -279,6 +286,8 @@ impl<'a> IndexBuilder<'a> {
             pairs: Vec::new(),
             bzl: None,
             bzl_unread: false,
+            sky: None,
+            sky_unread: false,
             boundaries: Vec::new(),
             lineage,
             bazel_version: String::new(),
@@ -330,6 +339,8 @@ impl<'a> IndexBuilder<'a> {
             pairs: Vec::new(),
             bzl: None,
             bzl_unread: v.bzl_closure,
+            sky: None,
+            sky_unread: v.sky.present,
             boundaries: v.boundaries().collect(),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
@@ -383,6 +394,23 @@ impl<'a> IndexBuilder<'a> {
         if std::mem::take(&mut self.bzl_unread) {
             self.bzl = self.base.and_then(BzlClosure::from_view);
         }
+    }
+
+    /// Installs (or replaces) the Skyframe loading layer.
+    pub fn set_sky_layer(&mut self, l: crate::sky::SkyLayer) {
+        self.sky = Some(l);
+        self.sky_unread = false;
+    }
+
+    /// The layer carried over from the base, for a caller that wants to
+    /// refresh only the packages it re-queried. Read out of the base on first
+    /// use, so a builder that is only ever asked for an overlay never pays the
+    /// inversion.
+    pub fn take_sky_layer(&mut self) -> Option<crate::sky::SkyLayer> {
+        if std::mem::take(&mut self.sky_unread) {
+            self.sky = self.base.and_then(|v| crate::sky::SkyLayer::from_view(v.sky));
+        }
+        self.sky.take()
     }
 
     pub fn set_config_hash(&mut self, h: [u8; 32]) {
@@ -760,6 +788,10 @@ impl<'a> IndexBuilder<'a> {
         }
 
         self.read_base_bzl();
+        let sky = match self.take_sky_layer() {
+            Some(l) => l.finish(),
+            None => crate::sky::SkyTables::empty(),
+        };
         let mut repo_boundary_bytes = Vec::new();
         let mut repo_boundary_offsets = vec![0u32];
         let mut repo_boundary_ignored = Vec::with_capacity(self.boundaries.len());
@@ -800,6 +832,7 @@ impl<'a> IndexBuilder<'a> {
                 bazel_version: self.bazel_version,
                 config_hash: self.config_hash,
                 bzl_closure: bzl.present,
+                sky_layer: sky.present,
                 counts,
             },
             provenance: Provenance {
@@ -865,6 +898,14 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_bytes,
             repo_boundary_offsets,
             repo_boundary_ignored,
+            sky_root_bytes: sky.root_bytes,
+            sky_root_offsets: sky.root_offsets,
+            sky_key_bytes: sky.key_bytes,
+            sky_key_offsets: sky.key_offsets,
+            sky_kind: sky.kind,
+            sky_root: sky.root,
+            sky_rdep_offsets: sky.rdep_offsets,
+            sky_rdep_edges: sky.rdep_edges,
         }
     }
 }
