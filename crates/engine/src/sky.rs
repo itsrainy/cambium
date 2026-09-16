@@ -58,7 +58,7 @@ pub(crate) fn build_layer(
     }
     let started = std::time::Instant::now();
     let cold = onto.is_none();
-    let (text, paths) = q.dump_loading_layer(filter)?;
+    let (text, mut paths) = q.dump_loading_layer(filter)?;
     let bytes = text.len();
     let mut layer = onto.unwrap_or_default();
     let blocks = match requeried {
@@ -119,6 +119,85 @@ pub(crate) fn build_layer(
                 roots
             ),
         });
+    }
+    // A cold dump can come back with the package graph's *shape* and none of
+    // its packages: every `PACKAGE_LOOKUP`, every `GLOB`, every file, and one
+    // `PACKAGE` node with a value. `dump --skyframe=count` on the same server
+    // says the 644 package nodes are there, and `dump --skyframe=deps` prints
+    // one, because the universe query streamed its answer and left the values
+    // uncommitted. Asking Bazel for the same packages a second time is cheap
+    // (the graph is warm, nothing is re-read) and materialises them, after
+    // which the dump is whole. Seen on apollo (7.4.1) and reported on xla and
+    // envoy (8.7); not seen on bazel or sourcegraph, which is why a layer
+    // count alone never showed it.
+    //
+    // This is a repair, not a fall back: if the second dump is no better the
+    // run still fails below, and a run that never needed it pays nothing.
+    if cold && !layer.looks_loaded() && q.reload_packages() {
+        let (packages, with_deps) = layer.package_dep_health();
+        tracing::warn!(
+            packages,
+            with_deps,
+            "the dump held the loading graph's shape and not its packages; asking bazel \
+             for them again and dumping once more"
+        );
+        let (text, paths2) = q.dump_loading_layer(filter)?;
+        let mut again = SkyLayer::new();
+        let blocks = again.apply_dump(&text, &paths2);
+        tracing::debug!(
+            blocks,
+            nodes = again.num_nodes(),
+            packages = again.count_of(Kind::Package),
+            "read the Skyframe loading layer off the server again"
+        );
+        if again.looks_loaded() {
+            layer = again;
+            paths = paths2;
+        }
+    }
+    // Two more shapes a layer can take that answer nothing, both of which
+    // have been seen on a real subject and neither of which a node count
+    // shows. The check is a cold build's, where the dump is the whole loading
+    // phase and these ratios are facts about the repository rather than about
+    // what one run happened to ask for.
+    if cold {
+        // A `.bzl` edit travels `FILE_STATE -> FILE -> BZL_LOAD -> PACKAGE`,
+        // one hop more than a `BUILD` edit. If no `BZL_LOAD` in the layer
+        // hangs off a file of this repository, that hop is cut for every
+        // Starlark file at once and every `.bzl` edit silently reaches
+        // nothing, while `BUILD` edits go on working.
+        // A repository with no Starlark files of its own has no chain to cut,
+        // and nothing to complain about.
+        if layer.count_of(Kind::BzlLoad) > 0 && !layer.any_bzl_load_over_own_file() {
+            return Err(EngineError::BazelQuery {
+                what: "dump --skyframe=deps".into(),
+                code: None,
+                stderr: format!(
+                    "the loading layer has {} BZL_LOAD nodes and not one of them hangs off a \
+                     file of this workspace ({}), so no .bzl edit could reach a package \
+                     through it",
+                    layer.count_of(Kind::BzlLoad),
+                    paths.workspace()
+                ),
+            });
+        }
+        // And a package that depends on no `BZL_LOAD`, no glob and no
+        // sub-directory lookup is a package nothing can dirty but its own
+        // `BUILD` file. A few are real (Bazel 7 synthesises `//external` from
+        // the workspace file alone); most of them being so is a layer that
+        // kept its nodes and lost its edges.
+        let (packages, with_deps) = layer.package_dep_health();
+        if packages > 0 && with_deps * 100 < packages * 90 {
+            return Err(EngineError::BazelQuery {
+                what: "dump --skyframe=deps".into(),
+                code: None,
+                stderr: format!(
+                    "only {with_deps} of {packages} packages in the loading layer depend on a \
+                     BZL_LOAD, a glob or a sub-directory lookup; the layer kept its nodes and \
+                     lost the edges a changed path travels"
+                ),
+            });
+        }
     }
     Ok(Some(layer))
 }

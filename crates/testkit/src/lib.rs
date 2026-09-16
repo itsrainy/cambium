@@ -274,6 +274,14 @@ pub struct Scanning {
     /// run does on a long-lived server, so a test can ask whether one
     /// happened at all, and for what.
     dumps: std::sync::Mutex<Vec<String>>,
+    /// Stand in for a server that has the loading graph's nodes and not its
+    /// package values: the first dump comes back with every `PACKAGE` block
+    /// removed, and asking the server to load the repository again restores
+    /// them. Real Bazel does this after a streamed `//...:*` query (seen on
+    /// apollo 7.4.1), and the engine is expected to notice and repair it.
+    hides_packages_until_reloaded: std::sync::atomic::AtomicBool,
+    /// How many times the engine asked for the repository to be loaded again.
+    reloads: std::sync::atomic::AtomicUsize,
 }
 
 impl Scanning {
@@ -288,7 +296,23 @@ impl Scanning {
             workspace: None,
             external_rules: None,
             dumps: std::sync::Mutex::new(Vec::new()),
+            hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
+            reloads: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Serve the first dump with its `PACKAGE` blocks missing, as a real
+    /// server does after a streamed universe query, and serve them once the
+    /// engine has asked for the repository to be loaded again.
+    pub fn hiding_packages_until_reloaded(self) -> Self {
+        self.hides_packages_until_reloaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// How many times the engine asked Bazel to load the repository again.
+    pub fn reloads(&self) -> usize {
+        self.reloads.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The filters this querier has been asked to dump, in order. Empty means
@@ -395,11 +419,42 @@ impl PackageQuerier for Scanning {
         })?;
         let packages: Vec<String> = self.packages.iter().map(|p| p.to_string()).collect();
         let tree = cambium_synth::sky::InMemory(&files.0);
-        Ok((
-            cambium_synth::sky::dump(&packages, &tree),
-            cambium_synth::sky::paths(),
-        ))
+        let mut text = cambium_synth::sky::dump(&packages, &tree);
+        if self
+            .hides_packages_until_reloaded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            text = without_package_blocks(&text);
+        }
+        Ok((text, cambium_synth::sky::paths()))
     }
+
+    fn reload_packages(&self) -> bool {
+        self.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hides_packages_until_reloaded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+/// A dump with every `PACKAGE` block dropped and everything else, including
+/// `PACKAGE_LOOKUP`, left alone. A block is a line at column zero and the
+/// indented lines under it.
+fn without_package_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut dropping = false;
+    for line in text.lines() {
+        let header = !line.starts_with(' ') && !line.is_empty();
+        if header {
+            dropping = line.starts_with("PACKAGE:");
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// A querier that reads a toy BUILD syntax out of a directory: one rule per

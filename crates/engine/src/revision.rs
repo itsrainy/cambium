@@ -223,6 +223,10 @@ impl PackageQuerier for RevisionQuerier {
     ) -> std::result::Result<(String, cambium_index::sky::Paths), EngineError> {
         self.querier.dump_loading_layer(filter)
     }
+
+    fn reload_packages(&self) -> bool {
+        self.querier.reload_packages()
+    }
 }
 
 /// Where a run keeps its per-revision worktrees.

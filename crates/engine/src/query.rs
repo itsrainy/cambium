@@ -152,6 +152,19 @@ pub trait PackageQuerier {
         })
     }
 
+    /// Asks Bazel to load the whole repository once more, so that the loading
+    /// layer the next dump prints is the whole one.
+    ///
+    /// Only ever called when a cold dump came back with the loading graph's
+    /// shape and none of its package values (see [`crate::sky::build_layer`]).
+    /// The call is warm: the server has just loaded these packages and nothing
+    /// on disk has moved, so it re-reads nothing. `false` means this row
+    /// source has no server to ask, and the layer stands or falls on the dump
+    /// already taken.
+    fn reload_packages(&self) -> bool {
+        false
+    }
+
     /// `bazel query '//external:*' --output=build` over the checkout these
     /// rows describe, for [`cambium_index::externals::external_dir_repos`] to
     /// read the nested repositories' names out of.
@@ -266,19 +279,30 @@ impl PackageQuerier for BazelQuerier {
         &self,
         filter: &str,
     ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
-        let text = self
-            .bazel
-            .dump_skyframe(filter)
-            .map_err(|e| crate::error::EngineError::BazelQuery {
+        let text = self.bazel.dump_skyframe(filter).map_err(|e| {
+            crate::error::EngineError::BazelQuery {
                 what: "dump --skyframe=deps".into(),
                 code: None,
                 stderr: e.to_string(),
-            })?;
+            }
+        })?;
         let paths = cambium_index::sky::Paths::new(
             self.bazel.workspace().to_string_lossy(),
             self.bazel.output_base().unwrap_or_default(),
         );
         Ok((text, paths))
+    }
+
+    fn reload_packages(&self) -> bool {
+        match self.bazel.load_universe() {
+            Ok(()) => true,
+            Err(e) => {
+                // Not fatal in itself: the caller checks the dump that follows
+                // and fails the run if it is still not a loading layer.
+                tracing::debug!(error = %e, "could not ask bazel to load the repository again");
+                false
+            }
+        }
     }
 
     fn universe(&self) -> Result<Rows, crate::error::EngineError> {

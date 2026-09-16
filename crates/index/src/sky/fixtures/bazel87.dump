@@ -1,0 +1,1833 @@
+WARNING: This information is intended for consumption by developers only, and may change at any time. Script against it at your own risk!
+FILE:[/ws]/[.git/objects/16]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/16]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git]
+
+FILE_STATE:[/ws]/[.git/objects/42/BUILD.bazel]
+
+BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/rules.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+  Group 7:
+    BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+
+PACKAGE_LOOKUP:.git/objects/pack
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/pack]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/pack/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/pack/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/93]
+  Group 1:
+    FILE:[/ws]/[.git/objects/93]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/93]
+
+FILE_STATE:[/ws]/[.git/objects/b0/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[a]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+FILE_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[.git/objects/pack/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/pack]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/pack/BUILD]
+
+FILE:[/ws]/[.git/objects/49]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/49]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/pack]
+  Group 1:
+    FILE:[/ws]/[.git/objects/pack]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/pack]
+
+FILE:[/ws]/[.git/objects/42]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/42]
+
+FILE:[/ws]/[.git/refs/heads]
+  Group 1:
+    FILE:[/ws]/[.git/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/heads]
+
+DIRECTORY_LISTING:[/ws]/[.git/refs/tags]
+  Group 1:
+    FILE:[/ws]/[.git/refs/tags]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/refs/tags]
+
+DIRECTORY_LISTING:[/ws]/[]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[]
+
+FILE:[/ws]/[.git/objects/34]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/34]
+
+DIRECTORY_LISTING:[/ws]/[.git/info]
+  Group 1:
+    FILE:[/ws]/[.git/info]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/info]
+
+FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+FILE_STATE:[/ws]/[.git/objects/pack/BUILD.bazel]
+
+FILE:[/ws]/[.git/refs/heads/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/refs/heads]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/heads/BUILD]
+
+FILE:[/ws]/[.git/logs/refs/heads/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs/heads]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs/heads/BUILD]
+
+FILE:[/ws]/[.git/logs/refs/heads]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs/heads]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/34]
+  Group 1:
+    FILE:[/ws]/[.git/objects/34]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/34]
+
+FILE:[/ws]/[.git/logs/refs]
+  Group 1:
+    FILE:[/ws]/[.git/logs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs]
+
+FILE_STATE:[/ws]/[.git/objects/34/BUILD]
+
+FILE:[/ws]/[.git/objects/93]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/93]
+
+PACKAGE_LOOKUP:.git/objects/93
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/93]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/93/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/93/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects]
+
+FILE_STATE:[/ws]/[.git/objects/73/BUILD.bazel]
+
+DIRECTORY_LISTING:[/ws]/[.git/logs/refs/heads]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs/heads]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/logs/refs/heads]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/16]
+  Group 1:
+    FILE:[/ws]/[.git/objects/16]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/16]
+
+FILE:[/ws]/[a]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a]
+
+PACKAGE_LOOKUP:.git/objects/78
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/78]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/78/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/78/BUILD]
+
+FILE:[/ws]/[.git/objects/73]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/73]
+
+FILE:[/ws]/[.git/objects/78]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/78]
+
+FILE_STATE:[/ws]/[.git/hooks]
+
+PACKAGE_LOOKUP:.git/objects/73
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/73]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/73/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/73/BUILD]
+
+FILE:[/ws]/[.git/logs]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/78]
+  Group 1:
+    FILE:[/ws]/[.git/objects/78]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/78]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/73]
+  Group 1:
+    FILE:[/ws]/[.git/objects/73]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/73]
+
+FILE_STATE:[/ws]/[.git/BUILD]
+
+PACKAGE_LOOKUP:.git/logs
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/logs]
+
+  Group 5:
+    FILE:[/ws]/[.git/logs/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/logs/BUILD]
+
+FILE:[/ws]/[]
+  Group 1:
+    FILE_STATE:[/ws]/[]
+
+FILE_STATE:[/ws]/[.git/objects/93/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/16/BUILD]
+
+PACKAGE_LOOKUP:.git/logs/refs/heads
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/logs/refs/heads]
+
+  Group 5:
+    FILE:[/ws]/[.git/logs/refs/heads/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/logs/refs/heads/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/34
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/34]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/34/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/34/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/logs]
+  Group 1:
+    FILE:[/ws]/[.git/logs]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/logs]
+
+BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/helper.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/49]
+  Group 1:
+    FILE:[/ws]/[.git/objects/49]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/49]
+
+PACKAGE_LOOKUP:.git/objects/42
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/42]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/42/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/42/BUILD]
+
+FILE:[/ws]/[.git/hooks/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/hooks]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/hooks/BUILD.bazel]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/42]
+  Group 1:
+    FILE:[/ws]/[.git/objects/42]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/42]
+
+PACKAGE_LOOKUP:.git/objects/49
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/49]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/49/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/49/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/16
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/16]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/16/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/16/BUILD]
+
+FILE_STATE:[/ws]/[.git/info/BUILD.bazel]
+
+FILE:[/ws]/[tools/build_rules/BUILD]
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+FILE:[/ws]/[.git/objects/49/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/49]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/49/BUILD]
+
+FILE:[/ws]/[.git/objects/b0/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b0]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b0/BUILD]
+
+FILE:[/ws]/[.git/logs/refs/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs/BUILD]
+
+FILE:[/ws]/[.git/refs/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/info
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/info]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/info/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/info/BUILD]
+
+PACKAGE_LOOKUP:.git/info
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/info]
+
+  Group 5:
+    FILE:[/ws]/[.git/info/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/info/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/pack/BUILD]
+
+FILE:[/ws]/[.git/objects/pack/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/pack]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/pack/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/BUILD.bazel]
+
+DIRECTORY_LISTING:[/ws]/[.git/logs/refs]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/logs/refs]
+
+FILE:[/ws]/[MODULE.bazel.lock]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+PACKAGE_LOOKUP:.git/refs/tags
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/refs/tags]
+
+  Group 5:
+    FILE:[/ws]/[.git/refs/tags/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/refs/tags/BUILD]
+
+FILE:[/ws]/[.git/objects/34/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/34]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/34/BUILD]
+
+FILE:[/ws]/[.git/refs/tags]
+  Group 1:
+    FILE:[/ws]/[.git/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/tags]
+
+FILE:[/ws]/[.git/objects/ac/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/ac]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/ac/BUILD.bazel]
+
+FILE:[/ws]/[.git/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/refs/heads]
+  Group 1:
+    FILE:[/ws]/[.git/refs/heads]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/refs/heads]
+
+DIRECTORY_LISTING:[/ws]/[a/sub]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+FILE_STATE:[/ws]/[REPO.bazel]
+
+FILE:[/ws]/[.git/info]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/info]
+
+FILE:[/ws]/[.git/objects/b4/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b4]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b4/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/16/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/16]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/16/BUILD]
+
+FILE_STATE:[/ws]/[.git/hooks/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/e6/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.bazelignore]
+
+FILE:[/ws]/[a/helper.bzl]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/helper.bzl]
+
+FILE:[/ws]/[.git/info/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/info]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/info/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/de/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/49/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects]
+
+FILE_STATE:[/ws]/[.git/logs/refs/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects]
+
+FILE:[/ws]/[tools]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[tools]
+
+FILE_STATE:[/ws]/[.git/objects/BUILD.bazel]
+
+FILE:[/ws]/[tools/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE_STATE:[/ws]/[.git/objects/BUILD]
+
+FILE_STATE:[/ws]/[.git/refs/tags]
+
+FILE:[/ws]/[.git/logs/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/logs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/BUILD]
+
+FILE:[/ws]/[.git/objects/42/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/42]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/42/BUILD]
+
+FILE:[/ws]/[.git/objects/ac/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/ac]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/ac/BUILD]
+
+FILE_STATE:[/ws]/[.git]
+
+FILE:[/ws]/[a/sub/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+FILE:[/ws]/[REPO.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[REPO.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/b0/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/pack]
+
+FILE:[/ws]/[.git/refs/heads/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/refs/heads]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/heads/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/78/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/78]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/78/BUILD.bazel]
+
+FILE:[/ws]/[a/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/16]
+
+FILE:[/ws]/[.git/objects/42/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/42]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/42/BUILD.bazel]
+
+FILE:[/ws]/[tools/build_rules]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE:[/ws]/[.git/objects/info/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/info]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/info/BUILD]
+
+FILE:[/ws]/[MODULE.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel]
+
+PACKAGE_LOOKUP:tools
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools]
+
+  Group 5:
+    FILE:[/ws]/[tools/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[tools/BUILD]
+
+FILE_STATE:[/ws]/[.git/info]
+
+FILE:[/ws]/[.git/objects/78/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/78]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/78/BUILD]
+
+PACKAGE_LOOKUP:
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[]
+
+  Group 5:
+    FILE:[/ws]/[BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[BUILD]
+
+FILE_STATE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/49]
+
+FILE_STATE:[/ws]/[.git/objects/42]
+
+FILE_STATE:[/ws]/[.git/objects/34]
+
+FILE_STATE:[/ws]/[.git/objects/info/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/logs/refs/heads]
+
+FILE_STATE:[/ws]/[.git/refs/heads/BUILD]
+
+FILE:[/ws]/[BUILD]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/93]
+
+FILE_STATE:[/ws]/[.git/objects/fe/BUILD]
+
+FILE_STATE:[/ws]/[.git/logs/refs]
+
+FILE:[/ws]/[.git/objects]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects]
+
+FILE_STATE:[/ws]/[.git/logs/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/fe/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/fe]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/fe/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/78]
+
+FILE:[/ws]/[.git/refs/tags/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/refs/tags]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/tags/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/73]
+
+PACKAGE_LOOKUP:a
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a]
+
+  Group 5:
+    FILE:[/ws]/[a/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[.git/logs]
+
+FILE_STATE:[/ws]/[.git/objects/d3/BUILD]
+
+PACKAGE_LOOKUP:.git/objects
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/BUILD]
+
+FILE:[/ws]/[.git/objects/73/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/73]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/73/BUILD]
+
+FILE:[/ws]/[.git/objects/93/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/93]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/93/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/refs/tags/BUILD]
+
+FILE:[/ws]/[.git/objects/34/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/34]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/34/BUILD.bazel]
+
+PACKAGE_LOOKUP:.git/refs/heads
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/refs/heads]
+
+  Group 5:
+    FILE:[/ws]/[.git/refs/heads/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/refs/heads/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/ac]
+
+PACKAGE_LOOKUP:tools/build_rules
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools/build_rules]
+
+  Group 5:
+    FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[tools/build_rules/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/b4]
+
+DIRECTORY_LISTING:[/ws]/[.git]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git]
+
+FILE_STATE:[/ws]/[.git/objects/b0]
+
+FILE:[/ws]/[BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/logs/refs/heads/BUILD.bazel]
+
+FILE_STATE:[/ws]/[MODULE.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/refs/tags]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/93]
+
+FILE_STATE:[/ws]/[.git/objects/49/BUILD.bazel]
+
+PACKAGE:a
+  Group 1:
+    PACKAGE_LOOKUP:a
+
+  Group 2:
+    PRECOMPUTED:autoload_symbols
+
+  Group 3:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 4:
+    WORKSPACE_NAME:com.google.devtools.build.lib.skyframe.WorkspaceNameValue$$Lambda/0x00000001288b4000@9a0af88
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+  Group 6:
+    FILE:[/ws]/[a/BUILD]
+
+  Group 7:
+    PRECOMPUTED:default_visibility
+
+  Group 8:
+    PRECOMPUTED:config_setting_visibility_policy
+
+  Group 9:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 10:
+    REPO_PACKAGE_ARGS:@@
+
+  Group 11:
+    BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+
+  Group 12:
+    BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+
+  Group 13:
+    PACKAGE_LOOKUP:a/sub
+
+  Group 14:
+    GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a, globRequests = [GlobRequest: *.txt FILES]>
+
+FILE_STATE:[/ws]/[.git/logs/refs/BUILD.bazel]
+
+GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a, globRequests = [GlobRequest: *.txt FILES]>
+  Group 1:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 2:
+    DIRECTORY_LISTING:[/ws]/[a]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/78]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/73]
+
+FILE:[/ws]/[a/BUILD]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/de]
+
+FILE_STATE:[/ws]/[.git/objects/e6]
+
+IGNORED_SUBDIRECTORIES:@@
+  Group 1:
+    REPO_FILE:@@
+
+  Group 2:
+    PRECOMPUTED:path_package_locator
+
+  Group 3:
+    PRECOMPUTED:vendor_directory
+
+  Group 4:
+    FILE:[/ws]/[.bazelignore]
+
+FILE_STATE:[/ws]/[.git/info/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/logs]
+
+FILE_STATE:[/ws]/[.git/objects/d3]
+
+FILE_STATE:[/ws]/[.git/objects/16/BUILD.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/logs/refs/heads]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/34]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/info]
+
+FILE_STATE:[/ws]/[a/sub/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/49]
+
+FILE:[/ws]/[.git/objects/de/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/de]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/de/BUILD]
+
+FILE:[/ws]/[.git/logs/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/logs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/BUILD.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/42]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/16]
+
+FILE:[/ws]/[.git/refs/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/fe]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/pack]
+
+FILE:[/ws]/[.git/hooks/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/hooks]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/hooks/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/b4/BUILD]
+
+FILE_STATE:[/ws]/[a/rules.bzl]
+
+BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:tools/build_rules
+
+  Group 4:
+    PRECOMPUTED:starlark_semantics
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@, rootModuleShouldSeeWorkspaceRepos=true}
+
+FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+FILE_STATE:[/ws]/[.git/objects/34/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/ac]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/ac]
+
+FILE:[/ws]/[.git/objects/b0]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b0]
+
+FILE:[/ws]/[.git/objects/b4]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b4]
+
+FILE:[/ws]/[.git/objects/d3/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/d3]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/d3/BUILD.bazel]
+
+FILE_STATE:[/ws]/[a/helper.bzl]
+
+FILE_STATE:[/ws]/[BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/info]
+
+FILE:[/ws]/[.git/objects/49/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/49]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/49/BUILD.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[.git/logs/refs/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/de]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/de]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/refs/heads]
+
+FILE_STATE:[/ws]/[.git/objects/93/BUILD]
+
+FILE:[/ws]/[.git/objects/e6]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/e6]
+
+FILE_STATE:[/ws]/[.git/objects/e6/BUILD]
+
+FILE:[/ws]/[.git/objects/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/BUILD]
+
+FILE:[/ws]/[.git/objects/d3]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/d3]
+
+FILE:[/ws]/[.git/objects/16/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/16]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/16/BUILD.bazel]
+
+FILE:[/ws]/[tools/BUILD]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+FILE:[/ws]/[a/sub/BUILD]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/42/BUILD]
+
+FILE:[/ws]/[.git/objects/fe]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/fe]
+
+FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+FILE:[/ws]/[.git/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/BUILD.bazel]
+
+FILE:[/ws]/[a/rules.bzl]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/rules.bzl]
+
+DIRECTORY_LISTING:[/ws]/[.git/hooks]
+  Group 1:
+    FILE:[/ws]/[.git/hooks]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/hooks]
+
+PACKAGE_LOOKUP:.git/objects/fe
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/fe]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/fe/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/fe/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+FILE_STATE:[/ws]/[.git/hooks/BUILD]
+
+FILE:[/ws]/[.git/objects/b4/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b4]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b4/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/logs/refs]
+
+DIRECTORY_LISTING_STATE:[/ws]/[]
+
+FILE_STATE:[/ws]/[.git/refs/heads/BUILD.bazel]
+
+PACKAGE_LOOKUP:.git/objects/d3
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/d3]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/d3/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/d3/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/de
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/de]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/de/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/de/BUILD]
+
+FILE_STATE:[/ws]/[.git/logs/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/78/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/refs]
+
+PACKAGE_LOOKUP:.git/objects/e6
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/e6]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/e6/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/e6/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/ac
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/ac]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/ac/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/ac/BUILD]
+
+PACKAGE_LOOKUP:.git/refs
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/refs]
+
+  Group 5:
+    FILE:[/ws]/[.git/refs/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/refs/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/b4
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/b4]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/b4/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/b4/BUILD]
+
+PACKAGE_LOOKUP:.git/objects/b0
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/objects/b0]
+
+  Group 5:
+    FILE:[/ws]/[.git/objects/b0/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/objects/b0/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/d3/BUILD.bazel]
+
+FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/78/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/hooks]
+
+FILE_STATE:[/ws]/[.git/refs/BUILD]
+
+FILE:[/ws]/[.git/objects/info]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/info]
+
+FILE:[/ws]/[.git/objects/93/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/93]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/93/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/refs]
+  Group 1:
+    FILE:[/ws]/[.git/refs]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/refs]
+
+FILE:[/ws]/[.git/objects/e6/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/e6]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/e6/BUILD]
+
+FILE:[/ws]/[.git/objects/info/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/info]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/info/BUILD.bazel]
+
+FILE_STATE:[/ws]/[BUILD]
+
+FILE:[/ws]/[.git/objects/fe/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/fe]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/fe/BUILD]
+
+FILE_STATE:[/ws]/[.git/objects/fe/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/d3/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/objects/d3]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/d3/BUILD]
+
+FILE_STATE:[/ws]/[.git/refs/tags/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/ac/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/b4/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/73/BUILD]
+
+FILE:[/ws]/[.git/refs/tags/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/refs/tags]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs/tags/BUILD]
+
+FILE:[/ws]/[.git/refs]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/refs]
+
+FILE:[/ws]/[.bazelignore]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.bazelignore]
+
+FILE:[/ws]/[.git/objects/e6/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/e6]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/e6/BUILD.bazel]
+
+FILE:[/ws]/[.git/logs/refs/heads/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/logs/refs/heads]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/logs/refs/heads/BUILD.bazel]
+
+FILE:[/ws]/[.git/objects/de/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/de]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/de/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/refs/heads]
+
+FILE:[/ws]/[.git/info/BUILD]
+  Group 1:
+    FILE:[/ws]/[.git/info]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/info/BUILD]
+
+FILE_STATE:[/ws]/[.git/logs/refs/heads/BUILD]
+
+FILE_STATE:[/ws]/[tools]
+
+FILE:[/ws]/[.git/objects/73/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/73]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/73/BUILD.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/fe]
+
+PACKAGE_LOOKUP:.git/logs/refs
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/logs/refs]
+
+  Group 5:
+    FILE:[/ws]/[.git/logs/refs/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/logs/refs/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/e6]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/d3]
+  Group 1:
+    FILE:[/ws]/[.git/objects/d3]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/d3]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/ac]
+  Group 1:
+    FILE:[/ws]/[.git/objects/ac]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/ac]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/de]
+
+FILE_STATE:[/ws]/[.git/objects/de/BUILD]
+
+FILE_STATE:[/ws]/[a]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/b4]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b4]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/b4]
+
+FILE_STATE:[/ws]/[.git/objects/ac/BUILD]
+
+PACKAGE_LOOKUP:.git/hooks
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git/hooks]
+
+  Group 5:
+    FILE:[/ws]/[.git/hooks/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/hooks/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/refs]
+
+FILE:[/ws]/[.git/hooks]
+  Group 1:
+    FILE:[/ws]/[.git]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/hooks]
+
+FILE_STATE:[/ws]/[.git/refs/BUILD.bazel]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/info]
+  Group 1:
+    FILE:[/ws]/[.git/objects/info]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/info]
+
+FILE:[/ws]/[.git]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/ac]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/b0]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b0]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/b0]
+
+FILE:[/ws]/[a/sub]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/d3]
+
+FILE_STATE:[/ws]/[]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/b4]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/fe]
+  Group 1:
+    FILE:[/ws]/[.git/objects/fe]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/fe]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/b0]
+
+FILE:[/ws]/[.git/objects/b0/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[.git/objects/b0]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/b0/BUILD.bazel]
+
+FILE_STATE:[/ws]/[.git/objects/info/BUILD]
+
+PACKAGE_LOOKUP:.git
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[.git]
+
+  Group 5:
+    FILE:[/ws]/[.git/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[.git/BUILD]
+
+DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/info]
+
+PACKAGE_LOOKUP:a/sub
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    PRECOMPUTED:starlark_semantics
+
+  Group 3:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 4:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a/sub]
+
+  Group 5:
+    FILE:[/ws]/[a/sub/BUILD.bazel]
+
+  Group 6:
+    FILE:[/ws]/[a/sub/BUILD]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/de]
+  Group 1:
+    FILE:[/ws]/[.git/objects/de]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/de]
+
+FILE:[/ws]/[.git/objects/pack]
+  Group 1:
+    FILE:[/ws]/[.git/objects]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.git/objects/pack]
+
+DIRECTORY_LISTING:[/ws]/[.git/objects/e6]
+  Group 1:
+    FILE:[/ws]/[.git/objects/e6]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[.git/objects/e6]

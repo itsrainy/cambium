@@ -368,6 +368,84 @@ impl SkyLayer {
         self.foreign_roots.iter().map(String::as_str)
     }
 
+    /// How many main-repository packages the layer holds, and how many of
+    /// those have at least one loading-phase dependency it kept: a
+    /// `BZL_LOAD`, a `GLOB`, or the `PACKAGE_LOOKUP` of a sub-directory.
+    ///
+    /// The ratio is what tells a layer that describes the loading phase from
+    /// one that merely has the right node *count*. Every kind can be present,
+    /// every package can be there, and yet the edges that carry a changed
+    /// `.bzl` or a moved directory listing to a package can be missing
+    /// wholesale, because the keys they hang off were spelled in a way this
+    /// build dropped. That is not a shortfall a walk notices: it answers, it
+    /// answers quickly, and it answers too little.
+    pub fn package_dep_health(&self) -> (usize, usize) {
+        let mut total = 0usize;
+        let mut healthy = 0usize;
+        for (id, node) in self.nodes.iter().enumerate() {
+            if node.kind != Kind::Package || !is_main_package(&node.text) {
+                continue;
+            }
+            total += 1;
+            if self.fwd[id].iter().any(|&d| {
+                matches!(
+                    self.nodes[d as usize].kind,
+                    Kind::BzlLoad | Kind::Glob | Kind::PackageLookup
+                )
+            }) {
+                healthy += 1;
+            }
+        }
+        (total, healthy)
+    }
+
+    /// Whether this looks like the loading phase of a repository that was
+    /// actually loaded, rather than its shape with the packages missing.
+    ///
+    /// The distinguishing fact is the ratio, not any count: a dump that lost
+    /// its package values still holds every `PACKAGE_LOOKUP` (one per
+    /// directory Bazel asked about), so a handful of packages under thousands
+    /// of lookups is the signature. A repository really is allowed to have
+    /// very few packages, which is why the test is against the lookups it
+    /// performed and not against a number.
+    pub fn looks_loaded(&self) -> bool {
+        let lookups = self.count_of(Kind::PackageLookup);
+        let (packages, with_deps) = self.package_dep_health();
+        if lookups == 0 {
+            // Nothing asked where a package was, so there is nothing to judge
+            // the packages against. A filtered refresh looks like this.
+            return true;
+        }
+        if packages == 0 {
+            // Bazel looked for packages and the layer holds none of them.
+            return false;
+        }
+        if lookups > 32 && packages * 32 < lookups {
+            return false;
+        }
+        // One package with no loading dependency is allowed outright: Bazel 7
+        // synthesises `//external` from the workspace file alone, and in a
+        // repository with only a handful of packages that one would otherwise
+        // sink the ratio.
+        with_deps * 100 >= packages * 90 || with_deps + 1 >= packages
+    }
+
+    /// Whether any `BZL_LOAD` node has a `FILE` of this workspace under it.
+    ///
+    /// The chain a changed `.bzl` travels is `FILE_STATE -> FILE -> BZL_LOAD
+    /// -> PACKAGE`. If no `BZL_LOAD` in the whole layer hangs off a file of
+    /// this repository, that chain is cut for every Starlark file at once,
+    /// and a `.bzl` edit reaches nothing.
+    pub fn any_bzl_load_over_own_file(&self) -> bool {
+        self.nodes.iter().enumerate().any(|(id, node)| {
+            node.kind == Kind::BzlLoad
+                && self.fwd[id].iter().any(|&d| {
+                    let f = &self.nodes[d as usize];
+                    f.kind == Kind::File && f.root == WORKSPACE
+                })
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -535,7 +613,12 @@ impl SkyLayer {
     /// their glob nodes. There the dump is authoritative: a glob that no
     /// longer reaches a directory has to lose that edge, or a later commit
     /// would re-query a package for a file it no longer globs.
-    pub fn apply_refresh(&mut self, text: &str, paths: &Paths, requeried: &BTreeSet<String>) -> usize {
+    pub fn apply_refresh(
+        &mut self,
+        text: &str,
+        paths: &Paths,
+        requeried: &BTreeSet<String>,
+    ) -> usize {
         self.apply(text, paths, Some(requeried))
     }
 
@@ -841,11 +924,7 @@ impl<'a> SkyRef<'a> {
         let mut hi = self.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let probe = (
-                self.kind[mid],
-                self.root[mid],
-                self.keys.get(mid as u32),
-            );
+            let probe = (self.kind[mid], self.root[mid], self.keys.get(mid as u32));
             match probe.cmp(&key) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -992,9 +1071,7 @@ fn authoritative(node: &SkyNode, requeried: &BTreeSet<String>) -> bool {
         Kind::Package => requeried.contains(&node.text),
         // A glob key names its package in its own text, in either major's
         // spelling.
-        Kind::Glob => requeried.iter().any(|p| {
-            glob_names_package(&node.text, p)
-        }),
+        Kind::Glob => requeried.iter().any(|p| glob_names_package(&node.text, p)),
         _ => false,
     }
 }
@@ -1078,9 +1155,7 @@ impl SkyWalk {
 /// the `FILE` node of the file, which depends on its `FILE_STATE`, so the
 /// ordinary seed reaches it, and `BZL_LOAD -> BZL_LOAD` carries it through a
 /// `.bzl` loaded only by other `.bzl` files.
-pub fn seeds<'a>(
-    changed: impl IntoIterator<Item = (&'a str, bool)>,
-) -> BTreeSet<(Kind, String)> {
+pub fn seeds<'a>(changed: impl IntoIterator<Item = (&'a str, bool)>) -> BTreeSet<(Kind, String)> {
     let mut out = BTreeSet::new();
     for (path, structural) in changed {
         out.insert((Kind::FileState, path.to_string()));
@@ -1103,7 +1178,6 @@ pub fn seeds<'a>(
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests;
