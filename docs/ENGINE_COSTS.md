@@ -121,6 +121,19 @@ It buys the deletion of three models of Bazel's loading phase and the
 `.bzl`-closure witness that re-read every Starlark file of the head checkout
 whenever the stored closure came up short.
 
+What it costs a run, measured as the same 40-step correctness walk on the
+`bazel` subject at one seed, before and after (the cold index build once, then
+one materialised step per commit, each of which takes the second dump):
+
+| | before | after |
+|---|---:|---:|
+| step p50 | 1533 ms | 1865 ms |
+| step p90 | 2448 ms | 2925 ms |
+| cold index | 46.4 s | 54.8 s |
+
+About 330 ms a step and eight seconds of cold build, for an answer of the same
+size (tightness p50 and p90 are 1.0 either way) and the same recall.
+
 Costs elsewhere:
 
 - The sorted-label index adds ~470 ms to a cold build at `large` (4.0 s → 4.5 s)
