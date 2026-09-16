@@ -107,7 +107,10 @@ impl PackageQuerier for SynthQuerier<'_> {
         true
     }
 
-    fn dump_loading_layer(&self) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+    fn dump_loading_layer(
+        &self,
+        _filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
         let packages: Vec<String> = self
             .graph
             .packages

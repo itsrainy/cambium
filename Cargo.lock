@@ -318,6 +318,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "memmap2",
  "rayon",
+ "regex",
  "rkyv",
  "rustc-hash",
  "serde_json",

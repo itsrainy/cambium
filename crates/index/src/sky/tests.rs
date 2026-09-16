@@ -224,6 +224,67 @@ fn the_workspace_root_is_erased_and_other_roots_are_dropped() {
     assert_eq!(v.len(), 1);
 }
 
+/// The workspace Bazel writes back is not always the one it was handed.
+///
+/// Bazel resolves symbolic links and prints the real path in `[root]`. On
+/// macOS that is the default for anything under `$TMPDIR` (`/var` is a link to
+/// `/private/var`), which is where a `cambi profile` worktree lives. Matching
+/// on the handed spelling alone dropped every rooted key as "another
+/// repository's": the layer kept its `PACKAGE`, `PACKAGE_LOOKUP` and
+/// `BZL_LOAD` rows and lost every `FILE_STATE`, so no changed path could enter
+/// it and no `BUILD` edit re-queried its package. A tensorflow profile found
+/// it (three `BUILD`-editing commits reported as changing nothing); this is
+/// that dump, under that path shape.
+#[test]
+fn a_workspace_reached_through_a_symlink_is_still_this_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("ws");
+    std::fs::create_dir(&real).unwrap();
+    let real = std::fs::canonicalize(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_ne!(
+        link.to_string_lossy(),
+        real.to_string_lossy(),
+        "the test needs the two spellings to differ"
+    );
+
+    // The real Bazel 7.7.0 WORKSPACE-mode dump, rooted where Bazel would root
+    // it: at the resolved path.
+    let text = BAZEL7.replace("/ws", &real.to_string_lossy());
+    let mut l = SkyLayer::new();
+    // ...while the run was told about the link.
+    l.apply_dump(&text, &Paths::new(link.to_string_lossy(), "/ob"));
+    assert_eq!(l.foreign_roots().count(), 0, "nothing was rejected");
+    let t = l.finish();
+    let v = view(&t);
+
+    assert!(
+        v.id_of(Kind::FileState, "a/BUILD").is_some(),
+        "the seed a BUILD edit makes has to be in the layer"
+    );
+    assert!(v.id_of(Kind::Package, "a").is_some());
+    let w = walk_of(v, &[("a/BUILD", false)]);
+    assert!(w.packages.contains("a"), "{w:?}");
+    // And the glob node, whose key embeds the root as text rather than as a
+    // `[root]`, is this workspace's too.
+    assert!(
+        (0..v.len() as u32).any(|i| v.kind_of(i) == Kind::Glob),
+        "the glob key embeds the resolved root and was dropped with it"
+    );
+}
+
+/// The shape of the failure, so the guard above it has something to report: a
+/// dump whose file keys are rooted somewhere else leaves a layer with no
+/// `FILE_STATE` at all, and names the root it did use.
+#[test]
+fn a_dump_rooted_elsewhere_keeps_no_file_keys_and_says_where_they_were() {
+    let mut l = SkyLayer::new();
+    l.apply_dump(&BAZEL7.replace("/ws", "/somewhere/else"), &Paths::new("/ws", "/ob"));
+    assert_eq!(l.count_of(Kind::FileState), 0);
+    assert_eq!(l.foreign_roots().collect::<Vec<_>>(), ["/somewhere/else"]);
+}
+
 /// Another repository's packages, globs and ignore list are dropped with it.
 /// A reverse walk that reached one would stop there anyway, and the engine
 /// acts on a moved external repository through the externals stage.
@@ -440,6 +501,63 @@ fn seeds_are_the_file_state_and_the_listings_an_add_or_delete_moves() {
     // move, and seeding it would walk the `FILE` parent chain into every
     // package above the change.
     assert!(!s.contains(&(Kind::FileState, "a/b".to_string())));
+}
+
+/// The refresh filter, checked against the keys it has to let through and the
+/// ones it has to keep out. The real thing is checked against a real server in
+/// `crates/index/tests/sky_layer.rs`; this is the shape.
+#[test]
+fn the_refresh_filter_covers_what_re_querying_a_package_can_move() {
+    let f = refresh_filter(&["a".to_string(), "b/c".to_string()]).unwrap();
+    // A run that re-queried nothing asks for nothing.
+    assert!(refresh_filter(&[]).is_none());
+    // And one that re-queried most of the repository asks for everything
+    // rather than building a megabyte of regex.
+    let many: Vec<String> = (0..MAX_FILTERED_PACKAGES + 1).map(|i| format!("p{i}")).collect();
+    assert!(refresh_filter(&many).is_none());
+
+    let re = regex::Regex::new(&f).expect("a valid regex");
+    for key in [
+        "PACKAGE:a",
+        "PACKAGE:b/c",
+        "PACKAGE_LOOKUP:a",
+        "PACKAGE_LOOKUP:a/sub",
+        "BZL_LOAD:KeyForBuild{label=//x:y.bzl}",
+        "IGNORED_SUBDIRECTORIES:@@",
+        "FILE:[/ws]/[a/BUILD]",
+        "FILE_STATE:[/ws]/[a/BUILD]",
+        "FILE:[/ws]/[far/away/rules.bzl]",
+        "DIRECTORY_LISTING:[/ws]/[a/sub]",
+        "DIRECTORY_LISTING_STATE:[/ws]/[b/c/deep/er]",
+        "GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a, globRequests = []>",
+        "GLOB:<GlobDescriptor packageName=a packageRoot=/ws subdir= pattern=*.txt>",
+    ] {
+        assert!(re.is_match(key), "should match: {key}");
+    }
+    for key in [
+        // Another package's rows are not this refresh's to rewrite.
+        "PACKAGE:other",
+        "PACKAGE:ab",
+        "FILE:[/ws]/[other/BUILD]",
+        "DIRECTORY_LISTING:[/ws]/[other]",
+        // A package whose name merely starts with a dirty one's.
+        "GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = ab, globRequests = []>",
+        "GLOB:<GlobDescriptor packageName=ab packageRoot=/ws subdir= pattern=*.txt>",
+    ] {
+        assert!(!re.is_match(key), "should not match: {key}");
+    }
+    // No comma anywhere: the flag is a comma-separated list of regexes, so a
+    // comma inside one would split it in half.
+    assert!(!f.contains(','), "{f}");
+}
+
+/// A package name is a literal, not a pattern: `.` and `+` are legal in one.
+#[test]
+fn a_package_name_with_a_metacharacter_is_escaped() {
+    let f = refresh_filter(&["a.b".to_string()]).unwrap();
+    let re = regex::Regex::new(&f).unwrap();
+    assert!(re.is_match("PACKAGE:a.b"));
+    assert!(!re.is_match("PACKAGE:axb"));
 }
 
 #[test]

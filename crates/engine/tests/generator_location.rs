@@ -68,6 +68,7 @@ impl PackageQuerier for Canned {
 
     fn dump_loading_layer(
         &self,
+        _filter: &str,
     ) -> cambium_engine::Result<(String, cambium_index::sky::Paths)> {
         let files: BTreeMap<String, String> = self
             .packages()

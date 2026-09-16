@@ -45,6 +45,7 @@ use crate::query::PackageQuerier;
 pub(crate) fn build_layer(
     q: &dyn PackageQuerier,
     onto: Option<SkyLayer>,
+    filter: &str,
 ) -> Result<Option<SkyLayer>> {
     if !q.can_dump_loading_layer() {
         tracing::debug!(
@@ -55,7 +56,8 @@ pub(crate) fn build_layer(
         return Ok(onto);
     }
     let started = std::time::Instant::now();
-    let (text, paths) = q.dump_loading_layer()?;
+    let cold = onto.is_none();
+    let (text, paths) = q.dump_loading_layer(filter)?;
     let bytes = text.len();
     let mut layer = onto.unwrap_or_default();
     let blocks = layer.apply_dump(&text, &paths);
@@ -76,6 +78,38 @@ pub(crate) fn build_layer(
             stderr: format!(
                 "the dump returned {bytes} bytes and no Skyframe nodes; the loading layer \
                  would be empty, which no later run can be answered from"
+            ),
+        });
+    }
+    // A layer with no `FILE_STATE` node under the workspace is a layer no
+    // changed path can enter: every seed is a `FILE_STATE` or a
+    // `DIRECTORY_LISTING_STATE`, so the walk would reach nothing, re-query
+    // nothing, and report nothing, for every commit after this one.
+    //
+    // It happens when the `[root]` the dump writes is not the workspace this
+    // run was told about, and the only way that is visible is to look: Bazel
+    // resolves symbolic links and prints the real path, so a workspace under
+    // `$TMPDIR` on macOS (`/var` is a link to `/private/var`) writes keys the
+    // run does not recognise as its own. Saying so with the roots in hand is
+    // the difference between a failed run and a silently empty answer.
+    //
+    // Checked on a cold build, where the dump is the whole loading phase and
+    // must hold this workspace's files. A refresh is filtered to the packages
+    // its run re-queried and may legitimately carry no file key at all, so it
+    // is the cold build that establishes the lineage's roots; every later run
+    // asks the same handle for the same workspace.
+    if cold && layer.count_of(Kind::FileState) == 0 {
+        let roots: Vec<&str> = layer.foreign_roots().take(4).collect();
+        return Err(EngineError::BazelQuery {
+            what: "dump --skyframe=deps".into(),
+            code: None,
+            stderr: format!(
+                "the loading layer holds no file keys of this workspace ({}), so no changed \
+                 path could reach a package through it. The dump rooted its file keys at {:?}. \
+                 A root that does not match is usually a symlinked workspace path: bazel \
+                 resolves it and prints the real one",
+                paths.workspace(),
+                roots
             ),
         });
     }

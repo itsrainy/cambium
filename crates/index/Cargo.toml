@@ -21,6 +21,9 @@ tracing.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+# For checking the refresh filter's regex means what it says. Already in the
+# lock file (prost-build builds with it), so it costs no new dependency.
+regex = "1"
 tempfile.workspace = true
 zstd.workspace = true
 blake3.workspace = true

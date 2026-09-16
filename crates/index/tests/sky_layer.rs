@@ -144,3 +144,86 @@ fn a_splice_can_refresh_and_retire_rows() {
     let w = v.sky.walk(&cambium_index::sky::seeds([("a/BUILD", false)]));
     assert!(w.packages.is_empty(), "{w:?}");
 }
+
+/// A refresh names a subset of the packages, and leaves every other row alone.
+///
+/// That is what makes the incremental dump cheap: a run asks for the keys its
+/// re-queried packages can have moved, and everything else keeps the row the
+/// cold build wrote. A wholesale replace would empty the rest of the layer.
+#[test]
+fn a_dump_naming_a_subset_leaves_the_other_packages_rows_intact() {
+    const TWO: &str = "\
+PACKAGE:a
+  Group 1:
+    PACKAGE_LOOKUP:a
+
+  Group 2:
+    FILE:[/ws]/[a/BUILD]
+
+PACKAGE:b
+  Group 1:
+    PACKAGE_LOOKUP:b
+
+  Group 2:
+    FILE:[/ws]/[b/BUILD]
+
+PACKAGE_LOOKUP:a
+  Group 1:
+    FILE:[/ws]/[a/BUILD]
+
+PACKAGE_LOOKUP:b
+  Group 1:
+    FILE:[/ws]/[b/BUILD]
+
+FILE:[/ws]/[a/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[a/BUILD]
+
+FILE:[/ws]/[b/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[b/BUILD]
+
+FILE_STATE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[b/BUILD]
+";
+    // Only `a` was re-queried, and it gained a sub-package lookup.
+    const ONLY_A: &str = "\
+PACKAGE:a
+  Group 1:
+    PACKAGE_LOOKUP:a
+
+  Group 2:
+    FILE:[/ws]/[a/BUILD]
+
+  Group 3:
+    PACKAGE_LOOKUP:a/sub
+
+PACKAGE_LOOKUP:a/sub
+  Group 1:
+    FILE:[/ws]/[a/sub/BUILD]
+
+FILE:[/ws]/[a/sub/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[a/sub/BUILD]
+
+FILE_STATE:[/ws]/[a/sub/BUILD]
+";
+    let paths = Paths::new("/ws", "/ob");
+    let mut l = SkyLayer::new();
+    l.apply_dump(TWO, &paths);
+    l.apply_dump(ONLY_A, &paths);
+    let t = l.finish();
+    let v = t.as_ref();
+
+    // `b`'s rows are exactly as the first dump left them.
+    let w = v.walk(&cambium_index::sky::seeds([("b/BUILD", false)]));
+    assert!(w.packages.contains("b"), "{w:?}");
+    // `a`'s row was replaced, and the replacement took.
+    let w = v.walk(&cambium_index::sky::seeds([("a/sub/BUILD", true)]));
+    assert!(w.packages.contains("a"), "{w:?}");
+    assert!(w.lookups.contains("a/sub"), "{w:?}");
+    // And `a`'s own BUILD still reaches it.
+    let w = v.walk(&cambium_index::sky::seeds([("a/BUILD", false)]));
+    assert!(w.packages.contains("a"), "{w:?}");
+}
