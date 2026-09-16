@@ -861,9 +861,11 @@ impl<'a> Run<'a> {
                 } else {
                     cambium_index::sky::refresh_filter(&queried.to_query)
                 };
+                let requeried: BTreeSet<String> = queried.to_query.iter().cloned().collect();
                 match filter {
                     Some(filter) => {
-                        layer = crate::sky::build_layer(self.querier, layer, &filter)?;
+                        layer =
+                            crate::sky::build_layer(self.querier, layer, &filter, Some(&requeried))?;
                     }
                     None if queried.to_query.is_empty() => {
                         tracing::debug!(
@@ -879,6 +881,7 @@ impl<'a> Run<'a> {
                             self.querier,
                             layer,
                             cambium_index::sky::SKYKEY_FILTER,
+                            Some(&requeried),
                         )?;
                     }
                 }

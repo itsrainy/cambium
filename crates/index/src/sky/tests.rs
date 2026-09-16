@@ -412,6 +412,86 @@ fn a_refresh_replaces_a_row_and_leaves_the_rest_alone() {
     assert!(walk_of(v, &[("a/helper.bzl", false)]).packages.contains("a"));
 }
 
+/// A refresh may replace the rows of the packages the run re-queried, and may
+/// only merge into every other row.
+///
+/// A refresh dump comes from a server that has loaded part of the repository,
+/// and a node can appear there with fewer dependencies than it has at that
+/// commit. Replacing wholesale loses edges: a 40-step walk on the `bazel`
+/// subject ended with `PACKAGE:third_party/py/abseil` missing the edge to its
+/// own glob node, so a file added under that package would no longer re-query
+/// it. Merging cannot lose an edge.
+#[test]
+fn a_refresh_replaces_only_the_packages_it_re_queried() {
+    let paths = Paths::new("/ws", "/ob");
+    let mut l = SkyLayer::new();
+    l.apply_dump(BAZEL9, &paths);
+    let before = l.finish();
+    // `a`'s row holds a glob edge to start with.
+    let v = view(&before);
+    let a = v.id_of(Kind::Package, "a").unwrap();
+    let globs: Vec<u32> = (0..v.len() as u32)
+        .filter(|&i| v.kind_of(i) == Kind::Glob)
+        .collect();
+    assert_eq!(globs.len(), 1);
+    assert!(
+        v.rdeps.row(globs[0]).contains(&a),
+        "the package depends on its glob"
+    );
+
+    // A refresh that came back short of that edge, for a package the run did
+    // *not* ask about: the edge stays.
+    let short = "PACKAGE:a\n  Group 1:\n    PACKAGE_LOOKUP:a\n";
+    let mut l = SkyLayer::new();
+    l.apply_dump(BAZEL9, &paths);
+    l.apply_refresh(short, &paths, &BTreeSet::new());
+    let t = l.finish();
+    let v = view(&t);
+    let a = v.id_of(Kind::Package, "a").unwrap();
+    let g = (0..v.len() as u32).find(|&i| v.kind_of(i) == Kind::Glob).unwrap();
+    assert!(
+        v.rdeps.row(g).contains(&a),
+        "a refresh that did not re-query `a` may not drop its edges"
+    );
+    // A file added where the glob can see it still re-queries the package.
+    assert!(walk_of(v, &[("a/two.txt", true)]).packages.contains("a"));
+
+    // The same dump, for a package the run *did* re-query: the edge goes,
+    // because the package no longer globs and a later commit must not
+    // re-query it for a file it does not see.
+    let mut l = SkyLayer::new();
+    l.apply_dump(BAZEL9, &paths);
+    l.apply_refresh(short, &paths, &["a".to_string()].into());
+    let t = l.finish();
+    let v = view(&t);
+    let a = v.id_of(Kind::Package, "a").unwrap();
+    let g = (0..v.len() as u32).find(|&i| v.kind_of(i) == Kind::Glob).unwrap();
+    assert!(!v.rdeps.row(g).contains(&a), "the re-queried package's row is the dump's");
+    assert!(!walk_of(v, &[("a/two.txt", true)]).packages.contains("a"));
+}
+
+/// A glob key names its package, in either major's spelling, and does not
+/// claim a package whose name merely starts the same way.
+#[test]
+fn a_glob_key_is_matched_to_its_own_package() {
+    assert!(glob_names_package(
+        "<GlobsKey packageRoot = <workspace>, packageIdentifier = a, globRequests = []>",
+        "a"
+    ));
+    assert!(glob_names_package(
+        "<GlobDescriptor packageName=a packageRoot=<workspace> subdir= pattern=*.txt>",
+        "a"
+    ));
+    assert!(!glob_names_package(
+        "<GlobsKey packageRoot = <workspace>, packageIdentifier = ab, globRequests = []>",
+        "a"
+    ));
+    assert!(glob_names_package(
+        "<GlobsKey packageRoot = <workspace>, packageIdentifier = b/c, globRequests = []>",
+        "b/c"
+    ));
+}
+
 /// A deleted package's `PACKAGE` row is retired, so nothing reaches it and it
 /// names no package; its `PACKAGE_LOOKUP` survives, because the directory is
 /// still a directory and a later commit re-adding the `BUILD` file moves it.

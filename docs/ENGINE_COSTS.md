@@ -98,9 +98,51 @@ filter the engine uses (`^(PACKAGE|GLOB|FILE|DIRECTORY_LISTING|BZL_LOAD|IGNORED_
 
 The dump is 4.6% of the load it reads, and it is text this machine parses
 rather than work Bazel does twice: the graph is already in the server, and
-`dump` walks it. The incremental dump is smaller in proportion to what that
-run loaded, because a server only holds the packages it was asked for, which
-is why the second dump needs no package filter.
+`dump` walks it.
+
+### The incremental dump, and what a filter is worth
+
+A Bazel server holds everything it has ever loaded, not what the last command
+asked for. On the server a cold build filled (a `cambi profile`, a bench walk,
+a worker that built its own index), an unfiltered refresh dump therefore walks
+and prints the whole repository on every commit. On sourcegraph that was 15 to
+20 seconds a step.
+
+Two things bound it. A step that re-queried no package takes no dump at all:
+the dirty set is the layer's own answer, so nothing in the layer moved. A step
+that did re-query asks only for what that can have moved, by
+`--skykey_filter`.
+
+What the filter is worth is smaller than it looks, and worth stating because
+the obvious assumption is wrong. On the `bazel` subject, dumps against a server
+holding the universe, three runs each, minimum kept:
+
+| filter | wall | blocks |
+|---|---:|---:|
+| matches nothing | 0.22 s | 0 |
+| one key | 0.22 s | 1 |
+| the loading phase | 0.34 s | 17720 |
+| everything | 0.36 s | 21546 |
+
+So about 0.22 s is traversing the graph and about 0.12 s is printing 17720
+blocks. A filter can only take back the printing: cutting the output tenfold
+took a 13-package refresh from 0.34 s to about 0.24 s. On a graph the size of
+sourcegraph's the same proportion leaves a filtered dump at roughly twelve
+seconds, which is what a splicing step there still costs.
+
+The cost is therefore change-proportional in the number of *steps* that touch
+a package, not in the size of what they touched. Per-commit p50 is back within
+a few hundred milliseconds of where it was, and the steps that re-query pay a
+traversal:
+
+| `cambi profile` | before the layer | with the layer |
+|---|---:|---:|
+| tensorflow, 30 commits, p50 | 483 ms | 586 ms |
+| tensorflow, mean | 679 ms | 1.8 s |
+| sourcegraph, 10 commits, p50 | 1.1 s | 1.4 s |
+| sourcegraph, mean | 1.7 s | 5.0 s |
+
+Both subjects splice the same commits and answer the same targets either way.
 
 What it costs to *keep* is one more section of the index. On the same
 subject, `cambi inspect stats` over the head index the walk's rebuild oracle
