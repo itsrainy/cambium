@@ -862,6 +862,12 @@ impl<'a> Run<'a> {
                     cambium_index::sky::refresh_filter(&queried.to_query)
                 };
                 let requeried: BTreeSet<String> = queried.to_query.iter().cloned().collect();
+                tracing::debug!(
+                    packages = requeried.len(),
+                    cold = queried.cold_reason.is_some(),
+                    first = ?requeried.iter().take(5).collect::<Vec<_>>(),
+                    "refreshing the loading layer for the packages this run re-queried"
+                );
                 match filter {
                     Some(filter) => {
                         layer =
