@@ -226,7 +226,7 @@ fn head_check(
             }
             if diff.counts.sky_mismatch > 0 {
                 println!(
-                    "{subject}: head check at {pin}: {} loading layer mismatches",
+                    "{subject}: head check at {pin}: {} loading layer rows missing",
                     diff.counts.sky_mismatch
                 );
                 for line in &diff.sky_mismatch {
@@ -238,6 +238,12 @@ fn head_check(
                         diff.counts.sky_mismatch - diff.sky_mismatch.len()
                     );
                 }
+            }
+            if diff.counts.sky_extra > 0 {
+                println!(
+                    "{subject}: {} extra loading layer rows (an over-approximation, not a failure)",
+                    diff.counts.sky_extra
+                );
             }
             let mut d = diff.clone();
             d.counts.externals_mismatch = 0;

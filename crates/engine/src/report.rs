@@ -132,7 +132,10 @@ pub enum DirectReason {
     New,
     /// Its own definition changed.
     RuleHash,
-    /// Its package's `.bzl` load closure changed, so the rule implementation may have.
+    /// A changed Starlark file reached its package through the loading
+    /// layer's `BZL_LOAD` edges, so the rule implementation may have moved
+    /// without the rule proto moving. (The name is the one this reason has
+    /// carried since a static load closure answered the same question.)
     BzlClosure { package: String },
     /// A source file it consumes changed.
     File { path: String },

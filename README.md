@@ -26,12 +26,22 @@ That guarantee rests on one invariant:
 > inputs (`MODULE.bazel`, lockfiles, `.bazelrc`, toolchains).
 
 So an index built at one commit stays valid at another for every package whose
-inputs did not change. A run loads a base index, classifies
+inputs did not change. A run loads a base index, turns
 `git diff --name-status` into dirty packages and directly-changed files,
 re-queries only the dirty packages (`bazel query 'set(//a:* //b:* ...)'`),
 splices those rows in, derives the direct set, and walks the reverse edges.
 Every step is proportional to the change or the answer.
 [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md) has the time and the bytes.
+
+Which packages a changed path moved is not cambium's own reading of that
+invariant. The index carries Bazel's loading-phase graph alongside the target
+graph, taken from `bazel dump --skyframe=deps` on the server that just loaded
+the repository: the file states, directory listings, `glob` nodes, package
+lookups, packages and `BZL_LOAD` nodes, with the edges between them
+(`crates/index/src/sky`). A changed path becomes the Skyframe keys it moved,
+the reverse walk follows those edges, and every `PACKAGE` or `PACKAGE_LOOKUP`
+node it reaches is a dirty package. The invariant above says what makes that
+sound; the layer is where the edges come from.
 
 ### Where the invariant stops
 
@@ -46,8 +56,22 @@ rebuild.
 **Modelled** (cambium answers exactly, at incremental cost):
 
 - A new `BUILD` file carving a sub-package out of its parent, or a deleted one
-  returning its files: both packages are re-queried (`crates/classify`),
-  keeping every `glob()` honest.
+  returning its files: the parent depends on the sub-directory's
+  `PACKAGE_LOOKUP` because Bazel had to decide whose files those were, so the
+  reverse walk reaches it and both packages are re-queried. A package that did
+  not exist when the index was built is the one thing the layer cannot name
+  (Bazel never looked at the directory), so its own `BUILD` file names it.
+- A file appearing or vanishing where a `glob()` can see it: the directory
+  listing it moved is an edge into the package's glob node, so the package is
+  re-queried. A `glob` that does not reach the directory has no such edge, and
+  the change costs nothing.
+- A changed `.bzl`, including one loaded only by other `.bzl` files: its
+  `BZL_LOAD` node hangs off the file and the loaders' `BZL_LOAD` nodes hang off
+  it, so the packages behind it are re-queried and their rules are direct
+  whatever their hashes say (a rule implementation can move without any rule
+  proto moving).
+- `.bazelignore`: every package Bazel consulted the ignore list to load
+  depends on the node that reads the file, so an edit re-queries all of them.
 - A `bazel_dep` version bump, an override, or a lockfile moving on its own:
   the `MODULE.bazel` and `MODULE.bazel.lock` diffs name the repositories that
   moved, and every main-repo rule naming a label in them is reached through
@@ -85,14 +109,15 @@ still exact, only not incremental):
   every rule id added, changed or tombstoned, so a run can escalate on rule
   class `toolchain`, `platform` or `toolchain_type`, wherever the package is.
   The globs stay the answer for `.bzl` edits in those directories.
-- **`.bazelignore`.** Adding a directory deletes packages with no `BUILD`
-  diff. It should be a default invalidator path and is not yet.
 - **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
   and later). A bare `cc_library` comes from `@rules_cc` through a load the
-  BUILD file never writes, so the stored closure has no edge for it and a
-  `rules_cc` version bump does not dirty the packages using it. Until the
-  closure records the implied load, the sound answer is to treat a version bump
-  of an autoload provider as global on Bazel 8 or later.
+  BUILD file never writes. Bazel records that as a dependency on
+  `PRECOMPUTED:autoload_symbols`, a singleton every package in the repository
+  depends on, and the layer drops the singleton kinds for the reason the
+  module docs give: keeping them would put every package one reverse hop from
+  every other. So a `rules_cc` version bump still does not dirty the packages
+  using it, and the sound answer remains to treat a version bump of an autoload
+  provider as global on Bazel 8 or later.
 - **Symlinked directories inside a package.** `glob()` walks into them, and a
   change to the link target is a diff elsewhere. Unmodelled, alongside the
   source-directory limitation in
@@ -253,7 +278,7 @@ what to do about it.
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `depth_histogram` | \[int], optional | how many affected targets sit at each depth, `depth_histogram[d]` for depth `d` from 0 to the deepest reached; a depth nothing reached is a zero rather than a gap. Omitted when empty, which is what a global run and an empty answer both are |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `bzl_witnessed_dead`, `bzl_witnessed_loaded`, `bzl_witness_packages`, `bzl_witness_unavailable`, `bazelrc_flag_nodes` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `sky_seeds`, `sky_unknown_seeds`, `sky_visited`, `sky_new_packages`, `bazelrc_flag_nodes` |
 | `diagnostics` | \[object], optional | the actionable warnings this run raised, each `{code, level, message, location?, help?}`; omitted when empty. See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
 | `explanations` | \[object], optional | with the deprecated `--explain` (and within `cambi explain`): `target`, `path` (target → direct member), `direct`, `reason` |
 
@@ -399,12 +424,15 @@ tell the answer is `//...`, which is also exit code 2.
 | 1 | the first published contract |
 | 2 | `inspect stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `inspect stats` gained `in_degree.top` (the hub list) |
-| 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false`, a changed `.bzl` being resolved from the index's static load closure instead of from Bazel. `inspect stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
+| 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false`, a changed `.bzl` being answered from the index instead of from Bazel. `inspect stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
 | 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head, still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}`, the target naming something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from; those contribute their label consumers to the direct set, and their loading packages are not re-queried |
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached (the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`). Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |
 | 9 | `cambi status --format json` and `cambi doctor --format json`, new documents (fields above): a new document needs no bump, because the version says what the *existing* documents mean and a reader that has never seen `status` cannot be broken by its arrival; the same holds for `explain`. Also at 9: `diagnostics` on the affected report, the actionable warnings a run raised, each `{code, level, message, location?, help?}` with a stable `CAMBI-W` code, omitted when empty and purely additive, so a run with nothing to say prints what version 8 printed; `stats.spliced_rows`, the target rows the splice wrote into the base index, zero when the commit changed nothing the graph models; `cambi explain --format json` and `cambi affected --dry-run --format json`, two more new documents on the same terms; exit code 5 (the store could not be reached); and the global `--format`, with `--output` kept as a deprecated alias |
+| 10 | `depth_histogram`: how many affected targets sit at each reverse-dependency depth, index 0 first. Purely additive; the per-target `depth` it summarises has been in the document since 3 |
+| 11 | `affected[].package_depth` and `package_depth_histogram`: the same walk counted in package boundaries crossed, an edge inside one package being free. A target's `package_depth` never exceeds its `depth` |
+| 12 | `stats.sky_seeds`, `stats.sky_unknown_seeds`, `stats.sky_visited` and `stats.sky_new_packages`, describing the reverse walk over the Skyframe loading layer that now decides which packages a change moved; the four `stats.bzl_witness*` counters go with the witness they described. `stats.bzl_closure_hits` keeps its name and its meaning (dirty packages a changed Starlark file reached). `inspect stats` gained `counts.sky_nodes`, `counts.sky_edges`, `counts.sky_layer`, `counts.sky_by_kind` and `bytes.sky_layer` |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints: `index` (targets, tests, packages,

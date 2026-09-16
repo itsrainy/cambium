@@ -244,8 +244,8 @@ pub fn is_build_file(path: &str) -> bool {
 ///
 /// This is about *shape*, not about blast radius, and it is not the same
 /// question the invalidator globs answer. What a changed `.bzl` reaches is the
-/// loading layer's business — its `BZL_LOAD` node, and the `BZL_LOAD ->
-/// BZL_LOAD` edges above it. The default invalidator globs then name a few
+/// loading layer's business (its `BZL_LOAD` node, and the `BZL_LOAD ->
+/// BZL_LOAD` edges above it). The default invalidator globs then name a few
 /// directories (`tools/toolchains/**`, `platforms/**`) where a `.bzl` edit is
 /// treated as global anyway, because the files there define toolchains whose
 /// reach is not a loading-phase edge at all: a toolchain swap changes what

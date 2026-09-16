@@ -139,6 +139,14 @@ package owns a path, a package's targets, byte accounting, externals
 tables, and `verify` against Bazel. Plumbing, for checking a surprising
 `explain` answer without reading the index by hand.
 
+`inspect stats` reports the Skyframe loading layer alongside the target
+graph: its node and edge counts, a line per node kind (`FILE_STATE`, `FILE`,
+`DIRECTORY_LISTING_STATE`, `DIRECTORY_LISTING`, `GLOB`, `PACKAGE_LOOKUP`,
+`PACKAGE`, `BZL_LOAD`, `IGNORED`), and its share of the bytes. An index
+built without a dump says `none` there rather than zeros, because that is
+an index no incremental run can be answered from, and whoever is reading
+the line is the one who has to rebuild it.
+
 ### `status`
 
 Read-only and fast: no Bazel, no network beyond a store listing; an

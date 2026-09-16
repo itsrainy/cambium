@@ -460,6 +460,20 @@ impl<'a> Run<'a> {
             }
         }
         keep_surviving_packages(&mut dirty, self.querier, self.engine.workspace());
+        // A package the diff deleted is one this run acted on, so it belongs
+        // in the dirty set even though the query stage will not ask for it.
+        //
+        // The classifier used to put it there as a side effect of its carving
+        // rule. Nothing else does now, and `dirty_packages` is not only a
+        // report field: it is how a deleted package is *accounted for*. Every
+        // rule in it is tombstoned, so none can appear in the affected set,
+        // and the rdeps oracle's deleted half accepts "a surviving affected
+        // target in the package, or the package in the dirty set" and nothing
+        // else. A 40-step walk on the `bazel` subject found it: the commit
+        // that removed `third_party/py/{concurrent,dataclasses,mock}` left six
+        // of their targets unaccounted for.
+        let gone: Vec<String> = dirty.deleted_packages.iter().cloned().collect();
+        dirty.dirty.extend(gone);
         self.stats.ignored_files = dirty.ignored;
 
         // The stage's own escalation replaces an invalidator's wording: both
@@ -512,9 +526,9 @@ impl<'a> Run<'a> {
     /// has a node for every directory Bazel looked at and for nothing else. A
     /// directory that did not exist at base is in neither category: Bazel
     /// never statted it, so there is no `PACKAGE_LOOKUP` to reach and no
-    /// `PACKAGE` behind it. The walk still dirties the *parent* — the
-    /// directory listing it reads moved, which is how the parent finds out it
-    /// lost files — but the new package itself has to be named from the diff.
+    /// `PACKAGE` behind it. The walk still dirties the *parent* (the directory
+    /// listing it reads moved, which is how the parent finds out it lost
+    /// files) but the new package itself has to be named from the diff.
     ///
     /// This is a fact about a path, not a model of the loading phase: a
     /// `BUILD` file at `p/BUILD` defines the package `p`, and that is the same

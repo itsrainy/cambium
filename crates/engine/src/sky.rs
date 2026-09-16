@@ -33,19 +33,26 @@ use crate::query::PackageQuerier;
 ///
 /// `onto` is the layer carried over from the base index, whose rows the dump
 /// replaces one by one; `None` builds a fresh one, which is what a cold build
-/// does. Returns `None` only when the row source has no Bazel to ask at all —
-/// the synthetic querier, and the canned ones in tests — which produces an
-/// index with no layer, and the next run over that index says so.
+/// does.
+///
+/// A row source with no Bazel to ask gets `onto` back unchanged: a cold build
+/// through such a source produces an index with no layer (and the next run
+/// over that index says so), and a splice keeps the layer the base had rather
+/// than dropping it, which would make the *published* index one no later run
+/// could be answered from. Only the queriers with no filesystem behind them
+/// are in that position; the real one always dumps, and a dump that fails is
+/// an error.
 pub(crate) fn build_layer(
     q: &dyn PackageQuerier,
     onto: Option<SkyLayer>,
 ) -> Result<Option<SkyLayer>> {
     if !q.can_dump_loading_layer() {
         tracing::debug!(
-            "this row source has no Bazel server, so the index it produces carries no \
-             Skyframe loading layer"
+            carried = onto.is_some(),
+            "this row source has no Bazel server, so the Skyframe loading layer is \
+             whatever the base index already carried"
         );
-        return Ok(None);
+        return Ok(onto);
     }
     let started = std::time::Instant::now();
     let (text, paths) = q.dump_loading_layer()?;
