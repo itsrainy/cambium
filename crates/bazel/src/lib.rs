@@ -885,6 +885,37 @@ impl Bazel {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    /// Loads every package in the repository, keeping nothing.
+    ///
+    /// `//...:*` again, but as a plain label query rather than the streamed
+    /// proto the index is built from. The difference matters for one reason:
+    /// after the streamed query a server can hold the loading graph's nodes
+    /// without their values, and `dump --skyframe=deps` prints only values, so
+    /// the loading layer comes back with its packages missing. This query
+    /// materialises them. The output is thrown away.
+    ///
+    /// Warm by construction (it runs on the server that just answered the same
+    /// pattern), and `--keep_going` so a repository with a package that cannot
+    /// load is loaded as far as it goes, exactly as the index's own query is.
+    pub fn load_universe(&self) -> Result<()> {
+        let mut cmd = self.command("query");
+        cmd.arg("//...:*").arg("--output=label").arg("--keep_going");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let out = self.runner.output(&mut cmd)?;
+        // Exit 3 is `--keep_going` reporting that something did not load,
+        // which is the same answer the index's own query accepts.
+        match out.exit.code {
+            Some(0) | Some(3) => Ok(()),
+            _ => Err(BazelError::Failed {
+                args: "query //...:* --output=label".into(),
+                status: out.exit.to_string(),
+                stderr: truncate(&String::from_utf8_lossy(&out.stderr), 2000),
+            }),
+        }
+    }
+
     /// The server's output base, where external repositories are checked out.
     ///
     /// Only used to keep the machine's own paths out of the stored loading

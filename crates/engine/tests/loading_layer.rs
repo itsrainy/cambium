@@ -364,7 +364,11 @@ fn a_step_that_re_queried_nothing_takes_no_dump() {
             },
         )
         .unwrap();
-    assert!(out.report.dirty_packages.is_empty(), "{:?}", out.report.dirty_packages);
+    assert!(
+        out.report.dirty_packages.is_empty(),
+        "{:?}",
+        out.report.dirty_packages
+    );
     assert!(head.dumps().is_empty(), "asked for {:?}", head.dumps());
     // And the layer came through the splice whole.
     let v = out.index.as_ref().expect("materialised").view();
@@ -440,4 +444,62 @@ fn a_splice_refreshes_the_layer_of_the_packages_it_requeried() {
         .walk(&cambium_index::sky::seeds([("bazel/common.bzl", false)]));
     assert!(w.packages.contains("lib"), "{w:?}");
     assert!(w.packages.contains("app"), "{w:?}");
+}
+
+/// A cold dump that comes back with the loading graph's shape and none of its
+/// packages is repaired, not stored.
+///
+/// Real Bazel does this: after the streamed `//...:*` query the index is built
+/// from, a server can hold every `PACKAGE` node without a value, so
+/// `dump --skyframe=deps` prints the file keys, the lookups and the globs, and
+/// one package. Observed on apollo (Bazel 7.4.1), where it made every `.bzl`
+/// edit reach two packages instead of six hundred, and reported on xla and
+/// envoy (8.7). `dump --skyframe=count` on the same server says the packages
+/// are there, and asking Bazel to load them again materialises them.
+///
+/// So the engine looks at what it got, asks once more if the packages are
+/// missing, and stores the second answer. What it must never do is store the
+/// first one: an index whose layer holds no packages answers "nothing is
+/// dirty" for every commit after it.
+#[test]
+fn a_dump_that_lost_its_packages_is_loaded_again_rather_than_stored() {
+    let q = scanning(files()).hiding_packages_until_reloaded();
+    let (_e, index) = base(&q);
+    assert_eq!(q.reloads(), 1, "the engine did not ask for a second load");
+    let v = index.view();
+    assert!(v.sky.present);
+    let packages = v
+        .sky
+        .counts()
+        .iter()
+        .find(|(k, _)| *k == cambium_index::sky::Kind::Package)
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    assert_eq!(
+        packages,
+        PACKAGES.len(),
+        "the stored layer kept the package-less dump"
+    );
+}
+
+/// And the repaired layer answers a `.bzl` edit exactly as an unbroken one
+/// does, which is the property the repair exists for.
+#[test]
+fn a_repaired_layer_carries_a_bzl_edit_to_its_packages() {
+    let q = scanning(files()).hiding_packages_until_reloaded();
+    let (e, index) = base(&q);
+    let out = e
+        .compute(
+            index.view(),
+            &changed("bazel/common.bzl"),
+            &scanning(files()),
+            &req(),
+        )
+        .unwrap();
+    assert!(
+        out.report.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        out.report.dirty_packages
+    );
+    assert_eq!(out.report.direct, vec!["//app:app".to_string()]);
 }

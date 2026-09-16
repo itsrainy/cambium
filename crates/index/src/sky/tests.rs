@@ -22,27 +22,33 @@
 use super::*;
 
 const BAZEL9: &str = include_str!("fixtures/bazel9.dump");
+const BAZEL87: &str = include_str!("fixtures/bazel87.dump");
 const BAZEL7: &str = include_str!("fixtures/bazel7.dump");
 
-/// Both fixtures, so every check runs on both majors.
+/// Every fixture, so every check runs on every major cambium is tested
+/// against. 8.7 earns its place the hard way: the subjects that run on it
+/// (xla, envoy) and on 7.4 (apollo) were where a `.bzl` edit was reported as
+/// reaching nothing, and a suite that only had 7.7 and 9.2 could not have
+/// told anyone whether the spellings were the reason.
 fn layers() -> Vec<(&'static str, SkyLayer)> {
-    [("bazel 9.2.0", BAZEL9), ("bazel 7.7.0", BAZEL7)]
-        .into_iter()
-        .map(|(name, text)| {
-            let mut l = SkyLayer::new();
-            let seen = l.apply_dump(text, &Paths::new("/ws", "/ob"));
-            assert!(seen > 20, "{name}: only {seen} blocks");
-            (name, l)
-        })
-        .collect()
+    [
+        ("bazel 9.2.0", BAZEL9),
+        ("bazel 8.7.0", BAZEL87),
+        ("bazel 7.7.0", BAZEL7),
+    ]
+    .into_iter()
+    .map(|(name, text)| {
+        let mut l = SkyLayer::new();
+        let seen = l.apply_dump(text, &Paths::new("/ws", "/ob"));
+        assert!(seen > 20, "{name}: only {seen} blocks");
+        (name, l)
+    })
+    .collect()
 }
 
 /// The frozen tables, which is what a run actually walks.
 fn tables() -> Vec<(&'static str, SkyTables)> {
-    layers()
-        .into_iter()
-        .map(|(n, l)| (n, l.finish()))
-        .collect()
+    layers().into_iter().map(|(n, l)| (n, l.finish())).collect()
 }
 
 fn view(t: &SkyTables) -> SkyRef<'_> {
@@ -98,6 +104,100 @@ fn a_bzl_loaded_only_by_another_bzl_reaches_the_packages_behind_it() {
         // marks its rules direct: a rule implementation can change without
         // any rule proto moving.
         assert!(w.bzl_packages.contains("a"), "{name}: {w:?}");
+    }
+}
+
+/// The `.bzl` chain, spelled out hop by hop on every major.
+///
+/// `FILE_STATE -> FILE -> BZL_LOAD -> PACKAGE` is the chain a changed Starlark
+/// file travels, and it is three hops where a `BUILD` file's is two. A report
+/// that `.bzl` edits reached nothing on Bazel 7.4 and 8.7 while `BUILD` edits
+/// worked is exactly what a broken third hop looks like, so each hop is
+/// asserted separately rather than inferred from the walk's answer.
+#[test]
+fn the_bzl_chain_is_whole_on_every_major() {
+    for (name, t) in tables() {
+        let v = view(&t);
+        let file = v
+            .id_of(Kind::File, "a/rules.bzl")
+            .unwrap_or_else(|| panic!("{name}: no FILE node for the .bzl"));
+        assert!(
+            v.id_of(Kind::FileState, "a/rules.bzl").is_some(),
+            "{name}: no FILE_STATE node, so the seed has nothing to land on"
+        );
+        let loaders: Vec<&str> = v
+            .rdeps
+            .row(file)
+            .iter()
+            .filter(|&&up| v.kind_of(up) == Kind::BzlLoad)
+            .map(|&up| v.text(up))
+            .collect();
+        assert!(
+            !loaders.is_empty(),
+            "{name}: no BZL_LOAD hangs off the file, so the third hop is cut"
+        );
+        // And from a `BZL_LOAD` the walk gets to a package.
+        let w = walk_of(v, &[("a/rules.bzl", false)]);
+        assert!(w.packages.contains("a"), "{name}: {w:?}");
+        assert!(w.bzl_packages.contains("a"), "{name}: {w:?}");
+    }
+}
+
+/// A layer whose `BZL_LOAD` nodes hang off no file of this repository cannot
+/// carry a `.bzl` edit anywhere, whatever its node counts say. The build-time
+/// guard reads this.
+#[test]
+fn a_healthy_layer_has_bzl_loads_over_its_own_files_and_packages_with_deps() {
+    for (name, l) in layers() {
+        assert!(
+            l.any_bzl_load_over_own_file(),
+            "{name}: no BZL_LOAD over a file of this workspace"
+        );
+        let (total, healthy) = l.package_dep_health();
+        assert!(total > 0, "{name}: no packages at all");
+        // Not every package has one: under WORKSPACE, Bazel 7 synthesises
+        // `//external` from the workspace file alone, and it looks nothing up.
+        // The guard is a ratio for that reason.
+        assert!(
+            healthy * 100 >= total * 50 && healthy + 1 >= total,
+            "{name}: {healthy} of {total} packages have a loading dep"
+        );
+        assert!(l.looks_loaded(), "{name}: a real dump does not look loaded");
+    }
+}
+
+/// And the same layer with its packages taken out does not look loaded, which
+/// is the state a real server leaves behind after a streamed universe query:
+/// every lookup and every glob, and no package values.
+#[test]
+fn a_layer_with_the_lookups_and_none_of_the_packages_does_not_look_loaded() {
+    for (name, text) in [
+        ("bazel 9.2.0", BAZEL9),
+        ("bazel 8.7.0", BAZEL87),
+        ("bazel 7.7.0", BAZEL7),
+    ] {
+        let stripped: String = {
+            let mut out = String::new();
+            let mut dropping = false;
+            for line in text.lines() {
+                if !line.starts_with(' ') && !line.is_empty() {
+                    dropping = line.starts_with("PACKAGE:");
+                }
+                if !dropping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            out
+        };
+        let mut l = SkyLayer::new();
+        l.apply_dump(&stripped, &Paths::new("/ws", "/ob"));
+        assert_eq!(l.count_of(Kind::Package), 0, "{name}");
+        assert!(
+            l.count_of(Kind::PackageLookup) > 0,
+            "{name}: the fixture has no lookups to judge against"
+        );
+        assert!(!l.looks_loaded(), "{name}");
     }
 }
 
@@ -280,7 +380,10 @@ fn a_workspace_reached_through_a_symlink_is_still_this_workspace() {
 #[test]
 fn a_dump_rooted_elsewhere_keeps_no_file_keys_and_says_where_they_were() {
     let mut l = SkyLayer::new();
-    l.apply_dump(&BAZEL7.replace("/ws", "/somewhere/else"), &Paths::new("/ws", "/ob"));
+    l.apply_dump(
+        &BAZEL7.replace("/ws", "/somewhere/else"),
+        &Paths::new("/ws", "/ob"),
+    );
     assert_eq!(l.count_of(Kind::FileState), 0);
     assert_eq!(l.foreign_roots().collect::<Vec<_>>(), ["/somewhere/else"]);
 }
@@ -409,7 +512,9 @@ fn a_refresh_replaces_a_row_and_leaves_the_rest_alone() {
     let w = walk_of(v, &[("a/sub/BUILD", true)]);
     assert!(!w.packages.contains("a"), "{w:?}");
     // Everything the refresh did not name is untouched.
-    assert!(walk_of(v, &[("a/helper.bzl", false)]).packages.contains("a"));
+    assert!(walk_of(v, &[("a/helper.bzl", false)])
+        .packages
+        .contains("a"));
 }
 
 /// A refresh may replace the rows of the packages the run re-queried, and may
@@ -448,7 +553,9 @@ fn a_refresh_replaces_only_the_packages_it_re_queried() {
     let t = l.finish();
     let v = view(&t);
     let a = v.id_of(Kind::Package, "a").unwrap();
-    let g = (0..v.len() as u32).find(|&i| v.kind_of(i) == Kind::Glob).unwrap();
+    let g = (0..v.len() as u32)
+        .find(|&i| v.kind_of(i) == Kind::Glob)
+        .unwrap();
     assert!(
         v.rdeps.row(g).contains(&a),
         "a refresh that did not re-query `a` may not drop its edges"
@@ -465,8 +572,13 @@ fn a_refresh_replaces_only_the_packages_it_re_queried() {
     let t = l.finish();
     let v = view(&t);
     let a = v.id_of(Kind::Package, "a").unwrap();
-    let g = (0..v.len() as u32).find(|&i| v.kind_of(i) == Kind::Glob).unwrap();
-    assert!(!v.rdeps.row(g).contains(&a), "the re-queried package's row is the dump's");
+    let g = (0..v.len() as u32)
+        .find(|&i| v.kind_of(i) == Kind::Glob)
+        .unwrap();
+    assert!(
+        !v.rdeps.row(g).contains(&a),
+        "the re-queried package's row is the dump's"
+    );
     assert!(!walk_of(v, &[("a/two.txt", true)]).packages.contains("a"));
 }
 
@@ -593,7 +705,9 @@ fn the_refresh_filter_covers_what_re_querying_a_package_can_move() {
     assert!(refresh_filter(&[]).is_none());
     // And one that re-queried most of the repository asks for everything
     // rather than building a megabyte of regex.
-    let many: Vec<String> = (0..MAX_FILTERED_PACKAGES + 1).map(|i| format!("p{i}")).collect();
+    let many: Vec<String> = (0..MAX_FILTERED_PACKAGES + 1)
+        .map(|i| format!("p{i}"))
+        .collect();
     assert!(refresh_filter(&many).is_none());
 
     let re = regex::Regex::new(&f).expect("a valid regex");
@@ -660,7 +774,10 @@ fn every_stored_kind_byte_reads_back_as_itself() {
     // Both majors' spellings land on one kind.
     assert_eq!(Kind::from_dump("GLOB"), Some(Kind::Glob));
     assert_eq!(Kind::from_dump("GLOBS"), Some(Kind::Glob));
-    assert_eq!(Kind::from_dump("IGNORED_SUBDIRECTORIES"), Some(Kind::Ignored));
+    assert_eq!(
+        Kind::from_dump("IGNORED_SUBDIRECTORIES"),
+        Some(Kind::Ignored)
+    );
     assert_eq!(
         Kind::from_dump("IGNORED_PACKAGE_PREFIXES"),
         Some(Kind::Ignored)
