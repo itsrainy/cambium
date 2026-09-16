@@ -282,6 +282,13 @@ pub struct Scanning {
     hides_packages_until_reloaded: std::sync::atomic::AtomicBool,
     /// How many times the engine asked for the repository to be loaded again.
     reloads: std::sync::atomic::AtomicUsize,
+    /// The same for the refresh path: from this dump onward (1-based) the
+    /// `PACKAGE` blocks are removed, until the engine loads by label. Zero
+    /// never hides. A cold build takes dump 1, so `2` leaves the index whole
+    /// and breaks the splice's refresh, which is the case worth a test.
+    hides_from_dump: std::sync::atomic::AtomicUsize,
+    /// How many dumps this querier has served.
+    dumps_served: std::sync::atomic::AtomicUsize,
 }
 
 impl Scanning {
@@ -298,7 +305,17 @@ impl Scanning {
             dumps: std::sync::Mutex::new(Vec::new()),
             hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
             reloads: std::sync::atomic::AtomicUsize::new(0),
+            hides_from_dump: std::sync::atomic::AtomicUsize::new(0),
+            dumps_served: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Serve every dump from the `n`th onward with its `PACKAGE` blocks
+    /// missing, until the engine loads the packages by label.
+    pub fn hiding_packages_from_dump(self, n: usize) -> Self {
+        self.hides_from_dump
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     /// Serve the first dump with its `PACKAGE` blocks missing, as a real
@@ -420,13 +437,29 @@ impl PackageQuerier for Scanning {
         let packages: Vec<String> = self.packages.iter().map(|p| p.to_string()).collect();
         let tree = cambium_synth::sky::InMemory(&files.0);
         let mut text = cambium_synth::sky::dump(&packages, &tree);
+        let nth = self
+            .dumps_served
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let from = self
+            .hides_from_dump
+            .load(std::sync::atomic::Ordering::SeqCst);
         if self
             .hides_packages_until_reloaded
             .load(std::sync::atomic::Ordering::SeqCst)
+            || (from > 0 && nth >= from)
         {
             text = without_package_blocks(&text);
         }
         Ok((text, cambium_synth::sky::paths()))
+    }
+
+    fn reload_named(&self, _packages: &[String]) -> bool {
+        self.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hides_from_dump
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        true
     }
 
     fn reload_packages(&self) -> bool {
