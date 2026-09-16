@@ -269,6 +269,11 @@ pub struct Scanning {
     enumerates_tree: bool,
     workspace: Option<PathBuf>,
     external_rules: Option<String>,
+    /// The `--skykey_filter` of every loading-layer dump this querier was
+    /// asked for, in order. A dump is the most expensive thing an incremental
+    /// run does on a long-lived server, so a test can ask whether one
+    /// happened at all, and for what.
+    dumps: std::sync::Mutex<Vec<String>>,
 }
 
 impl Scanning {
@@ -282,7 +287,14 @@ impl Scanning {
             enumerates_tree: false,
             workspace: None,
             external_rules: None,
+            dumps: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The filters this querier has been asked to dump, in order. Empty means
+    /// no dump ran.
+    pub fn dumps(&self) -> Vec<String> {
+        self.dumps.lock().unwrap().clone()
     }
 
     /// Serve `files` as the Starlark source of the load closure.
@@ -373,7 +385,9 @@ impl PackageQuerier for Scanning {
 
     fn dump_loading_layer(
         &self,
+        filter: &str,
     ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        self.dumps.lock().unwrap().push(filter.to_string());
         let files = self.files.as_ref().ok_or_else(|| EngineError::BazelQuery {
             what: "dump --skyframe=deps".into(),
             code: None,
@@ -488,6 +502,7 @@ impl PackageQuerier for DirQuerier {
 
     fn dump_loading_layer(
         &self,
+        _filter: &str,
     ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
         let tree = cambium_synth::sky::OnDisk(self.root.clone());
         Ok((

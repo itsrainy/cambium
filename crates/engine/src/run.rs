@@ -839,14 +839,49 @@ impl<'a> Run<'a> {
                 builder.set_bzl_closure(c);
             }
             // The loading layer, refreshed from the same server the splice
-            // query just ran on. That server loaded exactly the packages this
-            // run re-queried, so the dump holds exactly their nodes and
-            // applying it replaces exactly their rows; every package the run
-            // did not touch keeps the row it had, which is what makes the
-            // second dump a small one.
+            // query just ran on, and only for what that query can have moved.
+            //
+            // The filter is not an optimisation. A Bazel server holds
+            // everything it has ever loaded, so on the server a cold build
+            // filled -- which is every `cambi profile` step, every bench walk
+            // step, and any CI worker that built its own index -- an
+            // unfiltered dump walks and prints the whole repository on every
+            // commit. A sourcegraph profile spent 15 to 20 seconds a step on
+            // exactly that, including steps that re-queried nothing at all.
             let mut layer = builder.take_sky_layer();
             if layer.is_some() {
-                layer = crate::sky::build_layer(self.querier, layer)?;
+                // Nothing re-queried and nothing deleted means no
+                // loading-phase node moved, by construction: the dirty set is
+                // what the layer's own walk produced. The cheapest dump is the
+                // one that does not run.
+                let filter = if queried.cold_reason.is_some() {
+                    // `//...` was re-queried, so everything is fair game and
+                    // the package list would be the whole repository anyway.
+                    Some(cambium_index::sky::SKYKEY_FILTER.to_string())
+                } else {
+                    cambium_index::sky::refresh_filter(&queried.to_query)
+                };
+                match filter {
+                    Some(filter) => {
+                        layer = crate::sky::build_layer(self.querier, layer, &filter)?;
+                    }
+                    None if queried.to_query.is_empty() => {
+                        tracing::debug!(
+                            "no package was re-queried, so no loading-phase node moved and \
+                             the layer needs no dump"
+                        );
+                    }
+                    // More packages than a filter is worth writing: ask for
+                    // the whole loading phase rather than build a megabyte of
+                    // regex to save less than the dump costs.
+                    None => {
+                        layer = crate::sky::build_layer(
+                            self.querier,
+                            layer,
+                            cambium_index::sky::SKYKEY_FILTER,
+                        )?;
+                    }
+                }
                 if let Some(l) = layer.as_mut() {
                     // A package whose BUILD file is gone has no `PACKAGE` node
                     // to refresh, and the dump cannot say so by omission: a

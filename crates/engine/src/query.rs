@@ -127,14 +127,24 @@ pub trait PackageQuerier {
         false
     }
 
-    /// `bazel dump --skyframe=deps` over the loading-phase kinds, on the
-    /// server these rows came from, with the paths needed to keep this
-    /// machine's own directories out of the stored keys.
+    /// `bazel dump --skyframe=deps --skykey_filter=<filter>`, on the server
+    /// these rows came from, with the paths needed to keep this machine's own
+    /// directories out of the stored keys.
+    ///
+    /// The filter is the caller's: a cold build asks for the whole loading
+    /// phase, a refresh for what re-querying its packages can have moved. It
+    /// matters because a long-lived server holds whatever it has ever loaded,
+    /// so a refresh on the server a cold build filled would otherwise dump the
+    /// entire repository on every step.
     ///
     /// Only ever called when [`PackageQuerier::can_dump_loading_layer`] is
     /// true, and an error here fails the run: see
     /// [`cambium_bazel::Bazel::dump_skyframe`].
-    fn dump_loading_layer(&self) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+        let _ = filter;
         Err(crate::error::EngineError::BazelQuery {
             what: "dump --skyframe=deps".into(),
             code: None,
@@ -254,10 +264,11 @@ impl PackageQuerier for BazelQuerier {
 
     fn dump_loading_layer(
         &self,
+        filter: &str,
     ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
         let text = self
             .bazel
-            .dump_skyframe(cambium_index::sky::SKYKEY_FILTER)
+            .dump_skyframe(filter)
             .map_err(|e| crate::error::EngineError::BazelQuery {
                 what: "dump --skyframe=deps".into(),
                 code: None,

@@ -157,7 +157,7 @@ pub const WORKSPACE_MARK: &str = "<workspace>";
 /// The placeholder an unrooted key's embedded output base becomes.
 pub const OUTPUT_BASE_MARK: &str = "<output_base>";
 
-/// The `--skykey_filter` the dump is taken with.
+/// The `--skykey_filter` a cold build's dump is taken with.
 ///
 /// A prefix set rather than an exact list, because `FILE` matches `FILE_STATE`
 /// and `PACKAGE` matches `PACKAGE_LOOKUP`, and because dropping either half of
@@ -165,24 +165,159 @@ pub const OUTPUT_BASE_MARK: &str = "<output_base>";
 /// and 8/9's `GLOBS` alike, `IGNORED_` both spellings of the ignore node.
 pub const SKYKEY_FILTER: &str = "^(PACKAGE|GLOB|FILE|DIRECTORY_LISTING|BZL_LOAD|IGNORED_)";
 
-/// Which absolute paths to erase from an unrooted key's own text.
+/// Past this many packages a refresh asks for the whole loading phase instead.
+///
+/// The filter is one command-line argument and grows with the package list
+/// (about 260 bytes a package), so a very large dirty set would build a
+/// megabyte of regex to save less than dumping everything costs. A run that
+/// dirty is re-querying most of the repository anyway.
+pub const MAX_FILTERED_PACKAGES: usize = 500;
+
+/// The `--skykey_filter` for a refresh after a run re-queried `packages`.
+///
+/// A refresh has to leave the layer exactly as a cold build at the same commit
+/// would: the rebuild oracle compares them row for row, and a row the refresh
+/// failed to write is a change that will not reach a package later. So the
+/// filter is not "the packages' own keys" but everything re-querying them can
+/// have moved:
+///
+/// - `PACKAGE` and the glob nodes of those packages, which is what changed;
+/// - every key *under* one of them, because a package can gain a
+///   sub-directory, a `BUILD` file or a listing, and those nodes have to exist
+///   before a later commit can seed them;
+/// - every `BZL_LOAD`, and the `FILE`/`FILE_STATE` of every `.bzl`, because a
+///   Starlark file's own loads move without its package being re-queried, and
+///   a new `.bzl` anywhere needs its file chain;
+/// - the ignore node, which is one key.
+///
+/// Everything else keeps the row it has: [`SkyLayer::apply_dump`] replaces
+/// only the rows of keys the dump names, so a filtered dump is an upsert over
+/// the packages it covers rather than a new layer.
+///
+/// Returns `None` for an empty package list. A run that re-queried nothing
+/// moved no loading-phase node and needs no dump at all, which is the
+/// difference between a step costing milliseconds and a step costing a
+/// traversal of the whole graph.
+pub fn refresh_filter(packages: &[String]) -> Option<String> {
+    if packages.is_empty() || packages.len() > MAX_FILTERED_PACKAGES {
+        return None;
+    }
+    // A package name's characters, so a glob key's package can be delimited
+    // without writing a comma (the flag is a comma-separated list, so a comma
+    // inside a pattern would split it).
+    const NOT_PACKAGE_CHAR: &str = "[^A-Za-z0-9/._+-]";
+    let names: Vec<String> = packages.iter().map(|p| escape(p)).collect();
+    // The subtree of each package: the package itself, or anything below it.
+    // The root package's subtree is the whole tree, which is what a cold dump
+    // holds anyway.
+    let subtree: Vec<String> = packages
+        .iter()
+        .map(|p| {
+            if p.is_empty() {
+                "[^]]*".to_string()
+            } else {
+                format!("{}(/[^]]*)?", escape(p))
+            }
+        })
+        .collect();
+    let p = names.join("|");
+    let q = subtree.join("|");
+    Some(format!(
+        "^(PACKAGE:({p})$\
+         |PACKAGE_LOOKUP:({q})$\
+         |GLOBS?:.*(packageIdentifier = ({p}){NOT_PACKAGE_CHAR}|packageName=({p}){NOT_PACKAGE_CHAR})\
+         |BZL_LOAD:\
+         |IGNORED_\
+         |(FILE|FILE_STATE):{ROOTED}{BZL}\
+         |(FILE|FILE_STATE|DIRECTORY_LISTING|DIRECTORY_LISTING_STATE):{ROOTED}({q}){CLOSE})",
+        ROOTED = ROOTED_PREFIX,
+        BZL = BZL_SUFFIX,
+        CLOSE = CLOSE_SUFFIX,
+    ))
+}
+
+/// `[root]/[` as a regex: the opening of every rooted key.
+const ROOTED_PREFIX: &str = r"\[[^]]*\]/\[";
+/// The rest of a rooted key naming any `.bzl` file.
+const BZL_SUFFIX: &str = r"[^]]*\.bzl\]$";
+/// The rest of a rooted key whose relative path the caller has just matched.
+const CLOSE_SUFFIX: &str = r"\]$";
+
+/// A package name as a literal in a regex. Bazel allows `.`, `+` and `-` in a
+/// package name, and the first two are metacharacters.
+fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if "\\.+*?()[]{}^$|".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Which absolute paths are this workspace's, and which to erase from an
+/// unrooted key's own text.
+///
+/// Every spelling of the workspace root counts, because Bazel does not
+/// necessarily write back the path it was handed: it resolves symbolic links
+/// and prints the real path in `[root]`. On macOS that is not an edge case,
+/// it is the default for anything under `$TMPDIR` (`/var` is a link to
+/// `/private/var`), which is where a `cambi profile` worktree lives. Matching
+/// on the given spelling alone dropped every `FILE`, `FILE_STATE`,
+/// `DIRECTORY_LISTING` and `GLOB` key as "another repository's", leaving a
+/// layer that no changed path could reach a package through, and saying
+/// nothing about it.
 #[derive(Clone, Debug, Default)]
 pub struct Paths {
-    /// The Bazel workspace, absolute and without a trailing slash.
-    pub workspace: String,
-    /// The server's output base, where external repositories live. Empty when
-    /// the caller could not name it, which costs only that those keys keep a
-    /// machine-specific spelling.
-    pub output_base: String,
+    /// Spellings of the Bazel workspace root, without trailing slashes.
+    workspaces: Vec<String>,
+    /// Spellings of the server's output base, where external repositories
+    /// live. Empty when the caller could not name it, which costs only that
+    /// those keys keep a machine-specific spelling.
+    output_bases: Vec<String>,
 }
 
 impl Paths {
+    /// `workspace` and `output_base` as the caller knows them. Each is also
+    /// resolved through the filesystem, and both spellings are kept: the
+    /// resolved one is what Bazel prints, the given one is what a caller with
+    /// no such directory on disk (a test, a synthetic subject) means.
     pub fn new(workspace: impl AsRef<str>, output_base: impl AsRef<str>) -> Self {
         Self {
-            workspace: workspace.as_ref().trim_end_matches('/').to_string(),
-            output_base: output_base.as_ref().trim_end_matches('/').to_string(),
+            workspaces: spellings(workspace.as_ref()),
+            output_bases: spellings(output_base.as_ref()),
         }
     }
+
+    /// Whether a dump's `[root]` names this workspace, in any of its
+    /// spellings.
+    pub fn is_workspace(&self, root: &str) -> bool {
+        let root = root.trim_end_matches('/');
+        self.workspaces.iter().any(|w| w == root)
+    }
+
+    /// The workspace as the caller named it, for a message.
+    pub fn workspace(&self) -> &str {
+        self.workspaces.first().map_or("", String::as_str)
+    }
+}
+
+/// A path, and its resolved form when that is a different string. Empty in,
+/// empty out: a caller that could not name the directory names none.
+fn spellings(path: &str) -> Vec<String> {
+    let given = path.trim_end_matches('/').to_string();
+    if given.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![given.clone()];
+    if let Ok(real) = std::fs::canonicalize(&given) {
+        let real = real.to_string_lossy().trim_end_matches('/').to_string();
+        if real != given {
+            out.push(real);
+        }
+    }
+    out
 }
 
 /// One node of the layer, as the owned form holds it.
@@ -205,6 +340,9 @@ pub struct SkyLayer {
     nodes: Vec<SkyNode>,
     ids: HashMap<SkyNode, u32>,
     fwd: Vec<Vec<u32>>,
+    /// Roots the dump used that are not this workspace, for diagnosis. Small:
+    /// one entry per external root a server holds.
+    foreign_roots: BTreeSet<String>,
 }
 
 impl SkyLayer {
@@ -218,6 +356,16 @@ impl SkyLayer {
 
     pub fn num_edges(&self) -> usize {
         self.fwd.iter().map(Vec::len).sum()
+    }
+
+    /// How many nodes of one kind the layer holds.
+    pub fn count_of(&self, kind: Kind) -> usize {
+        self.nodes.iter().filter(|n| n.kind == kind).count()
+    }
+
+    /// The roots the dumps used that were not this workspace's.
+    pub fn foreign_roots(&self) -> impl Iterator<Item = &str> {
+        self.foreign_roots.iter().map(String::as_str)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -271,12 +419,15 @@ impl SkyLayer {
     /// key is `[root]/[rel]` and reading one has to say which root it was, not
     /// because there is more than one to be.
     fn root_id(&mut self, root: &str, paths: &Paths) -> u32 {
-        let root = root.trim_end_matches('/');
-        if !paths.workspace.is_empty() && root == paths.workspace {
-            WORKSPACE
-        } else {
-            NOT_MINE
+        if paths.is_workspace(root) {
+            return WORKSPACE;
         }
+        // Kept so a layer that turned out to hold no file keys at all can say
+        // where the dump's keys actually were rooted, which is the whole of
+        // the diagnosis when a path does not match.
+        self.foreign_roots
+            .insert(root.trim_end_matches('/').to_string());
+        NOT_MINE
     }
 
     /// The node a dump key names, or `None` for a key the layer drops.
@@ -487,12 +638,17 @@ fn erase(text: &str, paths: &Paths) -> String {
     let mut out = text.to_string();
     // The output base first: on a default layout it sits *inside* nothing the
     // workspace names, but a caller may have put it under the workspace, and
-    // erasing the longer path first keeps that case stable.
-    if !paths.output_base.is_empty() && out.contains(&paths.output_base) {
-        out = out.replace(&paths.output_base, OUTPUT_BASE_MARK);
+    // erasing the longer path first keeps that case stable. Every spelling is
+    // tried, because a key embeds whichever one Bazel resolved to.
+    for b in &paths.output_bases {
+        if out.contains(b.as_str()) {
+            out = out.replace(b.as_str(), OUTPUT_BASE_MARK);
+        }
     }
-    if !paths.workspace.is_empty() && out.contains(&paths.workspace) {
-        out = out.replace(&paths.workspace, WORKSPACE_MARK);
+    for w in &paths.workspaces {
+        if out.contains(w.as_str()) {
+            out = out.replace(w.as_str(), WORKSPACE_MARK);
+        }
     }
     out
 }

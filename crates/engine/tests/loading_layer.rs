@@ -333,6 +333,77 @@ fn a_file_added_to_a_globbed_directory_dirties_its_package() {
     );
 }
 
+/// A step that re-queried nothing takes no dump.
+///
+/// This is the whole of the incremental cost on a long-lived server. Bazel
+/// keeps whatever it has loaded, so on the server a cold build filled, an
+/// unfiltered `dump --skyframe=deps` walks and prints the entire repository:
+/// a sourcegraph profile spent 15 to 20 seconds a commit on it, including the
+/// 26 commits of 30 that re-queried nothing at all. If no package was
+/// re-queried, no loading-phase node moved, by construction, because the
+/// dirty set is what the layer's own walk produced.
+#[test]
+fn a_step_that_re_queried_nothing_takes_no_dump() {
+    let (e, index) = base(&scanning(files()));
+    let mut tree = files();
+    tree.0.insert("lib/a.cc".into(), "int a;\n".into());
+    let (e2, index2) = base(&scanning(tree.clone()));
+    let _ = (e, index);
+
+    // A content-only edit to a source file: its consumers are reached through
+    // the rule layer's file rows, and no package is re-queried.
+    let head = scanning(tree);
+    let out = e2
+        .compute(
+            index2.view(),
+            &changed("lib/a.cc"),
+            &head,
+            &AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+        )
+        .unwrap();
+    assert!(out.report.dirty_packages.is_empty(), "{:?}", out.report.dirty_packages);
+    assert!(head.dumps().is_empty(), "asked for {:?}", head.dumps());
+    // And the layer came through the splice whole.
+    let v = out.index.as_ref().expect("materialised").view();
+    assert!(v.sky.present);
+    assert_eq!(v.sky.len(), index2.view().sky.len());
+}
+
+/// A step that did re-query asks only for what that can have moved.
+#[test]
+fn a_refresh_asks_only_for_the_packages_it_re_queried() {
+    let (e, index) = base(&scanning(files()));
+    let mut head_tree = files();
+    head_tree.0.insert(
+        "lib/BUILD".into(),
+        "load(\"//bazel:other.bzl\", \"lib_rule\")\nload(\"//bazel:common.bzl\", \"c\")\n".into(),
+    );
+    let head = scanning(head_tree);
+    let out = e
+        .compute(
+            index.view(),
+            &[Change::new(Status::Modified, "lib/BUILD")],
+            &head,
+            &AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+        )
+        .unwrap();
+    assert!(out.report.dirty_packages.contains(&"lib".to_string()));
+    let dumps = head.dumps();
+    assert_eq!(dumps.len(), 1, "{dumps:?}");
+    let f = &dumps[0];
+    assert!(f.contains("PACKAGE:(lib)$"), "{f}");
+    // Not the whole loading phase.
+    assert_ne!(f, cambium_index::sky::SKYKEY_FILTER, "{f}");
+    // A comma would split the filter in half: the flag is a list.
+    assert!(!f.contains(','), "{f}");
+}
+
 /// The materialised path refreshes the layer from the same server the splice
 /// query ran on, so the published index describes head rather than base.
 #[test]

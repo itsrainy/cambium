@@ -219,8 +219,9 @@ impl PackageQuerier for RevisionQuerier {
 
     fn dump_loading_layer(
         &self,
+        filter: &str,
     ) -> std::result::Result<(String, cambium_index::sky::Paths), EngineError> {
-        self.querier.dump_loading_layer()
+        self.querier.dump_loading_layer(filter)
     }
 }
 
