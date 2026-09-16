@@ -155,11 +155,12 @@ fn a_healthy_layer_has_bzl_loads_over_its_own_files_and_packages_with_deps() {
         );
         let (total, healthy) = l.package_dep_health();
         assert!(total > 0, "{name}: no packages at all");
-        // Not every package has one: under WORKSPACE, Bazel 7 synthesises
-        // `//external` from the workspace file alone, and it looks nothing up.
-        // The guard is a ratio for that reason.
-        assert!(
-            healthy * 100 >= total * 50 && healthy + 1 >= total,
+        // Every package that is counted has one. `//external` is the single
+        // package in a real dump that does not (Bazel 7 synthesises it from
+        // the workspace file alone and it looks nothing up), and it is not
+        // counted: see `is_synthetic_package`.
+        assert_eq!(
+            healthy, total,
             "{name}: {healthy} of {total} packages have a loading dep"
         );
         assert!(l.looks_loaded(), "{name}: a real dump does not look loaded");
@@ -786,4 +787,62 @@ fn every_stored_kind_byte_reads_back_as_itself() {
     assert_eq!(Kind::from_dump("PRECOMPUTED"), None);
     assert_eq!(Kind::from_dump("STARLARK_BUILTINS"), None);
     assert_eq!(Kind::from_dump("REPOSITORY_MAPPING"), None);
+}
+
+/// WORKSPACE mode re-queries `//external`, and nothing may judge it.
+///
+/// Bazel 7 synthesises that package from the workspace file alone. Its
+/// `PACKAGE` node's whole dependency list is `PRECOMPUTED:starlark_semantics`
+/// and `EXTERNAL_PACKAGE:...`, both kinds the layer drops, so it has no
+/// lookup, no glob, no load and no file of its own and it can never satisfy a
+/// health test written for real packages. A WORKSPACE edit re-queries it, and
+/// on sourcegraph that was two packages of which one could never pass, which
+/// aborted the run at step 126 of 300.
+///
+/// The fixture is the real 7.7.0 dump, which carries the real `//external`
+/// block; the assertions are on the two health tests directly, because that
+/// is where the run died.
+#[test]
+fn the_workspace_external_package_is_refreshed_but_never_judged() {
+    let mut l = SkyLayer::new();
+    let paths = Paths::new("/ws", "/ob");
+    l.apply_dump(BAZEL7, &paths);
+    assert!(
+        l.has_package("external"),
+        "the 7.7 fixture should carry the //external package"
+    );
+
+    // It is not counted against the cold build's ratio, and the layer is
+    // healthy without any allowance being made for it.
+    let (total, healthy) = l.package_dep_health();
+    assert_eq!(healthy, total);
+    assert!(l.looks_loaded());
+
+    // And a refresh that re-queries it, exactly as a WORKSPACE edit does,
+    // reports no shortfall -- neither for `external`, which the dump names
+    // with nothing the layer keeps, nor for the real package beside it.
+    let requeried: BTreeSet<String> = ["external".to_string(), "a".to_string()].into();
+    assert_eq!(
+        l.refresh_shortfall(BAZEL7, &paths, &requeried),
+        Vec::<String>::new()
+    );
+
+    // Even when the dump does not mention it at all, which is what a filtered
+    // refresh of some other package looks like.
+    let only_external: BTreeSet<String> = ["external".to_string()].into();
+    assert_eq!(
+        l.refresh_shortfall("", &paths, &only_external),
+        Vec::<String>::new()
+    );
+}
+
+/// The counterpart, so the exemption is not a hole: a real package the dump
+/// does not speak for is still reported.
+#[test]
+fn a_real_package_the_dump_omits_is_still_a_shortfall() {
+    let mut l = SkyLayer::new();
+    let paths = Paths::new("/ws", "/ob");
+    l.apply_dump(BAZEL7, &paths);
+    let requeried: BTreeSet<String> = ["a".to_string()].into();
+    assert_eq!(l.refresh_shortfall("", &paths, &requeried), vec!["a"]);
 }
