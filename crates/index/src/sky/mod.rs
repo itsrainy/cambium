@@ -65,18 +65,27 @@
 //! them, and the dump that follows is whole. Seen on apollo (7.4.1), reported
 //! on xla and envoy (8.7).
 //!
-//! What it is not, each ruled out against the reproducer: the Skyframe
+//! The cause is what ran on that server in between. A Bazel command whose
+//! option set differs from the last one's re-evaluates, and a command that
+//! runs its own Skyframe evaluation drops what it no longer needs. Two such
+//! commands used to sit between the universe query and the dump, both from
+//! the closure rescan: `mod dump_repo_mapping` and
+//! `query //external:* --output=build`. Bisected on apollo, one at a time on
+//! a fresh output base, each costs the dump 19 of its 644 packages, and
+//! through the engine the two together cost it all but one. So the dump runs
+//! first now, on the cold build and on the splice alike.
+//!
+//! What it is not, each ruled out against the same reproducer: the Skyframe
 //! high-water-mark GC (`--skyframe_high_water_mark_threshold=100` changes
 //! nothing), `--order_output=no` streaming (`--order_output=full` changes
-//! nothing), and the reader closing the proto pipe before EOF (by hand,
-//! draining and closing after 200 KB both keep all 644). It reproduces every
-//! time under the engine's own cold build in a fresh detached worktree, and
-//! never under the same commands from a shell in an equivalent worktree, nor
-//! in an in-place cold build. So there is no flag to set and the layer is
-//! verified instead: [`SkyLayer::looks_loaded`] on a cold build and
-//! [`SkyLayer::refresh_shortfall`] on a splice, each repaired by loading the
-//! packages again and dumping once more, and each an error if that does not
-//! help.
+//! nothing), and the reader closing the proto pipe before EOF (draining and
+//! closing after 200 KB both keep all 644).
+//!
+//! The layer is verified anyway, because the next command added between the
+//! query and the dump would be just as quiet: [`SkyLayer::looks_loaded`] on a
+//! cold build and [`SkyLayer::refresh_shortfall`] on a splice, each repaired
+//! by loading the packages again and dumping once more, and each an error if
+//! that does not help.
 
 pub mod dump;
 
