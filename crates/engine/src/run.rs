@@ -861,7 +861,16 @@ impl<'a> Run<'a> {
                 } else {
                     cambium_index::sky::refresh_filter(&queried.to_query)
                 };
-                let requeried: BTreeSet<String> = queried.to_query.iter().cloned().collect();
+                // Without the packages this run found gone: a deleted package
+                // has no `PACKAGE` block in any dump, and the refresh check
+                // would read its absence as a dump that lost it. They are
+                // dropped from the layer below instead.
+                let requeried: BTreeSet<String> = queried
+                    .to_query
+                    .iter()
+                    .filter(|p| !gone.contains(*p))
+                    .cloned()
+                    .collect();
                 tracing::debug!(
                     packages = requeried.len(),
                     cold = queried.cold_reason.is_some(),
@@ -870,8 +879,12 @@ impl<'a> Run<'a> {
                 );
                 match filter {
                     Some(filter) => {
-                        layer =
-                            crate::sky::build_layer(self.querier, layer, &filter, Some(&requeried))?;
+                        layer = crate::sky::build_layer(
+                            self.querier,
+                            layer,
+                            &filter,
+                            Some(&requeried),
+                        )?;
                     }
                     None if queried.to_query.is_empty() => {
                         tracing::debug!(

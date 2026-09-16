@@ -52,6 +52,31 @@
 //! payload. An unrooted key embeds absolute paths in its own text instead, and
 //! those are replaced with `<workspace>` and `<output_base>` placeholders for
 //! the same reason.
+//!
+//! # A dump can come back without its package values
+//!
+//! A server that has just answered `//...:*` can hold every `PACKAGE` node
+//! without a value: `dump --skyframe=count` reports 644 packages and
+//! `dump --skyframe=deps`, seconds later on that same server, prints one. The
+//! dump still carries every `FILE_STATE`, every `PACKAGE_LOOKUP` and every
+//! glob, so neither its size nor its node counts show the loss, and the walk
+//! over the layer that results answers "two packages" for a commit that moved
+//! six hundred. Asking Bazel for the same packages once more materialises
+//! them, and the dump that follows is whole. Seen on apollo (7.4.1), reported
+//! on xla and envoy (8.7).
+//!
+//! What it is not, each ruled out against the reproducer: the Skyframe
+//! high-water-mark GC (`--skyframe_high_water_mark_threshold=100` changes
+//! nothing), `--order_output=no` streaming (`--order_output=full` changes
+//! nothing), and the reader closing the proto pipe before EOF (by hand,
+//! draining and closing after 200 KB both keep all 644). It reproduces every
+//! time under the engine's own cold build in a fresh detached worktree, and
+//! never under the same commands from a shell in an equivalent worktree, nor
+//! in an in-place cold build. So there is no flag to set and the layer is
+//! verified instead: [`SkyLayer::looks_loaded`] on a cold build and
+//! [`SkyLayer::refresh_shortfall`] on a splice, each repaired by loading the
+//! packages again and dumping once more, and each an error if that does not
+//! help.
 
 pub mod dump;
 
@@ -620,6 +645,84 @@ impl SkyLayer {
         requeried: &BTreeSet<String>,
     ) -> usize {
         self.apply(text, paths, Some(requeried))
+    }
+
+    /// The packages of `requeried` a refresh dump did not speak for.
+    ///
+    /// A refresh replaces a re-queried package's row and merges into every
+    /// other, so a dump that omits a package's block, or names it with fewer
+    /// dependencies than it has, leaves the old row standing and says nothing.
+    /// That is the same loss a cold dump can suffer (see
+    /// [`SkyLayer::looks_loaded`]) reaching the incremental path: the splice
+    /// query is streamed on the same kind of server, and the packages it
+    /// re-queried can come back without their values.
+    ///
+    /// Read *before* the refresh is applied, against the layer as it stands,
+    /// so "thinner than it was" is a fact and not a guess. A package the run
+    /// deleted has no block to find and belongs in `gone`, not here.
+    ///
+    /// The three deps that matter are the ones a changed path arrives through:
+    /// the package's own `PACKAGE_LOOKUP`, its glob node, and any `BZL_LOAD`.
+    /// A package that had one and comes back without it has lost the edge,
+    /// not the edge's reason: Bazel re-queried it and told us what it depends
+    /// on, and it cannot depend on nothing.
+    pub fn refresh_shortfall(
+        &mut self,
+        text: &str,
+        paths: &Paths,
+        requeried: &BTreeSet<String>,
+    ) -> Vec<String> {
+        // Only the package blocks, and only of packages this run re-queried:
+        // a refresh dump of a whole repository is tens of megabytes and none
+        // of the rest of it is being judged here.
+        let mut blocks: Vec<(String, Vec<String>)> = Vec::new();
+        dump::parse_dump(text, &mut |k, d| {
+            if let Some((kind, rest)) = dump::kind_of(k) {
+                if kind == "PACKAGE" && requeried.contains(rest) {
+                    blocks.push((rest.to_string(), d.iter().map(|s| s.to_string()).collect()));
+                }
+            }
+        });
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        let mut thin: BTreeSet<String> = BTreeSet::new();
+        for (pkg, deps) in blocks {
+            named.insert(pkg.clone());
+            let mut healthy = false;
+            for dep in &deps {
+                let Some(node) = self.normalise(dep, paths) else {
+                    continue;
+                };
+                healthy |= match node.kind {
+                    Kind::PackageLookup => node.text == pkg,
+                    Kind::Glob => glob_names_package(&node.text, &pkg),
+                    Kind::BzlLoad => true,
+                    _ => false,
+                };
+                if healthy {
+                    break;
+                }
+            }
+            if !healthy {
+                thin.insert(pkg);
+            }
+        }
+        requeried
+            .iter()
+            .filter(|p| {
+                // Only a package the layer already knows can be *missing*: a
+                // package this run is the first to see has no old row to
+                // leave standing, and the walk names it for itself.
+                (!named.contains(*p) && self.has_package(p)) || thin.contains(*p)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the layer holds a `PACKAGE` node for `pkg`.
+    pub fn has_package(&self, pkg: &str) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.kind == Kind::Package && n.text == pkg)
     }
 
     /// `requeried` is `None` for a cold build (replace every row), or the

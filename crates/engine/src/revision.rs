@@ -227,6 +227,10 @@ impl PackageQuerier for RevisionQuerier {
     fn reload_packages(&self) -> bool {
         self.querier.reload_packages()
     }
+
+    fn reload_named(&self, packages: &[String]) -> bool {
+        self.querier.reload_named(packages)
+    }
 }
 
 /// Where a run keeps its per-revision worktrees.

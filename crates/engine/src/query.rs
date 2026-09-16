@@ -165,6 +165,14 @@ pub trait PackageQuerier {
         false
     }
 
+    /// The same, for named packages rather than the whole repository: the
+    /// refresh path's repair, where only the packages the splice query
+    /// re-queried can have been lost.
+    fn reload_named(&self, packages: &[String]) -> bool {
+        let _ = packages;
+        false
+    }
+
     /// `bazel query '//external:*' --output=build` over the checkout these
     /// rows describe, for [`cambium_index::externals::external_dir_repos`] to
     /// read the nested repositories' names out of.
@@ -291,6 +299,16 @@ impl PackageQuerier for BazelQuerier {
             self.bazel.output_base().unwrap_or_default(),
         );
         Ok((text, paths))
+    }
+
+    fn reload_named(&self, packages: &[String]) -> bool {
+        match self.bazel.load_packages(packages) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(error = %e, "could not ask bazel to load these packages again");
+                false
+            }
+        }
     }
 
     fn reload_packages(&self) -> bool {

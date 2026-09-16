@@ -65,8 +65,45 @@ pub(crate) fn build_layer(
         // A cold build's dump is the whole loading phase of a server that has
         // just loaded the whole repository: every row in it is the truth.
         None => layer.apply_dump(&text, &paths),
-        // A refresh may only speak for what the run asked Bazel to load.
-        Some(pkgs) => layer.apply_refresh(&text, &paths, pkgs),
+        // A refresh may only speak for what the run asked Bazel to load. The
+        // same value-less state a cold dump can come back in reaches here too
+        // -- the splice query is streamed on the same kind of server -- and on
+        // this path it is quieter still: a package whose block the dump omits
+        // keeps the row it had, so the layer stays plausible and goes stale.
+        // So the packages the run named are checked against the dump before
+        // any of it is applied, and a shortfall is re-loaded by label.
+        Some(pkgs) => {
+            let short = layer.refresh_shortfall(&text, &paths, pkgs);
+            if short.is_empty() {
+                layer.apply_refresh(&text, &paths, pkgs)
+            } else {
+                tracing::warn!(
+                    short = short.len(),
+                    of = pkgs.len(),
+                    first = ?short.iter().take(5).collect::<Vec<_>>(),
+                    "the refresh dump did not speak for every package this run re-queried; \
+                     loading them by label and dumping once more"
+                );
+                if !q.reload_named(&short) {
+                    return Err(shortfall(
+                        &short,
+                        pkgs.len(),
+                        "bazel could not be asked again",
+                    ));
+                }
+                let (text, paths2) = q.dump_loading_layer(filter)?;
+                let still = layer.refresh_shortfall(&text, &paths2, pkgs);
+                if !still.is_empty() {
+                    return Err(shortfall(
+                        &still,
+                        pkgs.len(),
+                        "and the dump after loading them by label was no better",
+                    ));
+                }
+                paths = paths2;
+                layer.apply_refresh(&text, &paths, pkgs)
+            }
+        }
     };
     tracing::debug!(
         blocks,
@@ -200,6 +237,26 @@ pub(crate) fn build_layer(
         }
     }
     Ok(Some(layer))
+}
+
+/// The error a refresh dump that would not speak for its packages fails with.
+///
+/// Named rather than inlined because the run has to say *which* packages, not
+/// just that something was short: the stale row that follows is invisible
+/// until a later commit fails to reach the package through it.
+fn shortfall(short: &[String], of: usize, why: &str) -> EngineError {
+    EngineError::BazelQuery {
+        what: "dump --skyframe=deps".into(),
+        code: None,
+        stderr: format!(
+            "{} of the {of} packages this run re-queried came back from the dump with no \
+             PACKAGE block, or with one that depends on no lookup, glob or BZL_LOAD, {why}. \
+             Their rows would have been left as they were and a later change would not reach \
+             them. First: {:?}",
+            short.len(),
+            short.iter().take(8).collect::<Vec<_>>()
+        ),
+    }
 }
 
 /// The Skyframe keys a diff moved.

@@ -503,3 +503,54 @@ fn a_repaired_layer_carries_a_bzl_edit_to_its_packages() {
     );
     assert_eq!(out.report.direct, vec!["//app:app".to_string()]);
 }
+
+/// The same loss on the refresh path, where it is quieter.
+///
+/// A refresh replaces a re-queried package's row and merges into every other,
+/// so a dump that omits a package's block leaves the row it had standing: the
+/// layer stays plausible, and the stale row only shows up as a later commit
+/// that does not reach the package. So the engine checks the dump against the
+/// packages the run named *before* applying any of it, loads the shortfall by
+/// label, and dumps again.
+#[test]
+fn a_refresh_dump_that_did_not_speak_for_its_packages_loads_them_by_label() {
+    // Dump 1 is the cold build's and is whole; dump 2 is the splice's.
+    let q = scanning(files()).hiding_packages_from_dump(2);
+    let (e, index) = base(&q);
+    // The same querier serves the splice, so its second dump is the refresh's.
+    let out = e
+        .compute(
+            index.view(),
+            &changed("app/BUILD"),
+            &q,
+            &AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+        )
+        .unwrap();
+    assert!(
+        out.report.dirty_packages.contains(&"app".to_string()),
+        "{:?}",
+        out.report.dirty_packages
+    );
+    assert_eq!(
+        q.reloads(),
+        1,
+        "the refresh did not load the short packages by label (dumps: {:?})",
+        q.dumps()
+    );
+    // And the spliced index still holds a layer that can answer the next
+    // commit: the package's row was refreshed, not left as it was.
+    let spliced = out.index.expect("a splice");
+    let v = spliced.view();
+    assert!(v.sky.present);
+    let packages = v
+        .sky
+        .counts()
+        .iter()
+        .find(|(k, _)| *k == cambium_index::sky::Kind::Package)
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    assert_eq!(packages, PACKAGES.len());
+}

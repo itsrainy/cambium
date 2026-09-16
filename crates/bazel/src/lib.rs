@@ -916,6 +916,54 @@ impl Bazel {
         }
     }
 
+    /// Loads the named packages, keeping nothing.
+    ///
+    /// [`Bazel::load_universe`] narrowed to a package list, for the refresh
+    /// path: only the packages a splice query re-queried can have come back
+    /// without their values, and `set(//a:* //b:*)` is a fraction of `//...`.
+    /// The expression goes through a query file when it is long, exactly as
+    /// the splice query's does.
+    pub fn load_packages(&self, packages: &[String]) -> Result<()> {
+        if packages.is_empty() {
+            return Ok(());
+        }
+        let expr = format!(
+            "set({})",
+            packages
+                .iter()
+                .map(|p| format!("//{p}:*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut cmd = self.command("query");
+        let _scratch = if expr.len() > MAX_INLINE_QUERY {
+            let path = self.scratch.join(format!(
+                "cambium-reload-{}-{}.txt",
+                std::process::id(),
+                now_nanos()
+            ));
+            std::fs::write(&path, &expr)?;
+            cmd.arg(format!("--query_file={}", path.display()));
+            Some(ScratchFile(path))
+        } else {
+            cmd.arg(&expr);
+            None
+        };
+        cmd.arg("--output=label").arg("--keep_going");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let out = self.runner.output(&mut cmd)?;
+        match out.exit.code {
+            Some(0) | Some(3) => Ok(()),
+            _ => Err(BazelError::Failed {
+                args: format!("query {} --output=label", truncate(&expr, 200)),
+                status: out.exit.to_string(),
+                stderr: truncate(&String::from_utf8_lossy(&out.stderr), 2000),
+            }),
+        }
+    }
+
     /// The server's output base, where external repositories are checked out.
     ///
     /// Only used to keep the machine's own paths out of the stored loading
