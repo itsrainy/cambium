@@ -828,16 +828,12 @@ impl<'a> Run<'a> {
                 .partition(|p| loaded.contains(p.as_str()));
             let mut gone = dirty.deleted_packages.clone();
             gone.extend(unloaded);
-            if let Some(c) = bzl::rescan_closure(
-                self.querier,
-                builder.take_bzl_closure(),
-                &scanned,
-                &stage.changed_bzl,
-                &gone,
-                &crate::bzl::dirs(&boundaries),
-            ) {
-                builder.set_bzl_closure(c);
-            }
+            // The loading layer goes first, before anything else is asked
+            // of this server. A Bazel command whose option set differs from
+            // the last one's re-evaluates, and the closure rescan below runs
+            // two such commands (`mod dump_repo_mapping` and
+            // `query //external:* --output=build`), each of which costs the
+            // dump packages it would otherwise have named.
             // The loading layer, refreshed from the same server the splice
             // query just ran on, and only for what that query can have moved.
             //
@@ -915,6 +911,16 @@ impl<'a> Run<'a> {
             }
             if let Some(l) = layer {
                 builder.set_sky_layer(l);
+            }
+            if let Some(c) = bzl::rescan_closure(
+                self.querier,
+                builder.take_bzl_closure(),
+                &scanned,
+                &stage.changed_bzl,
+                &gone,
+                &crate::bzl::dirs(&boundaries),
+            ) {
+                builder.set_bzl_closure(c);
             }
         }
         if !base.bazel_version.is_empty() {
