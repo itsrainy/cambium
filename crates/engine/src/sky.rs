@@ -84,7 +84,17 @@ pub(crate) fn build_layer(
                     "the refresh dump did not speak for every package this run re-queried; \
                      loading them by label and dumping once more"
                 );
-                if !q.reload_named(&short) {
+                // A step that re-queried `//...` has the whole repository in
+                // `pkgs`, and a `set()` of every label in it would be a query
+                // file of megabytes to say what `//...:*` says in seven
+                // characters. Past the same threshold the refresh filter
+                // gives up at, ask for the repository.
+                let asked = if short.len() > sky::MAX_FILTERED_PACKAGES {
+                    q.reload_packages()
+                } else {
+                    q.reload_named(&short)
+                };
+                if !asked {
                     return Err(shortfall(
                         &short,
                         pkgs.len(),

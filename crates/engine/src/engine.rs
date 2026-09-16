@@ -503,6 +503,23 @@ impl Engine {
             .map(cambium_index::repo_boundaries)
             .unwrap_or_default();
         b.set_repo_boundaries(boundaries.clone());
+        // The loading layer, on the server the universe query has just loaded
+        // the whole repository into. It has to be this server: a fresh one has
+        // an empty Skyframe graph and would dump nothing.
+        //
+        // And it has to be *now*, before anything else is asked of that
+        // server. A Bazel command whose option set differs from the last one's
+        // re-evaluates, and a command that runs its own Skyframe evaluation
+        // drops what it no longer needs; the two that used to sit between the
+        // universe query and this dump -- `mod dump_repo_mapping` and
+        // `query //external:* --output=build`, both from the closure rescan
+        // below -- each cost this dump 19 of apollo's 644 packages, measured
+        // one at a time on a fresh output base. Neither needs package values,
+        // so the dump goes first and they see the server it leaves behind.
+        if let Some(l) = crate::sky::build_layer(q, None, cambium_index::sky::SKYKEY_FILTER, None)?
+        {
+            b.set_sky_layer(l);
+        }
         let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
         if let Some(c) = crate::bzl::rescan_closure(
             q,
@@ -513,12 +530,6 @@ impl Engine {
             &crate::bzl::dirs(&boundaries),
         ) {
             b.set_bzl_closure(c);
-        }
-        // The loading layer, on the server the universe query has just loaded
-        // the whole repository into. It has to be this server: a fresh one has
-        // an empty Skyframe graph and would dump nothing.
-        if let Some(l) = crate::sky::build_layer(q, None, cambium_index::sky::SKYKEY_FILTER, None)? {
-            b.set_sky_layer(l);
         }
         Ok(b.finish(commit))
     }
