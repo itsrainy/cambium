@@ -214,8 +214,12 @@ pub(crate) fn build_layer(
         // Starlark file at once and every `.bzl` edit silently reaches
         // nothing, while `BUILD` edits go on working.
         // A repository with no Starlark files of its own has no chain to cut,
-        // and nothing to complain about.
-        if layer.count_of(Kind::BzlLoad) > 0 && !layer.any_bzl_load_over_own_file() {
+        // and nothing to complain about. That is asked of the workspace's own
+        // files, not of the `BZL_LOAD` count: a workspace of only `BUILD`
+        // files still loads a hundred `.bzl` files out of `@bazel_tools`, and
+        // counting those made this guard refuse to build an index at all for
+        // the smallest repository that consumes an external one.
+        if layer.has_own_bzl_file() && !layer.any_bzl_load_over_own_file() {
             return Err(EngineError::BazelQuery {
                 what: "dump --skyframe=deps".into(),
                 code: None,

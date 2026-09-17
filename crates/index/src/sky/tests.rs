@@ -846,3 +846,60 @@ fn a_real_package_the_dump_omits_is_still_a_shortfall() {
     let requeried: BTreeSet<String> = ["a".to_string()].into();
     assert_eq!(l.refresh_shortfall("", &paths, &requeried), vec!["a"]);
 }
+
+/// A workspace whose every `.bzl` comes from somewhere else has no chain to
+/// cut, and must not be mistaken for one whose chain is broken.
+///
+/// The smallest repository that consumes an external one is `BUILD` files and
+/// a `WORKSPACE` file and nothing else, and it still loads a hundred `.bzl`
+/// files out of `@bazel_tools`. Counting those made the cold build's guard
+/// refuse to build an index for it at all: "the loading layer has 120
+/// BZL_LOAD nodes and not one of them hangs off a file of this workspace".
+/// The question is about the workspace's own Starlark files, so that is what
+/// is asked.
+#[test]
+fn a_workspace_with_no_starlark_of_its_own_is_not_a_broken_chain() {
+    let dump = "\
+BZL_LOAD:KeyForBuild{label=@@rules_cc//cc:defs.bzl, isBuildPrelude=false}
+  Group 1:
+    FILE:[/ob/external/rules_cc]/[cc/defs.bzl]
+
+PACKAGE:a
+  Group 1:
+    PACKAGE_LOOKUP:a
+    FILE:[/ws]/[a/BUILD]
+
+PACKAGE_LOOKUP:a
+  Group 1:
+    FILE:[/ws]/[a/BUILD]
+
+FILE:[/ws]/[a/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[a/BUILD]
+
+FILE_STATE:[/ws]/[a/BUILD]
+";
+    let mut l = SkyLayer::new();
+    l.apply_dump(dump, &Paths::new("/ws", "/ob"));
+
+    assert!(l.count_of(Kind::BzlLoad) > 0, "the fixture has a BZL_LOAD");
+    assert!(
+        !l.has_own_bzl_file(),
+        "this workspace has no .bzl of its own"
+    );
+    // So the chain is not cut, it simply does not exist, and the layer is
+    // healthy: the package still reaches its own BUILD file.
+    assert!(!l.any_bzl_load_over_own_file());
+    let (total, healthy) = l.package_dep_health();
+    assert_eq!((total, healthy), (1, 1));
+    assert!(l.looks_loaded());
+}
+
+/// And a workspace that does have Starlark of its own still gets the check.
+#[test]
+fn a_workspace_with_its_own_starlark_is_still_checked() {
+    for (name, l) in layers() {
+        assert!(l.has_own_bzl_file(), "{name}");
+        assert!(l.any_bzl_load_over_own_file(), "{name}");
+    }
+}
