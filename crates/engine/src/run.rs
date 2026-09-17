@@ -904,7 +904,23 @@ impl<'a> Run<'a> {
                     // A package whose BUILD file is gone has no `PACKAGE` node
                     // to refresh, and the dump cannot say so by omission: a
                     // package that merely was not re-queried is omitted too.
-                    for p in &gone {
+                    //
+                    // Only the packages the *diff* deleted, never `gone`, which
+                    // also carries the packages this run re-queried and got no
+                    // targets for. Those two are not the same thing and the
+                    // difference is unrecoverable: retiring a `PACKAGE` node
+                    // clears its dependencies, so it leaves every reverse row,
+                    // and from then on a changed source file in that package
+                    // reaches its glob node and stops. Only a `BUILD` edit
+                    // could ever re-query it again (its `PACKAGE_LOOKUP`
+                    // survives), so its targets -- already tombstoned by the
+                    // empty update -- stay missing from the index for good. A
+                    // package Bazel could not load under `--keep_going` comes
+                    // back with no targets and is exactly that case, which is
+                    // why a subject with load errors bled whole packages:
+                    // //xla/python/ifrt/ir and its seventy targets, missing
+                    // from every later step of a 300-step walk.
+                    for p in &dirty.deleted_packages {
                         l.delete_package(p);
                     }
                 }

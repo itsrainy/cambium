@@ -554,3 +554,67 @@ fn a_refresh_dump_that_did_not_speak_for_its_packages_loads_them_by_label() {
         .unwrap_or(0);
     assert_eq!(packages, PACKAGES.len());
 }
+
+/// A package Bazel could not load is not a package that was deleted.
+///
+/// Under `--keep_going` a package that fails to load comes back from the query
+/// with no targets, exactly as a package whose `BUILD` file was removed does.
+/// The run puts both in `gone`, and retiring a `PACKAGE` node clears its
+/// dependencies, which takes it out of every reverse row: from then on a
+/// changed source file in that package reaches the package's glob node and
+/// stops. Only a `BUILD` edit could re-query it again, because its
+/// `PACKAGE_LOOKUP` survives. Its targets, already tombstoned by the empty
+/// update, would then stay missing from the index for good -- on a subject
+/// with load errors, whole packages at a time.
+///
+/// So only the packages the diff actually deleted retire their node.
+#[test]
+fn a_package_that_failed_to_load_can_still_be_dirtied_afterwards() {
+    fn lib_will_not_load(pkg: &str) -> PackageUpdate {
+        if pkg == "lib" {
+            // What `--keep_going` hands back for a package it could not load.
+            return PackageUpdate {
+                package: pkg.to_string(),
+                ..Default::default()
+            };
+        }
+        rows(pkg)
+    }
+
+    let (e, index) = base(&scanning(files()));
+    // A step that re-queries `lib` and gets nothing for it.
+    let broken = Scanning::new(PACKAGES, lib_will_not_load).with_files(files());
+    let out = e
+        .compute(
+            index.view(),
+            &changed("lib/BUILD"),
+            &broken,
+            &AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+        )
+        .unwrap();
+    let head = out.index.expect("materialised");
+
+    // Now the package loads again, and a file appearing in it must reach it.
+    // This is the hop the retirement broke: an added file travels
+    // DIRECTORY_LISTING_STATE -> DIRECTORY_LISTING -> GLOB -> PACKAGE, and
+    // never touches the PACKAGE_LOOKUP that survives a retirement.
+    let mut tree = files();
+    tree.0.insert("lib/new.cc".into(), String::new());
+    let out2 = e
+        .compute(
+            head.view(),
+            &[Change::new(Status::Added, "lib/new.cc")],
+            &scanning(tree),
+            &req(),
+        )
+        .unwrap();
+    assert!(!out2.report.global);
+    assert!(
+        out2.report.dirty_packages.contains(&"lib".to_string()),
+        "a package that failed to load once is unreachable for ever: {:?}",
+        out2.report.dirty_packages
+    );
+}
