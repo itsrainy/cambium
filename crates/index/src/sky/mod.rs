@@ -480,6 +480,23 @@ impl SkyLayer {
         })
     }
 
+    /// Whether this workspace has a Starlark file of its own in the layer.
+    ///
+    /// The question [`Self::any_bzl_load_over_own_file`] is only meaningful
+    /// for: a repository whose every `.bzl` comes from somewhere else has no
+    /// chain to cut, and its `BZL_LOAD` nodes hanging off nothing of its own
+    /// is the truth rather than a broken dump. A workspace of only `BUILD`
+    /// files and a `WORKSPACE` file is a real shape -- it is the shape of the
+    /// smallest repository that consumes an external one -- and it used to
+    /// fail the build outright.
+    pub fn has_own_bzl_file(&self) -> bool {
+        self.nodes.iter().any(|n| {
+            matches!(n.kind, Kind::File | Kind::FileState)
+                && n.root == WORKSPACE
+                && n.text.ends_with(".bzl")
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
