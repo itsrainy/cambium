@@ -152,6 +152,17 @@ none of them. Unset means the default.
   only-tool/only-cambium/both counts; needs no Bazel or checkout, so it
   works on results tarred off the box. Globally invalidated steps store
   nothing: cambium answered `//...` and nothing was compared.
+- The rebuild oracle's loading-layer rows live beside the walk record,
+  whole: `bench-results/<subject>/walk/rebuild-<pin>[-<ver>].json` (and
+  `walk/labels/<parent>..<head>/rebuild.json` for a `--rebuild-every`
+  step), every missing and extra row with its kind, key, path, package
+  and class (docs/METHODOLOGY.md, the loading-layer rows). `jq .counts`
+  for the tallies; the rows that fail the walk are
+  `jq '[.missing[] | select(.class == "unexplained")]'`, and
+  `jq -r '.missing[] | select(.class == "unexplained") | [.item, (.kind // .to.kind), .path] | @tsv'`
+  lists them by kind and path. `walk-<pin>.json` carries the same tallies
+  under `rebuild_oracle.sky` and names the file under `rebuild_oracle.rows`.
+  Needs no Bazel or checkout.
 - The job tmp dir (`$CLAUDE_JOB_DIR/tmp`) was wiped mid-session once; keep
   driver scripts and logs under the repo (ignored) or on the box. The
   engine's own index cache sits in `/tmp/cambium-cache/` on the box, same

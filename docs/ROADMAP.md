@@ -39,7 +39,7 @@ prototype measured the price of chasing them (docs/SKYFRAME_PROTOTYPES.md).
 | bazel, sourcegraph, apollo | 300 steps each, recall 1.0, PASS |
 | envoy | 32 of 300 unsound, all the `@quiche` external round trip (#22) |
 | xla | 10 of 300 unsound: 4 external round trip (#22), 6 main-repo (#23) |
-| rebuild oracle | "layer rows missing" non-zero on every subject, never named (#24) |
+| rebuild oracle | loading-layer rows now named and classified in `walk/rebuild-<pin>.json`, and an unexplained row fails the walk; the 40-step local bazel walk and box run A decide the residual (#24) |
 | known gaps without a subject step | autoload (#25), toolchain rule class (#26), declined cases (#27) |
 | over-reporting | inventoried in docs/OVER_REPORTING.md; the `.bazelrc` screen is the dominant global |
 

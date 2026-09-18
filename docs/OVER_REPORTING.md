@@ -52,7 +52,7 @@ driven by `api/bazel/api_build_system.bzl`; apollo 3 to 4; xla 0 to 1.
 | Deleted-`BUILD` survivors | `BUILD` deleted while `BUILD.bazel` survives, or a rename | the package kept and re-queried rather than tombstoned | `crates/engine/src/run.rs` (`keep_surviving_packages`) |
 | Deleted packages in `dirty_packages` | any package the diff deleted | the name reported dirty though never queried; how the rdeps oracle credits its deleted consumers | `crates/engine/src/run.rs`, `crates/bench/src/oracles/rdeps.rs` |
 | `BUILD` as a glob input | a modified `BUILD` in a `glob(["**"])` package | every rule consuming the `BUILD` as a source | `crates/classify/src/lib.rs` |
-| Layer rows a cold build would not write | any splice: a refresh replaces rows and never removes a node | inert extra nodes and edges, counted as `extra` by the rebuild oracle | `crates/bench/src/oracles/rebuild.rs` |
+| Layer rows a cold build would not write | any splice: a refresh replaces rows and never removes a node | inert extra nodes and edges, counted as `extra` by the rebuild oracle and named row by row in `walk/rebuild-<pin>.json` (`deleted_in_window` when the path is gone at the pin, `other` otherwise) | `crates/bench/src/oracles/rebuild.rs`, `crates/bench/src/walk/rebuild_rows.rs` |
 
 On envoy's 40 change sets the benchmark's classifier attributes cambium's
 extras as: external repository reach 65 226 labels, `.bzl` closure 10 605,

@@ -41,7 +41,58 @@ peers, and invocation detail is in [Tools](#tools).
 | oracle | question it answers | how |
 |---|---|---|
 | reverse-dependency (rdeps) | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path in a head package, batched by command-line length and unioned. A tool's answer must be a superset of the result. A file *deleted* at head has no label, so its consumers come from the parent index's file rows instead and must appear by label, by package, or in `dirty_packages` (the only spelling when a whole package is deleted, since every rule in it is tombstoned). The package spelling is offered only to a consumer that is itself gone at head; one that survives in another package must appear by label however dirty its own package is. This is the only ground truth, and every tool including cambium is scored against it. `--oracle-sample N` caps the steps queried; the full tier runs it on every step. |
-| rebuild | is the incremental updater exact? | the applied index at the pin (the one the walk carried step to step) is diffed node by node, edge by edge and rule hash by rule hash against an index cold-built fresh at the pin. Any difference fails. It always runs at the pin; `--rebuild-every N` also runs it every N steps. |
+| rebuild | is the incremental updater exact? | the applied index at the pin (the one the walk carried step to step) is diffed node by node, edge by edge and rule hash by rule hash against an index cold-built fresh at the pin, and its Skyframe loading layer row by row. Any difference in the graph fails; a loading-layer row the applied index lacks fails unless the walk can explain it (below). It always runs at the pin; `--rebuild-every N` also runs it every N steps. |
+
+*The loading-layer rows.* The rebuild oracle also compares the Skyframe
+loading layer (the `FILE`, `DIRECTORY_LISTING`, `PACKAGE`, `GLOB` and
+`BZL_LOAD` nodes and reverse edges the dirty stage walks), restricted on
+both sides to what a changed path in the subject can reach. Every row that
+differs is written, classified, to a sidecar beside the walk record:
+`bench-results/<subject>/walk/rebuild-<pin>[-<ver>].json` at the pin, and
+`walk/labels/<parent>..<head>/rebuild.json` for a `--rebuild-every` step.
+A row is a node (`kind`, `root`, `key`) or an edge (`from`, `to`), the
+repository `path` and `package` its key names when one can be read off it,
+and a `class`:
+
+- `created_in_window` (missing, expected): the row sits under a directory
+  created between the classification base and the compared commit, and
+  the applied layer holds no row at all under that directory. A cold
+  `//...` build walks every directory; a refresh dumps only what
+  re-querying the dirty packages made Bazel evaluate, so a directory no
+  re-queried package's glob descended into has its listing, lookup and
+  `BUILD` probe rows on the cold side only. Such rows are inert: every
+  seed into the directory starts under it, and a `BUILD` landing there
+  later is named from the diff. The applied-layer condition is what keeps
+  the class from excusing a real shortfall (a refresh that covered the
+  directory would have written at least its listing row). It is a bound,
+  not the exact set of directories the refreshes covered; only a per-step
+  record of what was re-queried would tighten it.
+- `load_error` (missing or extra, expected): the row's package, or either
+  end's for an edge, is one that either index recorded as failing to load
+  under `--keep_going`.
+- `deleted_in_window` (extra, expected): the row's path is gone at the
+  compared commit. A refresh cannot remove a node, so a file, package or
+  `.bzl` that stopped existing leaves its row behind.
+- `other` (extra): the path still exists; a dropped `load()`, a glob that
+  stopped matching. Inert either way.
+- `unexplained` (missing): nothing above accounts for it.
+
+The classification base is the head of the last cold rebuild inside the
+window (a fresh lineage resets the layer) or, when there was none, the
+window start; both commits are in the sidecar (`from`, `at`) and in the
+walk record, so a resumed walk classifies identically. The trees come from
+`git ls-tree` on the subject's checkout; a driver with no tree expects
+nothing, and every missing row is unexplained.
+
+The pass rule: a non-zero `unexplained` count fails the rebuild oracle,
+and the rebuild oracle's verdict is folded into the walk's `pass`, so a
+walk whose applied index disagrees with a cold build at the pin fails
+whatever every step said. Extras never fail. The tallies (`missing`,
+`missing_expected`, `missing_unexplained`, `extra`, `extra_expected`)
+travel in the walk record's `rebuild_oracle.sky`, and the report prints
+them beside the verdict. Until the 40-step local walk on the bazel subject
+has run against this classification, the rule stands as coded: no class
+of missing row is allowed beyond the two above.
 
 **Workload.** What tools are run on. There is one: the walk.
 
