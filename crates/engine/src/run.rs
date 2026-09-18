@@ -382,11 +382,13 @@ impl<'a> Run<'a> {
             // is an invalidator path or glob matching a changed file, and it
             // records which one; an empty path here would be a classifier
             // bug, not a run to fail.
-            let reason = GlobalReason::Invalidator {
+            //
+            // Its diagnostic waits until the externals stage has had its say
+            // below: when that stage escalates on the same file, its cause is
+            // the one the run reports, and a run has one cause, not two.
+            global = Some(GlobalReason::Invalidator {
                 path: dirty.invalidator.clone().unwrap_or_default(),
-            };
-            self.engine.diagnostics().emit(reason.diagnostic());
-            global = Some(reason);
+            });
         }
 
         // Changes inside a nested Bazel repository. `//...` stopped at its
@@ -484,6 +486,8 @@ impl<'a> Run<'a> {
             self.engine.diagnostics().emit(reason.diagnostic());
             dirty.global = true;
             global = Some(reason);
+        } else if let Some(reason @ GlobalReason::Invalidator { .. }) = &global {
+            self.engine.diagnostics().emit(reason.diagnostic());
         }
         self.stats.repos_dirty_by_bzl = ext.by_bzl;
 

@@ -213,6 +213,45 @@ pub fn is_toolchain_module(name: &str) -> bool {
     TOOLCHAIN_MODULES.contains(&name)
 }
 
+/// Modules Bazel 8 and later load native rules from behind the caller's
+/// back (`--incompatible_autoload_externally`).
+///
+/// Answers: *can a bump of this module be localised to the packages that
+/// `load()` from it?* Not on Bazel 8 or later. A bare `cc_library`,
+/// `py_binary`, `java_library`, `sh_test` or `proto_library` in a BUILD file
+/// is that module's Starlark rule, reached through a load no BUILD file
+/// writes; Bazel records the dependency as `PRECOMPUTED:autoload_symbols`, a
+/// singleton every package shares, and the loading layer drops singletons
+/// (`crate::sky`). So no edge in the index names the consumers, and the bump
+/// invalidates everything, under its own diagnostic. On Bazel 7 and earlier
+/// the native rules are Bazel's own and these are ordinary dependencies
+/// (four of them are on [`TOOLCHAIN_MODULES`] as well, which still applies).
+///
+/// - `rules_cc`, `rules_java`, `rules_python`, `rules_shell`, `protobuf`: the
+///   providers Bazel 8 autoloads by default. `protobuf` is the module name;
+///   `com_google_protobuf` is what a `WORKSPACE` calls the same repository,
+///   and Bazel autoloads from it under that name there.
+/// - `bazel_skylib`, `rules_proto` and the like are deliberately absent:
+///   nothing is autoloaded from them.
+///
+/// Explicit rather than derived from the Bazel that runs, so the list can be
+/// read and each entry can carry its reason; a provider that is missing
+/// under-reports, so the list errs towards more.
+pub const AUTOLOAD_PROVIDERS: &[&str] = &[
+    "com_google_protobuf",
+    "protobuf",
+    "rules_cc",
+    "rules_java",
+    "rules_python",
+    "rules_shell",
+];
+
+/// Whether a module or repository name is one Bazel 8 autoloads native rules
+/// from.
+pub fn is_autoload_provider(name: &str) -> bool {
+    AUTOLOAD_PROVIDERS.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,10 +326,16 @@ mod tests {
         assert!(KEYWORDS.iter().all(|k| !PURE_BUILTINS.contains(k)));
         assert!(unique_and_sorted(KEYWORDS));
         assert!(unique_and_sorted(TOOLCHAIN_MODULES));
+        assert!(unique_and_sorted(AUTOLOAD_PROVIDERS));
         assert!(unique(PATHY_NAMES));
         assert!(unique(PURE_BUILTINS), "PURE_BUILTINS repeats a name");
         // The one module the toolchain list documents leaving out.
         assert!(!is_toolchain_module("bazel_skylib"));
         assert!(is_toolchain_module("rules_cc"));
+        // Autoload providers: the module name and, for protobuf, the
+        // `WORKSPACE` name too; a macro library is neither.
+        assert!(is_autoload_provider("protobuf") && is_autoload_provider("com_google_protobuf"));
+        assert!(is_autoload_provider("rules_cc") && is_toolchain_module("rules_cc"));
+        assert!(!is_autoload_provider("bazel_skylib"));
     }
 }

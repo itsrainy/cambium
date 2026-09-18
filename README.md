@@ -99,6 +99,17 @@ still exact, only not incremental):
   toolchain or platform declarations elsewhere should add those directories,
   because toolchain resolution happens in analysis and has no query-graph edge
   for the reverse walk to follow.
+- A module Bazel 8 autoloads native rules from (`rules_cc`, `rules_java`,
+  `rules_python`, `rules_shell`, `protobuf`) moving in `MODULE.bazel`, its
+  lock or `WORKSPACE`, when the Bazel here is 8 or later or its version is
+  unknown (`CAMBI-W024`). A bare `cc_library` is that module's rule through a
+  load no BUILD file writes; Bazel records it as a dependency on
+  `PRECOMPUTED:autoload_symbols`, a singleton every package shares, which the
+  loading layer drops because keeping it would put every package one reverse
+  hop from every other. So nothing in the graph names the consumers, and the
+  sound answer is everything. On Bazel 7 and earlier the same bump reaches
+  the module's consumers through the graph (or stays global for the
+  toolchains it registers, `CAMBI-W014`).
 
 **Not modelled** (each with its status):
 
@@ -109,15 +120,6 @@ still exact, only not incremental):
   every rule id added, changed or tombstoned, so a run can escalate on rule
   class `toolchain`, `platform` or `toolchain_type`, wherever the package is.
   The globs stay the answer for `.bzl` edits in those directories.
-- **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
-  and later). A bare `cc_library` comes from `@rules_cc` through a load the
-  BUILD file never writes. Bazel records that as a dependency on
-  `PRECOMPUTED:autoload_symbols`, a singleton every package in the repository
-  depends on, and the layer drops the singleton kinds for the reason the
-  module docs give: keeping them would put every package one reverse hop from
-  every other. So a `rules_cc` version bump still does not dirty the packages
-  using it, and the sound answer remains to treat a version bump of an autoload
-  provider as global on Bazel 8 or later.
 - **Symlinked directories inside a package.** `glob()` walks into them, and a
   change to the link target is a diff elsewhere. Unmodelled, alongside the
   source-directory limitation in

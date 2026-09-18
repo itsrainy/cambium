@@ -113,7 +113,13 @@
 //! except through toolchain resolution, which has no edge to follow and which
 //! this stage therefore refuses to localise: any change to
 //! `register_toolchains`, to `register_execution_platforms`, or to a module on
-//! [`cambium_index::externals::TOOLCHAIN_MODULES`] stays global.
+//! [`cambium_index::externals::TOOLCHAIN_MODULES`] stays global. And, on
+//! Bazel 8 and later, except through autoload: a bare `cc_library` is
+//! `@rules_cc`'s rule through a load no BUILD file writes, and the loading
+//! layer drops the `PRECOMPUTED:autoload_symbols` singleton that records it,
+//! so a move of a module on [`cambium_index::externals::AUTOLOAD_PROVIDERS`]
+//! stays global too, under its own diagnostic ([`autoload_at`] decides from
+//! the Bazel version, and an unknown version counts as 8).
 //!
 //! # What stays global
 //!
@@ -134,6 +140,9 @@
 //! - A `MODULE.bazel` statement the parser does not recognise, on either side
 //!   of the diff.
 //! - Toolchain registration, as above.
+//! - An autoload provider moving under a Bazel that autoloads, as above:
+//!   `CAMBI-W024` rather than the stage's `CAMBI-W014`, because the stage
+//!   accounted for the change exactly and the answer is still everything.
 //! - A repository-rule input that no label names. See the soundness gap
 //!   documented on [`cambium_index::externals`].
 
@@ -141,7 +150,9 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
-use cambium_index::externals::{diff_module, scan_module, Mode, ModuleChange, ModuleFacts};
+use cambium_index::externals::{
+    diff_module, is_autoload_provider, scan_module, Autoload, Mode, ModuleChange, ModuleFacts,
+};
 use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
@@ -297,6 +308,13 @@ pub fn analyse(
             lock_changed = false;
         }
     }
+    // Whether the Bazel reading the tree autoloads native rules from provider
+    // modules, asked only when a diff could name one.
+    let autoload = if module_changed || lock_changed || !workspaces.is_empty() {
+        autoload_at(base, texts, base_rev)
+    } else {
+        Autoload::Off
+    };
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*
@@ -318,6 +336,21 @@ pub fn analyse(
                 return out;
             }
             WorkspaceChange::Moved { repos, bzl_paths } => {
+                // Bazel 8 autoloads from a `WORKSPACE` repository under the
+                // same names, `com_google_protobuf` for protobuf.
+                if autoload == Autoload::On {
+                    if let Some(r) = repos.iter().find(|r| is_autoload_provider(r)) {
+                        out.escalate(ExternalsCause::AutoloadProvider {
+                            module: r.clone(),
+                            why: format!(
+                                "`{path}` moved `{r}`, and Bazel 8 autoloads native rules from \
+                                 {r}: a BUILD file uses them through a load it never writes, so \
+                                 no edge names their consumers"
+                            ),
+                        });
+                        return out;
+                    }
+                }
                 for p in &bzl_paths {
                     // The repositories a workspace-closure `.bzl` can define
                     // are exactly what the index recorded for a changed `.bzl`
@@ -352,9 +385,13 @@ pub fn analyse(
     if module_changed {
         let base_facts = facts_at(texts, base_rev);
         let head_facts = facts_at(texts, head_rev);
-        match diff_module(&base_facts, &head_facts) {
+        match diff_module(&base_facts, &head_facts, autoload) {
             ModuleChange::Global(why) => {
                 out.escalate(ExternalsCause::Module { why });
+                return out;
+            }
+            ModuleChange::Autoload { module, why } => {
+                out.escalate(ExternalsCause::AutoloadProvider { module, why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -383,7 +420,7 @@ pub fn analyse(
         let base_lock = texts.text_at(base_rev, MODULE_LOCK);
         let head_lock = texts.text_at(head_rev, MODULE_LOCK);
         let change = match (base_lock, head_lock) {
-            (Some(b), Some(h)) => diff_lock(&b, &h, &facts),
+            (Some(b), Some(h)) => diff_lock(&b, &h, &facts, autoload),
             // One side has no lockfile at all: it was added or deleted, and
             // every repository in it is new or gone.
             _ => {
@@ -394,6 +431,10 @@ pub fn analyse(
         match change {
             ModuleChange::Global(why) => {
                 out.escalate(ExternalsCause::Lock { why });
+                return out;
+            }
+            ModuleChange::Autoload { module, why } => {
+                out.escalate(ExternalsCause::AutoloadProvider { module, why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -555,6 +596,40 @@ fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<St
     // `pkg:sub/file.bzl` is `pkg/sub/file.bzl`, and the root package's
     // `:file.bzl` is just `file.bzl`. A label with no `:` names no file.
     Some(join_path(l.package(), l.explicit_name()?))
+}
+
+/// Whether the Bazel reading the base tree autoloads native rules from the
+/// provider modules: Bazel 8 and later do, and a version nothing states is
+/// read as 8, the side that over-reports.
+///
+/// The version is the index header's first, which is `bazel --version` of
+/// the Bazel that built the index (bazelisk's resolution of `.bazelversion`,
+/// where that is how Bazel runs), and `.bazelversion` at the base revision
+/// when the header carries none: a synthetic index, or a header an old build
+/// left empty. `.bazelversion` is itself a default invalidator, so a pin that
+/// moves is global before this is asked.
+pub fn autoload_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> Autoload {
+    let header = base.bazel_version.trim_start_matches("bazel").trim();
+    let (major, source) = match crate::probe::leading_major(header) {
+        Some(m) => (Some(m), "index header"),
+        None => (
+            texts
+                .text_at(rev, ".bazelversion")
+                .and_then(|t| crate::probe::leading_major(&t)),
+            ".bazelversion",
+        ),
+    };
+    let autoload = match major {
+        Some(m) if m < 8 => Autoload::Off,
+        _ => Autoload::On,
+    };
+    tracing::debug!(
+        ?major,
+        source,
+        ?autoload,
+        "whether the Bazel reading the tree autoloads native rules"
+    );
+    autoload
 }
 
 /// [`Mode::detect`] for the base side of the diff: the tree as `texts` reads
@@ -802,6 +877,40 @@ mod tests {
         // Another repository, and a main-repo label.
         assert_eq!(repo_relative_path("@@other+//a:b.bzl", "mod", ""), None);
         assert_eq!(repo_relative_path("//a:b.bzl", "mod", ""), None);
+    }
+
+    /// The header wins, `.bazelversion` stands in for a header with no
+    /// version, and nothing at all is read as a Bazel that autoloads.
+    #[test]
+    fn the_bazel_version_decides_autoload_and_unknown_means_on() {
+        use cambium_index::IndexBuilder;
+        let pin = |v: Option<&str>| {
+            let mut m = BTreeMap::new();
+            if let Some(v) = v {
+                m.insert(
+                    ("base".to_string(), ".bazelversion".to_string()),
+                    v.to_string(),
+                );
+            }
+            FixedText(m)
+        };
+        let at = |header: &str, v: Option<&str>| {
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.set_bazel_version(header.to_string());
+            let d = b.finish("c0");
+            autoload_at(d.view(), &pin(v), "base")
+        };
+        assert_eq!(at("bazel 7.4.1", None), Autoload::Off);
+        assert_eq!(at("bazel 8.0.0rc2", None), Autoload::On);
+        assert_eq!(
+            at("bazel 9.2.0", Some("7.4.1")),
+            Autoload::On,
+            "the header wins"
+        );
+        assert_eq!(at("", Some("7.6.1")), Autoload::Off);
+        assert_eq!(at("synth", Some("8.4.2")), Autoload::On);
+        assert_eq!(at("", Some("latest")), Autoload::On);
+        assert_eq!(at("", None), Autoload::On);
     }
 
     #[test]

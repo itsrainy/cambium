@@ -113,6 +113,13 @@ pub enum ExternalsCause {
     /// The main repository's graph has no node for anything in there, so the
     /// only sound answer is everything.
     NestedRepositoryUnmapped { dir: String },
+    /// A module Bazel 8 autoloads native rules from moved (a `bazel_dep`
+    /// bump, an override, a lock re-resolution, a `WORKSPACE` declaration),
+    /// under a Bazel that autoloads. A bare `cc_library` is that module's
+    /// rule through a load no BUILD file writes, so no edge names its
+    /// consumers. Reported under its own code, not the stage's: the stage
+    /// accounted for the change exactly, and the answer is still everything.
+    AutoloadProvider { module: String, why: String },
 }
 
 impl fmt::Display for ExternalsCause {
@@ -128,7 +135,9 @@ impl fmt::Display for ExternalsCause {
                 "`{path}` changes a call from `{bzl}`, and cambium cannot say which \
                  repositories that file defines"
             ),
-            ExternalsCause::Module { why } | ExternalsCause::Lock { why } => f.write_str(why),
+            ExternalsCause::Module { why }
+            | ExternalsCause::Lock { why }
+            | ExternalsCause::AutoloadProvider { why, .. } => f.write_str(why),
             ExternalsCause::NestedRepositoryUnmapped { dir } => write!(
                 f,
                 "`{dir}` is a Bazel repository of its own, so `//...` never loaded anything \
@@ -213,6 +222,9 @@ impl GlobalReason {
             GlobalReason::Invalidator { .. } => Code::W013InvalidatorMatched,
             GlobalReason::NoLoadingLayer => Code::W008NoLoadingLayer,
             GlobalReason::WorkspaceLevelBzl { .. } => Code::W009WorkspaceLevelBzl,
+            GlobalReason::Externals(ExternalsCause::AutoloadProvider { .. }) => {
+                Code::W024AutoloadProvider
+            }
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
         }
     }
@@ -229,6 +241,7 @@ impl GlobalReason {
                 | Code::W013InvalidatorMatched
                 | Code::W014ExternalsGlobal
                 | Code::W015FlagUnresolved
+                | Code::W024AutoloadProvider
         )
     }
 
@@ -275,7 +288,9 @@ impl GlobalReason {
             ),
             GlobalReason::NoLoadingLayer => Diagnostic::warning(
                 self.code(),
-                format!("nothing can be told apart in this change, so everything is affected: {reason}"),
+                format!(
+                    "nothing can be told apart in this change, so everything is affected: {reason}"
+                ),
             )
             .with_help(
                 "rebuild the lineage with `cambi index build` against a bazel that can run \
@@ -297,6 +312,23 @@ impl GlobalReason {
                     Some(p) => d.at(p.clone(), None),
                     None => d,
                 }
+            }
+            GlobalReason::Externals(ExternalsCause::AutoloadProvider { module, .. }) => {
+                Diagnostic::warning(
+                    self.code(),
+                    format!(
+                        "a module Bazel autoloads native rules from moved, so everything is \
+                         affected: {reason}"
+                    ),
+                )
+                .with_help(format!(
+                    "expected on Bazel 8 and later, where a bare cc_library or proto_library \
+                     is {module}'s rule and no BUILD file loads it; nothing to configure. If \
+                     the Bazel here is older than 8 and nothing says so, pin it in \
+                     .bazelversion; --incompatible_autoload_externally= (empty) in .bazelrc \
+                     turns autoload off, and a toolchain module then stays global under \
+                     CAMBI-W014"
+                ))
             }
             GlobalReason::Externals(_) => Diagnostic::warning(
                 self.code(),
@@ -514,7 +546,31 @@ mod tests {
                 }),
                 "a novel section",
             ),
+            (
+                GlobalReason::Externals(ExternalsCause::AutoloadProvider {
+                    module: "rules_cc".into(),
+                    why: "`bazel_dep(rules_cc)` changed, and Bazel 8 autoloads native rules \
+                          from rules_cc"
+                        .into(),
+                }),
+                "`bazel_dep(rules_cc)` changed, and Bazel 8 autoloads native rules from rules_cc",
+            ),
         ]
+    }
+
+    /// The autoload cause is the one externals cause with a code of its own,
+    /// and its help line names the module.
+    #[test]
+    fn the_autoload_cause_has_its_own_code() {
+        let d = GlobalReason::Externals(ExternalsCause::AutoloadProvider {
+            module: "protobuf".into(),
+            why: "moved".into(),
+        })
+        .diagnostic();
+        assert_eq!(d.code, Code::W024AutoloadProvider);
+        assert!(d.help.as_deref().unwrap().contains("protobuf"), "{d:?}");
+        let d = GlobalReason::Externals(ExternalsCause::Module { why: "x".into() }).diagnostic();
+        assert_eq!(d.code, Code::W014ExternalsGlobal);
     }
 
     #[test]

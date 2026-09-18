@@ -98,13 +98,42 @@ pub struct ModuleFacts {
     pub unparsed: Vec<String>,
 }
 
+/// Whether the Bazel reading this tree autoloads native rules from the
+/// modules on [`crate::vocabulary::AUTOLOAD_PROVIDERS`].
+///
+/// Bazel 8 turned `--incompatible_autoload_externally` on, and from then on a
+/// bump of a provider module moves rules in packages that load nothing from
+/// it. The diffs take this as a parameter rather than reading a version
+/// themselves: which Bazel runs is the engine's knowledge (the index header,
+/// or `.bazelversion`), and a version nothing states is read as `On`, the
+/// side that over-reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Autoload {
+    /// Bazel 8 or later, or unknown: a provider module that moved is global.
+    On,
+    /// Bazel 7 or earlier: the native rules are Bazel's own, and a provider
+    /// module is an ordinary dependency (or a toolchain module, as before).
+    Off,
+}
+
 /// What a `MODULE.bazel` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleChange {
     /// Nothing a run can localise: invalidate everything, for this reason.
     Global(String),
+    /// A module Bazel autoloads native rules from moved, under a Bazel that
+    /// autoloads ([`Autoload::On`]): invalidate everything, for `why`, and
+    /// say so under the autoload diagnostic rather than the stage's own.
+    Autoload { module: String, why: String },
     /// Exactly these apparent repository names moved.
     Repos(BTreeSet<String>),
+}
+
+/// A reason the diff could not localise, as the readers write them.
+impl From<String> for ModuleChange {
+    fn from(why: String) -> Self {
+        ModuleChange::Global(why)
+    }
 }
 
 /// The apparent name the main repository sees a module under: the `repo_name`

@@ -64,9 +64,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::externals::{apparent_of, is_toolchain_module, ModuleChange, ModuleFacts};
+use crate::externals::{apparent_of, Autoload, ModuleChange, ModuleFacts};
 use crate::label::Label;
 use crate::util::diff_maps;
+use crate::vocabulary::{is_autoload_provider, is_toolchain_module};
 
 /// Lock format versions this parser was written against.
 ///
@@ -108,8 +109,10 @@ const KNOWN_EXT: &[&str] = &[
 ///
 /// `facts` is the (unchanged) `MODULE.bazel` at the head revision, used to map
 /// module and extension-internal repository names to the apparent names the
-/// main repository sees.
-pub fn diff_lock(base: &str, head: &str, facts: &ModuleFacts) -> ModuleChange {
+/// main repository sees. `autoload` is whether the Bazel reading the tree
+/// autoloads native rules from provider modules ([`Autoload`]), which decides
+/// what a moved `rules_cc` or `protobuf` means.
+pub fn diff_lock(base: &str, head: &str, facts: &ModuleFacts, autoload: Autoload) -> ModuleChange {
     let (b, h) = match (parse(base), parse(head)) {
         (Ok(b), Ok(h)) => (b, h),
         (Err(e), _) | (_, Err(e)) => return ModuleChange::Global(e),
@@ -156,13 +159,13 @@ pub fn diff_lock(base: &str, head: &str, facts: &ModuleFacts) -> ModuleChange {
             // Caches keyed by the extensions above: a repository they move is
             // a repository whose `generatedRepoSpecs` moved with them.
             "facts" | "factsVersions" | "selectedYankedVersions" => {}
-            "registryFileHashes" => match registry_moves(bx, hx, facts) {
+            "registryFileHashes" => match registry_moves(bx, hx, facts, autoload) {
                 Ok(r) => repos.extend(r),
-                Err(e) => return ModuleChange::Global(e),
+                Err(e) => return e,
             },
-            "moduleDepGraph" => match dep_graph_moves(bx, hx, facts) {
+            "moduleDepGraph" => match dep_graph_moves(bx, hx, facts, autoload) {
                 Ok(r) => repos.extend(r),
-                Err(e) => return ModuleChange::Global(e),
+                Err(e) => return e,
             },
             "moduleExtensions" => match extension_moves(bx, hx, facts) {
                 Ok(r) => repos.extend(r),
@@ -197,19 +200,31 @@ fn object<'a>(v: Option<&'a Value>, what: &str) -> Result<&'a Map<String, Value>
 }
 
 /// A module whose repository moved, under the apparent name the main
-/// repository sees, unless it is a toolchain module — whose version decides
-/// how everything is built and which has no edge in the graph.
+/// repository sees, unless it is one no edge in the graph can localise: a
+/// provider Bazel autoloads native rules from (under a Bazel that does), or
+/// a toolchain module, whose version decides how everything is built.
 fn module_moved(
     module: &str,
     facts: &ModuleFacts,
     out: &mut BTreeSet<String>,
     why: &str,
-) -> Result<(), String> {
+    autoload: Autoload,
+) -> Result<(), ModuleChange> {
+    if autoload == Autoload::On && is_autoload_provider(module) {
+        return Err(ModuleChange::Autoload {
+            module: module.to_string(),
+            why: format!(
+                "`MODULE.bazel.lock` moved `{module}` ({why}), and Bazel 8 autoloads native \
+                 rules from {module}: a BUILD file uses them through a load it never writes, \
+                 so no edge names their consumers"
+            ),
+        });
+    }
     if is_toolchain_module(module) {
-        return Err(format!(
+        return Err(ModuleChange::Global(format!(
             "`MODULE.bazel.lock` moved `{module}` ({why}), and {module} registers toolchains: \
              toolchain resolution has no edge in the query graph"
-        ));
+        )));
     }
     out.insert(apparent_of(facts, module).unwrap_or_else(|| module.to_string()));
     Ok(())
@@ -226,7 +241,8 @@ fn registry_moves(
     b: Option<&Value>,
     h: Option<&Value>,
     facts: &ModuleFacts,
-) -> Result<BTreeSet<String>, String> {
+    autoload: Autoload,
+) -> Result<BTreeSet<String>, ModuleChange> {
     let (b, h) = (
         normalise_registry(object(b, "registryFileHashes")?)?,
         normalise_registry(object(h, "registryFileHashes")?)?,
@@ -240,13 +256,15 @@ fn registry_moves(
                 return Err(format!(
                     "`MODULE.bazel.lock`'s registry file `{k}` changed, which can re-point any \
                      module in that registry"
-                ))
+                )
+                .into())
             }
             Some(module) => module_moved(
                 module,
                 facts,
                 &mut out,
                 "its registry metadata changed under the same resolution",
+                autoload,
             )?,
         }
     }
@@ -279,7 +297,8 @@ fn dep_graph_moves(
     b: Option<&Value>,
     h: Option<&Value>,
     facts: &ModuleFacts,
-) -> Result<BTreeSet<String>, String> {
+    autoload: Autoload,
+) -> Result<BTreeSet<String>, ModuleChange> {
     let (b, h) = (object(b, "moduleDepGraph")?, object(h, "moduleDepGraph")?);
     let mut out = BTreeSet::new();
     for (k, _, _) in diff_maps(b, h) {
@@ -288,9 +307,16 @@ fn dep_graph_moves(
         if module.is_empty() {
             return Err(format!(
                 "`MODULE.bazel.lock`'s dependency graph entry `{k}` has no module name"
-            ));
+            )
+            .into());
         }
-        module_moved(module, facts, &mut out, "its resolved version changed")?;
+        module_moved(
+            module,
+            facts,
+            &mut out,
+            "its resolved version changed",
+            autoload,
+        )?;
     }
     Ok(out)
 }
@@ -483,13 +509,16 @@ mod tests {
     fn repos(c: ModuleChange) -> BTreeSet<String> {
         match c {
             ModuleChange::Repos(r) => r,
-            ModuleChange::Global(g) => panic!("global: {g}"),
+            ModuleChange::Global(g) | ModuleChange::Autoload { why: g, .. } => {
+                panic!("global: {g}")
+            }
         }
     }
 
     fn global(c: ModuleChange) -> String {
         match c {
             ModuleChange::Global(g) => g,
+            ModuleChange::Autoload { why, .. } => panic!("autoload: {why}"),
             ModuleChange::Repos(r) => panic!("repos: {r:?}"),
         }
     }
@@ -511,7 +540,7 @@ mod tests {
     fn an_identical_lock_moves_nothing() {
         let f = scan_module(MODULE);
         let l = lock(&ext_entry("\"plain\": {\"v\": 1}", "d"));
-        assert!(repos(diff_lock(&l, &l, &f)).is_empty());
+        assert!(repos(diff_lock(&l, &l, &f, Autoload::Off)).is_empty());
     }
 
     #[test]
@@ -519,7 +548,7 @@ mod tests {
         let f = scan_module(MODULE);
         let b = lock(&ext_entry("\"plain\": {\"v\": 1}", "d1"));
         let h = lock(&ext_entry("\"plain\": {\"v\": 1}", "d2"));
-        assert!(repos(diff_lock(&b, &h, &f)).is_empty());
+        assert!(repos(diff_lock(&b, &h, &f, Autoload::Off)).is_empty());
     }
 
     #[test]
@@ -527,7 +556,10 @@ mod tests {
         let f = scan_module(MODULE);
         let b = lock(&ext_entry("\"plain\": {\"v\": 1}", "d"));
         let h = lock(&ext_entry("\"plain\": {\"v\": 2}", "d"));
-        assert_eq!(repos(diff_lock(&b, &h, &f)), ["plain".to_string()].into());
+        assert_eq!(
+            repos(diff_lock(&b, &h, &f, Autoload::Off)),
+            ["plain".to_string()].into()
+        );
     }
 
     /// `use_repo(gen, alias = "internal")`: the lock writes `internal`, the
@@ -537,7 +569,10 @@ mod tests {
         let f = scan_module(MODULE);
         let b = lock(&ext_entry("\"internal\": {\"v\": 1}", "d"));
         let h = lock(&ext_entry("\"internal\": {\"v\": 2}", "d"));
-        assert_eq!(repos(diff_lock(&b, &h, &f)), ["alias".to_string()].into());
+        assert_eq!(
+            repos(diff_lock(&b, &h, &f, Autoload::Off)),
+            ["alias".to_string()].into()
+        );
     }
 
     /// A repository of an extension the main module never uses: reported under
@@ -551,7 +586,7 @@ mod tests {
                  {{\"hidden\": {{\"v\": {v}}}}}}}}}"
             )
         };
-        let got = repos(diff_lock(&lock(&e("1")), &lock(&e("2")), &f));
+        let got = repos(diff_lock(&lock(&e("1")), &lock(&e("2")), &f, Autoload::Off));
         assert_eq!(got, ["dep".to_string(), "hidden".to_string()].into());
     }
 
@@ -565,7 +600,7 @@ mod tests {
         ));
         // `extra` is in no `use_repo`, so the main repository cannot name it:
         // the extension's own repositories are charged with it.
-        let got = repos(diff_lock(&b, &h, &f));
+        let got = repos(diff_lock(&b, &h, &f, Autoload::Off));
         assert!(got.contains("extra") && got.contains("plain"), "{got:?}");
     }
 
@@ -584,10 +619,21 @@ mod tests {
             )
         };
         // The revision alone moved: same resolution, nothing to dirty.
-        assert!(repos(diff_lock(&side("r1", "bb"), &side("r2", "bb"), &f)).is_empty());
+        assert!(repos(diff_lock(
+            &side("r1", "bb"),
+            &side("r2", "bb"),
+            &f,
+            Autoload::Off
+        ))
+        .is_empty());
         // And with one module's metadata genuinely changed.
         assert_eq!(
-            repos(diff_lock(&side("r1", "bb"), &side("r2", "zz"), &f)),
+            repos(diff_lock(
+                &side("r1", "bb"),
+                &side("r2", "zz"),
+                &f,
+                Autoload::Off
+            )),
             ["quiche".to_string()].into()
         );
     }
@@ -603,7 +649,7 @@ mod tests {
             )
         };
         assert_eq!(
-            repos(diff_lock(&side("1.0"), &side("2.0"), &f)),
+            repos(diff_lock(&side("1.0"), &side("2.0"), &f, Autoload::Off)),
             ["quiche".to_string()].into()
         );
     }
@@ -617,7 +663,8 @@ mod tests {
                  \"registryFileHashes\": {{\"https://r/bazel_registry.json\": \"{h}\"}}}}"
             )
         };
-        assert!(global(diff_lock(&side("a"), &side("b"), &f)).contains("bazel_registry.json"));
+        assert!(global(diff_lock(&side("a"), &side("b"), &f, Autoload::Off))
+            .contains("bazel_registry.json"));
     }
 
     #[test]
@@ -630,7 +677,52 @@ mod tests {
                  \"https://r/modules/apple_support/1.0/source.json\": \"{h}\"}}}}"
             )
         };
-        assert!(global(diff_lock(&side("a"), &side("b"), &f)).contains("apple_support"));
+        assert!(
+            global(diff_lock(&side("a"), &side("b"), &f, Autoload::Off)).contains("apple_support")
+        );
+    }
+
+    /// `protobuf` is an ordinary module until the Bazel reading the tree
+    /// autoloads `proto_library` from it; then its every consumer is one no
+    /// edge names.
+    #[test]
+    fn a_moved_autoload_provider_is_global_only_under_a_bazel_that_autoloads() {
+        let f = scan_module(MODULE);
+        let side = |h: &str| {
+            format!(
+                "{{\"lockFileVersion\": 24, \"moduleExtensions\": {{}}, \
+                 \"registryFileHashes\": {{\
+                 \"https://r/modules/protobuf/1.0/source.json\": \"{h}\"}}}}"
+            )
+        };
+        assert_eq!(
+            repos(diff_lock(&side("a"), &side("b"), &f, Autoload::Off)),
+            ["protobuf".to_string()].into()
+        );
+        match diff_lock(&side("a"), &side("b"), &f, Autoload::On) {
+            ModuleChange::Autoload { module, why } => {
+                assert_eq!(module, "protobuf");
+                assert!(
+                    why.contains("autoloads") && why.contains("protobuf"),
+                    "{why}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // A toolchain module keeps its own wording where autoload is off,
+        // and takes the autoload one where it is on: both are global.
+        let side = |h: &str| {
+            format!(
+                "{{\"lockFileVersion\": 24, \"moduleExtensions\": {{}}, \
+                 \"registryFileHashes\": {{\
+                 \"https://r/modules/rules_cc/1.0/source.json\": \"{h}\"}}}}"
+            )
+        };
+        assert!(global(diff_lock(&side("a"), &side("b"), &f, Autoload::Off)).contains("toolchains"));
+        assert!(matches!(
+            diff_lock(&side("a"), &side("b"), &f, Autoload::On),
+            ModuleChange::Autoload { .. }
+        ));
     }
 
     #[test]
@@ -644,7 +736,7 @@ mod tests {
             )
         };
         assert_eq!(
-            repos(diff_lock(&side("1"), &side("2"), &f)),
+            repos(diff_lock(&side("1"), &side("2"), &f, Autoload::Off)),
             ["quiche".to_string()].into()
         );
     }
@@ -655,12 +747,13 @@ mod tests {
         let side = |v: &str| {
             format!("{{\"lockFileVersion\": 24, \"moduleExtensions\": {{}}, \"novel\": {v}}}")
         };
-        assert!(global(diff_lock(&side("1"), &side("2"), &f)).contains("novel"));
+        assert!(global(diff_lock(&side("1"), &side("2"), &f, Autoload::Off)).contains("novel"));
         // The same key, unchanged, is not a reason to escalate.
         assert!(repos(diff_lock(
             &format!("{}, \"facts\": 1}}", side("1").trim_end_matches('}')),
             &format!("{}, \"facts\": 2}}", side("1").trim_end_matches('}')),
-            &f
+            &f,
+            Autoload::Off
         ))
         .is_empty());
     }
@@ -673,7 +766,7 @@ mod tests {
                 "\"//bazel:ext.bzl%gen\": {{\"general\": {{\"novelKey\": {v}}}}}"
             ))
         };
-        assert!(global(diff_lock(&side("1"), &side("2"), &f)).contains("novelKey"));
+        assert!(global(diff_lock(&side("1"), &side("2"), &f, Autoload::Off)).contains("novelKey"));
     }
 
     #[test]
@@ -681,7 +774,7 @@ mod tests {
         let f = scan_module(MODULE);
         let b = "{\"lockFileVersion\": 3, \"moduleExtensions\": {}}";
         let h = "{\"lockFileVersion\": 3, \"moduleExtensions\": {\"a\": {}}}";
-        assert!(global(diff_lock(b, h, &f)).contains("format version 3"));
+        assert!(global(diff_lock(b, h, &f, Autoload::Off)).contains("format version 3"));
     }
 
     #[test]
@@ -689,13 +782,13 @@ mod tests {
         let f = scan_module(MODULE);
         let b = "{\"lockFileVersion\": 13, \"moduleExtensions\": {}}";
         let h = "{\"lockFileVersion\": 24, \"moduleExtensions\": {}}";
-        assert!(global(diff_lock(b, h, &f)).contains("13 -> 24"));
+        assert!(global(diff_lock(b, h, &f, Autoload::Off)).contains("13 -> 24"));
     }
 
     #[test]
     fn unparsable_json_is_global() {
         let f = scan_module(MODULE);
-        assert!(global(diff_lock("{", "{}", &f)).contains("does not parse"));
+        assert!(global(diff_lock("{", "{}", &f, Autoload::Off)).contains("does not parse"));
     }
 
     #[test]
@@ -709,7 +802,7 @@ mod tests {
             ))
         };
         assert_eq!(
-            repos(diff_lock(&side("1"), &side("2"), &f)),
+            repos(diff_lock(&side("1"), &side("2"), &f, Autoload::Off)),
             ["plain".to_string()].into()
         );
     }

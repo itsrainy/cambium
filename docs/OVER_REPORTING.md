@@ -21,6 +21,7 @@ sound. Everything below is one of those two, at some scale.
 | `WORKSPACE` statement not localised | a statement the shape reader cannot place, including any reordering; the file added or removed | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/workspace.rs` |
 | `MODULE.bazel` or lockfile not localised | an unparsed statement, lock added or removed, unknown lock key, format version change | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/lockfile.rs` |
 | Toolchain registration | `register_toolchains`, `register_execution_platforms`, or any module on `TOOLCHAIN_MODULES` | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
+| Autoload provider moved | `rules_cc`, `rules_java`, `rules_python`, `rules_shell` or `protobuf` bumped, overridden, re-resolved in the lock or redeclared in `WORKSPACE`, under Bazel 8 or later (an unknown version counts as 8) | `CAMBI-W024` | `crates/engine/src/externals.rs` (`autoload_at`), `crates/index/src/vocabulary.rs` (`AUTOLOAD_PROVIDERS`) |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
 The `.bazelrc` screen is the dominant cause on the subjects: 13 of envoy's 18

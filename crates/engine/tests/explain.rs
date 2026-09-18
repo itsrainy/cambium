@@ -4,7 +4,7 @@
 //!
 //! The rows come from the synthetic source, so none of this needs Bazel.
 
-use cambium_engine::{AffectedRequest, Code, DirectReason, SynthQuerier};
+use cambium_engine::{AffectedRequest, Code, DirectReason, GlobalReason, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, Mutation};
 use cambium_testkit::{engine, req};
 
@@ -127,18 +127,9 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
     let diagnostics = e.diagnostics().drain();
     let cause = diagnostics
         .iter()
-        .find(|d| {
-            matches!(
-                d.code,
-                Code::W004BazelrcGlobal
-                    | Code::W008NoLoadingLayer
-                    | Code::W009WorkspaceLevelBzl
-                    | Code::W013InvalidatorMatched
-                    | Code::W014ExternalsGlobal
-                    | Code::W015FlagUnresolved
-            )
-        })
+        .find(|d| GlobalReason::is_cause(d.code))
         .unwrap_or_else(|| panic!("a global run should name its cause: {diagnostics:?}"));
+    assert_eq!(cause.code, Code::W004BazelrcGlobal);
     assert!(
         cause.help.is_some(),
         "the cause carries the fix `explain` prints: {cause:?}"
