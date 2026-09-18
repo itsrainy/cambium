@@ -45,11 +45,38 @@ prototype measured the price of chasing them (docs/SKYFRAME_PROTOTYPES.md).
 
 ## The plan, in order
 
-Each phase ends with a box run and a merge to main. Nothing starts on the
-next phase until the previous one's box run is green or its failure is
-understood and filed.
+The box is the gate, not the workbench. A full five-subject run is seven
+to eight hours of instance time, and the last one cost a day because it
+was three runs chained (a restart after an abort, a queued control walk,
+a cache purge before shutdown). So the phases below are batched into
+**three box runs total**, and each has a local gate that must pass before
+the box is started.
 
-### Phase 1: make the oracle say what it sees (#24)
+**The local gate, before any box run:**
+
+- `cargo test --workspace`, clippy clean.
+- The offline replay precheck over the stored indexes and recorded
+  change sets in `bench-precheck/` (docs/OPERATIONS.md). This is what
+  would have caught the `//external` guard abort before it cost a rerun.
+- `cambi profile` on the bazel subject (five commits, local), plus the
+  one subject the phase is about, at the steps its issue names. For #23
+  that is xla at the six named pairs; for #22 it is envoy at three of the
+  32 and xla at the four.
+- A 40-step local walk on the bazel subject with the oracle every step.
+
+**Box run rules:**
+
+- `SMOKE=1` first, then the full run in one invocation, never a chained
+  second run. If a subject aborts, the box stops, the abort is fixed
+  locally with the precheck, and the run is rescheduled as a whole.
+- Only the subjects the phase can change. A phase that touches the
+  loading layer runs all five; a phase that touches one stage runs the
+  subjects that exercise it.
+- No purge on the box. Peer caches are deleted by wiping the volume at
+  the end, or not at all; a 303 GB `rm` is not a shutdown step.
+- Stop is chained to the run script's exit, and the console is checked.
+
+### Phase 1: make the oracle say what it sees (#24), local only
 
 Cheapest work with the highest information return. The rebuild oracle
 counts missing loading-layer rows and prints a number.
@@ -60,13 +87,16 @@ counts missing loading-layer rows and prints a number.
   pin and the step as expected, and stop counting them.
 - Decide what is left: either a non-zero count fails the walk, or the
   allowed class is documented in docs/METHODOLOGY.md.
-- Rerun xla on current main (b8c8cbc is not in the box run). This tells
-  us whether the ifrt/ir cluster in #23 is already gone.
+- Rerun xla on the local machine at the six named pairs with the
+  current binary (b8c8cbc is not in the box run). This tells us whether
+  the ifrt/ir cluster in #23 is already gone without a box run.
 
-Exit: every subject reports zero unexplained missing rows, or the
-remaining ones are named and filed.
+Exit: the bazel local walk reports zero unexplained missing rows, or the
+remaining ones are named and filed. Other subjects are read from the
+existing box results; the sidecar can be produced from the stored walk
+JSON where it carries enough, and otherwise waits for box run A.
 
-### Phase 2: the xla main-repo misses (#23)
+### Phase 2: the xla main-repo misses (#23), local only
 
 Whatever Phase 1 leaves. Two candidates:
 
@@ -78,10 +108,10 @@ Whatever Phase 1 leaves. Two candidates:
   query, find the missing link (generated-file edges are the suspect),
   fix, add the shape to the synthetic corpus.
 
-Exit: xla history unsound steps are exactly the four external-route
-steps.
+Exit: the six named pairs are sound locally. The 300-step confirmation
+is box run A.
 
-### Phase 3: toolchain rule-class escalation (#26)
+### Phase 3: toolchain rule-class escalation (#26), local only
 
 Small and self-contained; done before the externals work because it
 closes a real hole with one rule.
@@ -93,10 +123,10 @@ closes a real hole with one rule.
   the proxy for it.
 - Synthetic test for each of the three classes.
 
-Exit: the globs are gone from the default config and the walk is
-unchanged on every subject.
+Exit: the globs are gone from the default config and the local bazel
+walk is unchanged.
 
-### Phase 4: autoload providers on Bazel 8+ (#25)
+### Phase 4: autoload providers on Bazel 8+ (#25), local only
 
 - The externals stage already knows which module a lock or `MODULE.bazel`
   diff moved. When that module is an autoload provider (`rules_cc`,
@@ -109,6 +139,15 @@ unchanged on every subject.
   the history has one.
 
 Exit: a provider bump on Bazel 8+ answers `//...` with a code.
+
+### Box run A: phases 1 through 4 together
+
+All five subjects, 300 steps, one invocation, after the local gate on the
+batched branch. Expected: bazel, sourcegraph, apollo unchanged; xla down
+to the four external-route steps; envoy unchanged at 32. The rebuild
+oracle's sidecar from Phase 1 is the new thing this run produces. This is
+also the run RESULTS.md is regenerated from, which retires the pre-layer
+numbers. Seven to eight hours, then stop.
 
 ### Phase 5: in-tree external repositories (#22)
 
@@ -136,12 +175,19 @@ stay as declarations.
    the round trip; it should now pass on envoy's 32 steps and xla's 4.
    Keep the probe, because a declared-only repository can still round
    trip and must still fail.
-5. **Cost.** Measure cold index and per-step cost on envoy and xla on the
-   box before and after. The universe grows by the in-tree repositories'
-   packages, which is bounded by the tree.
+5. **Cost.** Measure cold index and per-step cost on envoy locally first
+   (30 commits with `cambi profile`); the universe grows by the in-tree
+   repositories' packages, which is bounded by the tree.
 
-Exit: envoy and xla PASS at 300 steps, and the cold and per-step cost
-columns are within the budget set in Phase 0 below.
+Exit locally: envoy sound at three of its 32 steps and xla at its four,
+profile cost within budget.
+
+### Box run B: phase 5, and phase 6 if it is ready
+
+envoy and xla only, 300 steps, unless the change touched the loading
+layer's key filter, in which case all five. About four hours. Phase 6 is
+a separate stage with its own local gate, and if it lands on the same
+branch before run B starts it rides along; otherwise it waits for run C.
 
 ### Phase 6: the `.bazelrc` screen
 
@@ -156,8 +202,14 @@ envoy's 18, 6 of xla's 7) and the thing a CI operator will notice first.
 - `--registry` changes are a lock-file question, not a global; route them
   to the externals stage.
 
-Exit: the history global count drops on envoy and xla with no change to
-soundness.
+Exit locally: the global count drops on the envoy and xla profiles with
+no change to the affected sets. Confirmed at 300 steps in box run B or C.
+
+### Box run C: the closing run
+
+All five subjects, once, from main, after everything above is merged.
+This is the run the external write-up quotes. If run B already covered
+every phase, run C is the nightly's first run instead of a separate one.
 
 ### Phase 0, running throughout: the benchmark
 
@@ -169,9 +221,13 @@ when they block a phase.
 - A cost budget per subject, written down: cold index seconds and
   per-step p50 and p90 on the box. Phase 5 needs it to say whether the
   universe growth is acceptable.
-- Nightly on the box against main, results tarred back, RESULTS.md
-  regenerated. CI on GitHub is blocked on billing; the box is the CI until
-  that changes.
+- A scheduled run, not a nightly: weekly at most, or per merge to main
+  when a phase closes. CI on GitHub is blocked on billing; when it is
+  unblocked, the local gate moves there and the box stays for the
+  300-step runs only.
+- The precheck corpus in `bench-precheck/` kept current: every box run's
+  recorded change sets and stored indexes are added, so the next
+  precheck replays more of what the box would.
 - Regenerate RESULTS.md for the layer now; it still describes the
   pre-layer engine.
 
@@ -189,15 +245,20 @@ The remaining work is product, and it is where the next decision is:
 
 ## Order and sizing
 
-| phase | issues | size | why this order |
-|---|---|---:|---|
-| 0 | #14, RESULTS.md | ongoing | gates everything |
-| 1 | #24 | days | cheapest, most information |
-| 2 | #23 | days | may already be half done |
-| 3 | #26 | day | one rule, closes a hole |
-| 4 | #25 | day or two | one rule, closes a hole |
-| 5 | #22 | weeks | the design piece; decides envoy-shaped repos |
-| 6 | bazelrc | week | dominant global, operator-visible |
+| phase | issues | size | box run | why this order |
+|---|---|---:|---|---|
+| 0 | #14, RESULTS.md | ongoing | none | gates everything |
+| 1 | #24 | days | A | cheapest, most information |
+| 2 | #23 | days | A | may already be half done |
+| 3 | #26 | day | A | one rule, closes a hole |
+| 4 | #25 | day or two | A | one rule, closes a hole |
+| 5 | #22 | weeks | B | the design piece; decides envoy-shaped repos |
+| 6 | bazelrc | week | B or C | dominant global, operator-visible |
+
+Three box runs: A after phases 1 to 4 (all five subjects, ~8 h), B after
+phase 5 (envoy and xla, ~4 h), C once from main at the end (~8 h). About
+twenty instance hours for the whole roadmap, against the twenty-four the
+last single run cost.
 
 The order is by information per hour until Phase 5, which is the only
 phase whose outcome is uncertain. If Phase 5's cost measurement fails the
