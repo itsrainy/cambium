@@ -34,6 +34,11 @@ pub(crate) struct ScreenedDiff<'a> {
     /// `--registry` moved in a line the query reads: a lock-file question the
     /// externals stage answers ([`Run::registry_change`]).
     pub(crate) registry: Option<bazelrc::RegistryChange>,
+    /// Changed files named like rc files that Bazel is told not to read (the
+    /// root `.bazelrc` under `--noworkspace_rc`). They stay in `changes` as
+    /// ordinary source changes, and the dirty stage must not fire the
+    /// `.bazelrc` invalidator on them.
+    pub(crate) inert: Vec<String>,
     /// Set when a bazelrc edit invalidates the whole run.
     pub(crate) global: Option<GlobalReason>,
 }
@@ -75,6 +80,7 @@ impl Engine {
         let head_chain = chain_at(&req.head);
         let mut rcs: BTreeSet<&str> = base_chain.files.keys().map(String::as_str).collect();
         rcs.extend(head_chain.files.keys().map(String::as_str));
+        let workspace_rc = bazelrc::reads_workspace_rc(&self.cfg.bazel.startup_flags);
 
         let global = |path: &str, cause: BazelrcCause| -> ScreenedDiff<'a> {
             let reason = GlobalReason::Bazelrc {
@@ -88,14 +94,28 @@ impl Engine {
                 safe: 0,
                 label_flags: Vec::new(),
                 registry: None,
+                inert: Vec::new(),
                 global: Some(reason),
             }
         };
 
         let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
+        let mut inert: Vec<String> = Vec::new();
         let mut rc_changes = 0usize;
         for c in changes {
             if !rcs.contains(c.path.as_str()) {
+                // The root rc is a file Bazel reads for this workspace unless
+                // the startup flags say otherwise; then it is a source file
+                // like any other, and the `.bazelrc` invalidator must not
+                // undo that.
+                if c.path == bazelrc::WORKSPACE_RC && !workspace_rc {
+                    tracing::debug!(
+                        path = %c.path,
+                        "the startup flags say Bazel does not read the workspace rc; its edit \
+                         is an ordinary source change"
+                    );
+                    inert.push(c.path.clone());
+                }
                 kept.push(c);
                 continue;
             }
@@ -122,6 +142,7 @@ impl Engine {
                 safe: 0,
                 label_flags: Vec::new(),
                 registry: None,
+                inert,
                 global: None,
             };
         }
@@ -151,6 +172,7 @@ impl Engine {
             safe: rc_changes,
             label_flags: screen.label_flags,
             registry: screen.registry,
+            inert,
             global: None,
         }
     }
@@ -257,7 +279,7 @@ pub fn dirty_stage(
     let mut run = Run::new(engine, base, &refuses, req);
     run.stats.changed_files = changes.len();
     let changes: Vec<&Change> = changes.iter().collect();
-    run.dirty(&changes, ext)
+    run.dirty(&changes, &[], ext)
 }
 
 /// What the query stage read back.
@@ -314,7 +336,7 @@ pub(crate) fn compute(
         return Ok(run.global(reason));
     }
 
-    let stage = run.dirty(&screened.changes, &mut ext)?;
+    let stage = run.dirty(&screened.changes, &screened.inert, &mut ext)?;
     if let Some(reason) = stage.global {
         return Ok(run.global(reason));
     }
@@ -463,9 +485,19 @@ impl<'a> Run<'a> {
     /// new `BUILD` file, a file entering a `glob`, a `.bzl` loaded only by
     /// other `.bzl` files: all three are edges Bazel recorded, and none of
     /// them is a case in this function.
-    pub(crate) fn dirty(&mut self, changes: &[&Change], ext: &mut Externals) -> Result<DirtyStage> {
+    ///
+    /// `exempt` names changed files the bazelrc screen accounted for as
+    /// ordinary source changes (the root rc under `--noworkspace_rc`), which
+    /// the `.bazelrc` invalidator must therefore not fire on.
+    pub(crate) fn dirty(
+        &mut self,
+        changes: &[&Change],
+        exempt: &[String],
+        ext: &mut Externals,
+    ) -> Result<DirtyStage> {
         let mut matchers = Matchers::compile(&self.engine.config().rules())?;
         matchers.exempt(ext.handled.clone());
+        matchers.exempt(exempt.iter().cloned());
         let mut packages = PackageSet::from_index(self.base);
         let mut dirty = cambium_classify::dirty_set(
             changes,

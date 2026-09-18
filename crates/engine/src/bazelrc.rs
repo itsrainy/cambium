@@ -51,6 +51,13 @@
 //!   `import` whose target is missing would fail Bazel, and one naming a file
 //!   outside the repository cannot be read, so either one is unknown when the
 //!   line itself moved.
+//! - **Startup.** `[bazel].startup_flags` decide which files are rc files at
+//!   all: `--bazelrc=` adds one, and `--noworkspace_rc` tells Bazel not to
+//!   read `%workspace%/.bazelrc`, nor therefore anything it imports. Under
+//!   it the root rc is not an rc file for this workspace, and an edit to it
+//!   is an ordinary source change, exactly like a nested workspace's
+//!   `.bazelrc` (and exempt from the `.bazelrc` invalidator for the same
+//!   reason).
 //!
 //! # The allowlist
 //!
@@ -145,6 +152,27 @@ pub struct Chain {
     pub unresolved: BTreeMap<String, String>,
 }
 
+/// The workspace rc file, `%workspace%/.bazelrc`, which Bazel reads unless
+/// the startup option `--noworkspace_rc` says not to.
+pub const WORKSPACE_RC: &str = ".bazelrc";
+
+/// Whether Bazel reads [`WORKSPACE_RC`] under these startup flags.
+///
+/// `--noworkspace_rc` turns it off and `--workspace_rc` back on, the last
+/// one winning as in Bazel's startup parser (both are nullary: neither takes
+/// a value). Every other rc source, a `--bazelrc=` file and what it imports,
+/// is read regardless. The benchmark runs apollo this way, because its own
+/// rc carries a query flag the pinned Bazel refuses; under it the root rc is
+/// not an rc file for this workspace at all, and an edit to it is an
+/// ordinary source change.
+pub fn reads_workspace_rc(startup_flags: &[String]) -> bool {
+    startup_flags.iter().fold(true, |on, f| match f.as_str() {
+        "--noworkspace_rc" => false,
+        "--workspace_rc" => true,
+        _ => on,
+    })
+}
+
 /// Reads the rc chain at one revision.
 ///
 /// `read` returns a file's text at that revision, or `None` when it does not
@@ -152,14 +180,20 @@ pub struct Chain {
 /// absolute in Bazel; an absolute path under `root` is mapped into the
 /// repository and any other absolute path is outside it. A bare relative path
 /// is taken as repository-relative, which is the only reading under which it
-/// could name a file in the diff.
+/// could name a file in the diff. The chain starts from [`WORKSPACE_RC`]
+/// unless the startup flags say Bazel does not read it
+/// ([`reads_workspace_rc`]), and from every `--bazelrc=` file inside the
+/// repository.
 pub fn chain(
     root: &std::path::Path,
     startup_flags: &[String],
     read: &dyn Fn(&str) -> Option<String>,
 ) -> Chain {
     let mut out = Chain::default();
-    let mut queue: Vec<String> = vec![".bazelrc".to_string()];
+    let mut queue: Vec<String> = Vec::new();
+    if reads_workspace_rc(startup_flags) {
+        queue.push(WORKSPACE_RC.to_string());
+    }
     for f in startup_flags {
         if let Some(p) = f.strip_prefix("--bazelrc=") {
             if let Some(rel) = repo_relative(root, p) {
@@ -1925,5 +1959,44 @@ mod tests {
             vec!["try-import /elsewhere/x.bazelrc".to_string()],
             "outside the repository; a missing try-import inside it is silent"
         );
+    }
+
+    /// Under `--noworkspace_rc` the root rc and its imports are not read;
+    /// a `--bazelrc=` file inside the repository still is.
+    #[test]
+    fn noworkspace_rc_drops_the_root_rc_and_its_imports() {
+        let root = std::path::Path::new("/repo");
+        let files: BTreeMap<&str, &str> = [
+            (
+                ".bazelrc",
+                "import %workspace%/ci.bazelrc\ncommon --repo_env=A=1\n",
+            ),
+            ("ci.bazelrc", "common --jobs=8\n"),
+            ("tools/extra.rc", "common --jobs=4\n"),
+        ]
+        .into_iter()
+        .collect();
+        let read = |p: &str| files.get(p).map(|t| t.to_string());
+        let paths = |flags: &[&str]| {
+            let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+            reachable(root, &flags, &read)
+        };
+        let want =
+            |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            paths(&["--noworkspace_rc", "--bazelrc=/repo/tools/extra.rc"]),
+            want(&["tools/extra.rc"])
+        );
+        assert_eq!(paths(&["--noworkspace_rc"]), want(&[]));
+        // The last spelling wins, as in Bazel's startup parser.
+        assert_eq!(
+            paths(&["--noworkspace_rc", "--workspace_rc"]),
+            want(&[".bazelrc", "ci.bazelrc"])
+        );
+        assert!(reads_workspace_rc(&[]));
+        assert!(!reads_workspace_rc(&[
+            "--workspace_rc".to_string(),
+            "--noworkspace_rc".to_string()
+        ]));
     }
 }

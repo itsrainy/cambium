@@ -62,6 +62,14 @@ are applied before any flag is classified:
   naming a file outside the repository, is unknown when the line itself
   moved. The chain is read from git at both revisions, never from the
   working tree, so an untracked developer override is out of scope.
+- **Startup.** `[bazel].startup_flags` decide which files are rc files at
+  all: `--bazelrc=` adds one, and `--noworkspace_rc` tells Bazel not to
+  read `%workspace%/.bazelrc`, nor therefore anything it imports. Under it
+  the root rc is inert, and an edit to it is an ordinary source change,
+  like a nested workspace's `.bazelrc`, exempt from the `.bazelrc`
+  invalidator. apollo runs this way on the benchmark (its own rc carries a
+  query flag its pinned Bazel refuses), so its `.bazelrc` edits reach
+  neither the screen nor `CAMBI-W004`.
 
 What is left is classified by the allowlist, whose criterion is loading:
 whether the flag can change which packages load, which targets exist, or

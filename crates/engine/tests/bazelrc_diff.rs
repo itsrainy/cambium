@@ -323,6 +323,48 @@ fn a_nested_workspaces_bazelrc_is_not_this_workspaces() {
     assert_eq!(r.stats.bazelrc_safe_diffs, 0, "it was not screened at all");
 }
 
+/// Under the startup option `--noworkspace_rc` Bazel reads neither the root
+/// `.bazelrc` nor what it imports, so the file is inert for this workspace
+/// (apollo runs this way on the benchmark: its own rc carries a query flag
+/// the pinned Bazel refuses). An edit to it is an ordinary source change:
+/// not screened, and not the `.bazelrc` invalidator either.
+#[test]
+fn a_root_rc_the_startup_flags_ignore_is_an_ordinary_change() {
+    let g = graph();
+    let mut cfg = Config::default();
+    cfg.bazel.startup_flags = vec!["--noworkspace_rc".into()];
+    let (_d, e, base, head) = repo_with_files(
+        &[(".bazelrc", "common --repo_env=x=1\n")],
+        &[(".bazelrc", "common --repo_env=x=2\n")],
+        cfg,
+    );
+    let r = run(&e, &base, &head, &g).report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.bazelrc_safe_diffs, 0, "it was not screened at all");
+    let diags = drained(&e);
+    assert!(
+        !diags.iter().any(|d| matches!(
+            d.code,
+            cambium_engine::Code::W004BazelrcGlobal | cambium_engine::Code::W013InvalidatorMatched
+        )),
+        "{diags:?}"
+    );
+
+    // The last spelling wins, as in Bazel's startup parser.
+    let mut cfg = Config::default();
+    cfg.bazel.startup_flags = vec!["--noworkspace_rc".into(), "--workspace_rc".into()];
+    let (_d, e, base, head) = repo_with_files(
+        &[(".bazelrc", "common --repo_env=x=1\n")],
+        &[(".bazelrc", "common --repo_env=x=2\n")],
+        cfg,
+    );
+    let r = run(&e, &base, &head, &g).report;
+    assert_eq!(
+        r.global_reason.as_deref(),
+        Some(".bazelrc: common --repo_env changed, not on the loading-irrelevant allowlist")
+    );
+}
+
 /// And the converse: a file of any name that the root rc imports is an rc
 /// file, and an unsafe flag in it is global, named by its own path.
 #[test]

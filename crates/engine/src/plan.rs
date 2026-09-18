@@ -195,7 +195,7 @@ impl Engine {
                 return Ok(plan);
             }
         }
-        let stage = run.dirty(&screened.changes, &mut ext)?;
+        let stage = run.dirty(&screened.changes, &screened.inert, &mut ext)?;
 
         plan.dirty_packages = Some(stage.dirty.dirty.len());
         match stage.global {
