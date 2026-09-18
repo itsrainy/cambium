@@ -94,6 +94,48 @@ oracle of 761.
   that could possibly work and the one every other strategy has to beat on wall
   time.
 
+## What the four measured, and what became of them
+
+Each prototype ran ten seeded steps on the `bazel` subject (Bazel 9.2.0, seed
+0) against the control row above. The branches were closed once the loading
+layer landed (PR #20); the numbers and findings are kept here because they are
+what decided it. The full write-ups are on the closed PRs (#15 skycache, #16
+skyframe-oracle, #17 skyframe-index, #18 warm-query, #19 skyframe-analysis).
+
+| strategy | prepare p50 ms | answer p50 ms | recall | state p50 bytes | outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| skyframe-oracle | | | 1/10 | | dropped |
+| skyframe-index | 2335 | 61 | 10/10 | 945415 | landed as the loading layer |
+| skyframe-analysis | 49908 | 446 | 1/10 | 4.57 MB | dropped |
+| warm-query | 477 | 2066 | 10/10 | 0 | dropped (dev machines only) |
+| skycache (spike) | | | | | infeasible |
+
+- **skycache**: not reachable from a released Bazel. `upload` mode crashes on a
+  missing `LongVersionGetter`, the fingerprint store is in-memory only, and the
+  frontier dumps are Skyfocus state. `dump_upload_manifest_only` lists 12.5k
+  analysis keys without fingerprints, so a node that stayed and changed is
+  invisible.
+- **skyframe-oracle**: a loading dump is a snapshot, not an invalidation log.
+  It carries no `FILE_STATE` for ordinary sources, `PACKAGE` nodes never
+  depend on each other, and `--skyframe=rdeps` is direct only, so diffing two
+  dumps names almost nothing a source edit reaches.
+- **skyframe-index**: sound on all ten steps, nine exact, 61 ms answers. Glob
+  and sub-package rules fell out of `GLOBS` and `PACKAGE_LOOKUP` edges with no
+  code. The rule layer still had to come from the query proto (a source file's
+  contents reach consumers through rules and nothing else), `MODULE.bazel` has
+  no edges, and re-querying bought nothing. This is what the loading layer is.
+- **skyframe-analysis**: 285 MB per revision, recall 1/10. Implicit outputs,
+  `target_compatible_with` targets and failed analyses have no
+  `CONFIGURED_TARGET` node. Only toolchain edits have real edges; a flag or a
+  `bazel_dep` bump moves no key, and 23 of 24 config checksums change on any
+  flag. The one case it wins (a toolchain `BUILD` edit reaching 707 of 4175
+  targets where the engine escalates) is not worth the tier.
+- **warm-query**: sound on all ten steps and ties the index warm (1.4-2.1 s),
+  but a cold answer costs 11 s (32 s worst) and re-loads the universe, which
+  puts it on developer machines and out of CI. `--keep_going` is mandatory on
+  this subject, and seeding `rbuildfiles` instead of the changed `.bzl` loses
+  352 targets.
+
 ## Adding one
 
 1. Implement `Strategy` for a type in `crates/bench/src/skyframe/`. `name`
