@@ -17,8 +17,8 @@ use cambium_engine::Engine;
 use cambium_index::IndexFile;
 
 use super::cambi::{cold_build, Driver};
-use crate::oracles::rebuild::compare_by_label;
 use crate::oracles::rdeps::RdepsResult;
+use crate::oracles::rebuild::compare_by_label;
 use crate::state::{HistoryState, State};
 use crate::util::now_unix;
 
@@ -37,6 +37,13 @@ pub struct StepContext<'a> {
     pub head_index: Option<&'a Path>,
     /// cambium's affected set, restricted to what it reports on.
     pub cambium_set: &'a BTreeSet<String>,
+    /// The packages cambium marked dirty for this step.
+    ///
+    /// The `rdeps` oracle's deleted half needs it: when a change set deletes a
+    /// whole package, every rule in it is tombstoned and the package's name
+    /// survives nowhere in the affected set, so this is the only spelling that
+    /// can account for its consumers.
+    pub dirty_packages: &'a BTreeSet<String>,
     /// Run the `rdeps` oracle on this step.
     pub want_oracle: bool,
     /// Run the peers on this step.
@@ -254,10 +261,12 @@ impl Runner<'_> {
             p.tool(Some(crate::tools::cambi::NAME));
         }
         self.driver.checkout(&step.head)?;
-        let run = match self
-            .driver
-            .update(&step.parent, &step.head, &self.index_path, self.opts.publish)
-        {
+        let run = match self.driver.update(
+            &step.parent,
+            &step.head,
+            &self.index_path,
+            self.opts.publish,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 if let Some(p) = self.progress() {
@@ -302,10 +311,12 @@ impl Runner<'_> {
         let want_oracle = self.opts.oracle_sample.contains(i - 1);
         let want_peers = self.opts.peer_sample.contains(i - 1);
         let head_index = (run.wrote_index).then(|| self.index_path.as_path());
+        let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
         let ctx = StepContext {
             step,
             head_index,
             cambium_set: &run.labels,
+            dirty_packages: &dirty_packages,
             want_oracle,
             want_peers,
         };
@@ -406,12 +417,8 @@ impl Runner<'_> {
         let fresh = IndexFile::open(&fresh_path)?;
         let diff = compare_by_label(applied.view(), fresh.view(), self.opts.diff_cap);
         let ok = diff.is_empty();
-        self.result.head_index = super::cambi::archive_head_index(
-            self.engine,
-            &self.opts.state_dir,
-            to,
-            &fresh_path,
-        );
+        self.result.head_index =
+            super::cambi::archive_head_index(self.engine, &self.opts.state_dir, to, &fresh_path);
         self.result.rebuild_oracle = Some(RebuildOracle {
             ok,
             summary: if ok { String::new() } else { diff.summary() },
@@ -460,7 +467,10 @@ fn score_cambium(
 /// Recall is `|answer ∩ oracle| / |oracle|`; tightness is `|oracle| /
 /// |answer|`. Both `None` when the oracle did not run; tightness `None` on an
 /// empty answer, which has no ratio.
-pub fn score(labels: &BTreeSet<String>, oracle: Option<&RdepsResult>) -> (Option<f64>, Option<f64>) {
+pub fn score(
+    labels: &BTreeSet<String>,
+    oracle: Option<&RdepsResult>,
+) -> (Option<f64>, Option<f64>) {
     let Some(o) = oracle else {
         return (None, None);
     };

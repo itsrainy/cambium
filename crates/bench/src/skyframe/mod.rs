@@ -165,6 +165,14 @@ pub struct Prepared {
 pub struct Answer {
     /// The changed targets, as labels.
     pub targets: BTreeSet<String>,
+    /// The packages the strategy marked dirty, when it has such a notion.
+    ///
+    /// The `rdeps` oracle's deleted half reads it: a wholly-deleted package
+    /// tombstones every rule in it, so no label in `targets` carries the
+    /// package name and this is the only spelling left. A strategy with no
+    /// dirty set leaves it empty and is scored on labels alone.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dirty_packages: BTreeSet<String>,
     #[serde(with = "millis")]
     pub wall: Duration,
     pub notes: BTreeMap<String, String>,
@@ -238,8 +246,7 @@ impl RunResult {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_slice(&data)?)
     }
 }
@@ -371,6 +378,7 @@ impl Strategy for CambiStrategy<'_> {
         notes.insert("wrote_index".into(), run.index.is_some().to_string());
         Ok(Answer {
             targets: run.report.affected_labels().into_iter().collect(),
+            dirty_packages: run.report.dirty_packages.iter().cloned().collect(),
             wall: run.wall,
             notes,
         })

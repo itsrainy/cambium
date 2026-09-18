@@ -6,8 +6,8 @@
 //! smoke test; here [`NoLiveChecks`] stands in and the rebuild oracle is the
 //! proof.
 
-use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_bench::walk::{self, NoLiveChecks, Tier, WalkOptions};
+use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
 use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 use cambium_testkit::synthetic_engine;
@@ -103,21 +103,92 @@ fn steps(f: &Fixture) -> (Vec<String>, Vec<walk::Step>) {
     (commits, steps)
 }
 
+/// The live checks see cambium's dirty packages, not an empty set.
+///
+/// The `rdeps` oracle's deleted half credits a deleted file's consumer to its
+/// package when the rule is gone at head, and for a wholly-deleted package
+/// that is the only spelling left: every rule in it is tombstoned, so no
+/// affected label carries the package name. The driver used to hand the live
+/// checks an empty dirty set, which made that escape hatch unreachable and
+/// failed every change set that deleted a package outright.
+#[test]
+fn the_live_checks_get_the_steps_dirty_packages() {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<BTreeSet<String>>>,
+    }
+
+    impl walk::LiveChecks for Recorder {
+        fn oracle(
+            &self,
+            ctx: &walk::StepContext<'_>,
+        ) -> anyhow::Result<Option<cambium_bench::oracles::rdeps::RdepsResult>> {
+            self.seen.lock().unwrap().push(ctx.dirty_packages.clone());
+            Ok(None)
+        }
+        fn peers(
+            &self,
+            _: &walk::StepContext<'_>,
+            _: Option<&cambium_bench::oracles::rdeps::RdepsResult>,
+        ) -> Vec<cambium_bench::walk::model::ToolStep> {
+            Vec::new()
+        }
+    }
+
+    let f = fixture(6, "typical-pr");
+    let (commits, s) = steps(&f);
+    let rec = Recorder::default();
+    let r = walk::walk(&f.engine, &f.engine_driver(), &rec, &commits, &s, &opts(&f)).unwrap();
+    assert!(r.done);
+    let seen = rec.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        r.steps.len(),
+        "the oracle hook ran on every step"
+    );
+    // The record's count and the set the live checks saw are the same fact.
+    for (st, got) in r.steps.iter().zip(seen.iter()) {
+        assert_eq!(st.dirty_packages, got.len(), "{}..{}", st.parent, st.head);
+    }
+    assert!(
+        seen.iter().any(|d| !d.is_empty()),
+        "no step passed a dirty package through"
+    );
+}
+
 #[test]
 fn a_walk_runs_and_the_rebuild_oracle_holds() {
     let f = fixture(8, "typical-pr");
     let (commits, s) = steps(&f);
-    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
 
     assert!(r.done);
     assert_eq!(r.steps.len(), commits.len() - 1);
     assert_eq!(r.tier, Tier::Correctness);
     let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
-    assert!(ro.ok, "applied index differs from a rebuild: {}", ro.summary);
+    assert!(
+        ro.ok,
+        "applied index differs from a rebuild: {}",
+        ro.summary
+    );
     assert!(r.head_index.is_some(), "the pin's index was archived");
     assert!(r.summary.pass);
     // Every step scored cambium as a tool row, even with no oracle.
-    assert!(r.steps.iter().all(|st| st.tools.first().map(|t| t.name.as_str()) == Some("cambium")));
+    assert!(r
+        .steps
+        .iter()
+        .all(|st| st.tools.first().map(|t| t.name.as_str()) == Some("cambium")));
     assert!(r.steps.iter().any(|st| st.dirty_packages > 0));
     // The first step's parent is the cold-build commit; each step carries on.
     assert_eq!(r.steps[0].parent, commits[0]);
@@ -125,11 +196,17 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
 
     // Every step's index was published, so a resume could find it.
     for c in &commits {
-        assert!(f.engine.fetch_baseline(c).unwrap().is_some(), "no index for {c}");
+        assert!(
+            f.engine.fetch_baseline(c).unwrap().is_some(),
+            "no index for {c}"
+        );
     }
-    let on_disk =
-        walk::WalkResult::read(&walk::WalkResult::path(&f.results.join("walk"), &opts(&f).pin, Some("synth")))
-            .unwrap();
+    let on_disk = walk::WalkResult::read(&walk::WalkResult::path(
+        &f.results.join("walk"),
+        &opts(&f).pin,
+        Some("synth"),
+    ))
+    .unwrap();
     assert_eq!(on_disk.steps.len(), r.steps.len());
     assert!(on_disk.done);
 }
@@ -138,7 +215,15 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
 fn a_walk_resumes_from_its_last_published_index() {
     let f = fixture(6, "typical-pr");
     let (commits, s) = steps(&f);
-    let full = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    let full = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
     assert!(full.done);
 
     // Truncate to three steps and mark it unfinished, then resume.
@@ -151,17 +236,36 @@ fn a_walk_resumes_from_its_last_published_index() {
 
     let mut o = opts(&f);
     o.resume = true;
-    let resumed = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let resumed = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &o,
+    )
+    .unwrap();
     assert_eq!(resumed.steps.len(), commits.len() - 1);
     assert_eq!(resumed.steps[2].head, truncated.steps[2].head);
-    assert!(resumed.rebuild_oracle.unwrap().ok, "a resumed walk still equals a rebuild");
+    assert!(
+        resumed.rebuild_oracle.unwrap().ok,
+        "a resumed walk still equals a rebuild"
+    );
 }
 
 #[test]
 fn schema_seven_refuses_a_schema_six_walk_file() {
     let f = fixture(4, "typical-pr");
     let (commits, s) = steps(&f);
-    walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &opts(&f)).unwrap();
+    walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
     let path = walk::WalkResult::path(&f.results.join("walk"), &opts(&f).pin, Some("synth"));
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
