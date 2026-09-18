@@ -471,7 +471,10 @@ fn a_toolchain_module_bump_is_global() {
 /// where a bare `proto_library` comes from, through a load no BUILD file
 /// writes: the graph has no edge from the packages using it, so a bump is
 /// global, under a code of its own. The `bazel` subject has the real step:
-/// `3c82b1a2..a3db5085` bumps `rules_cc` to 0.2.19 under Bazel 9.
+/// `3c82b1a2..a3db5085` ("Update bazelbuild/bazel's rules_cc to version
+/// 0.2.19", `.bazelversion` 9.1.1) moves `bazel_features` and `rules_cc` in
+/// `MODULE.bazel`; the first localises, the second is this variant, and the
+/// same texts under a Bazel 7 pin give the toolchain reason instead.
 #[test]
 fn an_autoload_provider_bump_is_global_on_bazel_8() {
     let (e, index) = base(&scanning());
