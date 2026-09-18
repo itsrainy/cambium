@@ -12,7 +12,9 @@
 //! ```
 //!
 //! Real git (the engine reads both sides of the rc file with `git show`), rows
-//! and Starlark from a querier, and a Bazel binary that does not exist.
+//! and Starlark from a querier, and a Bazel binary that does not exist. The
+//! settings sit on `common` lines: a `build` line never reaches the index
+//! query (see `crate::bazelrc`), so it would be no change at all.
 
 use std::collections::BTreeMap;
 
@@ -152,8 +154,8 @@ fn run(base_rc: &str, head_rc: &str, defs: &str) -> cambium_engine::AffectedRepo
 #[test]
 fn flipping_a_setting_reaches_only_what_reads_it() {
     let r = run(
-        "build --jobs=8\nbuild --@envoy//bazel:crypto=openssl\n",
-        "build --jobs=8\nbuild --@envoy//bazel:crypto=boringssl\n",
+        "common --jobs=8\ncommon --@envoy//bazel:crypto=openssl\n",
+        "common --jobs=8\ncommon --@envoy//bazel:crypto=boringssl\n",
         DEFS,
     );
     assert!(!r.global, "{:?}", r.global_reason);
@@ -178,8 +180,8 @@ fn flipping_a_setting_reaches_only_what_reads_it() {
 #[test]
 fn the_main_repositorys_own_name_is_the_same_setting_as_a_bare_label() {
     let r = run(
-        "build --//bazel:crypto=openssl\n",
-        "build --//bazel:crypto=boringssl\n",
+        "common --//bazel:crypto=openssl\n",
+        "common --//bazel:crypto=boringssl\n",
         DEFS,
     );
     assert!(!r.global, "{:?}", r.global_reason);
@@ -190,8 +192,8 @@ fn the_main_repositorys_own_name_is_the_same_setting_as_a_bare_label() {
 #[test]
 fn a_bzl_that_names_the_setting_keeps_the_global() {
     let r = run(
-        "build --@envoy//bazel:crypto=openssl\n",
-        "build --@envoy//bazel:crypto=boringssl\n",
+        "common --@envoy//bazel:crypto=openssl\n",
+        "common --@envoy//bazel:crypto=boringssl\n",
         DEFS_WITH_TRANSITION,
     );
     assert!(r.global);
@@ -201,23 +203,47 @@ fn a_bzl_that_names_the_setting_keeps_the_global() {
     assert_eq!(r.stats.bazelrc_flag_nodes, 0);
 }
 
+/// A setting under `command:config` follows the config: skipped when the
+/// query never runs with it, resolved like an unconditional one when it does.
 #[test]
-fn a_setting_scoped_to_a_config_keeps_the_global() {
+fn a_setting_scoped_to_a_config_follows_the_config() {
     let r = run(
-        "build:ci --@envoy//bazel:crypto=openssl\n",
-        "build:ci --@envoy//bazel:crypto=boringssl\n",
+        "common:ci --@envoy//bazel:crypto=openssl\n",
+        "common:ci --@envoy//bazel:crypto=boringssl\n",
+        DEFS,
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.bazelrc_flag_nodes, 0);
+    assert!(r.affected.is_empty(), "{:?}", r.affected);
+
+    let r = run(
+        "common --config=ci\ncommon:ci --@envoy//bazel:crypto=openssl\n",
+        "common --config=ci\ncommon:ci --@envoy//bazel:crypto=boringssl\n",
+        DEFS,
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.bazelrc_flag_nodes, 1);
+    assert!(r.affected_labels().contains(&"//lib:tls".to_string()));
+
+    // Unresolvable under a config in effect: the reason carries the scope.
+    let r = run(
+        "common --config=ci\ncommon:ci --@quiche//:ssl_lib=@envoy//bazel:ssl\n",
+        "common --config=ci\ncommon:ci --@quiche//:ssl_lib=@envoy//bazel:boring\n",
         DEFS,
     );
     assert!(r.global);
     let why = r.global_reason.clone().unwrap();
-    assert!(why.contains("--config"), "{why}");
+    assert!(
+        why.starts_with("common:ci --@quiche//:ssl_lib changed"),
+        "{why}"
+    );
 }
 
 #[test]
 fn a_setting_no_rule_names_affects_nothing() {
     let r = run(
-        "build --//bazel:unused=1\n",
-        "build --//bazel:unused=2\n",
+        "common --//bazel:unused=1\n",
+        "common --//bazel:unused=2\n",
         DEFS,
     );
     assert!(!r.global, "{:?}", r.global_reason);
@@ -229,8 +255,8 @@ fn a_setting_no_rule_names_affects_nothing() {
 #[test]
 fn a_boolean_setting_written_as_a_negation_is_the_same_setting() {
     let r = run(
-        "build --//bazel:crypto\n",
-        "build --no//bazel:crypto\n",
+        "common --//bazel:crypto\n",
+        "common --no//bazel:crypto\n",
         DEFS,
     );
     assert!(!r.global, "{:?}", r.global_reason);
@@ -246,8 +272,8 @@ fn a_setting_in_an_external_repository_keeps_the_global() {
     // A main-repo rule naming the setting (`//q:q` does) is only part of the
     // picture, so the run stays global and says why.
     let r = run(
-        "build --@quiche//:ssl_lib=@envoy//bazel:ssl\n",
-        "build --@quiche//:ssl_lib=@envoy//bazel:boring\n",
+        "common --@quiche//:ssl_lib=@envoy//bazel:ssl\n",
+        "common --@quiche//:ssl_lib=@envoy//bazel:boring\n",
         DEFS,
     );
     assert!(r.global, "{:?}", r.bazelrc_flags);

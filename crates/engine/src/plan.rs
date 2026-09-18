@@ -183,7 +183,18 @@ impl Engine {
         // no checkout: the layer was dumped when the index was built, so a dry
         // run names the same packages the run would re-query.
         let mut run = crate::run::Run::new(self, view, &NoQuerier, &req);
-        let mut ext = run.externals(&changes, &crate::externals::GitText(&self.repo));
+        let texts = crate::externals::GitText(&self.repo);
+        let mut ext = run.externals(&changes, &texts);
+        // A `--registry` edit is the externals stage's question, and the
+        // stage has just read the lockfile.
+        if let Some(reg) = &screened.registry {
+            if let Some(reason) = run.registry_change(reg, &mut ext, &texts) {
+                plan.mode = PlanMode::Global;
+                plan.global_reason = Some(reason.to_string());
+                plan.diagnostics = drained(&self.diagnostics, diagnostics);
+                return Ok(plan);
+            }
+        }
         let stage = run.dirty(&screened.changes, &mut ext)?;
 
         plan.dirty_packages = Some(stage.dirty.dirty.len());

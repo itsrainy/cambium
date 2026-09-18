@@ -66,17 +66,29 @@ pub struct BazelConfig {
     pub startup_flags: Vec<String>,
 }
 
-/// Extends the built-in allowlist of `.bazelrc` flags known not to affect
-/// loading or analysis (see [`crate::bazelrc`]).
+/// What the `.bazelrc` screen (see [`crate::bazelrc`]) is told about this
+/// repository: flags it may skip, and configs the index query runs with.
 ///
-/// A repository knows things about its own flags that cambium cannot: a
-/// `--experimental_` flag it has audited, a wrapper flag only its own tooling
-/// reads. Entries are flag names, dashes optional, and may end in `*`. This is
-/// part of the config hash, because it decides what a run is allowed to skip.
+/// Both are part of the config hash, because they decide what a run is
+/// allowed to skip.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct BazelrcConfig {
+    /// Extends the built-in allowlist of flags known not to change what
+    /// `bazel query` loads. A repository knows things about its own flags
+    /// that cambium cannot: a `--experimental_` flag it has audited, a wrapper
+    /// flag only its own tooling reads. Entries are flag names, dashes
+    /// optional, and may end in `*`.
     pub allowlist_extra: Vec<String>,
+    /// `--config` names the index query runs with, on top of the ones the rc
+    /// chain itself names on lines the query reads (`common --config=x`,
+    /// `--enable_platform_specific_config`). A flag set under
+    /// `command:name` reaches the query only when `name` is in effect, and an
+    /// edit under any other config is ignored by the screen. Empty by
+    /// default: the query is run with no `--config` of its own, so only what
+    /// the rc chain names is in effect.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub configs: Vec<String>,
 }
 
 /// External-repository invalidation (`cambium_index::externals`).
@@ -875,6 +887,23 @@ mod tests {
             Config::default().hash(),
             *without.finalize().as_bytes(),
             "an index built before a derivation fix must not be spliceable"
+        );
+    }
+
+    /// `[bazelrc].configs` decides which rc lines a run may skip, so it is
+    /// in the hash; but an empty list is the default and must not mint a
+    /// lineage of its own.
+    #[test]
+    fn bazelrc_configs_reach_the_hash_only_when_set() {
+        let plain = Config::default();
+        assert!(!plain.to_toml().contains("configs"), "{}", plain.to_toml());
+        let mut c = Config::default();
+        c.bazelrc.configs = vec!["ci".into()];
+        assert_ne!(c.hash(), plain.hash());
+        assert!(
+            c.to_toml().contains("configs = [\"ci\"]"),
+            "{}",
+            c.to_toml()
         );
     }
 

@@ -279,9 +279,9 @@ location, and a `help:` line naming what to change. Human form follows `rustc`:
 warning[CAMBI-W004]: .bazelrc changed and the run went global
   --> .bazelrc:14
    |
-14 | build --define=FOO=1
-   |       ^^^^^^^^ --define is not on the loading-irrelevant allowlist
-   = help: add it to [bazelrc].allowlist_extra if it cannot affect analysis
+14 | common --repo_env=CC=clang
+   |        ^^^^^^^^^^ --repo_env is not on the loading-irrelevant allowlist
+   = help: add it to [bazelrc].allowlist_extra if it cannot affect loading
 ```
 
 Under `--format json` it's one object,

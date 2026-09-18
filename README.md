@@ -88,9 +88,13 @@ rebuild.
 **Escalated** (`cold_rebuild_reason` is reported and `//...` queried once;
 still exact, only not incremental):
 
-- `.bazelrc` edits outside the allowlist of flags known not to reach loading
-  or analysis (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
-  `--platforms`, `--extra_toolchains` and every `--incompatible_*` flag.
+- `.bazelrc` edits on a line the index query reads (`common`, `always`,
+  `query`, under no `--config` or one in effect) to a flag outside the
+  allowlist of flags known not to change what `bazel query` loads
+  (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
+  `--repo_env`, `--enable_bzlmod` and nearly every `--incompatible_*` flag.
+  A `build`-only line, or one under a `--config` the query does not run
+  with, is not a change; `--registry` is answered by the lockfile diff.
 - `register_toolchains` / `register_execution_platforms` in `MODULE.bazel`,
   and any `MODULE.bazel` or `WORKSPACE` statement the readers cannot classify
   by shape.

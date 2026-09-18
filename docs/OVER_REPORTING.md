@@ -14,7 +14,8 @@ sound. Everything below is one of those two, at some scale.
 | mechanism | fires on | diagnostic | where |
 |---|---|---|---|
 | Invalidator path or glob | a changed path in `[invalidators]`, the root `BUILD`, `tools/toolchains/**`, `platforms/**` | `CAMBI-W013` | `crates/classify/src/lib.rs` (`is_invalidator`), `crates/engine/src/run.rs` |
-| `.bazelrc` screen | a native flag outside the loading-irrelevant allowlist (`--registry`, `--incompatible_*`, `--define`, `--repo_env`, ...), any `--config`-scoped flag, an `import` line moved, a startup flag, an rc file added, removed or unreadable | `CAMBI-W004` | `crates/engine/src/run.rs` (`screen_bazelrc`), `crates/engine/src/bazelrc.rs` |
+| `.bazelrc` screen | a native flag outside the loading-irrelevant allowlist (`--enable_bzlmod`, `--incompatible_enable_proto_toolchain_resolution`, `--repo_env`, ...) on a line the index query reads (`common`, `always`, `query`, under no config or one in effect), a `--config=x` the query reads that no rc file defines, an `import` line moved whose target cannot be read, a startup flag, an rc file added, removed or unreadable | `CAMBI-W004` | `crates/engine/src/run.rs` (`screen_bazelrc`), `crates/engine/src/bazelrc.rs` |
+| `--registry` without its lock | an rc line the query reads changed `--registry` and `MODULE.bazel.lock` did not move in the same diff, with bzlmod live | `CAMBI-W014` | `crates/engine/src/run.rs` (`registry_change`) |
 | Starlark build setting unresolvable | a `.bazelrc` sets `--@repo//:flag` and the setting is outside the index, read by a transition, or not a parseable label | `CAMBI-W015` | `crates/engine/src/flags.rs` |
 | No loading layer in the base index | an index built without Bazel behind it, or one predating format 11 | `CAMBI-W008` | `crates/engine/src/run.rs` (`loading_layer_walk`) |
 | Workspace-level `.bzl` whose repositories cannot be named | a changed `.bzl` reached through `KeyForBzlmod` / `KeyForWorkspace` with no attribution | `CAMBI-W009` | `crates/engine/src/run.rs` (`workspace_bzl`), `crates/engine/src/externals.rs` |
@@ -23,9 +24,80 @@ sound. Everything below is one of those two, at some scale.
 | Toolchain registration | `register_toolchains`, `register_execution_platforms`, or any module on `TOOLCHAIN_MODULES` | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
-The `.bazelrc` screen is the dominant cause on the subjects: 13 of envoy's 18
-history globals and 6 of xla's 7 (docs/RESULTS.md). The rest fire rarely; the
+The `.bazelrc` screen was the dominant cause on the subjects: 13 of envoy's 18
+history globals and 6 of xla's 7 in docs/RESULTS.md, before the screen learnt
+which lines a query reads (the next section). The rest fire rarely; the
 invalidator lists of every subject are now empty.
+
+## The `.bazelrc` screen (`CAMBI-W004`)
+
+The index is `bazel query //...`, so an rc edit matters exactly when that
+query would load or report something different. The screen reads the whole
+rc chain (`.bazelrc`, `--bazelrc=` files inside the repository, and their
+`import`/`try-import` closure) at both ends of the range and screens the
+(command, config, flag) triples the query reads at each end. Three scopes
+are applied before any flag is classified:
+
+- **Command.** Bazel applies an rc line to the command it names and to the
+  commands that inherit from it. `query` inherits from nothing, so only
+  `common`, `always` and `query` lines reach it. A `build`, `test`, `run`,
+  `coverage` or `cquery` line is a fact about builds, not about the graph
+  the index holds, and is never a change to the screen. `startup` lines
+  reach every command and are never classified.
+- **Config.** A `command:name` line applies only when `--config=name` is in
+  effect. The configs in effect for the query are `[bazelrc].configs` and
+  any `--config` in `[bazel].extra_query_flags` (both empty on every subject;
+  the walk passes none), plus every `--config=` a line that is itself in
+  effect names, to a fixpoint, plus the five host names when
+  `--enable_platform_specific_config` is in effect (the host is not
+  modelled, so all of them count). A triple under any other config is
+  skipped. `--config` itself is never a changed flag: it is expanded, and
+  the flags it pulls in are what is screened, so the reason reads
+  `common:ci --repo_env` rather than a bare `--config`. A `--config=x` in
+  effect that no rc file defines for any command is unknown.
+- **Import.** An import is textual inclusion. A `try-import` whose target is
+  missing at an end contributes nothing there, as in Bazel; a target present
+  at an end is read into that end's chain and screened like the root, and
+  the reason names it. A plain `import` of a missing file, or either keyword
+  naming a file outside the repository, is unknown when the line itself
+  moved. The chain is read from git at both revisions, never from the
+  working tree, so an untracked developer override is out of scope.
+
+What is left is classified by the allowlist, whose criterion is loading:
+whether the flag can change which packages load, which targets exist, or
+which edges the query reports. Analysis-phase configuration (`select()`
+resolution, toolchain choice, compiler command lines) is declined by design
+(docs/ROADMAP.md), and flags that only have those effects are on the list.
+A Starlark build setting (`--@repo//pkg:flag`) is handed to the flag
+resolver (`CAMBI-W015` when it cannot be resolved); `--registry` is handed to
+the externals stage as a lock-file question. Two parse subtleties remain:
+repeated lines count as a change of value (`['']` to `['', '']`), and
+`--nofoo` and `--foo` are distinct keys, so one boolean flip is several
+changed triples. Neither changes a verdict.
+
+Every flag that fired `CAMBI-W004` across the five subject histories was
+classified twice against the Bazel 8.7.0 and 9.2.0 sources and `bazel help
+<command> --long`, and the two classifications reconciled. The table is also
+`EVIDENCE` in `crates/engine/src/bazelrc.rs`, where a test holds the allowlist
+to it.
+
+| flag | fired on | verdict | reasoning |
+|---|---|---|---|
+| `--registry` | envoy 293, 295, and six pin bumps in the 300-step history | routed | RepositoryOptions, accepted by `bazel query`. Selects the module registries resolution reads, so a list or pin change can change resolved module versions, patches and MODULE.bazel contents. Loading-relevant, and the resolved state is `MODULE.bazel.lock` (since 7.2 keyed on a hash per registry file read). When the lock moved in the same diff and the externals stage localised it, its diff names the modules whose registry metadata moved and the rc line adds nothing; with bzlmod off the line is inert; otherwise the stage escalates (`CAMBI-W014`) |
+| `--enable_bzlmod`, `--enable_workspace` | envoy 293 (added), 296 (removed) | relevant | Tags loading_and_analysis, accepted by `bazel query` in 8.7. They select the external dependency system: which repositories exist, canonical names, the repository mapping, whether WORKSPACE or MODULE.bazel is evaluated |
+| `--incompatible_enable_proto_toolchain_resolution` | envoy 80, 235 | relevant | A StarlarkSemantics option (BuildLanguageOptions), accepted by `bazel query`; part of every `.bzl` load key, and protobuf's `toolchain_helpers.bzl` reads it at `.bzl` top level to add or drop the legacy `_proto_compiler` attributes on proto rules, which are query-visible edges. The 235 instance was a duplicated line with the same value, which the multiset diff cannot tell from a change |
+| `--incompatible_default_to_explicit_init_py` | envoy 235 | irrelevant | Tags affects_outputs; the Python fragment reads it at analysis to decide whether `__init__.py` files are synthesised into runfiles. Not accepted by `bazel query`; a no-op in 9.2 |
+| `--per_file_copt` | envoy 235 | irrelevant | CppOptions, tags action_command_lines; C++ compile command lines only |
+| `--define` | envoy 235, 295 | irrelevant | CoreOptions; `bazel query` accepts it only because QueryCommand carries CoreOptions for `--action_env`, and never evaluates `select()`, `config_setting` or Make variables, its only consumers. cambium walks every `select()` branch, so no package, target or edge depends on the value; which branch is built is analysis-phase configuration, declined |
+| `--features`, `--host_features` | xla 228 | irrelevant | CoreOptions; the effective feature set of a configured target, computed at analysis for the toolchain's feature configuration (for `-external_include_paths`, C++ compile flags). No package, target or edge changes |
+| `--dynamic_mode` | xla 233 | irrelevant | CppOptions; read by `cc_binary`/`cc_test` through the cpp fragment to choose static versus dynamic linking. The loading_and_analysis tag is Bazel's coarse configured-graph bucket; not accepted by `bazel query` |
+| `--java_language_version`, `--tool_java_language_version` | bazel 50 | irrelevant | JavaOptions; java_toolchain selection through config_settings on the java fragment at analysis. Not accepted by `bazel query` |
+| `--cxxopt` | apollo (two steps) | irrelevant | CppOptions, tags action_command_lines; compile command lines only, and under `build`, which never reaches a query |
+| `--test_tag_filters` | envoy 51 | irrelevant | LoadingOptions, but included only by build and print_action; filters which already-loaded tests run. Already allowlisted; every instance was config-scoped too |
+| `--repo_env` | xla 239 | relevant | CommonCommandOptions, so every command reads it; folded into the repository environment that `repository_ctx.os.environ`/`getenv` and module extensions observe, and a changed value re-runs the repository rule. `HERMETIC_NCCL_VERSION` picks which NCCL redistribution xla downloads. `--action_env=NAME=VALUE` reaches the repository environment the same way and is not allowlisted either |
+| `--config` (`rocm`, `workspace`) | xla 50, 208 | routed | An rc expansion, not a flag: its relevance is that of the expanded section (`common:workspace --noenable_bzlmod --enable_workspace` makes `--config=workspace` the bzlmod switch). Expanded at each end and classified as the flags it carries; both instances sit under `common:rocm_ci*`, which the query never selects |
+| `try-import %workspace%/.custom.bazelrc` | apollo 8 | routed | Not a flag. The file is tracked at neither revision, so the line contributes nothing at either end and the edit is harmless; resolved through the chain as described above |
+| `--@repo//pkg:setting` (`@quiche//:*`, `@grpc//third_party:*`, `@protobuf//:*`, `@envoy//bazel:{crypto,ssl,enable_bzlmod}`, `@rules_ml_toolchain//common:*`, ...) | envoy 80, 235, 293, 295, 296; xla 233 | routed | Build settings: configuration visible only at analysis, unreadable by BUILD files, macros, repository rules or module extensions, so no package's content or edges depend on the value. Handed to the flag resolver rather than allowlisted: a main-repository setting is seeded through its `config_setting` edges, and an external one stays `CAMBI-W015`, soundly, because `bazel query` loads the flag's package while parsing the option, so a renamed or removed external setting changes what loads and can fail the query. Under a config that is not in effect the triple is skipped |
 
 ## Cost only, answer exact
 
