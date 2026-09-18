@@ -408,7 +408,9 @@ impl<'a> IndexBuilder<'a> {
     /// inversion.
     pub fn take_sky_layer(&mut self) -> Option<crate::sky::SkyLayer> {
         if std::mem::take(&mut self.sky_unread) {
-            self.sky = self.base.and_then(|v| crate::sky::SkyLayer::from_view(v.sky));
+            self.sky = self
+                .base
+                .and_then(|v| crate::sky::SkyLayer::from_view(v.sky));
         }
         self.sky.take()
     }

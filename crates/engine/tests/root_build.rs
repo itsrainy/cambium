@@ -54,10 +54,16 @@ const PACKAGES: &[&str] = &["", "app", "lib", "far"];
 /// tests edit one each.
 fn files() -> Files {
     Files(
-        ["BUILD", "BUILD.bazel", "app/BUILD", "lib/BUILD", "far/BUILD"]
-            .into_iter()
-            .map(|p| (p.to_string(), String::new()))
-            .collect(),
+        [
+            "BUILD",
+            "BUILD.bazel",
+            "app/BUILD",
+            "lib/BUILD",
+            "far/BUILD",
+        ]
+        .into_iter()
+        .map(|p| (p.to_string(), String::new()))
+        .collect(),
     )
 }
 

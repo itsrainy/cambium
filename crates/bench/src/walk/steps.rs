@@ -252,7 +252,12 @@ pub fn tag_steps(repo: &Repo, commits: &[String], probes: &Probes) -> Result<Vec
 /// Every step of the walk to `pin` over the last `range` first-parent
 /// commits, tagged. The commits themselves come back too: the first is
 /// where the cold build happens.
-pub fn steps(repo: &Repo, pin: &str, range: usize, probes: &Probes) -> Result<(Vec<String>, Vec<Step>)> {
+pub fn steps(
+    repo: &Repo,
+    pin: &str,
+    range: usize,
+    probes: &Probes,
+) -> Result<(Vec<String>, Vec<Step>)> {
     let commits = range_commits(repo, pin, range)?;
     let steps = tag_steps(repo, &commits, probes)?;
     Ok((commits, steps))

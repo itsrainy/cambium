@@ -20,10 +20,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::walk::{StepRecord, WalkResult};
 use crate::progress::Progress;
 use crate::state::State;
 use crate::util::{duration, parse_rfc3339, rfc3339_now};
+use crate::walk::{StepRecord, WalkResult};
 
 /// The snapshot document's version, carried by `--once --format json`.
 pub const WATCH_SCHEMA: u32 = 1;
@@ -234,9 +234,7 @@ fn read_subject(results_dir: &Path, subject: &str, engine: Option<&String>) -> S
         let sum = &w.summary;
         row.globals = Some(sum.globals);
         row.recorded = Some(sum.steps);
-        row.passed = Some(
-            w.steps.iter().filter(|st| st.pass).count(),
-        );
+        row.passed = Some(w.steps.iter().filter(|st| st.pass).count());
         row.compared = Some(sum.steps_with_oracle);
         row.min_recall = (sum.steps_with_oracle > 0).then_some(sum.soundness.worst_recall);
         row.p50_ms = (sum.steps > 0).then_some(sum.cost.cambium_walk.p50_ms);
@@ -264,16 +262,21 @@ fn eta(row: &SubjectSnapshot) -> Option<u64> {
     Some(remaining as u64 * p50 / 1000)
 }
 
-
 fn step_row(st: &StepRecord) -> ChangeSetRow {
-    let tool_ms: Vec<(String, u64)> =
-        st.tools.iter().map(|t| (t.name.clone(), t.wall_ms)).collect();
+    let tool_ms: Vec<(String, u64)> = st
+        .tools
+        .iter()
+        .map(|t| (t.name.clone(), t.wall_ms))
+        .collect();
     // The per-step "classes" line now carries the recall of each tool that the
     // oracle scored, low first, since a recall below 1.0 is the thing to see.
     let mut recalls: Vec<(String, usize)> = st
         .tools
         .iter()
-        .filter_map(|t| t.recall_vs_oracle.map(|r| (t.name.clone(), (r * 1000.0) as usize)))
+        .filter_map(|t| {
+            t.recall_vs_oracle
+                .map(|r| (t.name.clone(), (r * 1000.0) as usize))
+        })
         .collect();
     recalls.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     let tags = st
@@ -336,7 +339,7 @@ fn newest(dir: &Path, prefix: &str, pin: &str) -> Option<PathBuf> {
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+        if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
             best = Some((t, path));
         }
     }
@@ -605,9 +608,18 @@ mod tests {
                 rebuild_step: false,
                 global,
                 global_reason: None,
-                index: IndexCounts { nodes: 10, edges: 20, lineage: String::new() },
-                cambium: CambiumAnswer { direct: 1, affected: 40, tests: 1, cold_rebuild: false },
-                oracle: (!global).then(|| oracle),
+                index: IndexCounts {
+                    nodes: 10,
+                    edges: 20,
+                    lineage: String::new(),
+                },
+                cambium: CambiumAnswer {
+                    direct: 1,
+                    affected: 40,
+                    tests: 1,
+                    cold_rebuild: false,
+                },
+                oracle: (!global).then_some(oracle),
                 tools: vec![
                     ToolStep {
                         name: "cambium".into(),
@@ -633,7 +645,11 @@ mod tests {
         }
         let steps_vec: Vec<WalkStep> = recs
             .iter()
-            .map(|r| WalkStep { parent: r.parent.clone(), head: r.head.clone(), tags: r.tags.clone() })
+            .map(|r| WalkStep {
+                parent: r.parent.clone(),
+                head: r.head.clone(),
+                tags: r.tags.clone(),
+            })
             .collect();
         let sample = Sample::all(&steps_vec);
         let mut r = WalkResult {
@@ -664,7 +680,8 @@ mod tests {
             done: false,
         };
         r.summarise();
-        r.write(&WalkResult::path(&subject_dir.join("walk"), pin, None)).unwrap();
+        r.write(&WalkResult::path(&subject_dir.join("walk"), pin, None))
+            .unwrap();
     }
 
     /// A results tree as a run leaves one.
@@ -709,14 +726,22 @@ mod tests {
         fixture(dir.path());
         let s = snapshot(dir.path(), &[]);
         assert_eq!(
-            s.subjects.iter().map(|r| r.subject.as_str()).collect::<Vec<_>>(),
+            s.subjects
+                .iter()
+                .map(|r| r.subject.as_str())
+                .collect::<Vec<_>>(),
             ["apollo", "bazel", "envoy"],
             "scratch/ is not a subject"
         );
-        let text = render(&s).join("
-");
+        let text = render(&s).join(
+            "
+",
+        );
         assert!(text.contains("bazel    done      walk 50/50"), "{text}");
-        assert!(text.contains("23m20s"), "the finished run's own duration\n{text}");
+        assert!(
+            text.contains("23m20s"),
+            "the finished run's own duration\n{text}"
+        );
         assert!(text.contains("100.0%"), "worst recall\n{text}");
         assert!(text.contains("envoy    walk      walk 12/50"), "{text}");
         assert!(text.contains("c3f9a1b cambium"), "{text}");
@@ -725,7 +750,10 @@ mod tests {
         assert_eq!(envoy.eta_secs, Some(76));
         assert_eq!(envoy.globals, Some(4));
         assert!(text.contains("apollo   idle"), "{text}");
-        assert!(text.contains("errors\n  envoy    bazel query exit 3"), "{text}");
+        assert!(
+            text.contains("errors\n  envoy    bazel query exit 3"),
+            "{text}"
+        );
         assert!(
             text.contains("CAMBI-W004 .bazelrc changed and the run went global"),
             "{text}"
@@ -812,12 +840,16 @@ mod tests {
         let names = vec!["apollo".to_string()];
 
         assert_eq!(snapshot(dir.path(), &names).subjects[0].step, "done");
-        let other = std::collections::BTreeMap::from([("apollo".to_string(), "f8/new".to_string())]);
+        let other =
+            std::collections::BTreeMap::from([("apollo".to_string(), "f8/new".to_string())]);
         let row = &snapshot_with(dir.path(), &names, &other).subjects[0];
         assert_eq!(row.step, "stale");
         assert!(row.eta_secs.is_none());
         let same = std::collections::BTreeMap::from([("apollo".to_string(), "f8/old".to_string())]);
-        assert_eq!(snapshot_with(dir.path(), &names, &same).subjects[0].step, "done");
+        assert_eq!(
+            snapshot_with(dir.path(), &names, &same).subjects[0].step,
+            "done"
+        );
     }
 
     fn copy_tree(from: &Path, to: &Path) {

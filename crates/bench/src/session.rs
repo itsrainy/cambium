@@ -26,12 +26,12 @@ use anyhow::Result;
 use cambium_engine::Config;
 
 use crate::checkout::{Checkout, SubjectsDir};
-use crate::util::absolute;
 use crate::manifest::{Manifest, RepoEntry};
 use crate::progress::{Reporter, Step};
 use crate::state::State;
 use crate::subject::Subject;
 use crate::tools::cambi::Cambi;
+use crate::util::absolute;
 use crate::util::{cache_dir, versioned_name};
 
 /// What a session is opened with: the binary's globals and the flags every

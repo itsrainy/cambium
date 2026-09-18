@@ -85,7 +85,11 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         }
         let _ = writeln!(out);
     }
-    let _ = writeln!(out, "Globals: {}. Engine cold rebuilds: {}.", s.globals, s.engine_cold_rebuilds);
+    let _ = writeln!(
+        out,
+        "Globals: {}. Engine cold rebuilds: {}.",
+        s.globals, s.engine_cold_rebuilds
+    );
     let _ = writeln!(out);
 }
 

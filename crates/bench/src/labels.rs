@@ -238,9 +238,9 @@ pub struct Filter {
 
 impl Filter {
     pub fn matches(&self, row: &ClassRow) -> bool {
-        self.tool.as_ref().map_or(true, |t| *t == row.tool)
-            && self.class.map_or(true, |c| c == row.class)
-            && self.side.map_or(true, |s| s == row.side)
+        self.tool.as_ref().is_none_or(|t| *t == row.tool)
+            && self.class.is_none_or(|c| c == row.class)
+            && self.side.is_none_or(|s| s == row.side)
     }
 
     /// Whether anything was asked for at all. Nothing means the person wants

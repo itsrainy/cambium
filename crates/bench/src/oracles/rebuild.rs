@@ -722,8 +722,9 @@ FILE:[/ws]/[lib/sub/BUILD]
         // itself, which without that edge nothing can reach any more.
         assert_eq!(d.counts.sky_mismatch, 2, "{:?}", d.sky_mismatch);
         assert!(
-            d.sky_mismatch.iter().any(|l| l.contains("PACKAGE_LOOKUP")
-                && l.contains("only in rebuilt")),
+            d.sky_mismatch
+                .iter()
+                .any(|l| l.contains("PACKAGE_LOOKUP") && l.contains("only in rebuilt")),
             "{d:?}"
         );
         assert!(!d.is_empty());

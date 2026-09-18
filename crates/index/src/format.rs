@@ -566,7 +566,7 @@ impl IndexFile {
         // requires `p_off == PREFIX_LEN`, and the backing buffer itself starts
         // aligned — a mapping page-aligned, an `AlignedVec<16>` by
         // construction — so this can only fail if those invariants regress.
-        if (map.as_ptr() as usize + frame.payload.0) % ALIGN != 0 {
+        if !(map.as_ptr() as usize + frame.payload.0).is_multiple_of(ALIGN) {
             return Err(IndexError::BadHeader {
                 path: path.to_path_buf(),
                 reason: format!("payload is not {ALIGN}-byte aligned"),

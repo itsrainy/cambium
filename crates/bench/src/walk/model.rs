@@ -274,7 +274,11 @@ pub struct WalkResult {
 
 impl WalkResult {
     pub fn path(walk_dir: &Path, pin: &str, version: Option<&str>) -> PathBuf {
-        walk_dir.join(crate::util::versioned_name(&format!("walk-{pin}"), version, "json"))
+        walk_dir.join(crate::util::versioned_name(
+            &format!("walk-{pin}"),
+            version,
+            "json",
+        ))
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -296,9 +300,13 @@ impl WalkResult {
     /// not pass, whatever every step said. Per step the oracle is still
     /// `None` and `pass` is the steps' alone.
     pub fn summarise(&mut self) {
-        self.summary = summarise(&self.steps, &self.oracle_sample, &self.peer_sample, self.index_build_ms);
-        self.summary.pass =
-            self.summary.pass && self.rebuild_oracle.as_ref().is_none_or(|o| o.ok);
+        self.summary = summarise(
+            &self.steps,
+            &self.oracle_sample,
+            &self.peer_sample,
+            self.index_build_ms,
+        );
+        self.summary.pass = self.summary.pass && self.rebuild_oracle.as_ref().is_none_or(|o| o.ok);
     }
 }
 
@@ -426,7 +434,11 @@ mod tests {
         let oracle = RdepsResult {
             oracle_labels: 10,
             matched: (10.0 * cambium_recall) as usize,
-            missing: if oracle_ok { vec![] } else { vec!["//x:y".into()] },
+            missing: if oracle_ok {
+                vec![]
+            } else {
+                vec!["//x:y".into()]
+            },
             ..Default::default()
         };
         StepRecord {
@@ -456,11 +468,16 @@ mod tests {
     #[test]
     fn cambium_is_a_tightness_row_not_the_denominator() {
         let steps = vec![step("h1", true, 1.0), step("h2", true, 1.0)];
-        let sample = Sample::all(&steps.iter().map(|s| super::super::steps::Step {
-            parent: s.parent.clone(),
-            head: s.head.clone(),
-            tags: s.tags.clone(),
-        }).collect::<Vec<_>>());
+        let sample = Sample::all(
+            &steps
+                .iter()
+                .map(|s| super::super::steps::Step {
+                    parent: s.parent.clone(),
+                    head: s.head.clone(),
+                    tags: s.tags.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
         let sum = summarise(&steps, &sample, &Sample::default(), 5000);
         assert!(sum.tightness.contains_key("cambium"));
         assert!(sum.tightness.contains_key("bazel-diff"));
@@ -538,11 +555,16 @@ mod tests {
     #[test]
     fn a_missing_step_fails_the_run_and_names_the_worst() {
         let steps = vec![step("h1", true, 1.0), step("h2", false, 0.8)];
-        let sample = Sample::all(&steps.iter().map(|s| super::super::steps::Step {
-            parent: s.parent.clone(),
-            head: s.head.clone(),
-            tags: s.tags.clone(),
-        }).collect::<Vec<_>>());
+        let sample = Sample::all(
+            &steps
+                .iter()
+                .map(|s| super::super::steps::Step {
+                    parent: s.parent.clone(),
+                    head: s.head.clone(),
+                    tags: s.tags.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
         let sum = summarise(&steps, &sample, &Sample::default(), 0);
         assert!(!sum.pass);
         assert_eq!(sum.soundness.steps_missing, 1);

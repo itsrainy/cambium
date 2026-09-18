@@ -194,7 +194,11 @@ pub struct Walked {
 
 /// The one walk: cambium and, per the tier's schedule, the rdeps oracle and
 /// the peers, over a first-parent window to the pin.
-pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocations) -> Result<Walked> {
+pub fn run_walk(
+    run: &SubjectRun<'_>,
+    req: &WalkRequest,
+    locations: &ToolLocations,
+) -> Result<Walked> {
     let tier = crate::walk::Tier::parse(&req.tier)
         .ok_or_else(|| anyhow::anyhow!("unknown tier {:?}: correctness, full", req.tier))?;
     let schedule = tier.schedule(&req.overrides);
@@ -202,7 +206,11 @@ pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocatio
     // The peers are the named tools, cambium excluded (it is the driver, not
     // a peer). `--peers none` and a schedule with peers off both mean none.
     let peers_off = req.peers.iter().any(|p| p == "none") || !schedule.peers;
-    let wanted = if peers_off { Vec::new() } else { tools::wanted(&req.peers)? };
+    let wanted = if peers_off {
+        Vec::new()
+    } else {
+        tools::wanted(&req.peers)?
+    };
     let owned: Vec<Box<dyn tools::Tool>> = wanted
         .iter()
         .map(|n| tools::open(n, locations))
@@ -235,12 +243,17 @@ pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocatio
         invalidator_globs: globs,
     };
     let (commits, steps) = crate::walk::steps(&checkout.repo, &run.entry.pin, range, &probes)?;
-    anyhow::ensure!(steps.len() >= 1, "a walk needs at least one step");
+    anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
 
     let oracle_sample = if schedule.oracle_every_step {
         crate::walk::Sample::all(&steps)
     } else {
-        crate::walk::sample(&steps, run.session.seed, schedule.per_tag, Some(schedule.oracle_sample))
+        crate::walk::sample(
+            &steps,
+            run.session.seed,
+            schedule.per_tag,
+            Some(schedule.oracle_sample),
+        )
     };
     let peer_sample = if peers_off {
         crate::walk::Sample::default()
@@ -280,7 +293,9 @@ pub fn run_walk(run: &SubjectRun<'_>, req: &WalkRequest, locations: &ToolLocatio
     };
     let path = crate::walk::WalkResult::path(&results, &run.entry.pin, run.version());
     refuse_existing(&path, "walk", req.on_existing, || {
-        crate::walk::WalkResult::read(&path).ok().map(|w| w.steps.len())
+        crate::walk::WalkResult::read(&path)
+            .ok()
+            .map(|w| w.steps.len())
     })?;
 
     let driver = crate::walk::CambiDriver {
@@ -320,8 +335,6 @@ pub fn walk_summary(r: &crate::walk::WalkResult) -> String {
     )
 }
 
-/// The change sets to compare: an explicit file, else the one a previous run
-/// wrote for this pin, else a fresh selection with the requested kinds.
 // ------------------------------------------------------------------ labels
 
 /// What `labels` asks about one change set's stored sets.
