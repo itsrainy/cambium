@@ -71,6 +71,11 @@ use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REP
 pub enum WorkspaceChange {
     /// Nothing this diff can localise: invalidate everything, for this reason.
     Global(String),
+    /// A statement that registers toolchains or execution platforms moved. As
+    /// global as [`WorkspaceChange::Global`], and kept apart so the run can
+    /// report it under the toolchain code rather than the stage's own: the
+    /// gap is the graph's (toolchain resolution has no edge), not the stage's.
+    Registration(String),
     /// These repositories moved, and these workspace-closure `.bzl` files had
     /// a call of theirs change — whatever repositories *they* can define moved
     /// too, which only the index can say.
@@ -225,7 +230,7 @@ pub fn diff_workspace(base: &str, head: &str) -> WorkspaceChange {
     for (k, b, h) in diff_maps(&bi, &hi) {
         let one = h.or(b).expect("a key comes from one of the two sides");
         if registers_toolchains(&one.callee) {
-            return WorkspaceChange::Global(format!(
+            return WorkspaceChange::Registration(format!(
                 "`{}` registers toolchains, and toolchain resolution has no edge in the query \
                  graph",
                 one.short
@@ -339,13 +344,20 @@ mod tests {
     fn moved(c: WorkspaceChange) -> (BTreeSet<String>, BTreeSet<String>) {
         match c {
             WorkspaceChange::Moved { repos, bzl_paths } => (repos, bzl_paths),
-            WorkspaceChange::Global(g) => panic!("global: {g}"),
+            other => panic!("{other:?}"),
         }
     }
 
     fn global(c: WorkspaceChange) -> String {
         match c {
             WorkspaceChange::Global(g) => g,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn registration(c: WorkspaceChange) -> String {
+        match c {
+            WorkspaceChange::Registration(g) => g,
             other => panic!("{other:?}"),
         }
     }
@@ -441,7 +453,7 @@ mod tests {
                 .replace("\"1\"", "\"2\"")
                 .replace("//x:y", "//x:z");
             assert!(
-                global(diff_workspace(&base, &head)).contains("toolchain"),
+                registration(diff_workspace(&base, &head)).contains("toolchain"),
                 "{call}"
             );
         }

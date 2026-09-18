@@ -213,6 +213,23 @@ pub fn is_toolchain_module(name: &str) -> bool {
     TOOLCHAIN_MODULES.contains(&name)
 }
 
+/// The rule classes that declare what toolchain resolution chooses between.
+///
+/// Answers: *can a reverse walk over the graph find what a rule of this class
+/// moves when it appears, changes or vanishes?* No. A `toolchain()` is
+/// resolved, not depended on: the `cc_library` it will compile has no edge to
+/// it, and neither does the `register_toolchains` call that offers it. So one
+/// of these moving, in any package, can change what every target builds with,
+/// and the only sound answer is everything. The three are native rules with no
+/// implementation of their own, which is what makes the rule hash a complete
+/// witness: a macro that declares one moves its proto, and there is no `.bzl`
+/// behind the rule itself to move without the proto moving.
+pub const TOOLCHAIN_RULE_CLASSES: &[&str] = &["platform", "toolchain", "toolchain_type"];
+
+pub fn is_toolchain_rule_class(class: &str) -> bool {
+    TOOLCHAIN_RULE_CLASSES.contains(&class)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +243,25 @@ mod tests {
         v.sort_unstable();
         v.dedup();
         v.len() == list.len()
+    }
+
+    /// The three native declaration classes, and nothing that merely
+    /// implements a toolchain (`cc_toolchain`, `cc_toolchain_config`, ...):
+    /// those are reached through ordinary edges and have no place here.
+    #[test]
+    fn the_toolchain_rule_classes_are_the_three_native_declarations() {
+        assert!(unique_and_sorted(TOOLCHAIN_RULE_CLASSES));
+        for c in ["platform", "toolchain", "toolchain_type"] {
+            assert!(is_toolchain_rule_class(c), "{c}");
+        }
+        for c in [
+            "cc_toolchain",
+            "cc_toolchain_config",
+            "constraint_value",
+            "filegroup",
+        ] {
+            assert!(!is_toolchain_rule_class(c), "{c}");
+        }
     }
 
     /// The relationships between the lists that the readers rely on, stated

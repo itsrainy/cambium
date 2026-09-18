@@ -103,6 +103,11 @@ pub struct ModuleFacts {
 pub enum ModuleChange {
     /// Nothing a run can localise: invalidate everything, for this reason.
     Global(String),
+    /// `register_toolchains` / `register_execution_platforms` moved. As global
+    /// as [`ModuleChange::Global`], and kept apart so the run can report it
+    /// under the toolchain code rather than the stage's own: the gap is the
+    /// graph's (toolchain resolution has no edge), not the stage's.
+    Registration(String),
     /// Exactly these apparent repository names moved.
     Repos(BTreeSet<String>),
 }

@@ -41,6 +41,7 @@ pub fn bazel_workspace_root(start: &std::path::Path) -> Option<std::path::PathBu
 }
 
 pub use baseline::BaselineCache;
+pub use cambium_diff::Change;
 pub use config::Config;
 pub use diag::{Code, Diagnostic, Diagnostics, Level, Location};
 pub use engine::{
@@ -48,14 +49,13 @@ pub use engine::{
     OnGlobal, PublishPolicy, PublishSource, RunOutcome,
 };
 pub use error::{EngineError, Result};
+pub use externals::Externals;
 pub use inspect::{hex, IndexQuery, QueryOptions};
 pub use plan::{PlanMode, RunPlan};
 pub use probe::Probes;
 pub use profile::{Profile, Revisions, WorktreeRevisions};
 pub use query::{BazelQuerier, PackageQuerier};
-pub use reason::{ExternalsCause, GlobalReason};
-pub use externals::Externals;
-pub use cambium_diff::Change;
+pub use reason::{ExternalsCause, GlobalReason, RuleChange};
 pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
 pub use revision::{RevisionQuerier, RevisionWorkspace};
 pub use run::{dirty_stage, DirtyStage};

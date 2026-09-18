@@ -1,8 +1,8 @@
 //! The incremental run, one stage at a time.
 //!
 //! [`compute`] is the pipeline: external repositories, the bazelrc screen, the
-//! flag resolve, the dirty set, the query, the splice, the direct set and the
-//! walk. Each stage is a method on [`Run`] with a typed result, and the plan
+//! flag resolve, the dirty set, the query, the splice, the toolchain check, the
+//! direct set and the walk. Each stage is a method on [`Run`] with a typed result, and the plan
 //! (`crate::plan`) runs the first stages of the same pipeline against git
 //! alone, so a dry run cannot say one thing and the run then do another.
 
@@ -11,7 +11,10 @@ use std::path::Path;
 
 use cambium_classify::{DirtySet, Matchers, PackageSet};
 use cambium_diff::Change;
-use cambium_index::{GraphView, IndexBuilder, IndexRef, SpliceReport, WalkOptions};
+use cambium_index::{
+    is_toolchain_rule_class, GraphView, IndexBuilder, IndexRef, SpliceReport, WalkOptions,
+};
+use rustc_hash::FxHashMap;
 
 use crate::bazelrc;
 use crate::bzl;
@@ -21,7 +24,7 @@ use crate::error::Result;
 use crate::externals::{Externals, WorkspaceText};
 use crate::flags::FlagReach;
 use crate::query::{PackageQuerier, Rows};
-use crate::reason::{self, BazelrcCause, ExternalsCause, GlobalReason};
+use crate::reason::{self, BazelrcCause, ExternalsCause, GlobalReason, RuleChange};
 use crate::report::{AffectedReport, Stats, Stopwatch, Timings, SCHEMA_VERSION};
 
 /// A diff with the bazelrc changes it can prove irrelevant removed.
@@ -289,6 +292,13 @@ pub(crate) fn compute(
 
     let queried = run.query(&stage, &ext)?;
     let spliced = run.splice(&stage, &queried, &ext)?;
+    // The one escalation the splice itself can raise: a toolchain
+    // declaration moved, and the graph has no edge from it to what it
+    // moves. Decided here, over the splice report and the base, rather than
+    // inside the direct set, which only sees a view with no rule classes.
+    if let Some(reason) = run.toolchain_rules(&queried, &spliced) {
+        return Ok(run.global_after_splice(reason));
+    }
     Ok(run.answer(spliced, &stage, &flags, queried.cold_reason))
 }
 
@@ -381,12 +391,11 @@ impl<'a> Run<'a> {
             // The only thing that makes the classifier's own dirty set global
             // is an invalidator path or glob matching a changed file, and it
             // records which one; an empty path here would be a classifier
-            // bug, not a run to fail.
-            let reason = GlobalReason::Invalidator {
+            // bug, not a run to fail. Its diagnostic is raised below, once
+            // the external-repository stage has said whether it replaces it.
+            global = Some(GlobalReason::Invalidator {
                 path: dirty.invalidator.clone().unwrap_or_default(),
-            };
-            self.engine.diagnostics().emit(reason.diagnostic());
-            global = Some(reason);
+            });
         }
 
         // Changes inside a nested Bazel repository. `//...` stopped at its
@@ -478,12 +487,23 @@ impl<'a> Run<'a> {
 
         // The stage's own escalation replaces an invalidator's wording: both
         // say "everything", but only one of them says why in terms of the
-        // module system.
-        if let Some(cause) = ext.take_cause() {
-            let reason = GlobalReason::Externals(cause);
-            self.engine.diagnostics().emit(reason.diagnostic());
-            dirty.global = true;
-            global = Some(reason);
+        // module system. A run has one cause and one cause's diagnostic,
+        // and `cambi explain` prints the first it finds, so the invalidator's
+        // is raised only here, once nothing has replaced it: `MODULE.bazel`
+        // and `WORKSPACE` are default invalidators, and a change the stage
+        // escalated on used to be reported twice, under two codes.
+        match ext.take_cause() {
+            Some(cause) => {
+                let reason = GlobalReason::Externals(cause);
+                self.engine.diagnostics().emit(reason.diagnostic());
+                dirty.global = true;
+                global = Some(reason);
+            }
+            None => {
+                if let Some(reason @ GlobalReason::Invalidator { .. }) = &global {
+                    self.engine.diagnostics().emit(reason.diagnostic());
+                }
+            }
         }
         self.stats.repos_dirty_by_bzl = ext.by_bzl;
 
@@ -987,6 +1007,129 @@ impl<'a> Run<'a> {
         })
     }
 
+    /// The toolchain check: did the splice add, change or tombstone a
+    /// `toolchain`, `platform` or `toolchain_type` rule?
+    ///
+    /// Toolchain resolution happens in analysis and has no edge in the query
+    /// graph. A `toolchain()` that matches better than the one every
+    /// `cc_library` resolved to yesterday changes what all of them build
+    /// with, and nothing in the reverse walk reaches it: the rules that will
+    /// use it do not name it, and the `register_toolchains` call that offers
+    /// it is not an edge either. So one of these rules moving, in any
+    /// package, is a whole-repository answer. The default invalidator globs
+    /// (`tools/toolchains/**`, `platforms/**`) used to stand in for this, and
+    /// were a naming convention rather than a rule: a `platform()` declared
+    /// elsewhere never escalated, and a `filegroup` under `tools/toolchains/`
+    /// always did.
+    ///
+    /// The three classes are native rules with no implementation of their
+    /// own, so a `.bzl` edit can only move one through its proto (a macro
+    /// that declares it), which the rule hash sees; a changed `.bzl` that
+    /// leaves every hash alone moved no declaration and takes the ordinary
+    /// route. What the hash cannot see is the implementation *behind* a
+    /// declaration (a `cc_toolchain_config` whose `.bzl` changed): the walk
+    /// reaches the `toolchain()` naming it through ordinary edges and stops
+    /// there, which is the analysis-phase edge declined with the rest.
+    ///
+    /// The head class comes from the rows this run queried and the base class
+    /// from the base index, whose ids the splice preserves; a tombstoned node
+    /// has no class left in the builder, so the base is the only place a
+    /// removed rule's class can be read.
+    fn toolchain_rules(
+        &mut self,
+        queried: &Queried,
+        spliced: &Spliced<'_>,
+    ) -> Option<GlobalReason> {
+        let base = self.base;
+        // Only the rows of the three classes: in the usual run there are
+        // none, and the map is empty.
+        let head_class: FxHashMap<&str, &str> = queried
+            .rows
+            .updates
+            .iter()
+            .flat_map(|u| u.targets.iter())
+            .filter_map(|t| {
+                let c = t.rule_class.as_deref()?;
+                is_toolchain_rule_class(c).then_some((t.label.as_str(), c))
+            })
+            .collect();
+        let in_base = |id: u32| id < base.num_nodes();
+        let base_class = |id: u32| {
+            in_base(id)
+                .then(|| base.rule_class(id))
+                .flatten()
+                .filter(|c| is_toolchain_rule_class(c))
+        };
+        let mut moved: Vec<(String, String, RuleChange)> = Vec::new();
+        for pd in &spliced.splice.packages {
+            for &id in &pd.changed {
+                let label = spliced.builder.label(id);
+                match (base_class(id), head_class.get(label).copied()) {
+                    (None, None) => {}
+                    // Declared with one of the classes now and not before:
+                    // new to the graph, or a rule of another class until now.
+                    (None, Some(c)) => {
+                        let change = if in_base(id) && base.is_rule(id) {
+                            RuleChange::Changed
+                        } else {
+                            RuleChange::Added
+                        };
+                        moved.push((label.to_string(), c.to_string(), change));
+                    }
+                    (Some(_), Some(c)) => {
+                        moved.push((label.to_string(), c.to_string(), RuleChange::Changed));
+                    }
+                    // Declared with one of the classes before, and as
+                    // something else now: the declaration is gone.
+                    (Some(c), None) => {
+                        moved.push((label.to_string(), c.to_string(), RuleChange::Removed));
+                    }
+                }
+            }
+            for &id in &pd.deleted {
+                if let Some(c) = base_class(id) {
+                    moved.push((
+                        base.label(id).to_string(),
+                        c.to_string(),
+                        RuleChange::Removed,
+                    ));
+                }
+            }
+        }
+        for (_, ids) in &spliced.deleted_by_package {
+            for &id in ids {
+                if let Some(c) = base_class(id) {
+                    moved.push((
+                        base.label(id).to_string(),
+                        c.to_string(),
+                        RuleChange::Removed,
+                    ));
+                }
+            }
+        }
+        if moved.is_empty() {
+            return None;
+        }
+        // One rule names the cause, the first by label so the report does
+        // not depend on query order; the count goes in the log line, which
+        // is where anything beyond the sentence belongs.
+        moved.sort_by(|a, b| a.0.cmp(&b.0));
+        let count = moved.len();
+        let (label, class, change) = moved.swap_remove(0);
+        let reason = GlobalReason::ToolchainRule {
+            label,
+            class,
+            change,
+        };
+        tracing::info!(
+            %reason,
+            moved = count,
+            "a toolchain declaration moved; treating the change as global"
+        );
+        self.engine.diagnostics().emit(reason.diagnostic());
+        Some(reason)
+    }
+
     /// Materialise a whole new index, or take only the delta; then the direct
     /// set, the walk and the report over whichever it was.
     ///
@@ -1124,6 +1267,25 @@ impl<'a> Run<'a> {
     fn global(mut self, reason: GlobalReason) -> RunOutcome {
         self.timings.dirty = self.sw.lap();
         self.timings.total = self.timings.dirty;
+        self.global_outcome(reason)
+    }
+
+    /// The run is over after the splice: the query and the splice were paid
+    /// for, and everything is affected anyway.
+    ///
+    /// The spliced index goes with the answer, as it does for every global
+    /// (`RunOutcome::index` is `None`), so `cambi index update` rebuilds a
+    /// lineage at head. Keeping it would be sound, since the graph was spliced
+    /// exactly as on any other run and toolchain resolution is not in it
+    /// either way; it is the first thing to change if a subject's history
+    /// shows declarations moving often enough for the cold build to matter.
+    fn global_after_splice(mut self, reason: GlobalReason) -> RunOutcome {
+        self.timings.splice = self.sw.lap();
+        self.timings.total = self.timings.dirty + self.timings.query + self.timings.splice;
+        self.global_outcome(reason)
+    }
+
+    fn global_outcome(self, reason: GlobalReason) -> RunOutcome {
         RunOutcome {
             report: AffectedReport {
                 schema: SCHEMA_VERSION,

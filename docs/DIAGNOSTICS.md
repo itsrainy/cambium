@@ -28,6 +28,7 @@ Every warning and error carries a stable code, assigned once and never reused; r
 | `CAMBI-W020` | `cambi init` found a `.gitignore` not mentioning `cambium.local.toml` | Add the line: it holds machine-local paths and binaries, and committing them makes them everybody's |
 | `CAMBI-W021` | `cambi inspect verify` couldn't run `rdeps` for one sampled target, skipped it; `checked` counts only compared targets | Run `bazel query 'rdeps(//..., <label>)'` by hand to see why; other samples' verdict stands |
 | `CAMBI-W022` | `bazel mod dump_repo_mapping` stdout wasn't a JSON object, so identity mapping stood in for the real one; a renamed `bazel_dep` can then name the wrong repository | Run `bazel mod dump_repo_mapping ""`, check stdout is one JSON object (a wrapper script printing to stdout is the usual cause); rebuild once fixed |
+| `CAMBI-W023` | a `toolchain`, `platform` or `toolchain_type` rule was added, changed or removed in some package, or a `register_toolchains` / `register_execution_platforms` call moved in `MODULE.bazel` or `WORKSPACE`; toolchain resolution has no query-graph edge, so everything is affected | Expected; nothing to configure. The message names the rule or the file. The rule is by class, not by path, so no `[invalidators].globs` entry is needed for the directories that hold declarations |
 
 ## Errors
 

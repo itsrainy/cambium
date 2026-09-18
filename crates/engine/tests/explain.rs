@@ -136,6 +136,7 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
                     | Code::W013InvalidatorMatched
                     | Code::W014ExternalsGlobal
                     | Code::W015FlagUnresolved
+                    | Code::W023ToolchainMoved
             )
         })
         .unwrap_or_else(|| panic!("a global run should name its cause: {diagnostics:?}"));

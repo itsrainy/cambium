@@ -91,24 +91,33 @@ still exact, only not incremental):
 - `.bazelrc` edits outside the allowlist of flags known not to reach loading
   or analysis (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
   `--platforms`, `--extra_toolchains` and every `--incompatible_*` flag.
-- `register_toolchains` / `register_execution_platforms` in `MODULE.bazel`,
-  and any `MODULE.bazel` or `WORKSPACE` statement the readers cannot classify
-  by shape.
-- `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs,
-  default `tools/toolchains/**` and `platforms/**`; a repository keeping
-  toolchain or platform declarations elsewhere should add those directories,
-  because toolchain resolution happens in analysis and has no query-graph edge
-  for the reverse walk to follow.
+- A `toolchain()`, `platform()` or `toolchain_type()` rule added, changed or
+  removed, in any package (`CAMBI-W023`). The splice reports every rule id it
+  added, changed or tombstoned, and one of those three classes among them is
+  a whole-repository answer, because toolchain resolution happens in analysis
+  and has no query-graph edge for the reverse walk to follow. This is the
+  rule the default `tools/toolchains/**` and `platforms/**` invalidator globs
+  used to stand in for; they are gone, and a rule of another class under
+  those directories is an ordinary rule.
+- `register_toolchains` / `register_execution_platforms` in `MODULE.bazel` or
+  `WORKSPACE` (the same `CAMBI-W023`), and any `MODULE.bazel` or `WORKSPACE`
+  statement the readers cannot classify by shape.
+- `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs (no
+  glob by default).
 
 **Not modelled** (each with its status):
 
-- **A `toolchain()` or `platform()` declared outside the invalidator globs.**
-  A better-matching toolchain in an unrelated package changes what every
-  consumer builds with, and nothing reaches it; the globs are today's only
-  answer. The planned fix needs no configuration: the splice already reports
-  every rule id added, changed or tombstoned, so a run can escalate on rule
-  class `toolchain`, `platform` or `toolchain_type`, wherever the package is.
-  The globs stay the answer for `.bzl` edits in those directories.
+- **A toolchain's implementation moving behind an unchanged declaration.**
+  The three declaration classes are native rules with no implementation of
+  their own, so everything about one is in its proto and the rule hash sees
+  it move. What the hash cannot see is the implementation the `toolchain`
+  attribute points at: a `cc_toolchain_config` whose `.bzl` changed reaches
+  the `toolchain()` that names it through ordinary edges, and the walk stops
+  there, because nothing depends on a `toolchain()` by label. That is
+  toolchain resolution itself, an analysis-phase edge declined with the rest
+  (docs/ROADMAP.md). A repository that wants a `.bzl` edit under its
+  toolchain directories to stay global can list them in
+  `[invalidators].globs`, which is what the old defaults did.
 - **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
   and later). A bare `cc_library` comes from `@rules_cc` through a load the
   BUILD file never writes. Bazel records that as a dependency on

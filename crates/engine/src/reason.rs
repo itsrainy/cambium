@@ -11,7 +11,9 @@
 //! histograms `global_reason` across runs and across releases, so every string
 //! here is byte-for-byte what the run said before the enum existed; the test
 //! at the bottom pins each one. Anything new about a cause goes in a new
-//! field of the diagnostic, not in the sentence.
+//! field of the diagnostic, not in the sentence. A cause that changes *code*
+//! keeps its sentence for the same reason: a toolchain registration is coded
+//! with the rule-class escalation now, and says what it always said.
 
 use std::fmt;
 
@@ -104,6 +106,13 @@ pub enum ExternalsCause {
     WorkspaceBzlUnattributed { path: String, bzl: String },
     /// The `MODULE.bazel` diff has a change it cannot localise.
     Module { why: String },
+    /// A `WORKSPACE` statement that registers toolchains or execution
+    /// platforms moved. The graph's gap rather than the stage's, so it is
+    /// coded with the rule-class escalation ([`Code::W023ToolchainMoved`]).
+    WorkspaceRegistration { path: String, why: String },
+    /// `MODULE.bazel`'s `register_toolchains` / `register_execution_platforms`
+    /// calls moved. Coded like [`ExternalsCause::WorkspaceRegistration`].
+    ModuleRegistration { why: String },
     /// `MODULE.bazel.lock` appeared or vanished.
     LockAddedOrRemoved,
     /// The lockfile diff has a change it cannot localise.
@@ -122,13 +131,16 @@ impl fmt::Display for ExternalsCause {
                 f,
                 "`{path}` was added or removed, and every repository it declares with it"
             ),
-            ExternalsCause::Workspace { path, why } => write!(f, "`{path}`: {why}"),
+            ExternalsCause::Workspace { path, why }
+            | ExternalsCause::WorkspaceRegistration { path, why } => write!(f, "`{path}`: {why}"),
             ExternalsCause::WorkspaceBzlUnattributed { path, bzl } => write!(
                 f,
                 "`{path}` changes a call from `{bzl}`, and cambium cannot say which \
                  repositories that file defines"
             ),
-            ExternalsCause::Module { why } | ExternalsCause::Lock { why } => f.write_str(why),
+            ExternalsCause::Module { why }
+            | ExternalsCause::Lock { why }
+            | ExternalsCause::ModuleRegistration { why } => f.write_str(why),
             ExternalsCause::NestedRepositoryUnmapped { dir } => write!(
                 f,
                 "`{dir}` is a Bazel repository of its own, so `//...` never loaded anything \
@@ -139,6 +151,41 @@ impl fmt::Display for ExternalsCause {
                  is new or gone",
             ),
         }
+    }
+}
+
+impl ExternalsCause {
+    /// Whether the cause is a toolchain registration moving: the one thing
+    /// the stage refuses to localise for the graph's sake rather than its
+    /// own, and which is therefore coded with the rule-class escalation
+    /// ([`Code::W023ToolchainMoved`]) instead of [`Code::W014ExternalsGlobal`].
+    pub fn is_registration(&self) -> bool {
+        matches!(
+            self,
+            ExternalsCause::WorkspaceRegistration { .. }
+                | ExternalsCause::ModuleRegistration { .. }
+        )
+    }
+}
+
+/// What the splice did to a rule, for a reason that names one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleChange {
+    /// Not in the base index, or not a rule there.
+    Added,
+    /// Its rule hash moved, or its class did.
+    Changed,
+    /// Tombstoned: gone from a re-queried package, or with its package.
+    Removed,
+}
+
+impl fmt::Display for RuleChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RuleChange::Added => "added",
+            RuleChange::Changed => "changed",
+            RuleChange::Removed => "removed",
+        })
     }
 }
 
@@ -166,6 +213,15 @@ pub enum GlobalReason {
     WorkspaceLevelBzl { paths: Vec<String> },
     /// The external-repository stage escalated.
     Externals(ExternalsCause),
+    /// The splice added, changed or tombstoned a `toolchain`, `platform` or
+    /// `toolchain_type` rule. Toolchain resolution has no edge in the query
+    /// graph, so nothing reaches what it moves. One rule is named; the log
+    /// line carries the count.
+    ToolchainRule {
+        label: String,
+        class: String,
+        change: RuleChange,
+    },
 }
 
 /// `` `one` `` for a single path, `3 changed `.bzl` files` for several.
@@ -200,6 +256,15 @@ impl fmt::Display for GlobalReason {
                 bzl_files(paths)
             ),
             GlobalReason::Externals(cause) => write!(f, "{cause}"),
+            GlobalReason::ToolchainRule {
+                label,
+                class,
+                change,
+            } => write!(
+                f,
+                "{label} ({class}) was {change}; toolchain resolution has no edge in the query \
+                 graph, so no reverse walk can find what it moves"
+            ),
         }
     }
 }
@@ -213,7 +278,9 @@ impl GlobalReason {
             GlobalReason::Invalidator { .. } => Code::W013InvalidatorMatched,
             GlobalReason::NoLoadingLayer => Code::W008NoLoadingLayer,
             GlobalReason::WorkspaceLevelBzl { .. } => Code::W009WorkspaceLevelBzl,
+            GlobalReason::Externals(c) if c.is_registration() => Code::W023ToolchainMoved,
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
+            GlobalReason::ToolchainRule { .. } => Code::W023ToolchainMoved,
         }
     }
 
@@ -229,6 +296,7 @@ impl GlobalReason {
                 | Code::W013InvalidatorMatched
                 | Code::W014ExternalsGlobal
                 | Code::W015FlagUnresolved
+                | Code::W023ToolchainMoved
         )
     }
 
@@ -275,7 +343,9 @@ impl GlobalReason {
             ),
             GlobalReason::NoLoadingLayer => Diagnostic::warning(
                 self.code(),
-                format!("nothing can be told apart in this change, so everything is affected: {reason}"),
+                format!(
+                    "nothing can be told apart in this change, so everything is affected: {reason}"
+                ),
             )
             .with_help(
                 "rebuild the lineage with `cambi index build` against a bazel that can run \
@@ -298,6 +368,20 @@ impl GlobalReason {
                     None => d,
                 }
             }
+            GlobalReason::Externals(c) if c.is_registration() => {
+                let d = Diagnostic::warning(
+                    self.code(),
+                    format!("a toolchain registration moved, so everything is affected: {reason}"),
+                )
+                .with_help(
+                    "expected: a changed registration can resolve a different toolchain for \
+                     every target, and resolution has no query-graph edge; nothing to configure",
+                );
+                match c {
+                    ExternalsCause::WorkspaceRegistration { path, .. } => d.at(path.clone(), None),
+                    _ => d.at("MODULE.bazel", None),
+                }
+            }
             GlobalReason::Externals(_) => Diagnostic::warning(
                 self.code(),
                 format!(
@@ -308,6 +392,15 @@ impl GlobalReason {
             .with_help(
                 "the message names the file; [externals].enabled = false turns the stage off \
                  if its precision is not wanted here",
+            ),
+            GlobalReason::ToolchainRule { .. } => Diagnostic::warning(
+                self.code(),
+                format!("a toolchain declaration moved, so everything is affected: {reason}"),
+            )
+            .with_help(
+                "expected: a toolchain, platform or toolchain_type rule is resolved in analysis, \
+                 not depended on, so no reverse walk can bound what it moves; nothing to \
+                 configure",
             ),
         }
     }
@@ -514,7 +607,92 @@ mod tests {
                 }),
                 "a novel section",
             ),
+            // The two registration causes say exactly what they said under
+            // the stage's own code; only the code moved.
+            (
+                GlobalReason::Externals(ExternalsCause::ModuleRegistration {
+                    why: "`register_toolchains` / `register_execution_platforms` changed; \
+                          toolchain resolution has no edge in the query graph, so no reverse \
+                          walk can find what it moves"
+                        .into(),
+                }),
+                "`register_toolchains` / `register_execution_platforms` changed; toolchain \
+                 resolution has no edge in the query graph, so no reverse walk can find what it \
+                 moves",
+            ),
+            (
+                GlobalReason::Externals(ExternalsCause::WorkspaceRegistration {
+                    path: "WORKSPACE".into(),
+                    why: "`go_register_toolchains(version = \"2\")` registers toolchains, and \
+                          toolchain resolution has no edge in the query graph"
+                        .into(),
+                }),
+                "`WORKSPACE`: `go_register_toolchains(version = \"2\")` registers toolchains, \
+                 and toolchain resolution has no edge in the query graph",
+            ),
+            (
+                GlobalReason::ToolchainRule {
+                    label: "//tools/cpp:linux_toolchain".into(),
+                    class: "toolchain".into(),
+                    change: RuleChange::Added,
+                },
+                "//tools/cpp:linux_toolchain (toolchain) was added; toolchain resolution has no \
+                 edge in the query graph, so no reverse walk can find what it moves",
+            ),
+            (
+                GlobalReason::ToolchainRule {
+                    label: "//platforms:linux_arm64".into(),
+                    class: "platform".into(),
+                    change: RuleChange::Removed,
+                },
+                "//platforms:linux_arm64 (platform) was removed; toolchain resolution has no \
+                 edge in the query graph, so no reverse walk can find what it moves",
+            ),
         ]
+    }
+
+    /// A registration is the graph's gap, not the stage's: it is coded with
+    /// the rule-class escalation and located at the file it was read from,
+    /// while every other externals cause keeps the stage's code.
+    #[test]
+    fn a_registration_is_coded_with_the_toolchain_rule_and_the_rest_of_the_stage_is_not() {
+        let module =
+            GlobalReason::Externals(ExternalsCause::ModuleRegistration { why: "x".into() });
+        assert_eq!(module.code(), Code::W023ToolchainMoved);
+        assert_eq!(
+            module.diagnostic().location.map(|l| l.path),
+            Some("MODULE.bazel".to_string())
+        );
+        let ws = GlobalReason::Externals(ExternalsCause::WorkspaceRegistration {
+            path: "WORKSPACE.bazel".into(),
+            why: "x".into(),
+        });
+        assert_eq!(ws.code(), Code::W023ToolchainMoved);
+        assert_eq!(
+            ws.diagnostic().location.map(|l| l.path),
+            Some("WORKSPACE.bazel".to_string())
+        );
+        for other in [
+            ExternalsCause::Module { why: "x".into() },
+            ExternalsCause::Lock { why: "x".into() },
+            ExternalsCause::Workspace {
+                path: "WORKSPACE".into(),
+                why: "x".into(),
+            },
+            ExternalsCause::LockAddedOrRemoved,
+        ] {
+            assert!(!other.is_registration(), "{other:?}");
+            assert_eq!(
+                GlobalReason::Externals(other).code(),
+                Code::W014ExternalsGlobal
+            );
+        }
+        let rule = GlobalReason::ToolchainRule {
+            label: "//a:b".into(),
+            class: "toolchain_type".into(),
+            change: RuleChange::Changed,
+        };
+        assert_eq!(rule.code(), Code::W023ToolchainMoved);
     }
 
     #[test]

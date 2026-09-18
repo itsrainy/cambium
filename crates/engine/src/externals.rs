@@ -133,7 +133,9 @@
 //!   `externals.enabled` is off; `handled` exempts it when the stage read it.
 //! - A `MODULE.bazel` statement the parser does not recognise, on either side
 //!   of the diff.
-//! - Toolchain registration, as above.
+//! - Toolchain registration, as above. Reported under the toolchain code
+//!   (`CAMBI-W023`, the one a moved `toolchain()` rule raises) rather than
+//!   the stage's own: the gap is the graph's, not the stage's.
 //! - A repository-rule input that no label names. See the soundness gap
 //!   documented on [`cambium_index::externals`].
 
@@ -310,6 +312,13 @@ pub fn analyse(
             return out;
         };
         match diff_workspace(&b, &h) {
+            WorkspaceChange::Registration(why) => {
+                out.escalate(ExternalsCause::WorkspaceRegistration {
+                    path: path.to_string(),
+                    why,
+                });
+                return out;
+            }
             WorkspaceChange::Global(why) => {
                 out.escalate(ExternalsCause::Workspace {
                     path: path.to_string(),
@@ -353,6 +362,10 @@ pub fn analyse(
         let base_facts = facts_at(texts, base_rev);
         let head_facts = facts_at(texts, head_rev);
         match diff_module(&base_facts, &head_facts) {
+            ModuleChange::Registration(why) => {
+                out.escalate(ExternalsCause::ModuleRegistration { why });
+                return out;
+            }
             ModuleChange::Global(why) => {
                 out.escalate(ExternalsCause::Module { why });
                 return out;
@@ -392,7 +405,9 @@ pub fn analyse(
             }
         };
         match change {
-            ModuleChange::Global(why) => {
+            // A lockfile carries no registration; the second arm is for the
+            // enum's sake.
+            ModuleChange::Global(why) | ModuleChange::Registration(why) => {
                 out.escalate(ExternalsCause::Lock { why });
                 return out;
             }

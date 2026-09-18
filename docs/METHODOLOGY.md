@@ -252,9 +252,10 @@ yardstick. Only the oracle is.
 - **Configured builds.** cambium and the loading-phase peers work on the
   unconfigured target graph, keeping `select()` branches: cambium's largest
   over-approximation class.
-- **The edge of the invariant.** Toolchain and platform declarations
-  outside the invalidator globs, `.bazelignore`, autoloaded native rules
-  and symlinked directories aren't modelled; the README's "Where the
+- **The edge of the invariant.** A toolchain implementation moving behind
+  an unchanged declaration (the declarations themselves escalate, by rule
+  class, wherever they live), `.bazelignore`, autoloaded native rules and
+  symlinked directories aren't modelled; the README's "Where the
   invariant stops" section is the authoritative list, with each case's
   status.
 

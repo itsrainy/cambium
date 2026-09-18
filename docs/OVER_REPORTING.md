@@ -13,14 +13,16 @@ sound. Everything below is one of those two, at some scale.
 
 | mechanism | fires on | diagnostic | where |
 |---|---|---|---|
-| Invalidator path or glob | a changed path in `[invalidators]`, the root `BUILD`, `tools/toolchains/**`, `platforms/**` | `CAMBI-W013` | `crates/classify/src/lib.rs` (`is_invalidator`), `crates/engine/src/run.rs` |
+| Invalidator path or glob | a changed path in `[invalidators].paths` (`MODULE.bazel`, `.bazelrc`, `.bazelversion`, `REPO.bazel`, ...) or a configured glob; no glob is on by default | `CAMBI-W013` | `crates/classify/src/lib.rs` (`is_invalidator`), `crates/engine/src/run.rs` |
 | `.bazelrc` screen | a native flag outside the loading-irrelevant allowlist (`--registry`, `--incompatible_*`, `--define`, `--repo_env`, ...), any `--config`-scoped flag, an `import` line moved, a startup flag, an rc file added, removed or unreadable | `CAMBI-W004` | `crates/engine/src/run.rs` (`screen_bazelrc`), `crates/engine/src/bazelrc.rs` |
 | Starlark build setting unresolvable | a `.bazelrc` sets `--@repo//:flag` and the setting is outside the index, read by a transition, or not a parseable label | `CAMBI-W015` | `crates/engine/src/flags.rs` |
 | No loading layer in the base index | an index built without Bazel behind it, or one predating format 11 | `CAMBI-W008` | `crates/engine/src/run.rs` (`loading_layer_walk`) |
 | Workspace-level `.bzl` whose repositories cannot be named | a changed `.bzl` reached through `KeyForBzlmod` / `KeyForWorkspace` with no attribution | `CAMBI-W009` | `crates/engine/src/run.rs` (`workspace_bzl`), `crates/engine/src/externals.rs` |
 | `WORKSPACE` statement not localised | a statement the shape reader cannot place, including any reordering; the file added or removed | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/workspace.rs` |
 | `MODULE.bazel` or lockfile not localised | an unparsed statement, lock added or removed, unknown lock key, format version change | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/lockfile.rs` |
-| Toolchain registration | `register_toolchains`, `register_execution_platforms`, or any module on `TOOLCHAIN_MODULES` | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
+| Toolchain declaration | a `toolchain`, `platform` or `toolchain_type` rule the splice added, changed or tombstoned, in any package | `CAMBI-W023` | `crates/engine/src/run.rs` (`toolchain_rules`), `crates/index/src/vocabulary.rs` (`TOOLCHAIN_RULE_CLASSES`) |
+| Toolchain registration | `register_toolchains`, `register_execution_platforms` in `MODULE.bazel` or `WORKSPACE` | `CAMBI-W023` | `crates/engine/src/externals.rs`, `crates/index/src/externals/module_diff.rs`, `crates/index/src/workspace.rs` |
+| Toolchain module moved | any module on `TOOLCHAIN_MODULES` bumped, overridden or re-pinned | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
 The `.bazelrc` screen is the dominant cause on the subjects: 13 of envoy's 18

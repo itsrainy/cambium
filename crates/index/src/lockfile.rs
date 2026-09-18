@@ -483,14 +483,14 @@ mod tests {
     fn repos(c: ModuleChange) -> BTreeSet<String> {
         match c {
             ModuleChange::Repos(r) => r,
-            ModuleChange::Global(g) => panic!("global: {g}"),
+            other => panic!("{other:?}"),
         }
     }
 
     fn global(c: ModuleChange) -> String {
         match c {
             ModuleChange::Global(g) => g,
-            ModuleChange::Repos(r) => panic!("repos: {r:?}"),
+            other => panic!("{other:?}"),
         }
     }
 

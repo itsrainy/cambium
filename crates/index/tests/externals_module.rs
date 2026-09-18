@@ -153,11 +153,16 @@ fn a_toolchain_module_bump_is_global() {
     }
 }
 
+/// Global, and told apart from the stage's own escalations so the run can
+/// code it with the rule-class one (`CAMBI-W023`).
 #[test]
 fn register_toolchains_is_global() {
     let base = scan_module("register_toolchains(\"//a:b\")\n");
     let head = scan_module("register_toolchains(\"//a:c\")\n");
-    assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
+    assert!(matches!(
+        diff_module(&base, &head),
+        ModuleChange::Registration(_)
+    ));
 }
 
 /// The unparsed statement is global when it is the edit, and inert when
