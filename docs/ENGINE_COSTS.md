@@ -32,7 +32,7 @@ them a `.bzl` that 42 packages load.
 
 | stage | delta overlay | materialised | proportional to |
 |---|---:|---:|---|
-| dirty set | 40 | 40 | changed files (plus one `rbuildfiles` call) |
+| dirty set | 40 | 40 | changed files, and the loading layer the walk touches |
 | query | 4 | 4 | targets in dirty packages, synthetic here; a real Bazel query dominates |
 | splice | **24** | **~1200** | the change / **the whole graph** |
 | direct set | 1 | 1 | dirty targets and changed files |
@@ -79,6 +79,102 @@ The two must answer identically, enforced rather than assumed: every
 scenario in the property tests and every revision of the soundness sweep
 computes the answer both ways and requires the affected, direct and test
 sets, and the `explain` paths, to match.
+
+## What the loading-phase dump costs
+
+Which packages a changed path moved is answered by a reverse walk over the
+Skyframe loading layer the index carries (`crates/index/src/sky`), and that
+layer is `bazel dump --skyframe=deps` taken on the server that just loaded the
+repository. Two dumps a lineage step: one after the cold build's `//...:*`
+query, one after the splice query, on that run's own server.
+
+Measured on the `bazel` subject (Bazel 9.2.0, 572 packages loaded), with the
+filter the engine uses (`^(PACKAGE|GLOB|FILE|DIRECTORY_LISTING|BZL_LOAD|IGNORED_)`):
+
+| | wall | stdout | blocks |
+|---|---:|---:|---:|
+| the universe query that fills Skyframe | 7.7 s | | |
+| the dump after it | **0.37 s** | **8.2 MB** | 17741 |
+
+The dump is 4.6% of the load it reads, and it is text this machine parses
+rather than work Bazel does twice: the graph is already in the server, and
+`dump` walks it.
+
+### The incremental dump, and what a filter is worth
+
+A Bazel server holds everything it has ever loaded, not what the last command
+asked for. On the server a cold build filled (a `cambi profile`, a bench walk,
+a worker that built its own index), an unfiltered refresh dump therefore walks
+and prints the whole repository on every commit. On sourcegraph that was 15 to
+20 seconds a step.
+
+Two things bound it. A step that re-queried no package takes no dump at all:
+the dirty set is the layer's own answer, so nothing in the layer moved. A step
+that did re-query asks only for what that can have moved, by
+`--skykey_filter`.
+
+What the filter is worth is smaller than it looks, and worth stating because
+the obvious assumption is wrong. On the `bazel` subject, dumps against a server
+holding the universe, three runs each, minimum kept:
+
+| filter | wall | blocks |
+|---|---:|---:|
+| matches nothing | 0.22 s | 0 |
+| one key | 0.22 s | 1 |
+| the loading phase | 0.34 s | 17720 |
+| everything | 0.36 s | 21546 |
+
+So about 0.22 s is traversing the graph and about 0.12 s is printing 17720
+blocks. A filter can only take back the printing: cutting the output tenfold
+took a 13-package refresh from 0.34 s to about 0.24 s. On a graph the size of
+sourcegraph's the same proportion leaves a filtered dump at roughly twelve
+seconds, which is what a splicing step there still costs.
+
+The cost is therefore change-proportional in the number of *steps* that touch
+a package, not in the size of what they touched. Per-commit p50 is back within
+a few hundred milliseconds of where it was, and the steps that re-query pay a
+traversal:
+
+| `cambi profile` | before the layer | with the layer |
+|---|---:|---:|
+| tensorflow, 30 commits, p50 | 483 ms | 586 ms |
+| tensorflow, mean | 679 ms | 1.8 s |
+| sourcegraph, 10 commits, p50 | 1.1 s | 1.4 s |
+| sourcegraph, mean | 1.7 s | 5.0 s |
+
+Both subjects splice the same commits and answer the same targets either way.
+
+What it costs to *keep* is one more section of the index. On the same
+subject, `cambi inspect stats` over the head index the walk's rebuild oracle
+built:
+
+| | nodes | edges | bytes |
+|---|---:|---:|---:|
+| target graph | 24805 | 82217 | 3.8 MiB |
+| loading layer | 16070 | 27030 | 1.1 MiB |
+
+That is 22% of the uncompressed index, and it compresses with the rest (the
+file is 777 KiB on disk). Per kind the layer is 4620 `FILE`, 4563
+`FILE_STATE`, 1520 `PACKAGE_LOOKUP`, 1491 `DIRECTORY_LISTING` and as many
+`DIRECTORY_LISTING_STATE`, 1255 `BZL_LOAD`, 573 `PACKAGE`, 556 `GLOB` and one
+ignore node.
+
+It buys the deletion of three models of Bazel's loading phase and the
+`.bzl`-closure witness that re-read every Starlark file of the head checkout
+whenever the stored closure came up short.
+
+What it costs a run, measured as the same 40-step correctness walk on the
+`bazel` subject at one seed, before and after (the cold index build once, then
+one materialised step per commit, each of which takes the second dump):
+
+| | before | after |
+|---|---:|---:|
+| step p50 | 1533 ms | 1865 ms |
+| step p90 | 2448 ms | 2925 ms |
+| cold index | 46.4 s | 54.8 s |
+
+About 330 ms a step and eight seconds of cold build, for an answer of the same
+size (tightness p50 and p90 are 1.0 either way) and the same recall.
 
 Costs elsewhere:
 

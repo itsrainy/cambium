@@ -220,19 +220,20 @@ pub(crate) fn derive_direct<V: GraphView + ?Sized>(
 
     for pd in &inputs.splice.packages {
         if inputs.bzl_dirty.contains(&pd.package) {
-            // Spec 6.7's "bzl closure hash changed" branch, keyed on
-            // membership of the stored load closure instead of a stored hash,
-            // and load-bearing rather than an optimisation.
+            // Spec 6.7's "bzl closure hash changed" branch, keyed on what the
+            // loading layer's reverse walk reached through `BZL_LOAD` edges
+            // instead of on a stored hash, and load-bearing rather than an
+            // optimisation.
             //
             // A `.bzl` edit that changes a rule implementation without changing
             // any BUILD attribute leaves every rule proto in the loading
             // packages byte-identical — Bazel folds a rule's definition
-            // environment into the proto, not the loading BUILD file's load
-            // closure. So every rule hash comes back unchanged and `pd.changed`
-            // is empty. Marking every rule in the package direct regardless of
+            // environment into the proto, not the loading BUILD file's loads.
+            // So every rule hash comes back unchanged and `pd.changed` is
+            // empty. Marking every rule in the package direct regardless of
             // its hash is the only thing that catches it, and
             // `Packages::bzl_closure_hash` is written as zero for exactly that
-            // reason: the closure names the same set the hash comparison would
+            // reason: the walk names the same set the hash comparison would
             // have, and names *which* packages, which a hash cannot.
             // (Covered by the `edit bzl` end-to-end scenario, which
             // asserts this is *why* those targets are reported.)

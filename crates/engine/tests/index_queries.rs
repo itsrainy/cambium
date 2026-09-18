@@ -319,7 +319,8 @@ fn stats_accounts_for_every_byte_and_describes_the_shape() {
         + b.rule_hashes
         + b.node_columns
         + b.package_table
-        + b.bzl_closure;
+        + b.bzl_closure
+        + b.sky_layer;
     assert_eq!(
         accounted as i64 + b.framing,
         b.file_total as i64,

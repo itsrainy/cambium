@@ -117,6 +117,62 @@ pub trait PackageQuerier {
         self.workspace().map(cambium_index::loads::starlark_files)
     }
 
+    /// Whether this row source can produce a Skyframe loading-layer dump.
+    ///
+    /// False for a source with no Bazel behind it (the synthetic querier, a
+    /// canned one in a test), and the engine then builds an index with no
+    /// layer — which the next run refuses to answer a change from, rather
+    /// than reading an absent layer as "nothing is dirty".
+    fn can_dump_loading_layer(&self) -> bool {
+        false
+    }
+
+    /// `bazel dump --skyframe=deps --skykey_filter=<filter>`, on the server
+    /// these rows came from, with the paths needed to keep this machine's own
+    /// directories out of the stored keys.
+    ///
+    /// The filter is the caller's: a cold build asks for the whole loading
+    /// phase, a refresh for what re-querying its packages can have moved. It
+    /// matters because a long-lived server holds whatever it has ever loaded,
+    /// so a refresh on the server a cold build filled would otherwise dump the
+    /// entire repository on every step.
+    ///
+    /// Only ever called when [`PackageQuerier::can_dump_loading_layer`] is
+    /// true, and an error here fails the run: see
+    /// [`cambium_bazel::Bazel::dump_skyframe`].
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+        let _ = filter;
+        Err(crate::error::EngineError::BazelQuery {
+            what: "dump --skyframe=deps".into(),
+            code: None,
+            stderr: "this row source has no Bazel server to dump".into(),
+        })
+    }
+
+    /// Asks Bazel to load the whole repository once more, so that the loading
+    /// layer the next dump prints is the whole one.
+    ///
+    /// Only ever called when a cold dump came back with the loading graph's
+    /// shape and none of its package values (see [`crate::sky::build_layer`]).
+    /// The call is warm: the server has just loaded these packages and nothing
+    /// on disk has moved, so it re-reads nothing. `false` means this row
+    /// source has no server to ask, and the layer stands or falls on the dump
+    /// already taken.
+    fn reload_packages(&self) -> bool {
+        false
+    }
+
+    /// The same, for named packages rather than the whole repository: the
+    /// refresh path's repair, where only the packages the splice query
+    /// re-queried can have been lost.
+    fn reload_named(&self, packages: &[String]) -> bool {
+        let _ = packages;
+        false
+    }
+
     /// `bazel query '//external:*' --output=build` over the checkout these
     /// rows describe, for [`cambium_index::externals::external_dir_repos`] to
     /// read the nested repositories' names out of.
@@ -221,6 +277,50 @@ impl PackageQuerier for BazelQuerier {
 
     fn external_rules(&self) -> Option<String> {
         self.bazel.external_rules()
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), crate::error::EngineError> {
+        let text = self.bazel.dump_skyframe(filter).map_err(|e| {
+            crate::error::EngineError::BazelQuery {
+                what: "dump --skyframe=deps".into(),
+                code: None,
+                stderr: e.to_string(),
+            }
+        })?;
+        let paths = cambium_index::sky::Paths::new(
+            self.bazel.workspace().to_string_lossy(),
+            self.bazel.output_base().unwrap_or_default(),
+        );
+        Ok((text, paths))
+    }
+
+    fn reload_named(&self, packages: &[String]) -> bool {
+        match self.bazel.load_packages(packages) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(error = %e, "could not ask bazel to load these packages again");
+                false
+            }
+        }
+    }
+
+    fn reload_packages(&self) -> bool {
+        match self.bazel.load_universe() {
+            Ok(()) => true,
+            Err(e) => {
+                // Not fatal in itself: the caller checks the dump that follows
+                // and fails the run if it is still not a loading layer.
+                tracing::debug!(error = %e, "could not ask bazel to load the repository again");
+                false
+            }
+        }
     }
 
     fn universe(&self) -> Result<Rows, crate::error::EngineError> {

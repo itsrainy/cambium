@@ -27,6 +27,7 @@ pub mod label;
 pub mod loads;
 pub mod lockfile;
 pub mod overlay;
+pub mod sky;
 pub mod space;
 mod starlark;
 pub mod strtab;
@@ -60,6 +61,7 @@ pub use loads::{
 };
 pub use lockfile::diff_lock;
 pub use overlay::{Overlay, OverlaySize};
+pub use sky::{SkyLayer, SkyRef, SkyTables, SkyWalk};
 pub use strtab::{Interner, StrTabRef};
 pub use view::{labels_sorted, GraphView};
 pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};

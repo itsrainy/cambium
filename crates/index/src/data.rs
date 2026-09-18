@@ -133,6 +133,14 @@ pub struct Header {
     /// first says "nothing loads this", the second "we do not know". Without
     /// the flag a run over the second would silently under-approximate.
     pub bzl_closure: bool,
+    /// This index carries a Skyframe loading layer (see [`crate::sky`]).
+    ///
+    /// Recorded for the same reason `bzl_closure` is: a repository whose
+    /// loading phase touched nothing and an index built without a dump are the
+    /// same empty arrays, and only one of them can be answered from. A run
+    /// whose base has no layer fails with a reason rather than falling back to
+    /// a model of the rules the layer replaced.
+    pub sky_layer: bool,
     pub counts: Counts,
 }
 
@@ -311,6 +319,27 @@ pub struct IndexData {
     // change there that no repository claims moves nothing, where the same
     // change under a boundary Bazel does read is a hole in the graph.
     pub repo_boundary_ignored: Vec<bool>,
+
+    // ---- the Skyframe loading layer (format 11) ----
+    //
+    // Bazel's own loading-phase graph, taken from `bazel dump
+    // --skyframe=deps` and kept as reverse edges. One node table, ordered by
+    // `(kind, root, key)` so a seed is a binary search, and one CSR of the
+    // nodes that depend on each node. See [`crate::sky`] for the kinds, the
+    // spellings and why the singleton kinds are dropped.
+    //
+    // `sky_root_*` is the root table: root 0 is the workspace and is stored as
+    // the empty string, so no absolute path of the machine that built the
+    // index is in the payload. `sky_key_*` holds the relative path of a rooted
+    // key and the normalised key text of an unrooted one.
+    pub sky_root_bytes: Vec<u8>,
+    pub sky_root_offsets: Vec<u32>,
+    pub sky_key_bytes: Vec<u8>,
+    pub sky_key_offsets: Vec<u32>,
+    pub sky_kind: Vec<u8>,
+    pub sky_root: Vec<u32>,
+    pub sky_rdep_offsets: Vec<u32>,
+    pub sky_rdep_edges: Vec<u32>,
 }
 
 /// Borrowed view over an index, owned or archived. Every algorithm in the
@@ -388,6 +417,9 @@ pub struct IndexRef<'a> {
     pub repo_boundaries: StrTabRef<'a>,
     /// Per boundary, whether `.bazelignore` names its directory.
     pub repo_boundary_ignored: &'a [bool],
+
+    /// Bazel's own loading-phase graph; see [`crate::sky`].
+    pub sky: crate::sky::SkyRef<'a>,
 }
 
 impl<'a> IndexRef<'a> {
@@ -407,6 +439,8 @@ impl<'a> IndexRef<'a> {
             ("repo_input_patterns", self.repo_input_patterns),
             ("repo_maps", self.repo_maps),
             ("repo_boundaries", self.repo_boundaries),
+            ("sky_roots", self.sky.roots),
+            ("sky_keys", self.sky.keys),
         ] {
             t.validate(what)?;
         }
@@ -893,6 +927,23 @@ macro_rules! index_view {
                 offsets: $u32s(&$d.repo_boundary_offsets),
             },
             repo_boundary_ignored: &$d.repo_boundary_ignored,
+            sky: crate::sky::SkyRef {
+                present: $d.header.sky_layer,
+                roots: StrTabRef {
+                    bytes: &$d.sky_root_bytes,
+                    offsets: $u32s(&$d.sky_root_offsets),
+                },
+                keys: StrTabRef {
+                    bytes: &$d.sky_key_bytes,
+                    offsets: $u32s(&$d.sky_key_offsets),
+                },
+                kind: &$d.sky_kind,
+                root: $u32s(&$d.sky_root),
+                rdeps: CsrRef {
+                    offsets: $u32s(&$d.sky_rdep_offsets),
+                    edges: $u32s(&$d.sky_rdep_edges),
+                },
+            },
         }
     };
 }

@@ -1,0 +1,875 @@
+WARNING: This information is intended for consumption by developers only, and may change at any time. Script against it at your own risk!
+FILE:[/virtual_builtins_bzl]/[common/cc]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/cc]
+
+
+FILE:[/ws]/[BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD.bazel]
+
+
+FILE_STATE:[/ws]/[MODULE.bazel]
+
+PACKAGE_LOOKUP:a/sub
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 3:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a/sub]
+
+  Group 4:
+    FILE:[/ws]/[a/sub/BUILD.bazel]
+
+  Group 5:
+    FILE:[/ws]/[a/sub/BUILD]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_env.bzl]
+
+FILE_STATE:[/virtual_builtins_bzl]/[bazel/exports.bzl]
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/python]
+
+DIRECTORY_LISTING:[/ws]/[a]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+
+IGNORED_SUBDIRECTORIES:@@
+  Group 1:
+    REPO_FILE:@@
+
+  Group 2:
+    PRECOMPUTED:path_package_locator
+
+  Group 3:
+    PRECOMPUTED:vendor_directory
+
+  Group 4:
+    FILE:[/ws]/[.bazelignore]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_env.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/objc/apple_env.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db/embedded_tools]/[]
+
+FILE_STATE:[/ws]/[a/sub]
+
+FILE:[/virtual_builtins_bzl]/[]
+  Group 1:
+    FILE_STATE:[/virtual_builtins_bzl]/[]
+
+
+FILE:[/ws]/[a/BUILD]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD]
+
+
+FILE:[/virtual_builtins_bzl]/[common/objc/objc_info.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/objc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc/objc_info.bzl]
+
+
+DIRECTORY_LISTING:[/ws]/[]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[]
+
+
+FILE:[/ob/external/bazel_tools]/[]
+  Group 1:
+    FILE_STATE:[/ob/external/bazel_tools]/[]
+
+  Group 2:
+    FILE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[]
+
+  Group 3:
+    FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[embedded_tools]
+
+
+FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+FILE:[/virtual_builtins_bzl]/[exports.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[exports.bzl]
+
+
+FILE:[/virtual_builtins_bzl]/[common/util.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/util.bzl]
+
+
+FILE_STATE:[/ws]/[a/sub/BUILD]
+
+FILE:[/ws]/[a]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a]
+
+
+FILE:[/virtual_builtins_bzl]/[common/objc/apple_platform.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/objc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_platform.bzl]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/exports.bzl]
+
+FILE:[/ws]/[]
+  Group 1:
+    FILE_STATE:[/ws]/[]
+
+
+PACKAGE_LOOKUP:
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 3:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[]
+
+  Group 4:
+    FILE:[/ws]/[BUILD.bazel]
+
+  Group 5:
+    FILE:[/ws]/[BUILD]
+
+
+FILE_STATE:[/ws]/[a/rules.bzl]
+
+FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:bazel/exports.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[bazel/exports.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+  Group 4:
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/cc/cc_common_bazel.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/java/java_common.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_common.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/python/py_internal.bzl, isBuildPrelude=false}
+
+
+PACKAGE_LOOKUP:a
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 3:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[a]
+
+  Group 4:
+    FILE:[/ws]/[a/BUILD.bazel]
+
+  Group 5:
+    FILE:[/ws]/[a/BUILD]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/python/py_internal.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/python/py_internal.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[exports.bzl]
+
+FILE:[/ws]/[tools/build_rules/BUILD]
+  Group 1:
+    FILE:[/ws]/[tools/build_rules]
+
+
+FILE_STATE:[/ws]/[a/helper.bzl]
+
+FILE:[/virtual_builtins_bzl]/[common/objc/apple_common.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/objc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_common.bzl]
+
+
+FILE_STATE:[/ws]/[BUILD.bazel]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+FILE:[/ws]/[MODULE.bazel.lock]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel.lock]
+
+
+FILE_STATE:[/ob/external/bazel_tools]/[]
+  Group 1:
+    REPOSITORY_DIRECTORY:@@bazel_tools
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[]
+
+FILE:[/ws]/[tools/BUILD]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common]
+
+FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[embedded_tools/MODULE.bazel]
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/java/java_common.bzl]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_common.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/objc/apple_common.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+  Group 4:
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_env.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_platform.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_toolchain.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/objc_info.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/xcode/providers.bzl, isBuildPrelude=false}
+
+
+FILE:[/ob/external/bazel_tools]/[MODULE.bazel]
+  Group 1:
+    FILE:[/ob/external/bazel_tools]/[]
+
+  Group 2:
+    FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[embedded_tools/MODULE.bazel]
+
+
+FILE:[/ws]/[a/sub/BUILD]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD]
+
+
+FILE:[/virtual_builtins_bzl]/[common/objc/apple_toolchain.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/objc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_toolchain.bzl]
+
+
+FILE:[/virtual_builtins_bzl]/[bazel]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[bazel]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_platform.bzl]
+
+BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/rules.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@}
+
+  Group 7:
+    BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+
+
+BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:tools/build_rules
+
+  Group 4:
+    PRECOMPUTED:starlark_semantics
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@}
+
+
+FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+FILE:[/ws]/[a/rules.bzl]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/rules.bzl]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/cc/cc_helper_internal.bzl]
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/cc/cc_common_bazel.bzl]
+
+DIRECTORY_LISTING:[/ws]/[a/sub]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    DIRECTORY_LISTING_STATE:[/ws]/[a/sub]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/exports.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/exports.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE_STATE:[/ws]/[REPO.bazel]
+
+FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[embedded_tools]
+
+DIRECTORY_LISTING_STATE:[/ws]/[a]
+
+PACKAGE:a
+  Group 1:
+    PRECOMPUTED:lazy_macro_expansion_packages
+
+  Group 2:
+    PACKAGE_LOOKUP:a
+
+  Group 3:
+    PRECOMPUTED:autoload_symbols
+
+  Group 4:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 5:
+    REPOSITORY_MAPPING:Key{repoName=@@}
+
+  Group 6:
+    FILE:[/ws]/[a/BUILD]
+
+  Group 7:
+    PRECOMPUTED:default_visibility
+
+  Group 8:
+    PRECOMPUTED:config_setting_visibility_policy
+
+  Group 9:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 10:
+    REPO_PACKAGE_ARGS:@@
+
+  Group 11:
+    BZL_LOAD:KeyForBuild{label=//tools/build_rules:prelude_bazel, isBuildPrelude=true}
+
+  Group 12:
+    BZL_LOAD:KeyForBuild{label=//a:rules.bzl, isBuildPrelude=false}
+
+  Group 13:
+    PACKAGE_LOOKUP:a/sub
+
+  Group 14:
+    GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a, globRequests = [GlobRequest: *.txt FILES]>
+
+
+DIRECTORY_LISTING_STATE:[/ws]/[]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/cc/cc_common_bazel.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/cc/cc_common_bazel.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+  Group 4:
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/cc/cc_helper_internal.bzl, isBuildPrelude=false}
+
+
+PACKAGE_LOOKUP:tools/build_rules
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 3:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools/build_rules]
+
+  Group 4:
+    FILE:[/ws]/[tools/build_rules/BUILD.bazel]
+
+  Group 5:
+    FILE:[/ws]/[tools/build_rules/BUILD]
+
+
+FILE_STATE:[/ws]/[.bazelignore]
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_common.bzl]
+
+FILE:[/ws]/[a/helper.bzl]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/helper.bzl]
+
+
+FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+PACKAGE_ERROR_MESSAGE:a
+  Group 1:
+    PACKAGE:a
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/objc_info.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/objc/objc_info.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+BZL_LOAD:KeyForBuild{label=//a:helper.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:autoload_symbols
+
+  Group 2:
+    STARLARK_BUILTINS:Starlark @_builtins
+
+  Group 3:
+    CONTAINING_PACKAGE_LOOKUP:a
+
+  Group 4:
+    FILE:[/ws]/[a/helper.bzl]
+
+  Group 5:
+    PRECOMPUTED:starlark_semantics
+
+  Group 6:
+    REPOSITORY_MAPPING:Key{repoName=@@}
+
+
+FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[]
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/java]
+
+FILE:[/ws]/[tools]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[tools]
+
+
+FILE:[/ws]/[tools/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+
+FILE_STATE:[/ws]/[BUILD]
+
+FILE:[/virtual_builtins_bzl]/[common/java/java_common.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/java]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/java/java_common.bzl]
+
+
+PACKAGE_LOOKUP:tools
+  Group 1:
+    PRECOMPUTED:path_package_locator
+
+  Group 2:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 3:
+    LOCAL_REPOSITORY_LOOKUP:[/ws]/[tools]
+
+  Group 4:
+    FILE:[/ws]/[tools/BUILD.bazel]
+
+  Group 5:
+    FILE:[/ws]/[tools/BUILD]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_toolchain.bzl]
+
+FILE_STATE:[/virtual_builtins_bzl]/[bazel]
+
+FILE:[/ws]/[a/sub/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[a/sub]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub/BUILD.bazel]
+
+
+FILE:[/virtual_builtins_bzl]/[common/python/py_internal.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/python]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/python/py_internal.bzl]
+
+
+FILE:[/virtual_builtins_bzl]/[common/cc/cc_common_bazel.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/cc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/cc/cc_common_bazel.bzl]
+
+
+FILE:[/ws]/[REPO.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[REPO.bazel]
+
+
+FILE:[/virtual_builtins_bzl]/[common/cc/cc_helper_internal.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/cc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/cc/cc_helper_internal.bzl]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/xcode]
+
+FILE:[/virtual_builtins_bzl]/[common/xcode/providers.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/xcode]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/xcode/providers.bzl]
+
+
+FILE:[/virtual_builtins_bzl]/[common]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common]
+
+
+FILE:[/ws]/[a/BUILD.bazel]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/BUILD.bazel]
+
+
+FILE:[/ws]/[.bazelignore]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[.bazelignore]
+
+
+FILE:[/ws]/[tools/build_rules]
+  Group 1:
+    FILE:[/ws]/[tools]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/cc]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/xcode/providers.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/xcode/providers.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+  Group 4:
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_platform.bzl, isBuildPrelude=false}
+
+
+FILE:[/ws]/[MODULE.bazel]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[MODULE.bazel]
+
+
+FILE:[/virtual_builtins_bzl]/[common/objc/apple_env.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common/objc]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc/apple_env.bzl]
+
+
+FILE:[/virtual_builtins_bzl]/[common/objc]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/objc]
+
+
+FILE:[/virtual_builtins_bzl]/[common/python]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/python]
+
+
+FILE:[/virtual_builtins_bzl]/[bazel/exports.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[bazel]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[bazel/exports.bzl]
+
+
+FILE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[]
+  Group 1:
+    FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db]/[]
+
+
+FILE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db/embedded_tools]/[]
+  Group 1:
+    FILE_STATE:[/home/user/.cache/bazel/_bazel_user/install/c3100451b619e4702a880475c90d93db/embedded_tools]/[]
+
+
+FILE_STATE:[/ws]/[a/BUILD]
+
+FILE:[/virtual_builtins_bzl]/[common/java]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/java]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/objc/objc_info.bzl]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/java/java_common.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/java/java_common.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE_STATE:[/ws]/[tools]
+
+GLOBS:<GlobsKey packageRoot = /ws, packageIdentifier = a, globRequests = [GlobRequest: *.txt FILES]>
+  Group 1:
+    IGNORED_SUBDIRECTORIES:@@
+
+  Group 2:
+    DIRECTORY_LISTING:[/ws]/[a]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_toolchain.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/objc/apple_toolchain.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE:[/ws]/[BUILD]
+  Group 1:
+    FILE:[/ws]/[]
+
+  Group 2:
+    FILE_STATE:[/ws]/[BUILD]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/util.bzl]
+
+FILE_STATE:[/ws]/[a]
+
+FILE:[/virtual_builtins_bzl]/[common/exports.bzl]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/exports.bzl]
+
+
+FILE:[/ws]/[a/sub]
+  Group 1:
+    FILE:[/ws]/[a]
+
+  Group 2:
+    FILE_STATE:[/ws]/[a/sub]
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/python/py_internal.bzl]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:exports.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[exports.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+  Group 4:
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:bazel/exports.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/exports.bzl, isBuildPrelude=false}
+
+    BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/util.bzl, isBuildPrelude=false}
+
+
+FILE_STATE:[/ws]/[]
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/util.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/util.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/cc/cc_helper_internal.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/cc/cc_helper_internal.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE:[/virtual_builtins_bzl]/[common/xcode]
+  Group 1:
+    FILE:[/virtual_builtins_bzl]/[common]
+
+  Group 2:
+    FILE_STATE:[/virtual_builtins_bzl]/[common/xcode]
+
+
+BZL_LOAD:KeyForBuiltins{label=@@_builtins//:common/objc/apple_platform.bzl, isBuildPrelude=false}
+  Group 1:
+    PRECOMPUTED:starlark_semantics
+
+  Group 2:
+    FILE:[/virtual_builtins_bzl]/[common/objc/apple_platform.bzl]
+
+  Group 3:
+    REPOSITORY_MAPPING:Key{repoName=@@_builtins}
+
+
+FILE_STATE:[/virtual_builtins_bzl]/[common/xcode/providers.bzl]
+

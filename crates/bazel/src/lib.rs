@@ -853,6 +853,141 @@ impl Bazel {
         }
     }
 
+    /// `bazel dump --skyframe=deps`, filtered to a set of key kinds.
+    ///
+    /// This is Bazel's own loading-phase graph, on the server this handle has
+    /// just loaded the repository into, and it is what
+    /// `cambium_index::sky` stores. It has to run on the *same* server as the
+    /// query that loaded the packages: a fresh server has an empty Skyframe
+    /// graph and would dump nothing at all.
+    ///
+    /// `filter` is a comma-separated list of regexes matching the `KIND:`
+    /// prefix, a `-` prefix excluding. Failure is an error with Bazel's own
+    /// stderr in it, never an empty answer: an index without a layer is one
+    /// no later run can be answered from, so the caller has to be told rather
+    /// than handed an index that silently says nothing is dirty.
+    pub fn dump_skyframe(&self, filter: &str) -> Result<String> {
+        // No `HYGIENE` here: `dump` is a debugging command and rejects the
+        // progress flags every other invocation passes (`ERROR:
+        // --noshow_loading_progress :: Unrecognized option`), which is a hard
+        // exit rather than a warning.
+        let mut cmd = self.command("dump");
+        cmd.arg("--skyframe=deps")
+            .arg(format!("--skykey_filter={filter}"));
+        let out = self.runner.output(&mut cmd)?;
+        if !out.exit.success {
+            return Err(BazelError::Failed {
+                args: format!("dump --skyframe=deps --skykey_filter={filter}"),
+                status: out.exit.to_string(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Loads every package in the repository, keeping nothing.
+    ///
+    /// `//...:*` again, but as a plain label query rather than the streamed
+    /// proto the index is built from. The difference matters for one reason:
+    /// after the streamed query a server can hold the loading graph's nodes
+    /// without their values, and `dump --skyframe=deps` prints only values, so
+    /// the loading layer comes back with its packages missing. This query
+    /// materialises them. The output is thrown away.
+    ///
+    /// Warm by construction (it runs on the server that just answered the same
+    /// pattern), and `--keep_going` so a repository with a package that cannot
+    /// load is loaded as far as it goes, exactly as the index's own query is.
+    pub fn load_universe(&self) -> Result<()> {
+        let mut cmd = self.command("query");
+        cmd.arg("//...:*").arg("--output=label").arg("--keep_going");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let out = self.runner.output(&mut cmd)?;
+        // Exit 3 is `--keep_going` reporting that something did not load,
+        // which is the same answer the index's own query accepts.
+        match out.exit.code {
+            Some(0) | Some(3) => Ok(()),
+            _ => Err(BazelError::Failed {
+                args: "query //...:* --output=label".into(),
+                status: out.exit.to_string(),
+                stderr: truncate(&String::from_utf8_lossy(&out.stderr), 2000),
+            }),
+        }
+    }
+
+    /// Loads the named packages, keeping nothing.
+    ///
+    /// [`Bazel::load_universe`] narrowed to a package list, for the refresh
+    /// path: only the packages a splice query re-queried can have come back
+    /// without their values, and `set(//a:* //b:*)` is a fraction of `//...`.
+    /// The expression goes through a query file when it is long, exactly as
+    /// the splice query's does.
+    pub fn load_packages(&self, packages: &[String]) -> Result<()> {
+        if packages.is_empty() {
+            return Ok(());
+        }
+        let expr = format!(
+            "set({})",
+            packages
+                .iter()
+                .map(|p| format!("//{p}:*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut cmd = self.command("query");
+        let _scratch = if expr.len() > MAX_INLINE_QUERY {
+            let path = self.scratch.join(format!(
+                "cambium-reload-{}-{}.txt",
+                std::process::id(),
+                now_nanos()
+            ));
+            std::fs::write(&path, &expr)?;
+            cmd.arg(format!("--query_file={}", path.display()));
+            Some(ScratchFile(path))
+        } else {
+            cmd.arg(&expr);
+            None
+        };
+        cmd.arg("--output=label").arg("--keep_going");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let out = self.runner.output(&mut cmd)?;
+        match out.exit.code {
+            Some(0) | Some(3) => Ok(()),
+            _ => Err(BazelError::Failed {
+                args: format!("query {} --output=label", truncate(&expr, 200)),
+                status: out.exit.to_string(),
+                stderr: truncate(&String::from_utf8_lossy(&out.stderr), 2000),
+            }),
+        }
+    }
+
+    /// The server's output base, where external repositories are checked out.
+    ///
+    /// Only used to keep the machine's own paths out of the stored loading
+    /// layer, so an answer that cannot be had costs a few machine-specific
+    /// strings in the payload and nothing else.
+    pub fn output_base(&self) -> Option<String> {
+        let mut cmd = self.command("info");
+        cmd.arg("output_base");
+        match self.runner.output(&mut cmd) {
+            Ok(o) if o.exit.success => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            }
+            Ok(o) => {
+                tracing::debug!(status = %o.exit, "bazel info output_base did not succeed");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "could not run bazel info output_base");
+                None
+            }
+        }
+    }
+
     /// The root module's repository mapping as Bazel prints it, for
     /// `cambium_index::RepoMapping::from_dump` to parse.
     ///

@@ -68,13 +68,14 @@ codes! {
     /// A store fetch command failed with something on stderr, and the
     /// artifact was read as absent.
     W007StoreFetchFailed => "CAMBI-W007",
-    /// The base index carries no static `.bzl` load closure, so a changed
-    /// `.bzl` cannot be resolved and the run is global.
-    W008NoLoadClosure => "CAMBI-W008",
+    /// The base index carries no Skyframe loading layer, so which packages
+    /// the change moved cannot be answered and the run is global.
+    W008NoLoadingLayer => "CAMBI-W008",
     /// A changed `.bzl` is loaded outside any package, so the run is global.
     W009WorkspaceLevelBzl => "CAMBI-W009",
-    /// The witness found a changed `.bzl` that *is* loaded at head but has no
-    /// node in the stored closure: the closure was incomplete.
+    /// Retired with the static `.bzl` load closure's witness (format 11): the
+    /// loading layer's `BZL_LOAD` edges are Bazel's own, so there is no
+    /// stored closure left to be incomplete. The code is not reused.
     W010IncompleteClosure => "CAMBI-W010",
     /// The base index this run computed could not be published.
     W011PublishFailed => "CAMBI-W011",

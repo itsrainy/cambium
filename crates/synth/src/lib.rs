@@ -10,6 +10,7 @@ pub mod graph;
 pub mod mutate;
 pub mod proto;
 pub mod reference;
+pub mod sky;
 pub mod spec;
 
 pub use emit::{emit_git_history, emit_workspace, force_clear, EmitError, EmittedRepo, SynthFiles};

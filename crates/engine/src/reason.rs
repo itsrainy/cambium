@@ -157,11 +157,11 @@ pub enum GlobalReason {
     },
     /// A changed path matched an invalidator path or glob.
     Invalidator { path: String },
-    /// `.bzl` files changed and the base index has no load closure to
-    /// resolve them against.
-    NoLoadClosure { paths: Vec<String> },
-    /// `.bzl` files changed whose loader is `MODULE.bazel` or `WORKSPACE`
-    /// rather than a package, and the index could not name the repositories
+    /// The base index carries no Skyframe loading layer, so which packages a
+    /// change moved cannot be answered at all.
+    NoLoadingLayer,
+    /// `.bzl` files changed that the module system loads rather than any
+    /// package's BUILD file, and the index could not name the repositories
     /// they define.
     WorkspaceLevelBzl { paths: Vec<String> },
     /// The external-repository stage escalated.
@@ -186,14 +186,13 @@ impl fmt::Display for GlobalReason {
                 cause,
             } => write!(f, "{command} --{name} changed {cause}"),
             GlobalReason::Invalidator { path } => write!(f, "{path} matches an invalidator"),
-            GlobalReason::NoLoadClosure { paths } => write!(
-                f,
-                "{} changed and the base index carries no static .bzl load closure",
-                bzl_files(paths)
+            GlobalReason::NoLoadingLayer => f.write_str(
+                "the base index carries no skyframe loading layer, so which packages the \
+                 change moved cannot be answered",
             ),
             // The wording is deliberately the one the `rbuildfiles` path used
             // before the static closure replaced it, so the benchmark's
-            // reason histogram is comparable across the change.
+            // reason histogram is comparable across both changes.
             GlobalReason::WorkspaceLevelBzl { paths } => write!(
                 f,
                 "{} is loaded by MODULE.bazel/WORKSPACE (repository rules), not by any \
@@ -212,7 +211,7 @@ impl GlobalReason {
             GlobalReason::Bazelrc { .. } => Code::W004BazelrcGlobal,
             GlobalReason::Flag { .. } => Code::W015FlagUnresolved,
             GlobalReason::Invalidator { .. } => Code::W013InvalidatorMatched,
-            GlobalReason::NoLoadClosure { .. } => Code::W008NoLoadClosure,
+            GlobalReason::NoLoadingLayer => Code::W008NoLoadingLayer,
             GlobalReason::WorkspaceLevelBzl { .. } => Code::W009WorkspaceLevelBzl,
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
         }
@@ -225,7 +224,7 @@ impl GlobalReason {
         matches!(
             code,
             Code::W004BazelrcGlobal
-                | Code::W008NoLoadClosure
+                | Code::W008NoLoadingLayer
                 | Code::W009WorkspaceLevelBzl
                 | Code::W013InvalidatorMatched
                 | Code::W014ExternalsGlobal
@@ -274,22 +273,14 @@ impl GlobalReason {
                 "if the path cannot move the build graph, take it out of [invalidators].paths \
                  / globs, or add it to [ignore].globs",
             ),
-            GlobalReason::NoLoadClosure { paths } => {
-                let d = Diagnostic::warning(
-                    self.code(),
-                    format!(
-                        "a changed .bzl could not be resolved, so everything is affected: {reason}"
-                    ),
-                )
-                .with_help(
-                    "rebuild the lineage with `cambi index build` from a checkout the row \
-                     source can read",
-                );
-                match paths.first() {
-                    Some(p) => d.at(p.clone(), None),
-                    None => d,
-                }
-            }
+            GlobalReason::NoLoadingLayer => Diagnostic::warning(
+                self.code(),
+                format!("nothing can be told apart in this change, so everything is affected: {reason}"),
+            )
+            .with_help(
+                "rebuild the lineage with `cambi index build` against a bazel that can run \
+                 `dump --skyframe=deps`",
+            ),
             GlobalReason::WorkspaceLevelBzl { paths } => {
                 let d = Diagnostic::warning(
                     self.code(),
@@ -474,17 +465,9 @@ mod tests {
                 "MODULE.bazel matches an invalidator",
             ),
             (
-                GlobalReason::NoLoadClosure {
-                    paths: vec!["bazel/x.bzl".into()],
-                },
-                "`bazel/x.bzl` changed and the base index carries no static .bzl load closure",
-            ),
-            (
-                GlobalReason::NoLoadClosure {
-                    paths: vec!["a.bzl".into(), "b.bzl".into()],
-                },
-                "2 changed `.bzl` files changed and the base index carries no static .bzl load \
-                 closure",
+                GlobalReason::NoLoadingLayer,
+                "the base index carries no skyframe loading layer, so which packages the \
+                 change moved cannot be answered",
             ),
             (
                 GlobalReason::WorkspaceLevelBzl {

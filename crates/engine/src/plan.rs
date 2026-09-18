@@ -178,8 +178,10 @@ impl Engine {
 
         // The run's own first stages, in the run's own order: external
         // repositories first, so a diff they account for does not also fire
-        // the `MODULE.bazel` invalidator; then the dirty set, with the
-        // changed `.bzl` files resolved through the load closure.
+        // the `MODULE.bazel` invalidator; then the dirty set, which is the
+        // reverse walk over the loading layer the index carries. No Bazel and
+        // no checkout: the layer was dumped when the index was built, so a dry
+        // run names the same packages the run would re-query.
         let mut run = crate::run::Run::new(self, view, &NoQuerier, &req);
         let mut ext = run.externals(&changes, &crate::externals::GitText(&self.repo));
         let stage = run.dirty(&screened.changes, &mut ext)?;

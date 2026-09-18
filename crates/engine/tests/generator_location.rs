@@ -57,6 +57,37 @@ impl PackageQuerier for Canned {
     fn version(&self) -> String {
         "canned".to_string()
     }
+
+    /// The loading layer for a tree of nothing but BUILD files, which is what
+    /// a canned row set describes. Without one the dirty stage has nothing to
+    /// walk and the run is global, which would make this test pass for the
+    /// wrong reason.
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+        _filter: &str,
+    ) -> cambium_engine::Result<(String, cambium_index::sky::Paths)> {
+        let files: BTreeMap<String, String> = self
+            .packages()
+            .map(|p| {
+                let path = if p.is_empty() {
+                    "BUILD.bazel".to_string()
+                } else {
+                    format!("{p}/BUILD.bazel")
+                };
+                (path, String::new())
+            })
+            .collect();
+        let packages: Vec<String> = self.packages().cloned().collect();
+        let tree = cambium_synth::sky::InMemory(&files);
+        Ok((
+            cambium_synth::sky::dump(&packages, &tree),
+            cambium_synth::sky::paths(),
+        ))
+    }
 }
 
 #[test]

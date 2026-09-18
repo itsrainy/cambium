@@ -78,6 +78,16 @@ oracle of 761.
   itself considers dirty.
 - **skyframe-index**: populate the index from a filtered `bazel dump
   --skyframe=deps` and shape it like that dump, instead of from `bazel query`.
+  *Landed, in a narrower form than the prototype measured.* The rule layer
+  still comes from `bazel query`; what the dump supplies is a second layer
+  underneath it, which answers which packages a changed path moved
+  (`crates/index/src/sky`, `docs/STORE.md` format 11). The prototype's own
+  findings carried over: a source file's contents reach consumers through the
+  rule layer and nothing else, and the singleton key kinds have to be dropped
+  or every package sits one reverse hop from every other. Two of its choices
+  did not: the ignore node is kept (it is the one singleton a changed path
+  reaches, and keeping it is what makes a `.bazelignore` edit mean what it
+  says), and keys of other repositories are dropped rather than stored.
 - **skyframe-analysis**: an opt-in `CONFIGURED_TARGET` tier built from an
   analysis-phase dump, for the dependencies that only exist after analysis.
 - **warm-query**: `bazel query rdeps` against a live server, the cheapest thing

@@ -269,6 +269,26 @@ pub struct Scanning {
     enumerates_tree: bool,
     workspace: Option<PathBuf>,
     external_rules: Option<String>,
+    /// The `--skykey_filter` of every loading-layer dump this querier was
+    /// asked for, in order. A dump is the most expensive thing an incremental
+    /// run does on a long-lived server, so a test can ask whether one
+    /// happened at all, and for what.
+    dumps: std::sync::Mutex<Vec<String>>,
+    /// Stand in for a server that has the loading graph's nodes and not its
+    /// package values: the first dump comes back with every `PACKAGE` block
+    /// removed, and asking the server to load the repository again restores
+    /// them. Real Bazel does this after a streamed `//...:*` query (seen on
+    /// apollo 7.4.1), and the engine is expected to notice and repair it.
+    hides_packages_until_reloaded: std::sync::atomic::AtomicBool,
+    /// How many times the engine asked for the repository to be loaded again.
+    reloads: std::sync::atomic::AtomicUsize,
+    /// The same for the refresh path: from this dump onward (1-based) the
+    /// `PACKAGE` blocks are removed, until the engine loads by label. Zero
+    /// never hides. A cold build takes dump 1, so `2` leaves the index whole
+    /// and breaks the splice's refresh, which is the case worth a test.
+    hides_from_dump: std::sync::atomic::AtomicUsize,
+    /// How many dumps this querier has served.
+    dumps_served: std::sync::atomic::AtomicUsize,
 }
 
 impl Scanning {
@@ -282,7 +302,40 @@ impl Scanning {
             enumerates_tree: false,
             workspace: None,
             external_rules: None,
+            dumps: std::sync::Mutex::new(Vec::new()),
+            hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
+            reloads: std::sync::atomic::AtomicUsize::new(0),
+            hides_from_dump: std::sync::atomic::AtomicUsize::new(0),
+            dumps_served: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Serve every dump from the `n`th onward with its `PACKAGE` blocks
+    /// missing, until the engine loads the packages by label.
+    pub fn hiding_packages_from_dump(self, n: usize) -> Self {
+        self.hides_from_dump
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// Serve the first dump with its `PACKAGE` blocks missing, as a real
+    /// server does after a streamed universe query, and serve them once the
+    /// engine has asked for the repository to be loaded again.
+    pub fn hiding_packages_until_reloaded(self) -> Self {
+        self.hides_packages_until_reloaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    /// How many times the engine asked Bazel to load the repository again.
+    pub fn reloads(&self) -> usize {
+        self.reloads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The filters this querier has been asked to dump, in order. Empty means
+    /// no dump ran.
+    pub fn dumps(&self) -> Vec<String> {
+        self.dumps.lock().unwrap().clone()
     }
 
     /// Serve `files` as the Starlark source of the load closure.
@@ -362,6 +415,79 @@ impl PackageQuerier for Scanning {
     fn external_rules(&self) -> Option<String> {
         self.external_rules.clone()
     }
+
+    /// A querier with a tree behind it can produce a loading layer, from the
+    /// dump that tree would have made (see [`crate::sky`]). One without a
+    /// tree cannot, and the index it builds carries no layer — which is the
+    /// shape the tests of that very case want.
+    fn can_dump_loading_layer(&self) -> bool {
+        self.files.is_some()
+    }
+
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        self.dumps.lock().unwrap().push(filter.to_string());
+        let files = self.files.as_ref().ok_or_else(|| EngineError::BazelQuery {
+            what: "dump --skyframe=deps".into(),
+            code: None,
+            stderr: "this querier has no tree".into(),
+        })?;
+        let packages: Vec<String> = self.packages.iter().map(|p| p.to_string()).collect();
+        let tree = cambium_synth::sky::InMemory(&files.0);
+        let mut text = cambium_synth::sky::dump(&packages, &tree);
+        let nth = self
+            .dumps_served
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let from = self
+            .hides_from_dump
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if self
+            .hides_packages_until_reloaded
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || (from > 0 && nth >= from)
+        {
+            text = without_package_blocks(&text);
+        }
+        Ok((text, cambium_synth::sky::paths()))
+    }
+
+    fn reload_named(&self, _packages: &[String]) -> bool {
+        self.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hides_from_dump
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    fn reload_packages(&self) -> bool {
+        self.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.hides_packages_until_reloaded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+/// A dump with every `PACKAGE` block dropped and everything else, including
+/// `PACKAGE_LOOKUP`, left alone. A block is a line at column zero and the
+/// indented lines under it.
+fn without_package_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut dropping = false;
+    for line in text.lines() {
+        let header = !line.starts_with(' ') && !line.is_empty();
+        if header {
+            dropping = line.starts_with("PACKAGE:");
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// A querier that reads a toy BUILD syntax out of a directory: one rule per
@@ -456,6 +582,21 @@ impl PackageQuerier for DirQuerier {
 
     fn workspace(&self) -> Option<&Path> {
         Some(&self.root)
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+        _filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        let tree = cambium_synth::sky::OnDisk(self.root.clone());
+        Ok((
+            cambium_synth::sky::dump(&self.packages(), &tree),
+            cambium_synth::sky::paths(),
+        ))
     }
 }
 

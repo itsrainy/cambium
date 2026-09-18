@@ -139,6 +139,17 @@ Three separate things, not interchangeable:
   reads but no repository rule claims (a hole in the graph, so everything is
   affected) from one Bazel never reads (nothing can depend on it, so the
   change is ignored).
+  **11**: the *Skyframe loading layer* (`sky_*`; `crates/index/src/sky`),
+  Bazel's own loading-phase graph read back from `bazel dump
+  --skyframe=deps` on the server that just loaded the repository, stored as
+  a node table ordered by `(kind, root, key)` plus a CSR of reverse edges.
+  It answers "which packages did this changed path move" from the edges
+  Bazel recorded, and three restatements of that question went with the
+  bump: the classifier's sub-package carving rule, its glob rule, and the
+  package half of the static `.bzl` load closure. Keys of other
+  repositories are dropped (they are sinks for this walk, and keeping them
+  put the machine's output base in the payload), except `BZL_LOAD`, because
+  an external `.bzl` can be a file of this tree.
   At each bump, an empty table in an older index would otherwise misread as
   "no mapping needed" rather than "never looked".
 

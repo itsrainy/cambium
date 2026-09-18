@@ -32,6 +32,30 @@ pub struct GraphDiff {
     /// before the field existed; `bench report` reads every history file.
     #[serde(default)]
     pub externals_mismatch: Vec<String>,
+    /// The Skyframe loading layer, node by node and edge by edge, where the
+    /// applied index is *short*: a node or a reverse edge a cold build at the
+    /// same commit has and the incrementally applied one does not.
+    ///
+    /// This is the table the dirty stage walks, so a short row means a change
+    /// that should have reached a package does not, which is the one class of
+    /// bug the design does not tolerate. It is also invisible to the node,
+    /// edge and rule-hash comparisons above, because the two indexes describe
+    /// the same target graph either way. Absent from records written before
+    /// the field existed.
+    #[serde(default)]
+    pub sky_mismatch: Vec<String>,
+    /// The other direction: layer rows the applied index has and a cold build
+    /// does not. Counted and reported, and it does not fail the oracle.
+    ///
+    /// A refresh replaces the rows of the nodes its dump names and leaves
+    /// every other row alone, which is what makes the incremental dump cheap;
+    /// what it cannot do is *remove* a node, so a file, package or `.bzl` that
+    /// stopped existing leaves its row behind. Such a row is inert (nothing
+    /// depends on it, so no walk reaches a package through it) and it is an
+    /// over-approximation of the same shape the rest of the engine is allowed:
+    /// acceptable, and measured.
+    #[serde(default)]
+    pub sky_extra: Vec<String>,
     /// Totals, so a capped report still says how big the disagreement is.
     pub counts: DiffCounts,
 }
@@ -46,11 +70,24 @@ pub struct DiffCounts {
     pub edges_only_in_rebuilt: usize,
     #[serde(default)]
     pub externals_mismatch: usize,
+    #[serde(default)]
+    pub sky_mismatch: usize,
+    #[serde(default)]
+    pub sky_extra: usize,
 }
 
 impl GraphDiff {
+    /// Whether the two indexes agree on everything a run's answer can depend
+    /// on.
+    ///
+    /// `sky_extra` is deliberately not part of it: a layer row the applied
+    /// index kept and a cold build never wrote costs bytes and nothing else.
+    /// Everything else here is an answer that would differ.
     pub fn is_empty(&self) -> bool {
-        self.counts == DiffCounts::default()
+        DiffCounts {
+            sky_extra: 0,
+            ..self.counts.clone()
+        } == DiffCounts::default()
     }
 
     pub fn summary(&self) -> String {
@@ -58,14 +95,16 @@ impl GraphDiff {
         format!(
             "nodes only in applied: {}, only in rebuilt: {}; kind mismatches: {}; \
              rule hash mismatches: {}; edges only in applied: {}, only in rebuilt: {}; \
-             externals mismatches: {}",
+             externals mismatches: {}; loading layer rows missing: {} (extra: {})",
             c.nodes_only_in_applied,
             c.nodes_only_in_rebuilt,
             c.kind_mismatch,
             c.rule_hash_mismatch,
             c.edges_only_in_applied,
             c.edges_only_in_rebuilt,
-            c.externals_mismatch
+            c.externals_mismatch,
+            c.sky_mismatch,
+            c.sky_extra
         )
     }
 }
@@ -159,7 +198,137 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
         }
     }
     compare_externals(applied, rebuilt, cap, &mut d);
+    compare_sky(applied, rebuilt, cap, &mut d);
     d
+}
+
+/// The Skyframe loading layer, node by node and edge by edge.
+///
+/// A splice refreshes only the packages the run re-queried, and a cold build
+/// at the same commit dumps the whole repository; the two must describe the
+/// same loading-phase graph. Nothing above sees a disagreement here (the
+/// layer is neither a target nor an edge between targets) but it is what the
+/// dirty stage walks, so an index whose layer is short of an edge answers a
+/// smaller question than a cold build would for every commit after it.
+///
+/// Node identity is `(kind, root name, key)`, so the comparison survives the
+/// two layers assigning different ids, exactly as the rule-layer comparison
+/// survives two lineages assigning different node ids.
+fn compare_sky(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d: &mut GraphDiff) {
+    let mut missing = |s: String| {
+        d.counts.sky_mismatch += 1;
+        if d.sky_mismatch.len() < cap {
+            d.sky_mismatch.push(s);
+        }
+    };
+    if applied.sky.present != rebuilt.sky.present {
+        missing(format!(
+            "loading layer present: applied {}, rebuilt {}",
+            applied.sky.present, rebuilt.sky.present
+        ));
+        return;
+    }
+    if !applied.sky.present {
+        return;
+    }
+
+    /// `(kind, root, key)` for every node, and the same for each of its
+    /// reverse edges' other end.
+    fn names(v: cambium_index::sky::SkyRef<'_>) -> Vec<String> {
+        (0..v.len() as u32)
+            .map(|id| {
+                format!(
+                    "{}:[{}]/[{}]",
+                    v.kind_of(id).name(),
+                    v.root_name(id),
+                    v.text(id)
+                )
+            })
+            .collect()
+    }
+    /// The nodes a changed path in this repository can reach: everything
+    /// backwards from a file or directory state of the workspace itself.
+    ///
+    /// Comparing anything else would measure how much of the world each run's
+    /// server happened to load rather than what the index knows. A cold
+    /// `//...` build evaluates far more than an incremental run does: on the
+    /// `bazel` subject it leaves about five hundred `BZL_LOAD` nodes of other
+    /// repositories behind, some two thousand rows once their edges are
+    /// counted, and no main-repository diff can reach any of them.
+    fn reachable(v: cambium_index::sky::SkyRef<'_>) -> Vec<bool> {
+        use cambium_index::sky::Kind;
+        let mut seen = vec![false; v.len()];
+        let mut stack: Vec<u32> = Vec::new();
+        for id in 0..v.len() as u32 {
+            let seed = matches!(v.kind_of(id), Kind::FileState | Kind::DirectoryListingState)
+                && v.root[id as usize] == cambium_index::sky::WORKSPACE;
+            if seed && !seen[id as usize] {
+                seen[id as usize] = true;
+                stack.push(id);
+            }
+        }
+        while let Some(id) = stack.pop() {
+            for &up in v.rdeps.row(id) {
+                if !seen[up as usize] {
+                    seen[up as usize] = true;
+                    stack.push(up);
+                }
+            }
+        }
+        seen
+    }
+    let (na, nb) = (names(applied.sky), names(rebuilt.sky));
+    let (ka, kb) = (reachable(applied.sky), reachable(rebuilt.sky));
+    let (sa, sb): (BTreeSet<&str>, BTreeSet<&str>) = (
+        na.iter()
+            .enumerate()
+            .filter(|(i, _)| ka[*i])
+            .map(|(_, s)| s.as_str())
+            .collect(),
+        nb.iter()
+            .enumerate()
+            .filter(|(i, _)| kb[*i])
+            .map(|(_, s)| s.as_str())
+            .collect(),
+    );
+    let mut extra = |s: String| {
+        d.counts.sky_extra += 1;
+        if d.sky_extra.len() < cap {
+            d.sky_extra.push(s);
+        }
+    };
+    for n in sa.difference(&sb) {
+        extra(format!("node only in applied: {n}"));
+    }
+    for n in sb.difference(&sa) {
+        missing(format!("node only in rebuilt: {n}"));
+    }
+
+    fn edges<'a>(
+        v: cambium_index::sky::SkyRef<'_>,
+        names: &'a [String],
+        keep: &[bool],
+    ) -> BTreeSet<(&'a str, &'a str)> {
+        let mut out = BTreeSet::new();
+        for to in 0..v.len() as u32 {
+            if !keep[to as usize] {
+                continue;
+            }
+            for &from in v.rdeps.row(to) {
+                if keep[from as usize] {
+                    out.insert((names[from as usize].as_str(), names[to as usize].as_str()));
+                }
+            }
+        }
+        out
+    }
+    let (ea, eb) = (edges(applied.sky, &na, &ka), edges(rebuilt.sky, &nb, &kb));
+    for (from, to) in ea.difference(&eb) {
+        extra(format!("edge only in applied: {from} -> {to}"));
+    }
+    for (from, to) in eb.difference(&ea) {
+        missing(format!("edge only in rebuilt: {from} -> {to}"));
+    }
 }
 
 /// The externals side tables, keyed by name rather than by id.
@@ -373,6 +542,100 @@ mod tests {
         assert_eq!(d.counts.externals_mismatch, 1, "{:?}", d.externals_mismatch);
         assert!(d.externals_mismatch[0].contains("api/"), "{d:?}");
         assert!(!d.is_empty());
+    }
+
+    /// The same regression one layer down: two indexes whose nodes, edges,
+    /// rule hashes and externals tables agree exactly, one of whose loading
+    /// layer is short of the edge a new sub-package travels. The dirty stage
+    /// walks that layer, so the short one answers a narrower question for
+    /// every commit after it, and nothing else in the oracle can see it.
+    #[test]
+    fn a_short_loading_layer_is_reported_though_the_graph_is_identical() {
+        const FULL: &str = "\
+PACKAGE:lib
+  Group 1:
+    PACKAGE_LOOKUP:lib
+
+  Group 2:
+    PACKAGE_LOOKUP:lib/sub
+
+PACKAGE_LOOKUP:lib/sub
+  Group 1:
+    FILE:[/ws]/[lib/sub/BUILD]
+
+FILE:[/ws]/[lib/sub/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[lib/sub/BUILD]
+";
+        // The same dump with the package's lookup of its sub-directory gone.
+        const SHORT: &str = "\
+PACKAGE:lib
+  Group 1:
+    PACKAGE_LOOKUP:lib
+
+PACKAGE_LOOKUP:lib/sub
+  Group 1:
+    FILE:[/ws]/[lib/sub/BUILD]
+
+FILE:[/ws]/[lib/sub/BUILD]
+  Group 1:
+    FILE_STATE:[/ws]/[lib/sub/BUILD]
+";
+        fn index(dump: &str) -> cambium_index::IndexData {
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.apply_packages(&[PackageUpdate {
+                package: "lib".into(),
+                targets: vec![TargetRow::rule("//lib:core", "cc_library", vec![])],
+                ..Default::default()
+            }]);
+            let mut l = cambium_index::SkyLayer::new();
+            l.apply_dump(dump, &cambium_index::sky::Paths::new("/ws", "/ob"));
+            b.set_sky_layer(l);
+            b.finish("c")
+        }
+        // The short one as the *applied* index: a row the cold build has and
+        // it does not, which is a change that would not reach a package.
+        let (a, b) = (index(SHORT), index(FULL));
+        let d = compare_by_label(a.view(), b.view(), 10);
+        assert_eq!(d.counts.nodes_only_in_applied, 0);
+        assert_eq!(d.counts.rule_hash_mismatch, 0);
+        assert_eq!(d.counts.edges_only_in_applied, 0);
+        assert_eq!(d.counts.externals_mismatch, 0);
+        // Two rows: the edge the short layer lacks, and the package node
+        // itself, which without that edge nothing can reach any more.
+        assert_eq!(d.counts.sky_mismatch, 2, "{:?}", d.sky_mismatch);
+        assert!(
+            d.sky_mismatch.iter().any(|l| l.contains("PACKAGE_LOOKUP")
+                && l.contains("only in rebuilt")),
+            "{d:?}"
+        );
+        assert!(!d.is_empty());
+        assert!(d.summary().contains("loading layer rows missing: 2"));
+
+        // The other way round is an over-approximation: a row the applied
+        // index kept and a cold build never wrote is inert, so it is counted
+        // and does not fail the oracle. A refresh replaces the rows its dump
+        // names and cannot remove a node, so this is what a long walk leaves.
+        let d = compare_by_label(b.view(), a.view(), 10);
+        assert_eq!(d.counts.sky_mismatch, 0, "{:?}", d.sky_mismatch);
+        assert_eq!(d.counts.sky_extra, 2, "{:?}", d.sky_extra);
+        assert!(d.sky_extra[0].contains("only in applied"), "{d:?}");
+        assert!(d.is_empty(), "{d:?}");
+
+        // And an index with no layer at all is told apart from one whose
+        // loading phase touched nothing.
+        let none = {
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.apply_packages(&[PackageUpdate {
+                package: "lib".into(),
+                targets: vec![TargetRow::rule("//lib:core", "cc_library", vec![])],
+                ..Default::default()
+            }]);
+            b.finish("c")
+        };
+        let d = compare_by_label(none.view(), b.view(), 10);
+        assert_eq!(d.counts.sky_mismatch, 1, "{:?}", d.sky_mismatch);
+        assert!(d.sky_mismatch[0].contains("present"), "{d:?}");
     }
 
     #[test]

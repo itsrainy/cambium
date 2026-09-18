@@ -168,8 +168,15 @@ pub struct DirtyStage {
     pub dirty: DirtySet,
     /// The package layout at head, for resolving changed files to labels.
     pub packages: PackageSet,
-    /// Packages dirtied through a changed `.bzl` in their load closure.
+    /// Of the dirty packages, the ones a changed Starlark file reached
+    /// through the loading layer's `BZL_LOAD` edges. Their rules are marked
+    /// direct outright: a `.bzl` edit can change a rule's implementation
+    /// without moving any rule proto, so every rule hash comes back unchanged.
     pub bzl_dirty: BTreeSet<String>,
+    /// The diff's `.bzl` paths. Not a dirty-set input any more; the
+    /// external-repository stage's closure rescan needs them to know which
+    /// memoised parses to drop.
+    pub changed_bzl: BTreeSet<String>,
     /// Leaf nodes of the external repositories that moved, as `(id, label)`.
     pub external_nodes: Vec<(u32, String)>,
     /// How many packages each moved repository contributed, for the overflow
@@ -346,10 +353,18 @@ impl<'a> Run<'a> {
         reach
     }
 
-    /// The dirty set: the classifier over the screened diff, the changed
-    /// `.bzl` files resolved through the load closure, the packages a deleted
-    /// BUILD file did not really delete, and the external repositories' reach
-    /// into the graph.
+    /// The dirty set: the loading layer's reverse walk over the screened diff,
+    /// the classifier's path-shaped half, the packages a deleted BUILD file
+    /// did not really delete, and the external repositories' reach into the
+    /// graph.
+    ///
+    /// The walk is the whole of "which packages must be re-queried". Nothing
+    /// here restates a rule of Bazel's loading phase: a changed path becomes
+    /// the Skyframe keys it moved, and every `PACKAGE` or `PACKAGE_LOOKUP`
+    /// node the reverse walk reaches is dirty. A sub-package carved out by a
+    /// new `BUILD` file, a file entering a `glob`, a `.bzl` loaded only by
+    /// other `.bzl` files: all three are edges Bazel recorded, and none of
+    /// them is a case in this function.
     pub(crate) fn dirty(&mut self, changes: &[&Change], ext: &mut Externals) -> Result<DirtyStage> {
         let mut matchers = Matchers::compile(&self.engine.config().rules())?;
         matchers.exempt(ext.handled.clone());
@@ -431,20 +446,34 @@ impl<'a> Run<'a> {
         }
         self.stats.repos_dirty_by_input = ext.by_input;
 
-        let resolved = bzl::resolve_changed(bzl::BzlStage {
-            base_view: self.base,
-            querier: self.querier,
-            dirty: &mut dirty,
-            ext,
-            stats: &mut self.stats,
-            diags: self.engine.diagnostics(),
-            externals_enabled: self.engine.config().externals.enabled,
-        });
-        if let Some(reason) = resolved.global {
-            dirty.global = true;
-            global = Some(reason);
+        let walk = self.loading_layer_walk(changes, &mut dirty, &mut global);
+        self.packages_the_layer_cannot_name(changes, &packages, &mut dirty);
+        let changed_bzl: BTreeSet<String> = changes
+            .iter()
+            .filter(|c| cambium_classify::is_bzl_file(&c.path))
+            .map(|c| c.path.clone())
+            .collect();
+        if !dirty.global {
+            if let Some(reason) = self.workspace_bzl(&changed_bzl, ext) {
+                dirty.global = true;
+                global = Some(reason);
+            }
         }
         keep_surviving_packages(&mut dirty, self.querier, self.engine.workspace());
+        // A package the diff deleted is one this run acted on, so it belongs
+        // in the dirty set even though the query stage will not ask for it.
+        //
+        // The classifier used to put it there as a side effect of its carving
+        // rule. Nothing else does now, and `dirty_packages` is not only a
+        // report field: it is how a deleted package is *accounted for*. Every
+        // rule in it is tombstoned, so none can appear in the affected set,
+        // and the rdeps oracle's deleted half accepts "a surviving affected
+        // target in the package, or the package in the dirty set" and nothing
+        // else. A 40-step walk on the `bazel` subject found it: the commit
+        // that removed `third_party/py/{concurrent,dataclasses,mock}` left six
+        // of their targets unaccounted for.
+        let gone: Vec<String> = dirty.deleted_packages.iter().cloned().collect();
+        dirty.dirty.extend(gone);
         self.stats.ignored_files = dirty.ignored;
 
         // The stage's own escalation replaces an invalidator's wording: both
@@ -483,11 +512,199 @@ impl<'a> Run<'a> {
         Ok(DirtyStage {
             dirty,
             packages,
-            bzl_dirty: resolved.packages,
+            bzl_dirty: walk.bzl_packages,
+            changed_bzl,
             external_nodes,
             packages_by_repo,
             global,
         })
+    }
+
+    /// The one package a changed path names that the loading layer cannot.
+    ///
+    /// The layer is Bazel's graph *as it was when the index was built*, so it
+    /// has a node for every directory Bazel looked at and for nothing else. A
+    /// directory that did not exist at base is in neither category: Bazel
+    /// never statted it, so there is no `PACKAGE_LOOKUP` to reach and no
+    /// `PACKAGE` behind it. The walk still dirties the *parent* (the directory
+    /// listing it reads moved, which is how the parent finds out it lost
+    /// files) but the new package itself has to be named from the diff.
+    ///
+    /// This is a fact about a path, not a model of the loading phase: a
+    /// `BUILD` file at `p/BUILD` defines the package `p`, and that is the same
+    /// rule `PackageSet` applies to decide who owns a file. The case the
+    /// carving rule existed for — the *parent* of the new package — is gone,
+    /// and it is the half the layer answers better.
+    ///
+    /// It fires only where the layer is silent, and the layer itself says
+    /// where that is: a package it holds a `PACKAGE` node for is one the walk
+    /// speaks for. The diff's own status is not the test. A `BUILD` file that
+    /// git reports as modified can still name a package that did not exist at
+    /// base, because a range of commits that creates a file and then edits it
+    /// can be folded either way, and reading the status as proof of novelty
+    /// would miss exactly the package the change created.
+    ///
+    /// A synthetic cold-rebuild comparison is what found this: the incremental
+    /// run was short of every target in a package the change created, because
+    /// the layer built at base had never heard of the directory.
+    fn packages_the_layer_cannot_name(
+        &self,
+        changes: &[&Change],
+        packages: &PackageSet,
+        dirty: &mut DirtySet,
+    ) {
+        if dirty.global {
+            return;
+        }
+        for c in changes {
+            if c.status == cambium_diff::Status::Deleted
+                || !cambium_classify::is_build_file(&c.path)
+                // A `BUILD` file inside a nested repository defines a package
+                // of *that* repository, which this one can never query.
+                || packages.boundary_of(&c.path).is_some()
+            {
+                continue;
+            }
+            let pkg = cambium_classify::dirname(&c.path);
+            // The condition is the layer's own: a package it has a `PACKAGE`
+            // node for is one the walk speaks for, and adding it here would be
+            // a second opinion. One it has no node for is one Bazel had not
+            // loaded when the index was built, and the only thing that knows
+            // the name is the path.
+            if self
+                .base
+                .sky
+                .id_of(cambium_index::sky::Kind::Package, pkg)
+                .is_some()
+            {
+                continue;
+            }
+            tracing::debug!(
+                package = %pkg,
+                path = %c.path,
+                "a BUILD file names a package the layer has no node for; querying it"
+            );
+            dirty.dirty.insert(pkg.to_string());
+        }
+    }
+
+    /// A changed `.bzl` the module system loads can define repository rules,
+    /// whose output is not in the rule layer at all.
+    ///
+    /// This is the external-repository stage's business, not the dirty set's,
+    /// and it is unchanged in what it decides: the index records which
+    /// repositories each workspace-closure `.bzl` defines, so the usual answer
+    /// is "these repositories moved", and only a file whose repositories
+    /// cannot be named escalates.
+    ///
+    /// What changed is how "is this file in the workspace closure" is
+    /// answered. It used to be a flag on the statically parsed closure, plus a
+    /// witness that re-scanned the head checkout whenever the closure had no
+    /// node for the file — because the closure could be short and had no way
+    /// to know it. Now it is the `BZL_LOAD` key Bazel wrote
+    /// (`KeyForBzlmod`, `KeyForWorkspace`) and the `BZL_LOAD -> BZL_LOAD`
+    /// edges above it, which exist because Bazel followed them.
+    fn workspace_bzl(
+        &mut self,
+        changed_bzl: &BTreeSet<String>,
+        ext: &mut Externals,
+    ) -> Option<GlobalReason> {
+        if changed_bzl.is_empty()
+            || !self.engine.config().externals.enabled
+            || !self.base.sky.present
+        {
+            return None;
+        }
+        let mut unnamed: Vec<String> = Vec::new();
+        for path in changed_bzl {
+            if !self.base.sky.bzl_is_workspace_level(path) {
+                continue;
+            }
+            let repos = self
+                .base
+                .bzl_id(path)
+                .and_then(|id| crate::externals::repos_of_workspace_bzl(self.base, id));
+            match repos {
+                Some(repos) => {
+                    tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
+                    ext.by_bzl += repos.len();
+                    ext.name(path, repos.iter());
+                    // The rule's implementation moved, so what it writes into
+                    // the repository can be anything.
+                    ext.load_repos.extend(repos.iter().cloned());
+                    ext.repos.extend(repos);
+                }
+                None => unnamed.push(path.clone()),
+            }
+        }
+        if unnamed.is_empty() {
+            return None;
+        }
+        tracing::warn!(
+            files = ?unnamed,
+            "a changed .bzl is loaded by the module system and the index cannot name the \
+             repositories it defines; treating the change as global"
+        );
+        let reason = GlobalReason::WorkspaceLevelBzl { paths: unnamed };
+        self.engine.diagnostics().emit(reason.diagnostic());
+        Some(reason)
+    }
+
+    /// The loading layer's reverse walk, and what it means.
+    ///
+    /// Every package the walk reaches goes into the dirty set, whether it is a
+    /// `PACKAGE` node (a package that was loaded) or a `PACKAGE_LOOKUP` one (a
+    /// directory Bazel looked in, which this commit may have just made a
+    /// package). The second kind is why a new `BUILD` file needs no rule: the
+    /// index built at base has no `PACKAGE` node for a package that did not
+    /// exist there, but it has the lookup that found nothing, and the lookup
+    /// carries the name.
+    ///
+    /// A base index with no layer cannot be walked, and the run says so rather
+    /// than reading an absent layer as "no package is dirty". That can only be
+    /// an index built by a row source with no Bazel behind it; a real one is
+    /// built by a cold build, which fails outright if the dump does.
+    fn loading_layer_walk(
+        &mut self,
+        changes: &[&Change],
+        dirty: &mut DirtySet,
+        global: &mut Option<GlobalReason>,
+    ) -> cambium_index::SkyWalk {
+        if dirty.global {
+            return Default::default();
+        }
+        if !self.base.sky.present {
+            let reason = GlobalReason::NoLoadingLayer;
+            tracing::warn!(
+                "the base index carries no Skyframe loading layer; \
+                 treating the change as global"
+            );
+            self.engine.diagnostics().emit(reason.diagnostic());
+            dirty.global = true;
+            *global = Some(reason);
+            return Default::default();
+        }
+        let seeds = crate::sky::seeds_of(changes);
+        let walk = self.base.sky.walk(&seeds);
+        tracing::debug!(
+            seeds = seeds.len(),
+            unknown_seeds = walk.unknown_seeds,
+            visited = walk.visited,
+            packages = walk.packages.len(),
+            lookups = walk.lookups.len(),
+            bzl_packages = walk.bzl_packages.len(),
+            external_packages = walk.external_packages,
+            "walked the Skyframe loading layer"
+        );
+        for p in walk.dirty() {
+            dirty.dirty.insert(p.to_string());
+        }
+        self.stats.bzl_closure_hits = walk.bzl_packages.len();
+        self.stats.sky_seeds = seeds.len();
+        self.stats.sky_unknown_seeds = walk.unknown_seeds;
+        self.stats.sky_visited = walk.visited;
+        self.stats.sky_new_packages = walk.lookups.len();
+        walk
     }
 
     /// The query: normally the dirty packages, and only those.
@@ -611,11 +828,111 @@ impl<'a> Run<'a> {
                 .partition(|p| loaded.contains(p.as_str()));
             let mut gone = dirty.deleted_packages.clone();
             gone.extend(unloaded);
+            // The loading layer goes first, before anything else is asked
+            // of this server. A Bazel command whose option set differs from
+            // the last one's re-evaluates, and the closure rescan below runs
+            // two such commands (`mod dump_repo_mapping` and
+            // `query //external:* --output=build`), each of which costs the
+            // dump packages it would otherwise have named.
+            // The loading layer, refreshed from the same server the splice
+            // query just ran on, and only for what that query can have moved.
+            //
+            // The filter is not an optimisation. A Bazel server holds
+            // everything it has ever loaded, so on the server a cold build
+            // filled -- which is every `cambi profile` step, every bench walk
+            // step, and any CI worker that built its own index -- an
+            // unfiltered dump walks and prints the whole repository on every
+            // commit. A sourcegraph profile spent 15 to 20 seconds a step on
+            // exactly that, including steps that re-queried nothing at all.
+            let mut layer = builder.take_sky_layer();
+            if layer.is_some() {
+                // Nothing re-queried and nothing deleted means no
+                // loading-phase node moved, by construction: the dirty set is
+                // what the layer's own walk produced. The cheapest dump is the
+                // one that does not run.
+                let filter = if queried.cold_reason.is_some() {
+                    // `//...` was re-queried, so everything is fair game and
+                    // the package list would be the whole repository anyway.
+                    Some(cambium_index::sky::SKYKEY_FILTER.to_string())
+                } else {
+                    cambium_index::sky::refresh_filter(&queried.to_query)
+                };
+                // Without the packages this run found gone: a deleted package
+                // has no `PACKAGE` block in any dump, and the refresh check
+                // would read its absence as a dump that lost it. They are
+                // dropped from the layer below instead.
+                let requeried: BTreeSet<String> = queried
+                    .to_query
+                    .iter()
+                    .filter(|p| !gone.contains(*p))
+                    .cloned()
+                    .collect();
+                tracing::debug!(
+                    packages = requeried.len(),
+                    cold = queried.cold_reason.is_some(),
+                    first = ?requeried.iter().take(5).collect::<Vec<_>>(),
+                    "refreshing the loading layer for the packages this run re-queried"
+                );
+                match filter {
+                    Some(filter) => {
+                        layer = crate::sky::build_layer(
+                            self.querier,
+                            layer,
+                            &filter,
+                            Some(&requeried),
+                        )?;
+                    }
+                    None if queried.to_query.is_empty() => {
+                        tracing::debug!(
+                            "no package was re-queried, so no loading-phase node moved and \
+                             the layer needs no dump"
+                        );
+                    }
+                    // More packages than a filter is worth writing: ask for
+                    // the whole loading phase rather than build a megabyte of
+                    // regex to save less than the dump costs.
+                    None => {
+                        layer = crate::sky::build_layer(
+                            self.querier,
+                            layer,
+                            cambium_index::sky::SKYKEY_FILTER,
+                            Some(&requeried),
+                        )?;
+                    }
+                }
+                if let Some(l) = layer.as_mut() {
+                    // A package whose BUILD file is gone has no `PACKAGE` node
+                    // to refresh, and the dump cannot say so by omission: a
+                    // package that merely was not re-queried is omitted too.
+                    //
+                    // Only the packages the *diff* deleted, never `gone`, which
+                    // also carries the packages this run re-queried and got no
+                    // targets for. Those two are not the same thing and the
+                    // difference is unrecoverable: retiring a `PACKAGE` node
+                    // clears its dependencies, so it leaves every reverse row,
+                    // and from then on a changed source file in that package
+                    // reaches its glob node and stops. Only a `BUILD` edit
+                    // could ever re-query it again (its `PACKAGE_LOOKUP`
+                    // survives), so its targets -- already tombstoned by the
+                    // empty update -- stay missing from the index for good. A
+                    // package Bazel could not load under `--keep_going` comes
+                    // back with no targets and is exactly that case, which is
+                    // why a subject with load errors bled whole packages:
+                    // //xla/python/ifrt/ir and its seventy targets, missing
+                    // from every later step of a 300-step walk.
+                    for p in &dirty.deleted_packages {
+                        l.delete_package(p);
+                    }
+                }
+            }
+            if let Some(l) = layer {
+                builder.set_sky_layer(l);
+            }
             if let Some(c) = bzl::rescan_closure(
                 self.querier,
                 builder.take_bzl_closure(),
                 &scanned,
-                &dirty.changed_bzl,
+                &stage.changed_bzl,
                 &gone,
                 &crate::bzl::dirs(&boundaries),
             ) {

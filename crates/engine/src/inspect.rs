@@ -247,6 +247,20 @@ pub struct CountStats {
     /// can define repository rules and so invalidate everything.
     #[serde(default)]
     pub bzl_workspace_files: u32,
+    /// Nodes in the Skyframe loading layer, and edges between them. Zero for
+    /// an index built without a dump, which `sky_layer` tells apart from an
+    /// index whose loading phase touched nothing.
+    #[serde(default)]
+    pub sky_nodes: u32,
+    #[serde(default)]
+    pub sky_edges: u64,
+    /// Whether the index carries a loading layer at all.
+    #[serde(default)]
+    pub sky_layer: bool,
+    /// Layer nodes by kind, in the layer's own kind order, as
+    /// `("PACKAGE", 1234)`.
+    #[serde(default)]
+    pub sky_by_kind: Vec<(String, u32)>,
 }
 
 /// Per-component byte sizes. Every field is the size of the arrays as they sit
@@ -281,6 +295,9 @@ pub struct ByteStats {
     /// the walk stopped at.
     #[serde(default)]
     pub bzl_closure: u64,
+    /// The Skyframe loading layer: node table, root table and reverse CSR.
+    #[serde(default)]
+    pub sky_layer: u64,
     pub framing: i64,
     /// What labels would cost stored as `(package_id, relative_name)` instead
     /// of whole strings. See [`LabelPacking`].
@@ -607,6 +624,15 @@ impl<'a> IndexQuery<'a> {
             tombstoned_packages: 0,
             bzl_files: 0,
             bzl_workspace_files: 0,
+            sky_nodes: v.sky.len() as u32,
+            sky_edges: v.sky.num_edges() as u64,
+            sky_layer: v.sky.present,
+            sky_by_kind: v
+                .sky
+                .counts()
+                .into_iter()
+                .map(|(k, n)| (k.name().to_string(), n as u32))
+                .collect(),
         };
         for id in 0..v.num_nodes() {
             match v.kind_of(id) {
@@ -685,6 +711,15 @@ impl<'a> IndexQuery<'a> {
             + v.pkg_ext.offsets.len() * 4
             + v.pkg_ext.edges.len() * 4) as u64;
 
+        let sky_layer = (v.sky.roots.bytes.len()
+            + v.sky.roots.offsets.len() * 4
+            + v.sky.keys.bytes.len()
+            + v.sky.keys.offsets.len() * 4
+            + v.sky.kind.len()
+            + v.sky.root.len() * 4
+            + v.sky.rdeps.offsets.len() * 4
+            + v.sky.rdeps.edges.len() * 4) as u64;
+
         let accounted = label_table
             + label_sorted
             + rule_class_table
@@ -695,7 +730,8 @@ impl<'a> IndexQuery<'a> {
             + rule_hashes
             + node_columns
             + package_table
-            + bzl_closure;
+            + bzl_closure
+            + sky_layer;
 
         let bytes = ByteStats {
             file_total,
@@ -721,6 +757,7 @@ impl<'a> IndexQuery<'a> {
             node_columns,
             package_table,
             bzl_closure,
+            sky_layer,
             framing: file_total as i64 - accounted as i64,
             label_packing,
         };
