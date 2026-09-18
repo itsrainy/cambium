@@ -149,7 +149,8 @@ impl RebuildRows {
         mut missing: Vec<Row>,
         mut extra: Vec<Row>,
     ) -> Self {
-        let by_class_then_name = |a: &Row, b: &Row| a.class.cmp(&b.class).then_with(|| a.item.cmp(&b.item));
+        let by_class_then_name =
+            |a: &Row, b: &Row| a.class.cmp(&b.class).then_with(|| a.item.cmp(&b.item));
         missing.sort_by(by_class_then_name);
         extra.sort_by(by_class_then_name);
         let counts = counts(&missing, &extra);
@@ -299,7 +300,12 @@ pub fn classify(
     let missing = diff
         .missing
         .iter()
-        .map(|item| row(item, missing_class(item, trees, applied_paths, error_packages)))
+        .map(|item| {
+            row(
+                item,
+                missing_class(item, trees, applied_paths, error_packages),
+            )
+        })
         .collect();
     let extra = diff
         .extra
@@ -405,11 +411,16 @@ fn created_root(p: &str, from: &BTreeSet<String>, to: &BTreeSet<String>) -> Opti
 /// An extra is deleted-in-window when an end names a path gone at `to`, a
 /// load error when an end's package failed, else other. With no tree,
 /// other.
-fn extra_class(item: &SkyItem, to: Option<&BTreeSet<String>>, error_packages: &BTreeSet<String>) -> RowClass {
+fn extra_class(
+    item: &SkyItem,
+    to: Option<&BTreeSet<String>>,
+    error_packages: &BTreeSet<String>,
+) -> RowClass {
     let Some(to) = to else {
         return RowClass::Other;
     };
-    let ends: Vec<(Option<String>, Option<String>)> = endpoints(item).into_iter().map(locate).collect();
+    let ends: Vec<(Option<String>, Option<String>)> =
+        endpoints(item).into_iter().map(locate).collect();
     if ends
         .iter()
         .any(|(p, _)| p.as_deref().is_some_and(|p| !exists(to, p)))
@@ -475,7 +486,13 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &set(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&["lib"]),
+            &set(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir/sub"));
         assert_eq!(m[0].package.as_deref(), Some("newdir/sub"));
@@ -520,7 +537,13 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&["lib"]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &set(&["lib"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
     }
 
@@ -553,7 +576,13 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &set(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&["lib"]),
+            &set(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir"));
         // A load error at either end is a load error.
@@ -564,7 +593,13 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&["lib"]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &set(&["lib"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::LoadError]);
     }
 
@@ -586,7 +621,11 @@ mod tests {
         let (_, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
         assert_eq!(
             classes(&e),
-            vec![RowClass::DeletedInWindow, RowClass::DeletedInWindow, RowClass::Other]
+            vec![
+                RowClass::DeletedInWindow,
+                RowClass::DeletedInWindow,
+                RowClass::Other
+            ]
         );
     }
 
@@ -601,10 +640,16 @@ mod tests {
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
         let (m, e) = classify(&d, None, None, &set(&[]), &set(&["lib"]));
-        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        assert_eq!(
+            classes(&m),
+            vec![RowClass::Unexplained, RowClass::Unexplained]
+        );
         assert_eq!(classes(&e), vec![RowClass::Other]);
         let (m, _) = classify(&d, Some(&tree(FROM)), None, &set(&[]), &set(&[]));
-        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        assert_eq!(
+            classes(&m),
+            vec![RowClass::Unexplained, RowClass::Unexplained]
+        );
     }
 
     /// (ix) What each kind's key names.
@@ -612,9 +657,15 @@ mod tests {
     fn every_kind_locates_what_its_key_names() {
         let s = |v: &str| Some(v.to_string());
         assert_eq!(locate(&name(Kind::File, "a/b.txt")), (s("a/b.txt"), None));
-        assert_eq!(locate(&name(Kind::FileState, "a/BUILD")), (s("a/BUILD"), None));
+        assert_eq!(
+            locate(&name(Kind::FileState, "a/BUILD")),
+            (s("a/BUILD"), None)
+        );
         assert_eq!(locate(&name(Kind::DirectoryListing, "a")), (s("a"), None));
-        assert_eq!(locate(&name(Kind::DirectoryListingState, "a/b")), (s("a/b"), None));
+        assert_eq!(
+            locate(&name(Kind::DirectoryListingState, "a/b")),
+            (s("a/b"), None)
+        );
         let other_root = SkyName {
             kind: Kind::File,
             root: "/somewhere/else".into(),
@@ -623,7 +674,10 @@ mod tests {
         assert_eq!(locate(&other_root), (None, None));
         assert_eq!(locate(&name(Kind::Package, "a/b")), (s("a/b"), s("a/b")));
         assert_eq!(locate(&name(Kind::PackageLookup, "")), (s(""), s("")));
-        assert_eq!(locate(&name(Kind::PackageLookup, "@@rules//x")), (None, None));
+        assert_eq!(
+            locate(&name(Kind::PackageLookup, "@@rules//x")),
+            (None, None)
+        );
         assert_eq!(
             locate(&name(
                 Kind::Glob,
@@ -646,11 +700,17 @@ mod tests {
             (s("pkg/f.bzl"), None)
         );
         assert_eq!(
-            locate(&name(Kind::BzlLoad, "KeyForBuild{label=//pkg:f.bzl, isBuildPrelude=false}")),
+            locate(&name(
+                Kind::BzlLoad,
+                "KeyForBuild{label=//pkg:f.bzl, isBuildPrelude=false}"
+            )),
             (s("pkg/f.bzl"), None)
         );
         assert_eq!(
-            locate(&name(Kind::BzlLoad, "KeyForBuild{label=@@//:f.bzl, isBuildPrelude=false}")),
+            locate(&name(
+                Kind::BzlLoad,
+                "KeyForBuild{label=@@//:f.bzl, isBuildPrelude=false}"
+            )),
             (s("f.bzl"), None)
         );
         assert_eq!(
@@ -672,7 +732,9 @@ mod tests {
         let path = RebuildRows::path(dir.path(), "abc123", Some("9.2.0"));
         assert_eq!(path.file_name().unwrap(), "rebuild-abc123-9.2.0.json");
         assert_eq!(
-            RebuildRows::path(dir.path(), "abc123", None).file_name().unwrap(),
+            RebuildRows::path(dir.path(), "abc123", None)
+                .file_name()
+                .unwrap(),
             "rebuild-abc123.json"
         );
         let d = diff(
@@ -690,7 +752,11 @@ mod tests {
         let doc = RebuildRows::new("subj", "abc123", "f0", "abc123", "9.2.0", m, e);
         assert_eq!(
             classes(&doc.missing),
-            vec![RowClass::Unexplained, RowClass::Unexplained, RowClass::CreatedInWindow]
+            vec![
+                RowClass::Unexplained,
+                RowClass::Unexplained,
+                RowClass::CreatedInWindow
+            ]
         );
         assert_eq!(
             doc.counts,

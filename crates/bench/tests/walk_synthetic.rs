@@ -281,7 +281,11 @@ fn a_walk_resumes_from_its_last_published_index() {
     assert_eq!(resumed.steps.len(), commits.len() - 1);
     assert_eq!(resumed.steps[2].head, truncated.steps[2].head);
     let ro = resumed.rebuild_oracle.unwrap();
-    assert!(ro.ok, "a resumed walk still equals a rebuild: {}", ro.summary);
+    assert!(
+        ro.ok,
+        "a resumed walk still equals a rebuild: {}",
+        ro.summary
+    );
     assert!(sidecar.exists(), "the resumed walk rewrote the sidecar");
     assert_eq!(walk::RebuildRows::read(&sidecar).unwrap().counts, ro.sky);
 }

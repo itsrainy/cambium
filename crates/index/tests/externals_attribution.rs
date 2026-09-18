@@ -724,7 +724,7 @@ fn a_readable_file_that_defines_nothing_is_not_the_universe() {
     assert!(
         ri.bzl_repos
             .get("tools/rules/sqlgen.bzl")
-            .map_or(true, BTreeSet::is_empty),
+            .is_none_or(BTreeSet::is_empty),
         "{:?}",
         ri.bzl_repos
     );

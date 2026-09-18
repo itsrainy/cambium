@@ -722,8 +722,9 @@ FILE:[/ws]/[lib/sub/BUILD]
         // itself, which without that edge nothing can reach any more.
         assert_eq!(d.counts.sky_mismatch, 2, "{:?}", d.sky_mismatch);
         assert!(
-            d.sky_mismatch.iter().any(|l| l.contains("PACKAGE_LOOKUP")
-                && l.contains("only in rebuilt")),
+            d.sky_mismatch
+                .iter()
+                .any(|l| l.contains("PACKAGE_LOOKUP") && l.contains("only in rebuilt")),
             "{d:?}"
         );
         assert!(!d.is_empty());
@@ -745,7 +746,10 @@ FILE:[/ws]/[lib/sub/BUILD]
                 _ => None,
             })
             .expect("a node row");
-        assert_eq!((node.kind, node.root.as_str(), node.key.as_str()), (Kind::Package, "", "lib"));
+        assert_eq!(
+            (node.kind, node.root.as_str(), node.key.as_str()),
+            (Kind::Package, "", "lib")
+        );
         let (from, to) = sky
             .missing
             .iter()
@@ -761,7 +765,10 @@ FILE:[/ws]/[lib/sub/BUILD]
         }
         // And a row round-trips through its stored shape, kind by name.
         let text = serde_json::to_string(&sky.missing).unwrap();
-        assert!(text.contains("\"item\":\"edge\"") && text.contains("\"kind\":\"PACKAGE_LOOKUP\""), "{text}");
+        assert!(
+            text.contains("\"item\":\"edge\"") && text.contains("\"kind\":\"PACKAGE_LOOKUP\""),
+            "{text}"
+        );
         let back: Vec<SkyItem> = serde_json::from_str(&text).unwrap();
         assert_eq!(back, sky.missing);
 

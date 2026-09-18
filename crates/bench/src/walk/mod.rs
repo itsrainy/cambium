@@ -34,11 +34,13 @@ pub mod sampling;
 pub mod steps;
 pub mod tier;
 
-pub use model::{StepRecord, WalkResult, WalkSummary};
-pub use sampling::{sample, Coverage, Sample};
-pub use steps::{steps, tag_steps, Probes, Step, Tag};
-pub use cambi::{cold_build, tree_paths, CambiDriver, ColdBuild, Driver, EngineDriver, RowSource, Update};
-pub use rebuild_rows::{RebuildRows, Row, RowClass, RowCounts};
+pub use cambi::{
+    cold_build, tree_paths, CambiDriver, ColdBuild, Driver, EngineDriver, RowSource, Update,
+};
 pub use driver::{score, walk, LiveChecks, NoLiveChecks, StepContext, WalkOptions};
 pub use live::BazelChecks;
+pub use model::{StepRecord, WalkResult, WalkSummary};
+pub use rebuild_rows::{RebuildRows, Row, RowClass, RowCounts};
+pub use sampling::{sample, Coverage, Sample};
+pub use steps::{steps, tag_steps, Probes, Step, Tag};
 pub use tier::{Overrides, Schedule, Tier};

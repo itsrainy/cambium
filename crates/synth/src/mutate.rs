@@ -678,7 +678,7 @@ fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<
 /// package's `exports_files` and from every consumer's `srcs`, recording the
 /// BUILD edits that implies.
 fn unexport(g: &mut SynthGraph, target: u32, slot: Option<u32>, changes: &mut Vec<Change>) {
-    let gone = |t: u32, s: u32| t == target && slot.map_or(true, |slot| slot == s);
+    let gone = |t: u32, s: u32| t == target && slot.is_none_or(|slot| slot == s);
     let pkg = g.targets[target as usize].package;
     let exported = &mut g.packages[pkg as usize].exported;
     let before = exported.len();
