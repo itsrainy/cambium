@@ -422,7 +422,12 @@ mod tests {
             started_unix: 0,
             index_build_ms: 12000,
             steps: vec![rec],
-            rebuild_oracle: Some(RebuildOracle { ok: true, summary: String::new() }),
+            rebuild_oracle: Some(RebuildOracle {
+                ok: true,
+                summary: String::new(),
+                rows: None,
+                sky: Default::default(),
+            }),
             head_index: None,
             summary: WalkSummary::default(),
             done: true,

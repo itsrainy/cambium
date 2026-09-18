@@ -605,6 +605,29 @@ fn a_glob_key_is_matched_to_its_own_package() {
     ));
 }
 
+/// The package a glob key names, read out rather than matched: both majors'
+/// spellings, the root package's empty name, and the `a` / `ab` boundary.
+#[test]
+fn a_glob_keys_package_is_read_out_in_either_spelling() {
+    assert_eq!(
+        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = a/b, globRequests = []>"),
+        Some("a/b")
+    );
+    assert_eq!(
+        glob_package("<GlobDescriptor packageName=a/b packageRoot=<workspace> subdir= pattern=*.txt>"),
+        Some("a/b")
+    );
+    assert_eq!(
+        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = ab, globRequests = []>"),
+        Some("ab")
+    );
+    assert_eq!(
+        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = , globRequests = []>"),
+        Some("")
+    );
+    assert_eq!(glob_package("PACKAGE:a"), None);
+}
+
 /// A deleted package's `PACKAGE` row is retired, so nothing reaches it and it
 /// names no package; its `PACKAGE_LOOKUP` survives, because the directory is
 /// still a directory and a later commit re-adding the `BUILD` file moves it.

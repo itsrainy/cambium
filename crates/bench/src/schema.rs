@@ -9,7 +9,9 @@
 //! |---|---|---|---|
 //! | `bench-results/<subject>/state.json` | [`RESULT_SCHEMA`] | every workload | the next run, `watch` |
 //! | `bench-results/<subject>/walk/walk-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `walk` | `report`, `replay`, `watch` |
+//! | `bench-results/<subject>/walk/rebuild-<pin>[-<ver>].json` | [`RESULT_SCHEMA`] | `walk` | `report` (its counts, through the walk record), by hand with `jq` |
 //! | `bench-results/<subject>/walk/labels/<base>..<head>/*.zst` | none | `walk` | `labels` |
+//! | `bench-results/<subject>/walk/labels/<base>..<head>/rebuild.json` | [`RESULT_SCHEMA`] | `walk --rebuild-every N` | by hand with `jq` |
 //! | `bench-results/<subject>/progress.json` | [`PROGRESS_SCHEMA`] | every workload | `watch` |
 //! | `bench-results/<subject>/index-<sha>[-<ver>].bin`, `bases/<sha>.bin`, `heads/<pin>.bin` | the index format | `subjects build`, `walk` | `replay` |
 //! | `paths-<pin>[-<ver>].json` | [`REPLAY_SCHEMA`] | `replay --write-paths` | `replay` |

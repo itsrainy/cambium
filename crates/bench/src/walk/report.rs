@@ -60,11 +60,30 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         },
     );
     if let Some(o) = &r.rebuild_oracle {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "Rebuild oracle at the pin: {}.",
             if o.ok { "held" } else { &o.summary }
         );
+        if let Some(file) = &o.rows {
+            let c = &o.sky;
+            if o.ok {
+                let _ = write!(
+                    out,
+                    " Loading layer: {} extra rows ({} for paths deleted in the window or a \
+                     package that failed to load); rows in walk/{file}.",
+                    c.extra, c.extra_expected
+                );
+            } else {
+                let _ = write!(
+                    out,
+                    " Loading layer: {} missing rows, {} expected (created in the window or a \
+                     package that failed to load), {} unexplained; rows in walk/{file}.",
+                    c.missing, c.missing_expected, c.missing_unexplained
+                );
+            }
+        }
+        let _ = writeln!(out);
     }
     let _ = writeln!(out, "Globals: {}. Engine cold rebuilds: {}.", s.globals, s.engine_cold_rebuilds);
     let _ = writeln!(out);
@@ -228,6 +247,12 @@ mod tests {
             rebuild_oracle: Some(RebuildOracle {
                 ok: true,
                 summary: String::new(),
+                rows: Some("rebuild-bbbbbbbbbbbb0-7.4.1.json".into()),
+                sky: crate::walk::RowCounts {
+                    extra: 4,
+                    extra_expected: 3,
+                    ..Default::default()
+                },
             }),
             head_index: None,
             summary: WalkSummary::default(),
@@ -249,6 +274,33 @@ mod tests {
         assert!(md.contains("Index build: 5000 ms"));
         assert!(md.contains("full run per step"));
         assert!(md.contains("Rebuild oracle at the pin: held"));
+        assert!(md.contains("4 extra rows (3 for paths deleted"), "{md}");
+        assert!(md.contains("rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json"), "{md}");
         assert!(md.contains("bazel 7.4.1"));
+    }
+
+    /// A failing oracle names the sidecar and how many rows nothing explains.
+    #[test]
+    fn a_failing_rebuild_oracle_names_its_rows_and_the_unexplained_count() {
+        let mut r = a_walk();
+        r.rebuild_oracle = Some(RebuildOracle {
+            ok: false,
+            summary: "loading layer rows missing: 5 (extra: 0); loading layer unexplained: 2".into(),
+            rows: Some("rebuild-bbbbbbbbbbbb0-7.4.1.json".into()),
+            sky: crate::walk::RowCounts {
+                missing: 5,
+                missing_expected: 3,
+                missing_unexplained: 2,
+                ..Default::default()
+            },
+        });
+        r.summarise();
+        assert!(!r.summary.pass);
+        let md = render(&r);
+        assert!(md.contains("Rebuild oracle at the pin: loading layer rows missing: 5"), "{md}");
+        assert!(
+            md.contains("Loading layer: 5 missing rows, 3 expected (created in the window or a package that failed to load), 2 unexplained; rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
+            "{md}"
+        );
     }
 }

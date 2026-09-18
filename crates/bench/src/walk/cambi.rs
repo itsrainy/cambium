@@ -8,6 +8,7 @@
 //! product binary, which is how the walk loop is tested over a synthetic git
 //! history.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,24 @@ pub trait Driver {
     /// Brings the index for `base` forward to `head`, writing the result to
     /// `out` and publishing it when asked.
     fn update(&self, base: &str, head: &str, out: &Path, publish: bool) -> Result<Update>;
+
+    /// Every path in the tree at `rev`, for the rebuild oracle to classify
+    /// its loading-layer rows against ([`super::rebuild_rows`]); `None` for
+    /// a driver with no tree, which leaves every missing row unexplained.
+    fn paths(&self, _rev: &str) -> Result<Option<BTreeSet<String>>> {
+        Ok(None)
+    }
+}
+
+/// `git ls-tree -r --name-only` at `rev`, NUL-separated so a path with a
+/// space or a quote reads back as itself.
+pub fn tree_paths(dir: &Path, rev: &str) -> Result<BTreeSet<String>> {
+    let out = crate::checkout::git(dir, &["ls-tree", "-r", "--name-only", "-z", rev])?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// One forward step's result: the answer, its affected set, what it cost, and
@@ -84,6 +103,10 @@ impl Driver for CambiDriver<'_> {
             wrote_index,
         })
     }
+
+    fn paths(&self, rev: &str) -> Result<Option<BTreeSet<String>>> {
+        tree_paths(&self.checkout.dir, rev).map(Some)
+    }
 }
 
 /// Where a driver that does not run Bazel gets its package rows.
@@ -94,6 +117,10 @@ pub trait RowSource {
     }
     /// The row source for `rev`.
     fn querier(&self, rev: &str) -> Result<Box<dyn PackageQuerier + '_>>;
+    /// The tree at `rev`, if it has one; see [`Driver::paths`].
+    fn paths(&self, _rev: &str) -> Result<Option<BTreeSet<String>>> {
+        Ok(None)
+    }
 }
 
 /// cambium in process, over a row source: no product binary, no Bazel.
@@ -182,6 +209,10 @@ impl Driver for EngineDriver<'_> {
             wrote_index,
         })
     }
+
+    fn paths(&self, rev: &str) -> Result<Option<BTreeSet<String>>> {
+        self.rows.paths(rev)
+    }
 }
 
 /// One cold build's shape, for the walk's index-build record and the rebuild
@@ -258,5 +289,39 @@ pub fn archive_head_index(
             tracing::warn!(%pin, error = format!("{e:#}"), "could not archive the head index");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cambium_testkit::{commit_all, init_repo, write};
+
+    /// The tree at each revision, whole, with a path a line-split would
+    /// have mangled.
+    #[test]
+    fn the_tree_at_a_revision_lists_every_path_including_one_with_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        init_repo(&root);
+        write(&root, "BUILD", "");
+        write(&root, "lib/a.cc", "");
+        let first = commit_all(&root, "one");
+        write(&root, "new dir/with space.txt", "");
+        write(&root, "lib/b.cc", "");
+        std::fs::remove_file(root.join("lib/a.cc")).unwrap();
+        let second = commit_all(&root, "two");
+
+        let at_first = tree_paths(&root, &first).unwrap();
+        assert_eq!(
+            at_first.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["BUILD", "lib/a.cc"]
+        );
+        let at_second = tree_paths(&root, &second).unwrap();
+        assert_eq!(
+            at_second.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["BUILD", "lib/b.cc", "new dir/with space.txt"]
+        );
+        assert!(tree_paths(&root, "nosuchrev").is_err());
     }
 }

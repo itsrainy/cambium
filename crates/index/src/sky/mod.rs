@@ -1244,25 +1244,25 @@ fn authoritative(node: &SkyNode, requeried: &BTreeSet<String>) -> bool {
     }
 }
 
-/// Whether a glob key is `package`'s. Bazel 8/9 write
-/// `packageIdentifier = pkg,`; Bazel 7 writes `packageName=pkg `.
-fn glob_names_package(text: &str, package: &str) -> bool {
+/// The package a glob key names, in either major's spelling: Bazel 8/9
+/// write `packageIdentifier = pkg,`; Bazel 7 writes `packageName=pkg `.
+/// The name runs to the first character a package name cannot hold, so `a`
+/// never claims `ab`'s glob. `None` for a key in neither spelling.
+pub fn glob_package(text: &str) -> Option<&str> {
     for prefix in ["packageIdentifier = ", "packageName="] {
         let Some(i) = text.find(prefix) else { continue };
         let rest = &text[i + prefix.len()..];
-        if let Some(tail) = rest.strip_prefix(package) {
-            // The next character must not be one a package name can hold, or
-            // `a` would claim `ab`'s glob.
-            if !tail
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || "/._+-".contains(c))
-            {
-                return true;
-            }
-        }
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || "/._+-".contains(c)))
+            .unwrap_or(rest.len());
+        return Some(&rest[..end]);
     }
-    false
+    None
+}
+
+/// Whether a glob key is `package`'s.
+fn glob_names_package(text: &str, package: &str) -> bool {
+    glob_package(text) == Some(package)
 }
 
 /// Whether a `BZL_LOAD` key is one the module system asked for, rather than a

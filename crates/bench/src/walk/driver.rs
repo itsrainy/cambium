@@ -18,7 +18,7 @@ use cambium_index::IndexFile;
 
 use super::cambi::{cold_build, Driver};
 use crate::oracles::rdeps::RdepsResult;
-use crate::oracles::rebuild::compare_by_label;
+use crate::oracles::rebuild::{compare_by_label_with_sky, SkyDiff};
 use crate::state::{HistoryState, State};
 use crate::util::now_unix;
 
@@ -26,6 +26,7 @@ use super::model::{
     CambiumAnswer, IndexCounts, RebuildOracle, StepRecord, StepTimings, ToolStep, WalkResult,
     WalkSummary,
 };
+use super::rebuild_rows::{self, RebuildRows};
 use super::sampling::Sample;
 use super::steps::Step;
 use super::tier::Schedule;
@@ -371,14 +372,16 @@ impl Runner<'_> {
             tools,
             pass,
         };
-        if rebuild_step {
-            self.mid_walk_rebuild(&step.head)?;
-        }
         if let Some(p) = self.progress() {
             p.diagnostics(&run.report.diagnostics);
             p.tool(None);
         }
+        // Pushed before the mid-walk oracle so that, when this step itself
+        // cold-rebuilt, the rows are classified against its head.
         self.result.steps.push(rec);
+        if rebuild_step {
+            self.mid_walk_rebuild(step)?;
+        }
         self.result.summarise();
         self.result.write(&self.path)?;
         if let Some(rs) = self.state.history.as_mut() {
@@ -390,16 +393,81 @@ impl Runner<'_> {
         Ok(())
     }
 
-    /// A mid-walk rebuild oracle: cold-build at `head` and compare, without
-    /// publishing (that would overwrite the walk's own carried index).
-    fn mid_walk_rebuild(&mut self, head: &str) -> Result<()> {
+    /// The tree at `rev`, or `None` with a warning: a driver that cannot
+    /// list its tree leaves every missing layer row unexplained, and a FAIL
+    /// from that cause has to be diagnosable from the log.
+    fn tree(&self, rev: &str) -> Option<BTreeSet<String>> {
+        match self.driver.paths(rev) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(%rev, error = format!("{e:#}"), "cannot list the tree; every missing loading-layer row will be unexplained");
+                None
+            }
+        }
+    }
+
+    /// The commit the loading-layer rows are classified against: the head
+    /// of the last cold rebuild inside the window (a fresh lineage resets
+    /// the layer), else the window start. Both are in the walk record, so a
+    /// resumed walk classifies identically.
+    fn classification_base(&self) -> String {
+        self.result
+            .steps
+            .iter()
+            .rev()
+            .find(|s| !s.carried_index)
+            .map(|s| s.head.clone())
+            .unwrap_or_else(|| self.result.from.clone())
+    }
+
+    /// Every loading-layer row of the diff, classified.
+    fn layer_rows(
+        &self,
+        sky: &SkyDiff,
+        at: &str,
+        applied: cambium_index::IndexRef<'_>,
+        rebuilt: cambium_index::IndexRef<'_>,
+    ) -> RebuildRows {
+        let from = self.classification_base();
+        let from_tree = self.tree(&from);
+        let to_tree = self.tree(at);
+        let applied_paths = rebuild_rows::applied_paths(applied.sky);
+        let errors = rebuild_rows::error_packages(applied, rebuilt);
+        let (missing, extra) = rebuild_rows::classify(
+            sky,
+            from_tree.as_ref(),
+            to_tree.as_ref(),
+            &applied_paths,
+            &errors,
+        );
+        RebuildRows::new(
+            &self.opts.repo_id,
+            &self.opts.pin,
+            &from,
+            at,
+            &self.opts.bazel_version,
+            missing,
+            extra,
+        )
+    }
+
+    /// A mid-walk rebuild oracle: cold-build at the step's head and compare,
+    /// without publishing (that would overwrite the walk's own carried
+    /// index). The rows go beside the step's label sets.
+    fn mid_walk_rebuild(&mut self, step: &Step) -> Result<()> {
+        let head = step.head.as_str();
         let fresh = self.index_path.with_extension("rebuild.bin");
         let _ = cold_build(self.driver, head, &fresh, false)?;
         let applied = IndexFile::open(&self.index_path)?;
         let rebuilt = IndexFile::open(&fresh)?;
-        let diff = compare_by_label(applied.view(), rebuilt.view(), self.opts.diff_cap);
-        if !diff.is_empty() {
-            tracing::error!(%head, summary = %diff.summary(), "mid-walk rebuild oracle diverged");
+        let (diff, sky) =
+            compare_by_label_with_sky(applied.view(), rebuilt.view(), self.opts.diff_cap);
+        let rows = self.layer_rows(&sky, head, applied.view(), rebuilt.view());
+        let dir = crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, head);
+        rows.write(&dir.join(rebuild_rows::MID_WALK_FILE))?;
+        let unexplained = rows.counts.missing_unexplained;
+        if sky.present.is_some() || !diff.holds_with_sky_missing(unexplained) {
+            tracing::error!(%head, summary = %diff.summary(), unexplained, "mid-walk rebuild oracle diverged");
         }
         let _ = std::fs::remove_file(&fresh);
         Ok(())
@@ -407,6 +475,10 @@ impl Runner<'_> {
 
     /// The rebuild oracle at the pin: the applied index must equal a fresh
     /// cold build, and the fresh index is archived for `replay --head-check`.
+    ///
+    /// The loading-layer half is judged on its unexplained rows
+    /// ([`rebuild_rows`]): a row a refresh could never have written is
+    /// listed in the sidecar and does not fail the walk.
     fn rebuild_oracle(&mut self, to: &str) -> Result<()> {
         if let Some(p) = self.progress() {
             p.item(self.result.steps.len(), "rebuild oracle");
@@ -415,13 +487,30 @@ impl Runner<'_> {
         let _ = cold_build(self.driver, to, &fresh_path, false)?;
         let applied = IndexFile::open(&self.index_path)?;
         let fresh = IndexFile::open(&fresh_path)?;
-        let diff = compare_by_label(applied.view(), fresh.view(), self.opts.diff_cap);
-        let ok = diff.is_empty();
+        let (diff, sky) =
+            compare_by_label_with_sky(applied.view(), fresh.view(), self.opts.diff_cap);
+        let rows = self.layer_rows(&sky, to, applied.view(), fresh.view());
+        let rows_path = RebuildRows::path(
+            &self.opts.results_dir,
+            &self.opts.pin,
+            Some(&self.opts.bazel_version),
+        );
+        rows.write(&rows_path)?;
+        let unexplained = rows.counts.missing_unexplained;
+        let ok = sky.present.is_none() && diff.holds_with_sky_missing(unexplained);
         self.result.head_index =
             super::cambi::archive_head_index(self.engine, &self.opts.state_dir, to, &fresh_path);
         self.result.rebuild_oracle = Some(RebuildOracle {
             ok,
-            summary: if ok { String::new() } else { diff.summary() },
+            summary: if ok {
+                String::new()
+            } else {
+                format!("{}; loading layer unexplained: {unexplained}", diff.summary())
+            },
+            rows: rows_path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned()),
+            sky: rows.counts,
         });
         let _ = std::fs::remove_file(&fresh_path);
         Ok(())

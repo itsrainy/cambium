@@ -13,6 +13,7 @@ use cambium_synth::{ChangeSpec, GraphSpec, SynthGraph};
 use cambium_testkit::synthetic_engine;
 
 struct SynthDriver {
+    root: std::path::PathBuf,
     commits: Vec<String>,
     graphs: Vec<SynthGraph>,
 }
@@ -25,6 +26,12 @@ impl RowSource for SynthDriver {
             .position(|c| c == rev)
             .ok_or_else(|| anyhow::anyhow!("unknown revision {rev}"))?;
         Ok(Box::new(SynthQuerier::new(&self.graphs[i])))
+    }
+
+    /// The fixture emits a real git history, so the rebuild oracle's rows
+    /// are classified against real trees, as on a subject.
+    fn paths(&self, rev: &str) -> anyhow::Result<Option<std::collections::BTreeSet<String>>> {
+        walk::tree_paths(&self.root, rev).map(Some)
     }
 }
 
@@ -63,6 +70,7 @@ fn fixture(revisions: u64, preset: &str) -> Fixture {
         _dir: dir,
         engine,
         driver: SynthDriver {
+            root,
             commits: repo.commits,
             graphs: repo.graphs,
         },
@@ -184,6 +192,29 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
     );
     assert!(r.head_index.is_some(), "the pin's index was archived");
     assert!(r.summary.pass);
+
+    // The loading-layer rows went to the sidecar beside the walk record,
+    // classified against the fixture's own git trees.
+    let sidecar = walk::RebuildRows::path(&f.results.join("walk"), &opts(&f).pin, Some("synth"));
+    assert!(sidecar.exists(), "no sidecar at {}", sidecar.display());
+    assert_eq!(
+        ro.rows.as_deref(),
+        sidecar.file_name().and_then(|n| n.to_str()),
+        "the record names the sidecar"
+    );
+    let rows = walk::RebuildRows::read(&sidecar).unwrap();
+    assert_eq!(rows.at, opts(&f).pin);
+    assert_eq!(rows.from, commits[0], "no cold rebuild inside the window");
+    assert_eq!(rows.counts, ro.sky);
+    assert_eq!(ro.sky.missing_unexplained, 0, "{:?}", rows.missing);
+    assert!(!rows.truncated);
+    for row in &rows.extra {
+        assert_eq!(
+            row.class,
+            walk::RowClass::DeletedInWindow,
+            "an extra row a refresh could not remove: {row:?}"
+        );
+    }
     // Every step scored cambium as a tool row, even with no oracle.
     assert!(r
         .steps
@@ -233,6 +264,8 @@ fn a_walk_resumes_from_its_last_published_index() {
     truncated.done = false;
     truncated.rebuild_oracle = None;
     truncated.write(&path).unwrap();
+    let sidecar = walk::RebuildRows::path(&f.results.join("walk"), &opts(&f).pin, Some("synth"));
+    std::fs::remove_file(&sidecar).unwrap();
 
     let mut o = opts(&f);
     o.resume = true;
@@ -247,10 +280,10 @@ fn a_walk_resumes_from_its_last_published_index() {
     .unwrap();
     assert_eq!(resumed.steps.len(), commits.len() - 1);
     assert_eq!(resumed.steps[2].head, truncated.steps[2].head);
-    assert!(
-        resumed.rebuild_oracle.unwrap().ok,
-        "a resumed walk still equals a rebuild"
-    );
+    let ro = resumed.rebuild_oracle.unwrap();
+    assert!(ro.ok, "a resumed walk still equals a rebuild: {}", ro.summary);
+    assert!(sidecar.exists(), "the resumed walk rewrote the sidecar");
+    assert_eq!(walk::RebuildRows::read(&sidecar).unwrap().counts, ro.sky);
 }
 
 #[test]

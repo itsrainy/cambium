@@ -21,6 +21,7 @@ use crate::env::Environment;
 use crate::oracles::rdeps::RdepsResult;
 use crate::util::percentile;
 
+use super::rebuild_rows::RowCounts;
 use super::sampling::{Coverage, Sample};
 use super::steps::Tag;
 use super::tier::{Schedule, Tier};
@@ -222,11 +223,22 @@ impl Default for WalkSummary {
 }
 
 /// The rebuild oracle at the pin: applied index versus a fresh cold build.
+///
+/// `ok` counts the loading layer by its unexplained missing rows
+/// ([`super::rebuild_rows`]), and it is folded into [`WalkSummary::pass`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RebuildOracle {
     pub ok: bool,
     /// A human summary of the diff; empty when it held.
     pub summary: String,
+    /// The sidecar beside this file that lists every loading-layer row,
+    /// classified: `rebuild-<pin>[-<ver>].json` under `walk/`. Absent from
+    /// records written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<String>,
+    /// The sidecar's tallies.
+    #[serde(default)]
+    pub sky: RowCounts,
 }
 
 /// One subject's walk at one pin.
@@ -279,8 +291,14 @@ impl WalkResult {
         Ok(())
     }
 
+    /// Rolls the steps up, and folds the pin's rebuild oracle into `pass`: a
+    /// walk whose applied index disagrees with a cold build at the pin did
+    /// not pass, whatever every step said. Per step the oracle is still
+    /// `None` and `pass` is the steps' alone.
     pub fn summarise(&mut self) {
         self.summary = summarise(&self.steps, &self.oracle_sample, &self.peer_sample, self.index_build_ms);
+        self.summary.pass =
+            self.summary.pass && self.rebuild_oracle.as_ref().is_none_or(|o| o.ok);
     }
 }
 
@@ -449,6 +467,72 @@ mod tests {
         assert_eq!(sum.tightness["bazel-diff"].steps, 2);
         assert_eq!(sum.cost.index_build_ms, 5000);
         assert!(sum.pass);
+    }
+
+    fn a_result(steps: Vec<StepRecord>, rebuild_oracle: Option<RebuildOracle>) -> WalkResult {
+        let sample = Sample::all(&steps.iter().map(|s| super::super::steps::Step {
+            parent: s.parent.clone(),
+            head: s.head.clone(),
+            tags: s.tags.clone(),
+        }).collect::<Vec<_>>());
+        WalkResult {
+            schema: crate::RESULT_SCHEMA,
+            repo: "r".into(),
+            pin: "h2".into(),
+            from: "p".into(),
+            to: "h2".into(),
+            tier: Tier::Correctness,
+            schedule: Tier::Correctness.defaults(),
+            oracle_sample: sample,
+            peer_sample: Sample::default(),
+            environment: Environment {
+                machine: crate::harness::Machine::detect(),
+                bazel_version_used: String::new(),
+                cambi_version: String::new(),
+                tool_sha: String::new(),
+                engine_id: String::new(),
+                config_hash: String::new(),
+                output_bases: Default::default(),
+            },
+            started_unix: 0,
+            index_build_ms: 0,
+            steps,
+            rebuild_oracle,
+            head_index: None,
+            summary: WalkSummary::default(),
+            done: false,
+        }
+    }
+
+    /// The pin's verdict lands in `pass`; a walk still in progress, with no
+    /// verdict yet, is judged by its steps alone.
+    #[test]
+    fn a_failed_rebuild_oracle_fails_the_walk_and_none_leaves_it_alone() {
+        let steps = vec![step("h1", true, 1.0), step("h2", true, 1.0)];
+        let mut r = a_result(steps.clone(), None);
+        r.summarise();
+        assert!(r.summary.pass);
+        r.rebuild_oracle = Some(RebuildOracle {
+            ok: true,
+            summary: String::new(),
+            rows: Some("rebuild-h2.json".into()),
+            sky: RowCounts::default(),
+        });
+        r.summarise();
+        assert!(r.summary.pass);
+        r.rebuild_oracle = Some(RebuildOracle {
+            ok: false,
+            summary: "loading layer unexplained: 3".into(),
+            rows: Some("rebuild-h2.json".into()),
+            sky: RowCounts {
+                missing: 3,
+                missing_unexplained: 3,
+                ..Default::default()
+            },
+        });
+        r.summarise();
+        assert!(!r.summary.pass);
+        assert_eq!(r.summary.soundness.steps_missing, 0, "the steps were sound");
     }
 
     #[test]

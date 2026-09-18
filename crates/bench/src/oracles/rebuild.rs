@@ -6,7 +6,9 @@
 //! kinds, their rule hashes, and the forward edges as label change sets.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
+use cambium_index::sky::{Kind, SkyRef};
 use cambium_index::{IndexRef, NodeKind};
 use serde::{Deserialize, Serialize};
 
@@ -84,8 +86,18 @@ impl GraphDiff {
     /// index kept and a cold build never wrote costs bytes and nothing else.
     /// Everything else here is an answer that would differ.
     pub fn is_empty(&self) -> bool {
+        self.holds_with_sky_missing(self.counts.sky_mismatch)
+    }
+
+    /// [`Self::is_empty`] with the loading layer's missing count replaced by
+    /// `unexplained`: the rows left after the walk classified the ones a
+    /// refresh could never have written (a directory created inside the
+    /// window, a package that failed to load). See
+    /// [`crate::walk::rebuild_rows`].
+    pub fn holds_with_sky_missing(&self, unexplained: usize) -> bool {
         DiffCounts {
             sky_extra: 0,
+            sky_mismatch: unexplained,
             ..self.counts.clone()
         } == DiffCounts::default()
     }
@@ -113,9 +125,196 @@ fn kind_name(k: NodeKind) -> &'static str {
     cambium_engine::inspect::kind_name(k)
 }
 
+/// A loading-layer node by name: `(kind, root, key)`, the identity the
+/// comparison uses because two layers assign different ids.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SkyName {
+    #[serde(with = "kind_name_serde")]
+    pub kind: Kind,
+    /// The root's name; empty for the workspace.
+    pub root: String,
+    pub key: String,
+}
+
+impl SkyName {
+    fn of(v: SkyRef<'_>, id: u32) -> Self {
+        SkyName {
+            kind: v.kind_of(id),
+            root: v.root_name(id).into_owned(),
+            key: v.text(id).to_string(),
+        }
+    }
+}
+
+/// `KIND:[root]/[key]`, the spelling the capped string rows use.
+impl fmt::Display for SkyName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:[{}]/[{}]", self.kind.name(), self.root, self.key)
+    }
+}
+
+/// A [`Kind`] as its dump name, so a stored row reads as the dump does.
+mod kind_name_serde {
+    use cambium_index::sky::Kind;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(k: &Kind, s: S) -> Result<S::Ok, S::Error> {
+        k.name().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Kind, D::Error> {
+        let s = String::deserialize(d)?;
+        Kind::from_dump(&s)
+            .or(match s.as_str() {
+                "IGNORED" => Some(Kind::Ignored),
+                "TOMBSTONE" => Some(Kind::Tombstone),
+                _ => None,
+            })
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown loading-layer kind {s:?}")))
+    }
+}
+
+/// One loading-layer row: a node, or a reverse edge between two.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "item", rename_all = "snake_case")]
+pub enum SkyItem {
+    Node(SkyName),
+    Edge { from: SkyName, to: SkyName },
+}
+
+impl fmt::Display for SkyItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SkyItem::Node(n) => write!(f, "{n}"),
+            SkyItem::Edge { from, to } => write!(f, "{from} -> {to}"),
+        }
+    }
+}
+
+/// The loading-layer half of the diff, whole: every row, uncapped, so the
+/// walk can classify each one rather than the first fifty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkyDiff {
+    /// `Some((applied, rebuilt))` when the two sides disagree on whether a
+    /// layer is present at all; the row lists are then empty.
+    pub present: Option<(bool, bool)>,
+    /// Rows the rebuilt layer has and the applied one does not, nodes first,
+    /// each list in `(kind, root, key)` order.
+    pub missing: Vec<SkyItem>,
+    /// Rows the applied layer has and the rebuilt one does not.
+    pub extra: Vec<SkyItem>,
+}
+
+/// The loading layer, node by node and edge by edge, restricted on both
+/// sides to what a changed path in this repository can reach.
+///
+/// Comparing anything else would measure how much of the world each run's
+/// server happened to load rather than what the index knows. A cold `//...`
+/// build evaluates far more than an incremental run does: on the `bazel`
+/// subject it leaves about five hundred `BZL_LOAD` nodes of other
+/// repositories behind, some two thousand rows once their edges are counted,
+/// and no main-repository diff can reach any of them.
+pub fn sky_diff(applied: SkyRef<'_>, rebuilt: SkyRef<'_>) -> SkyDiff {
+    let mut d = SkyDiff::default();
+    if applied.present != rebuilt.present {
+        d.present = Some((applied.present, rebuilt.present));
+        return d;
+    }
+    if !applied.present {
+        return d;
+    }
+
+    fn names(v: SkyRef<'_>) -> Vec<SkyName> {
+        (0..v.len() as u32).map(|id| SkyName::of(v, id)).collect()
+    }
+    /// The nodes a changed path in this repository can reach: everything
+    /// backwards from a file or directory state of the workspace itself.
+    fn reachable(v: SkyRef<'_>) -> Vec<bool> {
+        let mut seen = vec![false; v.len()];
+        let mut stack: Vec<u32> = Vec::new();
+        for id in 0..v.len() as u32 {
+            let seed = matches!(v.kind_of(id), Kind::FileState | Kind::DirectoryListingState)
+                && v.root[id as usize] == cambium_index::sky::WORKSPACE;
+            if seed && !seen[id as usize] {
+                seen[id as usize] = true;
+                stack.push(id);
+            }
+        }
+        while let Some(id) = stack.pop() {
+            for &up in v.rdeps.row(id) {
+                if !seen[up as usize] {
+                    seen[up as usize] = true;
+                    stack.push(up);
+                }
+            }
+        }
+        seen
+    }
+    let (na, nb) = (names(applied), names(rebuilt));
+    let (ka, kb) = (reachable(applied), reachable(rebuilt));
+    let kept = |names: &[SkyName], keep: &[bool]| -> BTreeSet<SkyName> {
+        names
+            .iter()
+            .zip(keep)
+            .filter(|(_, k)| **k)
+            .map(|(n, _)| n.clone())
+            .collect()
+    };
+    let (sa, sb) = (kept(&na, &ka), kept(&nb, &kb));
+    for n in sa.difference(&sb) {
+        d.extra.push(SkyItem::Node(n.clone()));
+    }
+    for n in sb.difference(&sa) {
+        d.missing.push(SkyItem::Node(n.clone()));
+    }
+
+    fn edges<'a>(
+        v: SkyRef<'_>,
+        names: &'a [SkyName],
+        keep: &[bool],
+    ) -> BTreeSet<(&'a SkyName, &'a SkyName)> {
+        let mut out = BTreeSet::new();
+        for to in 0..v.len() as u32 {
+            if !keep[to as usize] {
+                continue;
+            }
+            for &from in v.rdeps.row(to) {
+                if keep[from as usize] {
+                    out.insert((&names[from as usize], &names[to as usize]));
+                }
+            }
+        }
+        out
+    }
+    let (ea, eb) = (edges(applied, &na, &ka), edges(rebuilt, &nb, &kb));
+    for (from, to) in ea.difference(&eb) {
+        d.extra.push(SkyItem::Edge {
+            from: (*from).clone(),
+            to: (*to).clone(),
+        });
+    }
+    for (from, to) in eb.difference(&ea) {
+        d.missing.push(SkyItem::Edge {
+            from: (*from).clone(),
+            to: (*to).clone(),
+        });
+    }
+    d
+}
+
 /// Compares two indexes by label, ignoring ids, tombstones and unknown nodes.
 /// Lists are capped at `cap` entries each; the counts are exact.
 pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize) -> GraphDiff {
+    compare_by_label_with_sky(applied, rebuilt, cap).0
+}
+
+/// [`compare_by_label`], also returning the loading-layer half whole: the
+/// [`GraphDiff`] keeps `cap` rendered rows of it, the [`SkyDiff`] every row.
+pub fn compare_by_label_with_sky(
+    applied: IndexRef<'_>,
+    rebuilt: IndexRef<'_>,
+    cap: usize,
+) -> (GraphDiff, SkyDiff) {
     fn live(v: IndexRef<'_>) -> BTreeMap<&str, u32> {
         (0..v.num_nodes())
             .filter(|&id| !v.is_tombstone(id) && v.kind_of(id) != NodeKind::Unknown)
@@ -198,11 +397,12 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
         }
     }
     compare_externals(applied, rebuilt, cap, &mut d);
-    compare_sky(applied, rebuilt, cap, &mut d);
-    d
+    let sky = sky_diff(applied.sky, rebuilt.sky);
+    compare_sky(&sky, cap, &mut d);
+    (d, sky)
 }
 
-/// The Skyframe loading layer, node by node and edge by edge.
+/// The Skyframe loading layer, rendered into the capped string rows.
 ///
 /// A splice refreshes only the packages the run re-queried, and a cold build
 /// at the same commit dumps the whole repository; the two must describe the
@@ -213,121 +413,38 @@ pub fn compare_by_label(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize
 ///
 /// Node identity is `(kind, root name, key)`, so the comparison survives the
 /// two layers assigning different ids, exactly as the rule-layer comparison
-/// survives two lineages assigning different node ids.
-fn compare_sky(applied: IndexRef<'_>, rebuilt: IndexRef<'_>, cap: usize, d: &mut GraphDiff) {
+/// survives two lineages assigning different node ids. The rows come from
+/// [`sky_diff`]; this only spells them.
+fn compare_sky(sky: &SkyDiff, cap: usize, d: &mut GraphDiff) {
     let mut missing = |s: String| {
         d.counts.sky_mismatch += 1;
         if d.sky_mismatch.len() < cap {
             d.sky_mismatch.push(s);
         }
     };
-    if applied.sky.present != rebuilt.sky.present {
-        missing(format!(
-            "loading layer present: applied {}, rebuilt {}",
-            applied.sky.present, rebuilt.sky.present
-        ));
+    if let Some((a, b)) = sky.present {
+        missing(format!("loading layer present: applied {a}, rebuilt {b}"));
         return;
     }
-    if !applied.sky.present {
-        return;
-    }
-
-    /// `(kind, root, key)` for every node, and the same for each of its
-    /// reverse edges' other end.
-    fn names(v: cambium_index::sky::SkyRef<'_>) -> Vec<String> {
-        (0..v.len() as u32)
-            .map(|id| {
-                format!(
-                    "{}:[{}]/[{}]",
-                    v.kind_of(id).name(),
-                    v.root_name(id),
-                    v.text(id)
-                )
-            })
-            .collect()
-    }
-    /// The nodes a changed path in this repository can reach: everything
-    /// backwards from a file or directory state of the workspace itself.
-    ///
-    /// Comparing anything else would measure how much of the world each run's
-    /// server happened to load rather than what the index knows. A cold
-    /// `//...` build evaluates far more than an incremental run does: on the
-    /// `bazel` subject it leaves about five hundred `BZL_LOAD` nodes of other
-    /// repositories behind, some two thousand rows once their edges are
-    /// counted, and no main-repository diff can reach any of them.
-    fn reachable(v: cambium_index::sky::SkyRef<'_>) -> Vec<bool> {
-        use cambium_index::sky::Kind;
-        let mut seen = vec![false; v.len()];
-        let mut stack: Vec<u32> = Vec::new();
-        for id in 0..v.len() as u32 {
-            let seed = matches!(v.kind_of(id), Kind::FileState | Kind::DirectoryListingState)
-                && v.root[id as usize] == cambium_index::sky::WORKSPACE;
-            if seed && !seen[id as usize] {
-                seen[id as usize] = true;
-                stack.push(id);
-            }
-        }
-        while let Some(id) = stack.pop() {
-            for &up in v.rdeps.row(id) {
-                if !seen[up as usize] {
-                    seen[up as usize] = true;
-                    stack.push(up);
-                }
-            }
-        }
-        seen
-    }
-    let (na, nb) = (names(applied.sky), names(rebuilt.sky));
-    let (ka, kb) = (reachable(applied.sky), reachable(rebuilt.sky));
-    let (sa, sb): (BTreeSet<&str>, BTreeSet<&str>) = (
-        na.iter()
-            .enumerate()
-            .filter(|(i, _)| ka[*i])
-            .map(|(_, s)| s.as_str())
-            .collect(),
-        nb.iter()
-            .enumerate()
-            .filter(|(i, _)| kb[*i])
-            .map(|(_, s)| s.as_str())
-            .collect(),
-    );
     let mut extra = |s: String| {
         d.counts.sky_extra += 1;
         if d.sky_extra.len() < cap {
             d.sky_extra.push(s);
         }
     };
-    for n in sa.difference(&sb) {
-        extra(format!("node only in applied: {n}"));
+    for item in &sky.extra {
+        extra(only_in(item, "applied"));
     }
-    for n in sb.difference(&sa) {
-        missing(format!("node only in rebuilt: {n}"));
+    for item in &sky.missing {
+        missing(only_in(item, "rebuilt"));
     }
+}
 
-    fn edges<'a>(
-        v: cambium_index::sky::SkyRef<'_>,
-        names: &'a [String],
-        keep: &[bool],
-    ) -> BTreeSet<(&'a str, &'a str)> {
-        let mut out = BTreeSet::new();
-        for to in 0..v.len() as u32 {
-            if !keep[to as usize] {
-                continue;
-            }
-            for &from in v.rdeps.row(to) {
-                if keep[from as usize] {
-                    out.insert((names[from as usize].as_str(), names[to as usize].as_str()));
-                }
-            }
-        }
-        out
-    }
-    let (ea, eb) = (edges(applied.sky, &na, &ka), edges(rebuilt.sky, &nb, &kb));
-    for (from, to) in ea.difference(&eb) {
-        extra(format!("edge only in applied: {from} -> {to}"));
-    }
-    for (from, to) in eb.difference(&ea) {
-        missing(format!("edge only in rebuilt: {from} -> {to}"));
+/// `node only in <side>: <name>` or `edge only in <side>: <from> -> <to>`.
+fn only_in(item: &SkyItem, side: &str) -> String {
+    match item {
+        SkyItem::Node(n) => format!("node only in {side}: {n}"),
+        SkyItem::Edge { from, to } => format!("edge only in {side}: {from} -> {to}"),
     }
 }
 
@@ -612,6 +729,42 @@ FILE:[/ws]/[lib/sub/BUILD]
         assert!(!d.is_empty());
         assert!(d.summary().contains("loading layer rows missing: 2"));
 
+        // The structured half carries every row where the string lists are
+        // capped, and spells each one exactly as the string row does.
+        let (capped, sky) = compare_by_label_with_sky(a.view(), b.view(), 1);
+        assert_eq!(capped.sky_mismatch.len(), 1, "{capped:?}");
+        assert_eq!(capped.counts.sky_mismatch, 2);
+        assert!(sky.present.is_none());
+        assert_eq!(sky.missing.len(), 2, "{sky:?}");
+        assert!(sky.extra.is_empty(), "{sky:?}");
+        let node = sky
+            .missing
+            .iter()
+            .find_map(|i| match i {
+                SkyItem::Node(n) => Some(n),
+                _ => None,
+            })
+            .expect("a node row");
+        assert_eq!((node.kind, node.root.as_str(), node.key.as_str()), (Kind::Package, "", "lib"));
+        let (from, to) = sky
+            .missing
+            .iter()
+            .find_map(|i| match i {
+                SkyItem::Edge { from, to } => Some((from, to)),
+                _ => None,
+            })
+            .expect("an edge row");
+        assert_eq!((from.kind, from.key.as_str()), (Kind::Package, "lib"));
+        assert_eq!((to.kind, to.key.as_str()), (Kind::PackageLookup, "lib/sub"));
+        for (item, row) in sky.missing.iter().zip(&d.sky_mismatch) {
+            assert!(row.ends_with(&item.to_string()), "{row} vs {item}");
+        }
+        // And a row round-trips through its stored shape, kind by name.
+        let text = serde_json::to_string(&sky.missing).unwrap();
+        assert!(text.contains("\"item\":\"edge\"") && text.contains("\"kind\":\"PACKAGE_LOOKUP\""), "{text}");
+        let back: Vec<SkyItem> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, sky.missing);
+
         // The other way round is an over-approximation: a row the applied
         // index kept and a cold build never wrote is inert, so it is counted
         // and does not fail the oracle. A refresh replaces the rows its dump
@@ -621,6 +774,8 @@ FILE:[/ws]/[lib/sub/BUILD]
         assert_eq!(d.counts.sky_extra, 2, "{:?}", d.sky_extra);
         assert!(d.sky_extra[0].contains("only in applied"), "{d:?}");
         assert!(d.is_empty(), "{d:?}");
+        assert!(d.holds_with_sky_missing(0));
+        assert!(!d.holds_with_sky_missing(1));
 
         // And an index with no layer at all is told apart from one whose
         // loading phase touched nothing.
@@ -633,9 +788,11 @@ FILE:[/ws]/[lib/sub/BUILD]
             }]);
             b.finish("c")
         };
-        let d = compare_by_label(none.view(), b.view(), 10);
+        let (d, sky) = compare_by_label_with_sky(none.view(), b.view(), 10);
         assert_eq!(d.counts.sky_mismatch, 1, "{:?}", d.sky_mismatch);
         assert!(d.sky_mismatch[0].contains("present"), "{d:?}");
+        assert_eq!(sky.present, Some((false, true)));
+        assert!(sky.missing.is_empty() && sky.extra.is_empty());
     }
 
     #[test]
