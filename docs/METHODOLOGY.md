@@ -72,7 +72,13 @@ compared commit: the nearest `BUILD` or `BUILD.bazel` above it), and a
   file: a file added to a directory that already existed sits under no
   created directory, its rows are exactly what the refresh of its package
   had to write, and a new `.bzl` in particular has consumers that a layer
-  without its `BZL_LOAD` node would never dirty. The class is a bound,
+  without its `BZL_LOAD` node would never dirty. Nor is the created
+  directory ever one that holds a `BUILD` or `BUILD.bazel` at the compared
+  commit: that directory is a package created inside the window, which the
+  engine had to name from the diff and query, so its rows are owed and a
+  hole in them is a shortfall. Refusing the class there costs a correct
+  engine nothing, since a package it did query leaves at least its lookup
+  and `BUILD` rows under the root. The class is a bound,
   not the exact set of directories the refreshes covered; only a per-step
   record of what was re-queried would tighten it.
 - `load_error` (missing, expected): the row's package, or either end's for

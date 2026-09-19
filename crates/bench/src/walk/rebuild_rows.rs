@@ -34,7 +34,13 @@
 //! listing, so a hole under a directory the applied layer does know is a
 //! shortfall, not a `//...`-only row. The created root is always a
 //! directory: a file added to a directory that already existed is a row the
-//! refresh of its package had to write, and the class never claims it.
+//! refresh of its package had to write, and the class never claims it. Nor
+//! does it claim a created directory that holds a `BUILD` or `BUILD.bazel`
+//! at the compared commit: that directory is a package created inside the
+//! window, which the engine had to name from the diff and query, so its
+//! rows are owed rather than inert (a queried new package leaves at least
+//! its lookup and `BUILD` rows under the root, so refusing the class there
+//! costs a correct engine nothing).
 //!
 //! A package the cold build at the compared commit failed to load under
 //! `--keep_going` has whatever rows its partial evaluation left, and the
@@ -457,7 +463,7 @@ fn missing_node_class(
     };
     let (path, package) = locate_in(name, Some(to));
     if let Some(root) = path.as_deref().and_then(|p| created_root(p, from, to)) {
-        if !exists(applied_paths, &root) {
+        if !exists(applied_paths, &root) && !holds_build_file(to, &root) {
             return RowClass::CreatedInWindow;
         }
     }
@@ -494,6 +500,25 @@ fn created_root(p: &str, from: &BTreeSet<String>, to: &BTreeSet<String>) -> Opti
         .chain(whole)
         .find(|prefix| !exists(from, prefix))
         .map(str::to_string)
+}
+
+/// Whether the tree holds a `BUILD` or `BUILD.bazel` anywhere under `dir`.
+///
+/// A directory created inside the window that holds one is a package the
+/// engine had to name from the diff and query, so a missing row under it is
+/// a refresh shortfall and not a `//...`-only row.
+fn holds_build_file(tree: &BTreeSet<String>, dir: &str) -> bool {
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    tree.range(prefix.clone()..)
+        .take_while(|f| f.starts_with(&prefix))
+        .any(|f| {
+            let base = f.rsplit_once('/').map_or(f.as_str(), |(_, n)| n);
+            base == "BUILD" || base == "BUILD.bazel"
+        })
 }
 
 /// An extra is deleted-in-window when an end names a path gone at `to`, a
@@ -567,8 +592,9 @@ mod tests {
         "BUILD",
         "lib/BUILD",
         "lib/a.cc",
-        "newdir/BUILD",
         "newdir/sub/f.txt",
+        "newpkg/BUILD",
+        "newpkg/data.txt",
         "lib/old.bzl",
     ];
 
@@ -602,6 +628,28 @@ mod tests {
             &errs(&[]),
         );
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
+    }
+
+    /// (ii-b) A directory created in the window that holds a `BUILD` is a
+    /// package the engine had to name from the diff and query, so its rows
+    /// are owed however little the applied layer knows of it.
+    #[test]
+    fn a_hole_in_a_package_created_in_the_window_is_unexplained() {
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::PackageLookup, "newpkg")),
+                SkyItem::Node(name(Kind::Package, "newpkg")),
+                SkyItem::Node(name(Kind::FileState, "newpkg/BUILD")),
+                SkyItem::Node(name(Kind::File, "newpkg/data.txt")),
+                SkyItem::Edge {
+                    from: name(Kind::Package, "newpkg"),
+                    to: name(Kind::File, "newpkg/data.txt"),
+                },
+            ],
+            vec![],
+        );
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
+        assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
     }
 
     /// (iii) A path that existed at the base had every chance to be written.
