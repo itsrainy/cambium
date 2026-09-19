@@ -207,7 +207,7 @@ mod path_maps;
 mod pattern;
 
 pub use crate::vocabulary::{is_toolchain_module, TOOLCHAIN_MODULES};
-pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, repo_settings, Mode, RepoSetting};
+pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, rc_imports, repo_settings, Mode, RepoSetting};
 pub use external_query::external_dir_repos;
 pub use inputs::{build_repo_inputs, dir_candidates, main_repo_patterns, repo_setting_inputs};
 pub use module_diff::diff_module;

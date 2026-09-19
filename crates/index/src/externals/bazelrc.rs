@@ -125,6 +125,40 @@ pub struct RepoSetting {
     pub value: String,
 }
 
+/// The rc files a bazelrc pulls in, repo-relative, in the order it names
+/// them.
+///
+/// `import %workspace%/bazel/quiche.rc` and its `try-import` spelling are the
+/// only two; a file outside the tree (an absolute path, `%workspace%` aside)
+/// is not a file this index can read and is left out. Bazel's own `import` is
+/// textual inclusion, so a setting written in the imported file reaches the
+/// build exactly as one written here does.
+pub fn rc_imports(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        let Some(command) = toks.next() else { continue };
+        if command != "import" && command != "try-import" {
+            continue;
+        }
+        let Some(target) = toks.next() else { continue };
+        let rel = match target.strip_prefix("%workspace%/") {
+            Some(rest) => rest,
+            None if target.starts_with('/') || target.starts_with('%') => continue,
+            None => target,
+        };
+        let rel = rel.trim_start_matches("./");
+        if !rel.is_empty() {
+            out.push(rel.to_string());
+        }
+    }
+    out
+}
+
 /// Every `build`/`common` line of a bazelrc that sets a flag of an external
 /// repository, in file order.
 ///
@@ -196,6 +230,20 @@ mod tests {
         assert_eq!(got[1].repo, "grpc");
         assert_eq!(got[1].command, "common:asan");
         assert_eq!(got[1].value, "@envoy//:y");
+    }
+
+    #[test]
+    fn the_rc_files_an_rc_file_imports_are_named() {
+        let rc = "# a comment\n\
+                  build --//:x=y\n\
+                  import %workspace%/bazel/quiche.rc\n\
+                  try-import %workspace%/./local.rc\n\
+                  import relative.rc\n\
+                  import /etc/outside.rc\n";
+        assert_eq!(
+            rc_imports(rc),
+            vec!["bazel/quiche.rc", "local.rc", "relative.rc"]
+        );
     }
 
     #[test]

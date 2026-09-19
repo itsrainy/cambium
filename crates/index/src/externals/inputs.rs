@@ -153,16 +153,24 @@ fn overlay_map(path: &str) -> PathMap {
 /// (`--@envoy//...` inside envoy) is not an external repository's flag, and a
 /// value that is not a label of this tree is not an input.
 pub fn repo_setting_inputs(src: &dyn FileText, m: &RepoMapping) -> Vec<RepoSetting> {
-    let Some(text) = src.text(".bazelrc") else {
-        return Vec::new();
-    };
-    repo_settings(&text)
-        .into_iter()
-        .filter(|s| {
+    // `import` is textual inclusion, so a setting in an imported rc file is a
+    // setting of this build. envoy keeps whole families of flags in
+    // `bazel/*.rc`, and reading the top-level file alone misses them.
+    let mut queue = vec![".bazelrc".to_string()];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    while let Some(path) = queue.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(text) = src.text(&path) else { continue };
+        queue.extend(crate::externals::rc_imports(&text));
+        out.extend(repo_settings(&text).into_iter().filter(|s| {
             Label::parse(&s.flag).is_some_and(|l| !l.is_main(m))
                 && !main_repo_patterns(&s.value, m).is_empty()
-        })
-        .collect()
+        }));
+    }
+    out
 }
 
 /// Computes the repository-input map for a checkout.
