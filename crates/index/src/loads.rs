@@ -936,6 +936,24 @@ fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
         .collect()
 }
 
+/// Marks every boundary a main-repo package lies under as traversed.
+///
+/// Run once, on the packages the cold universe query returned: a package name
+/// under a boundary directory is Bazel saying it read that directory as part
+/// of this repository, whatever marker the directory carries.
+pub fn mark_traversed<'a>(
+    boundaries: &mut [Boundary],
+    packages: impl IntoIterator<Item = &'a str>,
+) {
+    let packages: Vec<&str> = packages.into_iter().collect();
+    for b in boundaries.iter_mut() {
+        let prefix = format!("{}/", b.dir);
+        b.traversed = packages
+            .iter()
+            .any(|p| *p == b.dir.as_str() || p.starts_with(&prefix));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,23 +1225,5 @@ mod tests {
         assert_eq!(g.package_closure("p", &f2, &m).bzl.len(), 1);
         g.invalidate("p/a.bzl");
         assert_eq!(g.package_closure("p", &f2, &m).bzl.len(), 2);
-    }
-}
-
-/// Marks every boundary a main-repo package lies under as traversed.
-///
-/// Run once, on the packages the cold universe query returned: a package name
-/// under a boundary directory is Bazel saying it read that directory as part
-/// of this repository, whatever marker the directory carries.
-pub fn mark_traversed<'a>(
-    boundaries: &mut [Boundary],
-    packages: impl IntoIterator<Item = &'a str>,
-) {
-    let packages: Vec<&str> = packages.into_iter().collect();
-    for b in boundaries.iter_mut() {
-        let prefix = format!("{}/", b.dir);
-        b.traversed = packages
-            .iter()
-            .any(|p| *p == b.dir.as_str() || p.starts_with(&prefix));
     }
 }

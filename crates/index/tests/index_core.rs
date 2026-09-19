@@ -772,8 +772,7 @@ fn a_boundary_is_traversed_when_the_universe_returned_a_package_under_it() {
     ];
     cambium_index::mark_traversed(
         &mut bs,
-        ["lib", "third_party/tsl/tsl/platform", "third_party/tslx"]
-            .into_iter(),
+        ["lib", "third_party/tsl/tsl/platform", "third_party/tslx"],
     );
     assert!(bs[0].traversed);
     // A stale `true` is cleared: the answer is this universe query's, and a
