@@ -799,6 +799,10 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
         global: stage.global.is_some() || stage.dirty.global,
         reason: stage.global.as_ref().map(|r| r.to_string()),
     };
+    if !dirty.global {
+        out.indeterminate
+            .extend(undecidable_registration(&ext, head_rev, texts));
+    }
     // What each package is dirty *by*, as a diagnostic over the engine's
     // answer: a `.bzl` in its load closure, one of the two external routes,
     // or a changed file of its own.
@@ -841,6 +845,47 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
         out.affected_lower_bound = lower_bound(base, changes, &external_nodes);
     }
     out
+}
+
+/// Whether the registered-repository escalation could run at all.
+///
+/// `CAMBI-W023` also fires from outside the query graph: a repository this
+/// commit moved that `MODULE.bazel` or a legacy `WORKSPACE` at head registers
+/// toolchains or execution platforms from. That check reads the registering
+/// file and nothing else, so the change set need not name it -- an ordinary
+/// source edit routed into a repository is enough. With neither text in
+/// reach the stage cannot run the check, and its "not global" is this
+/// replay's missing input rather than the engine's answer, so the step is
+/// not comparable.
+fn undecidable_registration(
+    ext: &externals::Externals,
+    head_rev: &str,
+    texts: &dyn WorkspaceText,
+) -> Vec<String> {
+    let dirty: Vec<&str> = ext
+        .repos
+        .iter()
+        .filter(|r| !ext.target_only.contains(*r))
+        .map(String::as_str)
+        .collect();
+    if dirty.is_empty() {
+        return Vec::new();
+    }
+    let readable = |p: &str| texts.text_at(head_rev, p).is_some();
+    if readable(externals::MODULE_FILE)
+        || externals::LEGACY_WORKSPACE_FILES
+            .iter()
+            .any(|p| readable(p))
+    {
+        return Vec::new();
+    }
+    let repos: Vec<String> = dirty.iter().map(|r| format!("`@{r}`")).collect();
+    vec![format!(
+        "the change set moves {}, and whether the workspace registers toolchains or execution \
+         platforms from it needs `MODULE.bazel` or `WORKSPACE` at head; pass --repo to decide \
+         this one",
+        repos.join(" and ")
+    )]
 }
 
 /// The module texts a change set needs and this replay cannot read, as the
@@ -1444,6 +1489,38 @@ impl ReplayRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registered-repository escalation reads `MODULE.bazel` at head
+    /// whatever the change set named, so an ordinary source edit that moves a
+    /// repository is undecidable offline: the stage answers "not global" for
+    /// want of a file, and a run that recorded `CAMBI-W023` for that step
+    /// would read as a divergence rather than as a question declined.
+    #[test]
+    fn a_moved_repository_with_no_module_text_is_undecidable() {
+        let mut ext = externals::Externals::default();
+        ext.repos.insert("mod".to_string());
+        let notes = undecidable_registration(&ext, "head", &NoText);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("`@mod`") && notes[0].contains("--repo"),
+            "{notes:?}"
+        );
+
+        // With the file in reach the stage decides it for itself.
+        let texts = module_at("head", "module(name = \"demo\", version = \"1\")\n");
+        assert!(undecidable_registration(&ext, "head", &texts).is_empty());
+
+        // Nothing moved, so there is nothing a registration could reach.
+        let empty = externals::Externals::default();
+        assert!(undecidable_registration(&empty, "head", &NoText).is_empty());
+
+        // A repository named only by a generated target cannot have moved,
+        // and the escalation skips it for the same reason.
+        let mut target_only = externals::Externals::default();
+        target_only.repos.insert("mod".to_string());
+        target_only.target_only.insert("mod".to_string());
+        assert!(undecidable_registration(&target_only, "head", &NoText).is_empty());
+    }
 
     /// The unreadable segment is second in the change set, behind a readable
     /// root. A first-match-only check answers nothing here, which is exactly
