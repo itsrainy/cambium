@@ -111,6 +111,20 @@ Whatever Phase 1 leaves. Two candidates:
 Exit: the six named pairs are sound locally. The 300-step confirmation
 is box run A.
 
+Answered for the six named pairs, 2026-09-19
+(docs/XLA_MAIN_REPO_MISSES.md). Neither candidate was right. The
+`cc_ir_header` chain is reached in full at the failing step, and all six pairs
+are one fault: a package that fails to load under `--keep_going` comes back
+empty (or truncated) and its update tombstones every row it owned, which
+`b8c8cbc` left standing. Such a package now keeps the rows the index has
+(`CAMBI-W028`). The mechanism needs a walk to show, so the measurement is box
+run A, not a per-pair rerun.
+
+Not answered: the same walk record has ten steps with main-repo misses, not
+six. Steps 46, 234, 256 and 262 (96 labels between them) are outside the
+mechanism and unexamined, so #23 does not close on this. They are the next
+thing to read.
+
 ### Phase 3: toolchain rule-class escalation (#26), local only
 
 Small and self-contained; done before the externals work because it

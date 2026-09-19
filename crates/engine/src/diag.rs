@@ -124,6 +124,15 @@ codes! {
     /// here so the two cannot collide, and stays skipped if that work lands
     /// under another number, since a number is never reassigned.
     W024AutoloadProvider => "CAMBI-W024",
+    /// A dirty package failed to load under `--keep_going` but its `BUILD`
+    /// file is still on disk, so its rows were carried forward rather than
+    /// tombstoned.
+    ///
+    /// Allocated as `CAMBI-W023` on its own branch (#23), before the
+    /// toolchain escalation took that number; `CAMBI-W025` through
+    /// `CAMBI-W027` are spoken for by the in-tree externals work, so this
+    /// lands on the next free number. A number is never reassigned.
+    W028PackageLoadFailed => "CAMBI-W028",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,

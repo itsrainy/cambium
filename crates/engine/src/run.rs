@@ -948,7 +948,55 @@ impl<'a> Run<'a> {
                 .filter(|p| !dirty.deleted_packages.contains(*p))
                 .cloned()
                 .collect();
-            let rows = self.querier.query(&to_query)?;
+            let mut rows = self.querier.query(&to_query)?;
+            // Carrying a failed package's rows forward is right when
+            // something else dirtied it: the rows are as old as the last
+            // query that loaded it, and stale beats gone (issue #23). It is
+            // the wrong direction when the load error is in the very `BUILD`
+            // file this commit edited, because then the rows describe the
+            // package before the edit and the targets the edit changed would
+            // be reported unaffected. Those go back into the updates, where
+            // the empty one tombstones them and their consumers go direct via
+            // `DeletedDep` -- the wide answer, which is the safe one.
+            let edited_here = build_files_edited(&dirty.direct_files);
+            let (reapplied, carried): (Vec<_>, Vec<_>) = std::mem::take(&mut rows.unloaded)
+                .into_iter()
+                .partition(|u| edited_here.contains(&u.package));
+            if !reapplied.is_empty() {
+                tracing::warn!(
+                    packages = reapplied.len(),
+                    first = ?reapplied.iter().take(5).map(|u| &u.package).collect::<Vec<_>>(),
+                    "these packages failed to load and their own BUILD file is what changed; \
+                     tombstoning them rather than answering from rows that predate the edit"
+                );
+                self.engine.diagnostics.emit(
+                    crate::diag::Diagnostic::warning(
+                        crate::diag::Code::W005PackagesTombstoned,
+                        format!(
+                            "{} package(s) failed to load under --keep_going and their own \
+                             BUILD file is what this change edited, so they were tombstoned \
+                             rather than answered from rows that predate the edit; their \
+                             consumers are reported as affected",
+                            reapplied.len()
+                        ),
+                    )
+                    .with_help(
+                        "fix the load error bazel reported for those packages; \
+                         run with --log warn to see its stderr",
+                    ),
+                );
+            }
+            rows.updates.extend(reapplied);
+            rows.unloaded = carried;
+            // A package that failed to load kept the rows the index already
+            // had for it, so this run did not re-query it: it must not reach
+            // the closure rescan or the loading-layer refresh as a package
+            // whose answer moved, or they would drop what they hold for it
+            // and undo the carry-forward one layer down.
+            let to_query: Vec<String> = to_query
+                .into_iter()
+                .filter(|p| !rows.unloaded.iter().any(|u| &u.package == p))
+                .collect();
             Queried {
                 to_query,
                 rows,
@@ -1509,6 +1557,24 @@ fn histogram(
         out[of(t) as usize] += 1;
     }
     out
+}
+
+/// The packages whose own `BUILD` file this change edited.
+///
+/// A modified BUILD file is a changed source path like any other, so the
+/// classifier has it in `direct_files`; this reads the package names back out
+/// of those paths. The root package is `""`, which is a real package name.
+fn build_files_edited(direct_files: &BTreeSet<String>) -> BTreeSet<String> {
+    direct_files
+        .iter()
+        .filter_map(|path| {
+            let (dir, name) = match path.rsplit_once('/') {
+                Some((dir, name)) => (dir, name),
+                None => ("", path.as_str()),
+            };
+            matches!(name, "BUILD" | "BUILD.bazel").then(|| dir.to_string())
+        })
+        .collect()
 }
 
 /// A deleted `BUILD` does not always delete the package.
