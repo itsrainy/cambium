@@ -48,7 +48,7 @@ pub(crate) fn rescan_closure(
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
     boundaries: &[String],
-    confirmed: &BTreeSet<String>,
+    confirmed: &BTreeSet<(String, String)>,
 ) -> Option<cambium_index::BzlClosure> {
     if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
         return prior;
@@ -90,9 +90,15 @@ pub(crate) fn rescan_closure(
     // incremental run carries the answer forward from the index it splices
     // onto, since a confirmed claim is a fact about the lineage and the
     // declaration that made it is an invalidator.
-    for r in confirmed {
-        if c.inputs.confirm_dir(r) {
-            tracing::debug!(repo = %r, "a confirmed repository claim maps its directory");
+    for (r, dir) in confirmed {
+        if c.inputs.confirm_dir(r, dir) {
+            tracing::debug!(repo = %r, %dir, "a confirmed repository claim maps its directory");
+        } else {
+            tracing::debug!(
+                repo = %r,
+                %dir,
+                "a carried-forward confirmation names a directory this closure no longer claims"
+            );
         }
     }
     report_repo_settings(querier, src, &mapping, &facts);

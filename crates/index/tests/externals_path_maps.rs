@@ -283,12 +283,19 @@ fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     // Confirmation is what turns it into the exhaustive mapping the engine
     // reads back to route a change under the directory.
     let mut ri = ri;
-    assert!(ri.confirm_dir("tsl"));
+    let mut other = ri.clone();
+    assert!(ri.confirm_dir("tsl", "third_party/tsl"));
     assert_eq!(
         ri.path_maps.get("tsl").map(|s| s.iter().cloned().collect::<Vec<_>>()),
         Some(vec![PathMap::exhaustive_dir("third_party/tsl/".into())])
     );
     assert!(ri.origins["tsl"].confirmed);
     // A repository with no candidate cannot be confirmed into one.
-    assert!(!ri.confirm_dir("nothing"));
+    assert!(!ri.confirm_dir("nothing", "third_party/tsl"));
+    // Nor can a confirmation of one directory promote a claim about another:
+    // the probe asked Bazel about `third_party/tsl`, and a closure that has
+    // been rescanned since can hold any other `path =` under the same name.
+    assert!(!other.confirm_dir("tsl", "third_party/tsl_new"));
+    assert!(!other.path_maps.contains_key("tsl"), "{:?}", other.path_maps);
+    assert!(other.origins.get("tsl").is_none_or(|o| !o.confirmed));
 }

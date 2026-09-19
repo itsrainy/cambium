@@ -1287,10 +1287,19 @@ fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String
     }
 }
 
-/// The confirmed repositories of an index, by apparent name.
-fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<String> {
+/// The confirmed repository claims of an index, as (apparent name,
+/// directory). The directory is carried because the confirmation was about
+/// one: see `RepoInputs::confirm_dir`.
+fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<(String, String)> {
     (0..base.num_repos())
-        .filter(|&r| base.repo_origin(r).confirmed)
-        .map(|r| base.repo_name(r).to_string())
+        .filter_map(|r| {
+            let o = base.repo_origin(r);
+            (o.confirmed && o.kind == cambium_index::externals::OriginKind::Dir).then(|| {
+                (
+                    base.repo_name(r).to_string(),
+                    o.dir.trim_end_matches('/').to_string(),
+                )
+            })
+        })
         .collect()
 }

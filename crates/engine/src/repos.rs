@@ -32,7 +32,11 @@ use std::collections::BTreeSet;
 
 use crate::query::PackageQuerier;
 
-/// The repositories whose candidate `Dir` claim Bazel confirmed.
+/// The candidate `Dir` claims Bazel confirmed, as (repository, directory).
+///
+/// The directory travels with the name because that is what was probed: a
+/// closure rescanned later can hold a different `path =` for the same name,
+/// and a confirmation carried forward by name alone would promote it.
 ///
 /// An empty answer is the behaviour before Phase 5: no claim is promoted, no
 /// boundary is mapped by one, and a change under it is global. Every way this
@@ -42,7 +46,7 @@ pub(crate) fn confirm_dir_claims(
     q: &dyn PackageQuerier,
     cfg: &crate::config::Externals,
     boundaries: &[cambium_index::Boundary],
-) -> BTreeSet<String> {
+) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     if !cfg.enabled || boundaries.is_empty() {
         return out;
@@ -133,7 +137,7 @@ pub(crate) fn confirm_dir_claims(
             continue;
         }
         tracing::debug!(repo, dir = %c.dir, packages = said.len(), "a repository claim is confirmed");
-        out.insert(repo.clone());
+        out.insert((repo.clone(), c.dir.trim_end_matches('/').to_string()));
     }
     out
 }

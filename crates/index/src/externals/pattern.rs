@@ -182,6 +182,9 @@ impl PathMap {
 /// repository". It is the identification half of issue #22: a repository the
 /// index can name a shape for is one whose changed files can be routed, and
 /// everything else is declared-only and keeps the wide answer.
+/// The variants are declared weakest first: the derived `Ord` is the
+/// precedence two claims about the same repository settle by. See
+/// [`RepoOrigin::claim`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OriginKind {
     /// Nothing about the repository's contents was derived: a registry
@@ -190,18 +193,20 @@ pub enum OriginKind {
     /// only its *shape* is unknown.
     #[default]
     Declared,
-    /// The repository is a directory of this tree, and
-    /// [`RepoOrigin::dir`] is that directory with its trailing `/`:
-    /// `local_path_override`, `local_repository`, `new_local_repository`.
-    Dir,
+    /// A repository rule writes the BUILD file itself, from a literal in the
+    /// closure (`repository_ctx.file("BUILD", ...)`). Envoy's `@envoy_repo`.
+    Generated,
     /// The sources are fetched but the BUILD file is a file of this tree, or
     /// a literal in the workspace closure. [`RepoOrigin::dir`] is the
     /// repo-relative path of that file, or empty for `build_file_content`.
     /// Envoy's `@quiche` before the bzlmod pin.
     Overlay,
-    /// A repository rule writes the BUILD file itself, from a literal in the
-    /// closure (`repository_ctx.file("BUILD", ...)`). Envoy's `@envoy_repo`.
-    Generated,
+    /// The repository is a directory of this tree, and
+    /// [`RepoOrigin::dir`] is that directory with its trailing `/`:
+    /// `local_path_override`, `local_repository`, `new_local_repository`.
+    /// The strongest claim: the whole repository is files of this tree, so it
+    /// outranks a claim about its BUILD file alone.
+    Dir,
 }
 
 impl OriginKind {
@@ -335,12 +340,20 @@ impl RepoInputs {
     /// `repo_rooted_at`). Confirmed is recorded on the origin so a later run,
     /// and `cambi inspect externals`, can say the claim was checked.
     ///
-    /// Does nothing for a repository with no candidate, so a stale
-    /// confirmation carried from an earlier index cannot invent a mapping.
-    pub fn confirm_dir(&mut self, repo: &str) -> bool {
+    /// Does nothing for a repository with no candidate, or one whose
+    /// candidate directory is not the `dir` Bazel was asked about, so neither
+    /// a stale confirmation carried from an earlier index nor a declaration
+    /// that moved since the probe can invent a mapping.
+    pub fn confirm_dir(&mut self, repo: &str, dir: &str) -> bool {
         let Some(c) = self.dir_candidates.get(repo).cloned() else {
             return false;
         };
+        // The confirmation is about a directory, not about a name. A closure
+        // that has been rescanned since the probe can hold a different `path
+        // =` for the same repository, and Bazel never agreed to that one.
+        if c.dir.trim_end_matches('/') != dir.trim_end_matches('/') {
+            return false;
+        }
         self.repos.insert(repo.to_string());
         // The mapping, and no input pattern beside it. The directory is a
         // repository boundary, so a change under it reaches the repository
@@ -351,20 +364,22 @@ impl RepoInputs {
             .entry(repo.to_string())
             .or_default()
             .insert(PathMap::exhaustive_dir(c.dir.clone()));
-        RepoOrigin::claim(
-            &mut self.origins,
-            repo,
+        // The confirmed `Dir` row replaces whatever claim stood before it,
+        // and carries the confirmation itself: a repository that also has an
+        // overlay BUILD must not read back as a confirmed origin whose
+        // directory is a BUILD file, which is what setting the flag on
+        // whichever row won precedence used to write.
+        let indexed = self.origins.get(repo).is_some_and(|o| o.indexed);
+        self.origins.insert(
+            repo.to_string(),
             RepoOrigin {
                 kind: OriginKind::Dir,
                 dir: c.dir,
                 evidence: c.evidence,
                 confirmed: true,
-                indexed: false,
+                indexed,
             },
         );
-        if let Some(o) = self.origins.get_mut(repo) {
-            o.confirmed = true;
-        }
         true
     }
 }

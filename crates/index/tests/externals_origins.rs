@@ -211,3 +211,33 @@ fn a_closure_local_repository_is_a_directory_of_this_tree() {
     assert_eq!(o.dir, "vendored/");
     assert_eq!(o.evidence, "bazel/deps.bzl");
 }
+
+/// A repository that is *both* a directory of this tree and carries an
+/// overlay BUILD: the directory is the stronger claim, and the origin must
+/// read back as that directory, not as the BUILD file's path. `confirm_dir`
+/// stamps the confirmation on this row, so a row whose `dir` is a BUILD file
+/// would have the index assert Bazel confirmed a file.
+#[test]
+fn a_directory_claim_outranks_the_overlay_build_file() {
+    let files = Files(vec![
+        (
+            "MODULE.bazel",
+            "module(name = \"envoy\")\n\
+             new_local_repository = use_repo_rule(\"//bazel:repo.bzl\", \"new_local_repository\")\n\
+             new_local_repository(\n\
+             \x20   name = \"quiche\",\n\
+             \x20   path = \"third_party/quiche\",\n\
+             \x20   build_file = \"@envoy//bazel/external:quiche.BUILD\",\n\
+             )\n",
+        ),
+        ("bazel/repo.bzl", "new_local_repository = 1\n"),
+        ("bazel/external/quiche.BUILD", "cc_library(name = \"q\")\n"),
+    ]);
+    let ri = inputs(&files, &RepoMapping::identity());
+    let o = &ri.origins["quiche"];
+    assert_eq!(o.kind, OriginKind::Dir, "{o:?}");
+    assert_eq!(o.dir, "third_party/quiche/");
+    assert!(OriginKind::Dir > OriginKind::Overlay);
+    assert!(OriginKind::Overlay > OriginKind::Generated);
+    assert!(OriginKind::Generated > OriginKind::Declared);
+}
