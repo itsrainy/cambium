@@ -5,9 +5,12 @@ of the 300-step xla walk where the oracle named main-repo targets cambium did
 not. It offered two candidate mechanisms and confirmed neither. This is what
 the recorded evidence says.
 
-## One mechanism, not two
+## One mechanism for the six, and four steps it does not cover
 
-All six steps are the same fault, and it is not the one the issue suspected.
+The six steps the issue lists are one fault, and it is not the one the issue
+suspected. They are not the whole of the walk's main-repo misses: the same
+record has ten such steps, and the four it does not list are unexplained
+(below).
 
 ### The `cc_ir_header` chain is not the miss
 
@@ -65,22 +68,61 @@ reaches `apply_packages`, which tombstones every target the package owned and
 clears every forward row they carried. Nothing re-queries a package whose
 `BUILD` did not change, so those rows stay gone for the rest of the lineage.
 
-The walk's shape is the signature. The six steps are indices 185, 186, 187,
-189, 190 and 194 of 300, a single window; the steps before and after are
-sound, because a later `BUILD` edit re-queried the packages and brought their
-rows back. 283 of the 284 steps with an oracle ran against a partial `rdeps`
-query, so xla does have load errors on this history, and they are what emptied
-those packages.
+The six are indices 185, 186, 187, 189, 190 and 194 of 300. That is one
+window, but the window's edges are not evidence of anything: the sound steps
+inside and beside it (188, 192, 193) re-queried nothing at all
+(`dirty_packages: 0`, `queried_targets: 0`), so no `BUILD` edit brought any row
+back there. Their soundness is a fact about which seeds those steps walk from,
+not about the index. What does hold up is the packages: at each of the six the
+index reports zero targets for a package the oracle reaches, and the frontier
+is an edge into it. 283 of the 284 steps with an oracle ran against a partial
+`rdeps` query, so xla does have load errors on this history, and they are what
+emptied those packages.
+
+### The four steps this does not explain
+
+`summary.soundness` of
+`bench-results-box/extracted/cambium/bench-results/xla/walk/walk-076fe93fad26cb2555e3bb86defa6a772d11cf35.json`
+reports `steps_sound 274`, `steps_missing 10`. Six of the ten are above. The
+other four are main-repo misses too and no reading here covers them:
+
+| step | pair | missing |
+|---:|---|---:|
+| 46 | `2c72f4acb3b4..f0791dddea19` | 4 |
+| 234 | `aa908163c7ae..0a1ec466320a` | 4 |
+| 256 | `d0abca510ed7..b2d442937e5a` | 48 |
+| 262 | `4052d4ca9439..1725bd8f8409` | 48 |
+
+Steps 46 and 234 miss the same four labels under `//xla/tsl/profiler/...`;
+steps 256 and 262 miss the same 48, scattered over some twenty packages
+(`//third_party/tsl/tsl/platform:dso_loader`,
+`//xla/backends/cpu/codegen:cpu_features` and the rest), which is not the shape
+an emptied package makes. All four re-queried nothing. They are open, and
+issue #23 does not close with them unexamined.
 
 ## The fix
 
-A requested package that came back with no targets keeps the rows the index
-has for it when its `BUILD` file is still on disk and the query really did
-report load errors. Two cases stay as they were: a package whose `BUILD` is
-gone was deleted and is tombstoned, and an exit 3 whose only complaint is
-`--deleted_packages` is a complete answer, not a partial one, so its packages
-are tombstoned too. The run reports the carry-forward with `CAMBI-W023` and
-the rows it stands on are as old as the last query that loaded the package.
+A requested package that bazel named in a load error keeps the rows the index
+has for it, whether it came back with no targets at all or with the few
+`--keep_going` created before the error (a truncated update is the same
+package half read, and applying it tombstones everything the error swallowed).
+Three cases stay tombstoned: a package whose `BUILD` is gone was deleted; a
+package this invocation declared deleted (`--deleted_packages`) does not exist
+in this configuration, however many other packages failed in the same batch,
+which is why the test is membership in the error list and not the presence of
+a `BUILD` file (envoy declares plenty of packages deleted whose BUILD files
+are on disk); and a package that loaded and is simply empty now was emptied by
+an edit. Past 32 error names bazel's stderr is counted and not recorded, and
+there the shape decides instead: no targets plus a `BUILD` file on disk.
+
+One case carries the other way. A package dirtied by an edit to its own
+`BUILD` file, which then failed to load, is tombstoned rather than carried:
+the rows the index has describe it before the edit, so answering from them
+would report the targets the edit changed as unaffected. Stale beats gone
+everywhere except there, where wide beats short.
+
+The run reports the carry-forward with `CAMBI-W023` and the rows it stands on
+are as old as the last query that loaded the package.
 
 The run also stops treating such a package as one it re-queried, so the `.bzl`
 closure rescan and the loading-layer refresh leave what they hold for it
@@ -103,6 +145,8 @@ these six. The 300-step walk is the measurement, and it is box run A.
 | `704cb1bae17e..927b467078fd` | 132 | same mechanism, `emitters/transforms` and two others emptied; not the `cc_ir_header` chain |
 | `927b467078fd..dc85a4033ee0` | 24 | same mechanism, `ifrt/ir` emptied |
 | `67157cf882d3..80c647bcaae0` | 1 | same mechanism, `//xla/codegen/emitters/ir` emptied |
+
+The four steps above are outside this table and outside the mechanism.
 
 None of the six is a generated-file edge, and none of them is closed by
 `b8c8cbc` on its own: that commit lets the package be dirtied again, it does

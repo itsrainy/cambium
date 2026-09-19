@@ -46,13 +46,21 @@ driven by `api/bazel/api_build_system.bzl`; apollo 3 to 4; xla 0 to 1.
 | Repository-rule attribution fallback | a `name =` the analysis cannot evaluate, a symbol outside the closure, an unparsed statement | every repository under the seeded subtree, or every repository the main repo defines | `crates/index/src/externals/mod.rs` (the per-occurrence ladder) |
 | Repository target fixpoint | an affected main-repo target a repository rule is built around | that repository's whole leaf set, to a fixpoint (a 900k-target repo once seeded 3819 repositories from one target) | `crates/engine/src/direct.rs` (`close_over_repository_targets`), logged at info above 8 repositories |
 | Nested repository mapped wholesale | any file under a mapped boundary such as `third_party/xla` | the whole mapped repository dirty | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`dirty_by_input`, `input_can_be_a_loaded_bzl` answers true to every unanswerable question) |
-| `--keep_going` tombstone | a dirty package fails to load at head | every consumer of its targets, as a cold build would; `CAMBI-W005` | `crates/engine/src/query.rs`, `crates/engine/src/direct.rs` |
+| `--keep_going` tombstone | a dirty package that does not exist at head: its `BUILD` file is gone, or this configuration declares it deleted | every consumer of its targets, as a cold build would; `CAMBI-W005` | `crates/engine/src/query.rs`, `crates/engine/src/direct.rs` |
+| `--keep_going` tombstone, own `BUILD` edited | a dirty package whose own `BUILD` file this change edited fails to load | every consumer of its targets; the alternative would answer from rows that predate the edit; `CAMBI-W005` | `crates/engine/src/run.rs` (`query`) |
 | `.bazelignore` edit | any change to the file | every package Bazel consulted the ignore list for, in practice all of them; the one singleton key the layer keeps | `crates/index/src/sky/mod.rs` (`Kind::Ignored`) |
 | Package the layer cannot name | a `BUILD` file naming a package with no `PACKAGE` node in the base layer | that whole package queried and spliced | `crates/engine/src/run.rs` (`packages_the_layer_cannot_name`) |
 | Deleted-`BUILD` survivors | `BUILD` deleted while `BUILD.bazel` survives, or a rename | the package kept and re-queried rather than tombstoned | `crates/engine/src/run.rs` (`keep_surviving_packages`) |
 | Deleted packages in `dirty_packages` | any package the diff deleted | the name reported dirty though never queried; how the rdeps oracle credits its deleted consumers | `crates/engine/src/run.rs`, `crates/bench/src/oracles/rdeps.rs` |
 | `BUILD` as a glob input | a modified `BUILD` in a `glob(["**"])` package | every rule consuming the `BUILD` as a source | `crates/classify/src/lib.rs` |
 | Layer rows a cold build would not write | any splice: a refresh replaces rows and never removes a node | inert extra nodes and edges, counted as `extra` by the rebuild oracle and named row by row in `walk/rebuild-<pin>.json` (`deleted_in_window` when the path is gone at the pin, `other` otherwise) | `crates/bench/src/oracles/rebuild.rs`, `crates/bench/src/walk/rebuild_rows.rs` |
+
+One `--keep_going` case is not on this page at all, and is here so that a
+triage reading it does not go looking for the wide answer. A dirty package
+bazel named in a load error, whose `BUILD` file this change did not edit,
+keeps the rows the index already has (`CAMBI-W023`, docs/XLA_MAIN_REPO_MISSES.md).
+That answer is stale, not wide: its consumers are not forced direct, and the
+rows it answers from are as old as the last query that loaded the package.
 
 On envoy's 40 change sets the benchmark's classifier attributes cambium's
 extras as: external repository reach 65 226 labels, `.bzl` closure 10 605,
