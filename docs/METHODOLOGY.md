@@ -51,8 +51,11 @@ differs is written, classified, to a sidecar beside the walk record:
 `bench-results/<subject>/walk/rebuild-<pin>[-<ver>].json` at the pin, and
 `walk/labels/<parent>..<head>/rebuild.json` for a `--rebuild-every` step.
 A row is a node (`kind`, `root`, `key`) or an edge (`from`, `to`), the
-repository `path` and `package` its key names when one can be read off it,
-and a `class`:
+repository `path` its key names when one can be read off it, the
+`package` (the one the key names, or, for a file, listing or `.bzl` row
+whose key names none, the one whose directory holds the path at the
+compared commit: the nearest `BUILD` or `BUILD.bazel` above it), and a
+`class`:
 
 - `created_in_window` (missing, expected): the row sits under a directory
   created between the classification base and the compared commit, and
@@ -64,12 +67,29 @@ and a `class`:
   seed into the directory starts under it, and a `BUILD` landing there
   later is named from the diff. The applied-layer condition is what keeps
   the class from excusing a real shortfall (a refresh that covered the
-  directory would have written at least its listing row). It is a bound,
+  directory would have written at least its listing row). The created
+  directory is a directory at the compared commit, never the row's own
+  file: a file added to a directory that already existed sits under no
+  created directory, its rows are exactly what the refresh of its package
+  had to write, and a new `.bzl` in particular has consumers that a layer
+  without its `BZL_LOAD` node would never dirty. The class is a bound,
   not the exact set of directories the refreshes covered; only a per-step
   record of what was re-queried would tighten it.
-- `load_error` (missing or extra, expected): the row's package, or either
-  end's for an edge, is one that either index recorded as failing to load
-  under `--keep_going`.
+- `load_error` (missing, expected): the row's package, or either end's for
+  an edge, is one the cold build at the compared commit recorded as
+  failing to load under `--keep_going`. Only the rebuilt index's list
+  counts for a missing row. The applied index's list is the lineage's
+  history, not its state: the engine carries it through every splice,
+  assigns it only when it is empty and caps it at 32 names, so a package
+  that failed once early in the window and has loaded fine since is still
+  in it, and a hole in that package's rows would be excused on the
+  strength of an error that no longer exists. A missing row can only be a
+  load-error artifact when the cold build itself failed the package.
+- `load_error` (extra, expected): either index's list names the row's
+  package. An extra never fails, so the looser test is harmless. A
+  package that failed to load has its glob inputs and `BUILD` probes on
+  one side and not the other, and those rows, which name their package
+  only through the tree, are the failure's and not a hole.
 - `deleted_in_window` (extra, expected): the row's path is gone at the
   compared commit. A refresh cannot remove a node, so a file, package or
   `.bzl` that stopped existing leaves its row behind.
@@ -90,9 +110,11 @@ walk whose applied index disagrees with a cold build at the pin fails
 whatever every step said. Extras never fail. The tallies (`missing`,
 `missing_expected`, `missing_unexplained`, `extra`, `extra_expected`)
 travel in the walk record's `rebuild_oracle.sky`, and the report prints
-them beside the verdict. Until the 40-step local walk on the bazel subject
-has run against this classification, the rule stands as coded: no class
-of missing row is allowed beyond the two above.
+all of them beside the verdict whether or not the oracle held, so a PASS
+reached by excusing thousands of missing rows says so where the verdict
+is read. Until the 40-step local walk on the bazel subject has run
+against this classification, the rule stands as coded: no class of
+missing row is allowed beyond the two above.
 
 **Workload.** What tools are run on. There is one: the walk.
 
