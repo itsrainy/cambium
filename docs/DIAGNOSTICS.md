@@ -10,7 +10,7 @@ Every warning and error carries a stable code, assigned once and never reused; r
 | `CAMBI-W002` | `cambium.toml` sets a key `cambi` no longer honours | Delete it; message names its replacement, if any |
 | `CAMBI-W003` | a stored index was skipped: `config_hash` doesn't match this workspace | Expected after a config edit; `cambi index build --publish` mints a lineage. Repeats mean the store holds another configuration's indexes |
 | `CAMBI-W004` | a `.bazelrc` edit could move the graph; run answered `//...` | Allowlist it in `[bazelrc].allowlist_extra` if it can't affect loading or analysis |
-| `CAMBI-W005` | dirty packages failed to load under `--keep_going` and were tombstoned, as a cold build would | Usually broken on this machine; fix if it should load. Consumers count as affected regardless |
+| `CAMBI-W005` | dirty packages failed to load under `--keep_going` and had no `BUILD` file either, so they were tombstoned as a deletion | Usually broken on this machine; fix if it should load. Consumers count as affected regardless |
 | `CAMBI-W006` | `bazel query //...` finished with errors: index is partial | Fix load errors, or accept partiality (`--allow-partial` / `baseline.publish_partial`) |
 | `CAMBI-W007` | a store fetch failed with stderr output and was read as absent | Check credentials and the bucket in `[baseline].store` |
 | `CAMBI-W008` | the base index carries no Skyframe loading layer, so which packages the change moved can't be answered; run went global | `cambi index build` against a Bazel that can run `dump --skyframe=deps` |
@@ -28,6 +28,7 @@ Every warning and error carries a stable code, assigned once and never reused; r
 | `CAMBI-W020` | `cambi init` found a `.gitignore` not mentioning `cambium.local.toml` | Add the line: it holds machine-local paths and binaries, and committing them makes them everybody's |
 | `CAMBI-W021` | `cambi inspect verify` couldn't run `rdeps` for one sampled target, skipped it; `checked` counts only compared targets | Run `bazel query 'rdeps(//..., <label>)'` by hand to see why; other samples' verdict stands |
 | `CAMBI-W022` | `bazel mod dump_repo_mapping` stdout wasn't a JSON object, so identity mapping stood in for the real one; a renamed `bazel_dep` can then name the wrong repository | Run `bazel mod dump_repo_mapping ""`, check stdout is one JSON object (a wrapper script printing to stdout is the usual cause); rebuild once fixed |
+| `CAMBI-W023` | a dirty package failed to load under `--keep_going` but its `BUILD` file is still there, so the rows the index already had for it stand | Fix the load error to refresh them; until then those rows are as old as the last query that loaded the package |
 
 ## Errors
 

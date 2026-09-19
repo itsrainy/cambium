@@ -111,6 +111,14 @@ Whatever Phase 1 leaves. Two candidates:
 Exit: the six named pairs are sound locally. The 300-step confirmation
 is box run A.
 
+Answered, 2026-09-19 (docs/XLA_MAIN_REPO_MISSES.md). Neither candidate was
+right. The `cc_ir_header` chain is reached in full at the failing step, and
+all six pairs are one fault: a package that fails to load under `--keep_going`
+comes back empty and its empty update tombstones every row it owned, which
+`b8c8cbc` left standing. Such a package now keeps the rows the index has
+(`CAMBI-W023`). The mechanism needs a walk to show, so the measurement is box
+run A, not a per-pair rerun.
+
 ### Phase 3: toolchain rule-class escalation (#26), local only
 
 Small and self-contained; done before the externals work because it
