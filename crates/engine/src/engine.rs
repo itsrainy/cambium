@@ -493,7 +493,7 @@ impl Engine {
         // universe query: it is a Bazel command with its own option set, and
         // one of those between the universe query and the layer dump below
         // costs that dump packages. See `crate::repos`.
-        let boundaries = q
+        let mut boundaries = q
             .workspace()
             .map(cambium_index::repo_boundaries)
             .unwrap_or_default();
@@ -505,6 +505,13 @@ impl Engine {
         if let Some(e) = &u.partial {
             b.set_partial(e.count, e.packages.clone());
         }
+        let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
+        // Which of those directories `//...` walked into after all. Read from
+        // the universe answer rather than from the marker the directory
+        // carries: Bazel 8.7 loads main-repo packages under xla's
+        // `third_party/tsl/REPO.bazel`, and a boundary the main repository
+        // owns packages under is not a hole in the graph.
+        cambium_index::mark_traversed(&mut boundaries, packages.iter().map(String::as_str));
         b.apply_packages(&u.updates);
         // Recorded whatever the externals stage is configured to do: a
         // phantom package is a wrong answer, not an optimisation.
@@ -526,7 +533,6 @@ impl Engine {
         {
             b.set_sky_layer(l);
         }
-        let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
         if let Some(c) = crate::bzl::rescan_closure(
             q,
             None,

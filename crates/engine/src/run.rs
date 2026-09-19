@@ -409,8 +409,12 @@ impl<'a> Run<'a> {
         // distinction is not academic: envoy's `docs/` and `mobile/` are both
         // `.bazelignore`d and carry a `MODULE.bazel` of their own, so without
         // it every documentation edit would be a whole-repository answer, for
-        // no soundness gained. A boundary Bazel *does* read and nothing maps
-        // stays global: there the graph really does have a hole where the
+        // no soundness gained. Nor is a boundary the cold universe query
+        // walked into a hole: its packages are this repository's, the
+        // classifier owned the paths as main-repo paths on the way here, and
+        // this loop has nothing left to say about them. What stays global is
+        // a boundary Bazel reads, loads no main-repo package in, and no
+        // repository maps: there the graph really does have a hole where the
         // directory's targets should be.
         let nested = std::mem::take(&mut dirty.nested);
         for (dir, paths) in &nested {
@@ -432,6 +436,22 @@ impl<'a> Run<'a> {
                     );
                     ext.by_input += 1;
                     crate::externals::dirty_by_input(self.base, ext, repo, &paths);
+                }
+                // A boundary `//...` walked into anyway is already answered:
+                // the classifier owned its paths as main-repo paths and they
+                // moved the packages that hold them. There is no hole in the
+                // graph to escalate over. The paths arrive here as well
+                // because a traversed boundary is also the repository it
+                // declares (xla's `third_party/tsl` is both), and the
+                // repository half is the arm above; unmapped, it has nothing
+                // left to say.
+                None if self.base.boundary_is_traversed(dir) => {
+                    tracing::debug!(
+                        dir,
+                        paths = paths.len(),
+                        "a change inside a traversed boundary no repository maps stays a \
+                         main-repo change"
+                    );
                 }
                 None if self.base.boundary_is_bazelignored(dir) => {
                     tracing::debug!(
@@ -806,11 +826,20 @@ impl<'a> Run<'a> {
         // A nested repository can appear or vanish in any commit, so the
         // boundary list is re-walked from the checkout these rows came from
         // rather than carried forward from the base.
-        let boundaries = self
+        let mut boundaries = self
             .querier
             .workspace()
             .map(cambium_index::repo_boundaries)
             .unwrap_or_default();
+        // Whether `//...` walks into a boundary is the universe query's
+        // answer, and this run did not make one, so the base's answer is
+        // carried forward for the directories it knows. A boundary this
+        // commit added has no answer yet and keeps `false`, which is the safe
+        // direction: its paths stay the repository's rather than becoming
+        // main-repo paths of packages that may not exist.
+        for b in &mut boundaries {
+            b.traversed = self.base.boundary_is_traversed(&b.dir);
+        }
         builder.set_repo_boundaries(boundaries.clone());
         // Only the materialised path: an overlay is never published, and the
         // run that produced it read the closure it needed out of the base.

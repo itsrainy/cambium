@@ -533,6 +533,19 @@ fn print_detail(d: &inspect::TargetDetail) {
 struct ExternalsRepo {
     name: String,
     canonical: String,
+    /// What the repository is as far as this tree is concerned: `dir`,
+    /// `overlay`, `generated`, or empty for a declaration cambium derived
+    /// nothing about.
+    origin: String,
+    /// The directory a `dir` repository is, or the BUILD file an `overlay`
+    /// is built with.
+    origin_dir: String,
+    /// Where the claim was read.
+    evidence: String,
+    /// Whether Bazel was asked to honour the claim and did.
+    confirmed: bool,
+    /// Whether the repository's own packages are indexed.
+    indexed: bool,
     path_maps: Vec<String>,
     /// `(pattern, feeds the rule)`.
     inputs: Vec<(String, bool)>,
@@ -563,9 +576,16 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
     }
     let repos = (0..v.num_repos())
         .filter(|&r| only.map_or(true, |o| o == v.repo_name(r)))
-        .map(|r| ExternalsRepo {
+        .map(|r| {
+            let o = v.repo_origin(r);
+            ExternalsRepo {
             name: v.repo_name(r).to_string(),
             canonical: v.repo_canonical_name(r).to_string(),
+            origin: o.kind.as_str().to_string(),
+            origin_dir: o.dir,
+            evidence: o.evidence,
+            confirmed: o.confirmed,
+            indexed: o.indexed,
             path_maps: v
                 .repo_path_maps(r)
                 .iter()
@@ -579,7 +599,7 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
                 })
                 .collect(),
             inputs: inputs.remove(&r).unwrap_or_default(),
-        })
+        }})
         .collect();
     let workspace_bzl = (0..v.num_bzl())
         .filter(|&id| v.bzl_in_workspace(id))
@@ -609,6 +629,26 @@ fn print_externals(d: &ExternalsDump) {
     println!("bzl_closure: {}", d.bzl_closure);
     for r in &d.repos {
         println!("repo {}\tcanonical {:?}", r.name, r.canonical);
+        println!(
+            "  origin  {}{}{}\tconfirmed {}\tindexed {}",
+            if r.origin.is_empty() {
+                "declared"
+            } else {
+                &r.origin
+            },
+            if r.origin_dir.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", r.origin_dir)
+            },
+            if r.evidence.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", r.evidence)
+            },
+            r.confirmed,
+            r.indexed
+        );
         for m in &r.path_maps {
             println!("  map     {m}");
         }

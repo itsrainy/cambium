@@ -131,8 +131,8 @@ impl fmt::Display for ExternalsCause {
             ExternalsCause::Module { why } | ExternalsCause::Lock { why } => f.write_str(why),
             ExternalsCause::NestedRepositoryUnmapped { dir } => write!(
                 f,
-                "`{dir}` is a Bazel repository of its own, so `//...` never loaded anything \
-                 in it, and cambium cannot say which external repository it is"
+                "`{dir}` is a Bazel repository of its own, this build's `//...` loaded no \
+                 package in it, and cambium cannot say which external repository it is"
             ),
             ExternalsCause::LockAddedOrRemoved => f.write_str(
                 "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
