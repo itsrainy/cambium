@@ -32,7 +32,10 @@ invalidator lists of every subject are now empty. The three `CAMBI-W023` rows
 postdate those numbers and are unmeasured on a full walk. The last of them is
 the one with room to surprise: a tree whose `MODULE.bazel` registers from an
 extension-defined repository now answers `//...` on any route that dirties
-that repository, where it used to name the repository and stop.
+that repository, where it used to name the repository and stop. The tree to
+check first is bazel's own, which registers this way; the count of such
+repositories there is not recorded here because no mirror was in reach to
+read it, and the next walk that has one should record it.
 
 ## Cost only, answer exact
 

@@ -148,7 +148,10 @@ README and docs/CLI.md say so rather than promising the plan is final.
 Exit: the globs are gone from the default config. The second half of the
 criterion (the local bazel walk is unchanged) is still open: the bazel
 mirror is not on this machine, so no `cambi profile` was run after the
-change and the walk is unmeasured. The subject's
+change and the walk is unmeasured. The measurement this criterion wants is
+`cambi profile --commits 5` on the local bazel mirror at HEAD 948b8c70e28,
+which is the revision the comparison was pinned to; run it there or the
+before and after are not the same walk. The subject's
 generated `cambium.toml` lists the two dropped globs explicitly, so they
 are still live for that walk and the drop is inert there; the next bench
 provisioning regenerates the file from `Config::default()` and drops them,
