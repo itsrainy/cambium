@@ -109,6 +109,11 @@ pub fn bazelrc_bzlmod(text: &str) -> Option<bool> {
 /// states on an unconditional command line, as [`bazelrc_bzlmod`] reads its
 /// flag; `None` when it says nothing, and the Bazel's own default stands.
 ///
+/// One file's text, not the closure: an `import` line is not a command and
+/// is skipped here, so a caller that wants what the tree as a whole states
+/// has to follow the imports itself and ask this of each file
+/// (`cambium_engine::externals::autoload_flag_at` does).
+///
 /// Both spellings are read: `--flag=value` (an empty value is
 /// `--incompatible_autoload_externally=`, the documented way to turn autoload
 /// off), and `--flag value`, where the next token is the value as it is for
