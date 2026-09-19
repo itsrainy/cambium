@@ -178,6 +178,10 @@ pub struct WalkRequest {
     pub tier: String,
     /// `--steps`; the subject's window when absent.
     pub steps: Option<usize>,
+    /// `--only`: `parent..head` pairs, abbreviated revisions accepted. When
+    /// this is not empty the walk runs those steps and no others, each
+    /// cold-built at its own parent.
+    pub only: Vec<String>,
     /// `--peers`, as typed; empty is the tier's default, `none` turns them
     /// off.
     pub peers: Vec<String>,
@@ -244,6 +248,8 @@ pub fn run_walk(
     };
     let (commits, steps) = crate::walk::steps(&checkout.repo, &run.entry.pin, range, &probes)?;
     anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
+    let only = select_only(&steps, &req.only)?;
+    let steps = only.clone().unwrap_or(steps);
 
     let oracle_sample = if schedule.oracle_every_step {
         crate::walk::Sample::all(&steps)
@@ -290,8 +296,9 @@ pub fn run_walk(
         resume: req.on_existing == OnExisting::Resume,
         diff_cap: 50,
         progress: Some(progress),
+        only: only.is_some(),
     };
-    let path = crate::walk::WalkResult::path(&results, &run.entry.pin, run.version());
+    let path = crate::walk::WalkResult::path(&results, &opts.result_pin(), run.version());
     refuse_existing(&path, "walk", req.on_existing, || {
         crate::walk::WalkResult::read(&path)
             .ok()
@@ -318,8 +325,53 @@ pub fn run_walk(
         oracle_steps = opts.oracle_sample.len(),
         "walking"
     );
-    let result = crate::walk::walk(&engine, &driver, &live, &commits, &steps, &opts)?;
+    let result = match only {
+        Some(_) => crate::walk::walk_only(&engine, &driver, &live, &steps, &opts)?,
+        None => crate::walk::walk(&engine, &driver, &live, &commits, &steps, &opts)?,
+    };
     Ok(Walked { result, path })
+}
+
+/// The steps `--only` names, in the order they were typed, or `None` when it
+/// named none.
+///
+/// Each spec is `parent..head`, and either revision may be abbreviated: the
+/// seven steps of a gate are read off a table of short hashes. A spec that
+/// names no step in the window is an error rather than a silent skip, since
+/// the whole point of the flag is to run exactly those steps.
+fn select_only(steps: &[crate::walk::Step], specs: &[String]) -> Result<Option<Vec<crate::walk::Step>>> {
+    if specs.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for spec in specs {
+        let (parent, head) = spec
+            .split_once("..")
+            .ok_or_else(|| anyhow::anyhow!("--only takes parent..head pairs, not {spec:?}"))?;
+        let (parent, head) = (parent.trim(), head.trim());
+        anyhow::ensure!(
+            !parent.is_empty() && !head.is_empty(),
+            "--only takes parent..head pairs, not {spec:?}"
+        );
+        let mut found = steps
+            .iter()
+            .filter(|s| s.parent.starts_with(parent) && s.head.starts_with(head));
+        let step = found
+            .next()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--only {spec}: no such step in the {} walked from the pin; widen --steps",
+                    steps.len()
+                )
+            })?
+            .clone();
+        anyhow::ensure!(
+            found.next().is_none(),
+            "--only {spec}: more than one step matches; use longer revisions"
+        );
+        out.push(step);
+    }
+    Ok(Some(out))
 }
 
 /// A one-line summary of a walk, for the terminal.
@@ -503,5 +555,53 @@ mod tests {
         let s = walk_summary(&r);
         assert!(s.contains("worst recall"), "{s}");
         assert!(s.contains("PASS"), "{s}");
+    }
+
+    fn step(parent: &str, head: &str) -> crate::walk::Step {
+        crate::walk::Step {
+            parent: parent.to_string(),
+            head: head.to_string(),
+            tags: Vec::new(),
+        }
+    }
+
+    fn window() -> Vec<crate::walk::Step> {
+        vec![
+            step("ceb0cac18c5a1111", "f4ecb6203acb2222"),
+            step("f4ecb6203acb2222", "4158f7e8b07b3333"),
+            step("4158f7e8b07b3333", "df1f25fb036d4444"),
+        ]
+    }
+
+    #[test]
+    fn only_picks_the_named_steps_in_the_order_they_were_typed() {
+        let all = window();
+        assert!(select_only(&all, &[]).unwrap().is_none(), "no flag walks the range");
+
+        let picked = select_only(
+            &all,
+            &[
+                "4158f7e8b07b..df1f25fb036d".to_string(),
+                "ceb0cac18c5a..f4ecb6203acb".to_string(),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].head, "df1f25fb036d4444");
+        assert_eq!(picked[1].head, "f4ecb6203acb2222");
+    }
+
+    #[test]
+    fn only_refuses_a_spec_it_cannot_place() {
+        let all = window();
+        let e = select_only(&all, &["deadbeef..cafebabe".to_string()]).unwrap_err();
+        assert!(format!("{e:#}").contains("no such step"), "{e:#}");
+
+        let e = select_only(&all, &["f4ecb6203acb".to_string()]).unwrap_err();
+        assert!(format!("{e:#}").contains("parent..head"), "{e:#}");
+
+        let e = select_only(&all, &["f4ecb6203acb2222..".to_string()]).unwrap_err();
+        assert!(format!("{e:#}").contains("parent..head"), "{e:#}");
     }
 }

@@ -152,6 +152,27 @@ impl LoadErrors {
 /// How many failing package names an outcome keeps.
 pub const MAX_ERROR_PACKAGES: usize = 32;
 
+/// The package part of a `@R//pkg` line, if `R` is the repository `repo`
+/// names, in either spelling Bazel prints.
+///
+/// Under bzlmod `bazel query` prints the *canonical* name, which is the
+/// apparent name with the extension that made it and a separator around it:
+/// `@@tsl+//tsl/platform` for `@tsl`, `@@+xla_extension+tsl//...` where an
+/// extension generated it. Reading only the apparent `@tsl//` spelling drops
+/// every line on Bazel 7 and later, which reads as a repository with no
+/// packages at all.
+fn package_of_repo(line: &str, repo: &str) -> Option<String> {
+    let (name, pkg) = line.trim_start_matches('@').split_once("//")?;
+    let named = name == repo
+        || name
+            .trim_end_matches(['+', '~'])
+            .rsplit(['+', '~'])
+            .next()
+            .is_some_and(|last| last == repo);
+    named.then(|| pkg.trim_start_matches('/').to_string())
+}
+
+
 /// The package named by one Bazel load-error line, if it is one.
 ///
 /// Two shapes, both emitted under `--keep_going`, and both interleaved with the
@@ -817,6 +838,54 @@ impl Bazel {
         Ok((parse_buildfile_labels(&out), false))
     }
 
+    /// `bazel query '@R//...' --output=package` for one repository: the
+    /// package list that says whether Bazel agrees with what the tree claims
+    /// the repository is.
+    ///
+    /// Run at cold build, *before* the universe query and never between it
+    /// and the loading-layer dump: it is a Bazel command with its own option
+    /// set, and one of those between the two costs the dump packages.
+    ///
+    /// Best-effort, like [`Bazel::external_rules`], with one difference: a
+    /// non-zero exit whose stdout still lists packages is kept, because a
+    /// repository that loaded while an unrelated one failed is the common
+    /// case on a large tree. The caller decides what a missing or partial
+    /// answer means; here it is only reported.
+    pub fn probe_repo(&self, repo: &str) -> Option<RepoProbe> {
+        let mut cmd = self.command("query");
+        cmd.arg(format!("@{repo}//...")).arg("--output=package");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let o = match self.runner.output(&mut cmd) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(error = %e, repo, "the repository probe could not run");
+                return None;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        let packages: Vec<String> = stdout
+            .lines()
+            .filter_map(|l| package_of_repo(l.trim(), repo))
+            .collect();
+        // Whether any package Bazel could not load belongs to this
+        // repository. The failure carries the label in whichever spelling
+        // this Bazel prints, so it is read the same way.
+        let load_error = stderr
+            .lines()
+            .any(|l| parse_load_error_line(l).is_some_and(|p| package_of_repo(&p, repo).is_some()));
+        if !o.exit.success && packages.is_empty() {
+            tracing::debug!(status = %o.exit, repo, "the repository probe listed no package");
+        }
+        Some(RepoProbe {
+            repo: repo.to_string(),
+            packages,
+            load_error,
+        })
+    }
+
     /// `bazel query '//external:*' --output=build`, which prints every
     /// repository the WORKSPACE evaluation declared, rule kind and attributes
     /// and all.
@@ -1414,6 +1483,26 @@ mod tests {
         assert_eq!(e.packages[0], "p0");
     }
 
+    /// Under bzlmod `bazel query` prints canonical repository names, and the
+    /// probe that reads only `@tsl//` reads a repository that loaded fine as
+    /// one with no packages at all.
+    #[test]
+    fn a_probe_reads_both_spellings_of_a_repository_name() {
+        assert_eq!(package_of_repo("@tsl//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(package_of_repo("@@tsl+//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(package_of_repo("@@tsl~//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(
+            package_of_repo("@@+xla_extension+tsl//tsl/platform", "tsl"),
+            Some("tsl/platform".into())
+        );
+        // The repository root is a package, and it is not the empty answer.
+        assert_eq!(package_of_repo("@@tsl+//", "tsl"), Some(String::new()));
+        // Another repository's packages are not this one's.
+        assert_eq!(package_of_repo("@@tsl_other+//pkg", "tsl"), None);
+        assert_eq!(package_of_repo("@other//pkg", "tsl"), None);
+        assert_eq!(package_of_repo("not a label", "tsl"), None);
+    }
+
     #[test]
     fn finds_the_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -1476,4 +1565,17 @@ mod tests {
         assert!(parse_buildfile_labels("").is_empty());
         assert!(parse_buildfile_labels("INFO: Empty results\n").is_empty());
     }
+}
+
+/// What one `bazel query '@R//...' --output=package` answered.
+///
+/// `packages` are repository-relative package names, `""` for the repository
+/// root (which prints as `@R//`). `load_error` says a package of this
+/// repository failed to load, which makes the list an undercount and is why
+/// a claim is never confirmed from one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoProbe {
+    pub repo: String,
+    pub packages: Vec<String>,
+    pub load_error: bool,
 }

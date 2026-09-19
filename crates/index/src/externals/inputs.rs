@@ -9,9 +9,10 @@ use crate::label::{rule_label, Label};
 use crate::loads::{FileText, LoadGraph, RepoMapping};
 use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 
+use super::bazelrc::{repo_settings, RepoSetting};
 use super::module_facts::{apparent_of, ModuleFacts};
 use super::path_maps::scan_path_maps;
-use super::pattern::{PathMap, Pattern, RepoInputs};
+use super::pattern::{DirCandidate, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
 
 /// What a main-repo label an external repository names can be an input
 /// through; empty when the string does not name the main repository, or does
@@ -100,17 +101,134 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     ]
 }
 
+/// The repo-relative path of a main-repo label naming a *file*, for the one
+/// attribute whose whole point is which file it is: `build_file`.
+///
+/// Narrower than [`main_repo_patterns`], which answers "what could this label
+/// feed": a `build_file` that is a format string, a relative label, or
+/// another repository's file is not a tree file this build can read, and a
+/// guess would put a path map on the wrong file.
+fn main_repo_file(label: &str, m: &RepoMapping) -> Option<String> {
+    let l = Label::parse(label)?;
+    if l.is_relative() || !l.is_main(m) {
+        return None;
+    }
+    let rest = l.rest();
+    if rest.is_empty() || !rest.bytes().all(is_label_byte) {
+        return None;
+    }
+    let name = l.name();
+    if name.is_empty() || name.starts_with("__") {
+        return None;
+    }
+    let path = l.path();
+    (!path.is_empty()).then_some(path)
+}
+
+/// What an `Overlay` claim records besides the origin: the BUILD file lands
+/// at the package root of the repository, which is what `build_hash` and the
+/// closure need to find it, and the mapping is *not* exhaustive — the sources
+/// come from somewhere else entirely, so a path it does not cover says
+/// nothing about whether the repository exports a `.bzl`.
+fn overlay_map(path: &str) -> PathMap {
+    PathMap {
+        from: path.to_string(),
+        to: "BUILD.bazel".to_string(),
+        exhaustive: false,
+    }
+}
+
+/// The `.bazelrc` lines that make a target of this tree an input of an
+/// external repository's targets.
+///
+/// `build --@quiche//:quic_base_impl_lib=//source/common/quic/platform:...`
+/// says a `label_flag` of `@quiche` resolves to a target of this tree, so
+/// every `@quiche` target that reads that flag depends on it. At envoy's
+/// bzlmod pin this is the only route back into the main repository that
+/// exists at all: the overlay BUILD file is hosted in the registry and names
+/// nothing of this tree.
+///
+/// Filtered from [`repo_settings`] by the two things text alone cannot
+/// decide: a flag on the main repository under its own apparent name
+/// (`--@envoy//...` inside envoy) is not an external repository's flag, and a
+/// value that is not a label of this tree is not an input.
+pub fn repo_setting_inputs(src: &dyn FileText, m: &RepoMapping) -> Vec<RepoSetting> {
+    // `import` is textual inclusion, so a setting in an imported rc file is a
+    // setting of this build. envoy keeps whole families of flags in
+    // `bazel/*.rc`, and reading the top-level file alone misses them.
+    let mut queue = vec![".bazelrc".to_string()];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    while let Some(path) = queue.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(text) = src.text(&path) else { continue };
+        queue.extend(crate::externals::rc_imports(&text));
+        out.extend(repo_settings(&text).into_iter().filter(|s| {
+            Label::parse(&s.flag).is_some_and(|l| !l.is_main(m))
+                && !main_repo_patterns(&s.value, m).is_empty()
+        }));
+    }
+    out
+}
+
 /// Computes the repository-input map for a checkout.
 ///
 /// `graph` is the load graph the closure walk already built, so the `.bzl`
 /// files here are read from the same memoised parse; `workspace` is that
 /// walk's workspace closure.
+/// The repositories a boundary directory might be, read from the workspace
+/// closure alone.
+///
+/// This is the pure-text pre-pass the cold build runs *before* the universe
+/// query, so that the probe that checks these claims can run before it too
+/// (a Bazel command between the universe query and the loading-layer dump
+/// costs the dump packages, which is why the order is fixed). It reads no
+/// package and runs no query: `MODULE.bazel` and the `.bzl` files it loads,
+/// which is where a `module_extension` implementation lives, and whose
+/// lambdas `Expr::walk` descends.
+///
+/// The answer is candidates, not facts. See [`RepoInputs::dir_candidates`].
+pub fn dir_candidates(
+    src: &dyn FileText,
+    m: &RepoMapping,
+    boundaries: &[String],
+) -> BTreeMap<String, DirCandidate> {
+    let mut out = BTreeMap::new();
+    if boundaries.is_empty() {
+        return out;
+    }
+    let mut graph = LoadGraph::new();
+    let workspace = graph.workspace_closure(src, m);
+    for id in workspace {
+        let path = graph.path(id).to_string();
+        let Some(text) = src.text(&path) else {
+            continue;
+        };
+        for (repo, dir, line) in super::path_maps::scan_bzl_path_maps(&text, m, boundaries).boundary_dirs {
+            out.entry(repo).or_insert(DirCandidate {
+                dir,
+                evidence: format!("{path}:{line}"),
+            });
+        }
+    }
+    out
+}
+
+/// `boundaries` are the directories `//...` stops at, as
+/// [`crate::repo_boundaries`] found them, with or without a trailing slash.
+/// They are what makes a repository rule's literal `path =` readable: a rule
+/// this crate knows nothing about that points at one of them is claiming to
+/// be that directory, and the claim is recorded as a candidate for the cold
+/// build to check against Bazel.
 pub fn build_repo_inputs(
     src: &dyn FileText,
     m: &RepoMapping,
     graph: &LoadGraph,
     workspace: &[u32],
     facts: &ModuleFacts,
+    boundaries: &[String],
 ) -> RepoInputs {
     let mut out = RepoInputs::default();
     // `@envoy//...` inside envoy is a main-repo label; see
@@ -158,9 +276,10 @@ pub fn build_repo_inputs(
             .or_default()
             .insert(repo.clone());
         out.path_maps
-            .entry(repo)
+            .entry(repo.clone())
             .or_default()
             .insert(PathMap::exhaustive_dir(path.clone()));
+        RepoOrigin::claim(&mut out.origins, &repo, dir_origin(path, "MODULE.bazel"));
     }
     // The same shape written as a repository rule in `MODULE.bazel`.
     for (repo, path) in &facts.local_repo_paths {
@@ -175,6 +294,34 @@ pub fn build_repo_inputs(
             .entry(repo.clone())
             .or_default()
             .insert(PathMap::exhaustive_dir(path.clone()));
+        RepoOrigin::claim(&mut out.origins, repo, dir_origin(path, "MODULE.bazel"));
+    }
+    // `new_local_repository(name = "quiche", build_file =
+    // "@envoy//bazel/external:quiche.BUILD")`: the sources are fetched and
+    // the BUILD file is a file of this tree. The file's own labels are read
+    // below, once the repository set is settled.
+    let mut overlays: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (repo, label) in &facts.build_files {
+        if !out.repos.contains(repo) && !facts.deps.contains_key(repo) {
+            continue;
+        }
+        // A `bazel_dep` gets no row of its own today, because a declaration
+        // alone says nothing about this tree. One an overlay claim names does
+        // say something, so it gets one here.
+        out.repos.insert(repo.clone());
+        let path = main_repo_file(label, m);
+        RepoOrigin::claim(
+            &mut out.origins,
+            repo,
+            overlay_origin(path.as_deref(), "MODULE.bazel"),
+        );
+        if let Some(path) = path {
+            out.path_maps
+                .entry(repo.clone())
+                .or_default()
+                .insert(overlay_map(&path));
+            overlays.entry(path).or_default().insert(repo.clone());
+        }
     }
     for d in facts.deps.values() {
         out.canonical
@@ -280,10 +427,27 @@ pub fn build_repo_inputs(
     // of the symbols it exports does. The extra repositories a *label* in it
     // feeds are folded in here.
     let mut own: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Claims read out of the closure, held aside until the repository set is
+    // final: a claim about a name no repository table will carry is not a
+    // claim about anything.
+    let mut origins_from_bzl: BTreeMap<String, RepoOrigin> = BTreeMap::new();
     for (path, module) in att.modules() {
         let path = path.to_string();
         let mut file_repos = att.file_repos(&path).repos;
         for (offset, l) in string_literals(module) {
+            // The BUILD text a repository rule writes with
+            // `repository_ctx.file("BUILD", ...)` says what the repository
+            // *is*: envoy's `@envoy_repo`. Only an exactly attributed
+            // occurrence makes the claim — a fallback here would call every
+            // repository in the universe generated.
+            if l.build_text && !l.embedded {
+                let a = att.at(&path, offset);
+                if a.exact {
+                    for r in &a.repos {
+                        RepoOrigin::claim(&mut origins_from_bzl, r, generated_origin(&path));
+                    }
+                }
+            }
             let pats = main_repo_patterns(&l.text, m);
             if pats.is_empty() {
                 continue;
@@ -326,7 +490,7 @@ pub fn build_repo_inputs(
     // that position is unattributable, rather than being handed to every
     // repository the main repository defines.
     for (path, module) in att.modules() {
-        let maps = scan_path_maps(module, m);
+        let maps = scan_path_maps(module, m, boundaries);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
                 let pat = Pattern::Prefix(pm.from.clone());
@@ -335,8 +499,44 @@ pub fn build_repo_inputs(
                 own.entry(path.to_string())
                     .or_default()
                     .insert(repo.clone());
+                RepoOrigin::claim(&mut origins_from_bzl, &repo, dir_origin(&pm.from, path));
                 out.path_maps.entry(repo).or_default().insert(pm);
             }
+        }
+        for (repo, label, line) in maps.overlays {
+            if !out.repos.contains(&repo) && !facts.deps.contains_key(&repo) {
+                continue;
+            }
+            out.repos.insert(repo.clone());
+            let file = (!label.is_empty())
+                .then(|| main_repo_file(&label, m))
+                .flatten();
+            let evidence = format!("{path}:{line}");
+            RepoOrigin::claim(
+                &mut origins_from_bzl,
+                &repo,
+                overlay_origin(file.as_deref(), &evidence),
+            );
+            if let Some(file) = file {
+                out.path_maps
+                    .entry(repo.clone())
+                    .or_default()
+                    .insert(overlay_map(&file));
+                overlays.entry(file).or_default().insert(repo.clone());
+            }
+        }
+        // A `path =` that is a boundary directory, from a rule this reader
+        // does not know. Recorded against the repository only when something
+        // else already says the main repository defines it, so a name that
+        // appears nowhere in the module graph cannot mint a candidate.
+        for (repo, dir, line) in maps.boundary_dirs {
+            if !out.repos.contains(&repo) {
+                continue;
+            }
+            out.dir_candidates.entry(repo).or_insert(DirCandidate {
+                dir,
+                evidence: format!("{path}:{line}"),
+            });
         }
         for (offset, pm) in &maps.symlinks {
             let a = att.at(path, *offset);
@@ -372,9 +572,83 @@ pub fn build_repo_inputs(
         }
         out.bzl_repos.insert(path, repos);
     }
+    for (repo, o) in origins_from_bzl {
+        if out.repos.contains(&repo) {
+            RepoOrigin::claim(&mut out.origins, &repo, o);
+        }
+    }
+    // The BUILD file of an overlay repository is a file of this tree, and
+    // every main-repo label in it is a dependency of that repository's
+    // *targets* — `//source/common/quic/platform:quic_base_impl_lib` in
+    // envoy's `bazel/external/quiche.BUILD`. That is the same kind of input
+    // as a label embedded in the BUILD text a repository rule writes, and it
+    // is recorded the same way: target-only, so the engine applies rule (1)
+    // alone and the repository fixpoint does the rest.
+    //
+    // Read off the text rather than parsed: a BUILD file is Starlark, but
+    // what is wanted from it is every label it names, which is what
+    // `labels_in` answers for the generated case already.
+    for (file, repos) in &overlays {
+        let Some(text) = src.text(file) else {
+            continue;
+        };
+        for label in labels_in(&text) {
+            for pat in main_repo_patterns(&label, m) {
+                embedded.insert(pat.clone());
+                out.patterns
+                    .entry(pat)
+                    .or_default()
+                    .extend(repos.iter().cloned());
+            }
+        }
+    }
+    // The same kind of input again, written in configuration: a `.bazelrc`
+    // line that resolves an external repository's build setting to a target
+    // of this tree. Target-only, so rule (1) and the repository fixpoint
+    // answer it, exactly as the overlay BUILD file's labels are answered.
+    for s in repo_setting_inputs(src, m) {
+        // A plain `bazel_dep` has no row of its own, because a declaration
+        // says nothing about this tree. One a setting line names does say
+        // something, so it gets one here.
+        if !out.repos.contains(&s.repo) && !facts.deps.contains_key(&s.repo) {
+            continue;
+        }
+        out.repos.insert(s.repo.clone());
+        for pat in main_repo_patterns(&s.value, m) {
+            embedded.insert(pat.clone());
+            out.patterns.entry(pat).or_default().insert(s.repo.clone());
+        }
+    }
     out.target_only = embedded.difference(&direct).cloned().collect();
 
     out
+}
+
+/// The three origin claims, spelled once each.
+fn dir_origin(dir: &str, evidence: &str) -> RepoOrigin {
+    RepoOrigin {
+        kind: OriginKind::Dir,
+        dir: dir.to_string(),
+        evidence: evidence.to_string(),
+        ..RepoOrigin::default()
+    }
+}
+
+fn overlay_origin(build_file: Option<&str>, evidence: &str) -> RepoOrigin {
+    RepoOrigin {
+        kind: OriginKind::Overlay,
+        dir: build_file.unwrap_or_default().to_string(),
+        evidence: evidence.to_string(),
+        ..RepoOrigin::default()
+    }
+}
+
+fn generated_origin(evidence: &str) -> RepoOrigin {
+    RepoOrigin {
+        kind: OriginKind::Generated,
+        evidence: evidence.to_string(),
+        ..RepoOrigin::default()
+    }
 }
 
 /// The repo-relative path of a `.bzl` label in the main repository, under
@@ -436,6 +710,11 @@ fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
     // more finely than the whole universe, so as inputs they would feed
     // every repository the module declares.
     let mut skip: BTreeSet<usize> = BTreeSet::new();
+    // The literals passed to `repository_ctx.file("BUILD", ...)` and
+    // `.template("BUILD.bazel", ...)`: the text that becomes the
+    // repository's BUILD file. The enclosing call is what makes it that, and
+    // nothing downstream can tell from the literal alone.
+    let mut build_texts: BTreeSet<usize> = BTreeSet::new();
     let mut skip_first = |args: &[crate::starlark::Arg<'_>]| {
         if let Some(a) = args.first() {
             if matches!(a.kind, ArgKind::Positional(_)) && a.value().as_str().is_some() {
@@ -462,6 +741,17 @@ fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
                 {
                     skip_first(args);
                 }
+                ExprKind::Call { callee, args }
+                    if matches!(
+                        &callee.kind,
+                        ExprKind::Attr {
+                            name: "file" | "template",
+                            ..
+                        }
+                    ) =>
+                {
+                    mark_build_text(args, &mut build_texts);
+                }
                 _ => {}
             });
         }
@@ -471,6 +761,7 @@ fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
         if skip.contains(&offset) {
             continue;
         }
+        let build_text = build_texts.contains(&offset);
         for l in labels_in(&lit) {
             if l != lit {
                 out.push((
@@ -478,6 +769,7 @@ fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
                     Literal {
                         text: l,
                         embedded: true,
+                        build_text,
                     },
                 ));
             }
@@ -487,6 +779,7 @@ fn string_literals(m: &Module<'_>) -> Vec<(usize, Literal)> {
             Literal {
                 text: lit,
                 embedded: false,
+                build_text,
             },
         ));
     }
@@ -500,6 +793,38 @@ struct Literal {
     /// `true` for a label-shaped substring of a larger literal: text the
     /// repository rule writes, not a label it resolves.
     embedded: bool,
+    /// `true` when the literal this came from is the BUILD file text a
+    /// repository rule writes: `rctx.file("BUILD", '''...''')`. That makes
+    /// the repository a [`OriginKind::Generated`] one.
+    build_text: bool,
+}
+
+/// Marks the literals of a `file("BUILD", ...)` / `template("BUILD.bazel",
+/// ...)` call other than the file name itself.
+///
+/// Narrow on purpose: only a first argument that is literally one of Bazel's
+/// two BUILD file names counts, so a rule writing `rctx.file(name + ".bzl")`
+/// claims nothing. Every other argument's literals are marked, because which
+/// one carries the text differs between `file(path, content)` and
+/// `template(path, tpl, substitutions)`, and marking one too many can only
+/// add a claim about a repository that does write a BUILD file.
+fn mark_build_text(args: &[crate::starlark::Arg<'_>], out: &mut BTreeSet<usize>) {
+    let mut it = args
+        .iter()
+        .filter(|a| matches!(a.kind, ArgKind::Positional(_)));
+    let Some(first) = it.next() else {
+        return;
+    };
+    if !matches!(first.value().as_str(), Some("BUILD" | "BUILD.bazel")) {
+        return;
+    }
+    for a in args.iter().filter(|a| a.value().span != first.value().span) {
+        a.value().walk(&mut |x| {
+            if matches!(x.kind, ExprKind::Str(_)) {
+                out.insert(x.span.start);
+            }
+        });
+    }
 }
 
 fn is_label_byte(c: u8) -> bool {

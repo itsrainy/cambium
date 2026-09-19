@@ -488,6 +488,17 @@ impl Engine {
 
     /// Full build from an arbitrary row source.
     pub fn full_build_with(&self, commit: &str, q: &dyn PackageQuerier) -> Result<IndexData> {
+        // Where `//...` stops, and which of those directories a repository
+        // rule of this tree claims to be. Both are read from the checkout,
+        // and the probe that checks the claims runs here, *before* the
+        // universe query: it is a Bazel command with its own option set, and
+        // one of those between the universe query and the layer dump below
+        // costs that dump packages. See `crate::repos`.
+        let mut boundaries = q
+            .workspace()
+            .map(cambium_index::repo_boundaries)
+            .unwrap_or_default();
+        let confirmed = crate::repos::confirm_dir_claims(q, &self.cfg.externals, &boundaries);
         let u = q.universe()?;
         let mut b = IndexBuilder::new(cambium_index::new_lineage());
         b.set_bazel_version(q.version());
@@ -495,14 +506,16 @@ impl Engine {
         if let Some(e) = &u.partial {
             b.set_partial(e.count, e.packages.clone());
         }
+        let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
+        // Which of those directories `//...` walked into after all. Read from
+        // the universe answer rather than from the marker the directory
+        // carries: Bazel 8.7 loads main-repo packages under xla's
+        // `third_party/tsl/REPO.bazel`, and a boundary the main repository
+        // owns packages under is not a hole in the graph.
+        cambium_index::mark_traversed(&mut boundaries, packages.iter().map(String::as_str));
         b.apply_packages(&u.updates);
-        // Where `//...` stopped. Walked from the same checkout the rows came
-        // from, and recorded whatever the externals stage is configured to do:
-        // a phantom package is a wrong answer, not an optimisation.
-        let boundaries = q
-            .workspace()
-            .map(cambium_index::repo_boundaries)
-            .unwrap_or_default();
+        // Recorded whatever the externals stage is configured to do: a
+        // phantom package is a wrong answer, not an optimisation.
         b.set_repo_boundaries(boundaries.clone());
         // The loading layer, on the server the universe query has just loaded
         // the whole repository into. It has to be this server: a fresh one has
@@ -521,7 +534,6 @@ impl Engine {
         {
             b.set_sky_layer(l);
         }
-        let packages: Vec<String> = u.updates.iter().map(|p| p.package.clone()).collect();
         if let Some(c) = crate::bzl::rescan_closure(
             q,
             None,
@@ -529,6 +541,7 @@ impl Engine {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &crate::bzl::dirs(&boundaries),
+            &confirmed,
         ) {
             b.set_bzl_closure(c);
         }

@@ -67,6 +67,7 @@ fn local_repository_calls_declare_their_own_mapping() {
          \x20   new_local_repository(name = \"x\", path = \"third_party/x/\", build_file = \"//bazel:x.BUILD\")\n\
          \x20   local_repository(name = \"outside\", path = \"../sibling\")\n",
         &envoy_mapping(),
+        &[],
     );
     assert_eq!(
         maps.named,
@@ -89,6 +90,7 @@ fn a_literal_symlink_is_a_mapping_and_a_computed_one_is_not() {
          \x20   ctx.symlink(\"api/bazel/\", \"bazel\")\n\
          \x20   rctx.symlink(target = Label(\"//api:versioning.txt\"), link_name = \"versioning.txt\")\n",
         &envoy_mapping(),
+        &[],
     );
     let symlinks: Vec<PathMap> = maps.symlinks.iter().map(|(_, p)| p.clone()).collect();
     assert_eq!(
@@ -127,6 +129,7 @@ fn a_computed_symlink_source_yields_no_mapping() {
          \x20   ctx.symlink(Label(\"@other//api:BUILD\"), \"BUILD\")\n\
          \x20   ctx.symlink(\"../outside\", \"x\")\n",
         &envoy_mapping(),
+        &[],
     );
     assert!(maps.symlinks.is_empty(), "{:?}", maps.symlinks);
 }
@@ -143,7 +146,7 @@ fn a_local_path_override_is_the_repositorys_root() {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
     assert_eq!(
         ri.path_maps["envoy_api"],
         [PathMap::exhaustive_dir("api/".into())]
@@ -172,7 +175,7 @@ fn an_unattributable_bzls_symlinks_map_nothing() {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
     assert!(ri.path_maps.is_empty(), "{:?}", ri.path_maps);
 }
 
@@ -191,4 +194,108 @@ fn an_exhaustive_path_map_round_trips_through_the_index() {
             exhaustive: false,
         })
     );
+}
+
+// -------------------------------------------- a rule's `path =` as a claim
+
+/// xla's shape: the call that says which directory the repository is sits
+/// inside the lambda a `module_extension` implementation is, under a callee
+/// no reader knows anything about.
+const TSL_BZL: &str = "def _tsl_impl(mctx):\n\
+     \x20   tf_vendored(name = \"tsl\", path = \"third_party/tsl\")\n\
+     tsl_extension = module_extension(implementation = _tsl_impl)\n";
+
+#[test]
+fn a_rule_whose_path_is_a_boundary_directory_is_a_candidate_even_inside_a_lambda() {
+    let maps = scan_bzl_path_maps(
+        TSL_BZL,
+        &RepoMapping::identity(),
+        &["third_party/tsl".to_string()],
+    );
+    assert_eq!(
+        maps.boundary_dirs
+            .iter()
+            .map(|(n, d, _)| (n.as_str(), d.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("tsl", "third_party/tsl/")]
+    );
+    // A candidate is not a mapping: nothing here says the rule honoured its
+    // own attribute, so no `named` map was minted.
+    assert!(maps.named.is_empty(), "{:?}", maps.named);
+}
+
+#[test]
+fn a_path_that_is_not_a_boundary_directory_is_not_a_candidate() {
+    let maps = scan_bzl_path_maps(
+        TSL_BZL,
+        &RepoMapping::identity(),
+        &["third_party/other".to_string()],
+    );
+    assert!(maps.boundary_dirs.is_empty(), "{:?}", maps.boundary_dirs);
+    // And neither is it one when nothing walked the tree for boundaries.
+    let none = scan_bzl_path_maps(TSL_BZL, &RepoMapping::identity(), &[]);
+    assert!(none.boundary_dirs.is_empty(), "{:?}", none.boundary_dirs);
+}
+
+#[test]
+fn a_build_file_label_that_happens_to_name_a_boundary_is_not_a_candidate() {
+    // Only the attribute named `path` can make the claim. A `build_file` or a
+    // `patches` entry naming the same directory says nothing about where the
+    // repository's sources are.
+    let maps = scan_bzl_path_maps(
+        "def deps():\n\
+         \x20   vendored(name = \"tsl\", build_file = \"//third_party/tsl:BUILD\", patches = [\"//third_party/tsl:p.patch\"])\n",
+        &RepoMapping::identity(),
+        &["third_party/tsl".to_string()],
+    );
+    assert!(maps.boundary_dirs.is_empty(), "{:?}", maps.boundary_dirs);
+}
+
+#[test]
+fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
+    let files = support::Files(vec![
+        (
+            "MODULE.bazel",
+            "tsl_extension = use_extension(\"//third_party:repo.bzl\", \"tsl_extension\")\n\
+             use_repo(tsl_extension, \"tsl\")\n",
+        ),
+        ("third_party/repo.bzl", TSL_BZL),
+    ]);
+    let m = RepoMapping::identity();
+    let mut g = LoadGraph::new();
+    let ws = g.workspace_closure(&files, &m);
+    let facts = read_module_facts(&files);
+    let b = vec!["third_party/tsl".to_string()];
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &b);
+    assert_eq!(
+        ri.dir_candidates.get("tsl").map(|c| c.dir.as_str()),
+        Some("third_party/tsl/")
+    );
+    // Unconfirmed, so nothing routes yet: no mapping, and the origin is
+    // still the widest one.
+    assert!(!ri.path_maps.contains_key("tsl"), "{:?}", ri.path_maps);
+
+    // The pre-pass the cold build runs before its universe query finds the
+    // same claim from the workspace files alone.
+    let pre = cambium_index::dir_candidates(&files, &m, &b);
+    assert_eq!(pre.get("tsl").map(|c| c.dir.as_str()), Some("third_party/tsl/"));
+
+    // Confirmation is what turns it into the exhaustive mapping the engine
+    // reads back to route a change under the directory.
+    let mut ri = ri;
+    let mut other = ri.clone();
+    assert!(ri.confirm_dir("tsl", "third_party/tsl"));
+    assert_eq!(
+        ri.path_maps.get("tsl").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+        Some(vec![PathMap::exhaustive_dir("third_party/tsl/".into())])
+    );
+    assert!(ri.origins["tsl"].confirmed);
+    // A repository with no candidate cannot be confirmed into one.
+    assert!(!ri.confirm_dir("nothing", "third_party/tsl"));
+    // Nor can a confirmation of one directory promote a claim about another:
+    // the probe asked Bazel about `third_party/tsl`, and a closure that has
+    // been rescanned since can hold any other `path =` under the same name.
+    assert!(!other.confirm_dir("tsl", "third_party/tsl_new"));
+    assert!(!other.path_maps.contains_key("tsl"), "{:?}", other.path_maps);
+    assert!(other.origins.get("tsl").is_none_or(|o| !o.confirmed));
 }

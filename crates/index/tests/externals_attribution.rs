@@ -35,7 +35,7 @@ fn an_unattributable_workspace_bzl_falls_back_to_every_repository() {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
     assert_eq!(
         ri.repos_for("data/thing.txt"),
         ["r".to_string()].into_iter().collect()

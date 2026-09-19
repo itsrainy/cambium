@@ -746,8 +746,12 @@ pub fn starlark_files(root: &std::path::Path) -> Vec<String> {
 }
 
 /// The marker files that make a directory a Bazel repository of its own.
-/// A subdirectory carrying any of them is a repository boundary: Bazel's
-/// `//...` stops at it, and nothing under it belongs to the main repository.
+/// A subdirectory carrying any of them is a repository boundary.
+///
+/// Whether `//...` actually stops at one is a separate question, answered by
+/// the universe query rather than by this table: Bazel 8.7 loads main-repo
+/// packages under xla's `third_party/tsl` even though it carries a
+/// `REPO.bazel`. See [`Boundary::traversed`].
 pub const REPO_MARKERS: &[&str] = &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"];
 
 /// A directory below the root that is a Bazel repository of its own.
@@ -760,6 +764,17 @@ pub struct Boundary {
     /// rule maps is a hole in the graph if Bazel reads it, and nothing at all
     /// if Bazel does not.
     pub bazelignored: bool,
+    /// Whether the cold universe query returned a main-repo package under the
+    /// directory, so `//...` walked into it after all.
+    ///
+    /// Measured, never inferred from the marker: which markers stop `//...`
+    /// differs by Bazel version, and xla's `third_party/tsl` carries a
+    /// `REPO.bazel` that Bazel 8.7 walks straight past. A traversed boundary
+    /// keeps main-repo ownership of its paths (the packages exist, so reading
+    /// one as a main-repo source mints no phantom), and is never the reason
+    /// for a whole-repository answer. False until the universe has answered,
+    /// which is the safe direction: the paths stay the repository's.
+    pub traversed: bool,
 }
 
 /// Every directory below `root` that is itself a Bazel repository, as
@@ -826,6 +841,7 @@ pub fn repo_boundaries(root: &std::path::Path) -> Vec<Boundary> {
                 out.push(Boundary {
                     dir: rel.clone(),
                     bazelignored,
+                    traversed: false,
                 });
             }
             // An ignored directory is not descended into whether or not it is
@@ -842,6 +858,70 @@ pub fn repo_boundaries(root: &std::path::Path) -> Vec<Boundary> {
     out
 }
 
+/// The packages a directory of this tree would have if it were a repository
+/// rooted there: every directory under `dir` that holds a BUILD file, named
+/// relative to `dir`, with `""` for `dir` itself.
+///
+/// This is the tree half of the C2 comparison: a repository rule that claims
+/// `path = "third_party/tsl"` is claiming Bazel's package list for that
+/// repository is exactly this set, and a rule that ignored or reinterpreted
+/// its `path` will not match it. Being wrong in the *wide* direction is safe
+/// here (the claim simply fails and the boundary keeps today's treatment),
+/// which is why anything doubtful is left out: a nested repository of its
+/// own is not part of this repository, and neither is a `.bazelignore`d
+/// directory of it.
+pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::BTreeSet<String> {
+    let dir = dir.trim_end_matches('/');
+    let base = if dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(dir)
+    };
+    let ignored = read_bazelignore(&base);
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![String::new()];
+    while let Some(rel) = stack.pop() {
+        let here = if rel.is_empty() {
+            base.clone()
+        } else {
+            base.join(&rel)
+        };
+        if ["BUILD", "BUILD.bazel"].iter().any(|b| here.join(b).exists()) {
+            out.insert(rel.clone());
+        }
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            if name == ".git" || name.starts_with("bazel-") {
+                continue;
+            }
+            let child = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ignored.contains(&child) {
+                continue;
+            }
+            // A repository of its own, nested inside this one: its packages
+            // are its own, not this repository's.
+            if REPO_MARKERS.iter().any(|m| here.join(&name).join(m).exists()) {
+                continue;
+            }
+            stack.push(child);
+        }
+    }
+    out
+}
+
 /// The directory paths `.bazelignore` names, without a trailing slash. The
 /// file is a plain list of repo-relative directories, one per line; it
 /// supports no globs, and blank lines are ignored.
@@ -854,6 +934,24 @@ fn read_bazelignore(root: &std::path::Path) -> rustc_hash::FxHashSet<String> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| l.to_string())
         .collect()
+}
+
+/// Marks every boundary a main-repo package lies under as traversed.
+///
+/// Run once, on the packages the cold universe query returned: a package name
+/// under a boundary directory is Bazel saying it read that directory as part
+/// of this repository, whatever marker the directory carries.
+pub fn mark_traversed<'a>(
+    boundaries: &mut [Boundary],
+    packages: impl IntoIterator<Item = &'a str>,
+) {
+    let packages: Vec<&str> = packages.into_iter().collect();
+    for b in boundaries.iter_mut() {
+        let prefix = format!("{}/", b.dir);
+        b.traversed = packages
+            .iter()
+            .any(|p| *p == b.dir.as_str() || p.starts_with(&prefix));
+    }
 }
 
 #[cfg(test)]

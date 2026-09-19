@@ -265,6 +265,19 @@ pub fn scan_module(text: &str) -> ModuleFacts {
                             f.local_repo_paths.insert(name.to_string(), d);
                         }
                     }
+                    // `build_file = "@envoy//bazel/external:quiche.BUILD"`
+                    // is the other half of the same idiom: the sources come
+                    // from elsewhere and the BUILD file is a file of this
+                    // tree. Read by key rather than swept out of
+                    // `args.strings()` below, because *which* attribute a
+                    // label came from is the whole fact — a patch and a
+                    // build_file are both labels and only one of them is the
+                    // package's BUILD file.
+                    if let Some(bf) = args.first("build_file") {
+                        f.build_files.insert(name.to_string(), bf.to_string());
+                    } else if args.first("build_file_content").is_some() {
+                        f.build_files.insert(name.to_string(), String::new());
+                    }
                 }
                 r.labels.extend(args.strings().cloned());
             }

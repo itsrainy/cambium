@@ -124,6 +124,18 @@ codes! {
     /// here so the two cannot collide, and stays skipped if that work lands
     /// under another number, since a number is never reassigned.
     W024AutoloadProvider => "CAMBI-W024",
+    /// An external repository's own packages could not be listed, or there
+    /// are more of them than `[externals] index_max_packages` allows, so
+    /// nothing derived about its shape is used.
+    W025RepoNotIndexed => "CAMBI-W025",
+    /// A repository rule claims to be a directory of this tree and Bazel's
+    /// package list for it says otherwise, so the claim is dropped and the
+    /// directory keeps the global answer.
+    W026RepoOriginUnconfirmed => "CAMBI-W026",
+    /// A `.bazelrc` line resolves an external repository's build setting to a
+    /// target of this tree, so that repository's answer is wide by the whole
+    /// repository.
+    W027BuildSettingCrossesRepository => "CAMBI-W027",
     /// A dirty package failed to load under `--keep_going` but its `BUILD`
     /// file is still on disk, so its rows were carried forward rather than
     /// tombstoned.

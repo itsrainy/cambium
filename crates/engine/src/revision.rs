@@ -213,6 +213,10 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.external_rules()
     }
 
+    fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        self.querier.probe_repos(repos)
+    }
+
     fn can_dump_loading_layer(&self) -> bool {
         self.querier.can_dump_loading_layer()
     }

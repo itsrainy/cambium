@@ -110,6 +110,21 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// classifier's sub-package carving rule, its glob rule, and the package half
 /// of the static `.bzl` load closure (`bzl_load_*`, `bzl_consumer_*`).
 ///
+/// Format 12 added the five repository-origin columns (`repo_origin_kind`,
+/// `repo_origin_dir`, `repo_origin_evidence`, `repo_confirmed`,
+/// `repo_indexed`): what each external repository *is* as far as this tree is
+/// concerned, which is the identification half of issue #22. The last two are
+/// written `false` by every build at this version; they are here so that the
+/// probe that confirms a claim and the universe change that indexes a
+/// repository need no further bump; `repo_confirmed` is filled from the
+/// probe, `repo_indexed` is not filled yet. It also added
+/// `repo_boundary_traversed`: per repository boundary of this tree, whether
+/// the cold universe query returned a main-repo package under it. The marker
+/// a directory carries does not settle that question (Bazel 8.7 loads
+/// packages under xla's `third_party/tsl/REPO.bazel`), and a boundary the
+/// main repository does own paths under must not be read as a hole in the
+/// graph.
+///
 /// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
 /// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
 /// no reader has consulted it since format 4; it is 32 bytes per package of
@@ -124,7 +139,7 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means
@@ -164,7 +179,20 @@ pub const FORMAT_VERSION: u32 = 11;
 /// edit, and no label entries at all, so a run that spliced onto one would
 /// keep both the over-broad answer and the whole-repository re-indexes it
 /// causes.
-pub const CONTENT_REVISION: u32 = 3;
+/// 4 --- repositories gained an origin, and with it two derivations that
+/// change what an index says rather than how it is laid out: the BUILD file a
+/// `build_file = <main-repo label>` names is read, and every main-repo label
+/// in it becomes a target-only input of that repository; and a repository
+/// whose BUILD text is written by its own rule, or whose sources are a
+/// directory of this tree, is recorded as such. An index written before this
+/// has neither, so a run that spliced onto one would keep reporting nothing
+/// when a target an overlay repository's BUILD names is edited — the 32
+/// recorded envoy misses of issue #22. The same revision records, per
+/// repository boundary, whether `//...` walked into it: an index written
+/// before this says nothing of the kind, so a run that spliced onto one
+/// would keep reading xla's `third_party/tsl` as a hole in the graph and
+/// answer the whole world for a change to a package Bazel loaded.
+pub const CONTENT_REVISION: u32 = 4;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;

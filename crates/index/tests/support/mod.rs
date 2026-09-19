@@ -43,7 +43,7 @@ pub fn inputs(files: &dyn FileText, m: &RepoMapping) -> RepoInputs {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(files, m);
     let facts = read_live_module_facts(files, m);
-    build_repo_inputs(files, m, &g, &ws, &facts)
+    build_repo_inputs(files, m, &g, &ws, &facts, &[])
 }
 
 pub fn set(names: &[&str]) -> BTreeSet<String> {

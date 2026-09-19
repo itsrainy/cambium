@@ -189,7 +189,9 @@
 //!   the module facts, the path maps and the solved attribution
 //!   (`crate::attribution`) together.
 //! - `bazelrc` — [`Mode`], [`bzlmod_live`] and [`bazelrc_bzlmod`]: which
-//!   world Bazel reads in a tree that carries both, decided once.
+//!   world Bazel reads in a tree that carries both, decided once; and
+//!   [`repo_settings`], the `--@R//:flag=<label>` lines that make a target of
+//!   this tree an input of an external repository's targets.
 //! - `external_query` — [`external_dir_repos`]: which repository a nested
 //!   repository's directory is, read off `bazel query '//external:*'` in the
 //!   WORKSPACE world, where a custom repository rule can put a repository at a
@@ -208,16 +210,19 @@ pub use crate::vocabulary::{
     is_autoload_provider, is_toolchain_module, registration_repo, AUTOLOAD_PROVIDERS,
     TOOLCHAIN_MODULES,
 };
-pub use bazelrc::{bazelrc_autoload_externally, bazelrc_bzlmod, bzlmod_live, Mode};
+pub use bazelrc::{
+    bazelrc_autoload_externally, bazelrc_bzlmod, bzlmod_live, rc_imports, repo_settings, Mode,
+    RepoSetting,
+};
 pub use external_query::external_dir_repos;
-pub use inputs::{build_repo_inputs, main_repo_patterns};
+pub use inputs::{build_repo_inputs, dir_candidates, main_repo_patterns, repo_setting_inputs};
 pub use module_diff::diff_module;
 pub use module_facts::{
     apparent_of, Autoload, Dep, Extension, ModuleChange, ModuleFacts, RepoRule,
 };
 pub use module_parser::{scan_module, MODULE_SEGMENT_SUFFIX};
 pub use path_maps::{scan_bzl_path_maps, BzlPathMaps};
-pub use pattern::{PathMap, Pattern, RepoInputs};
+pub use pattern::{DirCandidate, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
 
 use crate::loads::{FileText, RepoMapping};
 

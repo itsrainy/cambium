@@ -102,11 +102,26 @@ pub struct WalkOptions {
     /// How many differences the rebuild oracle lists.
     pub diff_cap: usize,
     pub progress: Option<std::sync::Arc<crate::progress::Reporter>>,
+    /// This is a `--only` walk: a handful of named steps rather than the
+    /// first-parent range, each one cold-built at its own parent. Its record
+    /// goes beside the full walk's under its own name, so a gate run never
+    /// overwrites a published one.
+    pub only: bool,
 }
 
 impl WalkOptions {
     fn result_path(&self) -> PathBuf {
-        WalkResult::path(&self.results_dir, &self.pin, Some(&self.bazel_version))
+        WalkResult::path(&self.results_dir, &self.result_pin(), Some(&self.bazel_version))
+    }
+
+    /// The name the record is filed under: the pin, or the pin marked as a
+    /// `--only` run.
+    pub fn result_pin(&self) -> String {
+        if self.only {
+            format!("{}-only", self.pin)
+        } else {
+            self.pin.clone()
+        }
     }
 }
 
@@ -163,6 +178,85 @@ pub fn walk(
     w.finish()
 }
 
+/// A walk of named steps only.
+///
+/// The gate for an engine change is a handful of oracle steps, not the whole
+/// first-parent range, and those steps do not neighbour each other: step 27 of
+/// envoy and step 154 have five score commits between them. So every step here
+/// is cold-built at its own parent and answered forward once, which is the
+/// same question the full walk asks of that step without the six hundred that
+/// carried the index to it. Nothing is carried between steps.
+///
+/// `--resume` continues a record this same set of steps wrote: the steps
+/// already in it are kept and the walk restarts at the first that is missing.
+/// A gate run is hours of cold builds, and re-running the ones that finished
+/// because the last one died is what `--restart` is for.
+pub fn walk_only(
+    engine: &Engine,
+    driver: &dyn Driver,
+    live: &dyn LiveChecks,
+    steps: &[Step],
+    opts: &WalkOptions,
+) -> Result<WalkResult> {
+    anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
+    let from = steps[0].parent.clone();
+    let to = steps[steps.len() - 1].head.clone();
+    let engine_id = State::engine_id(&engine.config().hash());
+    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
+    std::fs::create_dir_all(&opts.state_dir)?;
+    let index_path = opts.state_dir.join(crate::util::versioned_name(
+        &format!("index-{}-only", opts.pin),
+        Some(&opts.bazel_version),
+        "bin",
+    ));
+
+    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
+        Resume::Done(prev) => return Ok(prev),
+        // A `--only` walk cold-builds at every step's own parent, so the
+        // index the last completed step left in the store is not the base the
+        // next one wants; `resume` looked for it anyway, and an answer either
+        // way is one this walk can continue from.
+        Resume::From(prev, at) => (prev, at),
+        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    };
+    if start_at >= steps.len() {
+        let mut w = Runner {
+            engine,
+            driver,
+            live,
+            opts,
+            path: opts.result_path(),
+            index_path,
+            result,
+            state,
+        };
+        w.begin(steps.len(), &from, &to)?;
+        return w.finish();
+    }
+    let mut w = Runner {
+        engine,
+        driver,
+        live,
+        opts,
+        path: opts.result_path(),
+        index_path,
+        result,
+        state,
+    };
+    w.begin(steps.len(), &from, &to)?;
+    for (i, step) in steps.iter().enumerate().skip(start_at) {
+        // `start` already cold-built at the first step's parent; a resumed
+        // walk starts at a step nothing has built for.
+        if i > 0 || start_at > 0 {
+            w.driver.checkout(&step.parent)?;
+            cold_build(w.driver, &step.parent, &w.index_path, w.opts.publish)
+                .with_context(|| format!("cold build at {}", step.parent))?;
+        }
+        w.step(i + 1, steps.len(), step)?;
+    }
+    w.finish()
+}
+
 enum Resume {
     Done(WalkResult),
     From(WalkResult, usize),
@@ -206,9 +300,15 @@ fn resume(
         .last()
         .map(|s| s.head.clone())
         .unwrap_or_else(|| from.to_string());
+    let done = prev.steps.len();
+    // A `--only` walk needs no stored index to go on with: it cold-builds at
+    // the next step's own parent whatever the store holds.
+    if opts.only {
+        tracing::info!(%last, done, "resuming a walk of named steps");
+        return Ok(Resume::From(prev, done));
+    }
     match engine.fetch_baseline(&last)? {
         Some(_) => {
-            let done = prev.steps.len();
             tracing::info!(%last, done, "resuming walk");
             Ok(Resume::From(prev, done))
         }
@@ -559,6 +659,15 @@ fn score_cambium(
 /// Recall is `|answer ∩ oracle| / |oracle|`; tightness is `|oracle| /
 /// |answer|`. Both `None` when the oracle did not run; tightness `None` on an
 /// empty answer, which has no ratio.
+///
+/// Both ratios are over the main repository on both sides. The oracle's own
+/// set is already partitioned that way (`RdepsResult::missing_external` holds
+/// the rest), and the answer is partitioned here with the same
+/// [`crate::oracles::rdeps::is_external`] test, so an `@R//` rule in the
+/// answer is neither credited as a match nor charged as an extra. Without the
+/// partition a tool that answers over more than `//...` reads as loose in
+/// exact proportion to how much of the other vocabulary it carries, which
+/// measures the vocabulary difference and not the answer.
 pub fn score(
     labels: &BTreeSet<String>,
     oracle: Option<&RdepsResult>,
@@ -569,12 +678,16 @@ pub fn score(
     if o.oracle_labels == 0 {
         return (Some(1.0), None);
     }
+    let main = labels
+        .iter()
+        .filter(|l| !crate::oracles::rdeps::is_external(l))
+        .count();
     let matched = o.oracle_set.intersection(labels).count();
     let recall = matched as f64 / o.oracle_labels as f64;
-    let tightness = if labels.is_empty() {
+    let tightness = if main == 0 {
         None
     } else {
-        Some(o.oracle_labels as f64 / labels.len() as f64)
+        Some(o.oracle_labels as f64 / main as f64)
     };
     (Some(recall), tightness)
 }
@@ -619,4 +732,55 @@ fn start(
     result.write(&opts.result_path())?;
     let _ = to;
     Ok((result, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn oracle(labels: &[&str]) -> RdepsResult {
+        let mut r = RdepsResult::default();
+        r.oracle_set = set(labels);
+        r.oracle_labels = r.oracle_set.len();
+        r
+    }
+
+    #[test]
+    fn tightness_is_over_the_main_repository_on_both_sides() {
+        let o = oracle(&["//a:a", "//b:b"]);
+
+        let (recall, tightness) = score(&set(&["//a:a", "//b:b"]), Some(&o));
+        assert_eq!(recall, Some(1.0));
+        assert_eq!(tightness, Some(1.0), "an exact main-repo answer is tight");
+
+        // The same answer plus the repository rows an indexed external brings.
+        // They are not in the oracle's main-repo set and must not be charged
+        // as extras, or a tool reads as looser the more vocabulary it carries.
+        let (recall, tightness) = score(
+            &set(&["//a:a", "//b:b", "@quiche//:x", "@quiche//:y", "//external:z"]),
+            Some(&o),
+        );
+        assert_eq!(recall, Some(1.0));
+        assert_eq!(tightness, Some(1.0), "external rows are neither matched nor charged");
+
+        // A genuine main-repo extra still costs tightness.
+        let (_, tightness) = score(&set(&["//a:a", "//b:b", "//c:c"]), Some(&o));
+        assert_eq!(tightness, Some(2.0 / 3.0));
+    }
+
+    #[test]
+    fn an_answer_with_nothing_of_the_main_repository_in_it_has_no_ratio() {
+        let o = oracle(&["//a:a"]);
+        assert_eq!(score(&set(&[]), Some(&o)), (Some(0.0), None));
+        assert_eq!(
+            score(&set(&["@quiche//:x"]), Some(&o)),
+            (Some(0.0), None),
+            "no main-repo labels is the same empty ratio as no labels"
+        );
+        assert_eq!(score(&set(&["//a:a"]), None), (None, None));
+    }
 }

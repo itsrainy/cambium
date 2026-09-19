@@ -350,6 +350,16 @@ It takes `--steps N` (the window; the subject's own by default),
 `--peer-sample N`, `--per-tag N`, `--rebuild-every N`, and `--resume` /
 `--restart` for a walk already recorded at the pin.
 
+`--only <parent>..<head>[,...]` walks the named steps and no others. The
+steps a change is suspected on do not neighbour each other, so each named
+step is cold-built at its own parent and answered forward once rather than
+carrying an index through the six hundred between them; the answer for that
+step is the same question the full walk asks. Revisions may be abbreviated,
+a spec the window does not hold is an error rather than a skip, and the
+record is filed as `walk-<pin>-only[-<bazel>].json` so a gate run never
+overwrites a published walk. This is how a soundness gate costs seven
+oracle steps instead of a whole history.
+
 `cambium-bench` with no verb, on a terminal, is the launcher: it composes a
 run from the manifest's subjects (real and synthetic), the peers and a size,
 shows the exact command lines it will run, then switches to the watch

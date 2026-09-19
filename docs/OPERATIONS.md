@@ -229,6 +229,13 @@ none of them. Unset means the default.
   greps are anchored now; if it recurs, read the log's last line.
 - Two `cargo test` runs at once share `$TMPDIR/cambium-tests` and the
   store-layout test fails on the race. Run one at a time.
+- `[externals] index_max_packages` (default 1000) is how many packages an
+  external repository may have before cambium stops using what it derived
+  about its shape. Over it, the repository keeps the wide answer and says
+  so with `CAMBI-W025`, which is sound and slower. It goes in
+  `cambium.toml` beside `[externals] enabled`, and it is inside
+  `Config::hash()`: changing it changes the lineage's config hash, so
+  every stored index is skipped and the next run cold-builds.
 
 ## Known noise
 

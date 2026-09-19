@@ -186,6 +186,18 @@ pub trait PackageQuerier {
         None
     }
 
+    /// Asks Bazel which packages each of these repositories has.
+    ///
+    /// One `bazel query '@R//...' --output=package` per repository, at cold
+    /// build only, and before the universe query (see
+    /// [`cambium_bazel::Bazel::probe_repo`]). The answer confirms or refuses
+    /// what the tree claims a repository is; a querier with no Bazel behind
+    /// it answers nothing and every claim stays unconfirmed, which is the
+    /// wide behaviour the engine has today.
+    fn probe_repos(&self, _repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        Vec::new()
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a
@@ -195,6 +207,16 @@ pub trait PackageQuerier {
     /// synthetic one) returns `None` and the engine falls back to its own
     /// workspace.
     fn workspace(&self) -> Option<&Path> {
+        None
+    }
+
+    /// Where a diagnostic raised while reading this querier's checkout goes.
+    ///
+    /// The index-building side of a run reads files as well as rows, and some
+    /// of what it finds there is actionable rather than merely logged. A
+    /// querier with no collector behind it (the synthetic and test ones)
+    /// returns `None` and the finding stays a `tracing` line.
+    fn diagnostics(&self) -> Option<&crate::diag::Diagnostics> {
         None
     }
 }
@@ -215,6 +237,10 @@ pub struct BazelQuerier {
 }
 
 impl PackageQuerier for BazelQuerier {
+    fn diagnostics(&self) -> Option<&crate::diag::Diagnostics> {
+        Some(&self.diags)
+    }
+
     fn query(&self, packages: &[String]) -> Result<Rows, crate::error::EngineError> {
         let mut q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
         // Exit 3 is `--keep_going` finishing with errors, and the packages
@@ -369,6 +395,10 @@ impl PackageQuerier for BazelQuerier {
 
     fn external_rules(&self) -> Option<String> {
         self.bazel.external_rules()
+    }
+
+    fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        repos.iter().filter_map(|r| self.bazel.probe_repo(r)).collect()
     }
 
     fn can_dump_loading_layer(&self) -> bool {

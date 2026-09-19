@@ -48,6 +48,7 @@ pub(crate) fn rescan_closure(
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
     boundaries: &[String],
+    confirmed: &BTreeSet<(String, String)>,
 ) -> Option<cambium_index::BzlClosure> {
     if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
         return prior;
@@ -81,9 +82,69 @@ pub(crate) fn rescan_closure(
     // two trees can disagree, and this closure describes the head.
     let mode = cambium_index::Mode::detect(src, &mapping);
     let facts = cambium_index::read_module_facts_in(src, mode);
-    c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
+    c.inputs =
+        cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts, boundaries);
+    // A repository rule's `path =` claim is only a claim until Bazel's own
+    // package list for the repository says it holds (`crate::repos`). The
+    // check runs once, at cold build, before the universe query; an
+    // incremental run carries the answer forward from the index it splices
+    // onto, since a confirmed claim is a fact about the lineage and the
+    // declaration that made it is an invalidator.
+    for (r, dir) in confirmed {
+        if c.inputs.confirm_dir(r, dir) {
+            tracing::debug!(repo = %r, %dir, "a confirmed repository claim maps its directory");
+        } else {
+            tracing::debug!(
+                repo = %r,
+                %dir,
+                "a carried-forward confirmation names a directory this closure no longer claims"
+            );
+        }
+    }
+    report_repo_settings(querier, src, &mapping, &facts);
     map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     Some(c)
+}
+
+/// Says once, per closure rebuild, that a `.bazelrc` line makes a target of
+/// this tree an input of an external repository's targets.
+///
+/// The input itself is recorded by
+/// [`cambium_index::build_repo_inputs`]; this is the actionable half. The
+/// answer it buys is wide by the whole repository, because the edge the flag
+/// creates is between a main-repo target and whichever of the repository's
+/// targets read the setting, and nothing in the tree says which those are.
+fn report_repo_settings(
+    querier: &dyn PackageQuerier,
+    src: &dyn cambium_index::FileText,
+    mapping: &cambium_index::RepoMapping,
+    facts: &cambium_index::ModuleFacts,
+) {
+    let mapping = mapping.clone().with_main_alias(&facts.module_name);
+    for s in cambium_index::repo_setting_inputs(src, &mapping) {
+        tracing::debug!(
+            repo = %s.repo, flag = %s.flag, value = %s.value,
+            "a bazelrc line sets an external repository's build setting to a target of this tree"
+        );
+        let Some(diags) = querier.diagnostics() else {
+            continue;
+        };
+        diags.emit(
+            crate::diag::Diagnostic::warning(
+                crate::diag::Code::W027BuildSettingCrossesRepository,
+                format!(
+                    "`.bazelrc` sets `{}` to `{}`, so a change to that target moves every \
+                     target of `@{}`",
+                    s.flag, s.value, s.repo
+                ),
+            )
+            .with_help(format!(
+                "expected on a tree that configures its external repositories this way; the \
+                 answer is wide by `@{}` until the flag's readers are known",
+                s.repo
+            )),
+        );
+    }
 }
 
 /// Records which external repository each nested repository's directory is,
@@ -115,16 +176,49 @@ fn map_nested_repositories(
     let Some(text) = querier.external_rules() else {
         return;
     };
-    for (repo, dir) in cambium_index::externals::external_dir_repos(&text, boundaries) {
-        tracing::debug!(repo = %repo, dir = %dir, "a nested repository is an external repository");
-        inputs.path_maps.entry(repo.clone()).or_default().insert(
-            cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
-        );
+    for (repo, ext) in cambium_index::externals::external_dir_repos(&text, boundaries) {
+        if let Some(dir) = &ext.dir {
+            tracing::debug!(repo = %repo, dir = %dir, "a nested repository is an external repository");
+            inputs.path_maps.entry(repo.clone()).or_default().insert(
+                cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
+            );
+            cambium_index::externals::RepoOrigin::claim(
+                &mut inputs.origins,
+                &repo,
+                cambium_index::externals::RepoOrigin {
+                    kind: cambium_index::externals::OriginKind::Dir,
+                    dir: format!("{dir}/"),
+                    evidence: EVIDENCE.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        // A `build_file` names a file of this tree, so Bazel's own answer
+        // identifies the repository as an overlay even where no workspace
+        // file this build can read declares it. The path map is minted by the
+        // static reader when it can see the declaration; here the origin is
+        // what the answer is for, and the evidence says where it came from.
+        if let Some(bf) = &ext.build_file {
+            cambium_index::externals::RepoOrigin::claim(
+                &mut inputs.origins,
+                &repo,
+                cambium_index::externals::RepoOrigin {
+                    kind: cambium_index::externals::OriginKind::Overlay,
+                    dir: String::new(),
+                    evidence: EVIDENCE.to_string(),
+                    ..Default::default()
+                },
+            );
+            tracing::debug!(repo = %repo, build_file = %bf, "an external repository overlays a tree BUILD file");
+        }
         // Without an id in the repository table the mapping has nowhere to be
         // written, and the routing would find nothing.
         inputs.repos.insert(repo);
     }
 }
+
+/// Where a claim read out of `bazel query '//external:*'` came from.
+const EVIDENCE: &str = "//external:*";
 
 /// Just the directories of a boundary list, which is what the parsers below
 /// and the `//external:*` matcher take.

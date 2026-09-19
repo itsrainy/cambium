@@ -159,6 +159,110 @@ pub fn bazelrc_autoload_externally(text: &str) -> Option<String> {
     out
 }
 
+/// A `.bazelrc` line that sets an external repository's build setting.
+///
+/// `--@quiche//:quic_base_impl_lib=//source/common/quic/platform:quic_base_impl_lib`
+/// is a dependency of `@quiche`'s targets on a target of this tree, written
+/// in configuration rather than in a BUILD file. Nothing `bazel query` prints
+/// records it: the flag is read while the options are parsed, and only
+/// `cquery` sees the edge it creates.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepoSetting {
+    /// The command the line applies to, `build` or `common`, with its config
+    /// suffix when it has one (`build:compile-time-options`).
+    pub command: String,
+    /// The repository the flag's own label names, apparent spelling.
+    pub repo: String,
+    /// The flag's label, as written.
+    pub flag: String,
+    /// The value the line sets, as written.
+    pub value: String,
+}
+
+/// The rc files a bazelrc pulls in, repo-relative, in the order it names
+/// them.
+///
+/// `import %workspace%/bazel/quiche.rc` and its `try-import` spelling are the
+/// only two; a file outside the tree (an absolute path, `%workspace%` aside)
+/// is not a file this index can read and is left out. Bazel's own `import` is
+/// textual inclusion, so a setting written in the imported file reaches the
+/// build exactly as one written here does.
+pub fn rc_imports(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        let Some(command) = toks.next() else { continue };
+        if command != "import" && command != "try-import" {
+            continue;
+        }
+        let Some(target) = toks.next() else { continue };
+        let rel = match target.strip_prefix("%workspace%/") {
+            Some(rest) => rest,
+            None if target.starts_with('/') || target.starts_with('%') => continue,
+            None => target,
+        };
+        let rel = rel.trim_start_matches("./");
+        if !rel.is_empty() {
+            out.push(rel.to_string());
+        }
+    }
+    out
+}
+
+/// Every `build`/`common` line of a bazelrc that sets a flag of an external
+/// repository, in file order.
+///
+/// Text only: which of these values is a label of *this* tree, and which
+/// repository token is the main repository under its own apparent name, both
+/// need the repository mapping, and are decided by the caller.
+///
+/// Config-scoped lines (`build:asan --@R//:x=...`) are included. A flag set
+/// under a config reaches the build only when that config is in effect, so
+/// including it is wide rather than wrong, and the screen that models config
+/// scoping is Phase 6's.
+pub fn repo_settings(text: &str) -> Vec<RepoSetting> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        let Some(command) = toks.next() else {
+            continue;
+        };
+        let base = command.split(':').next().unwrap_or(command);
+        if base != "build" && base != "common" {
+            continue;
+        }
+        for tok in toks {
+            let Some(setting) = tok.strip_prefix("--@") else {
+                continue;
+            };
+            let Some((flag, value)) = setting.split_once('=') else {
+                continue;
+            };
+            let Some((repo, _)) = flag.split_once("//") else {
+                continue;
+            };
+            if repo.is_empty() || value.is_empty() {
+                continue;
+            }
+            out.push(RepoSetting {
+                command: command.to_string(),
+                repo: repo.trim_start_matches('@').to_string(),
+                flag: format!("@{flag}"),
+                value: value.to_string(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +313,43 @@ mod tests {
             bazelrc_autoload_externally("build --incompatible_autoload_externally_extra=1\n"),
             None
         );
+    }
+
+    #[test]
+    fn a_repository_flag_line_is_read_as_a_setting() {
+        let rc = "# a comment\n\
+                  build --@quiche//:quic_base_impl_lib=//source/common/quic/platform:base\n\
+                  common:asan --@grpc//:x=@envoy//:y\n\
+                  build --//:main_flag=yes\n\
+                  test --@quiche//:only_under_test=//a:b\n\
+                  import %workspace%/other.rc\n";
+        let got = repo_settings(rc);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].repo, "quiche");
+        assert_eq!(got[0].command, "build");
+        assert_eq!(got[0].flag, "@quiche//:quic_base_impl_lib");
+        assert_eq!(got[0].value, "//source/common/quic/platform:base");
+        assert_eq!(got[1].repo, "grpc");
+        assert_eq!(got[1].command, "common:asan");
+        assert_eq!(got[1].value, "@envoy//:y");
+    }
+
+    #[test]
+    fn the_rc_files_an_rc_file_imports_are_named() {
+        let rc = "# a comment\n\
+                  build --//:x=y\n\
+                  import %workspace%/bazel/quiche.rc\n\
+                  try-import %workspace%/./local.rc\n\
+                  import relative.rc\n\
+                  import /etc/outside.rc\n";
+        assert_eq!(
+            rc_imports(rc),
+            vec!["bazel/quiche.rc", "local.rc", "relative.rc"]
+        );
+    }
+
+    #[test]
+    fn a_flag_with_no_value_and_a_startup_line_are_not_settings() {
+        assert!(repo_settings("build --@r//:f\nstartup --@r//:f=//a:b\n").is_empty());
     }
 }

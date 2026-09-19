@@ -188,7 +188,7 @@ fn a_repository_rules_labels_become_its_inputs() {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
 
     assert_eq!(
         ri.repos_for(".github/config.yml"),
@@ -459,7 +459,7 @@ attrs = {"envoy_version": attr.label(default = "@envoy//:VERSION.txt")},
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
     let envoy_repo: BTreeSet<String> = ["envoy_repo".to_string()].into_iter().collect();
 
     // Named by the generated BUILD file: the repository's targets depend
@@ -524,4 +524,30 @@ fn adjacent_literals_are_one_string() {
         support::set(&["base_pip3"])
     );
     assert_eq!(ri.repos, support::set(&["base_pip3"]));
+}
+
+/// A repository build setting written in an rc file the workspace `.bazelrc`
+/// imports is a setting of this build, and the target it names is an input of
+/// that repository. envoy keeps families of flags in `bazel/*.rc`, and
+/// reading the top-level file alone answered nothing through `@quiche`.
+#[test]
+fn a_setting_in_an_imported_rc_file_is_an_input_of_its_repository() {
+    let files = support::Files(vec![
+        (
+            "MODULE.bazel",
+            "module(name = \"envoy\")\nbazel_dep(name = \"quiche\", version = \"1.0\")\n",
+        ),
+        (".bazelrc", "import %workspace%/bazel/quiche.rc\n"),
+        (
+            "bazel/quiche.rc",
+            "build --@quiche//:quic_base_impl_lib=//source/common/quic/platform:quic_base_impl_lib\n",
+        ),
+    ]);
+    let m = RepoMapping::from_dump("{\"\":\"\",\"envoy\":\"\",\"quiche\":\"quiche+\"}");
+    let ri = support::inputs(&files, &m);
+    assert!(ri.repos.contains("quiche"), "{:?}", ri.repos);
+    assert_eq!(
+        ri.repos_for_label("//source/common/quic/platform:quic_base_impl_lib"),
+        ["quiche".to_string()].into_iter().collect::<BTreeSet<_>>()
+    );
 }

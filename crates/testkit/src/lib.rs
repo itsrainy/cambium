@@ -269,6 +269,10 @@ pub struct Scanning {
     enumerates_tree: bool,
     workspace: Option<PathBuf>,
     external_rules: Option<String>,
+    /// What the repository probe answers, per repository, and which
+    /// repositories it has been asked about.
+    repo_probes: BTreeMap<String, cambium_bazel::RepoProbe>,
+    probed: std::sync::Mutex<Vec<String>>,
     /// The `--skykey_filter` of every loading-layer dump this querier was
     /// asked for, in order. A dump is the most expensive thing an incremental
     /// run does on a long-lived server, so a test can ask whether one
@@ -289,6 +293,9 @@ pub struct Scanning {
     hides_from_dump: std::sync::atomic::AtomicUsize,
     /// How many dumps this querier has served.
     dumps_served: std::sync::atomic::AtomicUsize,
+    /// Where a diagnostic the index-building side raises while reading this
+    /// querier's checkout goes, so a test can assert on the code.
+    diags: cambium_engine::Diagnostics,
 }
 
 impl Scanning {
@@ -302,12 +309,20 @@ impl Scanning {
             enumerates_tree: false,
             workspace: None,
             external_rules: None,
+            repo_probes: BTreeMap::new(),
+            probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
             hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
             reloads: std::sync::atomic::AtomicUsize::new(0),
             hides_from_dump: std::sync::atomic::AtomicUsize::new(0),
             dumps_served: std::sync::atomic::AtomicUsize::new(0),
+            diags: cambium_engine::Diagnostics::new(),
         }
+    }
+
+    /// The diagnostics raised while reading this querier's checkout.
+    pub fn diags(&self) -> &cambium_engine::Diagnostics {
+        &self.diags
     }
 
     /// Serve every dump from the `n`th onward with its `PACKAGE` blocks
@@ -336,6 +351,31 @@ impl Scanning {
     /// no dump ran.
     pub fn dumps(&self) -> Vec<String> {
         self.dumps.lock().unwrap().clone()
+    }
+
+    /// Answer the repository probe for `repo` with these packages (`""` is
+    /// the repository root), and say whether one of them failed to load.
+    pub fn with_repo_probe(
+        mut self,
+        repo: &str,
+        packages: &[&str],
+        load_error: bool,
+    ) -> Self {
+        self.repo_probes.insert(
+            repo.to_string(),
+            cambium_bazel::RepoProbe {
+                repo: repo.to_string(),
+                packages: packages.iter().map(|p| p.to_string()).collect(),
+                load_error,
+            },
+        );
+        self
+    }
+
+    /// The repositories the engine has probed, in order. Empty means no
+    /// probe ran.
+    pub fn probed(&self) -> Vec<String> {
+        self.probed.lock().unwrap().clone()
     }
 
     /// Serve `files` as the Starlark source of the load closure.
@@ -373,6 +413,10 @@ impl Scanning {
 }
 
 impl PackageQuerier for Scanning {
+    fn diagnostics(&self) -> Option<&cambium_engine::Diagnostics> {
+        Some(&self.diags)
+    }
+
     fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         Ok(packages
             .iter()
@@ -414,6 +458,14 @@ impl PackageQuerier for Scanning {
 
     fn external_rules(&self) -> Option<String> {
         self.external_rules.clone()
+    }
+
+    fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        self.probed.lock().unwrap().extend(repos.iter().cloned());
+        repos
+            .iter()
+            .filter_map(|r| self.repo_probes.get(r).cloned())
+            .collect()
     }
 
     /// A querier with a tree behind it can produce a loading layer, from the

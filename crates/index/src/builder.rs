@@ -178,6 +178,14 @@ impl BzlClosure {
                     .path_maps
                     .insert(name.clone(), maps.into_iter().collect());
             }
+            // The origin has to survive a splice for the same reason the
+            // path mapping does: a base index carries what the last cold
+            // build derived, and a run that dropped it would treat every
+            // repository as declared-only.
+            let o = v.repo_origin(r);
+            if o != crate::externals::RepoOrigin::default() {
+                inputs.origins.insert(name.clone(), o);
+            }
             inputs.repos.insert(name);
         }
         for p in 0..v.repo_input_patterns.len() as u32 {
@@ -797,10 +805,12 @@ impl<'a> IndexBuilder<'a> {
         let mut repo_boundary_bytes = Vec::new();
         let mut repo_boundary_offsets = vec![0u32];
         let mut repo_boundary_ignored = Vec::with_capacity(self.boundaries.len());
+        let mut repo_boundary_traversed = Vec::with_capacity(self.boundaries.len());
         for b in &self.boundaries {
             repo_boundary_bytes.extend_from_slice(b.dir.as_bytes());
             repo_boundary_offsets.push(repo_boundary_bytes.len() as u32);
             repo_boundary_ignored.push(b.bazelignored);
+            repo_boundary_traversed.push(b.traversed);
         }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
@@ -886,6 +896,14 @@ impl<'a> IndexBuilder<'a> {
             repo_name_offsets: bzl.repo_name_offsets,
             repo_canonical_bytes: bzl.repo_canonical_bytes,
             repo_canonical_offsets: bzl.repo_canonical_offsets,
+            repo_origin_kind_bytes: bzl.repo_origin_kind_bytes,
+            repo_origin_kind_offsets: bzl.repo_origin_kind_offsets,
+            repo_origin_dir_bytes: bzl.repo_origin_dir_bytes,
+            repo_origin_dir_offsets: bzl.repo_origin_dir_offsets,
+            repo_origin_evidence_bytes: bzl.repo_origin_evidence_bytes,
+            repo_origin_evidence_offsets: bzl.repo_origin_evidence_offsets,
+            repo_confirmed: bzl.repo_confirmed,
+            repo_indexed: bzl.repo_indexed,
             repo_input_bytes: bzl.repo_input_bytes,
             repo_input_offsets: bzl.repo_input_offsets,
             repo_input_prefix: bzl.repo_input_prefix,
@@ -900,6 +918,7 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_bytes,
             repo_boundary_offsets,
             repo_boundary_ignored,
+            repo_boundary_traversed,
             sky_root_bytes: sky.root_bytes,
             sky_root_offsets: sky.root_offsets,
             sky_key_bytes: sky.key_bytes,
@@ -939,6 +958,14 @@ struct BzlTables {
     repo_name_offsets: Vec<u32>,
     repo_canonical_bytes: Vec<u8>,
     repo_canonical_offsets: Vec<u32>,
+    repo_origin_kind_bytes: Vec<u8>,
+    repo_origin_kind_offsets: Vec<u32>,
+    repo_origin_dir_bytes: Vec<u8>,
+    repo_origin_dir_offsets: Vec<u32>,
+    repo_origin_evidence_bytes: Vec<u8>,
+    repo_origin_evidence_offsets: Vec<u32>,
+    repo_confirmed: Vec<bool>,
+    repo_indexed: Vec<bool>,
     repo_input_bytes: Vec<u8>,
     repo_input_offsets: Vec<u32>,
     repo_input_prefix: Vec<bool>,
@@ -963,6 +990,9 @@ impl BzlTables {
             pkg_ext_offsets: vec![0],
             repo_name_offsets: vec![0],
             repo_canonical_offsets: vec![0],
+            repo_origin_kind_offsets: vec![0],
+            repo_origin_dir_offsets: vec![0],
+            repo_origin_evidence_offsets: vec![0],
             repo_input_offsets: vec![0],
             repo_input_repo_offsets: vec![0],
             bzl_repo_offsets: vec![0],
@@ -1083,6 +1113,23 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         t.repo_canonical_bytes.extend_from_slice(canon.as_bytes());
         t.repo_canonical_offsets
             .push(t.repo_canonical_bytes.len() as u32);
+        // What the repository is, in the same repo-id order. A repository no
+        // claim was made about writes the empty spelling, which reads back as
+        // `Declared`.
+        let o = c.inputs.origins.get(*n).cloned().unwrap_or_default();
+        t.repo_origin_kind_bytes
+            .extend_from_slice(o.kind.as_str().as_bytes());
+        t.repo_origin_kind_offsets
+            .push(t.repo_origin_kind_bytes.len() as u32);
+        t.repo_origin_dir_bytes.extend_from_slice(o.dir.as_bytes());
+        t.repo_origin_dir_offsets
+            .push(t.repo_origin_dir_bytes.len() as u32);
+        t.repo_origin_evidence_bytes
+            .extend_from_slice(o.evidence.as_bytes());
+        t.repo_origin_evidence_offsets
+            .push(t.repo_origin_evidence_bytes.len() as u32);
+        t.repo_confirmed.push(o.confirmed);
+        t.repo_indexed.push(o.indexed);
         // The path mapping, in the same repo-id order. An empty run is the
         // "no derivable mapping" case.
         if let Some(maps) = c.inputs.path_maps.get(*n) {

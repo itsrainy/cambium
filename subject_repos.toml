@@ -111,8 +111,12 @@ extra_query_flags = []
 # Same reasoning as apollo: the patches and templates under third_party/ are
 # `patch_file` / `attr.label` inputs of workspace-closure repository rules,
 # the `.bzl` files are closure-handled, and `third_party/tsl/**` sources are
-# ordinary packages. Unverified offline (no local mirror); the box's recall
-# oracle is the gate.
+# both: Bazel 8.7 walks past the `REPO.bazel` marker, so they are ordinary
+# main-repo packages, *and* the directory is the repository `@tsl`, so a
+# change there is answered twice, once as those packages and once as the
+# whole repository dirty by input (docs/OVER_REPORTING.md, "Traversed
+# boundary counted twice"). Neither half needs an invalidator. Unverified
+# offline (no local mirror); the box's recall oracle is the gate.
 invalidators = []
 # The four `tools/toolchains/win_1803/py3{8,9}` packages are Windows
 # toolchains that cannot load on Linux, so the pin's index is PARTIAL by

@@ -265,6 +265,7 @@ fn opts(f: &Fixture) -> WalkOptions {
         resume: false,
         diff_cap: 20,
         progress: None,
+        only: false,
     }
 }
 
@@ -550,6 +551,108 @@ fn a_cold_build_with_no_layer_fails_the_oracle_whatever_the_rows_say() {
         "{}",
         ro.summary
     );
+}
+
+/// `--only` answers the named steps and nothing else, and answers them the
+/// same way the full walk does.
+///
+/// The two steps here do not neighbour each other, which is the whole point:
+/// a gate names the steps a change is suspected on, and those are scattered
+/// through the history. Each one is cold-built at its own parent instead of
+/// carrying an index through everything between, so the comparison against
+/// the full walk's own records is the proof that the shortcut asks the same
+/// question.
+#[test]
+fn only_answers_the_named_steps_the_way_the_full_walk_does() {
+    let f = fixture(6, "typical-pr");
+    let (commits, s) = steps(&f);
+    let full = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .unwrap();
+    assert!(full.done);
+    assert!(s.len() >= 4, "the fixture needs steps between the named two");
+
+    let named = vec![s[1].clone(), s[3].clone()];
+    let mut o = opts(&f);
+    o.only = true;
+    let only = walk::walk_only(&f.engine, &f.engine_driver(), &NoLiveChecks, &named, &o).unwrap();
+
+    assert!(only.done);
+    assert_eq!(only.steps.len(), 2, "the named steps and no others");
+    assert_eq!(only.from, named[0].parent);
+    assert_eq!(only.to, named[1].head);
+    for (rec, step) in only.steps.iter().zip(&named) {
+        assert_eq!(rec.parent, step.parent);
+        assert_eq!(rec.head, step.head);
+        let same = full
+            .steps
+            .iter()
+            .find(|r| r.head == step.head)
+            .expect("the full walk answered this step too");
+        assert_eq!(
+            rec.cambium.affected, same.cambium.affected,
+            "step {}..{} answered differently when it was named alone",
+            step.parent, step.head
+        );
+        assert_eq!(rec.global, same.global);
+        assert_eq!(rec.dirty_packages, same.dirty_packages);
+    }
+
+    // The record is filed beside the full walk's, not over it.
+    let mine = walk::WalkResult::path(
+        &f.results.join("walk"),
+        &format!("{}-only", o.pin),
+        Some("synth"),
+    );
+    assert!(mine.exists(), "no record at {}", mine.display());
+    let theirs = walk::WalkResult::path(&f.results.join("walk"), &o.pin, Some("synth"));
+    assert!(theirs.exists(), "the full walk's record was overwritten");
+    assert_eq!(walk::WalkResult::read(&theirs).unwrap().steps.len(), s.len());
+}
+
+/// `--only` with `--resume` continues the record it left, rather than
+/// cold-building the first named step again over it. A gate run is hours of
+/// cold builds and the CLI tells the operator to pass `--resume` after one
+/// dies.
+#[test]
+fn only_resumes_the_steps_it_has_not_answered() {
+    let f = fixture(6, "typical-pr");
+    let (_, s) = steps(&f);
+    assert!(s.len() >= 4);
+    let named = vec![s[1].clone(), s[3].clone()];
+    let mut o = opts(&f);
+    o.only = true;
+    walk::walk_only(&f.engine, &f.engine_driver(), &NoLiveChecks, &named, &o).unwrap();
+
+    // The shape a died run leaves: the first step answered, the second not.
+    let path = walk::WalkResult::path(
+        &f.results.join("walk"),
+        &format!("{}-only", o.pin),
+        Some("synth"),
+    );
+    let mut partial = walk::WalkResult::read(&path).unwrap();
+    partial.steps.truncate(1);
+    partial.done = false;
+    // A mark nothing but a re-run of that step can erase.
+    partial.steps[0].dirty_packages = 4242;
+    partial.write(&path).unwrap();
+
+    o.resume = true;
+    let resumed =
+        walk::walk_only(&f.engine, &f.engine_driver(), &NoLiveChecks, &named, &o).unwrap();
+    assert!(resumed.done);
+    assert_eq!(resumed.steps.len(), 2);
+    assert_eq!(
+        resumed.steps[0].dirty_packages, 4242,
+        "the finished step was answered again instead of resumed"
+    );
+    assert_eq!(resumed.steps[1].head, named[1].head);
 }
 
 #[test]

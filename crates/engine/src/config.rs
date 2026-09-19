@@ -111,11 +111,26 @@ pub struct BazelrcConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct Externals {
     pub enabled: bool,
+    /// How many packages an external repository may have before cambium
+    /// stops trying to say anything about its shape.
+    ///
+    /// A repository rule's claim that it is a directory of this tree is
+    /// checked against Bazel's own package list for it (see `crate::repos`),
+    /// and a repository far larger than the tree directory it claims is
+    /// either a misread or a repository whose answers are not worth the
+    /// query. Over the cap the claim is dropped with `CAMBI-W025` and the
+    /// repository keeps the wide answer. A thousand is well above every
+    /// in-tree repository on the subjects (534 packages for envoy's `api/`,
+    /// 4 for xla's `third_party/tsl`).
+    pub index_max_packages: u32,
 }
 
 impl Default for Externals {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            index_max_packages: 1_000,
+        }
     }
 }
 
@@ -898,7 +913,7 @@ mod tests {
             h.update(&4u32.to_le_bytes());
             h.update(b"\n");
             h.update(b"cambium-index-content-v");
-            h.update(&3u32.to_le_bytes());
+            h.update(&4u32.to_le_bytes());
             h.update(b"\n");
             h.update(Config::default().to_toml().as_bytes());
             *h.finalize().as_bytes()
