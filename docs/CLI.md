@@ -44,7 +44,12 @@ default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
 
 `--dry-run` prints the plan and exits: which index would load (revision,
 lineage, age), whether the answer is a splice, cold rebuild or global, and
-how many packages it would re-query. `status` shows it in short form.
+how many packages it would re-query. `status` shows it in short form. The
+stages it runs are the run's own, up to but not including the query, so the
+dirty set and every global the run reaches before querying are the plan's
+too. The one verdict it cannot reach is the toolchain check (`CAMBI-W023`),
+which reads rule classes off the rows the query returns: a `splice` or `cold
+rebuild` plan can still end as a `//...` run, exit 2.
 
 While it runs it narrates itself on stderr in the shared grammar below: an
 `index` phase (where it looked for an index, and what it found: `found at

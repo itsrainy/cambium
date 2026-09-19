@@ -623,6 +623,55 @@ fn a_repository_rules_bzl_names_its_repository_instead_of_going_global() {
     );
 }
 
+/// The last route into the dirty repositories is this one, so the
+/// registration check runs after it: a `.bzl` that defines a repository the
+/// head registers toolchains or execution platforms from is that
+/// repository's `toolchain()` declarations moving, and none of them is a row
+/// of `//...` for the rule-class check to read a class off. The registration
+/// itself did not move, so the module diff has nothing to say about it.
+#[test]
+fn a_registered_repository_a_workspace_bzl_defines_is_global() {
+    let (_e, index) = base(&scanning());
+    let head = format!("{MODULE_BASE}register_toolchains(\"@generated//:all\")\n");
+    let r = run(&index, &changed(&["bazel/repo.bzl"]), &texts(&head, &head));
+    assert!(r.global, "{r:?}");
+    assert!(
+        r.global_reason
+            .as_deref()
+            .is_some_and(|w| w.starts_with("`@generated` moved, and `MODULE.bazel` registers")),
+        "{:?}",
+        r.global_reason
+    );
+
+    // The same edit with the registration pointing at the main repository:
+    // those rules are rows of `//...`, and the rule-class check sees them.
+    let head = format!("{MODULE_BASE}register_toolchains(\"//tc:all\")\n");
+    let r = run(&index, &changed(&["bazel/repo.bzl"]), &texts(&head, &head));
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_bzl, 1);
+
+    // And with a path only a generated target names in the same commit. That
+    // path is answered from the graph after the walk, not by the stage, so it
+    // cannot put `@generated` among the spared repositories here; the route
+    // that can is the `.bzl` above, which runs after the stage filed its
+    // target-only repositories and lifts the filing for the ones it names.
+    // Either way the commit moved the rule, so the answer is the same.
+    let head = format!("{MODULE_BASE}register_toolchains(\"@generated//:all\")\n");
+    let r = run(
+        &index,
+        &changed(&["changelogs/current/x.rst", "bazel/repo.bzl"]),
+        &texts(&head, &head),
+    );
+    assert!(r.global, "{r:?}");
+    assert!(
+        r.global_reason
+            .as_deref()
+            .is_some_and(|w| w.starts_with("`@generated` moved, and `MODULE.bazel` registers")),
+        "{:?}",
+        r.global_reason
+    );
+}
+
 /// The soundness hole the bazel subject found on `9a7ba209..cc5c15fa`.
 ///
 /// `tools/build_defs/repo/utils.bzl` is loaded from `MODULE.bazel` (through

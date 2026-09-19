@@ -153,11 +153,16 @@ fn a_toolchain_module_bump_is_global() {
     }
 }
 
+/// Global, and told apart from the stage's own escalations so the run can
+/// code it with the rule-class one (`CAMBI-W023`).
 #[test]
 fn register_toolchains_is_global() {
     let base = scan_module("register_toolchains(\"//a:b\")\n");
     let head = scan_module("register_toolchains(\"//a:c\")\n");
-    assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
+    assert!(matches!(
+        diff_module(&base, &head),
+        ModuleChange::Registration(_)
+    ));
 }
 
 /// The unparsed statement is global when it is the edit, and inert when
@@ -263,4 +268,89 @@ fn a_changed_tag_leaves_the_other_extensions_alone() {
                 .collect()
         )
     );
+}
+
+/// `include("//bazel:x.MODULE.bazel")` (Bazel 7.2 and later) names a segment
+/// the reader follows at the same revision; the parser records its path and
+/// nothing else, and rejects the shapes Bazel rejects.
+#[test]
+fn an_include_records_the_segments_main_repo_path() {
+    let f = scan_module(
+        "module(name = \"demo\")\n\
+         include(\"//bazel:toolchains.MODULE.bazel\")\n\
+         include(\"//:extra.MODULE.bazel\")\n",
+    );
+    assert_eq!(
+        f.includes,
+        vec![
+            "bazel/toolchains.MODULE.bazel".to_string(),
+            "extra.MODULE.bazel".to_string()
+        ]
+    );
+    assert!(f.unparsed.is_empty(), "{:?}", f.unparsed);
+    // Not a main-repo label, and a name without the suffix: statements the
+    // reader does not know, so the diff escalates rather than guessing.
+    let f = scan_module(
+        "include(\"@other//:x.MODULE.bazel\")\n\
+         include(\"//bazel:toolchains.bzl\")\n",
+    );
+    assert!(f.includes.is_empty());
+    assert_eq!(f.unparsed.len(), 2, "{:?}", f.unparsed);
+}
+
+/// A registration pattern names the repository it offers rules from; a
+/// main-repo pattern names none.
+#[test]
+fn a_registration_names_the_repository_its_pattern_offers_rules_from() {
+    let f = scan_module(
+        "register_toolchains(\"//tc:linux\", \"@tc_mod//:all\")\n\
+         register_execution_platforms(\"@@plat+//:host\")\n",
+    );
+    assert_eq!(f.registrations.len(), 2);
+    assert_eq!(
+        f.registration_repos,
+        ["tc_mod".to_string(), "plat+".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+/// A segment's facts merge into the root's as if its text stood at the
+/// `include()`: the root's diff then sees a registration or a dependency the
+/// segment holds, and an extension asked for from both files is one.
+#[test]
+fn absorbing_a_segment_merges_its_facts_into_the_roots() {
+    let mut root = scan_module(
+        "module(name = \"demo\")\n\
+         include(\"//bazel:deps.MODULE.bazel\")\n\
+         maven = use_extension(\"@rules_jvm_external//:extensions.bzl\", \"maven\")\n\
+         maven.install(artifacts = [\"g:a:1\"])\n",
+    );
+    let segment = scan_module(
+        "bazel_dep(name = \"fmt\", version = \"1.0\")\n\
+         register_toolchains(\"@tc_mod//:all\")\n\
+         maven = use_extension(\"@rules_jvm_external//:extensions.bzl\", \"maven\")\n\
+         use_repo(maven, \"maven\")\n\
+         include(\"//bazel:more.MODULE.bazel\")\n",
+    );
+    root.absorb(segment);
+    assert_eq!(root.module_name, "demo");
+    assert!(root.deps.contains_key("fmt"));
+    assert_eq!(root.registrations.len(), 1);
+    assert!(root.registration_repos.contains("tc_mod"));
+    assert_eq!(
+        root.includes,
+        vec![
+            "bazel/deps.MODULE.bazel".to_string(),
+            "bazel/more.MODULE.bazel".to_string()
+        ]
+    );
+    let maven = root
+        .extensions
+        .values()
+        .find(|e| e.name == "maven")
+        .expect("one extension for both files");
+    assert_eq!(maven.tags.len(), 1);
+    assert!(maven.repos.contains("maven"));
+    assert_eq!(root.extensions.len(), 1);
 }

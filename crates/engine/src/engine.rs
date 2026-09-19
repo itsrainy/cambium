@@ -212,8 +212,9 @@ pub enum PublishSource<'a> {
 /// A completed run: the answer, plus the head index it produced.
 pub struct RunOutcome {
     pub report: AffectedReport,
-    /// Index at head. Present unless the run was globally invalidated before a
-    /// splice happened.
+    /// Index at head. Present unless the run was globally invalidated: before
+    /// a splice happened, or by what the splice found (a toolchain declaration
+    /// moving), in which case the spliced index goes with the answer too.
     pub index: Option<IndexData>,
     /// The base this run spliced onto. Only [`Engine::affected`] knows it —
     /// the pipeline below is handed a view and never learns where it came

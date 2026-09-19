@@ -133,7 +133,9 @@
 //!   `externals.enabled` is off; `handled` exempts it when the stage read it.
 //! - A `MODULE.bazel` statement the parser does not recognise, on either side
 //!   of the diff.
-//! - Toolchain registration, as above.
+//! - Toolchain registration, as above. Reported under the toolchain code
+//!   (`CAMBI-W023`, the one a moved `toolchain()` rule raises) rather than
+//!   the stage's own: the gap is the graph's, not the stage's.
 //! - A repository-rule input that no label names. See the soundness gap
 //!   documented on [`cambium_index::externals`].
 
@@ -141,7 +143,9 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
-use cambium_index::externals::{diff_module, scan_module, Mode, ModuleChange, ModuleFacts};
+use cambium_index::externals::{
+    diff_module, scan_module, Mode, ModuleChange, ModuleFacts, MODULE_SEGMENT_SUFFIX,
+};
 use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
 use cambium_index::workspace::{diff_workspace, WorkspaceChange};
@@ -231,6 +235,11 @@ pub struct Externals {
     /// says nothing about *why*, and a route that named repositories without
     /// saying which file did so left that line empty.
     pub dirtied_by: BTreeMap<String, Vec<String>>,
+    /// The subset of [`Externals::repos`] dirtied only through a path that a
+    /// target the repository rule *writes* names. Rule (1) alone applies to
+    /// them, and nothing the rule wrote can have moved, its `BUILD` files
+    /// included: a toolchain declared in one of these is where it was.
+    pub target_only: BTreeSet<String>,
 }
 
 impl Externals {
@@ -274,6 +283,7 @@ pub fn analyse(
     let mut module_changed = false;
     let mut lock_changed = false;
     let mut workspaces: Vec<&str> = Vec::new();
+    let mut segments: Vec<&str> = Vec::new();
     for c in changes {
         let c = c.borrow();
         if LEGACY_WORKSPACE_FILES.contains(&c.path.as_str()) {
@@ -283,7 +293,34 @@ pub fn analyse(
         match c.path.as_str() {
             MODULE_FILE => module_changed = true,
             MODULE_LOCK => lock_changed = true,
+            p if p.ends_with(MODULE_SEGMENT_SUFFIX) => segments.push(p),
             _ => {}
+        }
+    }
+    // An `include()`d segment of `MODULE.bazel` (Bazel 7.2 and later) is
+    // textually part of it, so a change there is a change to the module
+    // file. Which files those are is only known from the root's include
+    // list, read at either revision; the suffix Bazel requires of them is
+    // the cheap test that decides whether to read the root at all. A file
+    // with the suffix that nothing includes is an ordinary file. The two
+    // sides are read once and kept, since the module diff below wants the
+    // same pair.
+    let mut facts: Option<(ModuleFacts, ModuleFacts)> = None;
+    if !segments.is_empty() {
+        let (b, h) =
+            facts.get_or_insert_with(|| (facts_at(texts, base_rev), facts_at(texts, head_rev)));
+        let included: Vec<&str> = segments
+            .iter()
+            .copied()
+            .filter(|s| b.includes.iter().any(|i| i == s) || h.includes.iter().any(|i| i == s))
+            .collect();
+        if !included.is_empty() {
+            tracing::debug!(
+                segments = ?included,
+                "a segment MODULE.bazel includes changed; diffing the module file with it"
+            );
+            module_changed = true;
+            out.handled.extend(included.iter().map(|s| s.to_string()));
         }
     }
     // A tree Bazel reads in WORKSPACE mode has an inert `MODULE.bazel`: an
@@ -318,6 +355,13 @@ pub fn analyse(
             return out;
         };
         match diff_workspace(&b, &h) {
+            WorkspaceChange::Registration(why) => {
+                out.escalate(ExternalsCause::WorkspaceRegistration {
+                    path: path.to_string(),
+                    why,
+                });
+                return out;
+            }
             WorkspaceChange::Global(why) => {
                 out.escalate(ExternalsCause::Workspace {
                     path: path.to_string(),
@@ -358,9 +402,13 @@ pub fn analyse(
     }
 
     if module_changed {
-        let base_facts = facts_at(texts, base_rev);
-        let head_facts = facts_at(texts, head_rev);
+        let (base_facts, head_facts) =
+            facts.unwrap_or_else(|| (facts_at(texts, base_rev), facts_at(texts, head_rev)));
         match diff_module(&base_facts, &head_facts) {
+            ModuleChange::Registration(why) => {
+                out.escalate(ExternalsCause::ModuleRegistration { why });
+                return out;
+            }
             ModuleChange::Global(why) => {
                 out.escalate(ExternalsCause::Module { why });
                 return out;
@@ -400,7 +448,9 @@ pub fn analyse(
             }
         };
         match change {
-            ModuleChange::Global(why) => {
+            // A lockfile carries no registration; the second arm is for the
+            // enum's sake.
+            ModuleChange::Global(why) | ModuleChange::Registration(why) => {
                 out.escalate(ExternalsCause::Lock { why });
                 return out;
             }
@@ -452,6 +502,7 @@ pub fn analyse(
         }
         if out.repos.insert(name.clone()) {
             out.label_only += 1;
+            out.target_only.insert(name.clone());
             tracing::debug!(
                 repo = %name,
                 ?paths,
@@ -461,6 +512,84 @@ pub fn analyse(
     }
 
     out
+}
+
+/// A dirty repository that a `register_toolchains` /
+/// `register_execution_platforms` pattern at head offers rules from, and the
+/// cause to escalate with.
+///
+/// The rule-class check reads its rows off `//...`, and a `toolchain()` or
+/// `platform()` declared in an external repository is not among them: a
+/// `local_path_override` directory, a `local_repository`, a repository built
+/// from a main-repo file, a version bump. Every route that dirties such a
+/// repository localises to its label consumers and loaders, and toolchain
+/// resolution reaches neither, so a registered repository moving is the
+/// declaration moving, seen from outside the graph. A repository dirtied only
+/// through a target the rule writes is spared: nothing the rule wrote, its
+/// `BUILD` files included, can have moved.
+///
+/// The patterns are read at head, from `MODULE.bazel` (with its included
+/// segments) and from whichever legacy `WORKSPACE` file the tree has, and
+/// only when there is a dirty repository to hold them against. The root
+/// module's own name is the main repository and names nothing here.
+///
+/// Both worlds' files are read without asking which one Bazel is in. Which
+/// is live depends on the Bazel version as well as the flag (Bazel 7 with
+/// bzlmod on still reads `WORKSPACE`, unless a `WORKSPACE.bzlmod` stands in
+/// for it), and a registration in a file Bazel no longer reads can only make
+/// this answer wider. A pattern in a `.bzl` a macro registers from is
+/// invisible here, as it is to the statement diff: the macro moving is what
+/// escalates there.
+pub fn registered_repository_moved(
+    ext: &Externals,
+    texts: &dyn WorkspaceText,
+    head_rev: &str,
+) -> Option<ExternalsCause> {
+    if ext.cause.is_some() {
+        return None;
+    }
+    let dirty: Vec<&str> = ext
+        .repos
+        .iter()
+        .filter(|r| !ext.target_only.contains(*r))
+        .map(String::as_str)
+        .collect();
+    if dirty.is_empty() {
+        return None;
+    }
+    let find = |registered: &BTreeSet<String>| -> Option<String> {
+        dirty
+            .iter()
+            .copied()
+            .find(|r| registered.contains(*r))
+            .map(str::to_string)
+    };
+    // `MODULE.bazel` first: in the world Bazel reads today it is the file
+    // that registers, and the one a reader of the diagnostic will open. A
+    // tree with no module file at all skips it and pays nothing.
+    if texts.text_at(head_rev, MODULE_FILE).is_some() {
+        let facts = facts_at(texts, head_rev);
+        let mut repos = facts.registration_repos;
+        repos.remove(&facts.module_name);
+        if let Some(repo) = find(&repos) {
+            return Some(ExternalsCause::RegisteredRepository {
+                repo,
+                file: MODULE_FILE.to_string(),
+            });
+        }
+    }
+    for path in LEGACY_WORKSPACE_FILES {
+        let Some(t) = texts.text_at(head_rev, path) else {
+            continue;
+        };
+        if let Some(repo) = find(&cambium_index::workspace::registration_repos(&t)) {
+            return Some(ExternalsCause::RegisteredRepository {
+                repo,
+                file: path.to_string(),
+            });
+        }
+    }
+    None
 }
 
 /// Marks repository `repo` dirty because main-repo `paths` it is built from
@@ -476,6 +605,8 @@ pub fn dirty_by_input(base: IndexRef<'_>, out: &mut Externals, repo: u32, paths:
     for p in paths {
         out.name(p, std::iter::once(&name));
     }
+    // A path the rule reads can move anything it writes.
+    out.target_only.remove(&name);
     if out.load_repos.contains(&name) || input_can_be_a_loaded_bzl(base, repo, paths) {
         out.load_repos.insert(name.clone());
     } else {
@@ -582,18 +713,41 @@ pub fn mode_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> Mode
     Mode::detect(&At(texts, rev), &m)
 }
 
+/// `MODULE.bazel` at `rev`, with every segment it `include()`s merged in.
+///
+/// A segment is read at the same revision and absorbed as if its text stood
+/// at the `include()`; a segment's own includes are followed too, each path
+/// once. One that cannot be read is recorded as unparseable, for the same
+/// reason an unreadable root is: an empty side would diff as everything in
+/// it having been added or removed.
 fn facts_at(texts: &dyn WorkspaceText, rev: &str) -> ModuleFacts {
-    match texts.text_at(rev, MODULE_FILE) {
-        Some(t) => scan_module(&t),
+    let Some(t) = texts.text_at(rev, MODULE_FILE) else {
         // A revision whose `MODULE.bazel` cannot be read is not the same as
         // one with no dependencies: an empty side would diff as "every
         // `bazel_dep` was added". The parser records that as unparseable so
         // the caller escalates.
-        None => ModuleFacts {
+        return ModuleFacts {
             unparsed: vec![format!("MODULE.bazel is unreadable at {rev}")],
             ..Default::default()
-        },
+        };
+    };
+    let mut facts = scan_module(&t);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut next = 0;
+    while next < facts.includes.len() {
+        let path = facts.includes[next].clone();
+        next += 1;
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        match texts.text_at(rev, &path) {
+            Some(t) => facts.absorb(scan_module(&t)),
+            None => facts.unparsed.push(format!(
+                "`{path}`, which MODULE.bazel includes, is unreadable at {rev}"
+            )),
+        }
     }
+    facts
 }
 
 /// The repositories a changed workspace-closure `.bzl` can define, or `None`

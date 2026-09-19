@@ -13,7 +13,7 @@ sound. Everything below is one of those two, at some scale.
 
 | mechanism | fires on | diagnostic | where |
 |---|---|---|---|
-| Invalidator path or glob | a changed path in `[invalidators]`, the root `BUILD`, `tools/toolchains/**`, `platforms/**` | `CAMBI-W013` | `crates/classify/src/lib.rs` (`is_invalidator`), `crates/engine/src/run.rs` |
+| Invalidator path or glob | a changed path in `[invalidators].paths` (`MODULE.bazel`, `.bazelrc`, `.bazelversion`, `REPO.bazel`, ...) or a configured glob; no glob is on by default | `CAMBI-W013` | `crates/classify/src/lib.rs` (`is_invalidator`), `crates/engine/src/run.rs` |
 | `.bazelrc` screen | a native flag outside the loading-irrelevant allowlist (`--enable_bzlmod`, `--incompatible_enable_proto_toolchain_resolution`, `--repo_env`, ...) on a line the index query reads (`common`, `always`, `query`, under no config or one in effect), a `--config=x` the query reads that no rc file defines, an `import` line moved whose target cannot be read, a startup flag, an rc file added, removed or unreadable | `CAMBI-W004` | `crates/engine/src/run.rs` (`screen_bazelrc`), `crates/engine/src/bazelrc.rs` |
 | `--registry` without its lock's diff | an rc line the query reads changed `--registry` and the externals stage read no `MODULE.bazel.lock` diff (the lock did not move, or it moved beside a changed `MODULE.bazel`, whose diff names only the modules whose declaration moved), with bzlmod live | `CAMBI-W014` | `crates/engine/src/run.rs` (`registry_change`) |
 | Starlark build setting unresolvable | a `.bazelrc` sets `--@repo//:flag` and the setting is outside the index, read by a transition, or not a parseable label | `CAMBI-W015` | `crates/engine/src/flags.rs` |
@@ -21,7 +21,10 @@ sound. Everything below is one of those two, at some scale.
 | Workspace-level `.bzl` whose repositories cannot be named | a changed `.bzl` reached through `KeyForBzlmod` / `KeyForWorkspace` with no attribution | `CAMBI-W009` | `crates/engine/src/run.rs` (`workspace_bzl`), `crates/engine/src/externals.rs` |
 | `WORKSPACE` statement not localised | a statement the shape reader cannot place, including any reordering; the file added or removed | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/workspace.rs` |
 | `MODULE.bazel` or lockfile not localised | an unparsed statement, lock added or removed, unknown lock key, format version change | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/lockfile.rs` |
-| Toolchain registration | `register_toolchains`, `register_execution_platforms`, or any module on `TOOLCHAIN_MODULES` | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
+| Toolchain declaration | a `toolchain`, `platform`, `toolchain_type`, `constraint_setting` or `constraint_value` rule the splice added, changed or tombstoned, in any package; decided after the query, so a dry run cannot reach it | `CAMBI-W023` | `crates/engine/src/run.rs` (`toolchain_rules`), `crates/index/src/vocabulary.rs` (`TOOLCHAIN_RULE_CLASSES`) |
+| Toolchain registration | `register_toolchains`, `register_execution_platforms` in `MODULE.bazel`, in a `*.MODULE.bazel` segment the root `include()`s, or in `WORKSPACE` | `CAMBI-W023` | `crates/engine/src/externals.rs`, `crates/index/src/externals/module_diff.rs`, `crates/index/src/workspace.rs` |
+| Registered repository moved | any route dirtied an external repository that a registration pattern at head offers rules from, except one dirtied only through a path a target the repository rule writes names | `CAMBI-W023` | `crates/engine/src/externals.rs` (`registered_repository_moved`), `crates/index/src/vocabulary.rs` (`registration_repo`) |
+| Toolchain module moved | any module on `TOOLCHAIN_MODULES` bumped, overridden or re-pinned | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
 The `.bazelrc` screen was the dominant cause on the subjects: 17 of envoy's 18
@@ -30,6 +33,19 @@ which lines a query reads (the next section). Twelve of envoy's seventeen are
 its root `.bazelrc`; the other five are nested workspaces' rc files, which the
 screen now exempts rather than classifies. The rest fire rarely; the
 invalidator lists of every subject are now empty.
+
+The three `CAMBI-W023` rows postdate those numbers and are unmeasured on a
+full walk. The last of them is the one with room to surprise: a tree whose `MODULE.bazel` registers from an
+extension-defined repository now answers `//...` on any route that dirties
+that repository, where it used to name the repository and stop. The tree to
+check first is bazel's own, which registers this way. At `948b8c70e28` its
+`MODULE.bazel` carries five registration statements, and two of them name an
+extension-defined repository: `@local_config_winsdk//:all` (the
+`winsdk_configure` repository rule) and `@graalvm_ce_toolchains//:gvm` (the
+`bazel_build_deps` module extension). The other three (`//:all`,
+`//:default_host_platform`, `//tools/res:empty_rc_toolchain`) are in the tree
+itself and the rule-class check reads them as ordinary rows. So two
+repositories there carry the wide answer.
 
 ## The `.bazelrc` screen (`CAMBI-W004`)
 

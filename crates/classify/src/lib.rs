@@ -94,8 +94,15 @@ impl Matchers {
         self.exempt.extend(paths);
     }
 
-    /// A root-level `BUILD` file is an invalidator by default (it can define
-    /// package-wide settings), and so is anything matching a configured glob.
+    /// A path listed in `[invalidators].paths` is an invalidator, and so is
+    /// anything matching a configured glob (no glob is on by default).
+    ///
+    /// The defaults are the files that can change anything and that the graph
+    /// carries no edge to (`MODULE.bazel`, `.bazelrc`, `.bazelversion`,
+    /// `REPO.bazel`, ...). A root-level `BUILD` file is deliberately not
+    /// among them: its `package()` call applies to its own package and no
+    /// other, and everything else in it is an ordinary target in the root
+    /// package, whose consumers the graph already knows.
     pub fn is_invalidator(&self, path: &str) -> bool {
         !self.exempt.contains(path)
             && (self.exact.contains(path) || self.invalidators.is_match(path))
@@ -242,17 +249,18 @@ pub fn is_build_file(path: &str) -> bool {
 /// True if the path is a Starlark file whose contents can change rule
 /// definitions. `.bzl` only: `.bazelrc` and friends are invalidators.
 ///
-/// This is about *shape*, not about blast radius, and it is not the same
-/// question the invalidator globs answer. What a changed `.bzl` reaches is the
-/// loading layer's business (its `BZL_LOAD` node, and the `BZL_LOAD ->
-/// BZL_LOAD` edges above it). The default invalidator globs then name a few
-/// directories (`tools/toolchains/**`, `platforms/**`) where a `.bzl` edit is
-/// treated as global anyway, because the files there define toolchains whose
-/// reach is not a loading-phase edge at all: a toolchain swap changes what
-/// every action in the repository runs without any `BUILD` file loading the
-/// `.bzl` that did it. So a path can be both, and the invalidator wins; that
-/// is a deliberate over-approximation over a small, hand-named set of
-/// directories, not a statement about `.bzl` files in general.
+/// This is about *shape*, not about blast radius. What a changed `.bzl`
+/// reaches is the loading layer's business (its `BZL_LOAD` node, and the
+/// `BZL_LOAD -> BZL_LOAD` edges above it), and whether the rules it reached
+/// include a toolchain declaration is the splice's: a `toolchain()`,
+/// `platform()`, `toolchain_type()`, `constraint_setting()` or
+/// `constraint_value()` moving is a whole-repository answer by rule class,
+/// wherever it lives, because toolchain resolution is not a loading-phase
+/// edge at all. No default invalidator glob names a directory
+/// of `.bzl` files any more (`tools/toolchains/**` and `platforms/**` used
+/// to, as a stand-in for that rule); a repository can configure one back,
+/// and a path that matches an invalidator is an invalidator first, whatever
+/// else it is.
 pub fn is_bzl_file(path: &str) -> bool {
     path.ends_with(".bzl")
 }

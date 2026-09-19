@@ -64,5 +64,6 @@ pub use overlay::{Overlay, OverlaySize};
 pub use sky::{SkyLayer, SkyRef, SkyTables, SkyWalk};
 pub use strtab::{Interner, StrTabRef};
 pub use view::{labels_sorted, GraphView};
+pub use vocabulary::{is_toolchain_rule_class, TOOLCHAIN_RULE_CLASSES};
 pub use walk::{walk, walk_deps, walk_edges, walk_view, WalkOptions, WalkResult};
 pub use workspace::{diff_workspace, WorkspaceChange};

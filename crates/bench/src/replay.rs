@@ -785,7 +785,7 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
         explain: false,
         ..cambium_engine::AffectedRequest::new(base_rev, head_rev)
     };
-    let stage = match cambium_engine::dirty_stage(&engine, base, &req, changes, &mut ext) {
+    let stage = match cambium_engine::dirty_stage(&engine, base, &req, changes, &mut ext, texts) {
         Ok(s) => s,
         Err(e) => {
             // The one failure the stage has is a configuration whose rules do
@@ -799,6 +799,10 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
         global: stage.global.is_some() || stage.dirty.global,
         reason: stage.global.as_ref().map(|r| r.to_string()),
     };
+    if !dirty.global {
+        out.indeterminate
+            .extend(undecidable_registration(&ext, head_rev, texts));
+    }
     // What each package is dirty *by*, as a diagnostic over the engine's
     // answer: a `.bzl` in its load closure, one of the two external routes,
     // or a changed file of its own.
@@ -843,6 +847,85 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
     out
 }
 
+/// Whether the registered-repository escalation could run at all.
+///
+/// `CAMBI-W023` also fires from outside the query graph: a repository this
+/// commit moved that `MODULE.bazel` or a legacy `WORKSPACE` at head registers
+/// toolchains or execution platforms from. That check reads the registering
+/// file and nothing else, so the change set need not name it -- an ordinary
+/// source edit routed into a repository is enough. With neither text in
+/// reach the stage cannot run the check, and its "not global" is this
+/// replay's missing input rather than the engine's answer, so the step is
+/// not comparable.
+fn undecidable_registration(
+    ext: &externals::Externals,
+    head_rev: &str,
+    texts: &dyn WorkspaceText,
+) -> Vec<String> {
+    let dirty: Vec<&str> = ext
+        .repos
+        .iter()
+        .filter(|r| !ext.target_only.contains(*r))
+        .map(String::as_str)
+        .collect();
+    if dirty.is_empty() {
+        return Vec::new();
+    }
+    let readable = |p: &str| texts.text_at(head_rev, p).is_some();
+    if readable(externals::MODULE_FILE)
+        || externals::LEGACY_WORKSPACE_FILES
+            .iter()
+            .any(|p| readable(p))
+    {
+        return Vec::new();
+    }
+    let repos: Vec<String> = dirty.iter().map(|r| format!("`@{r}`")).collect();
+    vec![format!(
+        "the change set moves {}, and whether the workspace registers toolchains or execution \
+         platforms from it needs `MODULE.bazel` or `WORKSPACE` at head; pass --repo to decide \
+         this one",
+        repos.join(" and ")
+    )]
+}
+
+/// The module texts a change set needs and this replay cannot read, as the
+/// note naming them.
+///
+/// Every module-ish change is inspected, not just the first: a change set may
+/// edit a readable root and an unreadable segment in either order, and it is
+/// the unreadable one that makes the verdict an artefact of the replay. The
+/// note names the files that could not be read, which is not always the file
+/// that was changed (an unreadable root makes a readable segment undecidable
+/// too, because only the root's text says which segments it includes).
+fn unreadable_module_texts(
+    changes: &[Change],
+    head_rev: &str,
+    texts: &dyn WorkspaceText,
+) -> Vec<String> {
+    let module_file = |path: &str| {
+        path == externals::MODULE_FILE
+            || path.ends_with(cambium_index::externals::MODULE_SEGMENT_SUFFIX)
+    };
+    let mut unreadable = BTreeSet::new();
+    for c in changes.iter().filter(|c| module_file(&c.path)) {
+        if texts.text_at(head_rev, externals::MODULE_FILE).is_none() {
+            unreadable.insert(externals::MODULE_FILE.to_string());
+        }
+        if texts.text_at(head_rev, &c.path).is_none() {
+            unreadable.insert(c.path.clone());
+        }
+    }
+    if unreadable.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = unreadable.into_iter().collect();
+    vec![format!(
+        "the change set edits a module file and no git repository was given to read {} at \
+         either revision; pass --repo to decide this one",
+        names.join(" and ")
+    )]
+}
+
 /// What the replay cannot decide from its inputs, each as the note the
 /// outcome carries. Empty means the verdict may be compared.
 fn undecidable_inputs(
@@ -856,15 +939,11 @@ fn undecidable_inputs(
 
     // A `MODULE.bazel` this replay cannot read is the one case where the
     // stage's own answer ("unparseable, so global") is an artefact of the
-    // replay rather than a statement about the engine.
-    let touches_module = changes.iter().any(|c| c.path == externals::MODULE_FILE);
-    if touches_module && texts.text_at(head_rev, externals::MODULE_FILE).is_none() {
-        notes.push(format!(
-            "the change set edits {} and no git repository was given to read it at either \
-             revision; pass --repo to decide this one",
-            externals::MODULE_FILE
-        ));
-    }
+    // replay rather than a statement about the engine. A segment the root
+    // `include()`s is part of the same file, and only the root's text says
+    // which files those are, so both texts have to be in reach for a
+    // changed segment to be decided.
+    notes.extend(unreadable_module_texts(changes, head_rev, texts));
 
     // The bazelrc screen reads the file's *text* at both revisions and decides
     // whether every flag it changed is one that cannot reach loading. There is
@@ -1153,6 +1232,11 @@ pub struct RecordedAnswer {
     pub base: String,
     pub head: String,
     pub global: bool,
+    /// The sentence the run gave for a global, when it recorded one. Read
+    /// for one thing: whether the verdict was reached after the query, which
+    /// the replay never runs ([`diverge`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_reason: Option<String>,
     pub dirty_packages: usize,
     pub cold_rebuild: bool,
     /// `None` on a history record, which does not separate them out.
@@ -1178,6 +1262,7 @@ pub fn recorded_from_walk(r: &crate::walk::WalkResult) -> Vec<RecordedAnswer> {
             base: st.parent.clone(),
             head: st.head.clone(),
             global: st.global,
+            global_reason: st.global_reason.clone(),
             dirty_packages: st.dirty_packages,
             cold_rebuild: st.cambium.cold_rebuild,
             affected: (!st.global).then_some(st.cambium.affected),
@@ -1222,8 +1307,21 @@ impl std::fmt::Display for Divergence {
 /// the replay computes: whether the run went global, how many packages it
 /// dirtied, and whether it would cold-rebuild. An indeterminate replay yields
 /// nothing — a question the replay declined to answer is not a disagreement.
+/// Nor is a global the run reached *after* its query, over the rows it read
+/// back (a toolchain-class rule the splice found moved, `CAMBI-W023`): the
+/// replay runs no query, so its "not global" there is the dirty stage's
+/// answer to a question the run decided one stage later, and holding the two
+/// against each other would raise the same false lead on every such step.
 pub fn diverge(recorded: &RecordedAnswer, replayed: &ReplayOutcome) -> Vec<Divergence> {
     if !replayed.indeterminate.is_empty() {
+        return Vec::new();
+    }
+    if recorded.global
+        && recorded
+            .global_reason
+            .as_deref()
+            .is_some_and(cambium_engine::GlobalReason::decided_after_query)
+    {
         return Vec::new();
     }
     let key = recorded.key();
@@ -1325,6 +1423,9 @@ impl ReplayRun {
                     base: old.base.clone(),
                     head: old.head.clone(),
                     global: old.global,
+                    // A replay's global is always the dirty stage's, so the
+                    // after-query exemption never applies between two replays.
+                    global_reason: None,
                     dirty_packages: old.dirty_packages,
                     cold_rebuild: old.cold_rebuild,
                     affected: None,
@@ -1388,6 +1489,84 @@ impl ReplayRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registered-repository escalation reads `MODULE.bazel` at head
+    /// whatever the change set named, so an ordinary source edit that moves a
+    /// repository is undecidable offline: the stage answers "not global" for
+    /// want of a file, and a run that recorded `CAMBI-W023` for that step
+    /// would read as a divergence rather than as a question declined.
+    #[test]
+    fn a_moved_repository_with_no_module_text_is_undecidable() {
+        let mut ext = externals::Externals::default();
+        ext.repos.insert("mod".to_string());
+        let notes = undecidable_registration(&ext, "head", &NoText);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("`@mod`") && notes[0].contains("--repo"),
+            "{notes:?}"
+        );
+
+        // With the file in reach the stage decides it for itself.
+        let texts = module_at("head", "module(name = \"demo\", version = \"1\")\n");
+        assert!(undecidable_registration(&ext, "head", &texts).is_empty());
+
+        // Nothing moved, so there is nothing a registration could reach.
+        let empty = externals::Externals::default();
+        assert!(undecidable_registration(&empty, "head", &NoText).is_empty());
+
+        // A repository named only by a generated target cannot have moved,
+        // and the escalation skips it for the same reason.
+        let mut target_only = externals::Externals::default();
+        target_only.repos.insert("mod".to_string());
+        target_only.target_only.insert("mod".to_string());
+        assert!(undecidable_registration(&target_only, "head", &NoText).is_empty());
+    }
+
+    /// The unreadable segment is second in the change set, behind a readable
+    /// root. A first-match-only check answers nothing here, which is exactly
+    /// the `include()` case the note exists for.
+    #[test]
+    fn an_unreadable_segment_behind_a_readable_root_is_undecidable() {
+        let texts = files_at(
+            "head",
+            &[("MODULE.bazel", "include(\"//:tc.MODULE.bazel\")\n")],
+        );
+        let changes = [
+            Change::new(Status::Modified, "MODULE.bazel"),
+            Change::new(Status::Modified, "tc.MODULE.bazel"),
+        ];
+        let notes = unreadable_module_texts(&changes, "head", &texts);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("tc.MODULE.bazel"), "{}", notes[0]);
+        assert!(!notes[0].contains("read MODULE.bazel and"), "{}", notes[0]);
+    }
+
+    /// The note names the file it could not read, not the file that changed:
+    /// a readable segment is still undecidable when the root that says which
+    /// segments it includes is out of reach.
+    #[test]
+    fn the_module_note_names_the_text_it_could_not_read() {
+        let texts = files_at("head", &[("tc.MODULE.bazel", "register_toolchains()\n")]);
+        let changes = [Change::new(Status::Modified, "tc.MODULE.bazel")];
+        let notes = unreadable_module_texts(&changes, "head", &texts);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("MODULE.bazel"), "{}", notes[0]);
+        assert!(!notes[0].contains("tc.MODULE.bazel"), "{}", notes[0]);
+    }
+
+    /// Both texts in reach: nothing to decline.
+    #[test]
+    fn readable_module_texts_are_decidable() {
+        let texts = files_at(
+            "head",
+            &[
+                ("MODULE.bazel", "include(\"//:tc.MODULE.bazel\")\n"),
+                ("tc.MODULE.bazel", "register_toolchains()\n"),
+            ],
+        );
+        let changes = [Change::new(Status::Modified, "tc.MODULE.bazel")];
+        assert!(unreadable_module_texts(&changes, "head", &texts).is_empty());
+    }
 
     fn outcome(base: &str, head: &str, global: bool, dirty: usize, cold: bool) -> ReplayOutcome {
         ReplayOutcome {
@@ -1857,6 +2036,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
             base: "a".into(),
             head: "b".into(),
             global: false,
+            global_reason: None,
             dirty_packages: 7,
             cold_rebuild: false,
             affected: Some(100),
@@ -1877,6 +2057,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
             base: "a".into(),
             head: "b".into(),
             global: true,
+            global_reason: Some("`.bazelversion` matched an invalidator rule".into()),
             dirty_packages: 0,
             cold_rebuild: false,
             affected: None,
@@ -1888,12 +2069,50 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(d[0].field, "global");
     }
 
+    /// The run decided this global over the rows its query returned, which
+    /// the replay never has: the dirty stage's "not global" is not a
+    /// disagreement, and the fields beside it say nothing either. A global
+    /// report carries no affected count, and its cold-rebuild flag was
+    /// cleared when the verdict replaced it, while the replay computes that
+    /// flag from the dirty set it did compute: comparing either one raises a
+    /// second false lead on the same step.
+    #[test]
+    fn a_global_the_run_reached_after_its_query_is_not_a_divergence() {
+        let rec = RecordedAnswer {
+            base: "a".into(),
+            head: "b".into(),
+            global: true,
+            global_reason: Some(
+                "//tools/jdk:runtime (toolchain) was changed; toolchain resolution has no edge \
+                 in the query graph, so no reverse walk can find what it moves"
+                    .into(),
+            ),
+            dirty_packages: 0,
+            cold_rebuild: false,
+            affected: None,
+        };
+        assert!(diverge(&rec, &outcome("a", "b", false, 12, false)).is_empty());
+        // A registration moving is decided by the dirty stage, and stays a
+        // comparison: same code, different stage.
+        let rec = RecordedAnswer {
+            global_reason: Some(
+                "`register_toolchains` / `register_execution_platforms` changed; toolchain \
+                 resolution has no edge in the query graph, so no reverse walk can find what it \
+                 moves"
+                    .into(),
+            ),
+            ..rec
+        };
+        assert_eq!(diverge(&rec, &outcome("a", "b", false, 12, false)).len(), 1);
+    }
+
     #[test]
     fn an_indeterminate_replay_disagrees_with_nothing() {
         let rec = RecordedAnswer {
             base: "a".into(),
             head: "b".into(),
             global: false,
+            global_reason: None,
             dirty_packages: 7,
             cold_rebuild: false,
             affected: None,

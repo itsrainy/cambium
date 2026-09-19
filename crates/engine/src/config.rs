@@ -291,10 +291,19 @@ impl Default for Invalidators {
             // not know is checked against every `load()` in the head tree.
             // The glob only ever pre-empted one of those answers with a wider
             // one.
-            globs: ["tools/toolchains/**", "platforms/**"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            //
+            // `tools/toolchains/**` and `platforms/**` used to be here too,
+            // standing in for a rule the run did not have: a `toolchain()`,
+            // `platform()`, `toolchain_type()`, `constraint_setting()` or
+            // `constraint_value()` moving anywhere is a whole-repository
+            // answer, because toolchain resolution has no edge in the query
+            // graph. The run now reads that off the splice,
+            // by rule class, in every package (`CAMBI-W023`), so the globs
+            // only ever added the wider answer for a file under those
+            // directories that moved no declaration, and never fired for a
+            // declaration kept anywhere else. A repository that wants a
+            // `.bzl` edit there to stay global can list them here itself.
+            globs: Vec::new(),
         }
     }
 }
@@ -938,6 +947,17 @@ mod tests {
             "{}",
             c.to_toml()
         );
+    }
+
+    /// The two globs that used to be on by default (`tools/toolchains/**`,
+    /// `platforms/**`) stood in for the rule-class escalation the run now
+    /// has. A default that still named them would go global on a file under
+    /// those directories that moved no toolchain declaration, and would
+    /// change the config hash of every workspace for nothing.
+    #[test]
+    fn no_invalidator_glob_is_on_by_default() {
+        assert!(Config::default().invalidators.globs.is_empty());
+        assert!(Config::default().rules().invalidator_globs.is_empty());
     }
 
     #[test]

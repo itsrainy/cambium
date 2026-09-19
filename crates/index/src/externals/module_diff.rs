@@ -40,7 +40,7 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
         );
     }
     if base.registrations != head.registrations {
-        return ModuleChange::Global(
+        return ModuleChange::Registration(
             "`register_toolchains` / `register_execution_platforms` changed; toolchain resolution \
              has no edge in the query graph, so no reverse walk can find what it moves"
                 .into(),
