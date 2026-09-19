@@ -749,6 +749,32 @@ fn a_workspace_declaration_of_an_autoload_provider_is_global_on_bazel_8() {
     assert!(r.direct.is_empty());
 }
 
+/// The `WORKSPACE` route asks the same question as the module route, so a
+/// 7.4 tree whose `.bazelrc` opts into autoloads is global there too, and the
+/// diagnostic says "the Bazel here", not a version this tree is not running.
+#[test]
+fn a_workspace_declaration_of_a_provider_follows_the_bazelrc_flag() {
+    let (e, index) = base(&scanning());
+    let ws = |sha: &str| {
+        format!(
+            "{WORKSPACE_BASE}http_archive(\n    name = \"com_google_protobuf\",\n    \
+             sha256 = \"{sha}\",\n)\n"
+        )
+    };
+    let opted_in = with_bazelrc(
+        with_bazel(texts_with_workspace(&ws("ccc"), &ws("ddd")), "7.4.1"),
+        "common --incompatible_autoload_externally=@com_google_protobuf\n",
+    );
+    let r = run_on(&e, &index, &changed(&["WORKSPACE"]), &opted_in);
+    assert!(r.global, "{:?}", r.global_reason);
+    let reason = r.global_reason.unwrap();
+    assert!(
+        reason.contains("the Bazel here autoloads"),
+        "the reason must not name a version this tree is not running: {reason}"
+    );
+    cause(&e, Code::W024AutoloadProvider);
+}
+
 /// Toolchain registration has no edge in the graph wherever it is written.
 #[test]
 fn a_workspace_toolchain_registration_is_global() {

@@ -347,9 +347,9 @@ pub fn analyse(
                         out.escalate(ExternalsCause::AutoloadProvider {
                             module: r.clone(),
                             why: format!(
-                                "`{path}` moved `{r}`, and Bazel 8 autoloads native rules from \
-                                 {r}: a BUILD file uses them through a load it never writes, so \
-                                 no edge names their consumers"
+                                "`{path}` moved `{r}`, and the Bazel here autoloads native \
+                                 rules from {r}: a BUILD file uses them through a load it never \
+                                 writes, so no edge names their consumers"
                             ),
                         });
                         return out;
