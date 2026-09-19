@@ -205,6 +205,50 @@ envoy's 18, 6 of xla's 7) and the thing a CI operator will notice first.
 Exit locally: the global count drops on the envoy and xla profiles with
 no change to the affected sets. Confirmed at 300 steps in box run B or C.
 
+**Landed 2026-09-18**, all three parts, on `phase-6-bazelrc-screen`. The
+flag table and what it assumes are in docs/OVER_REPORTING.md under
+`CAMBI-W004`, and in `crates/engine/src/bazelrc.rs` as a comment per entry
+on `ALLOWLIST` (cleared) and, above it, the reason each refused flag is
+kept off that list. A flag is refused by falling off the allowlist, so
+there is no second list to keep in sync. `--config` scoping reads the configs in effect off the rc
+chain at both ends of the range, plus the new `[bazelrc].configs` for the
+ones a repository's own builds pass; the default is empty, which is what
+cambium's index query passes. A changed `--registry` goes to the externals
+stage and clears when `MODULE.bazel.lock` moved with it, and is
+`CAMBI-W014` rather than `CAMBI-W004` when it did not.
+
+Measured offline over each subject's own 300-step window, screen only, no
+Bazel and no index. The table is the survey the interrupted session ran
+against its own build of the screen, so re-derive it before the box run (`cargo test -p cambium-engine --test bazelrc_diff --
+--ignored --nocapture`, with `CAMBIUM_BAZELRC_ENTRY` / `_FILE` / `_PIN` /
+`_WINDOW`). "Before" is the `CAMBI-W004` count of run A's walk
+(`bench-results-box/.../walk/walk-<pin>.json`):
+
+| subject and rc file | edits in the window | before | after |
+|---|---:|---:|---:|
+| envoy `.bazelrc` | 13 | 12 | 4, plus 1 `CAMBI-W014` |
+| xla `tensorflow.bazelrc` | 5 | 5 | 0 |
+| xla `.bazelrc` | 1 | 1 | 0 |
+| bazel `.bazelrc` | 1 | 1 | 0 |
+
+envoy's four survivors are two `common --enable_bzlmod` (steps 293 and
+296) and two `common --incompatible_enable_proto_toolchain_resolution`
+(80 and 235), all loading-relevant under both classifications. Of the six
+registry bumps, five carry a root `MODULE.bazel.lock` and clear through
+the externals stage; step 262 carries only `MODULE.bazel`, so it stays
+global with the registry named, as `CAMBI-W014`. apollo and sourcegraph
+have no local mirror to survey: apollo's two `tools/bazel.rc build
+--cxxopt` globals (steps 40 and 63) are on the cleared table, and its
+step 8 `try-import %workspace%/.custom.bazelrc` stays global because the
+import rule is written down and not implemented.
+
+A step that was **not** global before cannot answer differently now: the
+screen only ever clears more, every flag it now clears was a global
+before rather than a seed into the direct set, and an allowlisted flag
+drops the same rc change out of the diff that it dropped before. What
+needs the box is the answers on the steps that are no longer global,
+which is box run B or C.
+
 ### Box run C: the closing run
 
 All five subjects, once, from main, after everything above is merged.
