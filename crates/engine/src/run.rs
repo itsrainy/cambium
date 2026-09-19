@@ -395,12 +395,16 @@ impl<'a> Run<'a> {
     ///
     /// The registries decide what module resolution reads, and the resolved
     /// state is `MODULE.bazel.lock`. When the lock moved in the same diff and
-    /// the externals stage localised it, its diff already names the modules
-    /// whose registry metadata moved, and the rc line adds nothing. When
-    /// bzlmod is off at base the line is inert. Otherwise the lock did not
-    /// move with the registry and what the new registries serve cannot be
-    /// read from the tree, so the stage escalates and the dirty stage reports
-    /// it (`CAMBI-W014`). With the stage off there is nobody to read the
+    /// the externals stage read its diff, that diff already names the modules
+    /// whose registry metadata moved, and the rc line adds nothing. The lock
+    /// moving beside a changed `MODULE.bazel` is not that: there the stage
+    /// takes the module diff and never reads the lock, so the only
+    /// repositories named are the ones whose *declaration* moved, while a
+    /// re-pointed registry can move the resolved state of every other module
+    /// in the graph. When bzlmod is off at base the line is inert.
+    /// Otherwise no lock diff was read beside the registry and what the new
+    /// registries serve cannot be read from the tree, so the stage escalates
+    /// and the dirty stage reports it (`CAMBI-W014`). With the stage off there is nobody to read the
     /// lock, and the edit is the blunt `CAMBI-W004` it always was.
     pub(crate) fn registry_change(
         &mut self,
@@ -426,11 +430,7 @@ impl<'a> Run<'a> {
             // stage will report.
             return None;
         }
-        if ext
-            .handled
-            .iter()
-            .any(|h| h == crate::externals::MODULE_LOCK)
-        {
+        if ext.lock_read {
             tracing::debug!(
                 path = %reg.path,
                 "--registry moved with MODULE.bazel.lock, whose diff names the modules that moved"

@@ -113,9 +113,11 @@ pub enum ExternalsCause {
     /// The main repository's graph has no node for anything in there, so the
     /// only sound answer is everything.
     NestedRepositoryUnmapped { dir: String },
-    /// An rc file the query reads changed `--registry`, and `MODULE.bazel.lock`
-    /// did not move with it, so which modules the new registries re-point
-    /// cannot be read from the tree. See `crate::bazelrc`, "`--registry`".
+    /// An rc file the query reads changed `--registry`, and no
+    /// `MODULE.bazel.lock` diff was read with it -- it did not move, or it
+    /// moved beside a changed `MODULE.bazel` and the module diff answered
+    /// for it -- so which modules the new registries re-point cannot be read
+    /// from the tree. See `crate::bazelrc`, "`--registry`".
     RegistryWithoutLock { path: String },
 }
 
@@ -144,8 +146,8 @@ impl fmt::Display for ExternalsCause {
             ),
             ExternalsCause::RegistryWithoutLock { path } => write!(
                 f,
-                "`{path}` changed --registry and `MODULE.bazel.lock` did not move with it, so \
-                 which modules the new registries re-point cannot be read"
+                "`{path}` changed --registry and no `MODULE.bazel.lock` diff was read with it, \
+                 so which modules the new registries re-point cannot be read"
             ),
         }
     }
@@ -542,8 +544,8 @@ mod tests {
                 GlobalReason::Externals(ExternalsCause::RegistryWithoutLock {
                     path: ".bazelrc".into(),
                 }),
-                "`.bazelrc` changed --registry and `MODULE.bazel.lock` did not move with it, \
-                 so which modules the new registries re-point cannot be read",
+                "`.bazelrc` changed --registry and no `MODULE.bazel.lock` diff was read \
+                 with it, so which modules the new registries re-point cannot be read",
             ),
         ]
     }

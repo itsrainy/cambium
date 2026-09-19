@@ -451,6 +451,51 @@ fn a_registry_change_whose_lock_moved_with_it_is_the_locks_question() {
     assert_eq!(r.stats.repos_dirty_by_module, 1, "fmt moved");
 }
 
+/// The registry moved, `MODULE.bazel` moved, and the lock moved with both.
+/// The stage takes the module diff and never reads the lock, so the only
+/// repositories named are the ones whose declaration moved; every other
+/// module in the graph resolves against the new registry and nothing says
+/// how it moved. The registry edit is still the stage's question.
+#[test]
+fn a_registry_change_beside_a_module_bump_is_not_answered_by_the_lock() {
+    let g = graph();
+    let bumped = "module(name = \"demo\")\nbazel_dep(name = \"fmt\", version = \"1.1\")\n";
+    let (_d, e, base, head) = repo_with_files(
+        &[
+            (".bazelrc", &registry_rc(BCR)),
+            ("MODULE.bazel", MODULE),
+            ("MODULE.bazel.lock", &lock(BCR, "h1", "h2")),
+        ],
+        &[
+            (".bazelrc", &registry_rc(MIRROR)),
+            ("MODULE.bazel", bumped),
+            ("MODULE.bazel.lock", &lock(MIRROR, "h1", "h3")),
+        ],
+        Config::default(),
+    );
+    let out = run_paths(
+        &e,
+        &base,
+        &head,
+        &g,
+        &[".bazelrc", "MODULE.bazel", "MODULE.bazel.lock"],
+    );
+    assert_eq!(
+        out.report.global_reason.as_deref(),
+        Some(
+            "`.bazelrc` changed --registry and no `MODULE.bazel.lock` diff was read with \
+             it, so which modules the new registries re-point cannot be read"
+        )
+    );
+    assert!(
+        drained(&e)
+            .iter()
+            .any(|d| d.code == cambium_engine::Code::W014ExternalsGlobal),
+        "{:?}",
+        drained(&e)
+    );
+}
+
 /// The registry moved and the lock did not: what the new registry serves is
 /// not in the tree, so the externals stage escalates.
 #[test]
@@ -470,8 +515,8 @@ fn a_registry_change_without_its_lock_is_global_through_the_externals_stage() {
     assert_eq!(
         r.global_reason.as_deref(),
         Some(
-            "`.bazelrc` changed --registry and `MODULE.bazel.lock` did not move with it, so \
-             which modules the new registries re-point cannot be read"
+            "`.bazelrc` changed --registry and no `MODULE.bazel.lock` diff was read with \
+             it, so which modules the new registries re-point cannot be read"
         )
     );
     assert!(
