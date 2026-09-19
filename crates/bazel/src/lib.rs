@@ -152,6 +152,27 @@ impl LoadErrors {
 /// How many failing package names an outcome keeps.
 pub const MAX_ERROR_PACKAGES: usize = 32;
 
+/// The package part of a `@R//pkg` line, if `R` is the repository `repo`
+/// names, in either spelling Bazel prints.
+///
+/// Under bzlmod `bazel query` prints the *canonical* name, which is the
+/// apparent name with the extension that made it and a separator around it:
+/// `@@tsl+//tsl/platform` for `@tsl`, `@@+xla_extension+tsl//...` where an
+/// extension generated it. Reading only the apparent `@tsl//` spelling drops
+/// every line on Bazel 7 and later, which reads as a repository with no
+/// packages at all.
+fn package_of_repo(line: &str, repo: &str) -> Option<String> {
+    let (name, pkg) = line.trim_start_matches('@').split_once("//")?;
+    let named = name == repo
+        || name
+            .trim_end_matches(['+', '~'])
+            .rsplit(['+', '~'])
+            .next()
+            .is_some_and(|last| last == repo);
+    named.then(|| pkg.trim_start_matches('/').to_string())
+}
+
+
 /// The package named by one Bazel load-error line, if it is one.
 ///
 /// Two shapes, both emitted under `--keep_going`, and both interleaved with the
@@ -845,19 +866,16 @@ impl Bazel {
         };
         let stdout = String::from_utf8_lossy(&o.stdout);
         let stderr = String::from_utf8_lossy(&o.stderr);
-        let prefix = format!("@{repo}//");
         let packages: Vec<String> = stdout
             .lines()
-            .filter_map(|l| l.trim().strip_prefix(&prefix))
-            .map(|p| p.trim_start_matches('/').to_string())
+            .filter_map(|l| package_of_repo(l.trim(), repo))
             .collect();
         // Whether any package Bazel could not load belongs to this
-        // repository. Both spellings of the failure carry the name.
-        let load_error = stderr.lines().any(|l| {
-            parse_load_error_line(l).is_some_and(|p| {
-                p.contains(&format!("@{repo}//")) || p.contains(&format!("{repo}//"))
-            })
-        });
+        // repository. The failure carries the label in whichever spelling
+        // this Bazel prints, so it is read the same way.
+        let load_error = stderr
+            .lines()
+            .any(|l| parse_load_error_line(l).is_some_and(|p| package_of_repo(&p, repo).is_some()));
         if !o.exit.success && packages.is_empty() {
             tracing::debug!(status = %o.exit, repo, "the repository probe listed no package");
         }
@@ -1463,6 +1481,26 @@ mod tests {
         assert_eq!(e.count as usize, MAX_ERROR_PACKAGES + 5);
         assert_eq!(e.packages.len(), MAX_ERROR_PACKAGES);
         assert_eq!(e.packages[0], "p0");
+    }
+
+    /// Under bzlmod `bazel query` prints canonical repository names, and the
+    /// probe that reads only `@tsl//` reads a repository that loaded fine as
+    /// one with no packages at all.
+    #[test]
+    fn a_probe_reads_both_spellings_of_a_repository_name() {
+        assert_eq!(package_of_repo("@tsl//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(package_of_repo("@@tsl+//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(package_of_repo("@@tsl~//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(
+            package_of_repo("@@+xla_extension+tsl//tsl/platform", "tsl"),
+            Some("tsl/platform".into())
+        );
+        // The repository root is a package, and it is not the empty answer.
+        assert_eq!(package_of_repo("@@tsl+//", "tsl"), Some(String::new()));
+        // Another repository's packages are not this one's.
+        assert_eq!(package_of_repo("@@tsl_other+//pkg", "tsl"), None);
+        assert_eq!(package_of_repo("@other//pkg", "tsl"), None);
+        assert_eq!(package_of_repo("not a label", "tsl"), None);
     }
 
     #[test]
