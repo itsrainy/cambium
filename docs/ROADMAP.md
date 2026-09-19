@@ -158,13 +158,26 @@ stay as declarations.
 
 1. **Identify them.** From the externals stage's existing facts:
    `local_path_override`, `new_local_repository`, `local_repository`, and
-   repository rules whose `path` or `build_file` names a tree path
-   (`@quiche` in envoy, `@tsl` in xla, `third_party/xla` in tensorflow).
+   repository rules whose `path` or `build_file` names a tree path (`@tsl`
+   in xla, `third_party/xla` in tensorflow). envoy's `@quiche` is that
+   shape only before b6e7e12e: at the pin it is a registry `bazel_dep`
+   whose overlay BUILD is hosted in the envoy registry, with no tree path
+   at all, and the only route back into this tree is 18 `.bazelrc`
+   `--@quiche//:flag=//...` lines. So identification reads the BUILD text
+   a repository is built with and the `.bazelrc` too, not just the call's
+   attributes.
 2. **Index them.** Extend the universe from `//...` to `//... + @repo//...`
    for each identified repository. Their rule and file nodes join the
    index with their real labels; the loading layer already carries their
    `PACKAGE` nodes under a different root and today drops them, so stop
    dropping keys whose root is an identified repository.
+
+   Soundness does not wait for this. The first stage lands sound by
+   width with the universe unchanged: every main-repo label a repository
+   is built from becomes an input of it, so a change that reaches one
+   dirties that repository whole and the consumers come back through the
+   reverse rows that exist today. That is what meets the exit below;
+   indexing the repositories is what makes the answers precise.
 3. **Walk them.** A changed tree path that is a source of `@repo//pkg` is
    seeded as that label; the reverse walk then crosses back into `//...`
    through the edges that were leaves before. The externals stage's
