@@ -432,7 +432,7 @@ impl Runner<'_> {
         let from_tree = self.tree(&from);
         let to_tree = self.tree(at);
         let applied_paths = rebuild_rows::applied_paths(applied.sky);
-        let errors = rebuild_rows::error_packages(applied, rebuilt);
+        let errors = rebuild_rows::ErrorPackages::of(applied, rebuilt);
         let (missing, extra) = rebuild_rows::classify(
             sky,
             from_tree.as_ref(),

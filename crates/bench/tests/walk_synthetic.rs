@@ -6,6 +6,8 @@
 //! smoke test; here [`NoLiveChecks`] stands in and the rebuild oracle is the
 //! proof.
 
+use std::cell::Cell;
+
 use cambium_bench::walk::{self, NoLiveChecks, Tier, WalkOptions};
 use cambium_bench::walk::{EngineDriver, RowSource};
 use cambium_engine::{Config, Engine, PackageQuerier, SynthQuerier};
@@ -16,6 +18,11 @@ struct SynthDriver {
     root: std::path::PathBuf,
     commits: Vec<String>,
     graphs: Vec<SynthGraph>,
+    /// A commit whose tree holds loose paths (files no target names) that a
+    /// cold `//...` walk lists and no refresh dump ever mentions.
+    loose: Option<(String, Vec<String>)>,
+    /// A commit whose querier has no loading layer to dump at all.
+    layerless: Option<String>,
 }
 
 impl RowSource for SynthDriver {
@@ -25,13 +32,115 @@ impl RowSource for SynthDriver {
             .iter()
             .position(|c| c == rev)
             .ok_or_else(|| anyhow::anyhow!("unknown revision {rev}"))?;
-        Ok(Box::new(SynthQuerier::new(&self.graphs[i])))
+        if self.layerless.as_deref() == Some(rev) {
+            return Ok(Box::new(Layerless(SynthQuerier::new(&self.graphs[i]))));
+        }
+        match &self.loose {
+            Some((at, paths)) if at == rev => {
+                Ok(Box::new(HoleQuerier::new(&self.graphs[i], paths.clone())))
+            }
+            _ => Ok(Box::new(SynthQuerier::new(&self.graphs[i]))),
+        }
     }
 
     /// The fixture emits a real git history, so the rebuild oracle's rows
     /// are classified against real trees, as on a subject.
     fn paths(&self, rev: &str) -> anyhow::Result<Option<std::collections::BTreeSet<String>>> {
         walk::tree_paths(&self.root, rev).map(Some)
+    }
+}
+
+/// A querier whose cold dump lists the loose paths and whose refresh dumps
+/// never do.
+///
+/// That is what a real refresh does for a directory no re-queried package's
+/// glob descends into (a cold `//...` walk lists every directory, a refresh
+/// only what its packages reached), and it is a hole when the loose path is
+/// a file inside a package the refresh did re-query. Which of the two it
+/// is, the walk's rebuild oracle has to tell.
+struct HoleQuerier<'a> {
+    cold: SynthQuerier<'a>,
+    warm: SynthQuerier<'a>,
+    /// A querier is used for one operation; it is a refresh unless the
+    /// universe was asked for.
+    refreshing: Cell<bool>,
+}
+
+impl<'a> HoleQuerier<'a> {
+    fn new(graph: &'a SynthGraph, loose: Vec<String>) -> Self {
+        HoleQuerier {
+            cold: SynthQuerier::with_loose_paths(graph, loose),
+            warm: SynthQuerier::new(graph),
+            refreshing: Cell::new(true),
+        }
+    }
+}
+
+impl PackageQuerier for HoleQuerier<'_> {
+    fn query(&self, packages: &[String]) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        self.refreshing.set(true);
+        self.warm.query(packages)
+    }
+
+    fn universe(&self) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        self.refreshing.set(false);
+        self.cold.universe()
+    }
+
+    fn version(&self) -> String {
+        self.cold.version()
+    }
+
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        self.cold.load_source()
+    }
+
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        self.cold.starlark_files()
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        true
+    }
+
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), cambium_engine::EngineError> {
+        if self.refreshing.get() {
+            self.warm.dump_loading_layer(filter)
+        } else {
+            self.cold.dump_loading_layer(filter)
+        }
+    }
+}
+
+/// A synthetic querier with no Bazel server to dump a loading layer from.
+struct Layerless<'a>(SynthQuerier<'a>);
+
+impl PackageQuerier for Layerless<'_> {
+    fn query(&self, packages: &[String]) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        self.0.query(packages)
+    }
+
+    fn universe(&self) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        self.0.universe()
+    }
+
+    fn version(&self) -> String {
+        self.0.version()
+    }
+
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        self.0.load_source()
+    }
+
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        self.0.starlark_files()
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        false
     }
 }
 
@@ -73,8 +182,52 @@ fn fixture(revisions: u64, preset: &str) -> Fixture {
             root,
             commits: repo.commits,
             graphs: repo.graphs,
+            loose: None,
+            layerless: None,
         },
     }
+}
+
+/// Appends a commit that adds `paths` (empty files no target names) to the
+/// fixture's history, with the graph unchanged, and makes it the commit
+/// whose refresh dumps never mention them. Returns its sha.
+fn append_loose_commit(f: &mut Fixture, paths: &[&str]) -> String {
+    let root = &f.driver.root;
+    for p in paths {
+        let file = root.join(p);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "notes\n").unwrap();
+    }
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "loose files"]);
+    let sha = git(&["rev-parse", "HEAD"]);
+    let graph = f.driver.graphs.last().unwrap().clone();
+    f.driver.graphs.push(graph);
+    f.driver.commits.push(sha.clone());
+    f.driver.loose = Some((sha.clone(), paths.iter().map(|p| p.to_string()).collect()));
+    sha
+}
+
+/// A package alive at the window start and at the pin.
+fn a_surviving_package(f: &Fixture) -> String {
+    let first = &f.driver.graphs[0];
+    let last = f.driver.graphs.last().unwrap();
+    first
+        .packages
+        .iter()
+        .zip(&last.packages)
+        .find(|(a, b)| a.alive && b.alive && a.path == b.path)
+        .map(|(a, _)| a.path.clone())
+        .expect("a package that survives the window")
 }
 
 fn opts(f: &Fixture) -> WalkOptions {
@@ -240,6 +393,110 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
     .unwrap();
     assert_eq!(on_disk.steps.len(), r.steps.len());
     assert!(on_disk.done);
+}
+
+/// A directory created inside the window that no re-queried package's glob
+/// descends into has its rows on the cold side only. They reach the sidecar
+/// as `created_in_window`, and the walk passes with them: the whole path
+/// from the diff through the classifier to `RebuildOracle.ok`, not the
+/// classifier alone.
+#[test]
+fn a_directory_no_refresh_had_reason_to_dump_is_expected_and_the_walk_passes() {
+    let mut f = fixture(4, "typical-pr");
+    let pin = append_loose_commit(&mut f, &["loose/notes.txt"]);
+    let (commits, s) = steps(&f);
+    let o = opts(&f);
+    assert_eq!(o.pin, pin);
+    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
+    assert!(ro.ok, "{}", ro.summary);
+    assert!(r.summary.pass);
+    assert!(ro.sky.missing > 0, "the cold layer listed the loose directory: {:?}", ro.sky);
+    assert_eq!(ro.sky.missing_expected, ro.sky.missing, "{:?}", ro.sky);
+    assert_eq!(ro.sky.missing_unexplained, 0);
+    let sidecar = walk::RebuildRows::path(&f.results.join("walk"), &pin, Some("synth"));
+    let rows = walk::RebuildRows::read(&sidecar).unwrap();
+    assert_eq!(rows.counts, ro.sky);
+    for row in &rows.missing {
+        assert_eq!(row.class, walk::RowClass::CreatedInWindow, "{row:?}");
+        assert!(
+            row.path.as_deref().is_some_and(|p| p == "loose" || p.starts_with("loose/")),
+            "{row:?}"
+        );
+    }
+    // The report says how many rows were excused, on a held oracle too.
+    let md = cambium_bench::walk::report::render(&r);
+    assert!(
+        md.contains(&format!(
+            "Rebuild oracle at the pin: held. Loading layer: {} missing rows ({} expected",
+            ro.sky.missing, ro.sky.missing
+        )),
+        "{md}"
+    );
+}
+
+/// A file added inside the window to a package directory the applied layer
+/// knows, which the refresh of that package never dumped, is a hole: the
+/// row is unexplained, the oracle does not hold, and the walk fails.
+#[test]
+fn a_hole_under_a_package_the_refresh_covered_fails_the_walk() {
+    let mut f = fixture(4, "typical-pr");
+    let pkg = a_surviving_package(&f);
+    let readme = format!("{pkg}/readme.txt");
+    let pin = append_loose_commit(&mut f, &[&readme]);
+    let (commits, s) = steps(&f);
+    let o = opts(&f);
+    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
+    assert!(!ro.ok, "{:?}", ro.sky);
+    assert!(!r.summary.pass);
+    assert!(ro.sky.missing_unexplained > 0, "{:?}", ro.sky);
+    assert!(
+        ro.summary.contains(&format!("loading layer unexplained: {}", ro.sky.missing_unexplained)),
+        "{}",
+        ro.summary
+    );
+    let sidecar = walk::RebuildRows::path(&f.results.join("walk"), &pin, Some("synth"));
+    let rows = walk::RebuildRows::read(&sidecar).unwrap();
+    let unexplained: Vec<&walk::Row> = rows
+        .missing
+        .iter()
+        .filter(|r| r.class == walk::RowClass::Unexplained)
+        .collect();
+    assert_eq!(unexplained.len(), ro.sky.missing_unexplained);
+    // The file's own rows, and its edge to the package directory (located
+    // by the directory, its `to` end); all placed in the package.
+    assert!(
+        unexplained.iter().all(|r| {
+            let p = r.path.as_deref();
+            (p == Some(readme.as_str()) || p == Some(pkg.as_str()))
+                && r.package.as_deref() == Some(pkg.as_str())
+        }),
+        "{unexplained:?}"
+    );
+    assert!(
+        unexplained.iter().any(|r| r.path.as_deref() == Some(readme.as_str())),
+        "{unexplained:?}"
+    );
+    // Sorted unexplained-first, so the first row is one that fails the walk.
+    assert_eq!(rows.missing[0].class, walk::RowClass::Unexplained);
+}
+
+/// An applied index with a layer against a cold build with none is not a
+/// layer with zero unexplained rows: the oracle does not hold, whatever the
+/// classifier counted.
+#[test]
+fn a_cold_build_with_no_layer_fails_the_oracle_whatever_the_rows_say() {
+    let mut f = fixture(3, "typical-pr");
+    f.driver.layerless = f.driver.commits.last().cloned();
+    let (commits, s) = steps(&f);
+    let o = opts(&f);
+    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
+    assert!(!ro.ok, "{:?}", ro.sky);
+    assert!(!r.summary.pass);
+    assert_eq!(ro.sky.missing_unexplained, 0, "no rows to classify: {:?}", ro.sky);
+    assert!(ro.summary.contains("loading layer rows missing: 1"), "{}", ro.summary);
 }
 
 #[test]

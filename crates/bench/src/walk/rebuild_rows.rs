@@ -13,11 +13,12 @@
 //! ```
 //!
 //! Each row is a node or an edge of the layer (`kind`, `root`, `key`), the
-//! repository path and package it names when one can be read off the key,
-//! and a [`RowClass`]. The classes are decided from three things the walk
-//! has to hand: the subject's tree at the classification base and at the
-//! compared commit (`git ls-tree`), the applied layer itself, and the two
-//! indexes' `error_packages`.
+//! repository path it names when one can be read off the key, the package
+//! (the one the key names, or the one whose directory holds the path at the
+//! compared commit), and a [`RowClass`]. The classes are decided from three
+//! things the walk has to hand: the subject's tree at the classification
+//! base and at the compared commit (`git ls-tree`), the applied layer
+//! itself, and the two indexes' `error_packages`.
 //!
 //! # Why a row can legitimately be missing
 //!
@@ -31,18 +32,27 @@
 //! claimed only when the applied layer has no row at all under the created
 //! directory: a refresh that covered it would have written at least its
 //! listing, so a hole under a directory the applied layer does know is a
-//! shortfall, not a `//...`-only row.
+//! shortfall, not a `//...`-only row. The created root is always a
+//! directory: a file added to a directory that already existed is a row the
+//! refresh of its package had to write, and the class never claims it.
 //!
-//! A package that failed to load under `--keep_going` on one side and not
-//! the other has different rows on each: [`RowClass::LoadError`]. Everything
-//! else missing is [`RowClass::Unexplained`], and that count is what the
-//! oracle's verdict is built from.
+//! A package the cold build at the compared commit failed to load under
+//! `--keep_going` has whatever rows its partial evaluation left, and the
+//! applied layer, which loaded it, has others: [`RowClass::LoadError`]. Only
+//! the rebuilt index's list can excuse a missing row; the applied index's
+//! list is the lineage's history (the engine carries it through every
+//! splice and never clears it), so a package that failed once early in the
+//! window and loaded fine since is in it, and excusing its holes on that
+//! account would pass a real shortfall. Everything else missing is
+//! [`RowClass::Unexplained`], and that count is what the oracle's verdict is
+//! built from.
 //!
 //! Extras never fail the oracle. A refresh cannot remove a node, so a file,
 //! package or `.bzl` that stopped existing leaves its row behind:
 //! [`RowClass::DeletedInWindow`] when the path is gone at the compared
-//! commit, [`RowClass::Other`] when it is not (a `load()` that was dropped,
-//! a glob that stopped matching).
+//! commit, [`RowClass::LoadError`] when either index names its package as
+//! failed, [`RowClass::Other`] when neither (a `load()` that was dropped, a
+//! glob that stopped matching).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -105,7 +115,10 @@ pub struct Row {
     /// a package or a listing, a file otherwise.
     #[serde(default)]
     pub path: Option<String>,
-    /// The package the key names, when it names one.
+    /// The package the key names or, for a file, listing or `.bzl` row, the
+    /// package whose directory holds the path at the compared commit.
+    /// Absent when neither applies (another repository's row, a driver with
+    /// no tree, a path under no package).
     #[serde(default)]
     pub package: Option<String>,
     pub class: RowClass,
@@ -120,7 +133,8 @@ pub enum RowClass {
     /// Missing, under a directory created inside the window that the applied
     /// layer holds no row under.
     CreatedInWindow,
-    /// Its package failed to load on one side or the other.
+    /// Missing: its package failed to load in the cold build at the
+    /// compared commit. Extra: either index names its package as failed.
     LoadError,
     /// Extra, for a path gone at the compared commit.
     DeletedInWindow,
@@ -248,13 +262,46 @@ fn bzl_path(key: &str) -> Option<String> {
 /// Whether `p` is a file in the tree or a directory some file sits under.
 /// The empty path is the root package and always exists.
 pub fn exists(tree: &BTreeSet<String>, p: &str) -> bool {
-    if p.is_empty() || tree.contains(p) {
+    tree.contains(p) || is_dir(tree, p)
+}
+
+/// Whether `p` is a directory in the tree: some file sits under it. The
+/// empty path is the root and always is.
+pub fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
+    if p.is_empty() {
         return true;
     }
     let dir = format!("{p}/");
     tree.range(dir.clone()..)
         .next()
         .is_some_and(|f| f.starts_with(&dir))
+}
+
+/// The package whose directory holds `p` in the tree: the nearest of `p`
+/// (when it is a directory) and its ancestors with a `BUILD` or
+/// `BUILD.bazel`, the root package included. `None` when none has one.
+pub fn enclosing_package(tree: &BTreeSet<String>, p: &str) -> Option<String> {
+    let mut dir = p;
+    loop {
+        if ["BUILD", "BUILD.bazel"]
+            .iter()
+            .any(|b| tree.contains(&join(dir, b)))
+        {
+            return Some(dir.to_string());
+        }
+        if dir.is_empty() {
+            return None;
+        }
+        dir = dir.rsplit_once('/').map_or("", |(d, _)| d);
+    }
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 /// The paths the applied layer's nodes name, for the created-in-window test.
@@ -271,14 +318,40 @@ pub fn applied_paths(layer: SkyRef<'_>) -> BTreeSet<String> {
         .collect()
 }
 
-/// The packages either index says failed to load.
-pub fn error_packages(applied: IndexRef<'_>, rebuilt: IndexRef<'_>) -> BTreeSet<String> {
-    applied
-        .error_packages
-        .iter()
-        .chain(rebuilt.error_packages.iter())
-        .cloned()
-        .collect()
+/// The packages each index says failed to load under `--keep_going`.
+///
+/// The rebuilt index's list is the truth about the compared commit: a cold
+/// build names exactly the packages it could not load there. The applied
+/// index's list is the lineage's history, not its state: the engine carries
+/// it through every splice, assigns it only when it is empty, and caps it,
+/// so it holds the first partial refresh's names and keeps them past the
+/// commit that fixed them. A missing row (the cold layer has it, the applied
+/// lacks it) can only be a load-error artifact when the cold build itself
+/// failed the package, so the rebuilt list alone excuses one. An extra never
+/// fails, and either list may explain it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ErrorPackages {
+    pub rebuilt: BTreeSet<String>,
+    pub applied: BTreeSet<String>,
+}
+
+impl ErrorPackages {
+    pub fn of(applied: IndexRef<'_>, rebuilt: IndexRef<'_>) -> Self {
+        ErrorPackages {
+            rebuilt: rebuilt.error_packages.iter().cloned().collect(),
+            applied: applied.error_packages.iter().cloned().collect(),
+        }
+    }
+
+    /// Whether a missing row of `package` is a load-error artifact.
+    fn excuses_missing(&self, package: &str) -> bool {
+        self.rebuilt.contains(package)
+    }
+
+    /// Whether an extra row of `package` is.
+    fn excuses_extra(&self, package: &str) -> bool {
+        self.rebuilt.contains(package) || self.applied.contains(package)
+    }
 }
 
 /// Classifies every row of a diff.
@@ -286,31 +359,31 @@ pub fn error_packages(applied: IndexRef<'_>, rebuilt: IndexRef<'_>) -> BTreeSet<
 /// `from` and `to` are the trees at the classification base and at the
 /// compared commit; with either absent nothing is expected, every missing
 /// row is unexplained and every extra is `other`. `applied_paths` is
-/// [`applied_paths`] over the applied layer, `error_packages` the union of
-/// both indexes'.
+/// [`applied_paths`] over the applied layer, `errors` both indexes'
+/// `error_packages` ([`ErrorPackages`]).
 pub fn classify(
     diff: &SkyDiff,
     from: Option<&BTreeSet<String>>,
     to: Option<&BTreeSet<String>>,
     applied_paths: &BTreeSet<String>,
-    error_packages: &BTreeSet<String>,
+    errors: &ErrorPackages,
 ) -> (Vec<Row>, Vec<Row>) {
     let trees = from.zip(to);
     let missing = diff
         .missing
         .iter()
-        .map(|item| row(item, missing_class(item, trees, applied_paths, error_packages)))
+        .map(|item| row(item, missing_class(item, trees, applied_paths, errors), to))
         .collect();
     let extra = diff
         .extra
         .iter()
-        .map(|item| row(item, extra_class(item, to, error_packages)))
+        .map(|item| row(item, extra_class(item, to, errors), to))
         .collect();
     (missing, extra)
 }
 
-fn row(item: &SkyItem, class: RowClass) -> Row {
-    let (path, package) = located(item);
+fn row(item: &SkyItem, class: RowClass, to: Option<&BTreeSet<String>>) -> Row {
+    let (path, package) = located(item, to);
     Row {
         item: item.clone(),
         path,
@@ -319,13 +392,27 @@ fn row(item: &SkyItem, class: RowClass) -> Row {
     }
 }
 
+/// [`locate`], with the package a file, listing or `.bzl` row sits in read
+/// off the tree at the compared commit when the key itself names none. A
+/// package that failed to load has its glob inputs and probes on one side
+/// and not the other, and those rows name the package only through the
+/// tree.
+fn locate_in(name: &SkyName, to: Option<&BTreeSet<String>>) -> (Option<String>, Option<String>) {
+    let (path, package) = locate(name);
+    let package = package.or_else(|| {
+        let (p, tree) = path.as_deref().zip(to)?;
+        enclosing_package(tree, p)
+    });
+    (path, package)
+}
+
 /// An edge is located by its `to` end (the dependency that is absent),
 /// falling back to `from`.
-fn located(item: &SkyItem) -> (Option<String>, Option<String>) {
+fn located(item: &SkyItem, to: Option<&BTreeSet<String>>) -> (Option<String>, Option<String>) {
     match item {
-        SkyItem::Node(n) => locate(n),
-        SkyItem::Edge { from, to } => match locate(to) {
-            (None, None) => locate(from),
+        SkyItem::Node(n) => locate_in(n, to),
+        SkyItem::Edge { from, to: dep } => match locate_in(dep, to) {
+            (None, None) => locate_in(from, to),
             l => l,
         },
     }
@@ -346,11 +433,11 @@ fn missing_class(
     item: &SkyItem,
     trees: Trees<'_>,
     applied_paths: &BTreeSet<String>,
-    error_packages: &BTreeSet<String>,
+    errors: &ErrorPackages,
 ) -> RowClass {
     endpoints(item)
         .into_iter()
-        .map(|n| missing_node_class(n, trees, applied_paths, error_packages))
+        .map(|n| missing_node_class(n, trees, applied_paths, errors))
         .max_by_key(|c| match c {
             RowClass::CreatedInWindow => 2,
             RowClass::LoadError => 1,
@@ -363,18 +450,18 @@ fn missing_node_class(
     name: &SkyName,
     trees: Trees<'_>,
     applied_paths: &BTreeSet<String>,
-    error_packages: &BTreeSet<String>,
+    errors: &ErrorPackages,
 ) -> RowClass {
     let Some((from, to)) = trees else {
         return RowClass::Unexplained;
     };
-    let (path, package) = locate(name);
+    let (path, package) = locate_in(name, Some(to));
     if let Some(root) = path.as_deref().and_then(|p| created_root(p, from, to)) {
         if !exists(applied_paths, &root) {
             return RowClass::CreatedInWindow;
         }
     }
-    if package.is_some_and(|p| error_packages.contains(&p)) {
+    if package.is_some_and(|p| errors.excuses_missing(&p)) {
         return RowClass::LoadError;
     }
     RowClass::Unexplained
@@ -382,9 +469,15 @@ fn missing_node_class(
 
 /// The directory created inside the window that `p` sits under: the
 /// shallowest prefix, absent at `from`, of the deepest ancestor of `p` that
-/// exists at `to` (`p` itself when it does; a `BUILD` probe of a directory
-/// with no `BUILD` resolves through the directory). `None` when that
-/// ancestor already existed at `from`, or when `p` has none.
+/// is a directory at `to` (`p` itself when it is one; a `BUILD` probe of a
+/// directory with no `BUILD` resolves through the directory). `None` when
+/// that ancestor already existed at `from`, or when `p` has none.
+///
+/// A file is never the root. A file added to a directory that existed at
+/// `from` has no created directory above it, and its own rows are exactly
+/// what the refresh of its package had to write; a `.bzl` in particular has
+/// consumers, and a layer without its `BZL_LOAD` node dirties nothing when
+/// it changes.
 fn created_root(p: &str, from: &BTreeSet<String>, to: &BTreeSet<String>) -> Option<String> {
     let mut anchor = p;
     while !exists(to, anchor) {
@@ -393,23 +486,27 @@ fn created_root(p: &str, from: &BTreeSet<String>, to: &BTreeSet<String>) -> Opti
     if anchor.is_empty() {
         return None;
     }
-    anchor
-        .match_indices('/')
-        .map(|(i, _)| i)
-        .chain(std::iter::once(anchor.len()))
-        .map(|i| &anchor[..i])
+    // Every proper prefix of the anchor is a directory at `to`; the anchor
+    // itself is one only when something sits under it.
+    let ancestors = anchor.match_indices('/').map(|(i, _)| &anchor[..i]);
+    let whole = is_dir(to, anchor).then_some(anchor);
+    ancestors
+        .chain(whole)
         .find(|prefix| !exists(from, prefix))
         .map(str::to_string)
 }
 
 /// An extra is deleted-in-window when an end names a path gone at `to`, a
-/// load error when an end's package failed, else other. With no tree,
-/// other.
-fn extra_class(item: &SkyItem, to: Option<&BTreeSet<String>>, error_packages: &BTreeSet<String>) -> RowClass {
+/// load error when either index says an end's package failed, else other.
+/// With no tree, other.
+fn extra_class(item: &SkyItem, to: Option<&BTreeSet<String>>, errors: &ErrorPackages) -> RowClass {
     let Some(to) = to else {
         return RowClass::Other;
     };
-    let ends: Vec<(Option<String>, Option<String>)> = endpoints(item).into_iter().map(locate).collect();
+    let ends: Vec<(Option<String>, Option<String>)> = endpoints(item)
+        .into_iter()
+        .map(|n| locate_in(n, Some(to)))
+        .collect();
     if ends
         .iter()
         .any(|(p, _)| p.as_deref().is_some_and(|p| !exists(to, p)))
@@ -418,7 +515,7 @@ fn extra_class(item: &SkyItem, to: Option<&BTreeSet<String>>, error_packages: &B
     }
     if ends
         .iter()
-        .any(|(_, pkg)| pkg.as_deref().is_some_and(|p| error_packages.contains(p)))
+        .any(|(_, pkg)| pkg.as_deref().is_some_and(|p| errors.excuses_extra(p)))
     {
         return RowClass::LoadError;
     }
@@ -443,6 +540,14 @@ mod tests {
 
     fn set(items: &[&str]) -> BTreeSet<String> {
         tree(items)
+    }
+
+    /// Packages the cold build at the compared commit failed to load.
+    fn errs(rebuilt: &[&str]) -> ErrorPackages {
+        ErrorPackages {
+            rebuilt: set(rebuilt),
+            applied: BTreeSet::new(),
+        }
     }
 
     fn diff(missing: Vec<SkyItem>, extra: Vec<SkyItem>) -> SkyDiff {
@@ -475,7 +580,7 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir/sub"));
         assert_eq!(m[0].package.as_deref(), Some("newdir/sub"));
@@ -494,7 +599,7 @@ mod tests {
             Some(&tree(FROM)),
             Some(&tree(TO)),
             &set(&["newdir/BUILD"]),
-            &set(&[]),
+            &errs(&[]),
         );
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
@@ -503,7 +608,7 @@ mod tests {
     #[test]
     fn a_path_present_at_the_base_is_unexplained() {
         let d = diff(vec![SkyItem::Node(name(Kind::File, "lib/a.cc"))], vec![]);
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -520,7 +625,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&["lib"]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
         assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
     }
 
@@ -532,14 +637,14 @@ mod tests {
             vec![SkyItem::Node(name(Kind::FileState, "newdir/sub/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         // But a probe of a directory that exists nowhere resolves to nothing.
         let d = diff(
             vec![SkyItem::Node(name(Kind::FileState, "nowhere/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -553,7 +658,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir"));
         // A load error at either end is a load error.
@@ -564,7 +669,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&["lib"]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
         assert_eq!(classes(&m), vec![RowClass::LoadError]);
     }
 
@@ -583,7 +688,7 @@ mod tests {
                 },
             ],
         );
-        let (_, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
+        let (_, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
         assert_eq!(
             classes(&e),
             vec![RowClass::DeletedInWindow, RowClass::DeletedInWindow, RowClass::Other]
@@ -600,14 +705,157 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
-        let (m, e) = classify(&d, None, None, &set(&[]), &set(&["lib"]));
+        let (m, e) = classify(&d, None, None, &set(&[]), &errs(&["lib"]));
         assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
         assert_eq!(classes(&e), vec![RowClass::Other]);
-        let (m, _) = classify(&d, Some(&tree(FROM)), None, &set(&[]), &set(&[]));
+        let (m, _) = classify(&d, Some(&tree(FROM)), None, &set(&[]), &errs(&[]));
         assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
     }
 
-    /// (ix) What each kind's key names.
+    /// (ix) The applied index's list is history: a package that failed once
+    /// in the window and loads at the pin cannot excuse a hole in its rows.
+    /// An extra never fails, and either list explains one.
+    #[test]
+    fn only_the_cold_builds_load_errors_excuse_a_missing_row() {
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::Package, "lib")),
+                SkyItem::Edge {
+                    from: name(Kind::Package, "lib"),
+                    to: name(Kind::PackageLookup, "lib/sub"),
+                },
+            ],
+            vec![SkyItem::Node(name(Kind::Package, "lib"))],
+        );
+        let applied_only = ErrorPackages {
+            rebuilt: set(&[]),
+            applied: set(&["lib"]),
+        };
+        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &applied_only);
+        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        assert_eq!(classes(&e), vec![RowClass::LoadError]);
+        let both = ErrorPackages {
+            rebuilt: set(&["lib"]),
+            applied: set(&["lib"]),
+        };
+        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &both);
+        assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
+        assert_eq!(classes(&e), vec![RowClass::LoadError]);
+    }
+
+    /// (x) A failed package's glob inputs and probes (its files, listings,
+    /// `.bzl` files) name the package only through the tree, and they are
+    /// load errors with the rest of it. The row carries the package it was
+    /// placed in.
+    #[test]
+    fn a_failed_packages_file_and_listing_rows_are_load_errors_too() {
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::FileState, "lib/a.cc")),
+                SkyItem::Node(name(Kind::DirectoryListing, "lib")),
+                SkyItem::Node(name(Kind::DirectoryListingState, "lib")),
+                SkyItem::Node(name(Kind::File, "lib/BUILD")),
+                SkyItem::Node(name(
+                    Kind::BzlLoad,
+                    "KeyForBuild{label=@@//lib:old.bzl, isBuildPrelude=false}",
+                )),
+                SkyItem::Edge {
+                    from: name(Kind::Glob, "<GlobsKey packageRoot = <workspace>, packageIdentifier = lib, globRequests = []>"),
+                    to: name(Kind::FileState, "lib/a.cc"),
+                },
+            ],
+            vec![SkyItem::Node(name(Kind::FileState, "lib/a.cc"))],
+        );
+        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
+        assert_eq!(classes(&m), vec![RowClass::LoadError; 6], "{m:?}");
+        assert!(m.iter().all(|r| r.package.as_deref() == Some("lib")), "{m:?}");
+        assert_eq!(classes(&e), vec![RowClass::LoadError]);
+        // A file under no package names none, and is not excused.
+        let d = diff(vec![SkyItem::Node(name(Kind::FileState, "old/x.txt"))], vec![]);
+        let to = tree(&["BUILD", "old/x.txt"]);
+        let from = tree(&["BUILD", "old/x.txt"]);
+        let no_root: BTreeSet<String> = ["old/x.txt".to_string()].into();
+        let (m, _) = classify(&d, Some(&no_root), Some(&no_root), &set(&[]), &errs(&["old"]));
+        assert_eq!(classes(&m), vec![RowClass::Unexplained]);
+        assert_eq!(m[0].package, None);
+        // With a root `BUILD` the root package holds it.
+        let (m, _) = classify(&d, Some(&from), Some(&to), &set(&[]), &errs(&[""]));
+        assert_eq!(classes(&m), vec![RowClass::LoadError]);
+        assert_eq!(m[0].package.as_deref(), Some(""));
+    }
+
+    /// (xi) A file added inside the window to a directory that existed at
+    /// the base is not under any created directory: its rows are what the
+    /// refresh of its package had to write, and a hole there is a hole.
+    #[test]
+    fn a_new_file_in_a_directory_that_existed_at_the_base_is_unexplained() {
+        let from = tree(&["BUILD", "lib/BUILD", "lib/a.txt"]);
+        let to = tree(&["BUILD", "lib/BUILD", "lib/a.txt", "lib/b.txt", "lib/new.bzl"]);
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::File, "lib/b.txt")),
+                SkyItem::Node(name(Kind::FileState, "lib/b.txt")),
+                SkyItem::Edge {
+                    from: name(Kind::Glob, "<GlobsKey packageRoot = <workspace>, packageIdentifier = lib, globRequests = []>"),
+                    to: name(Kind::File, "lib/b.txt"),
+                },
+                SkyItem::Node(name(
+                    Kind::BzlLoad,
+                    "KeyForBuild{label=@@//lib:new.bzl, isBuildPrelude=false}",
+                )),
+                SkyItem::Edge {
+                    from: name(Kind::Package, "lib"),
+                    to: name(
+                        Kind::BzlLoad,
+                        "KeyForBuild{label=@@//lib:new.bzl, isBuildPrelude=false}",
+                    ),
+                },
+            ],
+            vec![],
+        );
+        // Whether or not the applied layer knows the directory.
+        for applied in [set(&[]), set(&["lib", "lib/BUILD", "lib/a.txt"])] {
+            let (m, _) = classify(&d, Some(&from), Some(&to), &applied, &errs(&[]));
+            assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
+            assert!(m.iter().all(|r| r.package.as_deref() == Some("lib")), "{m:?}");
+        }
+        // A new directory beside them is still a created root, and a new
+        // file inside a new directory sits under that root.
+        let to = tree(&["BUILD", "lib/BUILD", "lib/a.txt", "lib/gen/out.txt"]);
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::DirectoryListing, "lib/gen")),
+                SkyItem::Node(name(Kind::FileState, "lib/gen/out.txt")),
+            ],
+            vec![],
+        );
+        let (m, _) = classify(&d, Some(&from), Some(&to), &set(&["lib/BUILD"]), &errs(&[]));
+        assert_eq!(classes(&m), vec![RowClass::CreatedInWindow; 2], "{m:?}");
+    }
+
+    /// (xii) The package a path sits in is the nearest `BUILD` above it.
+    #[test]
+    fn the_enclosing_package_is_the_nearest_build_file_above() {
+        let t = tree(&[
+            "BUILD.bazel",
+            "a/BUILD",
+            "a/b/c.txt",
+            "a/b/BUILD.bazel",
+            "x/y/z.txt",
+        ]);
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(enclosing_package(&t, "a/b/c.txt"), s("a/b"));
+        assert_eq!(enclosing_package(&t, "a/b"), s("a/b"));
+        assert_eq!(enclosing_package(&t, "a/other.txt"), s("a"));
+        assert_eq!(enclosing_package(&t, "a/sub/BUILD"), s("a"));
+        assert_eq!(enclosing_package(&t, "x/y/z.txt"), s(""));
+        assert_eq!(enclosing_package(&t, ""), s(""));
+        let no_root = tree(&["a/BUILD", "x/y/z.txt"]);
+        assert_eq!(enclosing_package(&no_root, "x/y/z.txt"), None);
+        assert_eq!(enclosing_package(&no_root, ""), None);
+    }
+
+    /// (xiii) What each kind's key names.
     #[test]
     fn every_kind_locates_what_its_key_names() {
         let s = |v: &str| Some(v.to_string());
@@ -664,7 +912,7 @@ mod tests {
         assert_eq!(locate(&name(Kind::Tombstone, "gone")), (None, None));
     }
 
-    /// (x) The document round-trips through its file, under the versioned
+    /// (xiv) The document round-trips through its file, under the versioned
     /// name beside the walk result, sorted unexplained-first.
     #[test]
     fn the_sidecar_round_trips_under_its_versioned_name() {
@@ -686,7 +934,7 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
-        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &set(&[]));
+        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
         let doc = RebuildRows::new("subj", "abc123", "f0", "abc123", "9.2.0", m, e);
         assert_eq!(
             classes(&doc.missing),
@@ -723,5 +971,11 @@ mod tests {
         assert!(!exists(&t, "a/"));
         assert!(!exists(&t, "b"));
         assert!(exists(&t, "z"));
+        // A file is not a directory; the root is.
+        assert!(is_dir(&t, ""));
+        assert!(is_dir(&t, "a/b"));
+        assert!(!is_dir(&t, "a/b/c.txt"));
+        assert!(!is_dir(&t, "z"));
+        assert!(!is_dir(&t, "nowhere"));
     }
 }
