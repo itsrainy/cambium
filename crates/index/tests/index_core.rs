@@ -299,6 +299,54 @@ fn a_generated_file_is_one_hop_between_consumer_and_generator() {
     assert_eq!(r.depth_of(m["//u:u"]), Some(2));
 }
 
+/// The shape xla's `cc_ir_header` macro writes, end to end: a source file is
+/// the `srcs` of a `cc_library`, a custom rule takes that library and the same
+/// source, a genrule takes the custom rule and declares two outputs, and the
+/// exposed `cc_library` takes both generated files, which a test then depends
+/// on. Seven hops, two of them through a generated file.
+///
+/// Issue #23 named this chain as the suspect for the xla main-repo misses,
+/// on the grounds that a generated file has one forward edge and nobody had
+/// checked where it leads. It leads where it should: a change to the source
+/// reaches the test at the far end, and every rule on the way is reported.
+#[test]
+fn a_generated_header_chain_reaches_the_tests_that_consume_it() {
+    let mut b = IndexBuilder::new(new_lineage());
+    b.apply_packages(&[
+        pkg(
+            "ir",
+            vec![
+                TargetRow::source_file("//ir:vector_ops.h"),
+                rule("ir", "ll_lib", &[], &["//ir:vector_ops.h"]),
+                rule("ir", "ll_extract_bc", &["//ir:ll_lib"], &["//ir:vector_ops.h"]),
+                rule("ir", "ll_gen", &["//ir:ll_extract_bc"], &[]),
+                generated("//ir:ll.o", "//ir:ll_gen"),
+                generated("//ir:ll.h", "//ir:ll_gen"),
+                rule("ir", "ll", &["//ir:ll.o", "//ir:ll.h"], &[]),
+            ],
+        ),
+        pkg("t", vec![rule("t", "lit", &["//ir:ll"], &[])]),
+    ]);
+    let d = b.finish("1");
+    let v = d.view();
+    let m = v.labels.build_map();
+
+    let r = walk(v, &[m["//ir:vector_ops.h"]], &WalkOptions::default());
+    assert_eq!(
+        view::labels_sorted(&v, &r.affected),
+        vec![
+            "//ir:ll",
+            "//ir:ll_extract_bc",
+            "//ir:ll_gen",
+            "//ir:ll_lib",
+            "//t:lit",
+        ]
+    );
+    // Source -> cc_library -> custom rule -> genrule -> generated header ->
+    // exposed cc_library -> test.
+    assert_eq!(r.depth_of(m["//t:lit"]), Some(6));
+}
+
 /// Re-querying only the generator's package after a different rule starts
 /// producing the file must leave the consumer's row identical to what a full
 /// rebuild writes. That is exactly what redirecting consumers straight at the
