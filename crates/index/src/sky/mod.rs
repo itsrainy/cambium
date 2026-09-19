@@ -1245,15 +1245,24 @@ fn authoritative(node: &SkyNode, requeried: &BTreeSet<String>) -> bool {
 }
 
 /// The package a glob key names, in either major's spelling: Bazel 8/9
-/// write `packageIdentifier = pkg,`; Bazel 7 writes `packageName=pkg `.
-/// The name runs to the first character a package name cannot hold, so `a`
-/// never claims `ab`'s glob. `None` for a key in neither spelling.
+/// write `packageIdentifier = pkg, globRequests = [...]`; Bazel 7 writes
+/// `packageName=pkg packageRoot=...`. The name runs to the field that
+/// follows it in its spelling, not to a character class: a package name may
+/// hold a space, a comma, an `@` and most other punctuation, and a key of
+/// another repository spells its package `@@repo//pkg`, none of which a
+/// class of name characters would read whole (and the root package's empty
+/// name would then claim every external glob). `None` for a key in neither
+/// spelling.
 pub fn glob_package(text: &str) -> Option<&str> {
-    for prefix in ["packageIdentifier = ", "packageName="] {
+    for (prefix, next_field, delimiter) in [
+        ("packageIdentifier = ", ", globRequests = ", [',', '>']),
+        ("packageName=", " packageRoot=", [' ', '>']),
+    ] {
         let Some(i) = text.find(prefix) else { continue };
         let rest = &text[i + prefix.len()..];
         let end = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || "/._+-".contains(c)))
+            .find(next_field)
+            .or_else(|| rest.find(delimiter))
             .unwrap_or(rest.len());
         return Some(&rest[..end]);
     }
