@@ -48,7 +48,7 @@ An error ends the run; exit codes are in the README's table.
 | `CAMBI-E011` | an io error against the store | Check path/permissions on `[baseline].store`; exit 5 |
 | `CAMBI-E012` | the store backend doesn't support the operation (listing, gc) | Use a backend that does, or skip it |
 | `CAMBI-E013` | the command line doesn't make sense, e.g. a format a verb can't render | Message names the flag; `cambi <verb> --help` lists what it takes |
-| `CAMBI-E014` | `cambium.local.toml` sets a key that's part of the config hash, deciding the graph, not the machine | Move it into `cambium.toml`; only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`, `baseline.compress_indexes`, `baseline.publish_partial` may appear locally |
+| `CAMBI-E014` | `cambium.local.toml` sets a key that's part of the config hash, deciding the graph, not the machine | Move it into `cambium.toml`; only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`, `baseline.compress_indexes`, `baseline.publish_partial` may appear locally. Of those, the rc-chain startup flags (`--bazelrc=`, `--noworkspace_rc`) are still hashed, so setting them locally makes that machine its own lineage |
 | `CAMBI-E015` | the Bazel binary wasn't found on `$PATH`, or printed no version | Install Bazel/bazelisk, or name it via `--bazel-binary` / `[bazel].binary` / `bazel.binary` |
 | `CAMBI-E016` | `cambi doctor` published a probe object to the store and couldn't read it back | Same calls `--publish` uses; confirm `[baseline].store` writable |
 | `CAMBI-E017` | a `cambi inspect` query named a label, package or node kind the index lacks | `cambi inspect targets <package>` lists a package's targets; `cambi inspect owner <path>` says which package owns a path |

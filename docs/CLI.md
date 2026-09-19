@@ -206,9 +206,14 @@ Hashed into every index produced; a hash mismatch blocks a splice.
 
 Beside it, gitignored, `cambium.local.toml` holds what's local, not the
 graph: only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
-`baseline.compress_indexes`, `baseline.publish_partial`, each excluded from
-the config hash so machine-local overrides can't falsely claim checkouts
-interchangeable; any other key is `CAMBI-E014`, naming key and file.
+`baseline.compress_indexes`, `baseline.publish_partial`, excluded from the
+config hash so machine-local overrides can't falsely claim checkouts
+interchangeable; any other key is `CAMBI-E014`, naming key and file. One
+exception, and it cuts the same way: the startup flags that decide which
+files are rc files at all (`--bazelrc=`, `--noworkspace_rc`) are hashed,
+because under `--noworkspace_rc` the root `.bazelrc` is a source file the
+run may skip. A machine that sets them gets its own lineage rather than
+splicing onto one built without them.
 `--cache-dir`, `--bazel-binary`, `CAMBIUM_CACHE_DIR` and `--config` take
 precedence over both files.
 

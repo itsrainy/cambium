@@ -167,6 +167,32 @@ pub const WORKSPACE_RC: &str = ".bazelrc";
 /// rc carries a query flag the pinned Bazel refuses; under it the root rc is
 /// not an rc file for this workspace at all, and an edit to it is an
 /// ordinary source change.
+/// The startup flags that decide *which files are rc files*, normalised.
+///
+/// The rest of `[bazel].startup_flags` picks a server (`--output_base=`,
+/// `--host_jvm_args=`) and says nothing about the graph. These two kinds do
+/// say something: `--bazelrc=` adds a file to the chain, and
+/// `--noworkspace_rc` takes the root `.bazelrc` out of it, which is what
+/// makes an edit to that file an ordinary source change the run may skip.
+/// So they are part of the config hash, and two checkouts that disagree
+/// about them are different lineages rather than silently spliceable ones.
+///
+/// Normalised so that only the effective answer is hashed: the `_rc` pair is
+/// last-wins and contributes nothing when it leaves Bazel's default alone.
+pub fn rc_chain_flags(startup_flags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !reads_workspace_rc(startup_flags) {
+        out.push("--noworkspace_rc".to_string());
+    }
+    out.extend(
+        startup_flags
+            .iter()
+            .filter(|f| f.starts_with("--bazelrc="))
+            .cloned(),
+    );
+    out
+}
+
 pub fn reads_workspace_rc(startup_flags: &[String]) -> bool {
     startup_flags.iter().fold(true, |on, f| match f.as_str() {
         "--noworkspace_rc" => false,
