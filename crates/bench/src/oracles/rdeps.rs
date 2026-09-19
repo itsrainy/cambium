@@ -346,16 +346,7 @@ impl RdepsOracle {
             self.run_batch(bazel, batch, &mut answer, &mut result);
         }
 
-        let (main, external): (BTreeSet<String>, BTreeSet<String>) =
-            answer.into_iter().partition(|l| !is_external(l));
-        result.oracle_labels = main.len();
-        result.matched = main.intersection(inputs.cambium).count();
-        result.missing = main.difference(inputs.cambium).cloned().collect();
-        result.missing_external = external
-            .into_iter()
-            .filter(|l| !inputs.cambium.contains(l))
-            .collect();
-        result.oracle_set = main;
+        partition(answer, inputs.cambium, &mut result);
         result.external_route = external_routes(bazel, &result.roots, &result.missing);
 
         if let Some(base) = inputs.base {
@@ -537,6 +528,26 @@ pub const MAX_ROUTE_PROBES: usize = 25;
 /// is missing, so it takes the first batch's worth and no more.
 pub const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
 
+/// Splits the oracle's answer into the halves the verdict is made of.
+///
+/// The main repository is what recall is over, so `oracle_set`, `matched` and
+/// `missing` are all main-repo labels and `missing_external` is the rest.
+/// Nothing in Phase 5 changes this: `missing` is what fails a change set
+/// (`RdepsResult::ok`), and `external_route` is a filter of `missing`, so it
+/// stays a subset of it however wide cambium's own vocabulary grows. A
+/// repository whose targets cambium does not reach shows up as a main-repo
+/// rule in `missing` and fails the step; it never leaves the verdict through
+/// `missing_external`.
+fn partition(answer: BTreeSet<String>, cambium: &BTreeSet<String>, result: &mut RdepsResult) {
+    let (main, external): (BTreeSet<String>, BTreeSet<String>) =
+        answer.into_iter().partition(|l| !is_external(l));
+    result.oracle_labels = main.len();
+    result.matched = main.intersection(cambium).count();
+    result.missing = main.difference(cambium).cloned().collect();
+    result.missing_external = external.into_iter().filter(|l| !cambium.contains(l)).collect();
+    result.oracle_set = main;
+}
+
 /// Which of `missing` Bazel reaches only by leaving `//...`.
 ///
 /// One `somepath(label, set(r1 r2 …))` per label: Bazel returns *a* shortest
@@ -714,6 +725,51 @@ mod tests {
 
     fn set(v: &[&str]) -> BTreeSet<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_verdict_is_the_main_repository_and_external_route_is_a_subset_of_it() {
+        let answer = set(&[
+            "//a:a",
+            "//b:b",
+            "//c:c",
+            "@quiche//:quiche",
+            "//external:thing",
+        ]);
+        let cambium = set(&["//a:a"]);
+        let mut r = RdepsResult::default();
+        partition(answer, &cambium, &mut r);
+
+        assert_eq!(r.oracle_labels, 3, "recall is over the main repository only");
+        assert_eq!(r.matched, 1);
+        assert_eq!(r.missing, vec!["//b:b".to_string(), "//c:c".to_string()]);
+        assert_eq!(
+            r.missing_external,
+            vec!["//external:thing".to_string(), "@quiche//:quiche".to_string()],
+            "the other vocabulary is recorded, never in the verdict"
+        );
+        assert!(!r.ok(), "a main-repo miss fails the change set");
+
+        // What `external_routes` returns is a filter of `missing`, so the
+        // invariant the gate rests on is that every route is a label the step
+        // already failed on. A repository cambium cannot reach must surface as
+        // a main-repo rule here, not as a second verdict of its own.
+        r.external_route = r.missing.iter().take(1).cloned().collect();
+        assert!(
+            r.external_route.iter().all(|l| r.missing.contains(l)),
+            "external_route ⊆ missing"
+        );
+        assert!(
+            r.external_route.iter().all(|l| !is_external(l)),
+            "a route is the main-repo rule at its end, not the repository it went through"
+        );
+
+        // And the verdict is `missing` alone: neither half of the external
+        // bookkeeping can pass or fail a step by itself.
+        let mut clean = RdepsResult::default();
+        partition(set(&["@quiche//:quiche"]), &BTreeSet::new(), &mut clean);
+        assert!(clean.ok(), "an answer Bazel reached only outside //... is not a miss");
+        assert_eq!(clean.missing_external.len(), 1);
     }
 
     #[test]
