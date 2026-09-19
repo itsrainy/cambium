@@ -14,23 +14,37 @@ use crate::query::{PackageQuerier, Rows};
 pub struct SynthQuerier<'a> {
     pub graph: &'a SynthGraph,
     files: SynthFiles<'a>,
+    /// Paths in the tree that no target names: a README, a directory of
+    /// notes. A cold `//...` walk lists every directory and a refresh only
+    /// what re-querying its packages reached, which is the difference the
+    /// bench's rebuild oracle classifies, so a test can hand a querier the
+    /// loose paths one side of it saw.
+    loose: Vec<String>,
 }
 
 impl<'a> SynthQuerier<'a> {
     pub fn new(graph: &'a SynthGraph) -> Self {
+        Self::with_loose_paths(graph, Vec::new())
+    }
+
+    /// A querier whose tree also holds `loose`, paths no target names.
+    pub fn with_loose_paths(graph: &'a SynthGraph, loose: Vec<String>) -> Self {
         Self {
             graph,
             files: SynthFiles(graph),
+            loose,
         }
     }
 }
 
 impl SynthQuerier<'_> {
-    /// Every path of the synthetic workspace: the Starlark files, and the
-    /// source files each live target names. A `glob` sees the second kind, so
-    /// the loading layer needs them to have directory listings.
+    /// Every path of the synthetic workspace: the Starlark files, the source
+    /// files each live target names, and the loose paths. A `glob` sees the
+    /// second kind, so the loading layer needs them to have directory
+    /// listings.
     fn tree_paths(&self) -> Vec<String> {
         let mut out = self.starlark_files().unwrap_or_default();
+        out.extend(self.loose.iter().cloned());
         for p in &self.graph.packages {
             if !p.alive {
                 continue;

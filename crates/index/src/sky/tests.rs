@@ -628,6 +628,53 @@ fn a_glob_keys_package_is_read_out_in_either_spelling() {
     assert_eq!(glob_package("PACKAGE:a"), None);
 }
 
+/// A package name may hold any character Bazel's label spelling allows (a
+/// space, a comma, an `@`), so the name is read to the field that follows
+/// it, not to a class of name characters; and an external key names its
+/// repository, never the root package.
+#[test]
+fn a_glob_keys_package_is_read_to_the_next_field_whatever_it_holds() {
+    assert_eq!(
+        glob_package(
+            "<GlobsKey packageRoot = /ws, packageIdentifier = third_party/@types, \
+             globRequests = [GlobRequest: *.ts FILES]>"
+        ),
+        Some("third_party/@types")
+    );
+    assert_eq!(
+        glob_package(
+            "<GlobsKey packageRoot = /ws, packageIdentifier = docs/a, b, \
+             globRequests = [GlobRequest: *.md FILES]>"
+        ),
+        Some("docs/a, b")
+    );
+    assert_eq!(
+        glob_package(
+            "<GlobDescriptor packageName=docs/foo bar packageRoot=/ws subdir= \
+             pattern=*.txt globberOperation=FILES>"
+        ),
+        Some("docs/foo bar")
+    );
+    let external = "<GlobsKey packageRoot = /ext/rules_cc, packageIdentifier = @@rules_cc//cc, \
+                    globRequests = [GlobRequest: *.bzl FILES]>";
+    assert_eq!(glob_package(external), Some("@@rules_cc//cc"));
+    assert!(!glob_names_package(external, ""));
+    assert!(!glob_names_package(external, "cc"));
+    assert!(glob_names_package(
+        "<GlobsKey packageRoot = /ws, packageIdentifier = third_party/@types, globRequests = []>",
+        "third_party/@types"
+    ));
+    assert!(!glob_names_package(
+        "<GlobsKey packageRoot = /ws, packageIdentifier = third_party/@types, globRequests = []>",
+        "third_party/"
+    ));
+    // A key in a spelling with no following field still ends at the closer.
+    assert_eq!(
+        glob_package("<GlobsKey packageIdentifier = a/b>"),
+        Some("a/b")
+    );
+}
+
 /// A deleted package's `PACKAGE` row is retired, so nothing reaches it and it
 /// names no package; its `PACKAGE_LOOKUP` survives, because the directory is
 /// still a directory and a later commit re-adding the `BUILD` file moves it.

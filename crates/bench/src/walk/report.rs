@@ -65,23 +65,18 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             "Rebuild oracle at the pin: {}.",
             if o.ok { "held" } else { &o.summary }
         );
+        // The same tallies whether or not the oracle held: a PASS reached by
+        // excusing thousands of missing rows has to say so where the verdict
+        // is read, not only in the sidecar.
         if let Some(file) = &o.rows {
             let c = &o.sky;
-            if o.ok {
-                let _ = write!(
-                    out,
-                    " Loading layer: {} extra rows ({} for paths deleted in the window or a \
-                     package that failed to load); rows in walk/{file}.",
-                    c.extra, c.extra_expected
-                );
-            } else {
-                let _ = write!(
-                    out,
-                    " Loading layer: {} missing rows, {} expected (created in the window or a \
-                     package that failed to load), {} unexplained; rows in walk/{file}.",
-                    c.missing, c.missing_expected, c.missing_unexplained
-                );
-            }
+            let _ = write!(
+                out,
+                " Loading layer: {} missing rows ({} expected: created in the window or a \
+                 package that failed to load; {} unexplained), {} extra ({} for paths deleted \
+                 in the window or a package that failed to load); rows in walk/{file}.",
+                c.missing, c.missing_expected, c.missing_unexplained, c.extra, c.extra_expected
+            );
         }
         let _ = writeln!(out);
     }
@@ -249,9 +244,11 @@ mod tests {
                 summary: String::new(),
                 rows: Some("rebuild-bbbbbbbbbbbb0-7.4.1.json".into()),
                 sky: crate::walk::RowCounts {
+                    missing: 6712,
+                    missing_expected: 6712,
+                    missing_unexplained: 0,
                     extra: 4,
                     extra_expected: 3,
-                    ..Default::default()
                 },
             }),
             head_index: None,
@@ -274,7 +271,11 @@ mod tests {
         assert!(md.contains("Index build: 5000 ms"));
         assert!(md.contains("full run per step"));
         assert!(md.contains("Rebuild oracle at the pin: held"));
-        assert!(md.contains("4 extra rows (3 for paths deleted"), "{md}");
+        // A held oracle still says how many missing rows it excused.
+        assert!(
+            md.contains("6712 missing rows (6712 expected: created in the window or a package that failed to load; 0 unexplained), 4 extra (3 for paths deleted"),
+            "{md}"
+        );
         assert!(md.contains("rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json"), "{md}");
         assert!(md.contains("bazel 7.4.1"));
     }
@@ -299,7 +300,7 @@ mod tests {
         let md = render(&r);
         assert!(md.contains("Rebuild oracle at the pin: loading layer rows missing: 5"), "{md}");
         assert!(
-            md.contains("Loading layer: 5 missing rows, 3 expected (created in the window or a package that failed to load), 2 unexplained; rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
+            md.contains("Loading layer: 5 missing rows (3 expected: created in the window or a package that failed to load; 2 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
             "{md}"
         );
     }
