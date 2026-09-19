@@ -20,14 +20,19 @@ sound. Everything below is one of those two, at some scale.
 | Workspace-level `.bzl` whose repositories cannot be named | a changed `.bzl` reached through `KeyForBzlmod` / `KeyForWorkspace` with no attribution | `CAMBI-W009` | `crates/engine/src/run.rs` (`workspace_bzl`), `crates/engine/src/externals.rs` |
 | `WORKSPACE` statement not localised | a statement the shape reader cannot place, including any reordering; the file added or removed | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/workspace.rs` |
 | `MODULE.bazel` or lockfile not localised | an unparsed statement, lock added or removed, unknown lock key, format version change | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/lockfile.rs` |
-| Toolchain declaration | a `toolchain`, `platform` or `toolchain_type` rule the splice added, changed or tombstoned, in any package | `CAMBI-W023` | `crates/engine/src/run.rs` (`toolchain_rules`), `crates/index/src/vocabulary.rs` (`TOOLCHAIN_RULE_CLASSES`) |
-| Toolchain registration | `register_toolchains`, `register_execution_platforms` in `MODULE.bazel` or `WORKSPACE` | `CAMBI-W023` | `crates/engine/src/externals.rs`, `crates/index/src/externals/module_diff.rs`, `crates/index/src/workspace.rs` |
+| Toolchain declaration | a `toolchain`, `platform`, `toolchain_type`, `constraint_setting` or `constraint_value` rule the splice added, changed or tombstoned, in any package; decided after the query, so a dry run cannot reach it | `CAMBI-W023` | `crates/engine/src/run.rs` (`toolchain_rules`), `crates/index/src/vocabulary.rs` (`TOOLCHAIN_RULE_CLASSES`) |
+| Toolchain registration | `register_toolchains`, `register_execution_platforms` in `MODULE.bazel`, in a `*.MODULE.bazel` segment the root `include()`s, or in `WORKSPACE` | `CAMBI-W023` | `crates/engine/src/externals.rs`, `crates/index/src/externals/module_diff.rs`, `crates/index/src/workspace.rs` |
+| Registered repository moved | any route dirtied an external repository that a registration pattern at head offers rules from, except one dirtied only through a path a target the repository rule writes names | `CAMBI-W023` | `crates/engine/src/externals.rs` (`registered_repository_moved`), `crates/index/src/vocabulary.rs` (`registration_repo`) |
 | Toolchain module moved | any module on `TOOLCHAIN_MODULES` bumped, overridden or re-pinned | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
 The `.bazelrc` screen is the dominant cause on the subjects: 13 of envoy's 18
 history globals and 6 of xla's 7 (docs/RESULTS.md). The rest fire rarely; the
-invalidator lists of every subject are now empty.
+invalidator lists of every subject are now empty. The three `CAMBI-W023` rows
+postdate those numbers and are unmeasured on a full walk. The last of them is
+the one with room to surprise: a tree whose `MODULE.bazel` registers from an
+extension-defined repository now answers `//...` on any route that dirties
+that repository, where it used to name the repository and stop.
 
 ## Cost only, answer exact
 

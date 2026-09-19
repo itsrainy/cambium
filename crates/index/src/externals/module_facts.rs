@@ -93,9 +93,63 @@ pub struct ModuleFacts {
     /// order. Toolchain resolution has no edge in the graph, so any movement
     /// here is global.
     pub registrations: Vec<String>,
+    /// The repositories those registrations offer rules from, by the name
+    /// written in the pattern (`register_toolchains("@x//:all")` names `x`).
+    /// A main-repo pattern names none: its rules are rows of `//...`. The
+    /// root module's own name can appear here (`@demo//tc:all`), and it is
+    /// the reader's business to know it is the main repository.
+    pub registration_repos: BTreeSet<String>,
+    /// Main-repo paths of the `include()`d segments (Bazel 7.2 and later),
+    /// in order. A segment is textually part of this file; whoever reads it
+    /// follows these at the same revision and [`ModuleFacts::absorb`]s each
+    /// one's facts, which also appends the segment's own includes here.
+    pub includes: Vec<String>,
     /// Top-level statements the parser did not recognise, rendered. A run that
     /// sees one of these on either side of a diff goes global.
     pub unparsed: Vec<String>,
+}
+
+impl ModuleFacts {
+    /// Merges an `include()`d segment's facts into the root's.
+    ///
+    /// Bazel reads an included file as if its text stood where the
+    /// `include()` call is, except that variable bindings stay in the file
+    /// they were made in; scanning each file on its own and merging the
+    /// results is exactly that. An extension asked for from two files is one
+    /// extension with both files' tags, as it is for Bazel. The `module()`
+    /// declaration is the root's alone.
+    pub fn absorb(&mut self, other: ModuleFacts) {
+        self.deps.extend(other.deps);
+        self.overrides.extend(other.overrides);
+        self.local_paths.extend(other.local_paths);
+        self.local_repo_paths.extend(other.local_repo_paths);
+        for (key, e) in other.extensions {
+            let mine = self.extensions.entry(key).or_default();
+            if mine.bzl.is_empty() {
+                mine.bzl = e.bzl;
+                mine.name = e.name;
+            }
+            mine.repos.extend(e.repos);
+            mine.renames.extend(e.renames);
+            mine.tags.extend(e.tags);
+            mine.labels.extend(e.labels);
+            mine.overrides.extend(e.overrides);
+        }
+        for (key, r) in other.repo_rules {
+            let mine = self.repo_rules.entry(key).or_default();
+            if mine.bzl.is_empty() {
+                mine.bzl = r.bzl;
+                mine.rule = r.rule;
+            }
+            mine.repos.extend(r.repos);
+            mine.calls.extend(r.calls);
+            mine.labels.extend(r.labels);
+        }
+        self.registrations.extend(other.registrations);
+        self.registration_repos.extend(other.registration_repos);
+        self.includes.extend(other.includes);
+        self.unparsed.extend(other.unparsed);
+    }
 }
 
 /// What a `MODULE.bazel` edit means.

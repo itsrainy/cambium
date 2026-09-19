@@ -7,12 +7,33 @@
 
 use std::collections::BTreeMap;
 
+use crate::label::{join_path, Label, Repo};
 use crate::starlark::{Arg, ArgKind, Expr, ExprKind, Module, Stmt};
-use crate::vocabulary::{is_local_repo_rule, HARMLESS};
+use crate::vocabulary::{is_local_repo_rule, registration_repo, HARMLESS};
 
 use super::module_facts::{Dep, ModuleFacts};
 use super::path_maps::local_dir;
 use super::pattern::SEP;
+
+/// The suffix Bazel requires of an `include()`d segment's file name.
+pub const MODULE_SEGMENT_SUFFIX: &str = ".MODULE.bazel";
+
+/// The main-repo path an `include()` label names, or `None` for a label that
+/// is not one Bazel would accept there: not in the main repository, no file
+/// name, or a name without the required suffix.
+fn included_path(label: &str) -> Option<String> {
+    let l = Label::parse(label)?;
+    match l.repo() {
+        Repo::Main => {}
+        Repo::Apparent(r) | Repo::Canonical(r) if r.is_empty() => {}
+        _ => return None,
+    }
+    let name = l.explicit_name()?;
+    if !name.ends_with(MODULE_SEGMENT_SUFFIX) {
+        return None;
+    }
+    Some(join_path(l.package(), name))
+}
 
 /// A top-level statement in one of the shapes `MODULE.bazel` is made of:
 /// `f(...)`, `x = f(...)`, `x.tag(...)`, or a bare name.
@@ -195,6 +216,22 @@ pub fn scan_module(text: &str) -> ModuleFacts {
             }
             (None, "register_toolchains") | (None, "register_execution_platforms") => {
                 f.registrations.push(args.render(name));
+                f.registration_repos.extend(
+                    args.strings()
+                        .filter_map(|s| registration_repo(s))
+                        .map(String::from),
+                );
+            }
+            (None, "include") => {
+                // `include("//bazel:x.MODULE.bazel")` (Bazel 7.2 and later):
+                // a segment of this file, textually, which the caller reads
+                // at the same revision and merges in. Bazel accepts only a
+                // main-repo label with that suffix; anything else is a
+                // statement this reader does not know.
+                match args.positional.first().and_then(|l| included_path(l)) {
+                    Some(p) => f.includes.push(p),
+                    None => f.unparsed.push(m.render_all(&span)),
+                }
             }
             (None, n) if n.ends_with("_override") => {
                 let module = args.first("module_name").unwrap_or_default().to_string();

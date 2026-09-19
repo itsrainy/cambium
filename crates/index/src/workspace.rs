@@ -64,7 +64,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::label::{Label, Repo};
 use crate::starlark::{Arg, Expr, ExprKind, Module, Stmt};
 use crate::util::diff_maps;
-use crate::vocabulary::{is_local_repo_rule, registers_toolchains, NOT_JUST_A_REPOSITORY};
+use crate::vocabulary::{
+    is_local_repo_rule, registers_toolchains, registration_repo, NOT_JUST_A_REPOSITORY,
+};
 
 /// What a `WORKSPACE` edit means.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +186,34 @@ fn call_shape<'s, 'a>(st: &'s Stmt<'a>) -> Option<(&'a str, &'s [Arg<'a>])> {
         }) => callee.as_name().map(|n| (n, args.as_slice())),
         _ => None,
     }
+}
+
+/// The repositories a `WORKSPACE`'s `register_toolchains` /
+/// `register_execution_platforms` calls offer rules from, by the name written
+/// in each pattern ([`registration_repo`]).
+///
+/// A macro that registers on the file's behalf (a `go_register_toolchains`
+/// with a version) names its repositories inside its own `.bzl`, which this
+/// cannot see; the escalation for a moved call covers the macro moving, and
+/// this answers only for a repository that moved under an unchanged call.
+pub fn registration_repos(text: &str) -> BTreeSet<String> {
+    let m = Module::parse(text);
+    let mut out = BTreeSet::new();
+    for st in &m.stmts {
+        let Some((callee, args)) = call_shape(st) else {
+            continue;
+        };
+        if !registers_toolchains(callee) {
+            continue;
+        }
+        out.extend(
+            m.args(args)
+                .strings()
+                .filter_map(|s| registration_repo(s))
+                .map(String::from),
+        );
+    }
+    out
 }
 
 /// Diffs two `WORKSPACE` texts.
@@ -386,6 +416,23 @@ mod tests {
         // And removing it again is the same statement moving the other way.
         let (repos, _) = moved(diff_workspace(&head, BASE));
         assert_eq!(repos, ["extra".to_string()].into());
+    }
+
+    /// The repositories the file registers toolchains from, for the run to
+    /// hold its dirty repositories against; a main-repo pattern and a macro
+    /// with no pattern name none.
+    #[test]
+    fn the_registration_patterns_name_their_repositories() {
+        let text = format!(
+            "{BASE}register_toolchains(\"//tc:all\", \"@llvm_toolchain//:all\")\n\
+             register_execution_platforms(\"@@plat+//:host\")\n\
+             go_register_toolchains(version = \"1.20\")\n"
+        );
+        assert_eq!(
+            registration_repos(&text),
+            ["llvm_toolchain".to_string(), "plat+".to_string()].into()
+        );
+        assert!(registration_repos(BASE).is_empty());
     }
 
     /// A macro from a main-repo `.bzl`: the file is named, and the index says

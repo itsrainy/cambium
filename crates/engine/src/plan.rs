@@ -6,9 +6,15 @@
 //!
 //! Everything here runs against git and the store and never against Bazel. The
 //! stages are the run's own — the position probe, the bazelrc screen, the
-//! external-repository analysis, the classifier's dirty set — so the plan
-//! cannot say one thing and the run then do another. What genuinely needs
-//! Bazel is not guessed at: it is reported as unknown until queried.
+//! external-repository analysis, the classifier's dirty set — so the dirty
+//! set, the cold-rebuild decision and every global the run reaches before its
+//! query are the plan's too. What genuinely needs Bazel is not guessed at: it
+//! is reported as unknown until queried, and one verdict is in that class. The
+//! toolchain check (`CAMBI-W023`) reads rule classes off the rows the query
+//! returns, so a plan that says `splice` or `cold rebuild` can still end as
+//! `//...` when the re-queried packages turn out to hold a toolchain-class
+//! rule that moved. The plan cannot see that from git, and says so on the
+//! modes it applies to rather than claiming the verdict is final.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,12 +28,17 @@ use crate::probe;
 #[serde(rename_all = "snake_case")]
 pub enum PlanMode {
     /// An index is in reach and the dirty packages are few enough to re-query.
+    /// Pending the query: a toolchain-class rule the splice then finds added,
+    /// changed or removed makes the run answer `//...` under `CAMBI-W023`,
+    /// which no stage before the query can see.
     Splice,
     /// An index is in reach, but the dirty set is over
     /// `limits.max_dirty_packages`, so the run re-queries `//...` and splices
-    /// all of it. Still exact; only the cost differs.
+    /// all of it. Still exact; only the cost differs. Pending the query as
+    /// [`PlanMode::Splice`] is.
     ColdRebuild,
-    /// Everything is affected, and the run knows it already.
+    /// Everything is affected, and the run knows it already: this verdict is
+    /// final, since the run reaches it before any query.
     Global,
     /// No usable index anywhere in the store: `bazel query //...` from cold.
     ColdBuild,
@@ -182,9 +193,10 @@ impl Engine {
         // reverse walk over the loading layer the index carries. No Bazel and
         // no checkout: the layer was dumped when the index was built, so a dry
         // run names the same packages the run would re-query.
+        let texts = crate::externals::GitText(&self.repo);
         let mut run = crate::run::Run::new(self, view, &NoQuerier, &req);
-        let mut ext = run.externals(&changes, &crate::externals::GitText(&self.repo));
-        let stage = run.dirty(&screened.changes, &mut ext)?;
+        let mut ext = run.externals(&changes, &texts);
+        let stage = run.dirty(&screened.changes, &mut ext, &texts)?;
 
         plan.dirty_packages = Some(stage.dirty.dirty.len());
         match stage.global {

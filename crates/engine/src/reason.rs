@@ -113,6 +113,13 @@ pub enum ExternalsCause {
     /// `MODULE.bazel`'s `register_toolchains` / `register_execution_platforms`
     /// calls moved. Coded like [`ExternalsCause::WorkspaceRegistration`].
     ModuleRegistration { why: String },
+    /// A repository the stage dirtied is one a registration pattern at head
+    /// offers toolchains or execution platforms from: its declarations are
+    /// not rows of `//...`, so the rule-class check cannot see them move, and
+    /// the route that dirtied it reaches only label consumers and loaders.
+    /// `file` is where the pattern was read. Coded like
+    /// [`ExternalsCause::WorkspaceRegistration`].
+    RegisteredRepository { repo: String, file: String },
     /// `MODULE.bazel.lock` appeared or vanished.
     LockAddedOrRemoved,
     /// The lockfile diff has a change it cannot localise.
@@ -141,6 +148,12 @@ impl fmt::Display for ExternalsCause {
             ExternalsCause::Module { why }
             | ExternalsCause::Lock { why }
             | ExternalsCause::ModuleRegistration { why } => f.write_str(why),
+            ExternalsCause::RegisteredRepository { repo, file } => write!(
+                f,
+                "`@{repo}` moved, and `{file}` registers toolchains or execution platforms from \
+                 it; toolchain resolution has no edge in the query graph, so no reverse walk can \
+                 find what it moves"
+            ),
             ExternalsCause::NestedRepositoryUnmapped { dir } => write!(
                 f,
                 "`{dir}` is a Bazel repository of its own, so `//...` never loaded anything \
@@ -164,6 +177,7 @@ impl ExternalsCause {
             self,
             ExternalsCause::WorkspaceRegistration { .. }
                 | ExternalsCause::ModuleRegistration { .. }
+                | ExternalsCause::RegisteredRepository { .. }
         )
     }
 }
@@ -224,6 +238,13 @@ pub enum GlobalReason {
     },
 }
 
+/// What every [`GlobalReason::ToolchainRule`] sentence ends with, after the
+/// rule and what happened to it. Pinned by the tests below, and the shape
+/// [`GlobalReason::decided_after_query`] reads back.
+const TOOLCHAIN_RULE_TAIL: &str =
+    "; toolchain resolution has no edge in the query graph, so no reverse walk can find what it \
+     moves";
+
 /// `` `one` `` for a single path, `3 changed `.bzl` files` for several.
 fn bzl_files(paths: &[String]) -> String {
     match paths {
@@ -260,11 +281,7 @@ impl fmt::Display for GlobalReason {
                 label,
                 class,
                 change,
-            } => write!(
-                f,
-                "{label} ({class}) was {change}; toolchain resolution has no edge in the query \
-                 graph, so no reverse walk can find what it moves"
-            ),
+            } => write!(f, "{label} ({class}) was {change}{TOOLCHAIN_RULE_TAIL}"),
         }
     }
 }
@@ -282,6 +299,35 @@ impl GlobalReason {
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
             GlobalReason::ToolchainRule { .. } => Code::W023ToolchainMoved,
         }
+    }
+
+    /// Whether a recorded reason sentence is one the run decides after the
+    /// query, over the rows it read back: a toolchain-class rule the splice
+    /// found moved ([`GlobalReason::ToolchainRule`]). Every other cause is
+    /// decided by the stages before the query, which a dry run and an
+    /// offline replay of the dirty stage reproduce; this one they cannot, so
+    /// a reader holding a recorded global against those stages skips it.
+    ///
+    /// By the sentence rather than the enum because the recorded answer is
+    /// the sentence: the benchmark harness stores `global_reason` and nothing
+    /// structured beside it. The shape is `<label> (<class>) was <change>;
+    /// <tail>`, with the class one of the toolchain classes.
+    pub fn decided_after_query(reason: &str) -> bool {
+        let Some(head) = reason.strip_suffix(TOOLCHAIN_RULE_TAIL) else {
+            return false;
+        };
+        let Some((label_class, change)) = head.rsplit_once(" was ") else {
+            return false;
+        };
+        let Some((label, class)) = label_class.rsplit_once(" (") else {
+            return false;
+        };
+        let Some(class) = class.strip_suffix(')') else {
+            return false;
+        };
+        !label.is_empty()
+            && cambium_index::is_toolchain_rule_class(class)
+            && ["added", "changed", "removed"].contains(&change)
     }
 
     /// Whether a diagnostic with this code is the one that explains a global
@@ -379,6 +425,7 @@ impl GlobalReason {
                 );
                 match c {
                     ExternalsCause::WorkspaceRegistration { path, .. } => d.at(path.clone(), None),
+                    ExternalsCause::RegisteredRepository { file, .. } => d.at(file.clone(), None),
                     _ => d.at("MODULE.bazel", None),
                 }
             }
@@ -648,7 +695,42 @@ mod tests {
                 "//platforms:linux_arm64 (platform) was removed; toolchain resolution has no \
                  edge in the query graph, so no reverse walk can find what it moves",
             ),
+            (
+                GlobalReason::ToolchainRule {
+                    label: "//constraints:libc".into(),
+                    class: "constraint_setting".into(),
+                    change: RuleChange::Changed,
+                },
+                "//constraints:libc (constraint_setting) was changed; toolchain resolution has \
+                 no edge in the query graph, so no reverse walk can find what it moves",
+            ),
+            (
+                GlobalReason::Externals(ExternalsCause::RegisteredRepository {
+                    repo: "llvm_toolchain".into(),
+                    file: "MODULE.bazel".into(),
+                }),
+                "`@llvm_toolchain` moved, and `MODULE.bazel` registers toolchains or execution \
+                 platforms from it; toolchain resolution has no edge in the query graph, so no \
+                 reverse walk can find what it moves",
+            ),
         ]
+    }
+
+    /// The one verdict reached after the query is the rule-class one, and it
+    /// is told apart by its sentence alone, since that is all a recorded
+    /// answer keeps: every other pinned sentence, the two registration causes
+    /// with the same tail included, is decided before the query.
+    #[test]
+    fn only_the_rule_class_sentence_is_decided_after_the_query() {
+        for (reason, text) in pinned() {
+            let after = matches!(reason, GlobalReason::ToolchainRule { .. });
+            assert_eq!(GlobalReason::decided_after_query(text), after, "{reason:?}");
+        }
+        assert!(!GlobalReason::decided_after_query(""));
+        assert!(!GlobalReason::decided_after_query(
+            "//a:b (filegroup) was changed; toolchain resolution has no edge in the query graph, \
+             so no reverse walk can find what it moves"
+        ));
     }
 
     /// A registration is the graph's gap, not the stage's: it is coded with
@@ -671,6 +753,15 @@ mod tests {
         assert_eq!(
             ws.diagnostic().location.map(|l| l.path),
             Some("WORKSPACE.bazel".to_string())
+        );
+        let registered = GlobalReason::Externals(ExternalsCause::RegisteredRepository {
+            repo: "x".into(),
+            file: "WORKSPACE".into(),
+        });
+        assert_eq!(registered.code(), Code::W023ToolchainMoved);
+        assert_eq!(
+            registered.diagnostic().location.map(|l| l.path),
+            Some("WORKSPACE".to_string())
         );
         for other in [
             ExternalsCause::Module { why: "x".into() },

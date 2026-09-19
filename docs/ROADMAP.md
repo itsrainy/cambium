@@ -123,8 +123,37 @@ closes a real hole with one rule.
   the proxy for it.
 - Synthetic test for each of the three classes.
 
-Exit: the globs are gone from the default config and the local bazel
-walk is unchanged.
+Landed as `CAMBI-W023`, wider than the bullets above in three places the
+review found, each with its own synthetic test:
+
+- `constraint_setting` and `constraint_value` join the three classes. A
+  setting's default or a value's parent moving changes what every platform
+  matches with no platform or toolchain proto moving, and the walk from the
+  constraint rule reaches only the declarations that name it.
+- A `register_*` call in a `*.MODULE.bazel` segment the root `include()`s
+  (Bazel 7.2 and later) is a call in the module file: the stage follows the
+  root's include list at both revisions and diffs the file with its segments
+  merged in. Before that, a segment was an ordinary source file and a
+  registration moving inside one had an empty answer.
+- A declaration in an external repository is not a row of `//...`, so the
+  rule-class check cannot see it move. A repository this commit moved that a
+  registration pattern at head offers rules from escalates instead, unless
+  the only route to it was a path a target the repository rule *writes*
+  names.
+
+The rule-class half is decided after the query, over the rows it read back,
+so it is the one verdict `affected --dry-run` cannot reach; the plan, the
+README and docs/CLI.md say so rather than promising the plan is final.
+
+Exit: the globs are gone from the default config. The second half of the
+criterion (the local bazel walk is unchanged) is still open: the bazel
+mirror is not on this machine, so no `cambi profile` was run after the
+change and the walk is unmeasured. The subject's
+generated `cambium.toml` lists the two dropped globs explicitly, so they
+are still live for that walk and the drop is inert there; the next bench
+provisioning regenerates the file from `Config::default()` and drops them,
+which changes the subject's config hash and starts a fresh lineage (a cost
+the walk pays at its start anyway).
 
 ### Phase 4: autoload providers on Bazel 8+ (#25), local only
 

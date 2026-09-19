@@ -2,9 +2,13 @@
 //!
 //! [`compute`] is the pipeline: external repositories, the bazelrc screen, the
 //! flag resolve, the dirty set, the query, the splice, the toolchain check, the
-//! direct set and the walk. Each stage is a method on [`Run`] with a typed result, and the plan
-//! (`crate::plan`) runs the first stages of the same pipeline against git
-//! alone, so a dry run cannot say one thing and the run then do another.
+//! direct set and the walk. Each stage is a method on [`Run`] with a typed
+//! result, and the plan (`crate::plan`) runs the stages before the query
+//! against git alone, so a dry run names the same dirty set and the same
+//! pre-query global the run would. One verdict is reached after the query:
+//! the toolchain check reads rule classes off the rows the query returned,
+//! so a splice or cold rebuild the plan announced can still end as `//...`
+//! under `CAMBI-W023`, and the plan says so of itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -212,6 +216,7 @@ pub fn dirty_stage(
     req: &AffectedRequest,
     changes: &[Change],
     ext: &mut Externals,
+    texts: &dyn WorkspaceText,
 ) -> Result<DirtyStage> {
     struct Refuses;
     impl PackageQuerier for Refuses {
@@ -234,7 +239,7 @@ pub fn dirty_stage(
     let mut run = Run::new(engine, base, &refuses, req);
     run.stats.changed_files = changes.len();
     let changes: Vec<&Change> = changes.iter().collect();
-    run.dirty(&changes, ext)
+    run.dirty(&changes, ext, texts)
 }
 
 /// What the query stage read back.
@@ -284,7 +289,7 @@ pub(crate) fn compute(
         return Ok(run.global(reason));
     }
 
-    let stage = run.dirty(&screened.changes, &mut ext)?;
+    let stage = run.dirty(&screened.changes, &mut ext, texts)?;
     if let Some(reason) = stage.global {
         return Ok(run.global(reason));
     }
@@ -375,7 +380,12 @@ impl<'a> Run<'a> {
     /// new `BUILD` file, a file entering a `glob`, a `.bzl` loaded only by
     /// other `.bzl` files: all three are edges Bazel recorded, and none of
     /// them is a case in this function.
-    pub(crate) fn dirty(&mut self, changes: &[&Change], ext: &mut Externals) -> Result<DirtyStage> {
+    pub(crate) fn dirty(
+        &mut self,
+        changes: &[&Change],
+        ext: &mut Externals,
+        texts: &dyn WorkspaceText,
+    ) -> Result<DirtyStage> {
         let mut matchers = Matchers::compile(&self.engine.config().rules())?;
         matchers.exempt(ext.handled.clone());
         let mut packages = PackageSet::from_index(self.base);
@@ -466,6 +476,29 @@ impl<'a> Run<'a> {
             if let Some(reason) = self.workspace_bzl(&changed_bzl, ext) {
                 dirty.global = true;
                 global = Some(reason);
+            }
+        }
+
+        // Every route that dirties a repository is in by now: the stage's
+        // own, the nested checkouts above, and the workspace-level `.bzl`
+        // files just read. A repository a registration pattern offers
+        // toolchains from is the rule-class escalation seen from outside
+        // `//...`, where the splice has no rows to read a class off, so it is
+        // decided here, after the last route.
+        //
+        // Only while no cause has been put on the record yet, since a run
+        // carries one. The missing layer and the unattributed workspace
+        // `.bzl` raise their diagnostics as they decide, so this defers to
+        // them; an invalidator's is raised below, once nothing has replaced
+        // it, and this is one of the things that replaces it. Reads the
+        // head's registrations only when there is a dirty repository to hold
+        // them against.
+        let reported = matches!(&global, Some(r) if !matches!(r, GlobalReason::Invalidator { .. }));
+        if !reported {
+            if let Some(cause) =
+                crate::externals::registered_repository_moved(ext, texts, &self.req.head)
+            {
+                ext.escalate(cause);
             }
         }
         keep_surviving_packages(&mut dirty, self.querier, self.engine.workspace());
@@ -652,6 +685,14 @@ impl<'a> Run<'a> {
                     // The rule's implementation moved, so what it writes into
                     // the repository can be anything.
                     ext.load_repos.extend(repos.iter().cloned());
+                    // This is the one route that runs after the stage filed
+                    // its target-only repositories, and it contradicts that
+                    // filing: the rule that writes the repository moved, so
+                    // its `BUILD` files moved with it
+                    // ([`Externals::target_only`]).
+                    for r in &repos {
+                        ext.target_only.remove(r);
+                    }
                     ext.repos.extend(repos);
                 }
                 None => unnamed.push(path.clone()),
@@ -1007,22 +1048,26 @@ impl<'a> Run<'a> {
         })
     }
 
-    /// The toolchain check: did the splice add, change or tombstone a
-    /// `toolchain`, `platform` or `toolchain_type` rule?
+    /// The toolchain check: did the splice add, change or tombstone a rule of
+    /// one of the toolchain classes (`toolchain`, `platform`,
+    /// `toolchain_type`, `constraint_setting`, `constraint_value`)?
     ///
     /// Toolchain resolution happens in analysis and has no edge in the query
     /// graph. A `toolchain()` that matches better than the one every
     /// `cc_library` resolved to yesterday changes what all of them build
     /// with, and nothing in the reverse walk reaches it: the rules that will
     /// use it do not name it, and the `register_toolchains` call that offers
-    /// it is not an edge either. So one of these rules moving, in any
-    /// package, is a whole-repository answer. The default invalidator globs
+    /// it is not an edge either. The two constraint classes are what a
+    /// platform and a toolchain match through, and a setting's default or a
+    /// value's parent moving changes that matching with no platform or
+    /// toolchain proto moving. So one of these rules moving, in any package,
+    /// is a whole-repository answer. The default invalidator globs
     /// (`tools/toolchains/**`, `platforms/**`) used to stand in for this, and
     /// were a naming convention rather than a rule: a `platform()` declared
     /// elsewhere never escalated, and a `filegroup` under `tools/toolchains/`
     /// always did.
     ///
-    /// The three classes are native rules with no implementation of their
+    /// The five classes are native rules with no implementation of their
     /// own, so a `.bzl` edit can only move one through its proto (a macro
     /// that declares it), which the rule hash sees; a changed `.bzl` that
     /// leaves every hash alone moved no declaration and takes the ordinary
@@ -1030,6 +1075,12 @@ impl<'a> Run<'a> {
     /// declaration (a `cc_toolchain_config` whose `.bzl` changed): the walk
     /// reaches the `toolchain()` naming it through ordinary edges and stops
     /// there, which is the analysis-phase edge declined with the rest.
+    ///
+    /// Decided after the query, because it needs the head rows' classes: the
+    /// one verdict a dry run (`crate::plan`) cannot reach. A declaration in
+    /// an external repository is not a row of `//...` at all; that side is
+    /// the dirty stage's, through the registration patterns
+    /// (`crate::externals::registered_repository_moved`).
     ///
     /// The head class comes from the rows this run queried and the base class
     /// from the base index, whose ids the splice preserves; a tombstoned node
@@ -1279,9 +1330,19 @@ impl<'a> Run<'a> {
     /// exactly as on any other run and toolchain resolution is not in it
     /// either way; it is the first thing to change if a subject's history
     /// shows declarations moving often enough for the cold build to matter.
+    ///
+    /// A query that overflowed `max_dirty_packages` set `stats.cold_rebuild`
+    /// on its way here, and that flag means "re-queried `//...` and spliced
+    /// it, answer still exact": a global is neither, and its lineage is not
+    /// kept. The flag is cleared so the report says one thing (`global`, with
+    /// its cause) rather than two, and a reader counting cold rebuilds and
+    /// globals counts this run once. The query's cost stays in
+    /// `timings.query`, and the overflow diagnostic (`CAMBI-W012`) stays in
+    /// the run's diagnostics, since it did happen.
     fn global_after_splice(mut self, reason: GlobalReason) -> RunOutcome {
         self.timings.splice = self.sw.lap();
         self.timings.total = self.timings.dirty + self.timings.query + self.timings.splice;
+        self.stats.cold_rebuild = false;
         self.global_outcome(reason)
     }
 

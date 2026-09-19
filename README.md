@@ -91,33 +91,51 @@ still exact, only not incremental):
 - `.bazelrc` edits outside the allowlist of flags known not to reach loading
   or analysis (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
   `--platforms`, `--extra_toolchains` and every `--incompatible_*` flag.
-- A `toolchain()`, `platform()` or `toolchain_type()` rule added, changed or
-  removed, in any package (`CAMBI-W023`). The splice reports every rule id it
-  added, changed or tombstoned, and one of those three classes among them is
-  a whole-repository answer, because toolchain resolution happens in analysis
-  and has no query-graph edge for the reverse walk to follow. This is the
-  rule the default `tools/toolchains/**` and `platforms/**` invalidator globs
-  used to stand in for; they are gone, and a rule of another class under
-  those directories is an ordinary rule.
-- `register_toolchains` / `register_execution_platforms` in `MODULE.bazel` or
-  `WORKSPACE` (the same `CAMBI-W023`), and any `MODULE.bazel` or `WORKSPACE`
-  statement the readers cannot classify by shape.
+- A `toolchain()`, `platform()`, `toolchain_type()`, `constraint_setting()`
+  or `constraint_value()` rule added, changed or removed, in any package
+  (`CAMBI-W023`). The splice reports every rule id it added, changed or
+  tombstoned, and one of those five classes among them is a whole-repository
+  answer, because toolchain resolution happens in analysis and has no
+  query-graph edge for the reverse walk to follow. The first three declare
+  what resolution chooses between; the two constraint classes are what a
+  platform and a toolchain match through, and a setting's default or a
+  value's parent moving changes that matching with no platform or toolchain
+  proto moving. This is the rule the default `tools/toolchains/**` and
+  `platforms/**` invalidator globs used to stand in for; they are gone, and a
+  rule of another class under those directories is an ordinary rule. The
+  check reads the classes off the rows the query returned, so it is the one
+  verdict a dry run cannot reach (see `--dry-run` below).
+- `register_toolchains` / `register_execution_platforms` in `MODULE.bazel`, in
+  a `*.MODULE.bazel` segment the root `include()`s, or in `WORKSPACE` (the
+  same `CAMBI-W023`), and any `MODULE.bazel` or `WORKSPACE` statement the
+  readers cannot classify by shape.
+- An external repository this commit moved that a registration pattern at
+  head offers rules from (the same `CAMBI-W023`): a `local_path_override`
+  directory, a `local_repository`, a repository built from a main-repo file,
+  a version bump. A declaration in an external repository is not a row of
+  `//...`, so the rule-class check above cannot see it move, and the routes
+  that dirty a repository reach only its label consumers and loaders.
+  A repository dirtied only through a path that a target the repository rule
+  *writes* names is spared: nothing the rule wrote, its `BUILD` files
+  included, can have moved.
 - `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs (no
   glob by default).
 
 **Not modelled** (each with its status):
 
 - **A toolchain's implementation moving behind an unchanged declaration.**
-  The three declaration classes are native rules with no implementation of
-  their own, so everything about one is in its proto and the rule hash sees
-  it move. What the hash cannot see is the implementation the `toolchain`
-  attribute points at: a `cc_toolchain_config` whose `.bzl` changed reaches
-  the `toolchain()` that names it through ordinary edges, and the walk stops
-  there, because nothing depends on a `toolchain()` by label. That is
-  toolchain resolution itself, an analysis-phase edge declined with the rest
-  (docs/ROADMAP.md). A repository that wants a `.bzl` edit under its
-  toolchain directories to stay global can list them in
-  `[invalidators].globs`, which is what the old defaults did.
+  The five escalating classes are native rules with no implementation of
+  their own, so what each one *declares* is in its proto and the rule hash
+  sees it move: that is what makes the rule above a complete witness for the
+  declarations themselves, constraint definitions included. What the hash
+  cannot see is the implementation the `toolchain` attribute points at: a
+  `cc_toolchain_config` whose `.bzl` changed reaches the `toolchain()` that
+  names it through ordinary edges, and the walk stops there, because nothing
+  depends on a `toolchain()` by label. That is toolchain resolution itself,
+  an analysis-phase edge declined with the rest (docs/ROADMAP.md). A
+  repository that wants a `.bzl` edit under its toolchain directories to stay
+  global can list them in `[invalidators].globs`, which is what the old
+  defaults did.
 - **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
   and later). A bare `cc_library` comes from `@rules_cc` through a load the
   BUILD file never writes. Bazel records that as a dependency on
@@ -191,7 +209,10 @@ The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
 no range means the merge base of `[git].default_branch` with `HEAD`.
 `--dry-run` prints the plan (which index would load, how the diff classifies,
 whether the run would splice, cold-rebuild or go global) and exits before any
-Bazel query.
+Bazel query. One verdict is pending that query: the toolchain check reads rule
+classes off the rows the query returns, so a plan that says `splice` or `cold
+rebuild` can still end as `//...` under `CAMBI-W023`. Every other global the
+run reaches, the plan reaches too.
 
 ```console
 $ cambi explain //app:main_test origin/main..HEAD

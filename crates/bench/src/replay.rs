@@ -785,7 +785,7 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
         explain: false,
         ..cambium_engine::AffectedRequest::new(base_rev, head_rev)
     };
-    let stage = match cambium_engine::dirty_stage(&engine, base, &req, changes, &mut ext) {
+    let stage = match cambium_engine::dirty_stage(&engine, base, &req, changes, &mut ext, texts) {
         Ok(s) => s,
         Err(e) => {
             // The one failure the stage has is a configuration whose rules do
@@ -856,14 +856,24 @@ fn undecidable_inputs(
 
     // A `MODULE.bazel` this replay cannot read is the one case where the
     // stage's own answer ("unparseable, so global") is an artefact of the
-    // replay rather than a statement about the engine.
-    let touches_module = changes.iter().any(|c| c.path == externals::MODULE_FILE);
-    if touches_module && texts.text_at(head_rev, externals::MODULE_FILE).is_none() {
-        notes.push(format!(
-            "the change set edits {} and no git repository was given to read it at either \
-             revision; pass --repo to decide this one",
-            externals::MODULE_FILE
-        ));
+    // replay rather than a statement about the engine. A segment the root
+    // `include()`s is part of the same file, and only the root's text says
+    // which files those are, so both texts have to be in reach for a
+    // changed segment to be decided.
+    let module_file = |path: &str| {
+        path == externals::MODULE_FILE
+            || path.ends_with(cambium_index::externals::MODULE_SEGMENT_SUFFIX)
+    };
+    if let Some(c) = changes.iter().find(|c| module_file(&c.path)) {
+        if texts.text_at(head_rev, externals::MODULE_FILE).is_none()
+            || texts.text_at(head_rev, &c.path).is_none()
+        {
+            notes.push(format!(
+                "the change set edits {} and no git repository was given to read it at either \
+                 revision; pass --repo to decide this one",
+                c.path
+            ));
+        }
     }
 
     // The bazelrc screen reads the file's *text* at both revisions and decides
@@ -1153,6 +1163,11 @@ pub struct RecordedAnswer {
     pub base: String,
     pub head: String,
     pub global: bool,
+    /// The sentence the run gave for a global, when it recorded one. Read
+    /// for one thing: whether the verdict was reached after the query, which
+    /// the replay never runs ([`diverge`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_reason: Option<String>,
     pub dirty_packages: usize,
     pub cold_rebuild: bool,
     /// `None` on a history record, which does not separate them out.
@@ -1178,6 +1193,7 @@ pub fn recorded_from_walk(r: &crate::walk::WalkResult) -> Vec<RecordedAnswer> {
             base: st.parent.clone(),
             head: st.head.clone(),
             global: st.global,
+            global_reason: st.global_reason.clone(),
             dirty_packages: st.dirty_packages,
             cold_rebuild: st.cambium.cold_rebuild,
             affected: (!st.global).then_some(st.cambium.affected),
@@ -1222,8 +1238,21 @@ impl std::fmt::Display for Divergence {
 /// the replay computes: whether the run went global, how many packages it
 /// dirtied, and whether it would cold-rebuild. An indeterminate replay yields
 /// nothing — a question the replay declined to answer is not a disagreement.
+/// Nor is a global the run reached *after* its query, over the rows it read
+/// back (a toolchain-class rule the splice found moved, `CAMBI-W023`): the
+/// replay runs no query, so its "not global" there is the dirty stage's
+/// answer to a question the run decided one stage later, and holding the two
+/// against each other would raise the same false lead on every such step.
 pub fn diverge(recorded: &RecordedAnswer, replayed: &ReplayOutcome) -> Vec<Divergence> {
     if !replayed.indeterminate.is_empty() {
+        return Vec::new();
+    }
+    if recorded.global
+        && recorded
+            .global_reason
+            .as_deref()
+            .is_some_and(cambium_engine::GlobalReason::decided_after_query)
+    {
         return Vec::new();
     }
     let key = recorded.key();
@@ -1325,6 +1354,9 @@ impl ReplayRun {
                     base: old.base.clone(),
                     head: old.head.clone(),
                     global: old.global,
+                    // A replay's global is always the dirty stage's, so the
+                    // after-query exemption never applies between two replays.
+                    global_reason: None,
                     dirty_packages: old.dirty_packages,
                     cold_rebuild: old.cold_rebuild,
                     affected: None,
@@ -1857,6 +1889,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
             base: "a".into(),
             head: "b".into(),
             global: false,
+            global_reason: None,
             dirty_packages: 7,
             cold_rebuild: false,
             affected: Some(100),
@@ -1877,6 +1910,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
             base: "a".into(),
             head: "b".into(),
             global: true,
+            global_reason: Some("`.bazelversion` matched an invalidator rule".into()),
             dirty_packages: 0,
             cold_rebuild: false,
             affected: None,
@@ -1888,12 +1922,50 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(d[0].field, "global");
     }
 
+    /// The run decided this global over the rows its query returned, which
+    /// the replay never has: the dirty stage's "not global" is not a
+    /// disagreement, and the fields beside it say nothing either. A global
+    /// report carries no affected count, and its cold-rebuild flag was
+    /// cleared when the verdict replaced it, while the replay computes that
+    /// flag from the dirty set it did compute: comparing either one raises a
+    /// second false lead on the same step.
+    #[test]
+    fn a_global_the_run_reached_after_its_query_is_not_a_divergence() {
+        let rec = RecordedAnswer {
+            base: "a".into(),
+            head: "b".into(),
+            global: true,
+            global_reason: Some(
+                "//tools/jdk:runtime (toolchain) was changed; toolchain resolution has no edge \
+                 in the query graph, so no reverse walk can find what it moves"
+                    .into(),
+            ),
+            dirty_packages: 0,
+            cold_rebuild: false,
+            affected: None,
+        };
+        assert!(diverge(&rec, &outcome("a", "b", false, 12, false)).is_empty());
+        // A registration moving is decided by the dirty stage, and stays a
+        // comparison: same code, different stage.
+        let rec = RecordedAnswer {
+            global_reason: Some(
+                "`register_toolchains` / `register_execution_platforms` changed; toolchain \
+                 resolution has no edge in the query graph, so no reverse walk can find what it \
+                 moves"
+                    .into(),
+            ),
+            ..rec
+        };
+        assert_eq!(diverge(&rec, &outcome("a", "b", false, 12, false)).len(), 1);
+    }
+
     #[test]
     fn an_indeterminate_replay_disagrees_with_nothing() {
         let rec = RecordedAnswer {
             base: "a".into(),
             head: "b".into(),
             global: false,
+            global_reason: None,
             dirty_packages: 7,
             cold_rebuild: false,
             affected: None,

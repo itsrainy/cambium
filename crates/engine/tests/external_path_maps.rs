@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::{FixedText, WorkspaceText};
 use cambium_engine::query::Rows;
-use cambium_engine::{AffectedRequest, EngineError, PackageQuerier};
+use cambium_engine::{AffectedRequest, Diagnostic, EngineError, PackageQuerier};
 use cambium_index::{FileText, IndexData, PackageUpdate, TargetRow};
 use cambium_testkit::{base, engine, req, Files, Scanning};
 
@@ -569,5 +569,106 @@ fn a_package_bazel_could_not_load_keeps_no_load_closure() {
         consumers_of_defs(head.view()),
         consumers_of_defs(rebuilt.view()),
         "the spliced index must agree with a full build about a package Bazel could not load"
+    );
+}
+
+/// `MODULE.bazel` at head, with a registration that offers toolchains out of
+/// one of the repositories. `@demo` is the main repository and names nothing
+/// here.
+fn registering(repo: &str) -> String {
+    format!("{MODULE_BASE}register_toolchains(\"@{repo}//:all\")\n")
+}
+
+/// The run and the diagnostics it raised, for the tests that want the code.
+fn run_with_diagnostics(
+    index: &IndexData,
+    paths: &[&str],
+    texts: &dyn WorkspaceText,
+) -> (cambium_engine::AffectedReport, Vec<Diagnostic>) {
+    let changes: Vec<Change> = paths
+        .iter()
+        .map(|p| Change::new(Status::Modified, *p))
+        .collect();
+    let e = engine();
+    let r = e
+        .compute_with_texts(index.view(), &changes, &scanning(), &req(), texts)
+        .unwrap()
+        .report;
+    (r, e.diagnostics().drain())
+}
+
+/// A `toolchain()` or `platform()` declared in an external repository is not
+/// a row of `//...`, so the rule-class check cannot see it move: the splice
+/// has no rows to read a class off, and the route that dirtied the
+/// repository reaches only its label consumers and loaders, which toolchain
+/// resolution is not among. A registration pattern at head that offers rules
+/// from a repository this commit moved is that declaration moving, seen from
+/// outside the graph, and carries the same code.
+#[test]
+fn a_registered_repository_the_commit_moved_is_global() {
+    let (_e, index) = base(&scanning());
+    let m = registering("mod");
+    let (r, diags) = run_with_diagnostics(&index, &["api/envoy/x.proto"], &texts(&m, &m));
+    let reason = r.global_reason.clone().expect("a global names its cause");
+    assert!(r.global, "{r:?}");
+    assert_eq!(
+        reason,
+        "`@mod` moved, and `MODULE.bazel` registers toolchains or execution platforms from it; \
+         toolchain resolution has no edge in the query graph, so no reverse walk can find what \
+         it moves"
+    );
+    let cause = diags
+        .iter()
+        .find(|d| d.code == cambium_engine::Code::W023ToolchainMoved)
+        .unwrap_or_else(|| panic!("no CAMBI-W023 among {diags:?}"));
+    assert!(cause.message.ends_with(&reason), "{}", cause.message);
+    assert_eq!(
+        cause.location.as_ref().map(|l| l.path.as_str()),
+        Some("MODULE.bazel")
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == cambium_engine::Code::W014ExternalsGlobal),
+        "one cause, under one code: {diags:?}"
+    );
+
+    // A repository nothing registers from is untouched by the rule: the same
+    // edit answers the label consumers of `@mod` and nothing more.
+    let m = registering("vend");
+    let r = run(&index, &["api/envoy/x.proto"], &texts(&m, &m));
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.affected_labels(), vec!["//lib:lib".to_string()]);
+}
+
+/// `@opaque`'s rule never read `notes/README.md`; a target the rule *wrote*
+/// names it. Nothing the rule wrote can have moved, its `BUILD` files
+/// included, so a `toolchain()` declared in that repository is where it was
+/// and the registration changes nothing. The rule's own input is the other
+/// answer: there the repository's contents may have moved.
+#[test]
+fn a_registered_repository_named_only_by_a_generated_target_is_not_global() {
+    let (_e, index) = base(&scanning());
+    let m = registering("opaque");
+    let r = run(&index, &["notes/README.md"], &texts(&m, &m));
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_target, 1);
+    assert!(
+        r.affected_labels().contains(&"//conf:conf".to_string()),
+        "{:?}",
+        r.affected_labels()
+    );
+
+    let r = run(&index, &["conf/settings.yml"], &texts(&m, &m));
+    assert!(
+        r.global,
+        "a path the rule reads can move anything it writes"
+    );
+    assert!(
+        r.global_reason
+            .as_deref()
+            .is_some_and(|w| w.starts_with("`@opaque` moved, and `MODULE.bazel` registers")),
+        "{:?}",
+        r.global_reason
     );
 }

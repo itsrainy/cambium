@@ -112,9 +112,37 @@ fn the_same_holds_for_a_root_build_bazel() {
 
 /// The reason that used to be attached to the root BUILD file belongs to
 /// `REPO.bazel`, which really does set defaults for every package.
+///
+/// The invalidator's diagnostic is raised once the external-repository stage
+/// has said whether it replaces it, so this also pins that it is still raised
+/// when nothing does: exactly one `CAMBI-W013`, ending with the reason.
 #[test]
 fn repo_bazel_is_still_an_invalidator() {
-    let (_e, index) = base(&synth());
-    let r = run(&index, "REPO.bazel");
+    let (e, index) = base(&synth());
+    let r = e
+        .compute(
+            index.view(),
+            &[Change::new(Status::Modified, "REPO.bazel")],
+            &synth(),
+            &req(),
+        )
+        .unwrap()
+        .report;
     assert!(r.global);
+    let reason = r
+        .global_reason
+        .clone()
+        .expect("a global run names its cause");
+    let diags = e.diagnostics().drain();
+    let causes: Vec<_> = diags
+        .iter()
+        .filter(|d| cambium_engine::GlobalReason::is_cause(d.code))
+        .collect();
+    assert_eq!(causes.len(), 1, "one cause, under one code: {diags:?}");
+    assert_eq!(causes[0].code, cambium_engine::Code::W013InvalidatorMatched);
+    assert!(
+        causes[0].message.ends_with(&reason),
+        "{} should end with {reason}",
+        causes[0].message
+    );
 }

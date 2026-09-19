@@ -112,8 +112,10 @@ pub(crate) fn names_a_repository(head: &str) -> bool {
 ///
 /// Answers: *does this top-level statement, which is none of the shapes
 /// `scan_module` extracts facts from, mean the file is beyond the parser?*
-/// No: `load` and `include` are edges the load graph already has, `print`
-/// and `fail` declare nothing, and `module` is read on its own.
+/// No: `load` is an edge the load graph already has, `print` and `fail`
+/// declare nothing, and `module` is read on its own. `include` is here for
+/// its bare name alone; the call form is read for the segment it names, and
+/// a label this reader cannot place is unparsed rather than waved through.
 pub(crate) const HARMLESS: &[&str] = &["load", "print", "fail", "module", "include"];
 
 /// `WORKSPACE` statements that declare something under a `name =` but whose
@@ -213,21 +215,50 @@ pub fn is_toolchain_module(name: &str) -> bool {
     TOOLCHAIN_MODULES.contains(&name)
 }
 
-/// The rule classes that declare what toolchain resolution chooses between.
+/// The rule classes that declare what toolchain resolution chooses between,
+/// and what it matches on.
 ///
 /// Answers: *can a reverse walk over the graph find what a rule of this class
 /// moves when it appears, changes or vanishes?* No. A `toolchain()` is
 /// resolved, not depended on: the `cc_library` it will compile has no edge to
 /// it, and neither does the `register_toolchains` call that offers it. So one
 /// of these moving, in any package, can change what every target builds with,
-/// and the only sound answer is everything. The three are native rules with no
-/// implementation of their own, which is what makes the rule hash a complete
-/// witness: a macro that declares one moves its proto, and there is no `.bzl`
-/// behind the rule itself to move without the proto moving.
-pub const TOOLCHAIN_RULE_CLASSES: &[&str] = &["platform", "toolchain", "toolchain_type"];
+/// and the only sound answer is everything.
+///
+/// `constraint_setting` and `constraint_value` are here because a `platform()`
+/// and a `toolchain()` match through them: a setting's
+/// `default_constraint_value` moving changes what every platform that leaves
+/// the setting unset matches, and a value re-parented to another setting
+/// changes what every platform naming it satisfies, with no platform or
+/// toolchain proto moving. The walk from the constraint rule reaches the
+/// declarations that name it and stops there, which is the same dead end.
+///
+/// All five are native rules with no implementation of their own, which is
+/// what makes the rule hash a complete witness: a macro that declares one
+/// moves its proto, and there is no `.bzl` behind the rule itself to move
+/// without the proto moving.
+pub const TOOLCHAIN_RULE_CLASSES: &[&str] = &[
+    "constraint_setting",
+    "constraint_value",
+    "platform",
+    "toolchain",
+    "toolchain_type",
+];
 
 pub fn is_toolchain_rule_class(class: &str) -> bool {
     TOOLCHAIN_RULE_CLASSES.contains(&class)
+}
+
+/// The repository a `register_toolchains` / `register_execution_platforms`
+/// pattern offers rules from, as written: `@x//:all` and `@@x//...` name `x`.
+/// A main-repo pattern (`//tc:all`, `@//...`) names none: the rules it offers
+/// are rows of `//...`, and the rule-class check sees them move.
+pub fn registration_repo(pattern: &str) -> Option<&str> {
+    let rest = pattern
+        .strip_prefix("@@")
+        .or_else(|| pattern.strip_prefix('@'))?;
+    let (repo, _) = rest.split_once("//")?;
+    (!repo.is_empty()).then_some(repo)
 }
 
 #[cfg(test)]
@@ -245,23 +276,41 @@ mod tests {
         v.len() == list.len()
     }
 
-    /// The three native declaration classes, and nothing that merely
+    /// The five native declaration classes, and nothing that merely
     /// implements a toolchain (`cc_toolchain`, `cc_toolchain_config`, ...):
-    /// those are reached through ordinary edges and have no place here.
+    /// those are reached through ordinary edges and have no place here. A
+    /// `config_setting` is not a constraint: `select()` keys are edges.
     #[test]
-    fn the_toolchain_rule_classes_are_the_three_native_declarations() {
+    fn the_toolchain_rule_classes_are_the_five_native_declarations() {
         assert!(unique_and_sorted(TOOLCHAIN_RULE_CLASSES));
-        for c in ["platform", "toolchain", "toolchain_type"] {
+        for c in [
+            "constraint_setting",
+            "constraint_value",
+            "platform",
+            "toolchain",
+            "toolchain_type",
+        ] {
             assert!(is_toolchain_rule_class(c), "{c}");
         }
         for c in [
             "cc_toolchain",
             "cc_toolchain_config",
-            "constraint_value",
+            "config_setting",
             "filegroup",
         ] {
             assert!(!is_toolchain_rule_class(c), "{c}");
         }
+    }
+
+    #[test]
+    fn a_registration_pattern_names_its_repository_and_a_main_repo_one_names_none() {
+        assert_eq!(registration_repo("@x//:all"), Some("x"));
+        assert_eq!(registration_repo("@@x+//cc:linux"), Some("x+"));
+        assert_eq!(registration_repo("@x//..."), Some("x"));
+        assert_eq!(registration_repo("//tc:all"), None);
+        assert_eq!(registration_repo("@//tc:all"), None);
+        assert_eq!(registration_repo("@x"), None);
+        assert_eq!(registration_repo(":all"), None);
     }
 
     /// The relationships between the lists that the readers rely on, stated
