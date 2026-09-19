@@ -227,10 +227,12 @@ pub enum GlobalReason {
     WorkspaceLevelBzl { paths: Vec<String> },
     /// The external-repository stage escalated.
     Externals(ExternalsCause),
-    /// The splice added, changed or tombstoned a `toolchain`, `platform` or
-    /// `toolchain_type` rule. Toolchain resolution has no edge in the query
-    /// graph, so nothing reaches what it moves. One rule is named; the log
-    /// line carries the count.
+    /// The splice added, changed or tombstoned a `toolchain`, `platform`,
+    /// `toolchain_type`, `constraint_setting` or `constraint_value` rule.
+    /// Toolchain resolution has no edge in the query graph, so nothing
+    /// reaches what it moves, and a constraint moving changes what every
+    /// platform naming it matches. One rule is named; the log line carries
+    /// the count.
     ToolchainRule {
         label: String,
         class: String,
@@ -445,9 +447,9 @@ impl GlobalReason {
                 format!("a toolchain declaration moved, so everything is affected: {reason}"),
             )
             .with_help(
-                "expected: a toolchain, platform or toolchain_type rule is resolved in analysis, \
-                 not depended on, so no reverse walk can bound what it moves; nothing to \
-                 configure",
+                "expected: a toolchain, platform, toolchain_type, constraint_setting or \
+                 constraint_value rule is resolved in analysis, not depended on, so no reverse \
+                 walk can bound what it moves; nothing to configure",
             ),
         }
     }

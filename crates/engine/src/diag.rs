@@ -108,10 +108,11 @@ codes! {
     /// `bazel mod dump_repo_mapping` succeeded but printed something that is
     /// not a mapping, so the identity mapping stands in for it.
     W022RepoMappingUnparsed => "CAMBI-W022",
-    /// A `toolchain`, `platform` or `toolchain_type` rule was added, changed
-    /// or removed, or a `register_toolchains` / `register_execution_platforms`
-    /// call moved: toolchain resolution has no edge in the query graph, so
-    /// the run is global.
+    /// A `toolchain`, `platform`, `toolchain_type`, `constraint_setting` or
+    /// `constraint_value` rule was added, changed or removed, or a
+    /// `register_toolchains` / `register_execution_platforms` call moved, or
+    /// a repository such a call offers rules from moved: toolchain
+    /// resolution has no edge in the query graph, so the run is global.
     W023ToolchainMoved => "CAMBI-W023",
 
     // ---- errors ----

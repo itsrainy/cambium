@@ -274,9 +274,10 @@ impl Default for Invalidators {
             //
             // `tools/toolchains/**` and `platforms/**` used to be here too,
             // standing in for a rule the run did not have: a `toolchain()`,
-            // `platform()` or `toolchain_type()` moving anywhere is a
-            // whole-repository answer, because toolchain resolution has no
-            // edge in the query graph. The run now reads that off the splice,
+            // `platform()`, `toolchain_type()`, `constraint_setting()` or
+            // `constraint_value()` moving anywhere is a whole-repository
+            // answer, because toolchain resolution has no edge in the query
+            // graph. The run now reads that off the splice,
             // by rule class, in every package (`CAMBI-W023`), so the globs
             // only ever added the wider answer for a file under those
             // directories that moved no declaration, and never fired for a

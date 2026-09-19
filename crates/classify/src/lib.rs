@@ -246,9 +246,10 @@ pub fn is_build_file(path: &str) -> bool {
 /// reaches is the loading layer's business (its `BZL_LOAD` node, and the
 /// `BZL_LOAD -> BZL_LOAD` edges above it), and whether the rules it reached
 /// include a toolchain declaration is the splice's: a `toolchain()`,
-/// `platform()` or `toolchain_type()` moving is a whole-repository answer by
-/// rule class, wherever it lives, because toolchain resolution is not a
-/// loading-phase edge at all. No default invalidator glob names a directory
+/// `platform()`, `toolchain_type()`, `constraint_setting()` or
+/// `constraint_value()` moving is a whole-repository answer by rule class,
+/// wherever it lives, because toolchain resolution is not a loading-phase
+/// edge at all. No default invalidator glob names a directory
 /// of `.bzl` files any more (`tools/toolchains/**` and `platforms/**` used
 /// to, as a stand-in for that rule); a repository can configure one back,
 /// and a path that matches an invalidator is an invalidator first, whatever
