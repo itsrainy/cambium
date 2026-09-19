@@ -124,6 +124,24 @@ still exact, only not incremental):
   included, can have moved.
 - `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs (no
   glob by default).
+- A module Bazel autoloads native rules from (`rules_python`, `rules_java`,
+  `rules_shell`, `protobuf`, `rules_android`) moving in `MODULE.bazel`, its
+  lock or `WORKSPACE`, under a Bazel that autoloads (`CAMBI-W024`): Bazel 8 at
+  its default, a Bazel 7.4 whose `.bazelrc` sets
+  `--incompatible_autoload_externally` to something, or a Bazel whose version
+  nothing states. A bare `py_binary` is then that module's rule through a load
+  no BUILD file writes; Bazel records it as a dependency on
+  `PRECOMPUTED:autoload_symbols`, a singleton every package shares, which the
+  loading layer drops because keeping it would put every package one reverse
+  hop from every other. So nothing in the graph names the consumers, and the
+  sound answer is everything. Elsewhere the same bump reaches the module's
+  consumers through the graph (or stays global for the toolchains it
+  registers, `CAMBI-W014`): on Bazel 7 at its default, on an 8 whose
+  `.bazelrc` sets the flag empty, and on Bazel 9, which disabled autoloads and
+  made the flag a no-op, so every one of those rules arrives through a `load()`
+  the package writes. `rules_cc` is on no Bazel's autoload list (8 keeps
+  `cc_library` in its own builtins, 9 moved it to `@rules_cc` behind an
+  explicit load), so its bump is a toolchain move and nothing more.
 
 **Not modelled** (each with its status):
 
@@ -140,15 +158,6 @@ still exact, only not incremental):
   repository that wants a `.bzl` edit under its toolchain directories to stay
   global can list them in `[invalidators].globs`, which is what the old
   defaults did.
-- **Autoloaded native rules** (`--incompatible_autoload_externally`, Bazel 8
-  and later). A bare `cc_library` comes from `@rules_cc` through a load the
-  BUILD file never writes. Bazel records that as a dependency on
-  `PRECOMPUTED:autoload_symbols`, a singleton every package in the repository
-  depends on, and the layer drops the singleton kinds for the reason the
-  module docs give: keeping them would put every package one reverse hop from
-  every other. So a `rules_cc` version bump still does not dirty the packages
-  using it, and the sound answer remains to treat a version bump of an autoload
-  provider as global on Bazel 8 or later.
 - **Symlinked directories inside a package.** `glob()` walks into them, and a
   change to the link target is a diff elsewhere. Unmodelled, alongside the
   source-directory limitation in

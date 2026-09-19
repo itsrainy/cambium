@@ -104,3 +104,110 @@ pub fn bazelrc_bzlmod(text: &str) -> Option<bool> {
     }
     out
 }
+
+/// The value of the last `--incompatible_autoload_externally` a bazelrc
+/// states on an unconditional command line, as [`bazelrc_bzlmod`] reads its
+/// flag; `None` when it says nothing, and the Bazel's own default stands.
+///
+/// One file's text, not the closure: an `import` line is not a command and
+/// is skipped here, so a caller that wants what the tree as a whole states
+/// has to follow the imports itself and ask this of each file
+/// (`cambium_engine::externals::autoload_flag_at` does).
+///
+/// Both spellings are read: `--flag=value` (an empty value is
+/// `--incompatible_autoload_externally=`, the documented way to turn autoload
+/// off), and `--flag value`, where the next token is the value as it is for
+/// Bazel's own parser, even when it starts with `-`: a value removing symbols
+/// (`-py_binary`) is a value, not another flag.
+pub fn bazelrc_autoload_externally(text: &str) -> Option<String> {
+    const FLAG: &str = "--incompatible_autoload_externally";
+    let mut out = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut tokens = line.split_whitespace();
+        let Some(command) = tokens.next() else {
+            continue;
+        };
+        if command.contains(':') || command == "import" || command == "try-import" {
+            continue;
+        }
+        let tokens: Vec<&str> = tokens.collect();
+        let mut i = 0;
+        while i < tokens.len() {
+            let tok = tokens[i];
+            i += 1;
+            if let Some(value) = tok.strip_prefix(FLAG) {
+                if let Some(value) = value.strip_prefix('=') {
+                    out = Some(value.trim_matches(['"', '\'']).to_string());
+                } else if value.is_empty() {
+                    let next = tokens.get(i).copied();
+                    if next.is_some() {
+                        i += 1;
+                    }
+                    out = Some(
+                        next.map(|t| t.trim_matches(['"', '\'']))
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_autoload_flag_is_read_off_unconditional_command_lines_only() {
+        assert_eq!(bazelrc_autoload_externally("build --jobs=8\n"), None);
+        assert_eq!(
+            bazelrc_autoload_externally("common --incompatible_autoload_externally=\n").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            bazelrc_autoload_externally(
+                "common --incompatible_autoload_externally=+@rules_python,@com_google_protobuf\n"
+            )
+            .as_deref(),
+            Some("+@rules_python,@com_google_protobuf")
+        );
+        // The last unconditional line wins; a `--config` line and a comment
+        // say nothing.
+        assert_eq!(
+            bazelrc_autoload_externally(
+                "build --incompatible_autoload_externally=+@rules_python\n\
+                 # build --incompatible_autoload_externally=@x\n\
+                 build:migrate --incompatible_autoload_externally=@y\n\
+                 common --incompatible_autoload_externally \"\"\n"
+            )
+            .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            bazelrc_autoload_externally("build --incompatible_autoload_externally +@rules_shell\n")
+                .as_deref(),
+            Some("+@rules_shell")
+        );
+        // In the separated spelling the next token is the value even when it
+        // starts with `-`: Bazel's parser takes it as one, and a value that
+        // only removes symbols is what turns autoload off.
+        assert_eq!(
+            bazelrc_autoload_externally(
+                "build --incompatible_autoload_externally -py_binary,+@rules_shell\n"
+            )
+            .as_deref(),
+            Some("-py_binary,+@rules_shell")
+        );
+        // A different flag with the same prefix is not this one.
+        assert_eq!(
+            bazelrc_autoload_externally("build --incompatible_autoload_externally_extra=1\n"),
+            None
+        );
+    }
+}

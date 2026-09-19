@@ -114,6 +114,16 @@ codes! {
     /// a repository such a call offers rules from moved: toolchain
     /// resolution has no edge in the query graph, so the run is global.
     W023ToolchainMoved => "CAMBI-W023",
+    /// A module Bazel autoloads native rules from (`rules_python`,
+    /// `protobuf`, ...) moved under a Bazel that autoloads (8 by default, or
+    /// 7.4 with the `.bazelrc` flag), so every package using those rules may
+    /// have changed and the run is global.
+    ///
+    /// `CAMBI-W023` is the toolchain rule-class escalation (#26), allocated
+    /// on its own branch at the same time as this one; the number is skipped
+    /// here so the two cannot collide, and stays skipped if that work lands
+    /// under another number, since a number is never reassigned.
+    W024AutoloadProvider => "CAMBI-W024",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,

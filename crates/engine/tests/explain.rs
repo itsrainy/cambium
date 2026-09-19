@@ -4,7 +4,7 @@
 //!
 //! The rows come from the synthetic source, so none of this needs Bazel.
 
-use cambium_engine::{AffectedRequest, Code, DirectReason, SynthQuerier};
+use cambium_engine::{AffectedRequest, Code, DirectReason, GlobalReason, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, Mutation};
 use cambium_testkit::{engine, req};
 
@@ -109,7 +109,8 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
     let base = e.full_build_with("c0", &SynthQuerier::new(&g)).unwrap();
 
     // `.bazelrc` is an invalidator by default, and with no checkout to read
-    // the two texts from, the screen cannot prove the edit harmless.
+    // the two texts from, the screen has no rc chain to diff, so the
+    // invalidator is the stage that answers.
     let changes = vec![cambium_diff::Change {
         path: ".bazelrc".into(),
         status: cambium_diff::Status::Modified,
@@ -127,19 +128,17 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
     let diagnostics = e.diagnostics().drain();
     let cause = diagnostics
         .iter()
-        .find(|d| {
-            matches!(
-                d.code,
-                Code::W004BazelrcGlobal
-                    | Code::W008NoLoadingLayer
-                    | Code::W009WorkspaceLevelBzl
-                    | Code::W013InvalidatorMatched
-                    | Code::W014ExternalsGlobal
-                    | Code::W015FlagUnresolved
-                    | Code::W023ToolchainMoved
-            )
-        })
+        .find(|d| GlobalReason::is_cause(d.code))
         .unwrap_or_else(|| panic!("a global run should name its cause: {diagnostics:?}"));
+    // The diagnostic found is the run's own cause, not a second one raised
+    // beside it: the report's reason and the diagnostic's message agree.
+    assert_eq!(cause.code, Code::W013InvalidatorMatched);
+    assert!(
+        cause
+            .message
+            .ends_with(report.global_reason.as_deref().unwrap()),
+        "{cause:?}"
+    );
     assert!(
         cause.help.is_some(),
         "the cause carries the fix `explain` prints: {cause:?}"

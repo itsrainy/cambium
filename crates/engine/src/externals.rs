@@ -113,7 +113,15 @@
 //! except through toolchain resolution, which has no edge to follow and which
 //! this stage therefore refuses to localise: any change to
 //! `register_toolchains`, to `register_execution_platforms`, or to a module on
-//! [`cambium_index::externals::TOOLCHAIN_MODULES`] stays global.
+//! [`cambium_index::externals::TOOLCHAIN_MODULES`] stays global. And, under a
+//! Bazel that autoloads, except through autoload: a bare `py_binary` is
+//! `@rules_python`'s rule through a load no BUILD file writes, and the loading
+//! layer drops the `PRECOMPUTED:autoload_symbols` singleton that records it,
+//! so a move of a module on [`cambium_index::externals::AUTOLOAD_PROVIDERS`]
+//! stays global too, under its own diagnostic. [`autoload_at`] decides which
+//! Bazel autoloads: 8 at its default, a 7.4 whose `.bazelrc` sets
+//! `--incompatible_autoload_externally`, and a version nothing states, which
+//! counts as 8.
 //!
 //! # What stays global
 //!
@@ -136,6 +144,9 @@
 //! - Toolchain registration, as above. Reported under the toolchain code
 //!   (`CAMBI-W023`, the one a moved `toolchain()` rule raises) rather than
 //!   the stage's own: the gap is the graph's, not the stage's.
+//! - An autoload provider moving under a Bazel that autoloads, as above:
+//!   `CAMBI-W024` rather than the stage's `CAMBI-W014`, because the stage
+//!   accounted for the change exactly and the answer is still everything.
 //! - A repository-rule input that no label names. See the soundness gap
 //!   documented on [`cambium_index::externals`].
 
@@ -144,7 +155,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::Change;
 use cambium_index::externals::{
-    diff_module, scan_module, Mode, ModuleChange, ModuleFacts, MODULE_SEGMENT_SUFFIX,
+    bazelrc_autoload_externally, diff_module, is_autoload_provider, scan_module, Autoload, Mode,
+    ModuleChange, ModuleFacts, MODULE_SEGMENT_SUFFIX,
 };
 use cambium_index::label::{join_path, Label, Repo};
 use cambium_index::lockfile::diff_lock;
@@ -342,6 +354,13 @@ pub fn analyse(
             lock_changed = false;
         }
     }
+    // Whether the Bazel reading the tree autoloads native rules from provider
+    // modules, asked only when a diff could name one.
+    let autoload = if module_changed || lock_changed || !workspaces.is_empty() {
+        autoload_at(base, texts, base_rev)
+    } else {
+        Autoload::Off
+    };
 
     // A legacy `WORKSPACE`, diffed statement by statement. The file is
     // imperative, so most of what it can say is still global; what it *can*
@@ -370,6 +389,22 @@ pub fn analyse(
                 return out;
             }
             WorkspaceChange::Moved { repos, bzl_paths } => {
+                // A Bazel that autoloads autoloads from a `WORKSPACE`
+                // repository under the same names, `com_google_protobuf` for
+                // protobuf.
+                if autoload == Autoload::On {
+                    if let Some(r) = repos.iter().find(|r| is_autoload_provider(r)) {
+                        out.escalate(ExternalsCause::AutoloadProvider {
+                            module: r.clone(),
+                            why: format!(
+                                "`{path}` moved `{r}`, and the Bazel here autoloads native \
+                                 rules from {r}: a BUILD file uses them through a load it never \
+                                 writes, so no edge names their consumers"
+                            ),
+                        });
+                        return out;
+                    }
+                }
                 for p in &bzl_paths {
                     // The repositories a workspace-closure `.bzl` can define
                     // are exactly what the index recorded for a changed `.bzl`
@@ -404,13 +439,17 @@ pub fn analyse(
     if module_changed {
         let (base_facts, head_facts) =
             facts.unwrap_or_else(|| (facts_at(texts, base_rev), facts_at(texts, head_rev)));
-        match diff_module(&base_facts, &head_facts) {
+        match diff_module(&base_facts, &head_facts, autoload) {
             ModuleChange::Registration(why) => {
                 out.escalate(ExternalsCause::ModuleRegistration { why });
                 return out;
             }
             ModuleChange::Global(why) => {
                 out.escalate(ExternalsCause::Module { why });
+                return out;
+            }
+            ModuleChange::Autoload { module, why } => {
+                out.escalate(ExternalsCause::AutoloadProvider { module, why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -439,7 +478,7 @@ pub fn analyse(
         let base_lock = texts.text_at(base_rev, MODULE_LOCK);
         let head_lock = texts.text_at(head_rev, MODULE_LOCK);
         let change = match (base_lock, head_lock) {
-            (Some(b), Some(h)) => diff_lock(&b, &h, &facts),
+            (Some(b), Some(h)) => diff_lock(&b, &h, &facts, autoload),
             // One side has no lockfile at all: it was added or deleted, and
             // every repository in it is new or gone.
             _ => {
@@ -452,6 +491,10 @@ pub fn analyse(
             // enum's sake.
             ModuleChange::Global(why) | ModuleChange::Registration(why) => {
                 out.escalate(ExternalsCause::Lock { why });
+                return out;
+            }
+            ModuleChange::Autoload { module, why } => {
+                out.escalate(ExternalsCause::AutoloadProvider { module, why });
                 return out;
             }
             ModuleChange::Repos(repos) => {
@@ -695,6 +738,123 @@ fn repo_relative_path(label: &str, apparent: &str, canonical: &str) -> Option<St
     // `pkg:sub/file.bzl` is `pkg/sub/file.bzl`, and the root package's
     // `:file.bzl` is just `file.bzl`. A label with no `:` names no file.
     Some(join_path(l.package(), l.explicit_name()?))
+}
+
+/// Whether the Bazel reading the base tree autoloads native rules from the
+/// provider modules.
+///
+/// The version decides ([`Autoload::from_major`]): Bazel 8 autoloads at its
+/// default, 7 and 9 do not, and a version nothing states is read as 8, the
+/// side that over-reports. Where that Bazel reads the flag
+/// ([`Autoload::reads_flag`]: 7, 8, or an unknown version, but not 9, where
+/// autoloads are disabled and the option is a no-op),
+/// `--incompatible_autoload_externally` on an unconditional command line of
+/// `.bazelrc` at `rev` says otherwise instead ([`Autoload::from_flag`]):
+/// empty is off on an 8 tree, a value naming a provider is on for a 7.4 tree
+/// opting in early.
+///
+/// The version is `.bazelversion` at `rev` where that file states one, and
+/// the index header otherwise: a tree with no `.bazelversion`, one whose
+/// content is a channel name (`latest`) rather than a number, or a run
+/// reading a synthetic index. The tree's own file is asked first because the
+/// header is written once, at the cold build ([`crate::engine`]), and copied
+/// forward verbatim on every update ([`crate::run`]); a lineage cold-built
+/// under Bazel 7 carries "bazel 7.4.1" in its header for as long as it
+/// lives, including after the tree has moved to Bazel 8, and deciding from
+/// it there would localise a provider bump the running Bazel autoloads.
+/// Where the header is the only source it is `bazel --version` of the Bazel
+/// that built the index (bazelisk's resolution of `.bazelversion`, where
+/// that is how Bazel runs).
+///
+/// The rc files are read as Bazel reads them: the root `.bazelrc` with its
+/// `import` / `try-import` targets inlined where they appear, so a tree that
+/// opts in from an imported file is seen ([`autoload_flag_at`]).
+pub fn autoload_at(base: IndexRef<'_>, texts: &dyn WorkspaceText, rev: &str) -> Autoload {
+    let header = base.bazel_version.trim_start_matches("bazel").trim();
+    let (major, source) = match texts
+        .text_at(rev, ".bazelversion")
+        .and_then(|t| crate::probe::leading_major(&t))
+    {
+        Some(m) => (Some(m), ".bazelversion"),
+        None => (crate::probe::leading_major(header), "index header"),
+    };
+    let flag = Autoload::reads_flag(major)
+        .then(|| autoload_flag_at(texts, rev))
+        .flatten();
+    let autoload = match &flag {
+        Some(value) => Autoload::from_flag(value),
+        None => Autoload::from_major(major),
+    };
+    tracing::debug!(
+        ?major,
+        source,
+        flag = ?flag,
+        ?autoload,
+        "whether the Bazel reading the tree autoloads native rules"
+    );
+    autoload
+}
+
+/// The `--incompatible_autoload_externally` the rc files Bazel reads for this
+/// workspace state at `rev`, or `None` when none of them states it.
+///
+/// `import` and `try-import` are followed in place, as Bazel reads them: the
+/// imported file's lines take effect where the import line sits, so the last
+/// unconditional statement anywhere in the closure wins. A tree opting into
+/// autoload early on Bazel 7.4 routinely keeps the flag in a shared file
+/// (`tools/common.bazelrc`) that the root `.bazelrc` imports, and reading
+/// the root file alone would call that tree "not autoloading" and localise a
+/// provider bump the running Bazel autoloads from.
+///
+/// Targets are `%workspace%`-relative or repository-relative, as in
+/// [`crate::bazelrc::reachable`]; an absolute path is outside the tree as
+/// `texts` reads it and is not followed, and neither is a file that does not
+/// exist at `rev` (which is what `try-import` is for). A cycle stops at the
+/// file already read.
+fn autoload_flag_at(texts: &dyn WorkspaceText, rev: &str) -> Option<String> {
+    fn walk(
+        texts: &dyn WorkspaceText,
+        rev: &str,
+        path: &str,
+        seen: &mut BTreeSet<String>,
+        out: &mut Option<String>,
+    ) {
+        if !seen.insert(path.to_string()) {
+            return;
+        }
+        let Some(text) = texts.text_at(rev, path) else {
+            return;
+        };
+        for line in text.lines() {
+            let mut tokens = line.split_whitespace();
+            let Some(command) = tokens.next() else {
+                continue;
+            };
+            if command == "import" || command == "try-import" {
+                if let Some(target) = tokens.next().and_then(rc_relative) {
+                    walk(texts, rev, &target, seen, out);
+                }
+                continue;
+            }
+            if let Some(value) = bazelrc_autoload_externally(line) {
+                *out = Some(value);
+            }
+        }
+    }
+    let mut out = None;
+    walk(texts, rev, ".bazelrc", &mut BTreeSet::new(), &mut out);
+    out
+}
+
+/// An `import` target as a repository-relative path, or `None` when it names
+/// a file the tree does not hold.
+fn rc_relative(target: &str) -> Option<String> {
+    let rel = target.strip_prefix("%workspace%/").unwrap_or(target);
+    if rel.starts_with('/') {
+        return None;
+    }
+    let rel = rel.trim_start_matches("./");
+    (!rel.is_empty()).then(|| rel.to_string())
 }
 
 /// [`Mode::detect`] for the base side of the diff: the tree as `texts` reads
@@ -965,6 +1125,174 @@ mod tests {
         // Another repository, and a main-repo label.
         assert_eq!(repo_relative_path("@@other+//a:b.bzl", "mod", ""), None);
         assert_eq!(repo_relative_path("//a:b.bzl", "mod", ""), None);
+    }
+
+    /// `.bazelversion` wins over the index header (which is written once and
+    /// goes stale when the tree moves), and the `.bazelrc` flag over both
+    /// where the Bazel reads it; only Bazel 8 autoloads at its default, and
+    /// nothing at all is read as 8.
+    #[test]
+    fn the_version_and_the_bazelrc_flag_decide_autoload_and_unknown_means_on() {
+        use cambium_index::IndexBuilder;
+        let tree = |v: Option<&str>, rc: Option<&str>| {
+            let mut m = BTreeMap::new();
+            if let Some(v) = v {
+                m.insert(
+                    ("base".to_string(), ".bazelversion".to_string()),
+                    v.to_string(),
+                );
+            }
+            if let Some(rc) = rc {
+                m.insert(("base".to_string(), ".bazelrc".to_string()), rc.to_string());
+            }
+            FixedText(m)
+        };
+        let at = |header: &str, v: Option<&str>, rc: Option<&str>| {
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.set_bazel_version(header.to_string());
+            let d = b.finish("c0");
+            autoload_at(d.view(), &tree(v, rc), "base")
+        };
+        assert_eq!(at("bazel 7.4.1", None, None), Autoload::Off);
+        assert_eq!(at("bazel 8.0.0rc2", None, None), Autoload::On);
+        assert_eq!(at("bazel 9.2.0", None, None), Autoload::Off);
+        assert_eq!(
+            at("bazel 8.4.2", Some("7.4.1"), None),
+            Autoload::Off,
+            "the tree's own `.bazelversion` wins"
+        );
+        // The case the precedence exists for: a lineage cold-built under 7
+        // keeps "bazel 7.4.1" in its header for ever, and the tree has since
+        // moved to 8, which autoloads.
+        assert_eq!(
+            at("bazel 7.4.1", Some("8.4.2"), None),
+            Autoload::On,
+            "a header that went stale does not decide"
+        );
+        assert_eq!(at("", Some("7.6.1"), None), Autoload::Off);
+        assert_eq!(at("synth", Some("8.4.2"), None), Autoload::On);
+        assert_eq!(at("", Some("9.1.1"), None), Autoload::Off);
+        assert_eq!(at("", Some("latest"), None), Autoload::On);
+        assert_eq!(at("", None, None), Autoload::On);
+        // Where Bazel reads the flag it decides either way: empty is off on
+        // 8, a value naming a provider is on for a 7.4 tree opting in early,
+        // and a value that only removes symbols autoloads nothing.
+        let rc =
+            |v: &str| format!("build --jobs=8\ncommon --incompatible_autoload_externally={v}\n");
+        assert_eq!(at("bazel 8.4.2", None, Some(&rc(""))), Autoload::Off);
+        assert_eq!(
+            at(
+                "bazel 7.4.1",
+                None,
+                Some(&rc("+@rules_python,@com_google_protobuf"))
+            ),
+            Autoload::On
+        );
+        assert_eq!(
+            at("bazel 8.4.2", None, Some(&rc("-@rules_python"))),
+            Autoload::Off
+        );
+        // Bazel 9 does not read it: autoloads are disabled there and the
+        // option is a no-op, so a line left over from an 8 tree changes
+        // nothing.
+        assert_eq!(
+            at("bazel 9.2.0", None, Some(&rc("@rules_shell"))),
+            Autoload::Off
+        );
+        assert_eq!(
+            at("", Some("9.0.0"), Some(&rc("+@rules_python"))),
+            Autoload::Off
+        );
+        // A `--config` line says nothing, and the version stands.
+        assert_eq!(
+            at(
+                "bazel 8.4.2",
+                None,
+                Some("build:migrate --incompatible_autoload_externally=\n")
+            ),
+            Autoload::On
+        );
+    }
+
+    /// The flag counts wherever the rc closure states it, which on a tree
+    /// that opted into autoload early is routinely an imported file.
+    #[test]
+    fn the_autoload_flag_is_read_through_import_lines() {
+        use cambium_index::IndexBuilder;
+        let at = |header: &str, files: &[(&str, &str)]| {
+            let mut m = BTreeMap::new();
+            for (path, text) in files {
+                m.insert(("base".to_string(), path.to_string()), text.to_string());
+            }
+            let mut b = IndexBuilder::new(cambium_index::new_lineage());
+            b.set_bazel_version(header.to_string());
+            let d = b.finish("c0");
+            autoload_at(d.view(), &FixedText(m), "base")
+        };
+        // A 7.4 tree whose only autoload statement sits in an imported file
+        // autoloads, and reading the root file alone would say it does not.
+        assert_eq!(
+            at(
+                "bazel 7.4.1",
+                &[
+                    (".bazelversion", "7.4.1\n"),
+                    (".bazelrc", "import %workspace%/tools/common.bazelrc\n"),
+                    (
+                        "tools/common.bazelrc",
+                        "common --incompatible_autoload_externally=+@rules_python,@com_google_protobuf\n"
+                    ),
+                ]
+            ),
+            Autoload::On
+        );
+        // `try-import`, a repository-relative target, and an 8 tree turning
+        // autoload off from an imported file.
+        assert_eq!(
+            at(
+                "bazel 8.4.2",
+                &[
+                    (".bazelversion", "8.4.2\n"),
+                    (".bazelrc", "try-import tools/flags.bazelrc\n"),
+                    (
+                        "tools/flags.bazelrc",
+                        "common --incompatible_autoload_externally=\n"
+                    ),
+                ]
+            ),
+            Autoload::Off
+        );
+        // The import takes effect where it sits: a line after it wins.
+        assert_eq!(
+            at(
+                "bazel 8.4.2",
+                &[
+                    (".bazelversion", "8.4.2\n"),
+                    (
+                        ".bazelrc",
+                        "import %workspace%/tools/off.bazelrc\ncommon --incompatible_autoload_externally=@rules_shell\n"
+                    ),
+                    ("tools/off.bazelrc", "common --incompatible_autoload_externally=\n"),
+                ]
+            ),
+            Autoload::On
+        );
+        // An import nothing can read (a `try-import` of a file that is not
+        // there, an absolute path outside the tree) says nothing, and a cycle
+        // terminates.
+        assert_eq!(
+            at(
+                "bazel 7.4.1",
+                &[
+                    (".bazelversion", "7.4.1\n"),
+                    (
+                        ".bazelrc",
+                        "try-import %workspace%/missing.bazelrc\nimport /etc/bazel.rc\nimport %workspace%/a.bazelrc\n"
+                    ),
+                    ("a.bazelrc", "import %workspace%/.bazelrc\n"),
+                ]
+            ),
+            Autoload::Off
+        );
     }
 
     #[test]

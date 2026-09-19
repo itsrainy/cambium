@@ -47,9 +47,9 @@ pub use data::{
     flags, pkg_flags, Counts, Header, IndexData, IndexRef, NodeKind, Provenance, NO_ID,
 };
 pub use externals::{
-    build_repo_inputs, bzlmod_live, diff_module, is_toolchain_module, read_live_module_facts,
-    read_module_facts, read_module_facts_in, scan_module, Mode, ModuleChange, ModuleFacts, PathMap,
-    Pattern, RepoInputs,
+    build_repo_inputs, bzlmod_live, diff_module, is_autoload_provider, is_toolchain_module,
+    read_live_module_facts, read_module_facts, read_module_facts_in, scan_module, Autoload, Mode,
+    ModuleChange, ModuleFacts, PathMap, Pattern, RepoInputs,
 };
 pub use format::{
     commit_pointer_key, index_file_name, index_key, is_zstd, parse_commit_pointer_key,

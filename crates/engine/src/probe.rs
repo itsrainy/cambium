@@ -1131,8 +1131,9 @@ fn read_trimmed(path: &Path) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// The leading integer of a version string: `7.4.1` is 7, `8.0.0rc2` is 8.
-fn leading_major(s: &str) -> Option<u32> {
+/// The leading integer of a version string: `7.4.1` is 7, `8.0.0rc2` is 8,
+/// and `latest` or `rolling` is nothing.
+pub(crate) fn leading_major(s: &str) -> Option<u32> {
     let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }

@@ -4,16 +4,23 @@ use std::collections::BTreeSet;
 
 use crate::util::diff_maps;
 
-use crate::vocabulary::is_toolchain_module;
+use crate::vocabulary::{is_autoload_provider, is_toolchain_module};
 
-use super::module_facts::{apparent_of, ModuleChange, ModuleFacts};
+use super::module_facts::{apparent_of, Autoload, ModuleChange, ModuleFacts};
 
 /// What changed between two revisions of a `MODULE.bazel`.
 ///
 /// Every rule here answers the same question: can a reverse walk over the
 /// main-repo graph find the targets this change moves? If it can, the change
 /// names repositories; if it cannot, it is global and says why.
-pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
+///
+/// `autoload` is whether the Bazel reading the tree autoloads native rules
+/// from provider modules; see [`Autoload`]. It is checked before the
+/// toolchain rule, and the order decides the answer for the three modules on
+/// both lists (`rules_python`, `rules_java`, `rules_shell`): under a Bazel
+/// that autoloads, a bump of one of those reports the autoload reason, which
+/// is the more specific of the two, rather than the toolchain one.
+pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts, autoload: Autoload) -> ModuleChange {
     // A statement the parser does not know is global only when it is what
     // changed. One that reads the same at both revisions (a call to a macro
     // the file loaded, say) moves nothing on its own; the `.bzl` behind it
@@ -52,6 +59,16 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
     // Dependencies: a version bump changes exactly one repository's contents.
     for (n, b, h) in diff_maps(&base.deps, &head.deps) {
         let module = h.or(b).map(|d| d.module.clone()).unwrap_or_default();
+        if autoload == Autoload::On && is_autoload_provider(&module) {
+            return ModuleChange::Autoload {
+                why: format!(
+                    "`bazel_dep({module})` changed, and the Bazel here autoloads native rules \
+                     from {module}: a BUILD file uses them through a load it never writes, so \
+                     no edge names their consumers"
+                ),
+                module,
+            };
+        }
         if is_toolchain_module(&module) {
             return ModuleChange::Global(format!(
                 "`bazel_dep({module})` changed, and {module} registers toolchains: toolchain \
@@ -63,6 +80,15 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts) -> ModuleChange {
 
     // Overrides: same, keyed by module name rather than apparent name.
     for (m, _, _) in diff_maps(&base.overrides, &head.overrides) {
+        if autoload == Autoload::On && is_autoload_provider(m) {
+            return ModuleChange::Autoload {
+                module: m.to_string(),
+                why: format!(
+                    "the override for `{m}` changed, and the Bazel here autoloads native rules \
+                     from {m}"
+                ),
+            };
+        }
         if is_toolchain_module(m) {
             return ModuleChange::Global(format!(
                 "the override for `{m}` changed, and {m} registers toolchains"

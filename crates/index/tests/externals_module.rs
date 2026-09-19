@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use cambium_index::externals::{diff_module, scan_module, ModuleChange};
+use cambium_index::externals::{diff_module, scan_module, Autoload, ModuleChange};
 
 #[test]
 fn parses_bazel_deps_and_overrides() {
@@ -70,7 +70,7 @@ fn a_comprehension_of_tag_calls_belongs_to_its_extension() {
     // And a change inside the comprehension is seen as a change to it.
     let g = scan_module(&t.replace("\"a:b\"", "\"a:z\""));
     assert_eq!(
-        diff_module(&f, &g),
+        diff_module(&f, &g, Autoload::Off),
         ModuleChange::Repos(["maven".to_string()].into_iter().collect())
     );
 }
@@ -112,7 +112,7 @@ fn a_changed_override_repo_moves_the_extensions_repositories() {
         format!("{base}inject_repo(cc, \"extra\")\n"),
     ] {
         assert_eq!(
-            diff_module(&scan_module(base), &scan_module(&head)),
+            diff_module(&scan_module(base), &scan_module(&head), Autoload::Off),
             ModuleChange::Repos(["local_config_cc".to_string()].into_iter().collect()),
             "{head}"
         );
@@ -138,7 +138,7 @@ fn a_version_bump_names_one_repository() {
     let base = scan_module("bazel_dep(name = \"fmt\", version = \"1.0\")\n");
     let head = scan_module("bazel_dep(name = \"fmt\", version = \"2.0\")\n");
     assert_eq!(
-        diff_module(&base, &head),
+        diff_module(&base, &head, Autoload::Off),
         ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
     );
 }
@@ -147,10 +147,64 @@ fn a_version_bump_names_one_repository() {
 fn a_toolchain_module_bump_is_global() {
     let base = scan_module("bazel_dep(name = \"rules_python\", version = \"1.0\")\n");
     let head = scan_module("bazel_dep(name = \"rules_python\", version = \"2.0\")\n");
-    match diff_module(&base, &head) {
+    match diff_module(&base, &head, Autoload::Off) {
         ModuleChange::Global(r) => assert!(r.contains("rules_python"), "{r}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// `protobuf` is an ordinary dependency under Bazel 7, and under Bazel 8 a
+/// provider of `proto_library` to packages that load nothing from it. A
+/// `rules_python` bump is global either way; the reason changes. A
+/// `rules_cc` bump is global for its toolchains alone: Bazel 8 autoloads
+/// nothing from it.
+#[test]
+fn an_autoload_provider_bump_is_global_only_under_a_bazel_that_autoloads() {
+    let base = scan_module("bazel_dep(name = \"protobuf\", version = \"29.0\")\n");
+    let head = scan_module("bazel_dep(name = \"protobuf\", version = \"30.0\")\n");
+    assert_eq!(
+        diff_module(&base, &head, Autoload::Off),
+        ModuleChange::Repos(["protobuf".to_string()].into_iter().collect())
+    );
+    match diff_module(&base, &head, Autoload::On) {
+        ModuleChange::Autoload { module, why } => {
+            assert_eq!(module, "protobuf");
+            assert!(
+                why.contains("autoloads") && why.contains("protobuf"),
+                "{why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let base = scan_module("bazel_dep(name = \"rules_python\", version = \"0.1\")\n");
+    let head = scan_module("bazel_dep(name = \"rules_python\", version = \"0.2\")\n");
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::Off),
+        ModuleChange::Global(r) if r.contains("toolchains")
+    ));
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::On),
+        ModuleChange::Autoload { .. }
+    ));
+    let base = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.1\")\n");
+    let head = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.2\")\n");
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::On),
+        ModuleChange::Global(r) if r.contains("toolchains")
+    ));
+    // An override of a provider is the same move by another statement.
+    let base = scan_module(
+        "bazel_dep(name = \"protobuf\", version = \"29.0\")\n\
+         single_version_override(module_name = \"protobuf\", version = \"29.1\")\n",
+    );
+    let head = scan_module(
+        "bazel_dep(name = \"protobuf\", version = \"29.0\")\n\
+         single_version_override(module_name = \"protobuf\", version = \"29.2\")\n",
+    );
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::On),
+        ModuleChange::Autoload { ref module, .. } if module == "protobuf"
+    ));
 }
 
 /// Global, and told apart from the stage's own escalations so the run can
@@ -160,7 +214,7 @@ fn register_toolchains_is_global() {
     let base = scan_module("register_toolchains(\"//a:b\")\n");
     let head = scan_module("register_toolchains(\"//a:c\")\n");
     assert!(matches!(
-        diff_module(&base, &head),
+        diff_module(&base, &head, Autoload::Off),
         ModuleChange::Registration(_)
     ));
 }
@@ -176,12 +230,16 @@ fn an_unparsed_statement_is_global_only_when_it_changed() {
         )
     };
     assert_eq!(
-        diff_module(&scan_module(&t("1.0")), &scan_module(&t("2.0"))),
+        diff_module(
+            &scan_module(&t("1.0")),
+            &scan_module(&t("2.0")),
+            Autoload::Off
+        ),
         ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
     );
     let edited = t("1.0").replace("vendored()", "vendored(x = 1)");
     assert!(matches!(
-        diff_module(&scan_module(&t("1.0")), &scan_module(&edited)),
+        diff_module(&scan_module(&t("1.0")), &scan_module(&edited), Autoload::Off),
         ModuleChange::Global(m) if m.contains("vendored") && m.contains("x")
     ));
 }
@@ -193,15 +251,21 @@ fn an_unparsed_statement_is_global_only_when_it_changed() {
 fn a_repeated_unparsed_statement_is_global() {
     let base = scan_module("load(\"//bazel:v.bzl\", \"vendored\")\nvendored()\nvendored()\n");
     let head = scan_module("load(\"//bazel:v.bzl\", \"vendored\")\nvendored()\n");
-    assert!(matches!(diff_module(&base, &head), ModuleChange::Global(_)));
-    assert!(matches!(diff_module(&head, &base), ModuleChange::Global(_)));
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::Off),
+        ModuleChange::Global(_)
+    ));
+    assert!(matches!(
+        diff_module(&head, &base, Autoload::Off),
+        ModuleChange::Global(_)
+    ));
 }
 
 #[test]
 fn an_unchanged_module_names_nothing() {
     let t = "bazel_dep(name = \"fmt\", version = \"1.0\")\nregister_toolchains(\"//a:b\")\n";
     assert_eq!(
-        diff_module(&scan_module(t), &scan_module(t)),
+        diff_module(&scan_module(t), &scan_module(t), Autoload::Off),
         ModuleChange::Repos(BTreeSet::new())
     );
 }
@@ -219,7 +283,7 @@ fn a_changed_tag_names_the_extensions_repositories() {
          use_repo(pip, \"base_pip3\")\n",
     );
     assert_eq!(
-        diff_module(&base, &head),
+        diff_module(&base, &head, Autoload::Off),
         ModuleChange::Repos(["base_pip3".to_string()].into_iter().collect())
     );
 }
@@ -243,7 +307,11 @@ fn a_version_bump_does_not_name_the_other_extensions_repositories() {
         )
     };
     assert_eq!(
-        diff_module(&scan_module(&text("1.0")), &scan_module(&text("2.0"))),
+        diff_module(
+            &scan_module(&text("1.0")),
+            &scan_module(&text("2.0")),
+            Autoload::Off
+        ),
         ModuleChange::Repos(["fmt".to_string()].into_iter().collect())
     );
 }
@@ -261,7 +329,11 @@ fn a_changed_tag_leaves_the_other_extensions_alone() {
         )
     };
     assert_eq!(
-        diff_module(&scan_module(&text("g:a:1")), &scan_module(&text("g:a:2"))),
+        diff_module(
+            &scan_module(&text("g:a:1")),
+            &scan_module(&text("g:a:2")),
+            Autoload::Off
+        ),
         ModuleChange::Repos(
             ["maven".to_string(), "unpinned_maven".to_string()]
                 .into_iter()

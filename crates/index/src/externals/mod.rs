@@ -204,12 +204,17 @@ mod module_parser;
 mod path_maps;
 mod pattern;
 
-pub use crate::vocabulary::{is_toolchain_module, registration_repo, TOOLCHAIN_MODULES};
-pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, Mode};
+pub use crate::vocabulary::{
+    is_autoload_provider, is_toolchain_module, registration_repo, AUTOLOAD_PROVIDERS,
+    TOOLCHAIN_MODULES,
+};
+pub use bazelrc::{bazelrc_autoload_externally, bazelrc_bzlmod, bzlmod_live, Mode};
 pub use external_query::external_dir_repos;
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;
-pub use module_facts::{apparent_of, Dep, Extension, ModuleChange, ModuleFacts, RepoRule};
+pub use module_facts::{
+    apparent_of, Autoload, Dep, Extension, ModuleChange, ModuleFacts, RepoRule,
+};
 pub use module_parser::{scan_module, MODULE_SEGMENT_SUFFIX};
 pub use path_maps::{scan_bzl_path_maps, BzlPathMaps};
 pub use pattern::{PathMap, Pattern, RepoInputs};

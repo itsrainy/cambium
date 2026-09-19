@@ -282,10 +282,11 @@ yardstick. Only the oracle is.
   over-approximation class.
 - **The edge of the invariant.** A toolchain implementation moving behind
   an unchanged declaration (the declarations themselves escalate, by rule
-  class, wherever they live), `.bazelignore`, autoloaded native rules and
-  symlinked directories aren't modelled; the README's "Where the
-  invariant stops" section is the authoritative list, with each case's
-  status.
+  class, wherever they live), `.bazelignore` and symlinked directories
+  aren't modelled, and a bump of a module the Bazel here autoloads native
+  rules from is escalated rather than followed (`CAMBI-W024`); the README's
+  "Where the invariant stops" section is the authoritative list, with each
+  case's status.
 
 ## Disagreement taxonomy
 

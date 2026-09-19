@@ -135,6 +135,13 @@ pub enum ExternalsCause {
     /// for it -- so which modules the new registries re-point cannot be read
     /// from the tree. See `crate::bazelrc`, "`--registry`".
     RegistryWithoutLock { path: String },
+    /// A module Bazel autoloads native rules from moved (a `bazel_dep` bump,
+    /// an override, a lock re-resolution, a `WORKSPACE` declaration), under a
+    /// Bazel that autoloads. A bare `py_binary` is that module's
+    /// rule through a load no BUILD file writes, so no edge names its
+    /// consumers. Reported under its own code, not the stage's: the stage
+    /// accounted for the change exactly, and the answer is still everything.
+    AutoloadProvider { module: String, why: String },
 }
 
 impl fmt::Display for ExternalsCause {
@@ -153,7 +160,8 @@ impl fmt::Display for ExternalsCause {
             ),
             ExternalsCause::Module { why }
             | ExternalsCause::Lock { why }
-            | ExternalsCause::ModuleRegistration { why } => f.write_str(why),
+            | ExternalsCause::ModuleRegistration { why }
+            | ExternalsCause::AutoloadProvider { why, .. } => f.write_str(why),
             ExternalsCause::RegisteredRepository { repo, file } => write!(
                 f,
                 "`@{repo}` moved, and `{file}` registers toolchains or execution platforms from \
@@ -309,6 +317,9 @@ impl GlobalReason {
             GlobalReason::Invalidator { .. } => Code::W013InvalidatorMatched,
             GlobalReason::NoLoadingLayer => Code::W008NoLoadingLayer,
             GlobalReason::WorkspaceLevelBzl { .. } => Code::W009WorkspaceLevelBzl,
+            GlobalReason::Externals(ExternalsCause::AutoloadProvider { .. }) => {
+                Code::W024AutoloadProvider
+            }
             GlobalReason::Externals(c) if c.is_registration() => Code::W023ToolchainMoved,
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
             GlobalReason::ToolchainRule { .. } => Code::W023ToolchainMoved,
@@ -357,6 +368,7 @@ impl GlobalReason {
                 | Code::W014ExternalsGlobal
                 | Code::W015FlagUnresolved
                 | Code::W023ToolchainMoved
+                | Code::W024AutoloadProvider
         )
     }
 
@@ -428,6 +440,25 @@ impl GlobalReason {
                     Some(p) => d.at(p.clone(), None),
                     None => d,
                 }
+            }
+            GlobalReason::Externals(ExternalsCause::AutoloadProvider { module, .. }) => {
+                Diagnostic::warning(
+                    self.code(),
+                    format!(
+                        "a module Bazel autoloads native rules from moved, so everything is \
+                         affected: {reason}"
+                    ),
+                )
+                .with_help(format!(
+                    "expected where Bazel autoloads native rules (Bazel 8 by default, or 7.4 \
+                     with --incompatible_autoload_externally set in .bazelrc; Bazel 9 \
+                     disabled autoloads): a bare py_binary or proto_library is {module}'s \
+                     rule and no BUILD file loads it; nothing to configure. If the Bazel here \
+                     is not 8 and nothing says so, pin it in .bazelversion; \
+                     --incompatible_autoload_externally= (empty) on an unconditional line of \
+                     .bazelrc turns autoload off, and a toolchain module then stays global \
+                     under CAMBI-W014"
+                ))
             }
             GlobalReason::Externals(c) if c.is_registration() => {
                 let d = Diagnostic::warning(
@@ -746,6 +777,16 @@ mod tests {
                  platforms from it; toolchain resolution has no edge in the query graph, so no \
                  reverse walk can find what it moves",
             ),
+            (
+                GlobalReason::Externals(ExternalsCause::AutoloadProvider {
+                    module: "protobuf".into(),
+                    why: "`bazel_dep(protobuf)` changed, and the Bazel here autoloads native \
+                          rules from protobuf"
+                        .into(),
+                }),
+                "`bazel_dep(protobuf)` changed, and the Bazel here autoloads native rules from \
+                 protobuf",
+            ),
         ]
     }
 
@@ -817,6 +858,21 @@ mod tests {
             change: RuleChange::Changed,
         };
         assert_eq!(rule.code(), Code::W023ToolchainMoved);
+    }
+
+    /// The autoload cause is the one externals cause with a code of its own,
+    /// and its help line names the module.
+    #[test]
+    fn the_autoload_cause_has_its_own_code() {
+        let d = GlobalReason::Externals(ExternalsCause::AutoloadProvider {
+            module: "protobuf".into(),
+            why: "moved".into(),
+        })
+        .diagnostic();
+        assert_eq!(d.code, Code::W024AutoloadProvider);
+        assert!(d.help.as_deref().unwrap().contains("protobuf"), "{d:?}");
+        let d = GlobalReason::Externals(ExternalsCause::Module { why: "x".into() }).diagnostic();
+        assert_eq!(d.code, Code::W014ExternalsGlobal);
     }
 
     #[test]
