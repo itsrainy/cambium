@@ -197,6 +197,16 @@ pub trait PackageQuerier {
     fn workspace(&self) -> Option<&Path> {
         None
     }
+
+    /// Where a diagnostic raised while reading this querier's checkout goes.
+    ///
+    /// The index-building side of a run reads files as well as rows, and some
+    /// of what it finds there is actionable rather than merely logged. A
+    /// querier with no collector behind it (the synthetic and test ones)
+    /// returns `None` and the finding stays a `tracing` line.
+    fn diagnostics(&self) -> Option<&crate::diag::Diagnostics> {
+        None
+    }
 }
 
 /// The real thing: `bazel query` for a package set.
@@ -215,6 +225,10 @@ pub struct BazelQuerier {
 }
 
 impl PackageQuerier for BazelQuerier {
+    fn diagnostics(&self) -> Option<&crate::diag::Diagnostics> {
+        Some(&self.diags)
+    }
+
     fn query(&self, packages: &[String]) -> Result<Rows, crate::error::EngineError> {
         let q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
         // Exit 3 is `--keep_going` finishing with errors: every package that

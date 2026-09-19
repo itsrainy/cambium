@@ -82,8 +82,50 @@ pub(crate) fn rescan_closure(
     let mode = cambium_index::Mode::detect(src, &mapping);
     let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
+    report_repo_settings(querier, src, &mapping, &facts);
     map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     Some(c)
+}
+
+/// Says once, per closure rebuild, that a `.bazelrc` line makes a target of
+/// this tree an input of an external repository's targets.
+///
+/// The input itself is recorded by
+/// [`cambium_index::build_repo_inputs`]; this is the actionable half. The
+/// answer it buys is wide by the whole repository, because the edge the flag
+/// creates is between a main-repo target and whichever of the repository's
+/// targets read the setting, and nothing in the tree says which those are.
+fn report_repo_settings(
+    querier: &dyn PackageQuerier,
+    src: &dyn cambium_index::FileText,
+    mapping: &cambium_index::RepoMapping,
+    facts: &cambium_index::ModuleFacts,
+) {
+    let mapping = mapping.clone().with_main_alias(&facts.module_name);
+    for s in cambium_index::repo_setting_inputs(src, &mapping) {
+        tracing::debug!(
+            repo = %s.repo, flag = %s.flag, value = %s.value,
+            "a bazelrc line sets an external repository's build setting to a target of this tree"
+        );
+        let Some(diags) = querier.diagnostics() else {
+            continue;
+        };
+        diags.emit(
+            crate::diag::Diagnostic::warning(
+                crate::diag::Code::W027BuildSettingCrossesRepository,
+                format!(
+                    "`.bazelrc` sets `{}` to `{}`, so a change to that target moves every \
+                     target of `@{}`",
+                    s.flag, s.value, s.repo
+                ),
+            )
+            .with_help(format!(
+                "expected on a tree that configures its external repositories this way; the \
+                 answer is wide by `@{}` until the flag's readers are known",
+                s.repo
+            )),
+        );
+    }
 }
 
 /// Records which external repository each nested repository's directory is,

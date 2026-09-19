@@ -108,6 +108,10 @@ codes! {
     /// `bazel mod dump_repo_mapping` succeeded but printed something that is
     /// not a mapping, so the identity mapping stands in for it.
     W022RepoMappingUnparsed => "CAMBI-W022",
+    /// A `.bazelrc` line resolves an external repository's build setting to a
+    /// target of this tree, so that repository's answer is wide by the whole
+    /// repository.
+    W027BuildSettingCrossesRepository => "CAMBI-W027",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,

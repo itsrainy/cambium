@@ -9,6 +9,7 @@ use crate::label::{rule_label, Label};
 use crate::loads::{FileText, LoadGraph, RepoMapping};
 use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 
+use super::bazelrc::{repo_settings, RepoSetting};
 use super::module_facts::{apparent_of, ModuleFacts};
 use super::path_maps::scan_path_maps;
 use super::pattern::{OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
@@ -135,6 +136,33 @@ fn overlay_map(path: &str) -> PathMap {
         to: "BUILD.bazel".to_string(),
         exhaustive: false,
     }
+}
+
+/// The `.bazelrc` lines that make a target of this tree an input of an
+/// external repository's targets.
+///
+/// `build --@quiche//:quic_base_impl_lib=//source/common/quic/platform:...`
+/// says a `label_flag` of `@quiche` resolves to a target of this tree, so
+/// every `@quiche` target that reads that flag depends on it. At envoy's
+/// bzlmod pin this is the only route back into the main repository that
+/// exists at all: the overlay BUILD file is hosted in the registry and names
+/// nothing of this tree.
+///
+/// Filtered from [`repo_settings`] by the two things text alone cannot
+/// decide: a flag on the main repository under its own apparent name
+/// (`--@envoy//...` inside envoy) is not an external repository's flag, and a
+/// value that is not a label of this tree is not an input.
+pub fn repo_setting_inputs(src: &dyn FileText, m: &RepoMapping) -> Vec<RepoSetting> {
+    let Some(text) = src.text(".bazelrc") else {
+        return Vec::new();
+    };
+    repo_settings(&text)
+        .into_iter()
+        .filter(|s| {
+            Label::parse(&s.flag).is_some_and(|l| !l.is_main(m))
+                && !main_repo_patterns(&s.value, m).is_empty()
+        })
+        .collect()
 }
 
 /// Computes the repository-input map for a checkout.
@@ -506,6 +534,23 @@ pub fn build_repo_inputs(
                     .or_default()
                     .extend(repos.iter().cloned());
             }
+        }
+    }
+    // The same kind of input again, written in configuration: a `.bazelrc`
+    // line that resolves an external repository's build setting to a target
+    // of this tree. Target-only, so rule (1) and the repository fixpoint
+    // answer it, exactly as the overlay BUILD file's labels are answered.
+    for s in repo_setting_inputs(src, m) {
+        // A plain `bazel_dep` has no row of its own, because a declaration
+        // says nothing about this tree. One a setting line names does say
+        // something, so it gets one here.
+        if !out.repos.contains(&s.repo) && !facts.deps.contains_key(&s.repo) {
+            continue;
+        }
+        out.repos.insert(s.repo.clone());
+        for pat in main_repo_patterns(&s.value, m) {
+            embedded.insert(pat.clone());
+            out.patterns.entry(pat).or_default().insert(s.repo.clone());
         }
     }
     out.target_only = embedded.difference(&direct).cloned().collect();

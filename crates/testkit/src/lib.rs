@@ -289,6 +289,9 @@ pub struct Scanning {
     hides_from_dump: std::sync::atomic::AtomicUsize,
     /// How many dumps this querier has served.
     dumps_served: std::sync::atomic::AtomicUsize,
+    /// Where a diagnostic the index-building side raises while reading this
+    /// querier's checkout goes, so a test can assert on the code.
+    diags: cambium_engine::Diagnostics,
 }
 
 impl Scanning {
@@ -307,7 +310,13 @@ impl Scanning {
             reloads: std::sync::atomic::AtomicUsize::new(0),
             hides_from_dump: std::sync::atomic::AtomicUsize::new(0),
             dumps_served: std::sync::atomic::AtomicUsize::new(0),
+            diags: cambium_engine::Diagnostics::new(),
         }
+    }
+
+    /// The diagnostics raised while reading this querier's checkout.
+    pub fn diags(&self) -> &cambium_engine::Diagnostics {
+        &self.diags
     }
 
     /// Serve every dump from the `n`th onward with its `PACKAGE` blocks
@@ -373,6 +382,10 @@ impl Scanning {
 }
 
 impl PackageQuerier for Scanning {
+    fn diagnostics(&self) -> Option<&cambium_engine::Diagnostics> {
+        Some(&self.diags)
+    }
+
     fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
         Ok(packages
             .iter()
