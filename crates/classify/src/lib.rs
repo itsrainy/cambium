@@ -127,6 +127,9 @@ pub struct PackageSet {
     /// Directories that are Bazel repositories of their own, each with a
     /// trailing `/`. See [`PackageSet::boundary_of`].
     boundaries: Vec<String>,
+    /// The subset of `boundaries` that `//...` walked into anyway, each with
+    /// a trailing `/`. See [`PackageSet::unwalked_boundary_of`].
+    traversed: Vec<String>,
 }
 
 impl PackageSet {
@@ -134,6 +137,7 @@ impl PackageSet {
         Self {
             packages: packages.into_iter().collect(),
             boundaries: Vec::new(),
+            traversed: Vec::new(),
         }
     }
 
@@ -150,6 +154,40 @@ impl PackageSet {
         v.dedup();
         self.boundaries = v;
         self
+    }
+
+    /// Of those directories, the ones the cold universe query returned a
+    /// main-repo package under, as `cambium_index::Boundary::traversed`
+    /// records them. Repo-relative and without a trailing slash.
+    pub fn with_traversed(mut self, dirs: impl IntoIterator<Item = String>) -> Self {
+        let mut v: Vec<String> = dirs
+            .into_iter()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("{}/", d.trim_end_matches('/')))
+            .collect();
+        v.sort();
+        v.dedup();
+        self.traversed = v;
+        self
+    }
+
+    /// The nested repository `path` sits in whose files are not this
+    /// repository's: a boundary `//...` really did stop at.
+    ///
+    /// A boundary Bazel walked into anyway is not one of them. Which markers
+    /// stop `//...` differs by Bazel version, and xla's `third_party/tsl`
+    /// carries a `REPO.bazel` that Bazel 8.7 walks straight past: its
+    /// packages are in the index, they are main-repo packages, and refusing
+    /// to own a file there would drop every target that depends on it. So
+    /// ownership is refused only where the universe query agrees that nothing
+    /// of this repository is there.
+    pub fn unwalked_boundary_of(&self, path: &str) -> Option<&str> {
+        let dir = self.boundary_of(path)?;
+        let walked = self
+            .traversed
+            .iter()
+            .any(|t| path.starts_with(t.as_str()) || path == &t[..t.len() - 1]);
+        (!walked).then_some(dir)
     }
 
     /// The nested repository `path` sits in, if any: the *outermost* one,
@@ -176,11 +214,19 @@ impl PackageSet {
                 packages.insert(index.package_name(p).to_string());
             }
         }
+        let boundaries: Vec<cambium_index::Boundary> = index.boundaries().collect();
         Self {
             packages,
             boundaries: Vec::new(),
+            traversed: Vec::new(),
         }
-        .with_boundaries(index.repo_boundaries().map(str::to_string))
+        .with_boundaries(boundaries.iter().map(|b| b.dir.clone()))
+        .with_traversed(
+            boundaries
+                .iter()
+                .filter(|b| b.traversed)
+                .map(|b| b.dir.clone()),
+        )
     }
 
     pub fn contains(&self, pkg: &str) -> bool {
@@ -199,7 +245,7 @@ impl PackageSet {
     /// directory `//...` never descended into has no main-repo package, and
     /// minting one from a changed path is what made the phantoms.
     pub fn insert(&mut self, pkg: String) {
-        if self.boundary_of(&pkg).is_some() {
+        if self.unwalked_boundary_of(&pkg).is_some() {
             return;
         }
         self.packages.insert(pkg);
@@ -217,7 +263,7 @@ impl PackageSet {
     /// first that is a package. O(depth) hash lookups — no binary search per
     /// component.
     pub fn owner_of(&self, path: &str) -> Option<&str> {
-        if self.boundary_of(path).is_some() {
+        if self.unwalked_boundary_of(path).is_some() {
             return None;
         }
         let mut end = path.rfind('/');
@@ -303,7 +349,7 @@ pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classificati
     }
     // Before anything reads the path as a package: a nested repository's files
     // are not this repository's, whatever they are called.
-    if let Some(dir) = packages.boundary_of(path) {
+    if let Some(dir) = packages.unwalked_boundary_of(path) {
         return Classification::Nested(dir.to_string());
     }
     if is_build_file(path) {
@@ -441,7 +487,7 @@ pub fn dirty_set(
         // repository. Pass two records it; pass one must not mint a main-repo
         // package name from it, nor touch the parent package, which is in a
         // different repository and cannot gain or lose files to it.
-        if packages.boundary_of(&c.path).is_some() {
+        if packages.unwalked_boundary_of(&c.path).is_some() {
             continue;
         }
         let pkg = dirname(&c.path).to_string();
@@ -485,7 +531,7 @@ pub fn dirty_set(
     // Pass two: everything else.
     for c in changes {
         let c = c.borrow();
-        if is_build_file(&c.path) && packages.boundary_of(&c.path).is_none() {
+        if is_build_file(&c.path) && packages.unwalked_boundary_of(&c.path).is_none() {
             continue;
         }
         match classify(&c.path, packages, m) {
@@ -539,6 +585,26 @@ pub fn dirty_set(
             }
             Classification::Ignored => out.ignored += 1,
             Classification::Nested(dir) => out.nested.entry(dir).or_default().push(c.path.clone()),
+        }
+    }
+
+    // A traversed boundary is two things at once, and both answers are owed.
+    // xla's `third_party/tsl` is a main-repo directory whose packages Bazel
+    // loaded (handled above, as any other path is) *and* the repository
+    // `@tsl`, whose targets consume those same files. Classification is
+    // single-owner, so the repository half is recorded here rather than as a
+    // classification: the paths go into `nested` beside the untraversed
+    // boundaries' paths, and the engine routes them to the repository the
+    // directory is, if it knows one.
+    for c in changes {
+        let c = c.borrow();
+        if let Some(dir) = packages.boundary_of(&c.path) {
+            if packages.unwalked_boundary_of(&c.path).is_none() {
+                out.nested
+                    .entry(dir.to_string())
+                    .or_default()
+                    .push(c.path.clone());
+            }
         }
     }
 
@@ -896,6 +962,65 @@ mod tests {
         assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
+    /// The xla shape: a `REPO.bazel` directory Bazel 8.7 walked into anyway.
+    fn traversed() -> PackageSet {
+        PackageSet::new(
+            ["", "lib", "third_party/tsl/tsl/platform"]
+                .into_iter()
+                .map(String::from),
+        )
+        .with_boundaries(["third_party/tsl".to_string()])
+        .with_traversed(["third_party/tsl".to_string()])
+    }
+
+    #[test]
+    fn a_traversed_boundary_keeps_main_repo_ownership() {
+        let p = traversed();
+        // Still a boundary, so the repository half can still be routed.
+        assert_eq!(
+            p.boundary_of("third_party/tsl/tsl/platform/dso_loader.cc"),
+            Some("third_party/tsl")
+        );
+        // But not one `//...` stopped at, so the packages under it are this
+        // repository's and own their files.
+        assert_eq!(p.unwalked_boundary_of("third_party/tsl/tsl/platform/x.cc"), None);
+        assert_eq!(
+            p.owner_of("third_party/tsl/tsl/platform/dso_loader.cc"),
+            Some("third_party/tsl/tsl/platform")
+        );
+        let m = matchers();
+        assert_eq!(
+            classify("third_party/tsl/tsl/platform/dso_loader.cc", &p, &m),
+            Classification::Source("third_party/tsl/tsl/platform".to_string())
+        );
+    }
+
+    #[test]
+    fn a_change_under_a_traversed_boundary_is_also_the_repositorys() {
+        let mut p = traversed();
+        let m = Matchers::compile(&Rules::default()).unwrap();
+        let d = dirty_set(
+            &[Change::new(
+                Status::Modified,
+                "third_party/tsl/tsl/platform/dso_loader.cc",
+            )],
+            &mut p,
+            &m,
+            &NoConsumers,
+        );
+        // The main-repo half.
+        assert!(d
+            .direct_files
+            .contains("third_party/tsl/tsl/platform/dso_loader.cc"));
+        // And the repository half, for the engine to route.
+        assert_eq!(
+            d.nested.get("third_party/tsl").map(Vec::len),
+            Some(1),
+            "{:?}",
+            d.nested
+        );
+    }
+
     fn nested() -> PackageSet {
         PackageSet::new(["", "lib", "third_party"].into_iter().map(String::from))
             .with_boundaries(["third_party/xla".to_string()])
@@ -973,6 +1098,7 @@ mod tests {
         b.set_repo_boundaries(vec![cambium_index::Boundary {
             dir: "third_party/xla".into(),
             bazelignored: false,
+            traversed: false,
         }]);
         b.apply_packages(&[cambium_index::PackageUpdate {
             package: "lib".into(),
