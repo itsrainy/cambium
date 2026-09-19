@@ -436,6 +436,13 @@ Blind spots, reported in its own output:
   `affected (lower bound)` and never gates on it.
 - **A cold rebuild's answer needs Bazel.** Replay reports only that the
   fallback fires, not what `//...` would return.
+- **A global the run reached after its query is not compared.** A
+  toolchain-class declaration the splice found moved (`CAMBI-W023`) is
+  decided over the rows the query read back, and replay runs no query, so
+  its "not global" there is an earlier stage's answer to a later stage's
+  question. Replay skips the comparison rather than raise that lead on
+  every such step, and the skip is silent: the step passes with no
+  divergence and no note.
 - **The stored index is at the pin**, so a divergence from a recorded
   answer is a lead, not a verdict. The tight loop is `--save-baseline`
   before the change and `--baseline` after (`SAVE_BASELINE=1` /

@@ -94,8 +94,15 @@ impl Matchers {
         self.exempt.extend(paths);
     }
 
-    /// A root-level `BUILD` file is an invalidator by default (it can define
-    /// package-wide settings), and so is anything matching a configured glob.
+    /// A path listed in `[invalidators].paths` is an invalidator, and so is
+    /// anything matching a configured glob (no glob is on by default).
+    ///
+    /// The defaults are the files that can change anything and that the graph
+    /// carries no edge to (`MODULE.bazel`, `.bazelrc`, `.bazelversion`,
+    /// `REPO.bazel`, ...). A root-level `BUILD` file is deliberately not
+    /// among them: its `package()` call applies to its own package and no
+    /// other, and everything else in it is an ordinary target in the root
+    /// package, whose consumers the graph already knows.
     pub fn is_invalidator(&self, path: &str) -> bool {
         !self.exempt.contains(path)
             && (self.exact.contains(path) || self.invalidators.is_match(path))
