@@ -682,7 +682,7 @@ pub const EVIDENCE: &[Evidence] = &[
          choose between legacy `_proto_compiler` attributes and toolchains on proto_library, \
          cc_proto_library and friends. Those implicit attributes are query-visible edges, so \
          `bazel query deps()` changes. The step-235 instance was `['']` -> `['', 'true']`, \
-         the same effective value twice, which the multiset diff cannot tell from a change; \
+         the same effective value twice, which the value-list diff reads as a change; \
          the flag class is loading-relevant regardless.",
     ),
     e(
@@ -1062,7 +1062,16 @@ fn truthy(values: &[String]) -> bool {
 /// configs that were in effect to get there.
 #[derive(Debug, Default)]
 struct Effective {
-    /// Triple -> its values from every file that sets it, sorted.
+    /// Triple -> its values from every file that sets it, in the order the
+    /// chain was read (path order, then line order within a file).
+    ///
+    /// Order is kept, and the comparison between the two ends is order
+    /// sensitive, because Bazel's effective value for a scalar flag is the
+    /// last occurrence in rc order: a diff that only moves a value from one
+    /// file (or one line) to another changes what Bazel does while leaving
+    /// the set of values alone. The read order here is not Bazel's rc order,
+    /// so this does not *compute* the effective value; it only refuses to
+    /// call such a diff unchanged, which screens more, never less.
     flags: BTreeMap<FlagKey, Vec<String>>,
     /// Triple -> the first file (in path order) that sets it.
     source: BTreeMap<FlagKey, String>,
@@ -1164,9 +1173,6 @@ fn effective(chain: &Chain, inv: &Invocation) -> Effective {
                 .entry(key.clone())
                 .or_insert_with(|| path.clone());
         }
-    }
-    for v in out.flags.values_mut().chain(out.startup.values_mut()) {
-        v.sort();
     }
     out
 }
@@ -1830,6 +1836,46 @@ mod tests {
         // Under `build` it never reaches the query.
         let s = screen("", "build --registry=https://example.com/r\n", &[]);
         assert_eq!(s.registry, None);
+    }
+
+    /// Bazel takes the last occurrence of a scalar flag in rc order, so a
+    /// diff that swaps which file carries which value changes what Bazel
+    /// does while leaving the values pooled over the chain alone. The screen
+    /// must not read that as unchanged.
+    #[test]
+    fn a_value_swapped_between_two_rc_files_is_a_change() {
+        let flag = "incompatible_enable_proto_toolchain_resolution";
+        let chain = |root: &str, ci: &str| Chain {
+            files: [
+                (
+                    ".bazelrc".to_string(),
+                    parse(&format!("common --{flag}={root}\n")),
+                ),
+                (
+                    "tools/ci.bazelrc".to_string(),
+                    parse(&format!("common --{flag}={ci}\n")),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            unresolved: Default::default(),
+        };
+        let s = screen_chain(
+            &chain("false", "true"),
+            &chain("true", "false"),
+            &Invocation {
+                configs: &[],
+                extra_allowlist: &[],
+            },
+        );
+        // `blocked` returns a Screen carrying only the blocker, so the
+        // verdict is the whole assertion: the swap was read as a change, and
+        // the flag it names is not allowlisted.
+        assert!(
+            matches!(&s.unknown, Some(b) if matches!(&b.why, Unknown::NotAllowlisted { name, .. } if name == flag)),
+            "{:?}",
+            s.unknown
+        );
     }
 
     #[test]
