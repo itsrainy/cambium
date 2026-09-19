@@ -271,7 +271,7 @@ impl GlobalReason {
             )
             .with_help(
                 "move the setting into the main repository, or add the flag to \
-                 [bazelrc].allowlist_extra if it cannot affect analysis",
+                 [bazelrc].allowlist_extra if it cannot change what `bazel query` loads",
             ),
             GlobalReason::Invalidator { path } => Diagnostic::warning(
                 self.code(),

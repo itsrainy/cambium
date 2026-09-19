@@ -200,7 +200,8 @@ var, default); the local override (below) is its own origin.
 ## Configuration
 
 `cambium.toml` at the workspace root is the contract, checked in: Bazel
-flags, invalidators, ignore globs, the `.bazelrc` allowlist, store, limits.
+flags, invalidators, ignore globs, the `.bazelrc` allowlist and the configs
+the index query runs with, store, limits.
 Hashed into every index produced; a hash mismatch blocks a splice.
 
 Beside it, gitignored, `cambium.local.toml` holds what's local, not the
@@ -281,7 +282,7 @@ warning[CAMBI-W004]: .bazelrc changed and the run went global
    |
 14 | common --repo_env=CC=clang
    |        ^^^^^^^^^^ --repo_env is not on the loading-irrelevant allowlist
-   = help: add it to [bazelrc].allowlist_extra if it cannot affect loading
+   = help: add it to [bazelrc].allowlist_extra if it cannot change what `bazel query` loads
 ```
 
 Under `--format json` it's one object,

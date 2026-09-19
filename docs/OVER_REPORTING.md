@@ -24,9 +24,11 @@ sound. Everything below is one of those two, at some scale.
 | Toolchain registration | `register_toolchains`, `register_execution_platforms`, or any module on `TOOLCHAIN_MODULES` | `CAMBI-W014` | `crates/engine/src/externals.rs`, `crates/index/src/vocabulary.rs` |
 | Nested repository nothing maps | a changed file under a directory with its own `WORKSPACE` or `MODULE.bazel` that no path map names and `.bazelignore` does not exclude | `CAMBI-W014` | `crates/engine/src/run.rs`, `crates/engine/src/externals.rs` (`repo_rooted_at`) |
 
-The `.bazelrc` screen was the dominant cause on the subjects: 13 of envoy's 18
+The `.bazelrc` screen was the dominant cause on the subjects: 17 of envoy's 18
 history globals and 6 of xla's 7 in docs/RESULTS.md, before the screen learnt
-which lines a query reads (the next section). The rest fire rarely; the
+which lines a query reads (the next section). Twelve of envoy's seventeen are
+its root `.bazelrc`; the other five are nested workspaces' rc files, which the
+screen now exempts rather than classifies. The rest fire rarely; the
 invalidator lists of every subject are now empty.
 
 ## The `.bazelrc` screen (`CAMBI-W004`)
@@ -35,7 +37,7 @@ The index is `bazel query //...`, so an rc edit matters exactly when that
 query would load or report something different. The screen reads the whole
 rc chain (`.bazelrc`, `--bazelrc=` files inside the repository, and their
 `import`/`try-import` closure) at both ends of the range and screens the
-(command, config, flag) triples the query reads at each end. Three scopes
+(command, config, flag) triples the query reads at each end. Four scopes
 are applied before any flag is classified:
 
 - **Command.** Bazel applies an rc line to the command it names and to the
@@ -105,6 +107,7 @@ to it.
 | `--repo_env` | xla 239 | relevant | CommonCommandOptions, so every command reads it; folded into the repository environment that `repository_ctx.os.environ`/`getenv` and module extensions observe, and a changed value re-runs the repository rule. `HERMETIC_NCCL_VERSION` picks which NCCL redistribution xla downloads. `--action_env=NAME=VALUE` reaches the repository environment the same way and is not allowlisted either |
 | `--config` (`rocm`, `workspace`) | xla 50, 208 | routed | An rc expansion, not a flag: its relevance is that of the expanded section (`common:workspace --noenable_bzlmod --enable_workspace` makes `--config=workspace` the bzlmod switch). Expanded at each end and classified as the flags it carries; both instances sit under `common:rocm_ci*`, which the query never selects |
 | `try-import %workspace%/.custom.bazelrc` | apollo 8 | routed | Not a flag. The file is tracked at neither revision, so the line contributes nothing at either end and the edit is harmless; resolved through the chain as described above |
+| `import`, `try-import` | apollo 8 (`try-import %workspace%/.custom.bazelrc` added, tracked at neither revision), envoy's `bazel/tests/external/.bazelrc` | routed | Not a flag: an import edit is loading-relevant exactly when the imported file's triples are. `try-import` is textual inclusion Bazel skips when the file is missing, so a target absent at both ends contributes no line at either and the edit is harmless; a target present at an end is read into that end's chain and screened like the root. A plain `import` of a missing file fails Bazel, and a target outside the repository cannot be read, so either is unknown when the line itself moved. The chain is read from git at both revisions, never from the working tree, so an untracked developer override is out of scope |
 | `--@repo//pkg:setting` (`@quiche//:*`, `@grpc//third_party:*`, `@protobuf//:*`, `@envoy//bazel:{crypto,ssl,enable_bzlmod}`, `@rules_ml_toolchain//common:*`, ...) | envoy 80, 235, 293, 295, 296; xla 233 | routed | Build settings: configuration visible only at analysis, unreadable by BUILD files, macros, repository rules or module extensions, so no package's content or edges depend on the value. Handed to the flag resolver rather than allowlisted: a main-repository setting is seeded through its `config_setting` edges, and an external one stays `CAMBI-W015`, soundly, because `bazel query` loads the flag's package while parsing the option, so a renamed or removed external setting changes what loads and can fail the query. Under a config that is not in effect the triple is skipped |
 
 ## Cost only, answer exact

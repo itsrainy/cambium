@@ -191,8 +191,11 @@ branch before run B starts it rides along; otherwise it waits for run C.
 
 ### Phase 6: the `.bazelrc` screen
 
-Not an under-report, but the dominant global on the subjects (13 of
+Not an under-report, but the dominant global on the subjects (17 of
 envoy's 18, 6 of xla's 7) and the thing a CI operator will notice first.
+Twelve of envoy's seventeen are its root `.bazelrc`; the other five are
+nested workspaces' rc files (`api/`, `mobile/`, `bazel/tests/external/`)
+that Bazel never reads for this workspace at all.
 
 - Widen the loading-irrelevant allowlist from evidence: collect every flag
   that fired `CAMBI-W004` across the five histories and classify each as
@@ -209,8 +212,11 @@ no change to the affected sets. Confirmed at 300 steps in box run B or C.
 flag table and what it assumes are in docs/OVER_REPORTING.md under
 `CAMBI-W004`, and in `crates/engine/src/bazelrc.rs` as a comment per entry
 on `ALLOWLIST` (cleared) and, above it, the reason each refused flag is
-kept off that list. A flag is refused by falling off the allowlist, so
-there is no second list to keep in sync. `--config` scoping reads the configs in effect off the rc
+kept off that list. A flag is refused by falling off the allowlist: the
+screen reads no deny list at runtime. `EVIDENCE` in the same file records
+the verdict for every flag that fired, refused ones included, and a test
+(`the_allowlist_agrees_with_the_evidence`) holds the list and the table to
+each other. `--config` scoping reads the configs in effect off the rc
 chain at both ends of the range, plus the new `[bazelrc].configs` for the
 ones a repository's own builds pass; the default is empty, which is what
 cambium's index query passes. A changed `--registry` goes to the externals

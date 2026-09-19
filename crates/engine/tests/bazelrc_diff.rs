@@ -5,10 +5,11 @@
 //! synthetic graph, no Bazel. `.bazelrc` is a default invalidator, so the first
 //! test is also the check that the screen runs *before* the generic rule.
 //!
-//! The screen's three scopes are each exercised against the engine: which
+//! The screen's four scopes are each exercised against the engine: which
 //! commands' lines the index query reads, which `--config` sections are in
-//! effect for it, and how an `import` is resolved at each end. Then the
-//! `--registry` route: a lock-file question the externals stage answers.
+//! effect for it, how an `import` is resolved at each end, and which files the
+//! startup flags make rc files at all. Then the `--registry` route: a
+//! lock-file question the externals stage answers.
 
 use cambium_engine::{AffectedRequest, Config, Engine, RunOutcome, SynthQuerier};
 use cambium_synth::{generate, GraphSpec, SynthGraph};
@@ -527,7 +528,7 @@ fn a_registry_change_with_the_externals_stage_off_is_the_old_global() {
     );
 }
 
-/// Real evidence, opt-in: classify every edit to one rc file of a subject
+/// Real evidence, opt-in: screen every edit to one rc file of a subject
 /// checkout and print the verdict, with a tally at the end. Ignored because
 /// it needs `~/.cache/cambium/subjects/<entry>`; run with
 /// `cargo test -p cambium-engine --test bazelrc_diff -- --ignored --nocapture`.
@@ -539,15 +540,16 @@ fn a_registry_change_with_the_externals_stage_off_is_the_old_global() {
 /// reads the whole import closure and can only have more in effect, which
 /// screens more rather than less.
 #[test]
-#[ignore = "needs the envoy subject checkout"]
-fn envoy_bazelrc_commits() {
+#[ignore = "needs a subject checkout under ~/.cache/cambium/subjects"]
+fn a_subjects_bazelrc_commits() {
     let entry = std::env::var("CAMBIUM_BAZELRC_ENTRY").unwrap_or_else(|_| "envoy".into());
     let root = dirs_home().join(".cache/cambium/subjects").join(&entry);
     if !root.exists() {
-        eprintln!("no envoy checkout at {}", root.display());
+        eprintln!("no {entry} checkout at {}", root.display());
         return;
     }
-    // envoy's pin; another entry is surveyed from its own HEAD.
+    // envoy's pin, the default entry's; another entry is surveyed from its
+    // own HEAD unless CAMBIUM_BAZELRC_PIN names one it has.
     let pin = &std::env::var("CAMBIUM_BAZELRC_PIN")
         .unwrap_or_else(|_| "7ba51266cc60cd560c37ea9cb3e2adf70676b6cf".into());
     let known = std::process::Command::new("git")

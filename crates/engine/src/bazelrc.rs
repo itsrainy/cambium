@@ -16,12 +16,14 @@
 //! triple that differs is on an allowlist of flags known not to reach loading.
 //! Everything else (an unknown flag, a startup option, an `import` it cannot
 //! resolve, a non-UTF-8 file, the file appearing or disappearing) is still
-//! global.
+//! global, except the two the screen can hand on rather than answer itself: a
+//! Starlark build setting goes to the flag resolver and a changed `--registry`
+//! to the externals stage, both below.
 //!
 //! # What reaches the query
 //!
 //! The index is `bazel query //...`, so the question is always "would that
-//! query load or report something different". Three scopes decide whether a
+//! query load or report something different". Four scopes decide whether a
 //! triple reaches it at all, before any flag is looked at:
 //!
 //! - **Command.** Bazel applies an rc line to the command it names and to the
@@ -377,12 +379,14 @@ impl std::fmt::Display for Unknown {
 /// What a `.bazelrc` diff means for the run, without an index to resolve
 /// label flags against.
 ///
-/// Kept for the opt-in evidence test that classifies a subject checkout's
-/// every `.bazelrc` edit; the engine itself uses [`screen_chain`], which can
-/// do better with a label flag than call it unknown.
-#[doc(hidden)]
+/// A test-only summary of [`Screen`]: the unit tests below state their
+/// expectations as one verdict per diff, which is shorter to read than the
+/// four fields. Nothing outside this module produces or consumes it; the
+/// engine uses [`screen_chain`], which can do better with a label flag or a
+/// `--registry` than call either unknown.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verdict {
+enum Verdict {
     /// Every changed flag is on the loading-irrelevant allowlist. The number of
     /// changed triples is carried for the stats line.
     Safe { changed_flags: usize },
@@ -423,8 +427,11 @@ const fn a(pattern: &'static str, why: &'static str) -> Allowed {
 ///   `--package_path`, `--incompatible_enable_proto_toolchain_resolution` and
 ///   every other `--incompatible_*` and `--experimental_*` flag not named
 ///   below: these are the graph, or a Starlark semantics option every `.bzl`
-///   is evaluated under. They are unknown by falling off this list; there is
-///   no separate deny list to keep in sync. `--config` never reaches this
+///   is evaluated under. They are unknown by falling off this list: the screen
+///   consults no deny list at runtime. [`EVIDENCE`] does record a verdict for
+///   every flag that fired, refused ones included, and
+///   `the_allowlist_agrees_with_the_evidence` holds the two to each other, so
+///   a flag named there and here must agree. `--config` never reaches this
 ///   list: it is expanded first.
 const ALLOWLIST: &[Allowed] = &[
     a(
@@ -1314,9 +1321,9 @@ pub fn screen(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> S
 /// untouched. A Starlark flag or `--registry` is unknown here;
 /// [`screen_chain`] is what the engine uses, and it can do better.
 ///
-/// See [`Verdict`] for why this survives.
-#[doc(hidden)]
-pub fn classify(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Verdict {
+/// See [`Verdict`]: this is for the unit tests below, and for nothing else.
+#[cfg(test)]
+fn classify(base_text: &str, head_text: &str, extra_allowlist: &[String]) -> Verdict {
     let s = screen(base_text, head_text, extra_allowlist);
     if let Some(b) = s.unknown {
         return Verdict::Unknown(b.why.to_string());
@@ -1854,6 +1861,25 @@ mod tests {
                 Effect::Routed => assert!(!allowed, "{} is routed, not allowlisted", ev.flag),
             }
             assert!(!ev.why.is_empty() && !ev.fired_on.is_empty(), "{}", ev.flag);
+        }
+    }
+
+    /// docs/OVER_REPORTING.md carries the same table for readers who never
+    /// open this file, so every flag with a verdict here has a row there.
+    #[test]
+    fn the_docs_carry_every_flag_the_evidence_does() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/OVER_REPORTING.md"),
+        )
+        .unwrap();
+        for ev in EVIDENCE {
+            // Two entries are not flags (`try-import`, and build settings as
+            // a family), so the row is found by the name, not by a `--`.
+            let name = ev.flag.split_whitespace().next().unwrap();
+            assert!(
+                doc.contains(name),
+                "docs/OVER_REPORTING.md does not name {name}"
+            );
         }
     }
 
