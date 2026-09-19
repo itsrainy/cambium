@@ -188,7 +188,7 @@ fn a_repository_rules_labels_become_its_inputs() {
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
 
     assert_eq!(
         ri.repos_for(".github/config.yml"),
@@ -459,7 +459,7 @@ attrs = {"envoy_version": attr.label(default = "@envoy//:VERSION.txt")},
     let mut g = LoadGraph::new();
     let ws = g.workspace_closure(&files, &m);
     let facts = read_module_facts(&files);
-    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts);
+    let ri = build_repo_inputs(&files, &m, &g, &ws, &facts, &[]);
     let envoy_repo: BTreeSet<String> = ["envoy_repo".to_string()].into_iter().collect();
 
     // Named by the generated BUILD file: the repository's targets depend

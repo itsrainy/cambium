@@ -12,7 +12,7 @@ use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 use super::bazelrc::{repo_settings, RepoSetting};
 use super::module_facts::{apparent_of, ModuleFacts};
 use super::path_maps::scan_path_maps;
-use super::pattern::{OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
+use super::pattern::{DirCandidate, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
 
 /// What a main-repo label an external repository names can be an input
 /// through; empty when the string does not name the main repository, or does
@@ -170,12 +170,57 @@ pub fn repo_setting_inputs(src: &dyn FileText, m: &RepoMapping) -> Vec<RepoSetti
 /// `graph` is the load graph the closure walk already built, so the `.bzl`
 /// files here are read from the same memoised parse; `workspace` is that
 /// walk's workspace closure.
+/// The repositories a boundary directory might be, read from the workspace
+/// closure alone.
+///
+/// This is the pure-text pre-pass the cold build runs *before* the universe
+/// query, so that the probe that checks these claims can run before it too
+/// (a Bazel command between the universe query and the loading-layer dump
+/// costs the dump packages, which is why the order is fixed). It reads no
+/// package and runs no query: `MODULE.bazel` and the `.bzl` files it loads,
+/// which is where a `module_extension` implementation lives, and whose
+/// lambdas `Expr::walk` descends.
+///
+/// The answer is candidates, not facts. See [`RepoInputs::dir_candidates`].
+pub fn dir_candidates(
+    src: &dyn FileText,
+    m: &RepoMapping,
+    boundaries: &[String],
+) -> BTreeMap<String, DirCandidate> {
+    let mut out = BTreeMap::new();
+    if boundaries.is_empty() {
+        return out;
+    }
+    let mut graph = LoadGraph::new();
+    let workspace = graph.workspace_closure(src, m);
+    for id in workspace {
+        let path = graph.path(id).to_string();
+        let Some(text) = src.text(&path) else {
+            continue;
+        };
+        for (repo, dir, line) in super::path_maps::scan_bzl_path_maps(&text, m, boundaries).boundary_dirs {
+            out.entry(repo).or_insert(DirCandidate {
+                dir,
+                evidence: format!("{path}:{line}"),
+            });
+        }
+    }
+    out
+}
+
+/// `boundaries` are the directories `//...` stops at, as
+/// [`crate::repo_boundaries`] found them, with or without a trailing slash.
+/// They are what makes a repository rule's literal `path =` readable: a rule
+/// this crate knows nothing about that points at one of them is claiming to
+/// be that directory, and the claim is recorded as a candidate for the cold
+/// build to check against Bazel.
 pub fn build_repo_inputs(
     src: &dyn FileText,
     m: &RepoMapping,
     graph: &LoadGraph,
     workspace: &[u32],
     facts: &ModuleFacts,
+    boundaries: &[String],
 ) -> RepoInputs {
     let mut out = RepoInputs::default();
     // `@envoy//...` inside envoy is a main-repo label; see
@@ -437,7 +482,7 @@ pub fn build_repo_inputs(
     // that position is unattributable, rather than being handed to every
     // repository the main repository defines.
     for (path, module) in att.modules() {
-        let maps = scan_path_maps(module, m);
+        let maps = scan_path_maps(module, m, boundaries);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
                 let pat = Pattern::Prefix(pm.from.clone());
@@ -471,6 +516,19 @@ pub fn build_repo_inputs(
                     .insert(overlay_map(&file));
                 overlays.entry(file).or_default().insert(repo.clone());
             }
+        }
+        // A `path =` that is a boundary directory, from a rule this reader
+        // does not know. Recorded against the repository only when something
+        // else already says the main repository defines it, so a name that
+        // appears nowhere in the module graph cannot mint a candidate.
+        for (repo, dir, line) in maps.boundary_dirs {
+            if !out.repos.contains(&repo) {
+                continue;
+            }
+            out.dir_candidates.entry(repo).or_insert(DirCandidate {
+                dir,
+                evidence: format!("{path}:{line}"),
+            });
         }
         for (offset, pm) in &maps.symlinks {
             let a = att.at(path, *offset);

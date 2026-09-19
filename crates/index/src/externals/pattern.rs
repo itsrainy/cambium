@@ -303,6 +303,68 @@ pub struct RepoInputs {
     /// shape, which is the widest answer and the one every index written
     /// before format 12 carries for every repository.
     pub origins: BTreeMap<String, RepoOrigin>,
+    /// Repository -> a *candidate* `Dir` claim read from a repository-rule
+    /// call whose literal `path =` is a boundary directory of this tree.
+    ///
+    /// Kept apart from [`RepoInputs::path_maps`] and [`RepoInputs::origins`]
+    /// on purpose: the rule behind the call is unknown code, so nothing in
+    /// the tree says it put the repository where its `path` attribute says.
+    /// A candidate becomes a mapping only through
+    /// [`RepoInputs::confirm_dir`], which the cold build calls for the
+    /// repositories whose own package list Bazel says matches the directory.
+    /// An unconfirmed candidate changes no answer: the boundary keeps the
+    /// wide treatment it has today.
+    pub dir_candidates: BTreeMap<String, DirCandidate>,
+}
+
+/// A `Dir` claim that has not been checked against Bazel yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirCandidate {
+    /// The directory, with its trailing `/`.
+    pub dir: String,
+    /// Where the claim was read, `file:line`.
+    pub evidence: String,
+}
+
+impl RepoInputs {
+    /// Promotes a candidate `Dir` claim to the mapping and origin it claims,
+    /// which is what makes the boundary route to the repository
+    /// (`PathMap::exhaustive_dir` is read back by the engine's
+    /// `repo_rooted_at`). Confirmed is recorded on the origin so a later run,
+    /// and `cambi inspect externals`, can say the claim was checked.
+    ///
+    /// Does nothing for a repository with no candidate, so a stale
+    /// confirmation carried from an earlier index cannot invent a mapping.
+    pub fn confirm_dir(&mut self, repo: &str) -> bool {
+        let Some(c) = self.dir_candidates.get(repo).cloned() else {
+            return false;
+        };
+        self.repos.insert(repo.to_string());
+        // The mapping, and no input pattern beside it. The directory is a
+        // repository boundary, so a change under it reaches the repository
+        // through the nested branch, which reads the exhaustive mapping back
+        // (`repo_rooted_at`); a `Pattern::Prefix` for the same directory
+        // would route it a second time and count the repository twice.
+        self.path_maps
+            .entry(repo.to_string())
+            .or_default()
+            .insert(PathMap::exhaustive_dir(c.dir.clone()));
+        RepoOrigin::claim(
+            &mut self.origins,
+            repo,
+            RepoOrigin {
+                kind: OriginKind::Dir,
+                dir: c.dir,
+                evidence: c.evidence,
+                confirmed: true,
+                indexed: false,
+            },
+        );
+        if let Some(o) = self.origins.get_mut(repo) {
+            o.confirmed = true;
+        }
+        true
+    }
 }
 
 impl RepoInputs {

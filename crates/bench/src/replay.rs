@@ -570,7 +570,13 @@ pub fn rederive_externals(
 
     let mut graph = cambium_index::LoadGraph::new();
     let workspace = graph.workspace_closure(&src, &mapping);
-    let inputs = cambium_index::build_repo_inputs(&src, &mapping, &graph, &workspace, &facts);
+    // The boundaries the index recorded, rather than a fresh filesystem walk:
+    // this re-derivation runs away from the checkout. A candidate `Dir` claim
+    // read through them stays a candidate, since confirming one takes a
+    // `bazel query` the offline replay has no way to run.
+    let boundaries: Vec<String> = base.repo_boundaries().map(|s| s.to_string()).collect();
+    let inputs =
+        cambium_index::build_repo_inputs(&src, &mapping, &graph, &workspace, &facts, &boundaries);
 
     let mut builder = cambium_index::IndexBuilder::from_view(base);
     let mut closure = builder

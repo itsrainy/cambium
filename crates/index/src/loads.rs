@@ -842,6 +842,70 @@ pub fn repo_boundaries(root: &std::path::Path) -> Vec<Boundary> {
     out
 }
 
+/// The packages a directory of this tree would have if it were a repository
+/// rooted there: every directory under `dir` that holds a BUILD file, named
+/// relative to `dir`, with `""` for `dir` itself.
+///
+/// This is the tree half of the C2 comparison: a repository rule that claims
+/// `path = "third_party/tsl"` is claiming Bazel's package list for that
+/// repository is exactly this set, and a rule that ignored or reinterpreted
+/// its `path` will not match it. Being wrong in the *wide* direction is safe
+/// here (the claim simply fails and the boundary keeps today's treatment),
+/// which is why anything doubtful is left out: a nested repository of its
+/// own is not part of this repository, and neither is a `.bazelignore`d
+/// directory of it.
+pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::BTreeSet<String> {
+    let dir = dir.trim_end_matches('/');
+    let base = if dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(dir)
+    };
+    let ignored = read_bazelignore(&base);
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![String::new()];
+    while let Some(rel) = stack.pop() {
+        let here = if rel.is_empty() {
+            base.clone()
+        } else {
+            base.join(&rel)
+        };
+        if ["BUILD", "BUILD.bazel"].iter().any(|b| here.join(b).exists()) {
+            out.insert(rel.clone());
+        }
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            if name == ".git" || name.starts_with("bazel-") {
+                continue;
+            }
+            let child = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ignored.contains(&child) {
+                continue;
+            }
+            // A repository of its own, nested inside this one: its packages
+            // are its own, not this repository's.
+            if REPO_MARKERS.iter().any(|m| here.join(&name).join(m).exists()) {
+                continue;
+            }
+            stack.push(child);
+        }
+    }
+    out
+}
+
 /// The directory paths `.bazelignore` names, without a trailing slash. The
 /// file is a plain list of repo-relative directories, one per line; it
 /// supports no globs, and blank lines are ignored.

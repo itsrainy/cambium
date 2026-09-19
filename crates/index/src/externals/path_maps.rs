@@ -43,15 +43,33 @@ pub struct BzlPathMaps {
     /// no tree file behind it. The line the call starts on comes back for the
     /// evidence string.
     pub overlays: Vec<(String, String, usize)>,
+    /// `<rule>(name = "tsl", path = "third_party/tsl")` under *any* callee,
+    /// where the path is a repository boundary directory of this tree: a
+    /// candidate claim that the repository is that directory, with the line
+    /// the call starts on for the evidence string.
+    ///
+    /// A candidate, not a mapping. The callee is a repository rule this
+    /// reader knows nothing about, so nothing here says the rule honoured its
+    /// own `path` attribute rather than reinterpreting it; the claim becomes
+    /// an exhaustive mapping only once Bazel's own package list for the
+    /// repository matches the directory (C2, `RepoInputs::confirm_dir`).
+    /// Restricting it to the attribute named `path` is why a `patches` entry
+    /// or a `build_file` label cannot fire it, and restricting it to a
+    /// boundary directory is why an ordinary subdirectory cannot either.
+    pub boundary_dirs: Vec<(String, String, usize)>,
 }
 
 /// Reads the path mappings out of one workspace-closure `.bzl`.
-pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping) -> BzlPathMaps {
-    scan_path_maps(&Module::parse(text), m)
+pub fn scan_bzl_path_maps(text: &str, m: &RepoMapping, boundaries: &[String]) -> BzlPathMaps {
+    scan_path_maps(&Module::parse(text), m, boundaries)
 }
 
 /// [`scan_bzl_path_maps`] on a file already parsed.
-pub(crate) fn scan_path_maps(module: &Module<'_>, m: &RepoMapping) -> BzlPathMaps {
+pub(crate) fn scan_path_maps(
+    module: &Module<'_>,
+    m: &RepoMapping,
+    boundaries: &[String],
+) -> BzlPathMaps {
     let mut out = BzlPathMaps::default();
     walk_stmts(&module.stmts, &mut |st| {
         for e in stmt_exprs(st) {
@@ -72,6 +90,22 @@ pub(crate) fn scan_path_maps(module: &Module<'_>, m: &RepoMapping) -> BzlPathMap
                         let bf = a.first("build_file").unwrap_or_default().to_string();
                         out.overlays
                             .push((n.to_string(), bf, module.line_of(x.span.start)));
+                    }
+                }
+                // A call of any rule whose literal `path =` is a boundary
+                // directory: a candidate `Dir` claim. Read before the callee
+                // is looked at, because the whole point is that the callee is
+                // a repository rule with a name this reader has never seen.
+                if !boundaries.is_empty() {
+                    let a = module.args(args);
+                    if let (Some(n), Some(d)) =
+                        (a.first("name"), a.first("path").and_then(local_dir))
+                    {
+                        let is_known = matches!(&callee.kind, ExprKind::Name(k) if is_local_repo_rule(k));
+                        if !is_known && boundaries.iter().any(|b| trimmed(b) == trimmed(&d)) {
+                            out.boundary_dirs
+                                .push((n.to_string(), d, module.line_of(x.span.start)));
+                        }
                     }
                 }
                 match &callee.kind {
@@ -108,6 +142,12 @@ pub(crate) fn scan_path_maps(module: &Module<'_>, m: &RepoMapping) -> BzlPathMap
         }
     });
     out
+}
+
+/// A directory with any trailing slash removed, so a boundary (`third_party/tsl`)
+/// and a `local_dir` (`third_party/tsl/`) compare equal.
+fn trimmed(d: &str) -> &str {
+    d.trim_end_matches('/')
 }
 
 /// The argument passed as keyword `kw`, or else the `pos`th positional one.
