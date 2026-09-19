@@ -91,8 +91,10 @@ extra_startup_flags = ["--noworkspace_rc"]
 extra_query_flags = []
 # `@local_config_cuda//cuda` cannot load without CUDA on the host, so the
 # pin's index is PARTIAL by one package on every run; the engine refuses to
-# publish such an index unless told the absence is understood.
-publish_partial = true
+# publish such an index unless told the absence is understood. The list names
+# exactly that package: any other load failure is a broken checkout or a
+# repository that did not fetch, and stops the publish.
+publish_partial = ["@local_config_cuda//cuda"]
 # Every file these globs caught in the published run is reached by label:
 # `*_configure.bzl` and `workspace.bzl` files are in the workspace load
 # closure, `BUILD.tpl` / `*.patch` / `*.BUILD` are `Label(...)` inputs of the
@@ -118,11 +120,14 @@ extra_query_flags = []
 # boundary counted twice"). Neither half needs an invalidator. Unverified
 # offline (no local mirror); the box's recall oracle is the gate.
 invalidators = []
-# The four `tools/toolchains/win_1803/py3{8,9}` packages are Windows
-# toolchains that cannot load on Linux, so the pin's index is PARTIAL by
-# exactly those on every run (docs/OPERATIONS.md); the engine refuses to
-# publish a partial index unless told the absence is understood.
-publish_partial = true
+# The `tools/toolchains/win_1803` packages are Windows toolchains that cannot
+# load on Linux, so the pin's index is PARTIAL by exactly those on every run
+# (docs/OPERATIONS.md); the engine refuses to publish a partial index unless
+# told the absence is understood. Naming them rather than saying `true` is
+# what would have stopped the 2026-09-18 index, which was short seventeen
+# packages because `@llvm-project` was absent when it was built and published
+# anyway (docs/salvage/2026-09-18/xla-partial-index-cause.md).
+publish_partial = ["//tools/toolchains/win_1803/..."]
 notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loading, large fetch"
 
 [[repo]]

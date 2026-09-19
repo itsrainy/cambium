@@ -580,7 +580,10 @@ impl Engine {
     /// The one implementation behind every publish. A partial index — one
     /// whose query finished with load errors — is refused unless the policy
     /// or `baseline.publish_partial` allows it: publishing it would hand
-    /// every later run a base that silently lacks packages. An index still in
+    /// every later run a base that silently lacks packages. The config's
+    /// answer is a policy, not a boolean — it can name the packages whose
+    /// absence is expected, and a failure it does not name is refused even
+    /// though some partial index would have been allowed. An index still in
     /// memory is written to the cache directory first and the scratch file
     /// removed afterwards, whatever the store said.
     pub fn publish(&self, source: PublishSource<'_>, policy: PublishPolicy) -> Result<Vec<String>> {
@@ -610,14 +613,38 @@ impl Engine {
                 lineage,
                 commit,
             } => {
-                if !(policy.allow_partial || self.cfg.baseline.publish_partial) {
+                if !policy.allow_partial {
                     let f = IndexFile::open(path)?;
                     let load = crate::inspect::PartialLoad::from(f.view());
                     if load.partial {
-                        return Err(EngineError::PartialIndex {
-                            commit: commit.to_string(),
-                            packages_in_error: load.packages_in_error,
-                        });
+                        use crate::config::PartialVerdict;
+                        match self
+                            .cfg
+                            .baseline
+                            .publish_partial
+                            .verdict(load.packages_in_error, &load.packages)
+                        {
+                            PartialVerdict::Allow => {}
+                            PartialVerdict::Refuse => {
+                                return Err(EngineError::PartialIndex {
+                                    commit: commit.to_string(),
+                                    packages_in_error: load.packages_in_error,
+                                })
+                            }
+                            PartialVerdict::Unexpected(packages) => {
+                                return Err(EngineError::PartialIndexUnexpected {
+                                    commit: commit.to_string(),
+                                    packages,
+                                })
+                            }
+                            PartialVerdict::Unverifiable { count, named } => {
+                                return Err(EngineError::PartialIndexUnverifiable {
+                                    commit: commit.to_string(),
+                                    count,
+                                    named,
+                                })
+                            }
+                        }
                     }
                 }
                 cache.publish(path, lineage, commit, &self.tree_of(commit))

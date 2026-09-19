@@ -177,6 +177,130 @@ pub struct Output {
     pub test_rule_suffixes: Vec<String>,
 }
 
+/// What a publish may accept in a partial index.
+///
+/// Written as `publish_partial` under `[baseline]`, in either of two forms:
+///
+/// ```toml
+/// publish_partial = false                                  # refuse any partial index
+/// publish_partial = ["//tools/toolchains/win_1803/..."]    # accept exactly these
+/// publish_partial = true                                   # accept whatever failed
+/// ```
+///
+/// The list form is the one to write. A subject whose graph cannot load on
+/// the host it is indexed on (a Windows toolchain on Linux, a CUDA
+/// configuration with no GPU) names those packages, and any *other* package
+/// that fails to load stops the publish. `true` is the old blanket answer and
+/// draws no such line: an index short seventeen packages because a repository
+/// failed to fetch that morning looks exactly like the expected two, and once
+/// it is in the store every run spliced onto it under-reports in silence.
+///
+/// An entry matches a package by exact name, or, written with a trailing
+/// `/...`, by prefix. Write a main-repo package as `//pkg` and an external one
+/// as `@repo//pkg`; the comparison reduces both sides to a repository and a
+/// package path, so it does not matter that Bazel prints the main repo bare
+/// and an external repository under its canonical name.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PartialPolicy {
+    /// `false` refuses every partial index; `true` accepts every one.
+    Blanket(bool),
+    /// The packages whose failure to load is expected here. An empty list
+    /// refuses, like `false`.
+    Expected(Vec<String>),
+}
+
+impl Default for PartialPolicy {
+    fn default() -> Self {
+        Self::Blanket(false)
+    }
+}
+
+/// What [`PartialPolicy::verdict`] made of a partial index's error list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartialVerdict {
+    /// Publish it: every package that failed was named as expected, or the
+    /// policy is the blanket `true`.
+    Allow,
+    /// Refuse: the policy accepts no partial index at all.
+    Refuse,
+    /// Refuse: packages failed that the policy does not name.
+    Unexpected(Vec<String>),
+    /// Refuse: more packages failed than Bazel's stderr recorded names for
+    /// (`cambium_bazel::MAX_ERROR_PACKAGES`), so the list cannot be checked
+    /// against the policy and an unexpected failure could be hiding past the
+    /// cut. Carries how many failed and how many are named.
+    Unverifiable { count: u32, named: usize },
+}
+
+impl PartialPolicy {
+    /// True when no partial index is publishable under this policy, which is
+    /// the default and also an empty list.
+    pub fn refuses_all(&self) -> bool {
+        match self {
+            Self::Blanket(b) => !b,
+            Self::Expected(v) => v.is_empty(),
+        }
+    }
+
+    /// A package name split into repository and package path, in the one
+    /// spelling both sides of a comparison can be written in.
+    ///
+    /// Bazel names a main-repo package bare (`error loading package
+    /// 'tools/toolchains/win_1803/py38'`) and an external one in full
+    /// (`no such package '@@local_config_cuda//cuda'`), and under bzlmod the
+    /// external form is the canonical name, with the extension that made it
+    /// spliced in. A human writes `//tools/...` and `@local_config_cuda//cuda`.
+    /// Both reduce here to the same pair.
+    fn split(name: &str) -> (&str, &str) {
+        match name.split_once("//") {
+            Some((repo, pkg)) => (repo.trim_matches(['@', '+']), pkg),
+            None => ("", name),
+        }
+    }
+
+    /// Whether this entry names `package`: the same repository, and a package
+    /// path equal to it or, written with a trailing `/...`, a prefix of it.
+    fn covers(entry: &str, package: &str) -> bool {
+        let (entry_repo, entry_pkg) = Self::split(entry);
+        let (pkg_repo, pkg) = Self::split(package);
+        if entry_repo != pkg_repo {
+            return false;
+        }
+        match entry_pkg.strip_suffix("/...") {
+            Some(prefix) => pkg == prefix || pkg.starts_with(&format!("{prefix}/")),
+            None => entry_pkg == pkg,
+        }
+    }
+
+    /// Whether an index whose query failed to load `count` packages, of which
+    /// stderr named `named`, may be published.
+    pub fn verdict(&self, count: u32, named: &[String]) -> PartialVerdict {
+        let expected = match self {
+            Self::Blanket(true) => return PartialVerdict::Allow,
+            Self::Blanket(false) => return PartialVerdict::Refuse,
+            Self::Expected(v) if v.is_empty() => return PartialVerdict::Refuse,
+            Self::Expected(v) => v,
+        };
+        if count as usize > named.len() {
+            return PartialVerdict::Unverifiable {
+                count,
+                named: named.len(),
+            };
+        }
+        let unexpected: Vec<String> = named
+            .iter()
+            .filter(|p| !expected.iter().any(|e| Self::covers(e, p)))
+            .cloned()
+            .collect();
+        if unexpected.is_empty() {
+            PartialVerdict::Allow
+        } else {
+            PartialVerdict::Unexpected(unexpected)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Baseline {
@@ -189,13 +313,19 @@ pub struct Baseline {
     /// run keeps its files, not what the graph is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<PathBuf>,
-    /// Allow publishing an index whose `bazel query` finished with load errors
-    /// (exit 3 under `--keep_going`). Off by default: a partial index answers
-    /// correctly about the packages it has and knows nothing about the rest,
-    /// and once it is in the store every later run splices onto it. Not part
-    /// of the config hash, for the same reason as `cache_dir`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub publish_partial: bool,
+    /// Which load errors a publish may accept in an index whose `bazel query`
+    /// finished with errors (exit 3 under `--keep_going`). Refuses everything
+    /// by default: a partial index answers correctly about the packages it has
+    /// and knows nothing about the rest, and once it is in the store every
+    /// later run splices onto it. Not part of the config hash, for the same
+    /// reason as `cache_dir`.
+    ///
+    /// Prefer the list form, which names the packages whose absence is
+    /// understood; `true` accepts whatever failed on the day, which is how a
+    /// transient fetch failure becomes a stored index that silently
+    /// under-reports. See [`PartialPolicy`].
+    #[serde(default, skip_serializing_if = "PartialPolicy::refuses_all")]
+    pub publish_partial: PartialPolicy,
     /// Write published and cached indexes as a zstd frame. On by default: an
     /// index compresses about 4-6x at level 3 for a few tens of milliseconds,
     /// and a reader takes either form, so this only exists for a store that
@@ -350,7 +480,7 @@ impl Default for Baseline {
             max_ancestor_walk: 20,
             retention_days: 30,
             cache_dir: None,
-            publish_partial: false,
+            publish_partial: PartialPolicy::default(),
             compress_indexes: true,
         }
     }
@@ -459,7 +589,7 @@ struct LocalBazel {
 struct LocalBaseline {
     cache_dir: Option<PathBuf>,
     compress_indexes: Option<bool>,
-    publish_partial: Option<bool>,
+    publish_partial: Option<PartialPolicy>,
 }
 
 impl Local {
@@ -1033,10 +1163,98 @@ retention_days = 30
         assert!(!c.to_toml().contains("max_changed_files"));
     }
 
+    #[test]
+    fn an_expected_package_list_clears_exactly_what_it_names() {
+        let p = PartialPolicy::Expected(vec![
+            "//tools/toolchains/win_1803/...".into(),
+            "@local_config_cuda//cuda".into(),
+        ]);
+        // Bazel names the main repo bare and the external one canonically.
+        assert_eq!(
+            p.verdict(
+                2,
+                &[
+                    "tools/toolchains/win_1803/py38".into(),
+                    "@@local_config_cuda//cuda".into(),
+                ]
+            ),
+            PartialVerdict::Allow
+        );
+        // The 2026-09-18 xla index: seventeen packages short because
+        // `@llvm-project` was absent. A blanket `true` published it.
+        assert_eq!(
+            p.verdict(
+                2,
+                &[
+                    "tools/toolchains/win_1803/py38".into(),
+                    "xla/codegen/emitters/transforms".into(),
+                ]
+            ),
+            PartialVerdict::Unexpected(vec!["xla/codegen/emitters/transforms".into()])
+        );
+        // A prefix entry does not cover a sibling directory that merely
+        // shares its first characters.
+        assert!(!PartialPolicy::covers(
+            "//tools/toolchains/win_1803/...",
+            "tools/toolchains/win_1803_old"
+        ));
+        assert!(PartialPolicy::covers(
+            "//tools/toolchains/win_1803/...",
+            "tools/toolchains/win_1803"
+        ));
+    }
+
+    #[test]
+    fn a_truncated_error_list_cannot_be_cleared_by_a_list() {
+        let p = PartialPolicy::Expected(vec!["//a".into()]);
+        // Past MAX_ERROR_PACKAGES bazel counts and stops naming, so an
+        // unexpected failure could be hiding past the cut.
+        assert_eq!(
+            p.verdict(40, &["a".into()]),
+            PartialVerdict::Unverifiable {
+                count: 40,
+                named: 1
+            }
+        );
+        // The blanket answers do not look at the list at all.
+        assert_eq!(
+            PartialPolicy::Blanket(true).verdict(40, &[]),
+            PartialVerdict::Allow
+        );
+        assert_eq!(
+            PartialPolicy::Blanket(false).verdict(1, &["a".into()]),
+            PartialVerdict::Refuse
+        );
+        // An empty list refuses, like `false`.
+        assert_eq!(
+            PartialPolicy::Expected(Vec::new()).verdict(1, &["a".into()]),
+            PartialVerdict::Refuse
+        );
+        assert!(PartialPolicy::Expected(Vec::new()).refuses_all());
+    }
+
+    #[test]
+    fn publish_partial_reads_both_the_boolean_and_the_list_forms() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            baseline: Baseline,
+        }
+        let read = |t: &str| toml::from_str::<W>(t).unwrap().baseline.publish_partial;
+        assert_eq!(
+            read("[baseline]\npublish_partial = true\n"),
+            PartialPolicy::Blanket(true)
+        );
+        assert_eq!(
+            read("[baseline]\npublish_partial = [\"//a/...\"]\n"),
+            PartialPolicy::Expected(vec!["//a/...".into()])
+        );
+        assert_eq!(read("[baseline]\n"), PartialPolicy::Blanket(false));
+    }
+
+    #[test]
     /// The whole point of the local file: every key it may set is already
     /// outside the config hash, so a machine-local override can never make two
     /// indexes claim to be interchangeable when they are not.
-    #[test]
     fn every_locally_overridable_key_is_outside_the_config_hash() {
         let base = Config::default().hash();
         let mut variants: Vec<(&str, Config)> = Vec::new();
@@ -1053,7 +1271,7 @@ retention_days = 30
         c.baseline.compress_indexes = false;
         variants.push(("baseline.compress_indexes", c));
         let mut c = Config::default();
-        c.baseline.publish_partial = true;
+        c.baseline.publish_partial = PartialPolicy::Expected(vec!["//a".into()]);
         variants.push(("baseline.publish_partial", c));
 
         for (key, cfg) in &variants {
@@ -1091,7 +1309,10 @@ retention_days = 30
         )
         .unwrap();
         assert_eq!(l.config.bazel.binary, "bazelisk");
-        assert!(l.config.baseline.publish_partial);
+        assert_eq!(
+            l.config.baseline.publish_partial,
+            PartialPolicy::Blanket(true)
+        );
         assert_eq!(
             l.origins.get("bazel.binary"),
             Some(&Origin::LocalFile {

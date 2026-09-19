@@ -480,8 +480,8 @@ impl PackageQuerier for BazelQuerier {
                     ),
                 )
                 .with_help(
-                    "fix the load errors, or publish the partial index deliberately with \
-                     --allow-partial (or baseline.publish_partial = true)",
+                    "fix the load errors, or name the packages whose absence is expected \
+                     in baseline.publish_partial (--allow-partial for one run)",
                 ),
             );
         });

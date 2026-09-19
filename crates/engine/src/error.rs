@@ -47,12 +47,40 @@ pub enum EngineError {
     #[error(
         "refusing to publish the index for {commit}: bazel could not load every package \
          ({packages_in_error} error lines), and an index missing packages would silently \
-         under-report for every run spliced onto it. Pass --allow-partial, or set \
-         baseline.publish_partial = true, to publish it anyway."
+         under-report for every run spliced onto it. Name the packages whose absence is \
+         expected here in baseline.publish_partial, or pass --allow-partial for this run."
     )]
     PartialIndex {
         commit: String,
         packages_in_error: u32,
+    },
+    /// `baseline.publish_partial` names the packages whose absence is
+    /// expected, and something else failed to load. The expected list is the
+    /// whole point: a subject that cannot load its Windows toolchains on
+    /// Linux still must not publish an index short a repository that failed
+    /// to fetch.
+    #[error(
+        "refusing to publish the index for {commit}: bazel could not load {} package(s) \
+         that baseline.publish_partial does not name ({}), so this index is short more \
+         than the absences this subject expects",
+        .packages.len(),
+        .packages.join(", ")
+    )]
+    PartialIndexUnexpected {
+        commit: String,
+        packages: Vec<String>,
+    },
+    /// More packages failed than bazel's stderr recorded names for, so the
+    /// failures cannot be checked against the expected list at all.
+    #[error(
+        "refusing to publish the index for {commit}: {count} packages failed to load but \
+         only {named} were named in bazel's stderr, so baseline.publish_partial's list \
+         cannot be checked against them"
+    )]
+    PartialIndexUnverifiable {
+        commit: String,
+        count: u32,
+        named: usize,
     },
     /// `index update` was asked to bring an index forward across a range
     /// that invalidates everything, and told not to rebuild instead.
@@ -130,11 +158,25 @@ impl EngineError {
                 Code::E008NoStore,
                 Some("set [baseline].store in cambium.toml"),
             ),
+            EngineError::PartialIndexUnexpected { .. } => (
+                Code::E009PartialIndex,
+                Some(
+                    "fix the load errors, or add the packages to \
+                     baseline.publish_partial if their absence is expected here",
+                ),
+            ),
+            EngineError::PartialIndexUnverifiable { .. } => (
+                Code::E009PartialIndex,
+                Some(
+                    "fix the load errors: past 32 error lines bazel stops naming \
+                     packages, so an expected-package list cannot clear this index",
+                ),
+            ),
             EngineError::PartialIndex { .. } => (
                 Code::E009PartialIndex,
                 Some(
-                    "fix the load errors, or pass --allow-partial (or set \
-                     baseline.publish_partial = true) to publish it anyway",
+                    "fix the load errors, or name the expected absences in \
+                     baseline.publish_partial; --allow-partial overrides for one run",
                 ),
             ),
             EngineError::Store(StoreError::NotConfigured) => (

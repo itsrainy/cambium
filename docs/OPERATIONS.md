@@ -207,9 +207,17 @@ none of them. Unset means the default.
   Linux.
 - zsh does not word-split `$VAR`; use explicit arrays in ad-hoc shell.
 - A subject whose pin is partial for a constant reason (apollo's
-  `@local_config_cuda`, xla's Windows toolchains) needs `publish_partial =
-  true` in `subject_repos.toml`, or `cambium-bench subjects build` refuses
-  to publish the index and every later step of that subject fails.
+  `@local_config_cuda`, xla's Windows toolchains) needs `publish_partial` in
+  `subject_repos.toml` naming those packages, or `cambium-bench subjects
+  build` refuses to publish the index and every later step of that subject
+  fails. Name them; do not write `true`. A list stops the publish when
+  something *else* fails to load, which is the case that matters: the xla
+  index of 2026-09-18 was short seventeen packages because `@llvm-project`
+  was absent when it was built, and a blanket `true` published it and handed
+  every later run a base that under-reported in silence
+  (docs/salvage/2026-09-18/xla-partial-index-cause.md). An entry is a package
+  name, `//pkg` or `@repo//pkg`, exact or with a trailing `/...` for a
+  prefix.
 - The pin index is not the index a change set ran against: envoy's pin is
   past its bzlmod migration, and the bases the run spliced onto were
   WORKSPACE-mode trees with an inert `MODULE.bazel`, so a replay against

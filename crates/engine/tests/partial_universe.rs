@@ -225,7 +225,7 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
     // apollo under Bazel 9 — has to be able to say so once and get on with it.
     let publish_partial = |e: Engine, allow: bool| {
         let mut cfg = e.config().clone();
-        cfg.baseline.publish_partial = allow;
+        cfg.baseline.publish_partial = cambium_engine::config::PartialPolicy::Blanket(allow);
         e.with_config(cfg)
     };
     let e = publish_partial(e, true);
@@ -233,6 +233,36 @@ fn publishing_a_partial_index_is_refused_unless_it_is_asked_for() {
         .publish_index(&path, &index.header.lineage, "head")
         .expect("publish_partial makes it explicit and allowed");
     assert!(!keys.is_empty());
+
+    // The list form draws the line the boolean cannot: naming one of the two
+    // failing packages still refuses, because the other one is not an absence
+    // this subject expects. This is the shape of the xla index of 2026-09-18,
+    // which was short seventeen packages an absent `@llvm-project` took with
+    // it and published anyway under a blanket `true`.
+    let expect = |e: Engine, names: &[&str]| {
+        let mut cfg = e.config().clone();
+        cfg.baseline.publish_partial = cambium_engine::config::PartialPolicy::Expected(
+            names.iter().map(|s| s.to_string()).collect(),
+        );
+        e.with_config(cfg)
+    };
+    let e = expect(e, &["//modules/planning"]);
+    let err = e
+        .publish_index(&path, &index.header.lineage, "head3")
+        .expect_err("third_party/bazel is not on the list");
+    match &err {
+        EngineError::PartialIndexUnexpected { packages, .. } => {
+            assert_eq!(packages, &vec!["third_party/bazel".to_string()], "{err}")
+        }
+        _ => panic!("{err}"),
+    }
+
+    // Naming both, one of them by prefix, clears it.
+    let e = expect(e, &["//modules/...", "//third_party/bazel"]);
+    assert!(!e
+        .publish_index(&path, &index.header.lineage, "head4")
+        .expect("both failures are expected here")
+        .is_empty());
 
     // And a complete index was never in question.
     let mut good = incremental_head(&e, false);
