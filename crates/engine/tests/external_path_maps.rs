@@ -427,8 +427,16 @@ fn an_input_edit_outside_an_exhaustive_mapping_does_not_re_query() {
         .find(|&r| v.repo_name(r) == "vend")
         .expect("the local repository");
     let maps = v.repo_path_maps(vend);
-    assert_eq!(maps.len(), 1, "{maps:?}");
-    assert!(maps[0].exhaustive, "{maps:?}");
+    // Two mappings, and both are true of it: the repository *is* `vendored/`,
+    // and the BUILD file it was declared with is a file of this tree that
+    // lands at its package root. The second is not exhaustive, and does not
+    // need to be — the first already accounts for the repository, which is
+    // what lets an uncovered path skip rule (2).
+    assert_eq!(maps.len(), 2, "{maps:?}");
+    assert!(maps.iter().any(|m| m.exhaustive && m.from == "vendored/"));
+    assert!(maps
+        .iter()
+        .any(|m| !m.exhaustive && m.from == "bazel/vend.BUILD" && m.to == "BUILD.bazel"));
 
     let r = run(
         &index,

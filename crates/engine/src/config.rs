@@ -844,7 +844,7 @@ mod tests {
             h.update(&4u32.to_le_bytes());
             h.update(b"\n");
             h.update(b"cambium-index-content-v");
-            h.update(&3u32.to_le_bytes());
+            h.update(&4u32.to_le_bytes());
             h.update(b"\n");
             h.update(Config::default().to_toml().as_bytes());
             *h.finalize().as_bytes()
