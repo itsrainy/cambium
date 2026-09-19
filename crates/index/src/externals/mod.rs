@@ -212,7 +212,7 @@ pub use module_diff::diff_module;
 pub use module_facts::{apparent_of, Dep, Extension, ModuleChange, ModuleFacts, RepoRule};
 pub use module_parser::scan_module;
 pub use path_maps::{scan_bzl_path_maps, BzlPathMaps};
-pub use pattern::{PathMap, Pattern, RepoInputs};
+pub use pattern::{OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
 
 use crate::loads::{FileText, RepoMapping};
 

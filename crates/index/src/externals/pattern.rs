@@ -175,6 +175,100 @@ impl PathMap {
     }
 }
 
+/// What kind of thing an external repository *is*, as far as the tree is
+/// concerned.
+///
+/// The question this answers is "which files of this tree, if any, are the
+/// repository". It is the identification half of issue #22: a repository the
+/// index can name a shape for is one whose changed files can be routed, and
+/// everything else is declared-only and keeps the wide answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OriginKind {
+    /// Nothing about the repository's contents was derived: a registry
+    /// `bazel_dep`, an http archive, anything fetched whose BUILD file came
+    /// with it. The repository still has inputs and is still dirtied by them;
+    /// only its *shape* is unknown.
+    #[default]
+    Declared,
+    /// The repository is a directory of this tree, and
+    /// [`RepoOrigin::dir`] is that directory with its trailing `/`:
+    /// `local_path_override`, `local_repository`, `new_local_repository`.
+    Dir,
+    /// The sources are fetched but the BUILD file is a file of this tree, or
+    /// a literal in the workspace closure. [`RepoOrigin::dir`] is the
+    /// repo-relative path of that file, or empty for `build_file_content`.
+    /// Envoy's `@quiche` before the bzlmod pin.
+    Overlay,
+    /// A repository rule writes the BUILD file itself, from a literal in the
+    /// closure (`repository_ctx.file("BUILD", ...)`). Envoy's `@envoy_repo`.
+    Generated,
+}
+
+impl OriginKind {
+    /// The stored spelling. Empty for [`OriginKind::Declared`], which is what
+    /// every index written before format 12 reads back as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginKind::Declared => "",
+            OriginKind::Dir => "dir",
+            OriginKind::Overlay => "overlay",
+            OriginKind::Generated => "generated",
+        }
+    }
+
+    /// Reads back [`OriginKind::as_str`]; an unknown spelling is
+    /// [`OriginKind::Declared`], the widest answer.
+    pub fn from_stored(s: &str) -> Self {
+        match s {
+            "dir" => OriginKind::Dir,
+            "overlay" => OriginKind::Overlay,
+            "generated" => OriginKind::Generated,
+            _ => OriginKind::Declared,
+        }
+    }
+}
+
+/// What the index derived about one repository's shape, and how far Bazel has
+/// agreed with it.
+///
+/// `Ord` on [`OriginKind`] is the precedence two claims about the same
+/// repository settle by, strongest last: a `Dir` claim is a whole directory
+/// of this tree and says more than an `Overlay`, which says more than a
+/// `Generated` BUILD text. See [`RepoOrigin::claim`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoOrigin {
+    pub kind: OriginKind,
+    /// The directory ([`OriginKind::Dir`], trailing `/`) or the BUILD file's
+    /// path ([`OriginKind::Overlay`]); empty otherwise.
+    pub dir: String,
+    /// Where the claim was read: a closure file path, `MODULE.bazel`, or
+    /// `//external:*`. Human-facing only — `cambi inspect externals` prints
+    /// it — and never read back by a decision.
+    pub evidence: String,
+    /// Whether Bazel has been asked to honour the claim and did. Always
+    /// `false` here: the probe that sets it is step A3. Stored so that the
+    /// column exists at format 12 and no later index format bump is needed
+    /// for it.
+    pub confirmed: bool,
+    /// Whether the repository's own packages are indexed. Always `false`
+    /// here; Stage B sets it. Stored for the same reason as `confirmed`.
+    pub indexed: bool,
+}
+
+impl RepoOrigin {
+    /// Records a claim, keeping the stronger of two about the same
+    /// repository. Equal kinds keep the first, so the answer does not depend
+    /// on the order the closure was scanned in.
+    pub fn claim(map: &mut BTreeMap<String, RepoOrigin>, repo: &str, o: RepoOrigin) {
+        match map.get(repo) {
+            Some(old) if old.kind >= o.kind => {}
+            _ => {
+                map.insert(repo.to_string(), o);
+            }
+        }
+    }
+}
+
 /// The main repository's contribution to external repositories, in the
 /// mutable form a build works with. [`crate::IndexBuilder`] flattens it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -204,6 +298,11 @@ pub struct RepoInputs {
     /// dirty repository against the canonical `@@name+//...` labels Bazel
     /// emits without re-running `bazel mod dump_repo_mapping`.
     pub canonical: BTreeMap<String, String>,
+    /// What each repository *is*, where the tree says so. A repository with
+    /// no entry is [`OriginKind::Declared`]: nothing was derived about its
+    /// shape, which is the widest answer and the one every index written
+    /// before format 12 carries for every repository.
+    pub origins: BTreeMap<String, RepoOrigin>,
 }
 
 impl RepoInputs {

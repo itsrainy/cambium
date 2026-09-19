@@ -279,6 +279,30 @@ pub struct IndexData {
     pub repo_name_offsets: Vec<u32>,
     pub repo_canonical_bytes: Vec<u8>,
     pub repo_canonical_offsets: Vec<u32>,
+    // ---- what each repository is (format 12) ----
+    //
+    // Five columns in repo-id order, the identification half of issue #22.
+    // `repo_origin_kind` is the stored spelling of
+    // [`crate::externals::OriginKind`] (empty means nothing was derived);
+    // `repo_origin_dir` is the tree directory a `Dir` repository is, with its
+    // trailing `/`, or the repo-relative path of an `Overlay`'s BUILD file;
+    // `repo_origin_evidence` is where the claim was read, for
+    // `cambi inspect externals` and for nothing else.
+    //
+    // `repo_confirmed` says Bazel was asked to honour the claim and did, and
+    // `repo_indexed` says the repository's own packages are in this index.
+    // Both are written `false` by every build today: the probe that sets the
+    // first and the universe change that sets the second are later steps of
+    // the same phase, and the columns exist now so that neither needs a
+    // format bump of its own.
+    pub repo_origin_kind_bytes: Vec<u8>,
+    pub repo_origin_kind_offsets: Vec<u32>,
+    pub repo_origin_dir_bytes: Vec<u8>,
+    pub repo_origin_dir_offsets: Vec<u32>,
+    pub repo_origin_evidence_bytes: Vec<u8>,
+    pub repo_origin_evidence_offsets: Vec<u32>,
+    pub repo_confirmed: Vec<bool>,
+    pub repo_indexed: Vec<bool>,
     pub repo_input_bytes: Vec<u8>,
     pub repo_input_offsets: Vec<u32>,
     pub repo_input_prefix: Vec<bool>,
@@ -399,6 +423,18 @@ pub struct IndexRef<'a> {
     pub repo_names: StrTabRef<'a>,
     /// Canonical name of each repo id, empty when unknown.
     pub repo_canonical: StrTabRef<'a>,
+    /// What each repository is: the stored spelling of
+    /// [`crate::externals::OriginKind`], one per repo id.
+    pub repo_origin_kind: StrTabRef<'a>,
+    /// The directory or BUILD-file path of that origin, empty when it has
+    /// none.
+    pub repo_origin_dir: StrTabRef<'a>,
+    /// Where the origin was read; human-facing only.
+    pub repo_origin_evidence: StrTabRef<'a>,
+    /// Whether Bazel has honoured the origin claim.
+    pub repo_confirmed: &'a [bool],
+    /// Whether the repository's own packages are in this index.
+    pub repo_indexed: &'a [bool],
     /// Main-repo path patterns, sorted, one per pattern id.
     pub repo_input_patterns: StrTabRef<'a>,
     /// Whether each pattern is a directory prefix rather than an exact path.
@@ -436,6 +472,9 @@ impl<'a> IndexRef<'a> {
             ("bzl_ext_labels", self.bzl_ext_labels),
             ("repo_names", self.repo_names),
             ("repo_canonical", self.repo_canonical),
+            ("repo_origin_kind", self.repo_origin_kind),
+            ("repo_origin_dir", self.repo_origin_dir),
+            ("repo_origin_evidence", self.repo_origin_evidence),
             ("repo_input_patterns", self.repo_input_patterns),
             ("repo_maps", self.repo_maps),
             ("repo_boundaries", self.repo_boundaries),
@@ -741,6 +780,25 @@ impl<'a> IndexRef<'a> {
         out
     }
 
+    /// What a repository *is*, as far as this tree is concerned. A repo id
+    /// past the end of the columns, which is every id of an index written
+    /// before format 12, reads back as
+    /// [`crate::externals::OriginKind::Declared`] with nothing beside it:
+    /// the widest answer.
+    pub fn repo_origin(&self, repo: u32) -> crate::externals::RepoOrigin {
+        let i = repo as usize;
+        if i >= self.repo_origin_kind.len() {
+            return crate::externals::RepoOrigin::default();
+        }
+        crate::externals::RepoOrigin {
+            kind: crate::externals::OriginKind::from_stored(self.repo_origin_kind.get(repo)),
+            dir: self.repo_origin_dir.get(repo).to_string(),
+            evidence: self.repo_origin_evidence.get(repo).to_string(),
+            confirmed: self.repo_confirmed.get(i).copied().unwrap_or(false),
+            indexed: self.repo_indexed.get(i).copied().unwrap_or(false),
+        }
+    }
+
     /// How main-repo paths land inside a repository, when that could be
     /// derived statically. An empty answer means "unknown", and the engine
     /// keeps its wide behaviour for that repository.
@@ -903,6 +961,20 @@ macro_rules! index_view {
                 bytes: &$d.repo_canonical_bytes,
                 offsets: $u32s(&$d.repo_canonical_offsets),
             },
+            repo_origin_kind: StrTabRef {
+                bytes: &$d.repo_origin_kind_bytes,
+                offsets: $u32s(&$d.repo_origin_kind_offsets),
+            },
+            repo_origin_dir: StrTabRef {
+                bytes: &$d.repo_origin_dir_bytes,
+                offsets: $u32s(&$d.repo_origin_dir_offsets),
+            },
+            repo_origin_evidence: StrTabRef {
+                bytes: &$d.repo_origin_evidence_bytes,
+                offsets: $u32s(&$d.repo_origin_evidence_offsets),
+            },
+            repo_confirmed: &$d.repo_confirmed,
+            repo_indexed: &$d.repo_indexed,
             repo_input_patterns: StrTabRef {
                 bytes: &$d.repo_input_bytes,
                 offsets: $u32s(&$d.repo_input_offsets),
