@@ -111,7 +111,10 @@ const KNOWN_EXT: &[&str] = &[
 /// module and extension-internal repository names to the apparent names the
 /// main repository sees. `autoload` is whether the Bazel reading the tree
 /// autoloads native rules from provider modules ([`Autoload`]), which decides
-/// what a moved `rules_cc` or `protobuf` means.
+/// what a moved `protobuf`, `rules_python`, `rules_java`, `rules_shell` or
+/// `rules_android` means. It decides nothing for `rules_cc`, which is not a
+/// provider: that bump is global for the toolchains it registers, at either
+/// setting.
 pub fn diff_lock(base: &str, head: &str, facts: &ModuleFacts, autoload: Autoload) -> ModuleChange {
     let (b, h) = match (parse(base), parse(head)) {
         (Ok(b), Ok(h)) => (b, h),

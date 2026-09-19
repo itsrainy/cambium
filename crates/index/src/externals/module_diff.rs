@@ -16,8 +16,10 @@ use super::module_facts::{apparent_of, Autoload, ModuleChange, ModuleFacts};
 ///
 /// `autoload` is whether the Bazel reading the tree autoloads native rules
 /// from provider modules; see [`Autoload`]. It is checked before the
-/// toolchain rule, because on Bazel 8 it is the more specific of the two
-/// reasons a `rules_cc` bump is global.
+/// toolchain rule, and the order decides the answer for the three modules on
+/// both lists (`rules_python`, `rules_java`, `rules_shell`): under a Bazel
+/// that autoloads, a bump of one of those reports the autoload reason, which
+/// is the more specific of the two, rather than the toolchain one.
 pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts, autoload: Autoload) -> ModuleChange {
     // A statement the parser does not know is global only when it is what
     // changed. One that reads the same at both revisions (a call to a macro
