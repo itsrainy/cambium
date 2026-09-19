@@ -133,9 +133,27 @@ a different route.
 
 The mechanism is a property of a walk, not of a pair: it needs a step whose
 query fails to load a package, and the damage shows up on later steps that
-re-query nothing. A cold index built at either end of a pair never reproduces
-it, so `cambi index build <base>` followed by `cambi affected` cannot measure
-these six. The 300-step walk is the measurement, and it is box run A.
+re-query nothing. A cold index built at either end of a pair does not reproduce
+that mechanism, so the 300-step walk is its measurement, and that is box run A.
+
+A pair-by-pair run measures something else, and one was done on 2026-09-19
+(docs/salvage/2026-09-18/xla-six-pairs-20260919.md): `cambi index build <base>`
+then `cambi affected <base>..<head> --include-manual`, scored against a
+`bazel query rdeps` oracle, on all six pairs. Every pair came back unsound, so
+the route does measure these pairs; it just does not measure this mechanism.
+What it found was a different fault. The base index those runs loaded was short
+seventeen packages because `@llvm-project` was absent when it was built, so the
+engine held no rows for them either to carry forward or to tombstone
+(docs/salvage/2026-09-18/xla-partial-index-cause.md). A freshly built index of
+the same revision, the same day, had an error set of exactly the two expected
+`tools/toolchains/win_1803` packages.
+
+Two faults therefore sit over the same packages, and any measurement has to say
+which one it is looking at. This document's mechanism needs a walk. The
+partial-index fault needs only a stale index, which is why every run now builds
+a fresh one. `--include-manual` matters to both: without it every pair shows a
+spurious 75-label miss, and the `cc_ir_header` chain is answered in full once
+it is passed, which is why that chain is no longer a suspect.
 
 | pair | issue's count | verdict here |
 |---|---:|---|
@@ -145,6 +163,15 @@ these six. The 300-step walk is the measurement, and it is box run A.
 | `704cb1bae17e..927b467078fd` | 132 | same mechanism, `emitters/transforms` and two others emptied; not the `cc_ir_header` chain |
 | `927b467078fd..dc85a4033ee0` | 24 | same mechanism, `ifrt/ir` emptied |
 | `67157cf882d3..80c647bcaae0` | 1 | same mechanism, `//xla/codegen/emitters/ir` emptied |
+
+These counts are the same six the 2026-09-19 pair run measured, label for
+label. The two readings agree on what happened and differ on why: a package
+whose load failed lost its rows, and "emptied" is that seen from the walk
+record, while the absent `@llvm-project` is what made the load fail in the
+first place. Neither reading makes the other wrong, and the fix in this
+document (carry the rows a failed load would have cost) is worth having
+whatever emptied the package, because a fresh index cannot help a walk that
+loses a package halfway through.
 
 The four steps above are outside this table and outside the mechanism.
 
