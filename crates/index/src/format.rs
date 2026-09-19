@@ -116,7 +116,14 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// concerned, which is the identification half of issue #22. The last two are
 /// written `false` by every build at this version; they are here so that the
 /// probe that confirms a claim and the universe change that indexes a
-/// repository need no further bump.
+/// repository need no further bump; `repo_confirmed` is filled from the
+/// probe, `repo_indexed` is not filled yet. It also added
+/// `repo_boundary_traversed`: per repository boundary of this tree, whether
+/// the cold universe query returned a main-repo package under it. The marker
+/// a directory carries does not settle that question (Bazel 8.7 loads
+/// packages under xla's `third_party/tsl/REPO.bazel`), and a boundary the
+/// main repository does own paths under must not be read as a hole in the
+/// graph.
 ///
 /// TODO: at the next bump, drop `IndexData::pkg_bzl_hash` and the
 /// `PackageUpdate::bzl_hash` that feeds it. Every writer fills the column and
@@ -180,7 +187,11 @@ pub const FORMAT_VERSION: u32 = 12;
 /// directory of this tree, is recorded as such. An index written before this
 /// has neither, so a run that spliced onto one would keep reporting nothing
 /// when a target an overlay repository's BUILD names is edited — the 32
-/// recorded envoy misses of issue #22.
+/// recorded envoy misses of issue #22. The same revision records, per
+/// repository boundary, whether `//...` walked into it: an index written
+/// before this says nothing of the kind, so a run that spliced onto one
+/// would keep reading xla's `third_party/tsl` as a hole in the graph and
+/// answer the whole world for a change to a package Bazel loaded.
 pub const CONTENT_REVISION: u32 = 4;
 
 pub const PREFIX_LEN: usize = 64;

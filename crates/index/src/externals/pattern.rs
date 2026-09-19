@@ -245,13 +245,15 @@ pub struct RepoOrigin {
     /// `//external:*`. Human-facing only — `cambi inspect externals` prints
     /// it — and never read back by a decision.
     pub evidence: String,
-    /// Whether Bazel has been asked to honour the claim and did. Always
-    /// `false` here: the probe that sets it is step A3. Stored so that the
-    /// column exists at format 12 and no later index format bump is needed
-    /// for it.
+    /// Whether Bazel has been asked to honour the claim and did: the probe
+    /// runs one `bazel query` per candidate directory at cold build and
+    /// compares its package list with the tree's. Only a `Dir` claim is
+    /// probed today, so every other kind reads back `false`.
     pub confirmed: bool,
     /// Whether the repository's own packages are indexed. Always `false`
-    /// here; Stage B sets it. Stored for the same reason as `confirmed`.
+    /// while the universe query is `//...` alone; the stage that widens it
+    /// is what sets this. Stored so the column exists at format 12 and no
+    /// later format bump is needed for it.
     pub indexed: bool,
 }
 

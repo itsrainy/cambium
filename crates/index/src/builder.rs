@@ -805,10 +805,12 @@ impl<'a> IndexBuilder<'a> {
         let mut repo_boundary_bytes = Vec::new();
         let mut repo_boundary_offsets = vec![0u32];
         let mut repo_boundary_ignored = Vec::with_capacity(self.boundaries.len());
+        let mut repo_boundary_traversed = Vec::with_capacity(self.boundaries.len());
         for b in &self.boundaries {
             repo_boundary_bytes.extend_from_slice(b.dir.as_bytes());
             repo_boundary_offsets.push(repo_boundary_bytes.len() as u32);
             repo_boundary_ignored.push(b.bazelignored);
+            repo_boundary_traversed.push(b.traversed);
         }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
@@ -916,6 +918,7 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_bytes,
             repo_boundary_offsets,
             repo_boundary_ignored,
+            repo_boundary_traversed,
             sky_root_bytes: sky.root_bytes,
             sky_root_offsets: sky.root_offsets,
             sky_key_bytes: sky.key_bytes,

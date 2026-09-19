@@ -58,8 +58,7 @@ pub use format::{
     CONTENT_REVISION, DEFAULT_ZSTD_LEVEL, FORMAT_VERSION, ZSTD_MAGIC,
 };
 pub use loads::{
-    build_dirs_under,
-    repo_boundaries, Boundary, FileText, Load, LoadGraph, PackageClosure, RepoMapping,
+    build_dirs_under, mark_traversed, repo_boundaries, Boundary, FileText, Load, LoadGraph, PackageClosure, RepoMapping,
 };
 pub use lockfile::diff_lock;
 pub use overlay::{Overlay, OverlaySize};

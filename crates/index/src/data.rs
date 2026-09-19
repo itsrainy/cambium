@@ -331,9 +331,13 @@ pub struct IndexData {
     // ---- repository boundaries in the main repository's tree (format 9) ----
     //
     // Directories below the root that carry a `WORKSPACE`, `WORKSPACE.bazel`,
-    // `MODULE.bazel` or `REPO.bazel` of their own. Bazel's `//...` stops at
-    // them, so the index has no package under one, and the classifier needs
-    // the list to keep from minting package names there out of changed paths.
+    // `MODULE.bazel` or `REPO.bazel` of their own. Bazel's `//...` usually
+    // stops at them, so the index has no package under one, and the classifier
+    // needs the list to keep from minting package names there out of changed
+    // paths. Usually, not always: Bazel 8.7 walks straight past xla's
+    // `third_party/tsl/REPO.bazel` and loads main-repo packages under it, so
+    // which of these directories `//...` really stopped at is read back from
+    // `repo_boundary_traversed` rather than from the marker.
     // Sorted, repo-relative, no trailing slash. An empty table means the
     // build never looked, which is how every index written before this reads.
     pub repo_boundary_bytes: Vec<u8>,
@@ -343,6 +347,11 @@ pub struct IndexData {
     // change there that no repository claims moves nothing, where the same
     // change under a boundary Bazel does read is a hole in the graph.
     pub repo_boundary_ignored: Vec<bool>,
+    // `repo_boundary_traversed` (format 12) marks, per boundary, one the cold
+    // universe query returned a main-repo package under. Which markers stop
+    // `//...` differs by Bazel version, so the flag is what this Bazel did
+    // rather than what the marker table predicts.
+    pub repo_boundary_traversed: Vec<bool>,
 
     // ---- the Skyframe loading layer (format 11) ----
     //
@@ -453,6 +462,8 @@ pub struct IndexRef<'a> {
     pub repo_boundaries: StrTabRef<'a>,
     /// Per boundary, whether `.bazelignore` names its directory.
     pub repo_boundary_ignored: &'a [bool],
+    /// Per boundary, whether `//...` loaded a main-repo package under it.
+    pub repo_boundary_traversed: &'a [bool],
 
     /// Bazel's own loading-phase graph; see [`crate::sky`].
     pub sky: crate::sky::SkyRef<'a>,
@@ -823,9 +834,11 @@ impl<'a> IndexRef<'a> {
     /// The same directories, each with whether `.bazelignore` names it.
     pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
         let flags = self.repo_boundary_ignored;
+        let walked = self.repo_boundary_traversed;
         (0..self.repo_boundaries.len()).map(move |i| crate::Boundary {
             dir: self.repo_boundaries.get(i as u32).to_string(),
             bazelignored: flags.get(i).copied().unwrap_or(false),
+            traversed: walked.get(i).copied().unwrap_or(false),
         })
     }
 
@@ -835,6 +848,16 @@ impl<'a> IndexRef<'a> {
         (0..self.repo_boundaries.len())
             .find(|i| self.repo_boundaries.get(*i as u32) == dir)
             .is_some_and(|i| self.repo_boundary_ignored.get(i).copied().unwrap_or(false))
+    }
+
+    /// Whether `//...` loaded a main-repo package under the boundary at
+    /// `dir`, so the main repository owns paths there after all. False for a
+    /// directory that is no boundary at all, and for every index written
+    /// before the universe answer was recorded.
+    pub fn boundary_is_traversed(&self, dir: &str) -> bool {
+        (0..self.repo_boundaries.len())
+            .find(|i| self.repo_boundaries.get(*i as u32) == dir)
+            .is_some_and(|i| self.repo_boundary_traversed.get(i).copied().unwrap_or(false))
     }
 
     /// The repositories a workspace-closure `.bzl` can define.
@@ -999,6 +1022,7 @@ macro_rules! index_view {
                 offsets: $u32s(&$d.repo_boundary_offsets),
             },
             repo_boundary_ignored: &$d.repo_boundary_ignored,
+            repo_boundary_traversed: &$d.repo_boundary_traversed,
             sky: crate::sky::SkyRef {
                 present: $d.header.sky_layer,
                 roots: StrTabRef {

@@ -628,6 +628,15 @@ fn bnd(dir: &str, bazelignored: bool) -> cambium_index::Boundary {
     cambium_index::Boundary {
         dir: dir.to_string(),
         bazelignored,
+        traversed: false,
+    }
+}
+
+fn walked(dir: &str) -> cambium_index::Boundary {
+    cambium_index::Boundary {
+        dir: dir.to_string(),
+        bazelignored: false,
+        traversed: true,
     }
 }
 
@@ -664,6 +673,7 @@ fn repository_boundaries_round_trip_and_survive_a_splice() {
     assert!(f.view().boundary_is_bazelignored("api"));
     assert!(!f.view().boundary_is_bazelignored("third_party/xla"));
     assert!(!f.view().boundary_is_bazelignored("nowhere"));
+    assert!(!f.view().boundary_is_traversed("api"));
 
     // A splice that never looks at the tree keeps the base's answer.
     let mut b = IndexBuilder::from_view(f.view());
@@ -710,4 +720,63 @@ fn walks_the_tree_for_nested_repositories() {
             bnd("third_party/xla/nested", false),
         ]
     );
+}
+
+#[test]
+fn whether_the_universe_walked_into_a_boundary_round_trips() {
+    // Which markers stop `//...` differs by Bazel version, so the flag is
+    // what the universe query returned rather than what the marker predicts:
+    // xla's `third_party/tsl` carries a `REPO.bazel` and Bazel 8.7 loads
+    // main-repo packages under it all the same.
+    let mut b = IndexBuilder::new(new_lineage());
+    b.set_repo_boundaries(vec![walked("third_party/tsl"), bnd("api", true)]);
+    b.apply_packages(&[pkg(
+        "third_party/tsl/tsl/platform",
+        vec![rule("third_party/tsl/tsl/platform", "dso_loader", &[], &[])],
+    )]);
+    let d = b.finish("deadbeef");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(index_file_name(&d.header.lineage, "deadbeef"));
+    format::write_index(&path, &d).unwrap();
+    let f = IndexFile::open(&path).unwrap();
+    assert!(f.view().boundary_is_traversed("third_party/tsl"));
+    assert!(!f.view().boundary_is_traversed("api"));
+    assert!(!f.view().boundary_is_traversed("nowhere"));
+    assert_eq!(
+        f.view().boundaries().collect::<Vec<_>>(),
+        vec![bnd("api", true), walked("third_party/tsl")]
+    );
+
+    // A splice keeps the base's answer: the run that makes one asks no
+    // universe query and has nothing newer to say.
+    let mut b = IndexBuilder::from_view(f.view());
+    b.apply_packages(&[pkg("e", vec![rule("e", "e", &[], &[])])]);
+    assert!(b.finish("f00d").view().boundary_is_traversed("third_party/tsl"));
+}
+
+#[test]
+fn a_boundary_is_traversed_when_the_universe_returned_a_package_under_it() {
+    let mut bs = vec![
+        cambium_index::Boundary {
+            dir: "third_party/tsl".into(),
+            bazelignored: false,
+            traversed: false,
+        },
+        cambium_index::Boundary {
+            dir: "api".into(),
+            bazelignored: true,
+            traversed: true,
+        },
+    ];
+    cambium_index::mark_traversed(
+        &mut bs,
+        ["lib", "third_party/tsl/tsl/platform", "third_party/tslx"]
+            .into_iter(),
+    );
+    assert!(bs[0].traversed);
+    // A stale `true` is cleared: the answer is this universe query's, and a
+    // directory name that merely shares a prefix is not under the boundary.
+    assert!(!bs[1].traversed);
 }
