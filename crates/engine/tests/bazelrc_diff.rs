@@ -527,15 +527,22 @@ fn a_registry_change_with_the_externals_stage_off_is_the_old_global() {
     );
 }
 
-/// Real evidence, opt-in: classify every `.bazelrc` edit in the envoy subject
-/// checkout and print the verdict. Ignored because it needs
-/// `~/.cache/cambium/subjects/envoy`; run with
+/// Real evidence, opt-in: classify every edit to one rc file of a subject
+/// checkout and print the verdict, with a tally at the end. Ignored because
+/// it needs `~/.cache/cambium/subjects/<entry>`; run with
 /// `cargo test -p cambium-engine --test bazelrc_diff -- --ignored --nocapture`.
+///
+/// `CAMBIUM_BAZELRC_ENTRY` picks the subject, `CAMBIUM_BAZELRC_FILE` the rc
+/// file (xla's globals are in `tensorflow.bazelrc`, envoy's in `.bazelrc`),
+/// `CAMBIUM_BAZELRC_PIN` and `CAMBIUM_BAZELRC_WINDOW` the range. One file is
+/// read, so the configs in effect are the ones it names for itself; a run
+/// reads the whole import closure and can only have more in effect, which
+/// screens more rather than less.
 #[test]
 #[ignore = "needs the envoy subject checkout"]
 fn envoy_bazelrc_commits() {
     let entry = std::env::var("CAMBIUM_BAZELRC_ENTRY").unwrap_or_else(|_| "envoy".into());
-    let root = dirs_home().join(".cache/cambium/subjects").join(entry);
+    let root = dirs_home().join(".cache/cambium/subjects").join(&entry);
     if !root.exists() {
         eprintln!("no envoy checkout at {}", root.display());
         return;
@@ -558,6 +565,7 @@ fn envoy_bazelrc_commits() {
     // with CAMBIUM_BAZELRC_WINDOW to survey more history.
     let n = std::env::var("CAMBIUM_BAZELRC_WINDOW").unwrap_or_else(|_| "50".into());
     let n = format!("-{}", n.trim_start_matches('-'));
+    let file = std::env::var("CAMBIUM_BAZELRC_FILE").unwrap_or_else(|_| ".bazelrc".into());
     let window = git(&root, &["log", "--first-parent", &n, "--format=%H", pin]);
     let window: Vec<&str> = window.lines().collect();
     let touching = git(
@@ -569,16 +577,45 @@ fn envoy_bazelrc_commits() {
             "--format=%H",
             pin,
             "--",
-            ".bazelrc",
+            file.as_str(),
         ],
     );
+    let (mut safe, mut registry) = (0usize, 0usize);
+    let mut unknown: Vec<String> = Vec::new();
     for sha in touching.lines().filter(|s| window.contains(s)) {
         let subject = git(&root, &["log", "-1", "--format=%s", sha]);
         let parent = git(&root, &["rev-parse", &format!("{sha}^")]);
-        let base = git(&root, &["show", &format!("{parent}:.bazelrc")]);
-        let head = git(&root, &["show", &format!("{sha}:.bazelrc")]);
-        let verdict = cambium_engine::bazelrc::classify(&base, &head, &[]);
-        println!("{} {subject}\n    {verdict:?}", &sha[..12]);
+        let base = git(&root, &["show", &format!("{parent}:{file}")]);
+        let head = git(&root, &["show", &format!("{sha}:{file}")]);
+        let s = cambium_engine::bazelrc::screen(&base, &head, &[]);
+        let verdict = match (&s.unknown, &s.registry, s.label_flags.first()) {
+            (Some(b), ..) => {
+                unknown.push(format!("{} {}", &sha[..12], b.why));
+                format!("global: {}", b.why)
+            }
+            (None, Some(r), _) => {
+                registry += 1;
+                format!("externals stage: {} --registry", r.key.command)
+            }
+            (None, None, Some(f)) => {
+                unknown.push(format!("{} {} (a build setting)", &sha[..12], f.label));
+                format!("flag resolver: {}", f.label)
+            }
+            (None, None, None) => {
+                safe += 1;
+                format!("safe, {} changed triples", s.changed_flags)
+            }
+        };
+        println!("{} {subject}\n    {verdict}", &sha[..12]);
+    }
+    // The line the local gate reads: how many of this file's edits the screen
+    // clears, and the first cause of each one it does not.
+    println!(
+        "\n{entry} {file}: {safe} safe, {registry} to the externals stage, {} global",
+        unknown.len()
+    );
+    for u in &unknown {
+        println!("    {u}");
     }
 }
 
