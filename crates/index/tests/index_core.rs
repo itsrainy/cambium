@@ -342,9 +342,11 @@ fn a_generated_header_chain_reaches_the_tests_that_consume_it() {
             "//t:lit",
         ]
     );
-    // Source -> cc_library -> custom rule -> genrule -> generated header ->
-    // exposed cc_library -> test.
-    assert_eq!(r.depth_of(m["//t:lit"]), Some(6));
+    // The shortest way up is the one the custom rule opens by naming the
+    // source itself: source -> custom rule -> genrule -> generated header ->
+    // exposed cc_library -> test. The route through the `cc_library` is one
+    // hop longer and reaches the same place.
+    assert_eq!(r.depth_of(m["//t:lit"]), Some(5));
 }
 
 /// Re-querying only the generator's package after a different rule starts
