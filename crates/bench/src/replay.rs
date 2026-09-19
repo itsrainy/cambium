@@ -843,6 +843,44 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
     out
 }
 
+/// The module texts a change set needs and this replay cannot read, as the
+/// note naming them.
+///
+/// Every module-ish change is inspected, not just the first: a change set may
+/// edit a readable root and an unreadable segment in either order, and it is
+/// the unreadable one that makes the verdict an artefact of the replay. The
+/// note names the files that could not be read, which is not always the file
+/// that was changed (an unreadable root makes a readable segment undecidable
+/// too, because only the root's text says which segments it includes).
+fn unreadable_module_texts(
+    changes: &[Change],
+    head_rev: &str,
+    texts: &dyn WorkspaceText,
+) -> Vec<String> {
+    let module_file = |path: &str| {
+        path == externals::MODULE_FILE
+            || path.ends_with(cambium_index::externals::MODULE_SEGMENT_SUFFIX)
+    };
+    let mut unreadable = BTreeSet::new();
+    for c in changes.iter().filter(|c| module_file(&c.path)) {
+        if texts.text_at(head_rev, externals::MODULE_FILE).is_none() {
+            unreadable.insert(externals::MODULE_FILE.to_string());
+        }
+        if texts.text_at(head_rev, &c.path).is_none() {
+            unreadable.insert(c.path.clone());
+        }
+    }
+    if unreadable.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = unreadable.into_iter().collect();
+    vec![format!(
+        "the change set edits a module file and no git repository was given to read {} at \
+         either revision; pass --repo to decide this one",
+        names.join(" and ")
+    )]
+}
+
 /// What the replay cannot decide from its inputs, each as the note the
 /// outcome carries. Empty means the verdict may be compared.
 fn undecidable_inputs(
@@ -860,21 +898,7 @@ fn undecidable_inputs(
     // `include()`s is part of the same file, and only the root's text says
     // which files those are, so both texts have to be in reach for a
     // changed segment to be decided.
-    let module_file = |path: &str| {
-        path == externals::MODULE_FILE
-            || path.ends_with(cambium_index::externals::MODULE_SEGMENT_SUFFIX)
-    };
-    if let Some(c) = changes.iter().find(|c| module_file(&c.path)) {
-        if texts.text_at(head_rev, externals::MODULE_FILE).is_none()
-            || texts.text_at(head_rev, &c.path).is_none()
-        {
-            notes.push(format!(
-                "the change set edits {} and no git repository was given to read it at either \
-                 revision; pass --repo to decide this one",
-                c.path
-            ));
-        }
-    }
+    notes.extend(unreadable_module_texts(changes, head_rev, texts));
 
     // The bazelrc screen reads the file's *text* at both revisions and decides
     // whether every flag it changed is one that cannot reach loading. There is
@@ -1420,6 +1444,52 @@ impl ReplayRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unreadable segment is second in the change set, behind a readable
+    /// root. A first-match-only check answers nothing here, which is exactly
+    /// the `include()` case the note exists for.
+    #[test]
+    fn an_unreadable_segment_behind_a_readable_root_is_undecidable() {
+        let texts = files_at(
+            "head",
+            &[("MODULE.bazel", "include(\"//:tc.MODULE.bazel\")\n")],
+        );
+        let changes = [
+            Change::new(Status::Modified, "MODULE.bazel"),
+            Change::new(Status::Modified, "tc.MODULE.bazel"),
+        ];
+        let notes = unreadable_module_texts(&changes, "head", &texts);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("tc.MODULE.bazel"), "{}", notes[0]);
+        assert!(!notes[0].contains("read MODULE.bazel and"), "{}", notes[0]);
+    }
+
+    /// The note names the file it could not read, not the file that changed:
+    /// a readable segment is still undecidable when the root that says which
+    /// segments it includes is out of reach.
+    #[test]
+    fn the_module_note_names_the_text_it_could_not_read() {
+        let texts = files_at("head", &[("tc.MODULE.bazel", "register_toolchains()\n")]);
+        let changes = [Change::new(Status::Modified, "tc.MODULE.bazel")];
+        let notes = unreadable_module_texts(&changes, "head", &texts);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("MODULE.bazel"), "{}", notes[0]);
+        assert!(!notes[0].contains("tc.MODULE.bazel"), "{}", notes[0]);
+    }
+
+    /// Both texts in reach: nothing to decline.
+    #[test]
+    fn readable_module_texts_are_decidable() {
+        let texts = files_at(
+            "head",
+            &[
+                ("MODULE.bazel", "include(\"//:tc.MODULE.bazel\")\n"),
+                ("tc.MODULE.bazel", "register_toolchains()\n"),
+            ],
+        );
+        let changes = [Change::new(Status::Modified, "tc.MODULE.bazel")];
+        assert!(unreadable_module_texts(&changes, "head", &texts).is_empty());
+    }
 
     fn outcome(base: &str, head: &str, global: bool, dirty: usize, cold: bool) -> ReplayOutcome {
         ReplayOutcome {
