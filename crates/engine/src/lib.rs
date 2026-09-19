@@ -26,6 +26,7 @@ pub mod query;
 pub mod reason;
 pub mod report;
 pub mod revision;
+mod repos;
 mod run;
 mod sky;
 pub mod store;

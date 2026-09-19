@@ -108,6 +108,14 @@ codes! {
     /// `bazel mod dump_repo_mapping` succeeded but printed something that is
     /// not a mapping, so the identity mapping stands in for it.
     W022RepoMappingUnparsed => "CAMBI-W022",
+    /// An external repository's own packages could not be listed, or there
+    /// are more of them than `[externals] index_max_packages` allows, so
+    /// nothing derived about its shape is used.
+    W025RepoNotIndexed => "CAMBI-W025",
+    /// A repository rule claims to be a directory of this tree and Bazel's
+    /// package list for it says otherwise, so the claim is dropped and the
+    /// directory keeps the global answer.
+    W026RepoOriginUnconfirmed => "CAMBI-W026",
     /// A `.bazelrc` line resolves an external repository's build setting to a
     /// target of this tree, so that repository's answer is wide by the whole
     /// repository.

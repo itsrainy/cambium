@@ -817,6 +817,57 @@ impl Bazel {
         Ok((parse_buildfile_labels(&out), false))
     }
 
+    /// `bazel query '@R//...' --output=package` for one repository: the
+    /// package list that says whether Bazel agrees with what the tree claims
+    /// the repository is.
+    ///
+    /// Run at cold build, *before* the universe query and never between it
+    /// and the loading-layer dump: it is a Bazel command with its own option
+    /// set, and one of those between the two costs the dump packages.
+    ///
+    /// Best-effort, like [`Bazel::external_rules`], with one difference: a
+    /// non-zero exit whose stdout still lists packages is kept, because a
+    /// repository that loaded while an unrelated one failed is the common
+    /// case on a large tree. The caller decides what a missing or partial
+    /// answer means; here it is only reported.
+    pub fn probe_repo(&self, repo: &str) -> Option<RepoProbe> {
+        let mut cmd = self.command("query");
+        cmd.arg(format!("@{repo}//...")).arg("--output=package");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let o = match self.runner.output(&mut cmd) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(error = %e, repo, "the repository probe could not run");
+                return None;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        let prefix = format!("@{repo}//");
+        let packages: Vec<String> = stdout
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(&prefix))
+            .map(|p| p.trim_start_matches('/').to_string())
+            .collect();
+        // Whether any package Bazel could not load belongs to this
+        // repository. Both spellings of the failure carry the name.
+        let load_error = stderr.lines().any(|l| {
+            parse_load_error_line(l).is_some_and(|p| {
+                p.contains(&format!("@{repo}//")) || p.contains(&format!("{repo}//"))
+            })
+        });
+        if !o.exit.success && packages.is_empty() {
+            tracing::debug!(status = %o.exit, repo, "the repository probe listed no package");
+        }
+        Some(RepoProbe {
+            repo: repo.to_string(),
+            packages,
+            load_error,
+        })
+    }
+
     /// `bazel query '//external:*' --output=build`, which prints every
     /// repository the WORKSPACE evaluation declared, rule kind and attributes
     /// and all.
@@ -1476,4 +1527,17 @@ mod tests {
         assert!(parse_buildfile_labels("").is_empty());
         assert!(parse_buildfile_labels("INFO: Empty results\n").is_empty());
     }
+}
+
+/// What one `bazel query '@R//...' --output=package` answered.
+///
+/// `packages` are repository-relative package names, `""` for the repository
+/// root (which prints as `@R//`). `load_error` says a package of this
+/// repository failed to load, which makes the list an undercount and is why
+/// a claim is never confirmed from one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoProbe {
+    pub repo: String,
+    pub packages: Vec<String>,
+    pub load_error: bool,
 }

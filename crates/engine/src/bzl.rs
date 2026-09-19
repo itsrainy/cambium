@@ -48,6 +48,7 @@ pub(crate) fn rescan_closure(
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
     boundaries: &[String],
+    confirmed: &BTreeSet<String>,
 ) -> Option<cambium_index::BzlClosure> {
     if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
         return prior;
@@ -81,7 +82,19 @@ pub(crate) fn rescan_closure(
     // two trees can disagree, and this closure describes the head.
     let mode = cambium_index::Mode::detect(src, &mapping);
     let facts = cambium_index::read_module_facts_in(src, mode);
-    c.inputs = cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts);
+    c.inputs =
+        cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts, boundaries);
+    // A repository rule's `path =` claim is only a claim until Bazel's own
+    // package list for the repository says it holds (`crate::repos`). The
+    // check runs once, at cold build, before the universe query; an
+    // incremental run carries the answer forward from the index it splices
+    // onto, since a confirmed claim is a fact about the lineage and the
+    // declaration that made it is an invalidator.
+    for r in confirmed {
+        if c.inputs.confirm_dir(r) {
+            tracing::debug!(repo = %r, "a confirmed repository claim maps its directory");
+        }
+    }
     report_repo_settings(querier, src, &mapping, &facts);
     map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     Some(c)

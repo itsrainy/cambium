@@ -186,6 +186,18 @@ pub trait PackageQuerier {
         None
     }
 
+    /// Asks Bazel which packages each of these repositories has.
+    ///
+    /// One `bazel query '@R//...' --output=package` per repository, at cold
+    /// build only, and before the universe query (see
+    /// [`cambium_bazel::Bazel::probe_repo`]). The answer confirms or refuses
+    /// what the tree claims a repository is; a querier with no Bazel behind
+    /// it answers nothing and every claim stays unconfirmed, which is the
+    /// wide behaviour the engine has today.
+    fn probe_repos(&self, _repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        Vec::new()
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a
@@ -291,6 +303,10 @@ impl PackageQuerier for BazelQuerier {
 
     fn external_rules(&self) -> Option<String> {
         self.bazel.external_rules()
+    }
+
+    fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
+        repos.iter().filter_map(|r| self.bazel.probe_repo(r)).collect()
     }
 
     fn can_dump_loading_layer(&self) -> bool {

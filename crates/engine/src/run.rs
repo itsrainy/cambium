@@ -777,6 +777,15 @@ impl<'a> Run<'a> {
     /// The splice: the rows onto the base, the deleted packages out of it,
     /// and — while the builder still has its interner — the changed source
     /// files resolved to node ids.
+    /// The repositories whose `Dir` claim was confirmed against Bazel when
+    /// this lineage's index was built cold.
+    ///
+    /// The check is a `bazel query` per repository and belongs to the cold
+    /// build, which runs it before the universe query (`crate::repos`). A
+    /// splice carries the answer forward instead of re-running it: the
+    /// declaration that makes the claim is a workspace-closure file, and a
+    /// change to one of those is an invalidator, so a claim cannot move under
+    /// a splice without the run being a cold build anyway.
     fn splice(
         &mut self,
         stage: &DirtyStage,
@@ -935,6 +944,7 @@ impl<'a> Run<'a> {
                 &stage.changed_bzl,
                 &gone,
                 &crate::bzl::dirs(&boundaries),
+                &confirmed_repos(base),
             ) {
                 builder.set_bzl_closure(c);
             }
@@ -1246,4 +1256,12 @@ fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String
             "  contributor"
         );
     }
+}
+
+/// The confirmed repositories of an index, by apparent name.
+fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<String> {
+    (0..base.num_repos())
+        .filter(|&r| base.repo_origin(r).confirmed)
+        .map(|r| base.repo_name(r).to_string())
+        .collect()
 }
