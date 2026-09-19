@@ -79,6 +79,16 @@ impl<'a> Module<'a> {
         }
     }
 
+    /// The 1-based line a byte offset falls on. Only ever used to spell a
+    /// piece of evidence for a human to read.
+    pub(crate) fn line_of(&self, offset: usize) -> usize {
+        self.text[..offset.min(self.text.len())]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count()
+            + 1
+    }
+
     /// The tokens whose spans start inside `span`.
     fn tokens_in(&self, span: &Span) -> &[Token<'a>] {
         let from = self.tokens.partition_point(|t| t.span.start < span.start);

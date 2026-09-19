@@ -85,6 +85,12 @@ pub struct ModuleFacts {
     /// `new_local_repository` instantiation points at, with its trailing `/`.
     /// A `use_repo_rule` shape; the `.bzl` scanner finds the WORKSPACE one.
     pub local_repo_paths: BTreeMap<String, String>,
+    /// Repository name -> the `build_file =` label of the repository-rule
+    /// instantiation that declares it. The sources are fetched, the BUILD
+    /// file is a file of this tree: envoy's `@quiche` before the bzlmod pin.
+    /// A `build_file_content =` instead of a label records the empty string,
+    /// which is the same shape (an overlay) with no tree file to read.
+    pub build_files: BTreeMap<String, String>,
     /// Keyed by `bzl\0name`.
     pub extensions: BTreeMap<String, Extension>,
     /// Keyed by `bzl\0rule`.

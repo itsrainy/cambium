@@ -45,37 +45,64 @@
 
 use std::collections::BTreeMap;
 
-/// Repository name -> the main-repo directory it is, for every rule in
-/// `--output=build` output carrying a string attribute whose value is exactly
-/// one of `boundaries` (repo-relative, no trailing slash).
+/// What one `//external:*` block says about a repository's shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExternalRepo {
+    /// The main-repo directory the repository is, when an attribute named
+    /// one; repo-relative, no trailing slash.
+    pub dir: Option<String>,
+    /// The `build_file` label as written, or the empty string when the block
+    /// carried `build_file_content` instead. `None` when it had neither.
+    ///
+    /// Unlike the directory this is *not* checked against the boundaries: a
+    /// `build_file` is a label, never a boundary directory, and it is read
+    /// for what it is rather than matched against anything.
+    pub build_file: Option<String>,
+}
+
+/// Repository name -> what the `--output=build` output says it is, for every
+/// rule carrying a string attribute whose value is exactly one of
+/// `boundaries` (repo-relative, no trailing slash), or a `build_file` /
+/// `build_file_content` of its own.
 ///
 /// The output is a sequence of `kind(\n  attr = value,\n ...)` blocks with
 /// one attribute per line, so a line reader is enough and no Starlark parse is
 /// needed. A block whose `name` is missing or is not a plain string literal,
 /// or which names no boundary, contributes nothing. `path` wins when a block
 /// names a boundary twice; otherwise the first such attribute does.
-pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String, String> {
+pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String, ExternalRepo> {
     let mut out = BTreeMap::new();
     let mut name: Option<String> = None;
     let mut path: Option<String> = None;
     let mut other: Option<String> = None;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with(')') {
-            if let (Some(n), Some(p)) = (name.take(), path.take().or(other.take())) {
-                out.insert(n, p);
+    let mut build_file: Option<String> = None;
+    macro_rules! flush {
+        () => {
+            if let Some(n) = name.take() {
+                let r = ExternalRepo {
+                    dir: path.take().or(other.take()),
+                    build_file: build_file.take(),
+                };
+                if r != ExternalRepo::default() {
+                    out.insert(n, r);
+                }
             }
             name = None;
             path = None;
             other = None;
+            build_file = None;
+        };
+    }
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with(')') {
+            flush!();
             continue;
         }
         if t.ends_with('(') && !line.starts_with(' ') {
             // A new rule block: whatever an unterminated previous one held is
             // not carried into it.
-            name = None;
-            path = None;
-            other = None;
+            flush!();
             continue;
         }
         let Some((key, value)) = t.split_once(" = ") else {
@@ -93,6 +120,14 @@ pub fn external_dir_repos(text: &str, boundaries: &[String]) -> BTreeMap<String,
             continue;
         }
         if key == "repo_mapping" || key.starts_with("generator_") {
+            continue;
+        }
+        if key == "build_file" {
+            build_file = Some(v);
+            continue;
+        }
+        if key == "build_file_content" {
+            build_file.get_or_insert_with(String::new);
             continue;
         }
         let dir = v.trim_start_matches("./").trim_end_matches('/').to_string();
@@ -123,6 +158,10 @@ fn string_literal(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dir<'a>(m: &'a BTreeMap<String, ExternalRepo>, n: &str) -> Option<&'a str> {
+        m.get(n)?.dir.as_deref()
+    }
 
     const OUT: &str = r#"# /ws/tensorflow/workspace3.bzl:8:12
 tf_vendored(
@@ -160,8 +199,8 @@ local_repository(
     #[test]
     fn reads_the_rules_whose_path_is_a_boundary() {
         let m = external_dir_repos(OUT, &boundaries());
-        assert_eq!(m.get("xla").map(String::as_str), Some("third_party/xla"));
-        assert_eq!(m.get("tsl").map(String::as_str), Some("third_party/tsl"));
+        assert_eq!(dir(&m, "xla"), Some("third_party/xla"));
+        assert_eq!(dir(&m, "tsl"), Some("third_party/tsl"));
         assert_eq!(m.len(), 2);
     }
 
@@ -181,8 +220,33 @@ local_repository(
             ")\n",
         );
         let m = external_dir_repos(text, &["api".to_string()]);
-        assert_eq!(m.get("envoy_api").map(String::as_str), Some("api"));
+        assert_eq!(dir(&m, "envoy_api"), Some("api"));
         assert_eq!(m.len(), 1);
+    }
+
+    /// The overlay half: `build_file` is a label, never a boundary, so it is
+    /// read for what it is and the block yields a repository even though it
+    /// names no directory at all.
+    #[test]
+    fn a_build_file_is_read_without_naming_a_directory() {
+        let text = concat!(
+            "new_local_repository(\n",
+            "  name = \"quiche\",\n",
+            "  build_file = \"@envoy//bazel/external:quiche.BUILD\",\n",
+            ")\n",
+            "http_archive(\n",
+            "  name = \"inline\",\n",
+            "  build_file_content = \"cc_library(name = 'x')\",\n",
+            ")\n",
+        );
+        let m = external_dir_repos(text, &[]);
+        assert_eq!(
+            m["quiche"].build_file.as_deref(),
+            Some("@envoy//bazel/external:quiche.BUILD")
+        );
+        assert_eq!(m["quiche"].dir, None);
+        assert_eq!(m["inline"].build_file.as_deref(), Some(""));
+        assert_eq!(m.len(), 2);
     }
 
     /// A rule's bookkeeping attributes are not directory claims either.

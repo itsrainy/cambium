@@ -35,6 +35,14 @@ pub struct BzlPathMaps {
     /// the file comes back alongside so the caller can ask for that
     /// attribution.
     pub symlinks: Vec<(usize, PathMap)>,
+    /// `<rule>(name = "quiche", build_file = "@envoy//bazel/external:quiche.BUILD")`:
+    /// the repository's sources are fetched and its BUILD file is a file of
+    /// this tree. The call names its own repository, like `named` does, and
+    /// the second half is the `build_file` label as written — empty when the
+    /// call passed `build_file_content` instead, which is the same shape with
+    /// no tree file behind it. The line the call starts on comes back for the
+    /// evidence string.
+    pub overlays: Vec<(String, String, usize)>,
 }
 
 /// Reads the path mappings out of one workspace-closure `.bzl`.
@@ -51,6 +59,21 @@ pub(crate) fn scan_path_maps(module: &Module<'_>, m: &RepoMapping) -> BzlPathMap
                 let ExprKind::Call { callee, args } = &x.kind else {
                     return;
                 };
+                // An overlay declaration, under any callee: `build_file` is
+                // a repository-rule attribute and nothing else has one. Read
+                // by key, because which attribute a label came from is the
+                // fact — a `patches` entry is a label too.
+                if args
+                    .iter()
+                    .any(|a| matches!(a.keyword(), Some("build_file" | "build_file_content")))
+                {
+                    let a = module.args(args);
+                    if let Some(n) = a.first("name") {
+                        let bf = a.first("build_file").unwrap_or_default().to_string();
+                        out.overlays
+                            .push((n.to_string(), bf, module.line_of(x.span.start)));
+                    }
+                }
                 match &callee.kind {
                     ExprKind::Name(name) if is_local_repo_rule(name) => {
                         let args = module.args(args);

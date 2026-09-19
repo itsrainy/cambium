@@ -777,3 +777,186 @@ fn turning_the_stage_off_restores_whole_world_invalidation() {
     assert!(out.report.global);
     assert!(out.report.global_reason.unwrap().contains("invalidator"));
 }
+
+/// The overlay shape, which is envoy's `@quiche` before the bzlmod pin: the
+/// sources are fetched and the BUILD file is a file of this tree.
+///
+/// Nothing read that BUILD file before, so a change to a target it names
+/// reached the repository through nothing at all — the 32 recorded misses of
+/// issue #22. Now every main-repo label in it is a target-only input of the
+/// repository, and the repository target fixpoint does the rest.
+mod overlay {
+    use super::*;
+
+    const MODULE: &str = "module(name = \"demo\", version = \"1\")\n\
+         new_local_repository = use_repo_rule(\"//bazel:repo.bzl\", \"new_local_repository\")\n\
+         new_local_repository(\n\
+         \x20   name = \"quiche\",\n\
+         \x20   build_file = \"@demo//bazel/external:quiche.BUILD\",\n\
+         )\n";
+
+    const PACKAGES: &[&str] = &["app", "lib", "source/quic/platform", "bazel"];
+
+    fn files() -> Files {
+        let mut m = BTreeMap::new();
+        let mut put = |k: &str, v: &str| m.insert(k.to_string(), v.to_string());
+        put("MODULE.bazel", MODULE);
+        put("bazel/repo.bzl", "new_local_repository = 1\n");
+        put("bazel/BUILD", "");
+        // The repository's BUILD file, in this tree. Both spellings of the
+        // main repository appear in it, because both are found in the wild:
+        // an in-tree overlay BUILD names the main repository by its apparent
+        // name, and `bazel query` prints the same labels bare.
+        put(
+            "bazel/external/quiche.BUILD",
+            "cc_library(\n\
+             \x20   name = \"quic_base\",\n\
+             \x20   deps = [\"@demo//source/quic/platform:quic_base_impl_lib\"],\n\
+             \x20   data = [\"//source/quic/platform:tables\"],\n\
+             )\n",
+        );
+        put("app/BUILD", "");
+        put("lib/BUILD", "");
+        put("source/quic/platform/BUILD", "");
+        Files(m)
+    }
+
+    fn rows(pkg: &str) -> PackageUpdate {
+        let targets = match pkg {
+            "app" => vec![TargetRow::rule(
+                "//app:app",
+                "demo_lib",
+                vec!["//lib:lib".into()],
+            )],
+            "lib" => vec![TargetRow::rule(
+                "//lib:lib",
+                "demo_lib",
+                vec!["@quiche//:quic_base".into()],
+            )],
+            "source/quic/platform" => vec![
+                TargetRow::source_file("//source/quic/platform:impl.cc"),
+                TargetRow::rule(
+                    "//source/quic/platform:quic_base_impl_lib",
+                    "demo_lib",
+                    vec!["//source/quic/platform:impl.cc".into()],
+                ),
+                TargetRow::rule("//source/quic/platform:tables", "filegroup", Vec::new()),
+            ],
+            _ => Vec::new(),
+        };
+        PackageUpdate {
+            package: pkg.to_string(),
+            targets,
+            ..Default::default()
+        }
+    }
+
+    fn scanning() -> Scanning {
+        Scanning::new(PACKAGES, rows)
+            .with_files(files())
+            .with_repo_mapping("{\"\":\"\",\"demo\":\"\",\"quiche\":\"quiche+\"}")
+    }
+
+    fn run(index: &IndexData, paths: &[&str]) -> cambium_engine::AffectedReport {
+        let e = engine();
+        let mut m = BTreeMap::new();
+        for rev in ["base", "head"] {
+            m.insert(
+                (rev.to_string(), "MODULE.bazel".to_string()),
+                MODULE.to_string(),
+            );
+        }
+        e.compute_with_texts(
+            index.view(),
+            &changed(paths),
+            &scanning(),
+            &req(),
+            &FixedText(m),
+        )
+        .unwrap()
+        .report
+    }
+
+    /// The index knows what the repository is and where its BUILD file lives.
+    #[test]
+    fn the_index_records_the_overlay_and_its_build_file() {
+        let (_e, index) = base(&scanning());
+        let v = index.view();
+        let id = (0..v.num_repos())
+            .find(|&r| v.repo_name(r) == "quiche")
+            .expect("the repository has a row");
+        let o = v.repo_origin(id);
+        assert_eq!(o.kind, cambium_index::externals::OriginKind::Overlay);
+        assert_eq!(o.dir, "bazel/external/quiche.BUILD");
+        assert_eq!(o.evidence, "MODULE.bazel");
+        // The probe that confirms the claim is a later step; nothing writes
+        // either column yet.
+        assert!(!o.confirmed);
+        assert!(!o.indexed);
+        // The BUILD file lands at the repository's package root, and the
+        // mapping is not exhaustive: the sources come from elsewhere.
+        let maps = v.repo_path_maps(id);
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].from, "bazel/external/quiche.BUILD");
+        assert_eq!(maps[0].to, "BUILD.bazel");
+        assert!(!maps[0].exhaustive);
+    }
+
+    /// The point of the step: a change that reaches a target the repository's
+    /// BUILD file names moves the repository, and with it every consumer of
+    /// its leaves.
+    #[test]
+    fn a_target_the_build_file_names_moves_the_repository() {
+        let (_e, index) = base(&scanning());
+        let r = run(&index, &["source/quic/platform/impl.cc"]);
+        assert!(!r.global, "{:?}", r.global_reason);
+        assert_eq!(r.stats.repos_dirty_by_target, 1);
+        assert!(
+            r.direct.iter().any(|d| d == "//lib:lib"),
+            "the repository's consumer is direct: {:?}",
+            r.direct
+        );
+        assert_eq!(
+            affected(&r),
+            [
+                "//app:app",
+                "//lib:lib",
+                "//source/quic/platform:quic_base_impl_lib"
+            ]
+        );
+    }
+
+    /// The bare `//` spelling in the same file is the main repository too.
+    #[test]
+    fn the_bare_main_repo_spelling_is_read_as_well() {
+        let (_e, index) = base(&scanning());
+        let v = index.view();
+        let named: Vec<&str> = v
+            .repos_for_label_kinds("//source/quic/platform:tables")
+            .into_iter()
+            .map(|(r, _)| v.repo_name(r))
+            .collect();
+        assert_eq!(named, ["quiche"]);
+        // Both are target-only: a file of those packages can move the
+        // repository's targets and can never be a `.bzl` it exports.
+        for l in [
+            "//source/quic/platform:tables",
+            "//source/quic/platform:quic_base_impl_lib",
+        ] {
+            assert!(
+                v.repos_for_label_kinds(l).iter().all(|&(_, feeds)| !feeds),
+                "{l} feeds the rule"
+            );
+        }
+    }
+
+    /// A file of this tree that the BUILD file does not name reaches nothing.
+    #[test]
+    fn an_unrelated_file_does_not_move_the_repository() {
+        let (_e, index) = base(&scanning());
+        let r = run(&index, &["app/main.cc"]);
+        assert!(!r.global, "{:?}", r.global_reason);
+        assert_eq!(r.stats.repos_dirty_by_target, 0);
+        assert_eq!(r.stats.repos_dirty_by_input, 0);
+    }
+}

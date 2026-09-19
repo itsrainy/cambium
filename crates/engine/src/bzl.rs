@@ -115,16 +115,49 @@ fn map_nested_repositories(
     let Some(text) = querier.external_rules() else {
         return;
     };
-    for (repo, dir) in cambium_index::externals::external_dir_repos(&text, boundaries) {
-        tracing::debug!(repo = %repo, dir = %dir, "a nested repository is an external repository");
-        inputs.path_maps.entry(repo.clone()).or_default().insert(
-            cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
-        );
+    for (repo, ext) in cambium_index::externals::external_dir_repos(&text, boundaries) {
+        if let Some(dir) = &ext.dir {
+            tracing::debug!(repo = %repo, dir = %dir, "a nested repository is an external repository");
+            inputs.path_maps.entry(repo.clone()).or_default().insert(
+                cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
+            );
+            cambium_index::externals::RepoOrigin::claim(
+                &mut inputs.origins,
+                &repo,
+                cambium_index::externals::RepoOrigin {
+                    kind: cambium_index::externals::OriginKind::Dir,
+                    dir: format!("{dir}/"),
+                    evidence: EVIDENCE.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        // A `build_file` names a file of this tree, so Bazel's own answer
+        // identifies the repository as an overlay even where no workspace
+        // file this build can read declares it. The path map is minted by the
+        // static reader when it can see the declaration; here the origin is
+        // what the answer is for, and the evidence says where it came from.
+        if let Some(bf) = &ext.build_file {
+            cambium_index::externals::RepoOrigin::claim(
+                &mut inputs.origins,
+                &repo,
+                cambium_index::externals::RepoOrigin {
+                    kind: cambium_index::externals::OriginKind::Overlay,
+                    dir: String::new(),
+                    evidence: EVIDENCE.to_string(),
+                    ..Default::default()
+                },
+            );
+            tracing::debug!(repo = %repo, build_file = %bf, "an external repository overlays a tree BUILD file");
+        }
         // Without an id in the repository table the mapping has nowhere to be
         // written, and the routing would find nothing.
         inputs.repos.insert(repo);
     }
 }
+
+/// Where a claim read out of `bazel query '//external:*'` came from.
+const EVIDENCE: &str = "//external:*";
 
 /// Just the directories of a boundary list, which is what the parsers below
 /// and the `//external:*` matcher take.
@@ -150,4 +183,3 @@ pub fn main_alias_mapping(
     }
     m
 }
-
