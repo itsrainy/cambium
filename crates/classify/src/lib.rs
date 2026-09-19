@@ -182,12 +182,45 @@ impl PackageSet {
     /// ownership is refused only where the universe query agrees that nothing
     /// of this repository is there.
     pub fn unwalked_boundary_of(&self, path: &str) -> Option<&str> {
-        let dir = self.boundary_of(path)?;
-        let walked = self
-            .traversed
+        // Outermost first: that is where `//...` stopped, so an untraversed
+        // boundary owns everything below it, inner boundaries included. Only
+        // when a boundary was walked into does the question pass inwards, to
+        // the repository vendored inside it that `//...` really did stop at.
+        self.containing_boundaries(path)
+            .find(|b| !self.is_traversed(b))
+            .map(|b| &b[..b.len() - 1])
+    }
+
+    /// The boundaries `path` lies under, outermost first, each with its
+    /// trailing `/`.
+    fn containing_boundaries<'s, 'p>(
+        &'s self,
+        path: &'p str,
+    ) -> impl Iterator<Item = &'s str> + use<'s, 'p> {
+        // `boundaries` is sorted, and a prefix sorts before what it prefixes,
+        // so this yields outer boundaries before the ones nested in them.
+        self.boundaries
             .iter()
-            .any(|t| path.starts_with(t.as_str()) || path == &t[..t.len() - 1]);
-        (!walked).then_some(dir)
+            .map(String::as_str)
+            .filter(move |b| path.starts_with(b) || path == &b[..b.len() - 1])
+    }
+
+    /// Whether `b` (with its trailing `/`) is a boundary the cold universe
+    /// query returned a main-repo package under.
+    fn is_traversed(&self, b: &str) -> bool {
+        self.traversed.binary_search_by(|t| t.as_str().cmp(b)).is_ok()
+    }
+
+    /// The boundaries `path` lies under that `//...` walked into: the
+    /// repositories a main-repo path is *also* a file of. See the second pass
+    /// in [`dirty_set`].
+    pub fn traversed_boundaries_of<'s, 'p>(
+        &'s self,
+        path: &'p str,
+    ) -> impl Iterator<Item = &'s str> + use<'s, 'p> {
+        self.containing_boundaries(path)
+            .filter(|b| self.is_traversed(b))
+            .map(|b| &b[..b.len() - 1])
     }
 
     /// The nested repository `path` sits in, if any: the *outermost* one,
@@ -598,13 +631,14 @@ pub fn dirty_set(
     // directory is, if it knows one.
     for c in changes {
         let c = c.borrow();
-        if let Some(dir) = packages.boundary_of(&c.path) {
-            if packages.unwalked_boundary_of(&c.path).is_none() {
-                out.nested
-                    .entry(dir.to_string())
-                    .or_default()
-                    .push(c.path.clone());
-            }
+        if packages.unwalked_boundary_of(&c.path).is_some() {
+            continue;
+        }
+        for dir in packages.traversed_boundaries_of(&c.path) {
+            out.nested
+                .entry(dir.to_string())
+                .or_default()
+                .push(c.path.clone());
         }
     }
 
@@ -1019,6 +1053,66 @@ mod tests {
             "{:?}",
             d.nested
         );
+    }
+
+    /// A repository vendored inside a traversed one: `third_party/tsl` is
+    /// walked into, and the `WORKSPACE` directory under it is not.
+    fn nested_in_traversed() -> PackageSet {
+        PackageSet::new(
+            ["", "lib", "third_party/tsl/tsl/platform"]
+                .into_iter()
+                .map(String::from),
+        )
+        .with_boundaries([
+            "third_party/tsl".to_string(),
+            "third_party/tsl/third_party/gemm".to_string(),
+        ])
+        .with_traversed(["third_party/tsl".to_string()])
+    }
+
+    #[test]
+    fn a_repository_inside_a_traversed_boundary_is_still_nested() {
+        let p = nested_in_traversed();
+        let path = "third_party/tsl/third_party/gemm/lib/matmul.cc";
+        assert_eq!(
+            p.unwalked_boundary_of(path),
+            Some("third_party/tsl/third_party/gemm")
+        );
+        // So no main-repo package owns it and none can be minted from it.
+        assert_eq!(p.owner_of(path), None);
+        assert_eq!(
+            classify(path, &p, &matchers()),
+            Classification::Nested("third_party/tsl/third_party/gemm".to_string())
+        );
+        let mut q = nested_in_traversed();
+        q.insert("third_party/tsl/third_party/gemm/lib".to_string());
+        assert!(!q.contains("third_party/tsl/third_party/gemm/lib"));
+        // The traversed half is still owed for paths outside the inner one.
+        assert_eq!(
+            p.traversed_boundaries_of("third_party/tsl/tsl/platform/x.cc")
+                .collect::<Vec<_>>(),
+            vec!["third_party/tsl"]
+        );
+    }
+
+    #[test]
+    fn the_inner_repository_is_routed_not_the_outer_one() {
+        let mut p = nested_in_traversed();
+        let m = Matchers::compile(&Rules::default()).unwrap();
+        let d = dirty_set(
+            &[Change::new(
+                Status::Modified,
+                "third_party/tsl/third_party/gemm/lib/matmul.cc",
+            )],
+            &mut p,
+            &m,
+            &NoConsumers,
+        );
+        assert_eq!(
+            d.nested.keys().collect::<Vec<_>>(),
+            vec!["third_party/tsl/third_party/gemm"]
+        );
+        assert!(d.direct_files.is_empty());
     }
 
     fn nested() -> PackageSet {
