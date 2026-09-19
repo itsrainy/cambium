@@ -243,7 +243,10 @@ pub fn render_subject_section(r: &SubjectResults) -> String {
 
 /// `bazel 7.4.1` -> `7.4.1`; anything else is left alone.
 fn tidy_version(v: &str) -> String {
-    v.trim().strip_prefix("bazel ").unwrap_or(v.trim()).to_string()
+    v.trim()
+        .strip_prefix("bazel ")
+        .unwrap_or(v.trim())
+        .to_string()
 }
 
 // ------------------------------------------------------------- the regions

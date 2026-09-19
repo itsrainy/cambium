@@ -610,19 +610,27 @@ fn a_glob_key_is_matched_to_its_own_package() {
 #[test]
 fn a_glob_keys_package_is_read_out_in_either_spelling() {
     assert_eq!(
-        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = a/b, globRequests = []>"),
+        glob_package(
+            "<GlobsKey packageRoot = <workspace>, packageIdentifier = a/b, globRequests = []>"
+        ),
         Some("a/b")
     );
     assert_eq!(
-        glob_package("<GlobDescriptor packageName=a/b packageRoot=<workspace> subdir= pattern=*.txt>"),
+        glob_package(
+            "<GlobDescriptor packageName=a/b packageRoot=<workspace> subdir= pattern=*.txt>"
+        ),
         Some("a/b")
     );
     assert_eq!(
-        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = ab, globRequests = []>"),
+        glob_package(
+            "<GlobsKey packageRoot = <workspace>, packageIdentifier = ab, globRequests = []>"
+        ),
         Some("ab")
     );
     assert_eq!(
-        glob_package("<GlobsKey packageRoot = <workspace>, packageIdentifier = , globRequests = []>"),
+        glob_package(
+            "<GlobsKey packageRoot = <workspace>, packageIdentifier = , globRequests = []>"
+        ),
         Some("")
     );
     assert_eq!(glob_package("PACKAGE:a"), None);

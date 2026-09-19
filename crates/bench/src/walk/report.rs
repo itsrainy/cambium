@@ -80,7 +80,11 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         }
         let _ = writeln!(out);
     }
-    let _ = writeln!(out, "Globals: {}. Engine cold rebuilds: {}.", s.globals, s.engine_cold_rebuilds);
+    let _ = writeln!(
+        out,
+        "Globals: {}. Engine cold rebuilds: {}.",
+        s.globals, s.engine_cold_rebuilds
+    );
     let _ = writeln!(out);
 }
 
@@ -276,7 +280,10 @@ mod tests {
             md.contains("6712 missing rows (6712 expected: created in the window or a package that failed to load; 0 unexplained), 4 extra (3 for paths deleted"),
             "{md}"
         );
-        assert!(md.contains("rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json"), "{md}");
+        assert!(
+            md.contains("rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json"),
+            "{md}"
+        );
         assert!(md.contains("bazel 7.4.1"));
     }
 
@@ -286,7 +293,8 @@ mod tests {
         let mut r = a_walk();
         r.rebuild_oracle = Some(RebuildOracle {
             ok: false,
-            summary: "loading layer rows missing: 5 (extra: 0); loading layer unexplained: 2".into(),
+            summary: "loading layer rows missing: 5 (extra: 0); loading layer unexplained: 2"
+                .into(),
             rows: Some("rebuild-bbbbbbbbbbbb0-7.4.1.json".into()),
             sky: crate::walk::RowCounts {
                 missing: 5,
@@ -298,7 +306,10 @@ mod tests {
         r.summarise();
         assert!(!r.summary.pass);
         let md = render(&r);
-        assert!(md.contains("Rebuild oracle at the pin: loading layer rows missing: 5"), "{md}");
+        assert!(
+            md.contains("Rebuild oracle at the pin: loading layer rows missing: 5"),
+            "{md}"
+        );
         assert!(
             md.contains("Loading layer: 5 missing rows (3 expected: created in the window or a package that failed to load; 2 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
             "{md}"

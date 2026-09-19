@@ -193,8 +193,14 @@ pub fn resolve(base: IndexRef<'_>, querier: &dyn PackageQuerier, flags: &[LabelF
 }
 
 fn reason(f: &LabelFlag, cause: FlagCause) -> GlobalReason {
+    // The scope as the rc file writes it: `common`, or `common:ci` for a
+    // setting under a config the query runs with.
+    let command = match &f.key.config {
+        Some(c) => format!("{}:{c}", f.key.command),
+        None => f.key.command.clone(),
+    };
     GlobalReason::Flag {
-        command: f.key.command.clone(),
+        command,
         name: f.key.name.clone(),
         cause,
     }

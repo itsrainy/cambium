@@ -132,7 +132,7 @@ impl Schedule {
     /// Whether step `i` (1-based, counting from the first step after the cold
     /// build) gets a mid-walk rebuild oracle.
     pub fn rebuilds_at(&self, i: usize) -> bool {
-        matches!(self.rebuild_every, Some(n) if n > 0 && i % n == 0)
+        matches!(self.rebuild_every, Some(n) if n > 0 && i.is_multiple_of(n))
     }
 }
 

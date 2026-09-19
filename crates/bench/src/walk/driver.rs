@@ -311,7 +311,7 @@ impl Runner<'_> {
         // done here from the same oracle the peers were scored with.
         let want_oracle = self.opts.oracle_sample.contains(i - 1);
         let want_peers = self.opts.peer_sample.contains(i - 1);
-        let head_index = (run.wrote_index).then(|| self.index_path.as_path());
+        let head_index = (run.wrote_index).then_some(self.index_path.as_path());
         let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
         let ctx = StepContext {
             step,
@@ -332,7 +332,7 @@ impl Runner<'_> {
         let mut tools = vec![score_cambium(&run.labels, wall_ms, oracle.as_ref())];
         tools.extend(self.live.peers(&ctx, oracle.as_ref()));
 
-        let cambium_ok = oracle.as_ref().map_or(true, |o| o.ok());
+        let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
         let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
         let rebuild_step = self.opts.schedule.rebuilds_at(i);
         let pass = cambium_ok && peers_ran;
@@ -505,7 +505,10 @@ impl Runner<'_> {
             summary: if ok {
                 String::new()
             } else {
-                format!("{}; loading layer unexplained: {unexplained}", diff.summary())
+                format!(
+                    "{}; loading layer unexplained: {unexplained}",
+                    diff.summary()
+                )
             },
             rows: rows_path
                 .file_name()

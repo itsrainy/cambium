@@ -169,7 +169,8 @@ impl RebuildRows {
         mut missing: Vec<Row>,
         mut extra: Vec<Row>,
     ) -> Self {
-        let by_class_then_name = |a: &Row, b: &Row| a.class.cmp(&b.class).then_with(|| a.item.cmp(&b.item));
+        let by_class_then_name =
+            |a: &Row, b: &Row| a.class.cmp(&b.class).then_with(|| a.item.cmp(&b.item));
         missing.sort_by(by_class_then_name);
         extra.sort_by(by_class_then_name);
         let counts = counts(&missing, &extra);
@@ -606,7 +607,13 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&["lib"]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir/sub"));
         assert_eq!(m[0].package.as_deref(), Some("newdir/sub"));
@@ -648,7 +655,13 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&["lib"]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
     }
 
@@ -656,7 +669,13 @@ mod tests {
     #[test]
     fn a_path_present_at_the_base_is_unexplained() {
         let d = diff(vec![SkyItem::Node(name(Kind::File, "lib/a.cc"))], vec![]);
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -673,7 +692,13 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&["lib"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
     }
 
@@ -685,14 +710,26 @@ mod tests {
             vec![SkyItem::Node(name(Kind::FileState, "newdir/sub/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         // But a probe of a directory that exists nowhere resolves to nothing.
         let d = diff(
             vec![SkyItem::Node(name(Kind::FileState, "nowhere/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -706,7 +743,13 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&["lib"]), &errs(&[]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&["lib"]),
+            &errs(&[]),
+        );
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir"));
         // A load error at either end is a load error.
@@ -717,7 +760,13 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&["lib"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::LoadError]);
     }
 
@@ -736,10 +785,20 @@ mod tests {
                 },
             ],
         );
-        let (_, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
+        let (_, e) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
         assert_eq!(
             classes(&e),
-            vec![RowClass::DeletedInWindow, RowClass::DeletedInWindow, RowClass::Other]
+            vec![
+                RowClass::DeletedInWindow,
+                RowClass::DeletedInWindow,
+                RowClass::Other
+            ]
         );
     }
 
@@ -754,10 +813,16 @@ mod tests {
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
         let (m, e) = classify(&d, None, None, &set(&[]), &errs(&["lib"]));
-        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        assert_eq!(
+            classes(&m),
+            vec![RowClass::Unexplained, RowClass::Unexplained]
+        );
         assert_eq!(classes(&e), vec![RowClass::Other]);
         let (m, _) = classify(&d, Some(&tree(FROM)), None, &set(&[]), &errs(&[]));
-        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        assert_eq!(
+            classes(&m),
+            vec![RowClass::Unexplained, RowClass::Unexplained]
+        );
     }
 
     /// (ix) The applied index's list is history: a package that failed once
@@ -779,8 +844,17 @@ mod tests {
             rebuilt: set(&[]),
             applied: set(&["lib"]),
         };
-        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &applied_only);
-        assert_eq!(classes(&m), vec![RowClass::Unexplained, RowClass::Unexplained]);
+        let (m, e) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &applied_only,
+        );
+        assert_eq!(
+            classes(&m),
+            vec![RowClass::Unexplained, RowClass::Unexplained]
+        );
         assert_eq!(classes(&e), vec![RowClass::LoadError]);
         let both = ErrorPackages {
             rebuilt: set(&["lib"]),
@@ -814,16 +888,34 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::FileState, "lib/a.cc"))],
         );
-        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&["lib"]));
+        let (m, e) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&["lib"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::LoadError; 6], "{m:?}");
-        assert!(m.iter().all(|r| r.package.as_deref() == Some("lib")), "{m:?}");
+        assert!(
+            m.iter().all(|r| r.package.as_deref() == Some("lib")),
+            "{m:?}"
+        );
         assert_eq!(classes(&e), vec![RowClass::LoadError]);
         // A file under no package names none, and is not excused.
-        let d = diff(vec![SkyItem::Node(name(Kind::FileState, "old/x.txt"))], vec![]);
+        let d = diff(
+            vec![SkyItem::Node(name(Kind::FileState, "old/x.txt"))],
+            vec![],
+        );
         let to = tree(&["BUILD", "old/x.txt"]);
         let from = tree(&["BUILD", "old/x.txt"]);
         let no_root: BTreeSet<String> = ["old/x.txt".to_string()].into();
-        let (m, _) = classify(&d, Some(&no_root), Some(&no_root), &set(&[]), &errs(&["old"]));
+        let (m, _) = classify(
+            &d,
+            Some(&no_root),
+            Some(&no_root),
+            &set(&[]),
+            &errs(&["old"]),
+        );
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
         assert_eq!(m[0].package, None);
         // With a root `BUILD` the root package holds it.
@@ -838,7 +930,13 @@ mod tests {
     #[test]
     fn a_new_file_in_a_directory_that_existed_at_the_base_is_unexplained() {
         let from = tree(&["BUILD", "lib/BUILD", "lib/a.txt"]);
-        let to = tree(&["BUILD", "lib/BUILD", "lib/a.txt", "lib/b.txt", "lib/new.bzl"]);
+        let to = tree(&[
+            "BUILD",
+            "lib/BUILD",
+            "lib/a.txt",
+            "lib/b.txt",
+            "lib/new.bzl",
+        ]);
         let d = diff(
             vec![
                 SkyItem::Node(name(Kind::File, "lib/b.txt")),
@@ -865,7 +963,10 @@ mod tests {
         for applied in [set(&[]), set(&["lib", "lib/BUILD", "lib/a.txt"])] {
             let (m, _) = classify(&d, Some(&from), Some(&to), &applied, &errs(&[]));
             assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
-            assert!(m.iter().all(|r| r.package.as_deref() == Some("lib")), "{m:?}");
+            assert!(
+                m.iter().all(|r| r.package.as_deref() == Some("lib")),
+                "{m:?}"
+            );
         }
         // A new directory beside them is still a created root, and a new
         // file inside a new directory sits under that root.
@@ -908,9 +1009,15 @@ mod tests {
     fn every_kind_locates_what_its_key_names() {
         let s = |v: &str| Some(v.to_string());
         assert_eq!(locate(&name(Kind::File, "a/b.txt")), (s("a/b.txt"), None));
-        assert_eq!(locate(&name(Kind::FileState, "a/BUILD")), (s("a/BUILD"), None));
+        assert_eq!(
+            locate(&name(Kind::FileState, "a/BUILD")),
+            (s("a/BUILD"), None)
+        );
         assert_eq!(locate(&name(Kind::DirectoryListing, "a")), (s("a"), None));
-        assert_eq!(locate(&name(Kind::DirectoryListingState, "a/b")), (s("a/b"), None));
+        assert_eq!(
+            locate(&name(Kind::DirectoryListingState, "a/b")),
+            (s("a/b"), None)
+        );
         let other_root = SkyName {
             kind: Kind::File,
             root: "/somewhere/else".into(),
@@ -919,7 +1026,10 @@ mod tests {
         assert_eq!(locate(&other_root), (None, None));
         assert_eq!(locate(&name(Kind::Package, "a/b")), (s("a/b"), s("a/b")));
         assert_eq!(locate(&name(Kind::PackageLookup, "")), (s(""), s("")));
-        assert_eq!(locate(&name(Kind::PackageLookup, "@@rules//x")), (None, None));
+        assert_eq!(
+            locate(&name(Kind::PackageLookup, "@@rules//x")),
+            (None, None)
+        );
         assert_eq!(
             locate(&name(
                 Kind::Glob,
@@ -942,11 +1052,17 @@ mod tests {
             (s("pkg/f.bzl"), None)
         );
         assert_eq!(
-            locate(&name(Kind::BzlLoad, "KeyForBuild{label=//pkg:f.bzl, isBuildPrelude=false}")),
+            locate(&name(
+                Kind::BzlLoad,
+                "KeyForBuild{label=//pkg:f.bzl, isBuildPrelude=false}"
+            )),
             (s("pkg/f.bzl"), None)
         );
         assert_eq!(
-            locate(&name(Kind::BzlLoad, "KeyForBuild{label=@@//:f.bzl, isBuildPrelude=false}")),
+            locate(&name(
+                Kind::BzlLoad,
+                "KeyForBuild{label=@@//:f.bzl, isBuildPrelude=false}"
+            )),
             (s("f.bzl"), None)
         );
         assert_eq!(
@@ -968,7 +1084,9 @@ mod tests {
         let path = RebuildRows::path(dir.path(), "abc123", Some("9.2.0"));
         assert_eq!(path.file_name().unwrap(), "rebuild-abc123-9.2.0.json");
         assert_eq!(
-            RebuildRows::path(dir.path(), "abc123", None).file_name().unwrap(),
+            RebuildRows::path(dir.path(), "abc123", None)
+                .file_name()
+                .unwrap(),
             "rebuild-abc123.json"
         );
         let d = diff(
@@ -982,11 +1100,21 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
-        let (m, e) = classify(&d, Some(&tree(FROM)), Some(&tree(TO)), &set(&[]), &errs(&[]));
+        let (m, e) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
         let doc = RebuildRows::new("subj", "abc123", "f0", "abc123", "9.2.0", m, e);
         assert_eq!(
             classes(&doc.missing),
-            vec![RowClass::Unexplained, RowClass::Unexplained, RowClass::CreatedInWindow]
+            vec![
+                RowClass::Unexplained,
+                RowClass::Unexplained,
+                RowClass::CreatedInWindow
+            ]
         );
         assert_eq!(
             doc.counts,

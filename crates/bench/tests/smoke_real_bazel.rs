@@ -279,13 +279,8 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     let refs: Vec<&dyn Tool> = tools.iter().map(|p| p.as_ref()).collect();
 
     let results = tmp.path().join("results/smoke/walk");
-    let (commits, steps) = walk::steps(
-        &checkout.repo,
-        &pin,
-        shas.len(),
-        &walk::Probes::default(),
-    )
-    .unwrap();
+    let (commits, steps) =
+        walk::steps(&checkout.repo, &pin, shas.len(), &walk::Probes::default()).unwrap();
     assert!(steps.len() >= 3, "{steps:?}");
 
     let cambi = cambi();
@@ -332,12 +327,10 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     // the benchmark would write into docs/RESULTS.md.
     println!(
         "{}",
-        cambium_bench::report::render_subject_section(
-            &cambium_bench::report::SubjectResults {
-                id: "smoke".into(),
-                walk: Some(result.clone()),
-            },
-        )
+        cambium_bench::report::render_subject_section(&cambium_bench::report::SubjectResults {
+            id: "smoke".into(),
+            walk: Some(result.clone()),
+        },)
     );
 
     for st in &result.steps {
@@ -352,7 +345,6 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     );
     assert!(result.summary.pass, "{:#?}", result.summary);
 }
-
 
 /// A second workspace, written for the oracle alone: `defs/defs.bzl` is both a
 /// macro other packages load *and* a source of a filegroup in its own package.
@@ -489,13 +481,8 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
     checkout.write_config(&entry, version.as_deref()).unwrap();
     let engine = checkout.engine(&entry, version.as_deref()).unwrap();
 
-    let (commits, steps) = walk::steps(
-        &checkout.repo,
-        &pin,
-        shas.len(),
-        &walk::Probes::default(),
-    )
-    .unwrap();
+    let (commits, steps) =
+        walk::steps(&checkout.repo, &pin, shas.len(), &walk::Probes::default()).unwrap();
     assert!(steps.len() >= 2, "{steps:?}");
     let cambi = cambi();
     let driver = walk::CambiDriver {
@@ -546,10 +533,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
     // `defs/defs.bzl` -> the filegroup that lists it in `srcs`. `//app:app`
     // reaches the file through a `load()`, which is not a `deps` edge, so
     // `rdeps` does not name it and cambium over-approximates by including it.
-    let bzl = result.steps[0]
-        .oracle
-        .as_ref()
-        .expect("an oracle ran");
+    let bzl = result.steps[0].oracle.as_ref().expect("an oracle ran");
     assert_eq!(bzl.roots, vec!["//defs:defs.bzl"], "{bzl:#?}");
     assert!(!bzl.sampled);
     assert_eq!(
@@ -562,10 +546,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
 
     // `lib/lib.txt` -> the genrule that reads it, and the app that consumes
     // its output.
-    let src_set = result.steps[1]
-        .oracle
-        .as_ref()
-        .expect("an oracle ran");
+    let src_set = result.steps[1].oracle.as_ref().expect("an oracle ran");
     assert_eq!(src_set.roots, vec!["//lib:lib.txt"], "{src_set:#?}");
     assert_eq!(
         src_set.oracle_set.iter().cloned().collect::<Vec<_>>(),

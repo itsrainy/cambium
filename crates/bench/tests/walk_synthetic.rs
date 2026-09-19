@@ -77,7 +77,10 @@ impl<'a> HoleQuerier<'a> {
 }
 
 impl PackageQuerier for HoleQuerier<'_> {
-    fn query(&self, packages: &[String]) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+    fn query(
+        &self,
+        packages: &[String],
+    ) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
         self.refreshing.set(true);
         self.warm.query(packages)
     }
@@ -119,7 +122,10 @@ impl PackageQuerier for HoleQuerier<'_> {
 struct Layerless<'a>(SynthQuerier<'a>);
 
 impl PackageQuerier for Layerless<'_> {
-    fn query(&self, packages: &[String]) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+    fn query(
+        &self,
+        packages: &[String],
+    ) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
         self.0.query(packages)
     }
 
@@ -204,7 +210,11 @@ fn append_loose_commit(f: &mut Fixture, paths: &[&str]) -> String {
             .args(args)
             .output()
             .unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
     git(&["add", "-A"]);
@@ -407,11 +417,23 @@ fn a_directory_no_refresh_had_reason_to_dump_is_expected_and_the_walk_passes() {
     let (commits, s) = steps(&f);
     let o = opts(&f);
     assert_eq!(o.pin, pin);
-    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &o,
+    )
+    .unwrap();
     let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
     assert!(ro.ok, "{}", ro.summary);
     assert!(r.summary.pass);
-    assert!(ro.sky.missing > 0, "the cold layer listed the loose directory: {:?}", ro.sky);
+    assert!(
+        ro.sky.missing > 0,
+        "the cold layer listed the loose directory: {:?}",
+        ro.sky
+    );
     assert_eq!(ro.sky.missing_expected, ro.sky.missing, "{:?}", ro.sky);
     assert_eq!(ro.sky.missing_unexplained, 0);
     let sidecar = walk::RebuildRows::path(&f.results.join("walk"), &pin, Some("synth"));
@@ -420,7 +442,9 @@ fn a_directory_no_refresh_had_reason_to_dump_is_expected_and_the_walk_passes() {
     for row in &rows.missing {
         assert_eq!(row.class, walk::RowClass::CreatedInWindow, "{row:?}");
         assert!(
-            row.path.as_deref().is_some_and(|p| p == "loose" || p.starts_with("loose/")),
+            row.path
+                .as_deref()
+                .is_some_and(|p| p == "loose" || p.starts_with("loose/")),
             "{row:?}"
         );
     }
@@ -446,13 +470,24 @@ fn a_hole_under_a_package_the_refresh_covered_fails_the_walk() {
     let pin = append_loose_commit(&mut f, &[&readme]);
     let (commits, s) = steps(&f);
     let o = opts(&f);
-    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &o,
+    )
+    .unwrap();
     let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
     assert!(!ro.ok, "{:?}", ro.sky);
     assert!(!r.summary.pass);
     assert!(ro.sky.missing_unexplained > 0, "{:?}", ro.sky);
     assert!(
-        ro.summary.contains(&format!("loading layer unexplained: {}", ro.sky.missing_unexplained)),
+        ro.summary.contains(&format!(
+            "loading layer unexplained: {}",
+            ro.sky.missing_unexplained
+        )),
         "{}",
         ro.summary
     );
@@ -475,7 +510,9 @@ fn a_hole_under_a_package_the_refresh_covered_fails_the_walk() {
         "{unexplained:?}"
     );
     assert!(
-        unexplained.iter().any(|r| r.path.as_deref() == Some(readme.as_str())),
+        unexplained
+            .iter()
+            .any(|r| r.path.as_deref() == Some(readme.as_str())),
         "{unexplained:?}"
     );
     // Sorted unexplained-first, so the first row is one that fails the walk.
@@ -491,12 +528,28 @@ fn a_cold_build_with_no_layer_fails_the_oracle_whatever_the_rows_say() {
     f.driver.layerless = f.driver.commits.last().cloned();
     let (commits, s) = steps(&f);
     let o = opts(&f);
-    let r = walk::walk(&f.engine, &f.engine_driver(), &NoLiveChecks, &commits, &s, &o).unwrap();
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &o,
+    )
+    .unwrap();
     let ro = r.rebuild_oracle.as_ref().expect("the rebuild oracle ran");
     assert!(!ro.ok, "{:?}", ro.sky);
     assert!(!r.summary.pass);
-    assert_eq!(ro.sky.missing_unexplained, 0, "no rows to classify: {:?}", ro.sky);
-    assert!(ro.summary.contains("loading layer rows missing: 1"), "{}", ro.summary);
+    assert_eq!(
+        ro.sky.missing_unexplained, 0,
+        "no rows to classify: {:?}",
+        ro.sky
+    );
+    assert!(
+        ro.summary.contains("loading layer rows missing: 1"),
+        "{}",
+        ro.summary
+    );
 }
 
 #[test]
@@ -538,7 +591,11 @@ fn a_walk_resumes_from_its_last_published_index() {
     assert_eq!(resumed.steps.len(), commits.len() - 1);
     assert_eq!(resumed.steps[2].head, truncated.steps[2].head);
     let ro = resumed.rebuild_oracle.unwrap();
-    assert!(ro.ok, "a resumed walk still equals a rebuild: {}", ro.summary);
+    assert!(
+        ro.ok,
+        "a resumed walk still equals a rebuild: {}",
+        ro.summary
+    );
     assert!(sidecar.exists(), "the resumed walk rewrote the sidecar");
     assert_eq!(walk::RebuildRows::read(&sidecar).unwrap().counts, ro.sky);
 }

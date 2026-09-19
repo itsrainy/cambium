@@ -32,9 +32,10 @@ use serde::{Deserialize, Serialize};
 ///   because a changed `.bzl` is in their static load closure.
 ///   `stats.rbuildfiles_called` stays in the document and is now always
 ///   `false`: the closure is read from the index instead of from Bazel.
-/// - **5** — `stats` gained `bazelrc_safe_diffs` (changed bazelrc files
-///   whose every changed flag was on the loading-irrelevant allowlist and
-///   which therefore invalidated nothing) and `stats.cold_rebuild` with the
+/// - **5** — `stats` gained `bazelrc_safe_diffs` (changed bazelrc files the
+///   screen read and cleared: none of the triples the index query reads
+///   changed in a way it could not account for, so the file itself
+///   invalidated nothing) and `stats.cold_rebuild` with the
 ///   optional `cold_rebuild_reason`: a run whose dirty set exceeded
 ///   `limits.max_dirty_packages` re-indexed the whole repository at head
 ///   instead of splicing. That is *not* a global invalidation — `affected`
@@ -237,9 +238,18 @@ pub struct Stats {
     /// comes back empty and tombstones nothing.
     #[serde(default)]
     pub sky_new_packages: usize,
-    /// Changed bazelrc files read and found irrelevant to loading: every
-    /// changed flag was on the allowlist, so the edit invalidated nothing
-    /// instead of invalidating everything.
+    /// Changed bazelrc files the screen read and cleared, so the file itself
+    /// invalidated nothing instead of invalidating everything.
+    ///
+    /// Cleared means every triple it changed that the index query reads was
+    /// accounted for: on the loading-irrelevant allowlist, a Starlark build
+    /// setting the flag resolver took, or `--registry`, which is routed to
+    /// the externals stage. A triple under a command or a `--config` the
+    /// query never reads is not read at all and does not keep the file out
+    /// of this count. Counted per file before the routed causes are
+    /// answered, so a run can report a cleared rc file and still be global:
+    /// a `--registry` the externals stage then escalates (`CAMBI-W014`) is
+    /// the case to expect. It is a count of files, not of allowlist hits.
     #[serde(default)]
     pub bazelrc_safe_diffs: usize,
     /// The dirty set was larger than `limits.max_dirty_packages`, so the run

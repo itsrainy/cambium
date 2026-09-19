@@ -283,7 +283,9 @@ fn workspace_closure(tree: &dyn Tree, files: &[String], m: &RepoMapping) -> BTre
         if !files.contains(&(*name).to_string()) {
             continue;
         }
-        let Some(text) = tree.text(name) else { continue };
+        let Some(text) = tree.text(name) else {
+            continue;
+        };
         for l in cambium_index::loads::scan_workspace_loads(&text) {
             if let Some(Load::Main(p)) = resolve_label(&l, "", m) {
                 stack.push(p);
@@ -347,14 +349,14 @@ mod tests {
 
     fn tree() -> std::collections::BTreeMap<String, String> {
         [
-                ("BUILD", ""),
-                ("a/BUILD", "load(\":rules.bzl\", \"r\")"),
-                ("a/rules.bzl", "load(\":helper.bzl\", \"h\")"),
-                ("a/helper.bzl", ""),
-                ("a/one.cc", ""),
-                ("a/sub/x.cc", ""),
-                (".bazelignore", ""),
-            ]
+            ("BUILD", ""),
+            ("a/BUILD", "load(\":rules.bzl\", \"r\")"),
+            ("a/rules.bzl", "load(\":helper.bzl\", \"h\")"),
+            ("a/helper.bzl", ""),
+            ("a/one.cc", ""),
+            ("a/sub/x.cc", ""),
+            (".bazelignore", ""),
+        ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()

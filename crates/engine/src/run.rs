@@ -31,6 +31,14 @@ pub(crate) struct ScreenedDiff<'a> {
     pub(crate) safe: usize,
     /// Changed Starlark build settings, to be resolved against the index.
     pub(crate) label_flags: Vec<bazelrc::LabelFlag>,
+    /// `--registry` moved in a line the query reads: a lock-file question the
+    /// externals stage answers ([`Run::registry_change`]).
+    pub(crate) registry: Option<bazelrc::RegistryChange>,
+    /// Changed files named like rc files that Bazel is told not to read (the
+    /// root `.bazelrc` under `--noworkspace_rc`). They stay in `changes` as
+    /// ordinary source changes, and the dirty stage must not fire the
+    /// `.bazelrc` invalidator on them.
+    pub(crate) inert: Vec<String>,
     /// Set when a bazelrc edit invalidates the whole run.
     pub(crate) global: Option<GlobalReason>,
 }
@@ -39,14 +47,15 @@ impl Engine {
     /// Reads every changed bazelrc and decides what its edit means.
     ///
     /// A bazelrc is an invalidator by default, and the generic rule can only
-    /// say "this file changed, so everything changed". Here the two texts are
-    /// available, so the run can ask the narrower question: did any flag change
-    /// that loading or analysis could see? When the answer is no, the change is
-    /// removed from the diff entirely — it dirties no package, because nothing
-    /// in the graph depends on the number of jobs — and when it is yes, or when
-    /// the file was added, removed, or is not text, the run is global exactly as
-    /// before. The screen can only ever shrink an answer that would otherwise
-    /// have been `//...`.
+    /// say "this file changed, so everything changed". Here the rc chain at
+    /// both ends of the range is available, so the run can ask the narrower
+    /// question: did any flag the index query reads change in a way loading
+    /// could see? When the answer is no, the change is removed from the diff
+    /// entirely (it dirties no package, because nothing in the graph depends
+    /// on the number of jobs), and when it is yes, or when a file was added,
+    /// removed, or is not text, the run is global exactly as before. The
+    /// screen can only ever shrink an answer that would otherwise have been
+    /// `//...`.
     ///
     /// Needs no index, which is why the plan can run it too.
     pub(crate) fn screen_bazelrc<'a>(
@@ -54,96 +63,135 @@ impl Engine {
         changes: &'a [Change],
         req: &AffectedRequest,
     ) -> ScreenedDiff<'a> {
-        let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
-        let mut safe = 0usize;
-        let mut label_flags: Vec<bazelrc::LabelFlag> = Vec::new();
+        use cambium_diff::Status;
         // Which files are rc files is a property of the root rc's import
         // graph, at either end of the range: a file imported only at head is
         // a file that just became one. Anything else named `.bazelrc` is a
         // nested workspace's, and an ordinary source change.
-        let rcs: std::collections::BTreeSet<String> = [&req.base, &req.head]
-            .into_iter()
-            .flat_map(|rev| {
-                let read = |p: &str| {
-                    self.repo
-                        .read_at(rev, p)
-                        .and_then(|b| String::from_utf8(b).ok())
-                };
-                bazelrc::reachable(self.workspace(), &self.cfg.bazel.startup_flags, &read)
-            })
-            .collect();
+        let chain_at = |rev: &str| {
+            let read = |p: &str| {
+                self.repo
+                    .read_at(rev, p)
+                    .and_then(|b| String::from_utf8(b).ok())
+            };
+            bazelrc::chain(self.workspace(), &self.cfg.bazel.startup_flags, &read)
+        };
+        let base_chain = chain_at(&req.base);
+        let head_chain = chain_at(&req.head);
+        let mut rcs: BTreeSet<&str> = base_chain.files.keys().map(String::as_str).collect();
+        rcs.extend(head_chain.files.keys().map(String::as_str));
+        let workspace_rc = bazelrc::reads_workspace_rc(&self.cfg.bazel.startup_flags);
+
+        let global = |path: &str, cause: BazelrcCause| -> ScreenedDiff<'a> {
+            let reason = GlobalReason::Bazelrc {
+                path: path.to_string(),
+                cause,
+            };
+            tracing::info!(path, %reason, "bazelrc edit forces a global run");
+            self.diagnostics.emit(reason.diagnostic());
+            ScreenedDiff {
+                changes: changes.iter().collect(),
+                safe: 0,
+                label_flags: Vec::new(),
+                registry: None,
+                inert: Vec::new(),
+                global: Some(reason),
+            }
+        };
+
+        let mut kept: Vec<&Change> = Vec::with_capacity(changes.len());
+        let mut inert: Vec<String> = Vec::new();
+        let mut rc_changes = 0usize;
         for c in changes {
-            if !rcs.contains(&c.path) {
+            if !rcs.contains(c.path.as_str()) {
+                // The root rc is a file Bazel reads for this workspace unless
+                // the startup flags say otherwise; then it is a source file
+                // like any other, and the `.bazelrc` invalidator must not
+                // undo that.
+                if c.path == bazelrc::WORKSPACE_RC && !workspace_rc {
+                    tracing::debug!(
+                        path = %c.path,
+                        "the startup flags say Bazel does not read the workspace rc; its edit \
+                         is an ordinary source change"
+                    );
+                    inert.push(c.path.clone());
+                }
                 kept.push(c);
                 continue;
             }
-            match self.bazelrc_verdict(c, req) {
-                Ok(s) => {
-                    tracing::debug!(
-                        path = %c.path, changed_flags = s.changed_flags,
-                        label_flags = s.label_flags.len(),
-                        "the bazelrc edit only touched flags that cannot affect loading, \
-                         or Starlark build settings the index can resolve"
-                    );
-                    safe += 1;
-                    label_flags.extend(s.label_flags);
-                }
-                Err(cause) => {
-                    let reason = GlobalReason::Bazelrc {
-                        path: c.path.clone(),
-                        cause,
-                    };
-                    tracing::info!(path = %c.path, %reason, "bazelrc edit forces a global run");
-                    self.diagnostics.emit(reason.diagnostic());
-                    return ScreenedDiff {
-                        changes: changes.iter().collect(),
-                        safe,
-                        label_flags: Vec::new(),
-                        global: Some(reason),
-                    };
+            if c.status != Status::Modified {
+                return global(&c.path, BazelrcCause::AddedOrRemoved);
+            }
+            // The chain reads text; a file that is not text at an end is
+            // simply absent from that end's chain, which would read as "it
+            // contributes nothing there". Say so instead.
+            for rev in [&req.base, &req.head] {
+                match self.repo.read_at(rev, &c.path) {
+                    None => return global(&c.path, BazelrcCause::Unreadable { rev: rev.clone() }),
+                    Some(bytes) if std::str::from_utf8(&bytes).is_err() => {
+                        return global(&c.path, BazelrcCause::NotUtf8 { rev: rev.clone() })
+                    }
+                    Some(_) => {}
                 }
             }
+            rc_changes += 1;
         }
+        if rc_changes == 0 {
+            return ScreenedDiff {
+                changes: kept,
+                safe: 0,
+                label_flags: Vec::new(),
+                registry: None,
+                inert,
+                global: None,
+            };
+        }
+
+        let configs = self.query_configs();
+        let screen = bazelrc::screen_chain(
+            &base_chain,
+            &head_chain,
+            &bazelrc::Invocation {
+                configs: &configs,
+                extra_allowlist: &self.cfg.bazelrc.allowlist_extra,
+            },
+        );
+        if let Some(b) = screen.unknown {
+            return global(&b.path, BazelrcCause::Unknown(b.why));
+        }
+        tracing::debug!(
+            rc_files = rc_changes,
+            changed_flags = screen.changed_flags,
+            label_flags = screen.label_flags.len(),
+            registry = screen.registry.is_some(),
+            "the bazelrc edit only touched flags the query does not read or that cannot affect \
+             loading, Starlark build settings the index can resolve, or --registry"
+        );
         ScreenedDiff {
             changes: kept,
-            safe,
-            label_flags,
+            safe: rc_changes,
+            label_flags: screen.label_flags,
+            registry: screen.registry,
+            inert,
             global: None,
         }
     }
 
-    /// `Ok(screen)` if this one bazelrc change is irrelevant to loading except
-    /// for Starlark build settings the caller will resolve, `Err(cause)` if it
-    /// is not or cannot be read.
-    fn bazelrc_verdict(
-        &self,
-        c: &Change,
-        req: &AffectedRequest,
-    ) -> std::result::Result<bazelrc::Screen, BazelrcCause> {
-        use cambium_diff::Status;
-        let path = &c.path;
-        match c.status {
-            Status::Modified => {}
-            _ => return Err(BazelrcCause::AddedOrRemoved),
+    /// The `--config` names the index query runs with on its command line:
+    /// `[bazelrc].configs`, plus any `--config` in `[bazel].extra_query_flags`.
+    fn query_configs(&self) -> Vec<String> {
+        let mut out = self.cfg.bazelrc.configs.clone();
+        let flags = &self.cfg.bazel.extra_query_flags;
+        for (i, f) in flags.iter().enumerate() {
+            if let Some(c) = f.strip_prefix("--config=") {
+                out.push(c.to_string());
+            } else if f == "--config" {
+                if let Some(c) = flags.get(i + 1) {
+                    out.push(c.clone());
+                }
+            }
         }
-        let text = |rev: &str| -> std::result::Result<String, BazelrcCause> {
-            let bytes = self
-                .repo
-                .read_at(rev, path)
-                .ok_or_else(|| BazelrcCause::Unreadable {
-                    rev: rev.to_string(),
-                })?;
-            String::from_utf8(bytes).map_err(|_| BazelrcCause::NotUtf8 {
-                rev: rev.to_string(),
-            })
-        };
-        let base = text(&req.base)?;
-        let head = text(&req.head)?;
-        let screen = bazelrc::screen(&base, &head, &self.cfg.bazelrc.allowlist_extra);
-        match screen.unknown {
-            Some(why) => Err(BazelrcCause::Unknown(why)),
-            None => Ok(screen),
-        }
+        out
     }
 }
 
@@ -231,7 +279,7 @@ pub fn dirty_stage(
     let mut run = Run::new(engine, base, &refuses, req);
     run.stats.changed_files = changes.len();
     let changes: Vec<&Change> = changes.iter().collect();
-    run.dirty(&changes, ext)
+    run.dirty(&changes, &[], ext)
 }
 
 /// What the query stage read back.
@@ -267,21 +315,28 @@ pub(crate) fn compute(
     let mut ext = run.externals(changes, texts);
 
     // A changed bazelrc is read before the generic invalidator check, and
-    // dropped from the diff when every flag it changed is known not to
-    // reach loading or analysis. Anything else about it — an unknown flag,
-    // an import, the file appearing or vanishing — invalidates the run, so
-    // this only ever turns a global into a smaller answer.
+    // dropped from the diff when every flag it changed is one the query does
+    // not read or is known not to reach loading. Anything else about it (an
+    // unknown flag, an import that cannot be resolved, the file appearing or
+    // vanishing) invalidates the run, so this only ever turns a global into
+    // a smaller answer. A `--registry` edit is handed to the externals stage,
+    // which has just read the lockfile.
     let screened = engine.screen_bazelrc(changes, req);
     run.stats.bazelrc_safe_diffs = screened.safe;
     if let Some(reason) = screened.global {
         return Ok(run.global(reason));
+    }
+    if let Some(reg) = &screened.registry {
+        if let Some(reason) = run.registry_change(reg, &mut ext, texts) {
+            return Ok(run.global(reason));
+        }
     }
     let flags = run.flags(&screened.label_flags);
     if let Some(reason) = flags.global {
         return Ok(run.global(reason));
     }
 
-    let stage = run.dirty(&screened.changes, &mut ext)?;
+    let stage = run.dirty(&screened.changes, &screened.inert, &mut ext)?;
     if let Some(reason) = stage.global {
         return Ok(run.global(reason));
     }
@@ -336,6 +391,71 @@ impl<'a> Run<'a> {
         ext
     }
 
+    /// A `--registry` edit the screen reported: a lock-file question.
+    ///
+    /// The registries decide what module resolution reads, and the resolved
+    /// state is `MODULE.bazel.lock`. When the lock moved in the same diff and
+    /// the externals stage read its diff, that diff already names the modules
+    /// whose registry metadata moved, and the rc line adds nothing. The lock
+    /// moving beside a changed `MODULE.bazel` is not that: there the stage
+    /// takes the module diff and never reads the lock, so the only
+    /// repositories named are the ones whose *declaration* moved, while a
+    /// re-pointed registry can move the resolved state of every other module
+    /// in the graph. When bzlmod is off at base the line is inert.
+    /// Otherwise no lock diff was read beside the registry and what the new
+    /// registries serve cannot be read from the tree, so the stage escalates
+    /// and the dirty stage reports it (`CAMBI-W014`). With the stage off there is nobody to read the
+    /// lock, and the edit is the blunt `CAMBI-W004` it always was.
+    pub(crate) fn registry_change(
+        &mut self,
+        reg: &bazelrc::RegistryChange,
+        ext: &mut Externals,
+        texts: &dyn WorkspaceText,
+    ) -> Option<GlobalReason> {
+        if !self.engine.config().externals.enabled {
+            let reason = GlobalReason::Bazelrc {
+                path: reg.path.clone(),
+                cause: BazelrcCause::Unknown(bazelrc::Unknown::NotAllowlisted {
+                    command: reg.key.command.clone(),
+                    config: reg.key.config.clone(),
+                    name: reg.key.name.clone(),
+                }),
+            };
+            tracing::info!(path = %reg.path, %reason, "bazelrc edit forces a global run");
+            self.engine.diagnostics().emit(reason.diagnostic());
+            return Some(reason);
+        }
+        if ext.cause.is_some() {
+            // Global already, for a reason of the stage's own that the dirty
+            // stage will report.
+            return None;
+        }
+        if ext.lock_read {
+            tracing::debug!(
+                path = %reg.path,
+                "--registry moved with MODULE.bazel.lock, whose diff names the modules that moved"
+            );
+            return None;
+        }
+        let mode = match ext.mode {
+            Some(m) => m,
+            None => *ext
+                .mode
+                .insert(crate::externals::mode_at(self.base, texts, &self.req.base)),
+        };
+        if !mode.bzlmod_live() {
+            tracing::info!(
+                path = %reg.path,
+                "--registry changed, but the base tree runs Bazel with bzlmod off: the edit is inert"
+            );
+            return None;
+        }
+        ext.escalate(ExternalsCause::RegistryWithoutLock {
+            path: reg.path.clone(),
+        });
+        None
+    }
+
     /// A changed Starlark build setting is a changed *target*, not a changed
     /// flag: resolve it against the index and seed its node, or learn why
     /// that cannot be trusted. See `crate::flags`.
@@ -365,9 +485,19 @@ impl<'a> Run<'a> {
     /// new `BUILD` file, a file entering a `glob`, a `.bzl` loaded only by
     /// other `.bzl` files: all three are edges Bazel recorded, and none of
     /// them is a case in this function.
-    pub(crate) fn dirty(&mut self, changes: &[&Change], ext: &mut Externals) -> Result<DirtyStage> {
+    ///
+    /// `exempt` names changed files the bazelrc screen accounted for as
+    /// ordinary source changes (the root rc under `--noworkspace_rc`), which
+    /// the `.bazelrc` invalidator must therefore not fire on.
+    pub(crate) fn dirty(
+        &mut self,
+        changes: &[&Change],
+        exempt: &[String],
+        ext: &mut Externals,
+    ) -> Result<DirtyStage> {
         let mut matchers = Matchers::compile(&self.engine.config().rules())?;
         matchers.exempt(ext.handled.clone());
+        matchers.exempt(exempt.iter().cloned());
         let mut packages = PackageSet::from_index(self.base);
         let mut dirty = cambium_classify::dirty_set(
             changes,

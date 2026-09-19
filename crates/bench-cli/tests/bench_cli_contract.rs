@@ -113,7 +113,9 @@ fn watch_once_reads_a_results_tree_it_did_not_produce() {
 #[test]
 fn the_verbs_are_the_ones_that_left_cambi() {
     let (_, stdout, _) = run(Path::new(BENCH), &["--help"]);
-    for sub in ["subjects", "walk", "skyframe", "replay", "labels", "report", "watch", "run"] {
+    for sub in [
+        "subjects", "walk", "skyframe", "replay", "labels", "report", "watch", "run",
+    ] {
         assert!(
             stdout.contains(sub),
             "`{sub}` is missing from the top-level help:\n{stdout}"
@@ -127,8 +129,6 @@ fn the_verbs_are_the_ones_that_left_cambi() {
         );
     }
 }
-
-
 
 /// The harness locates `cambi` the way the scripts hand it over, and records
 /// the version string it found.

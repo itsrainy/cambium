@@ -204,6 +204,14 @@ pub struct Externals {
     /// Workspace files the stage accounted for, and which must therefore not
     /// also fire an invalidator rule.
     pub handled: Vec<String>,
+    /// `MODULE.bazel.lock` moved and the stage *read its diff*: the
+    /// repositories it names are the ones whose resolved state moved. Only
+    /// the lock-without-`MODULE.bazel` route sets this. When `MODULE.bazel`
+    /// moved too, the lock is in [`Externals::handled`] because the module
+    /// diff subsumes it for invalidator purposes, and nobody read the lock;
+    /// a caller that needs the lock's own answer (`Run::registry_change`)
+    /// must read this, not `handled`.
+    pub lock_read: bool,
     /// How many repositories were named by a repository-rule input edit.
     pub by_input: usize,
     /// How many were named by the `MODULE.bazel` diff.
@@ -405,6 +413,7 @@ pub fn analyse(
                 out.load_repos.extend(repos.iter().cloned());
                 out.repos.extend(repos);
                 out.handled.push(MODULE_LOCK.to_string());
+                out.lock_read = true;
             }
         }
     }

@@ -200,14 +200,20 @@ var, default); the local override (below) is its own origin.
 ## Configuration
 
 `cambium.toml` at the workspace root is the contract, checked in: Bazel
-flags, invalidators, ignore globs, the `.bazelrc` allowlist, store, limits.
+flags, invalidators, ignore globs, the `.bazelrc` allowlist and the configs
+the index query runs with, store, limits.
 Hashed into every index produced; a hash mismatch blocks a splice.
 
 Beside it, gitignored, `cambium.local.toml` holds what's local, not the
 graph: only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`,
-`baseline.compress_indexes`, `baseline.publish_partial`, each excluded from
-the config hash so machine-local overrides can't falsely claim checkouts
-interchangeable; any other key is `CAMBI-E014`, naming key and file.
+`baseline.compress_indexes`, `baseline.publish_partial`, excluded from the
+config hash so machine-local overrides can't falsely claim checkouts
+interchangeable; any other key is `CAMBI-E014`, naming key and file. One
+exception, and it cuts the same way: the startup flags that decide which
+files are rc files at all (`--bazelrc=`, `--noworkspace_rc`) are hashed,
+because under `--noworkspace_rc` the root `.bazelrc` is a source file the
+run may skip. A machine that sets them gets its own lineage rather than
+splicing onto one built without them.
 `--cache-dir`, `--bazel-binary`, `CAMBIUM_CACHE_DIR` and `--config` take
 precedence over both files.
 
@@ -279,9 +285,9 @@ location, and a `help:` line naming what to change. Human form follows `rustc`:
 warning[CAMBI-W004]: .bazelrc changed and the run went global
   --> .bazelrc:14
    |
-14 | build --define=FOO=1
-   |       ^^^^^^^^ --define is not on the loading-irrelevant allowlist
-   = help: add it to [bazelrc].allowlist_extra if it cannot affect analysis
+14 | common --repo_env=CC=clang
+   |        ^^^^^^^^^^ --repo_env is not on the loading-irrelevant allowlist
+   = help: add it to [bazelrc].allowlist_extra if it cannot change what `bazel query` loads
 ```
 
 Under `--format json` it's one object,

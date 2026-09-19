@@ -58,25 +58,45 @@ pub struct BazelConfig {
     pub binary: String,
     pub extra_query_flags: Vec<String>,
     /// Startup options placed before the command word (`--output_base=...`,
-    /// `--bazelrc=...`). They choose *which server* answers, not what the
-    /// graph is, so they are excluded from the config hash: a benchmark run on a
-    /// different machine, with a different output base, still shares the
+    /// `--bazelrc=...`). Most of them choose *which server* answers, not what
+    /// the graph is, and are excluded from the config hash: a benchmark run on
+    /// a different machine, with a different output base, still shares the
     /// lineage.
+    ///
+    /// The exception is the two kinds that decide which files are rc files at
+    /// all (`--bazelrc=` and `--noworkspace_rc`; see
+    /// [`crate::bazelrc::rc_chain_flags`]). Under `--noworkspace_rc` the root
+    /// `.bazelrc` is not read by Bazel, so the screen treats an edit to it as
+    /// an ordinary source change and the run may skip it. That decides what a
+    /// run is allowed to skip, so it is hashed, and a machine that sets it
+    /// gets its own lineage instead of splicing onto one built without it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub startup_flags: Vec<String>,
 }
 
-/// Extends the built-in allowlist of `.bazelrc` flags known not to affect
-/// loading or analysis (see [`crate::bazelrc`]).
+/// What the `.bazelrc` screen (see [`crate::bazelrc`]) is told about this
+/// repository: flags it may skip, and configs the index query runs with.
 ///
-/// A repository knows things about its own flags that cambium cannot: a
-/// `--experimental_` flag it has audited, a wrapper flag only its own tooling
-/// reads. Entries are flag names, dashes optional, and may end in `*`. This is
-/// part of the config hash, because it decides what a run is allowed to skip.
+/// Both are part of the config hash, because they decide what a run is
+/// allowed to skip.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct BazelrcConfig {
+    /// Extends the built-in allowlist of flags known not to change what
+    /// `bazel query` loads. A repository knows things about its own flags
+    /// that cambium cannot: a `--experimental_` flag it has audited, a wrapper
+    /// flag only its own tooling reads. Entries are flag names, dashes
+    /// optional, and may end in `*`.
     pub allowlist_extra: Vec<String>,
+    /// `--config` names the index query runs with, on top of the ones the rc
+    /// chain itself names on lines the query reads (`common --config=x`,
+    /// `--enable_platform_specific_config`). A flag set under
+    /// `command:name` reaches the query only when `name` is in effect, and an
+    /// edit under any other config is ignored by the screen. Empty by
+    /// default: the query is run with no `--config` of its own, so only what
+    /// the rc chain names is in effect.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub configs: Vec<String>,
 }
 
 /// External-repository invalidation (`cambium_index::externals`).
@@ -656,7 +676,10 @@ impl Config {
         // that list has to be outside this hash or a machine-local override
         // could silently mint a lineage.
         graph_relevant.bazel.binary.clear();
-        graph_relevant.bazel.startup_flags.clear();
+        // All but the ones that decide which files are rc files, and so what
+        // a run may skip: those stay, normalised.
+        graph_relevant.bazel.startup_flags =
+            crate::bazelrc::rc_chain_flags(&self.bazel.startup_flags);
         graph_relevant.baseline = Baseline::default();
         graph_relevant.git = GitConfig::default();
         graph_relevant.limits = Limits::default();
@@ -817,8 +840,11 @@ mod tests {
         assert_eq!(a.hash(), b.hash());
     }
 
+    /// A startup flag that picks a server is a fact about a machine. One
+    /// that decides which files are rc files decides what a run may skip,
+    /// and two checkouts that disagree about it are not interchangeable.
     #[test]
-    fn startup_flags_do_not_reach_the_hash_or_the_default_serialisation() {
+    fn only_the_startup_flags_that_decide_the_rc_chain_reach_the_hash() {
         let a = Config::default();
         let mut b = Config::default();
         b.bazel.startup_flags.push("--output_base=/tmp/x".into());
@@ -830,6 +856,25 @@ mod tests {
         assert!(!a.to_toml().contains("startup_flags"));
         let back: Config = toml::from_str(&b.to_toml()).unwrap();
         assert_eq!(back, b);
+
+        let mut c = Config::default();
+        c.bazel.startup_flags.push("--noworkspace_rc".into());
+        assert_ne!(
+            a.hash(),
+            c.hash(),
+            "--noworkspace_rc makes the root .bazelrc a skippable source file"
+        );
+        let mut d = Config::default();
+        d.bazel
+            .startup_flags
+            .push("--bazelrc=tools/ci.bazelrc".into());
+        assert_ne!(a.hash(), d.hash(), "--bazelrc= adds a file to the chain");
+        // Normalised: the pair is last-wins, and leaving Bazel's default
+        // alone is the default lineage.
+        let mut e = Config::default();
+        e.bazel.startup_flags.push("--noworkspace_rc".into());
+        e.bazel.startup_flags.push("--workspace_rc".into());
+        assert_eq!(a.hash(), e.hash());
     }
 
     #[test]
@@ -875,6 +920,23 @@ mod tests {
             Config::default().hash(),
             *without.finalize().as_bytes(),
             "an index built before a derivation fix must not be spliceable"
+        );
+    }
+
+    /// `[bazelrc].configs` decides which rc lines a run may skip, so it is
+    /// in the hash; but an empty list is the default and must not mint a
+    /// lineage of its own.
+    #[test]
+    fn bazelrc_configs_reach_the_hash_only_when_set() {
+        let plain = Config::default();
+        assert!(!plain.to_toml().contains("configs"), "{}", plain.to_toml());
+        let mut c = Config::default();
+        c.bazelrc.configs = vec!["ci".into()];
+        assert_ne!(c.hash(), plain.hash());
+        assert!(
+            c.to_toml().contains("configs = [\"ci\"]"),
+            "{}",
+            c.to_toml()
         );
     }
 

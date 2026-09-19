@@ -722,7 +722,7 @@ impl<'a> Attribution<'a> {
         self.literal_names = self
             .named
             .iter()
-            .filter(|(scope, _)| scope.map_or(true, |d| self.def(d).live))
+            .filter(|(scope, _)| scope.is_none_or(|d| self.def(d).live))
             .map(|(_, l)| self.interner.name(*l).to_string())
             .collect();
     }

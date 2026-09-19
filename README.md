@@ -88,9 +88,13 @@ rebuild.
 **Escalated** (`cold_rebuild_reason` is reported and `//...` queried once;
 still exact, only not incremental):
 
-- `.bazelrc` edits outside the allowlist of flags known not to reach loading
-  or analysis (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
-  `--platforms`, `--extra_toolchains` and every `--incompatible_*` flag.
+- `.bazelrc` edits on a line the index query reads (`common`, `always`,
+  `query`, under no `--config` or one in effect) to a flag outside the
+  allowlist of flags known not to change what `bazel query` loads
+  (`crates/engine/src/bazelrc.rs`), including `--deleted_packages`,
+  `--repo_env`, `--enable_bzlmod` and nearly every `--incompatible_*` flag.
+  A `build`-only line, or one under a `--config` the query does not run
+  with, is not a change; `--registry` is answered by the lockfile diff.
 - `register_toolchains` / `register_execution_platforms` in `MODULE.bazel`,
   and any `MODULE.bazel` or `WORKSPACE` statement the readers cannot classify
   by shape.
@@ -425,7 +429,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 2 | `inspect stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `inspect stats` gained `in_degree.top` (the hub list) |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false`, a changed `.bzl` being answered from the index instead of from Bazel. `inspect stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
-| 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files whose every changed flag was on the loading-irrelevant allowlist, and which therefore invalidated nothing); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head, still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}`, the target naming something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
+| 5 | `stats.bazelrc_safe_diffs` (changed bazelrc files the screen read and cleared, so the file itself invalidated nothing: every triple it changed that the index query reads was allowlisted, resolved as a Starlark build setting, or routed to the externals stage as `--registry`. A file is counted before those routed causes are answered, so a cleared rc file can appear in a run that is global for one of them); `stats.cold_rebuild` and the optional `cold_rebuild_reason` (the dirty set exceeded `limits.max_dirty_packages`, so the run re-indexed at head, still exact, not global; `limits.max_changed_files`, which used to make that case global, is gone); `stats.repos_dirty_by_input`, `stats.repos_dirty_by_module`, `stats.repos_dirty_by_bzl` and `stats.external_direct_targets`; `--explain` gained the direct reason `{"kind": "external_repo", "label": ...}`, the target naming something in an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file the repository is built from) |
 | 6 | `stats.repos_label_only`: of the repositories an input-path edit dirtied, how many the repository's derived path mapping showed the edit could not be a `.bzl` loaded from; those contribute their label consumers to the direct set, and their loading packages are not re-queried |
 | 7 | `stats.bzl_witnessed_dead`, `stats.bzl_witnessed_loaded`, `stats.bzl_witness_packages` and `stats.bzl_witness_unavailable`: what the engine did about a changed `.bzl` the base index's load closure had no node for. `stats.bazelrc_flag_nodes` and the `bazelrc_flags` list: a `.bazelrc` edit that changes a Starlark build setting is no longer automatically global, and `--explain` gained the direct reason `{"kind": "starlark_flag", "label": ...}` |
 | 8 | `stats.repos_dirty_by_target`: external repositories whose *generated* targets name a main-repo rule target the reverse walk reached (the `@envoy_repo` shape, where the BUILD file the repository rule writes lists `@envoy//changelogs` in a `genrule`'s `tools`). Such a repository is found after the walk rather than from the diff, so the walk runs again from its label consumers, and `--explain` gained the direct reason `{"kind": "external_repo_target", "repo": ..., "via": ...}`. Only the repository's *targets* move this way: a repository rule runs during loading and cannot read a rule target's output, so no `.bzl` it exports can have changed and no package's load closure is re-queried |

@@ -113,6 +113,12 @@ pub enum ExternalsCause {
     /// The main repository's graph has no node for anything in there, so the
     /// only sound answer is everything.
     NestedRepositoryUnmapped { dir: String },
+    /// An rc file the query reads changed `--registry`, and no
+    /// `MODULE.bazel.lock` diff was read with it -- it did not move, or it
+    /// moved beside a changed `MODULE.bazel` and the module diff answered
+    /// for it -- so which modules the new registries re-point cannot be read
+    /// from the tree. See `crate::bazelrc`, "`--registry`".
+    RegistryWithoutLock { path: String },
 }
 
 impl fmt::Display for ExternalsCause {
@@ -138,6 +144,11 @@ impl fmt::Display for ExternalsCause {
                 "`MODULE.bazel.lock` was added or removed, so every resolved repository in it \
                  is new or gone",
             ),
+            ExternalsCause::RegistryWithoutLock { path } => write!(
+                f,
+                "`{path}` changed --registry and no `MODULE.bazel.lock` diff was read with it, \
+                 so which modules the new registries re-point cannot be read"
+            ),
         }
     }
 }
@@ -149,7 +160,8 @@ pub enum GlobalReason {
     Bazelrc { path: String, cause: BazelrcCause },
     /// A Starlark build setting a `.bazelrc` edit changed, unresolvable.
     Flag {
-        /// The rc command the flag was set under (`build`, `test`).
+        /// The rc scope the flag was set under, as the file writes it
+        /// (`common`, or `common:ci` under a config the query runs with).
         command: String,
         /// The flag name as written, without its dashes.
         name: String,
@@ -248,8 +260,9 @@ impl GlobalReason {
             // knows the file but not where in it.
             .at(path.clone(), None)
             .with_help(
-                "add the flag to [bazelrc].allowlist_extra if it cannot affect loading or \
-                 analysis",
+                "add the flag to [bazelrc].allowlist_extra if it cannot change what `bazel \
+                 query` loads; a flag under a --config the query does not run with is already \
+                 ignored, and [bazelrc].configs names the ones it does run with",
             ),
             GlobalReason::Flag { .. } => Diagnostic::warning(
                 self.code(),
@@ -260,7 +273,7 @@ impl GlobalReason {
             )
             .with_help(
                 "move the setting into the main repository, or add the flag to \
-                 [bazelrc].allowlist_extra if it cannot affect analysis",
+                 [bazelrc].allowlist_extra if it cannot change what `bazel query` loads",
             ),
             GlobalReason::Invalidator { path } => Diagnostic::warning(
                 self.code(),
@@ -275,7 +288,9 @@ impl GlobalReason {
             ),
             GlobalReason::NoLoadingLayer => Diagnostic::warning(
                 self.code(),
-                format!("nothing can be told apart in this change, so everything is affected: {reason}"),
+                format!(
+                    "nothing can be told apart in this change, so everything is affected: {reason}"
+                ),
             )
             .with_help(
                 "rebuild the lineage with `cambi index build` against a bazel that can run \
@@ -370,11 +385,34 @@ mod tests {
                 GlobalReason::Bazelrc {
                     path: ".bazelrc".into(),
                     cause: BazelrcCause::Unknown(Unknown::NotAllowlisted {
-                        command: "build".into(),
-                        name: "define".into(),
+                        command: "common".into(),
+                        config: None,
+                        name: "repo_env".into(),
                     }),
                 },
-                ".bazelrc: build --define changed, not on the loading-irrelevant allowlist",
+                ".bazelrc: common --repo_env changed, not on the loading-irrelevant allowlist",
+            ),
+            (
+                GlobalReason::Bazelrc {
+                    path: ".bazelrc".into(),
+                    cause: BazelrcCause::Unknown(Unknown::NotAllowlisted {
+                        command: "common".into(),
+                        config: Some("ci".into()),
+                        name: "repo_env".into(),
+                    }),
+                },
+                ".bazelrc: common:ci --repo_env changed, not on the loading-irrelevant allowlist",
+            ),
+            (
+                GlobalReason::Bazelrc {
+                    path: ".bazelrc".into(),
+                    cause: BazelrcCause::Unknown(Unknown::ConfigUndefined {
+                        command: "common".into(),
+                        config: "ci".into(),
+                    }),
+                },
+                ".bazelrc: common --config=ci changed, and no rc file defines `ci` for any \
+                 command",
             ),
             (
                 GlobalReason::Bazelrc {
@@ -395,18 +433,6 @@ mod tests {
                 },
                 ".bazelrc: startup --host_jvm_args changed, and startup options are never \
                  classified",
-            ),
-            (
-                GlobalReason::Bazelrc {
-                    path: ".bazelrc".into(),
-                    cause: BazelrcCause::Unknown(Unknown::ConfigScoped {
-                        command: "build".into(),
-                        config: "ci".into(),
-                        name: "@envoy//bazel:crypto".into(),
-                    }),
-                },
-                ".bazelrc: build:ci --@envoy//bazel:crypto changed, and a flag set under a \
-                 --config applies only to the runs that name it, which cambium does not model",
             ),
             (
                 GlobalReason::Flag {
@@ -513,6 +539,13 @@ mod tests {
                     why: "a novel section".into(),
                 }),
                 "a novel section",
+            ),
+            (
+                GlobalReason::Externals(ExternalsCause::RegistryWithoutLock {
+                    path: ".bazelrc".into(),
+                }),
+                "`.bazelrc` changed --registry and no `MODULE.bazel.lock` diff was read \
+                 with it, so which modules the new registries re-point cannot be read",
             ),
         ]
     }

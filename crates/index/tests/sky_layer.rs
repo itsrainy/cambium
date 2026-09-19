@@ -85,7 +85,9 @@ fn a_layer_survives_being_written_and_mapped_back() {
     assert_eq!(v.sky.roots.get(cambium_index::sky::WORKSPACE), "");
     assert!(!String::from_utf8_lossy(v.sky.keys.bytes).contains("/ws"));
 
-    let w = v.sky.walk(&cambium_index::sky::seeds([("a/sub/BUILD", true)]));
+    let w = v
+        .sky
+        .walk(&cambium_index::sky::seeds([("a/sub/BUILD", true)]));
     assert!(w.packages.contains("a"), "{w:?}");
     assert!(w.lookups.contains("a/sub"), "{w:?}");
 }

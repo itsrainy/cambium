@@ -180,7 +180,9 @@ fn fixture() -> AffectedReport {
             ".bazelrc changed and the run went global",
         )
         .at(".bazelrc", Some(14))
-        .with_help("add it to [bazelrc].allowlist_extra if it cannot affect analysis")],
+        .with_help(
+            "add it to [bazelrc].allowlist_extra if it cannot change what `bazel query` loads",
+        )],
         explanations: Some(vec![Explanation {
             target: "//app:main".into(),
             path: vec!["//app:main".into(), "//lib/core:core".into()],
