@@ -96,6 +96,16 @@ remaining ones are named and filed. Other subjects are read from the
 existing box results; the sidecar can be produced from the stored walk
 JSON where it carries enough, and otherwise waits for box run A.
 
+**Landed 2026-09-19**, merged to main in the 2026-09-19 integration. The
+sidecar is `walk/rebuild-<pin>.json`, written row by row
+(`crates/bench/src/oracles/rebuild.rs`,
+`crates/bench/src/walk/rebuild_rows.rs`), and rows for a path gone at the
+pin are classified `deleted_in_window` rather than counted. The exit gate
+is met on the 40-step bazel walk: `missing 0`, `missing_expected 0`,
+`missing_unexplained 0` (docs/XLA_MAIN_REPO_MISSES.md, last section). The
+other four subjects are unmeasured against the sidecar and wait on box run
+A.
+
 ### Phase 2: the xla main-repo misses (#23), local only
 
 The plan this section opened with (the `--keep_going` retirement bug fixed in
@@ -126,7 +136,8 @@ Measured 2026-09-19, on the box, at the six named pairs
   those packages for the rdeps oracle on the same box the same day. It was a
   transient fetch failure that was then published and reused as the base for
   all six pairs, which is what `publish_partial` being a blanket boolean
-  allows.
+  allows. Fixed 2026-09-19: `publish_partial` now names the packages whose
+  absence is expected, and a failure it does not name refuses the publish.
 
 The load-failure fix on this branch stands on its own terms: a package that
 fails to load under `--keep_going` used to come back empty and tombstone
@@ -231,6 +242,17 @@ hash and starts a fresh lineage (a cost the walk pays at its start anyway).
 Exit: a provider bump under a Bazel that autoloads answers `//...` with a
 code.
 
+**Landed 2026-09-19** as `CAMBI-W024`, merged in the 2026-09-19
+integration. The escalation reads both routes to "this Bazel autoloads":
+the version (8 at its default, 9 never, an unknown version read as 8) and
+`--incompatible_autoload_externally` in the rc chain on a 7.4
+(`crates/engine/src/externals.rs`, `autoload_at`). The provider list is
+`AUTOLOAD_PROVIDERS` in `crates/index/src/vocabulary.rs`, and
+docs/OVER_REPORTING.md carries the row. The precise variant (seeding only
+packages whose rule classes include an autoloaded native rule) was not
+taken, and the routes listed above as left for a phase of their own are
+still open.
+
 ### Box run A: phases 1 through 4 together
 
 All five subjects, 300 steps, one invocation, after the local gate on the
@@ -285,6 +307,19 @@ stay as declarations.
 
 Exit locally: envoy sound at three of its 32 steps and xla at its four,
 profile cost within budget.
+
+**Stage 1 landed 2026-09-19**, merged in the 2026-09-19 integration: sound
+by width, with the universe unchanged. A repository rule's literal `path =`
+is read as a candidate claim and confirmed against Bazel's own package list
+for the repository before a boundary is mapped by it
+(`crates/engine/src/repos.rs`), which is `CAMBI-W025` and `CAMBI-W026` when
+it is not; a `.bazelrc` line that sets an external repository's build
+setting to a target of this tree is an input of that repository
+(`CAMBI-W027`). Index `FORMAT_VERSION` is 12. `cambium-bench walk --only`
+landed with it, so a named step of a gate can be rerun without the history.
+Steps 2 through 5 of the plan (extending the universe to `@repo//...`,
+walking back through it, the gate, the cost measurement) are not done, and
+the exit above is unmeasured: it needs box run B.
 
 ### Box run B: phase 5, and phase 6 if it is ready
 

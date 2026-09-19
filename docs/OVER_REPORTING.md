@@ -157,6 +157,20 @@ driven by `api/bazel/api_build_system.bzl`; apollo 3 to 4; xla 0 to 1.
 | `BUILD` as a glob input | a modified `BUILD` in a `glob(["**"])` package | every rule consuming the `BUILD` as a source | `crates/classify/src/lib.rs` |
 | Layer rows a cold build would not write | any splice: a refresh replaces rows and never removes a node | inert extra nodes and edges, counted as `extra` by the rebuild oracle and named row by row in `walk/rebuild-<pin>.json` (`deleted_in_window` when the path is gone at the pin, `other` otherwise) | `crates/bench/src/oracles/rebuild.rs`, `crates/bench/src/walk/rebuild_rows.rs` |
 
+Two diagnostics say that a *narrower* answer was available and was not taken.
+A repository rule with a literal `path = "third_party/tsl"` claims the
+repository is that directory, which would turn every change under it from a
+global invalidation into an input edit of one repository (the "Nested
+repository mapped wholesale" row above). The claim is arbitrary Starlark and
+cannot check itself, so it is confirmed against Bazel's own package list, and
+a claim that fails keeps the answer the tree had before it: global by that
+directory. `CAMBI-W025` is the repository Bazel could not list, or one with
+more packages than `[externals] index_max_packages`; `CAMBI-W026` is the
+repository whose package list is not the claimed directory's BUILD-bearing
+directories, which is what a rule that reinterpreted its `path` looks like.
+Neither is a mechanism of its own: they name the reason a boundary is still
+answered wide (`crates/engine/src/repos.rs`).
+
 One `--keep_going` case is not on this page at all, and is here so that a
 triage reading it does not go looking for the wide answer. A dirty package
 bazel named in a load error, whose `BUILD` file this change did not edit,
