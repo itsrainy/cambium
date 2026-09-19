@@ -101,19 +101,79 @@ pub struct ModuleFacts {
 /// Whether the Bazel reading this tree autoloads native rules from the
 /// modules on [`crate::vocabulary::AUTOLOAD_PROVIDERS`].
 ///
-/// Bazel 8 turned `--incompatible_autoload_externally` on, and from then on a
-/// bump of a provider module moves rules in packages that load nothing from
-/// it. The diffs take this as a parameter rather than reading a version
+/// Bazel 8 turned `--incompatible_autoload_externally` on by default, and
+/// under it a bump of a provider module moves rules in packages that load
+/// nothing from it. Bazel 7.4 introduced the flag with an empty default, and
+/// Bazel 9 disabled autoloads altogether: the option is a deprecated no-op
+/// there, its `exports.bzl` defines no rule to autoload (an unloaded
+/// `cc_library` fails, asking for a `load()`), and so every rule a provider
+/// gives a package arrives through a `load()` the package writes, which is an
+/// edge. The version therefore says autoload for 8 and only 8, and the flag
+/// says otherwise only where Bazel reads it ([`Autoload::reads_flag`]).
+///
+/// The diffs take this as a parameter rather than reading a version
 /// themselves: which Bazel runs is the engine's knowledge (the index header,
-/// or `.bazelversion`), and a version nothing states is read as `On`, the
-/// side that over-reports.
+/// `.bazelversion`, `.bazelrc`), and a version nothing states is read as
+/// `On`, the side that over-reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Autoload {
-    /// Bazel 8 or later, or unknown: a provider module that moved is global.
+    /// A provider module that moved is global: Bazel 8 at its default, a
+    /// Bazel that reads the flag with the flag naming a provider, or a Bazel
+    /// nothing states.
     On,
-    /// Bazel 7 or earlier: the native rules are Bazel's own, and a provider
-    /// module is an ordinary dependency (or a toolchain module, as before).
+    /// The native rules are Bazel's own or are loaded explicitly, and a
+    /// provider module is an ordinary dependency (or a toolchain module, as
+    /// before): Bazel 7 at its default, Bazel 9 and later whatever the flag
+    /// says, or a Bazel that reads the flag with it set empty.
     Off,
+}
+
+impl Autoload {
+    /// What a Bazel of this major version does at its default: 8 autoloads,
+    /// every other known major does not, and an unknown one is read as 8.
+    pub fn from_major(major: Option<u32>) -> Autoload {
+        match major {
+            Some(8) | None => Autoload::On,
+            Some(_) => Autoload::Off,
+        }
+    }
+
+    /// Whether a Bazel of this major version reads
+    /// `--incompatible_autoload_externally` at all.
+    ///
+    /// 8 does (the flag is how an 8 tree opts out), and so does 7, where 7.4
+    /// introduced it as the way to opt in early; an older 7 never sees the
+    /// flag set, because a Bazel that does not know a flag will not start
+    /// with it. Bazel 9 and later do not: autoloads are disabled there and
+    /// the option is a deprecated no-op, so a line left over from an 8 tree
+    /// says nothing about what that Bazel loads. An unknown version is read
+    /// as 8 and reads the flag with it.
+    pub fn reads_flag(major: Option<u32>) -> bool {
+        matches!(major, Some(7) | Some(8) | None)
+    }
+
+    /// What an explicit `--incompatible_autoload_externally=<value>` says.
+    ///
+    /// The value is a comma-separated list of symbols and `@repository`
+    /// entries. A bare entry autoloads (and fails if the repository is
+    /// missing), a `+` entry autoloads when the repository is in the graph,
+    /// and a `-` entry removes the symbol from Bazel's namespace so that only
+    /// an explicit `load()` provides it, which is an edge. So the flag turns
+    /// autoload on exactly when some entry is not a removal, and an empty
+    /// value is the documented way to turn it off. Which repositories are
+    /// named is not read: a flag naming any provider keeps every provider
+    /// under autoload, the side that over-reports.
+    pub fn from_flag(value: &str) -> Autoload {
+        let autoloads = value
+            .split(',')
+            .map(str::trim)
+            .any(|e| !e.is_empty() && !e.starts_with('-'));
+        if autoloads {
+            Autoload::On
+        } else {
+            Autoload::Off
+        }
+    }
 }
 
 /// What a `MODULE.bazel` edit means.

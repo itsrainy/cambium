@@ -99,17 +99,22 @@ still exact, only not incremental):
   toolchain or platform declarations elsewhere should add those directories,
   because toolchain resolution happens in analysis and has no query-graph edge
   for the reverse walk to follow.
-- A module Bazel 8 autoloads native rules from (`rules_cc`, `rules_java`,
-  `rules_python`, `rules_shell`, `protobuf`) moving in `MODULE.bazel`, its
-  lock or `WORKSPACE`, when the Bazel here is 8 or later or its version is
-  unknown (`CAMBI-W024`). A bare `cc_library` is that module's rule through a
-  load no BUILD file writes; Bazel records it as a dependency on
+- A module Bazel autoloads native rules from (`rules_python`, `rules_java`,
+  `rules_shell`, `protobuf`, `rules_android`) moving, whichever route names
+  it: `MODULE.bazel`, its lock or `WORKSPACE`, an input path under a
+  `local_path_override` or a nested repository, or a workspace-closure `.bzl`
+  that defines it (`CAMBI-W024`). The escalation holds when the Bazel here
+  autoloads: Bazel 8 by default, any Bazel from 7.4 on whose `.bazelrc` sets
+  `--incompatible_autoload_externally` to something, or a Bazel whose
+  version nothing states. A bare `py_binary` is then that module's rule
+  through a load no BUILD file writes; Bazel records it as a dependency on
   `PRECOMPUTED:autoload_symbols`, a singleton every package shares, which the
   loading layer drops because keeping it would put every package one reverse
   hop from every other. So nothing in the graph names the consumers, and the
-  sound answer is everything. On Bazel 7 and earlier the same bump reaches
-  the module's consumers through the graph (or stays global for the
-  toolchains it registers, `CAMBI-W014`).
+  sound answer is everything. On Bazel 7 and 9 at their defaults, or with the
+  flag set empty, the same bump reaches the module's consumers through the
+  graph (or stays global for the toolchains it registers, `CAMBI-W014`, as
+  `rules_cc` does under every Bazel: nothing is autoloaded from it).
 
 **Not modelled** (each with its status):
 

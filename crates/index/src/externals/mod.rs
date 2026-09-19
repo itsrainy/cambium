@@ -207,7 +207,7 @@ mod pattern;
 pub use crate::vocabulary::{
     is_autoload_provider, is_toolchain_module, AUTOLOAD_PROVIDERS, TOOLCHAIN_MODULES,
 };
-pub use bazelrc::{bazelrc_bzlmod, bzlmod_live, Mode};
+pub use bazelrc::{bazelrc_autoload_externally, bazelrc_bzlmod, bzlmod_live, Mode};
 pub use external_query::external_dir_repos;
 pub use inputs::{build_repo_inputs, main_repo_patterns};
 pub use module_diff::diff_module;

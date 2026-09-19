@@ -60,9 +60,9 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts, autoload: Autoload) -
         if autoload == Autoload::On && is_autoload_provider(&module) {
             return ModuleChange::Autoload {
                 why: format!(
-                    "`bazel_dep({module})` changed, and Bazel 8 autoloads native rules from \
-                     {module}: a BUILD file uses them through a load it never writes, so no \
-                     edge names their consumers"
+                    "`bazel_dep({module})` changed, and the Bazel here autoloads native rules \
+                     from {module}: a BUILD file uses them through a load it never writes, so \
+                     no edge names their consumers"
                 ),
                 module,
             };
@@ -82,7 +82,8 @@ pub fn diff_module(base: &ModuleFacts, head: &ModuleFacts, autoload: Autoload) -
             return ModuleChange::Autoload {
                 module: m.to_string(),
                 why: format!(
-                    "the override for `{m}` changed, and Bazel 8 autoloads native rules from {m}"
+                    "the override for `{m}` changed, and the Bazel here autoloads native rules \
+                     from {m}"
                 ),
             };
         }

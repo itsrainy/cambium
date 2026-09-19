@@ -213,26 +213,38 @@ pub fn is_toolchain_module(name: &str) -> bool {
     TOOLCHAIN_MODULES.contains(&name)
 }
 
-/// Modules Bazel 8 and later load native rules from behind the caller's
-/// back (`--incompatible_autoload_externally`).
+/// Modules a Bazel that autoloads loads native rules from behind the
+/// caller's back (`--incompatible_autoload_externally`).
 ///
 /// Answers: *can a bump of this module be localised to the packages that
-/// `load()` from it?* Not on Bazel 8 or later. A bare `cc_library`,
-/// `py_binary`, `java_library`, `sh_test` or `proto_library` in a BUILD file
-/// is that module's Starlark rule, reached through a load no BUILD file
-/// writes; Bazel records the dependency as `PRECOMPUTED:autoload_symbols`, a
-/// singleton every package shares, and the loading layer drops singletons
-/// (`crate::sky`). So no edge in the index names the consumers, and the bump
-/// invalidates everything, under its own diagnostic. On Bazel 7 and earlier
-/// the native rules are Bazel's own and these are ordinary dependencies
-/// (four of them are on [`TOOLCHAIN_MODULES`] as well, which still applies).
+/// `load()` from it?* Not under a Bazel that autoloads from it. A bare
+/// `py_binary`, `java_library`, `sh_test`, `proto_library` or
+/// `android_library` in a BUILD file is then that module's Starlark rule,
+/// reached through a load no BUILD file writes; Bazel records the dependency
+/// as `PRECOMPUTED:autoload_symbols`, a singleton every package shares, and
+/// the loading layer drops singletons (`crate::sky`). So no edge in the
+/// index names the consumers, and the bump invalidates everything, under its
+/// own diagnostic. Where nothing is autoloaded the native rules are Bazel's
+/// own, or are loaded explicitly and so have edges, and these are ordinary
+/// dependencies (three of them are on [`TOOLCHAIN_MODULES`] as well, which
+/// still applies).
 ///
-/// - `rules_cc`, `rules_java`, `rules_python`, `rules_shell`, `protobuf`: the
-///   providers Bazel 8 autoloads by default. `protobuf` is the module name;
-///   `com_google_protobuf` is what a `WORKSPACE` calls the same repository,
-///   and Bazel autoloads from it under that name there.
-/// - `bazel_skylib`, `rules_proto` and the like are deliberately absent:
-///   nothing is autoloaded from them.
+/// Which Bazel autoloads is [`crate::externals::Autoload`]'s question: Bazel
+/// 8 at its default, and a 7.4 that sets the flag. Bazel 9 disabled autoloads
+/// and made the flag a no-op, so the rules a provider gives a package arrive
+/// there through a `load()` the package writes, which is an edge.
+///
+/// - `rules_python`, `rules_java`, `rules_shell`, `protobuf`, `rules_android`:
+///   the providers Bazel 8 autoloads by default (its
+///   `DEFAULT_INCOMPATIBLE_AUTOLOAD_EXTERNALLY`, 8.0.0 through 8.4.2).
+///   `protobuf` is the module name; `com_google_protobuf` is what a
+///   `WORKSPACE` calls the same repository, and Bazel autoloads from it under
+///   that name there.
+/// - `rules_cc` is deliberately absent: Bazel 8 keeps `cc_library` in its own
+///   builtins and autoloads nothing from `rules_cc`, whose bump is global for
+///   the toolchains it registers ([`TOOLCHAIN_MODULES`]) and nothing else.
+/// - `bazel_skylib`, `rules_proto` and the like are absent too: nothing is
+///   autoloaded from them.
 ///
 /// Explicit rather than derived from the Bazel that runs, so the list can be
 /// read and each entry can carry its reason; a provider that is missing
@@ -240,14 +252,14 @@ pub fn is_toolchain_module(name: &str) -> bool {
 pub const AUTOLOAD_PROVIDERS: &[&str] = &[
     "com_google_protobuf",
     "protobuf",
-    "rules_cc",
+    "rules_android",
     "rules_java",
     "rules_python",
     "rules_shell",
 ];
 
-/// Whether a module or repository name is one Bazel 8 autoloads native rules
-/// from.
+/// Whether a module or repository name is one a Bazel that autoloads loads
+/// native rules from.
 pub fn is_autoload_provider(name: &str) -> bool {
     AUTOLOAD_PROVIDERS.contains(&name)
 }
@@ -333,9 +345,12 @@ mod tests {
         assert!(!is_toolchain_module("bazel_skylib"));
         assert!(is_toolchain_module("rules_cc"));
         // Autoload providers: the module name and, for protobuf, the
-        // `WORKSPACE` name too; a macro library is neither.
+        // `WORKSPACE` name too; a macro library is neither, and `rules_cc`
+        // is a toolchain module Bazel 8 autoloads nothing from.
         assert!(is_autoload_provider("protobuf") && is_autoload_provider("com_google_protobuf"));
-        assert!(is_autoload_provider("rules_cc") && is_toolchain_module("rules_cc"));
+        assert!(is_autoload_provider("rules_python") && is_toolchain_module("rules_python"));
+        assert!(is_autoload_provider("rules_android") && !is_toolchain_module("rules_android"));
+        assert!(!is_autoload_provider("rules_cc") && is_toolchain_module("rules_cc"));
         assert!(!is_autoload_provider("bazel_skylib"));
     }
 }

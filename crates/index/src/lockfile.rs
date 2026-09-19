@@ -214,9 +214,9 @@ fn module_moved(
         return Err(ModuleChange::Autoload {
             module: module.to_string(),
             why: format!(
-                "`MODULE.bazel.lock` moved `{module}` ({why}), and Bazel 8 autoloads native \
-                 rules from {module}: a BUILD file uses them through a load it never writes, \
-                 so no edge names their consumers"
+                "`MODULE.bazel.lock` moved `{module}` ({why}), and the Bazel here autoloads \
+                 native rules from {module}: a BUILD file uses them through a load it never \
+                 writes, so no edge names their consumers"
             ),
         });
     }
@@ -709,20 +709,28 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // A toolchain module keeps its own wording where autoload is off,
-        // and takes the autoload one where it is on: both are global.
-        let side = |h: &str| {
+        // A toolchain module Bazel 8 also autoloads from keeps its own
+        // wording where autoload is off, and takes the autoload one where it
+        // is on: both are global. `rules_cc`, which Bazel 8 autoloads nothing
+        // from, keeps the toolchain wording either way.
+        let toolchain = |module: &str, h: &str| {
             format!(
                 "{{\"lockFileVersion\": 24, \"moduleExtensions\": {{}}, \
                  \"registryFileHashes\": {{\
-                 \"https://r/modules/rules_cc/1.0/source.json\": \"{h}\"}}}}"
+                 \"https://r/modules/{module}/1.0/source.json\": \"{h}\"}}}}"
             )
         };
-        assert!(global(diff_lock(&side("a"), &side("b"), &f, Autoload::Off)).contains("toolchains"));
+        let (a, b) = (
+            toolchain("rules_python", "a"),
+            toolchain("rules_python", "b"),
+        );
+        assert!(global(diff_lock(&a, &b, &f, Autoload::Off)).contains("toolchains"));
         assert!(matches!(
-            diff_lock(&side("a"), &side("b"), &f, Autoload::On),
+            diff_lock(&a, &b, &f, Autoload::On),
             ModuleChange::Autoload { .. }
         ));
+        let (a, b) = (toolchain("rules_cc", "a"), toolchain("rules_cc", "b"));
+        assert!(global(diff_lock(&a, &b, &f, Autoload::On)).contains("toolchains"));
     }
 
     #[test]

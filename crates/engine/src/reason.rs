@@ -113,9 +113,9 @@ pub enum ExternalsCause {
     /// The main repository's graph has no node for anything in there, so the
     /// only sound answer is everything.
     NestedRepositoryUnmapped { dir: String },
-    /// A module Bazel 8 autoloads native rules from moved (a `bazel_dep`
-    /// bump, an override, a lock re-resolution, a `WORKSPACE` declaration),
-    /// under a Bazel that autoloads. A bare `cc_library` is that module's
+    /// A module Bazel autoloads native rules from moved (a `bazel_dep` bump,
+    /// an override, a lock re-resolution, a `WORKSPACE` declaration), under a
+    /// Bazel that autoloads. A bare `py_binary` is that module's
     /// rule through a load no BUILD file writes, so no edge names its
     /// consumers. Reported under its own code, not the stage's: the stage
     /// accounted for the change exactly, and the answer is still everything.
@@ -322,12 +322,14 @@ impl GlobalReason {
                     ),
                 )
                 .with_help(format!(
-                    "expected on Bazel 8 and later, where a bare cc_library or proto_library \
-                     is {module}'s rule and no BUILD file loads it; nothing to configure. If \
-                     the Bazel here is older than 8 and nothing says so, pin it in \
-                     .bazelversion; --incompatible_autoload_externally= (empty) in .bazelrc \
-                     turns autoload off, and a toolchain module then stays global under \
-                     CAMBI-W014"
+                    "expected where Bazel autoloads native rules (Bazel 8 by default, or 7.4 \
+                     with --incompatible_autoload_externally set in .bazelrc; Bazel 9 \
+                     disabled autoloads): a bare py_binary or proto_library is {module}'s \
+                     rule and no BUILD file loads it; nothing to configure. If the Bazel here \
+                     is not 8 and nothing says so, pin it in .bazelversion; \
+                     --incompatible_autoload_externally= (empty) on an unconditional line of \
+                     .bazelrc turns autoload off, and a toolchain module then stays global \
+                     under CAMBI-W014"
                 ))
             }
             GlobalReason::Externals(_) => Diagnostic::warning(
@@ -548,12 +550,13 @@ mod tests {
             ),
             (
                 GlobalReason::Externals(ExternalsCause::AutoloadProvider {
-                    module: "rules_cc".into(),
-                    why: "`bazel_dep(rules_cc)` changed, and Bazel 8 autoloads native rules \
-                          from rules_cc"
+                    module: "protobuf".into(),
+                    why: "`bazel_dep(protobuf)` changed, and the Bazel here autoloads native \
+                          rules from protobuf"
                         .into(),
                 }),
-                "`bazel_dep(rules_cc)` changed, and Bazel 8 autoloads native rules from rules_cc",
+                "`bazel_dep(protobuf)` changed, and the Bazel here autoloads native rules from \
+                 protobuf",
             ),
         ]
     }

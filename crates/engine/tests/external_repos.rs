@@ -470,11 +470,16 @@ fn a_toolchain_module_bump_is_global() {
 /// Issue #25. `protobuf` is an ordinary dependency, and on Bazel 8 it is also
 /// where a bare `proto_library` comes from, through a load no BUILD file
 /// writes: the graph has no edge from the packages using it, so a bump is
-/// global, under a code of its own. The `bazel` subject has the real step:
+/// global, under a code of its own. The `bazel` subject's nearest step,
 /// `3c82b1a2..a3db5085` ("Update bazelbuild/bazel's rules_cc to version
-/// 0.2.19", `.bazelversion` 9.1.1) moves `bazel_features` and `rules_cc` in
-/// `MODULE.bazel`; the first localises, the second is this variant, and the
-/// same texts under a Bazel 7 pin give the toolchain reason instead.
+/// 0.2.19", `.bazelversion` 9.1.1), is not this variant: it moves
+/// `bazel_features` and `rules_cc` in `MODULE.bazel`, the first localises,
+/// and the second is global for the toolchains `rules_cc` registers
+/// (`CAMBI-W014`). Two reasons, either of which is enough: Bazel 8 keeps
+/// `cc_library` in its own builtins and autoloads nothing from `rules_cc`,
+/// and Bazel 9 (which that step pins) disabled autoloads altogether, so
+/// every rule `@rules_cc` gives a package arrives through a `load()` the
+/// package writes.
 #[test]
 fn an_autoload_provider_bump_is_global_on_bazel_8() {
     let (e, index) = base(&scanning());
@@ -554,6 +559,92 @@ fn a_provider_bump_under_an_unknown_bazel_version_is_read_as_bazel_8() {
     cause(&e, Code::W024AutoloadProvider);
 }
 
+/// Bazel 9 autoloads nothing at all: it disabled autoloads and its
+/// `exports.bzl` defines no rule to autoload, so every `py_binary` is an
+/// explicit `load()` with an edge, and a provider bump is as ordinary as on
+/// 7.
+#[test]
+fn a_provider_bump_on_bazel_9_is_an_ordinary_dependency() {
+    let (_e, index) = base(&scanning());
+    let module = format!("{MODULE_BASE}bazel_dep(name = \"protobuf\", version = \"29.0\")\n");
+    let head = module.replace("29.0", "30.0");
+    let r = run(
+        &index,
+        &changed(&["MODULE.bazel"]),
+        &with_bazel(texts(&module, &head), "9.2.0"),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_module, 1);
+}
+
+/// The same two revisions, with a `.bazelrc` at the base.
+fn with_bazelrc(mut t: FixedText, text: &str) -> FixedText {
+    t.0.insert(
+        ("base".to_string(), ".bazelrc".to_string()),
+        text.to_string(),
+    );
+    t
+}
+
+/// `--incompatible_autoload_externally` in `.bazelrc` decides over the
+/// version where Bazel reads the flag: empty turns autoload off on 8, which
+/// is what the diagnostic's help says to do, and a value naming a provider
+/// turns it on for a 7.4 tree opting in early. Bazel 9 does not read it:
+/// autoloads are disabled there, so a line left over from an 8 tree leaves
+/// the bump localised.
+#[test]
+fn the_bazelrc_flag_decides_autoload_where_bazel_reads_it() {
+    let (e, index) = base(&scanning());
+    let module = format!("{MODULE_BASE}bazel_dep(name = \"protobuf\", version = \"29.0\")\n");
+    let head = module.replace("29.0", "30.0");
+    let off = with_bazelrc(
+        with_bazel(texts(&module, &head), "8.4.2"),
+        "common --incompatible_autoload_externally=\n",
+    );
+    let r = run(&index, &changed(&["MODULE.bazel"]), &off);
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_module, 1);
+    let opted_in = |version: &str| {
+        with_bazelrc(
+            with_bazel(texts(&module, &head), version),
+            "build --jobs=8\n\
+             common --incompatible_autoload_externally=+@rules_python,@com_google_protobuf\n",
+        )
+    };
+    let r = run_on(&e, &index, &changed(&["MODULE.bazel"]), &opted_in("7.4.1"));
+    assert!(r.global, "{:?}", r.global_reason);
+    cause(&e, Code::W024AutoloadProvider);
+    let r = run(&index, &changed(&["MODULE.bazel"]), &opted_in("9.2.0"));
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_module, 1);
+}
+
+/// `rules_android` is on Bazel 8's default autoload list (`android_library`
+/// and friends) and registers no toolchains, so without the autoload rule
+/// its bump would reach explicit loaders alone.
+#[test]
+fn a_rules_android_bump_is_global_on_bazel_8() {
+    let (e, index) = base(&scanning());
+    let module = format!("{MODULE_BASE}bazel_dep(name = \"rules_android\", version = \"0.6.0\")\n");
+    let head = module.replace("0.6.0", "0.6.1");
+    let r = run_on(
+        &e,
+        &index,
+        &changed(&["MODULE.bazel"]),
+        &with_bazel(texts(&module, &head), "8.4.2"),
+    );
+    assert!(r.global);
+    assert!(r.global_reason.unwrap().contains("rules_android"));
+    cause(&e, Code::W024AutoloadProvider);
+    let r = run(
+        &index,
+        &changed(&["MODULE.bazel"]),
+        &with_bazel(texts(&module, &head), "7.6.1"),
+    );
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_module, 1);
+}
+
 #[test]
 fn a_legacy_workspace_edit_that_cannot_be_classified_is_global() {
     let (_e, index) = base(&scanning());
@@ -622,15 +713,17 @@ fn an_unrelated_workspace_declaration_reaches_nothing() {
     assert!(r.direct.is_empty());
 }
 
-/// Bazel 8 autoloads from a `WORKSPACE`-declared `rules_cc` as it does from
-/// the module, so the declaration moving is global there too, and on Bazel 7
-/// it is the one repository it names.
+/// Bazel 8 autoloads from a `WORKSPACE`-declared `com_google_protobuf` (its
+/// name for protobuf there) as it does from the module, so the declaration
+/// moving is global there too, and on Bazel 7 it is the one repository it
+/// names.
 #[test]
 fn a_workspace_declaration_of_an_autoload_provider_is_global_on_bazel_8() {
     let (e, index) = base(&scanning());
     let ws = |sha: &str| {
         format!(
-            "{WORKSPACE_BASE}http_archive(\n    name = \"rules_cc\",\n    sha256 = \"{sha}\",\n)\n"
+            "{WORKSPACE_BASE}http_archive(\n    name = \"com_google_protobuf\",\n    \
+             sha256 = \"{sha}\",\n)\n"
         )
     };
     let r = run_on(
@@ -642,7 +735,7 @@ fn a_workspace_declaration_of_an_autoload_provider_is_global_on_bazel_8() {
     assert!(r.global);
     let reason = r.global_reason.unwrap();
     assert!(
-        reason.contains("WORKSPACE") && reason.contains("rules_cc"),
+        reason.contains("WORKSPACE") && reason.contains("com_google_protobuf"),
         "{reason}"
     );
     cause(&e, Code::W024AutoloadProvider);

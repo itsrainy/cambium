@@ -129,14 +129,18 @@ walk is unchanged.
 ### Phase 4: autoload providers on Bazel 8+ (#25), local only
 
 - The externals stage already knows which module a lock or `MODULE.bazel`
-  diff moved. When that module is an autoload provider (`rules_cc`,
-  `rules_python`, `rules_java`, `rules_shell`, `protobuf`) and the
-  workspace's Bazel is 8 or later, escalate with a diagnostic.
+  diff moved, and which repository an input path or a workspace-closure
+  `.bzl` moved. When that module is an autoload provider (`rules_python`,
+  `rules_java`, `rules_shell`, `protobuf`, `rules_android`; not `rules_cc`,
+  which Bazel 8 autoloads nothing from) and the workspace's Bazel autoloads
+  (8 by default, or `--incompatible_autoload_externally` set in `.bazelrc`
+  on 7.4 or later), escalate with a diagnostic.
 - Precise variant, if cheap: seed every package whose rule classes include
   a native rule that module autoloads. Only if the rule-class table is
   already in the index; otherwise the escalation is enough.
-- One synthetic test, and a bazel-subject step that bumps `rules_cc` if
-  the history has one.
+- One synthetic test per route, and a bazel-subject step that bumps a
+  provider under Bazel 8 if the history has one (its `rules_cc` bumps are
+  toolchain moves, `CAMBI-W014`).
 
 Exit: a provider bump on Bazel 8+ answers `//...` with a code.
 

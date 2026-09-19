@@ -108,9 +108,10 @@ codes! {
     /// `bazel mod dump_repo_mapping` succeeded but printed something that is
     /// not a mapping, so the identity mapping stands in for it.
     W022RepoMappingUnparsed => "CAMBI-W022",
-    /// A module Bazel 8 autoloads native rules from (`rules_cc`, `protobuf`,
-    /// ...) moved, so every package using those rules may have changed and
-    /// the run is global.
+    /// A module Bazel autoloads native rules from (`rules_python`,
+    /// `protobuf`, ...) moved under a Bazel that autoloads (8 by default, or
+    /// 7.4 with the `.bazelrc` flag), so every package using those rules may
+    /// have changed and the run is global.
     ///
     /// `CAMBI-W023` is the toolchain rule-class escalation (#26), allocated
     /// on its own branch at the same time as this one; the number is skipped

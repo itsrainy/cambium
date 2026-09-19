@@ -155,7 +155,9 @@ fn a_toolchain_module_bump_is_global() {
 
 /// `protobuf` is an ordinary dependency under Bazel 7, and under Bazel 8 a
 /// provider of `proto_library` to packages that load nothing from it. A
-/// `rules_cc` bump is global either way; the reason changes.
+/// `rules_python` bump is global either way; the reason changes. A
+/// `rules_cc` bump is global for its toolchains alone: Bazel 8 autoloads
+/// nothing from it.
 #[test]
 fn an_autoload_provider_bump_is_global_only_under_a_bazel_that_autoloads() {
     let base = scan_module("bazel_dep(name = \"protobuf\", version = \"29.0\")\n");
@@ -174,8 +176,8 @@ fn an_autoload_provider_bump_is_global_only_under_a_bazel_that_autoloads() {
         }
         other => panic!("{other:?}"),
     }
-    let base = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.1\")\n");
-    let head = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.2\")\n");
+    let base = scan_module("bazel_dep(name = \"rules_python\", version = \"0.1\")\n");
+    let head = scan_module("bazel_dep(name = \"rules_python\", version = \"0.2\")\n");
     assert!(matches!(
         diff_module(&base, &head, Autoload::Off),
         ModuleChange::Global(r) if r.contains("toolchains")
@@ -183,6 +185,12 @@ fn an_autoload_provider_bump_is_global_only_under_a_bazel_that_autoloads() {
     assert!(matches!(
         diff_module(&base, &head, Autoload::On),
         ModuleChange::Autoload { .. }
+    ));
+    let base = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.1\")\n");
+    let head = scan_module("bazel_dep(name = \"rules_cc\", version = \"0.2\")\n");
+    assert!(matches!(
+        diff_module(&base, &head, Autoload::On),
+        ModuleChange::Global(r) if r.contains("toolchains")
     ));
     // An override of a provider is the same move by another statement.
     let base = scan_module(
