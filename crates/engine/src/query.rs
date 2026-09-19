@@ -216,14 +216,15 @@ pub struct BazelQuerier {
 
 impl PackageQuerier for BazelQuerier {
     fn query(&self, packages: &[String]) -> Result<Rows, crate::error::EngineError> {
-        let q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
-        // Exit 3 is `--keep_going` finishing with errors: every package that
-        // could load is in the output, and the ones that could not are the
-        // ones a cold build would also drop (the universe query runs with
-        // `--keep_going` too, so they are absent from a fresh index). Their
-        // empty updates tombstone their rows, and consumers become direct via
-        // `DeletedDep`. Envoy's `.bazelrc` lists `--deleted_packages` that still
-        // have BUILD files on disk; that is where this shows up in practice.
+        let mut q = query_packages(&self.bazel, packages, &self.opts, &self.files)?;
+        // Exit 3 is `--keep_going` finishing with errors, and the packages
+        // missing from the output are of two kinds. A package this
+        // configuration declares deleted, or whose `BUILD` file is gone, does
+        // not exist here: its empty update tombstones its rows and its
+        // consumers become direct via `DeletedDep`. Envoy's `.bazelrc` lists
+        // `--deleted_packages` that still have BUILD files on disk; that is
+        // where the first kind shows up in practice. A package that merely
+        // failed to load is handled below, and keeps what the index has.
         //
         // The load errors travel with the rows so the index built from them
         // is flagged partial, exactly as a cold build's would be: a package
@@ -232,22 +233,75 @@ impl PackageQuerier for BazelQuerier {
         // update` that published the result without saying so would leave
         // every later run silently short of it.
         if q.outcome.exit_code == Some(3) {
-            if q.packages_seen < packages.len() {
+            let partial = partial_of(&q.outcome);
+            // A package that failed to load is not a package that was
+            // deleted, and the difference is not recoverable later: an empty
+            // update tombstones every target it owned and clears every
+            // forward row they carried, so the consumers that reached them
+            // stop reaching them -- for the rest of the lineage, because
+            // nothing re-queries a package whose `BUILD` did not change. That
+            // is what took `//xla/python/ifrt/ir` and its seventy targets, and
+            // `//xla/codegen/emitters/transforms` with them, out of every
+            // later step of a 300-step walk (issue #23).
+            //
+            // So a requested package that came back with no targets keeps its
+            // rows when its `BUILD` file is still on disk and the query really
+            // did report load errors. The two exceptions stay tombstoned: a
+            // package whose `BUILD` is gone was deleted, and an exit 3 whose
+            // only complaint is `--deleted_packages` (`partial` is `None`) is
+            // a complete answer that says those packages do not exist here.
+            let mut unloaded = Vec::new();
+            if partial.is_some() {
+                let mut kept = Vec::with_capacity(q.updates.len());
+                for u in q.updates {
+                    if u.targets.is_empty() && u.build_hash != [0; 32] {
+                        unloaded.push(u.package);
+                    } else {
+                        kept.push(u);
+                    }
+                }
+                q.updates = kept;
+            }
+            if !unloaded.is_empty() {
+                tracing::warn!(
+                    packages = unloaded.len(),
+                    first = ?unloaded.iter().take(5).collect::<Vec<_>>(),
+                    "these dirty packages failed to load but still have a BUILD file; \
+                     carrying their rows forward rather than tombstoning them"
+                );
+                self.diags.emit(
+                    crate::diag::Diagnostic::warning(
+                        crate::diag::Code::W023PackageLoadFailed,
+                        format!(
+                            "{} dirty package(s) failed to load under --keep_going but still \
+                             have a BUILD file on disk, so the rows the index already had for \
+                             them stand and this run answers from them",
+                            unloaded.len()
+                        ),
+                    )
+                    .with_help(
+                        "those rows are as old as the last query that loaded the package; \
+                         fix the load error bazel reported to refresh them",
+                    ),
+                );
+            }
+            let tombstoned = packages.len() - q.packages_seen - unloaded.len();
+            if tombstoned > 0 {
                 tracing::warn!(
                     requested = packages.len(),
                     loaded = q.packages_seen,
                     declared_deleted = ?q.outcome.deleted_packages,
                     stderr = %q.outcome.stderr_tail,
-                    "some dirty packages did not load under --keep_going; tombstoning them, as a cold build would"
+                    "some dirty packages did not load under --keep_going and have no BUILD \
+                     file; tombstoning them, as a cold build would"
                 );
                 self.diags.emit(
                     crate::diag::Diagnostic::warning(
                         crate::diag::Code::W005PackagesTombstoned,
                         format!(
-                            "{} of {} dirty packages did not load under --keep_going and were \
-                             tombstoned, as a cold build would drop them; their consumers are \
-                             reported as affected",
-                            packages.len() - q.packages_seen,
+                            "{tombstoned} of {} dirty packages did not load under --keep_going \
+                             and were tombstoned, as a cold build would drop them; their \
+                             consumers are reported as affected",
                             packages.len()
                         ),
                     )
@@ -259,7 +313,8 @@ impl PackageQuerier for BazelQuerier {
             }
             return Ok(Rows {
                 updates: q.updates,
-                partial: partial_of(&q.outcome),
+                partial,
+                unloaded,
             });
         }
         // Any other failure is not a partial answer: if a requested package
@@ -366,6 +421,9 @@ impl PackageQuerier for BazelQuerier {
         Ok(Rows {
             updates: q.updates,
             partial,
+            // A cold build asked for the whole repository, not a package
+            // list: there is no carried row to keep for what did not load.
+            unloaded: Vec::new(),
         })
     }
 
@@ -448,6 +506,10 @@ pub struct Rows {
     pub updates: Vec<PackageUpdate>,
     /// `Some` when the query exited 3 under `--keep_going`.
     pub partial: Option<cambium_bazel::LoadErrors>,
+    /// Packages that were asked for, failed to load, and still have a `BUILD`
+    /// file on disk. They carry no update: the rows the base has for them
+    /// stand, and the run treats them as packages it did not re-query.
+    pub unloaded: Vec<String>,
 }
 
 impl From<Vec<PackageUpdate>> for Rows {
@@ -455,6 +517,7 @@ impl From<Vec<PackageUpdate>> for Rows {
         Self {
             updates,
             partial: None,
+            unloaded: Vec::new(),
         }
     }
 }
@@ -657,10 +720,11 @@ mod tests {
     const DECLARED_DELETED: &str = "ERROR: Skipping '//b:*': no such package 'b': Package is \
                                     considered deleted due to --deleted_packages\n";
 
-    /// Exit 3 under `--keep_going`: the packages that loaded come back, the
-    /// one that did not is an empty update, and the answer says it is partial.
+    /// Exit 3 under `--keep_going` where the package that did not come back
+    /// has no `BUILD` file either: that is a deletion, its empty update
+    /// tombstones its rows, and the answer says it is partial.
     #[test]
-    fn a_package_that_failed_to_load_is_tombstoned_and_reported() {
+    fn a_package_with_no_build_file_is_tombstoned_and_reported() {
         let q = querier(3, &[rule("//a:x")], LOAD_ERROR);
         let rows = q.query(&["a".into(), "b".into()]).unwrap();
         let by_package: Vec<(&str, usize)> = rows
@@ -673,6 +737,29 @@ mod tests {
         assert_eq!(partial.count, 1);
         assert_eq!(partial.packages, vec!["b".to_string()]);
         assert_eq!(codes(&q), vec![Code::W005PackagesTombstoned]);
+    }
+
+    /// The same exit 3, but the package that did not come back still has a
+    /// `BUILD` file on disk. That is a load failure, not a deletion, and
+    /// tombstoning it would clear every forward row its targets carried --
+    /// which no later step could repair, because nothing re-queries a package
+    /// whose `BUILD` did not change. Its rows are carried forward instead and
+    /// the run says so (issue #23: whole xla packages went missing from every
+    /// later step of a 300-step walk this way).
+    #[test]
+    fn a_package_that_failed_to_load_keeps_the_rows_the_index_has() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join("b")).unwrap();
+        std::fs::write(tree.path().join("b/BUILD"), "cc_library(name = \"y\")\n").unwrap();
+        let mut q = querier(3, &[rule("//a:x")], LOAD_ERROR);
+        q.files = FileSource::worktree(tree.path());
+
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        let by_package: Vec<&str> = rows.updates.iter().map(|u| u.package.as_str()).collect();
+        assert_eq!(by_package, vec!["a"], "b keeps whatever the index has");
+        assert_eq!(rows.unloaded, vec!["b".to_string()]);
+        assert!(rows.partial.is_some());
+        assert_eq!(codes(&q), vec![Code::W023PackageLoadFailed]);
     }
 
     /// Exit 3 whose only complaint is a package the invocation declared

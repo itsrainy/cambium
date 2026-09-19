@@ -108,6 +108,10 @@ codes! {
     /// `bazel mod dump_repo_mapping` succeeded but printed something that is
     /// not a mapping, so the identity mapping stands in for it.
     W022RepoMappingUnparsed => "CAMBI-W022",
+    /// A dirty package failed to load under `--keep_going` but its `BUILD`
+    /// file is still on disk, so its rows were carried forward rather than
+    /// tombstoned.
+    W023PackageLoadFailed => "CAMBI-W023",
 
     // ---- errors ----
     /// A failure with no more specific code: the transparent io, proto,

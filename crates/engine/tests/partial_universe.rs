@@ -29,6 +29,7 @@ impl PackageQuerier for PartialUniverse<'_> {
         Ok(Rows {
             updates: self.0.universe()?.updates,
             partial: Some(self.1.clone()),
+            unloaded: Vec::new(),
         })
     }
 }
@@ -124,6 +125,7 @@ impl PackageQuerier for PartialQuery<'_> {
         Ok(Rows {
             updates: self.0.query(packages)?.updates,
             partial: Some(self.1.clone()),
+            unloaded: Vec::new(),
         })
     }
     fn universe(&self) -> Result<Rows, EngineError> {
@@ -275,12 +277,14 @@ impl PackageQuerier for StderrQuery<'_> {
         Ok(Rows {
             updates: self.0.query(packages)?.updates,
             partial: cambium_engine::query::partial_of(&outcome(self.1)),
+            unloaded: Vec::new(),
         })
     }
     fn universe(&self) -> Result<Rows, EngineError> {
         Ok(Rows {
             updates: self.0.universe()?.updates,
             partial: cambium_engine::query::partial_of(&outcome(self.1)),
+            unloaded: Vec::new(),
         })
     }
 }

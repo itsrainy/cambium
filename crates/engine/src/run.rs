@@ -762,6 +762,15 @@ impl<'a> Run<'a> {
                 .cloned()
                 .collect();
             let rows = self.querier.query(&to_query)?;
+            // A package that failed to load kept the rows the index already
+            // had for it, so this run did not re-query it: it must not reach
+            // the closure rescan or the loading-layer refresh as a package
+            // whose answer moved, or they would drop what they hold for it
+            // and undo the carry-forward one layer down.
+            let to_query: Vec<String> = to_query
+                .into_iter()
+                .filter(|p| !rows.unloaded.contains(p))
+                .collect();
             Queried {
                 to_query,
                 rows,
