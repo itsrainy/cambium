@@ -100,21 +100,23 @@ still exact, only not incremental):
   because toolchain resolution happens in analysis and has no query-graph edge
   for the reverse walk to follow.
 - A module Bazel autoloads native rules from (`rules_python`, `rules_java`,
-  `rules_shell`, `protobuf`, `rules_android`) moving, whichever route names
-  it: `MODULE.bazel`, its lock or `WORKSPACE`, an input path under a
-  `local_path_override` or a nested repository, or a workspace-closure `.bzl`
-  that defines it (`CAMBI-W024`). The escalation holds when the Bazel here
-  autoloads: Bazel 8 by default, any Bazel from 7.4 on whose `.bazelrc` sets
-  `--incompatible_autoload_externally` to something, or a Bazel whose
-  version nothing states. A bare `py_binary` is then that module's rule
-  through a load no BUILD file writes; Bazel records it as a dependency on
+  `rules_shell`, `protobuf`, `rules_android`) moving in `MODULE.bazel`, its
+  lock or `WORKSPACE`, under a Bazel that autoloads (`CAMBI-W024`): Bazel 8 at
+  its default, a Bazel 7.4 whose `.bazelrc` sets
+  `--incompatible_autoload_externally` to something, or a Bazel whose version
+  nothing states. A bare `py_binary` is then that module's rule through a load
+  no BUILD file writes; Bazel records it as a dependency on
   `PRECOMPUTED:autoload_symbols`, a singleton every package shares, which the
   loading layer drops because keeping it would put every package one reverse
   hop from every other. So nothing in the graph names the consumers, and the
-  sound answer is everything. On Bazel 7 and 9 at their defaults, or with the
-  flag set empty, the same bump reaches the module's consumers through the
-  graph (or stays global for the toolchains it registers, `CAMBI-W014`, as
-  `rules_cc` does under every Bazel: nothing is autoloaded from it).
+  sound answer is everything. Elsewhere the same bump reaches the module's
+  consumers through the graph (or stays global for the toolchains it
+  registers, `CAMBI-W014`): on Bazel 7 at its default, on an 8 whose
+  `.bazelrc` sets the flag empty, and on Bazel 9, which disabled autoloads and
+  made the flag a no-op, so every one of those rules arrives through a `load()`
+  the package writes. `rules_cc` is on no Bazel's autoload list (8 keeps
+  `cc_library` in its own builtins, 9 moved it to `@rules_cc` behind an
+  explicit load), so its bump is a toolchain move and nothing more.
 
 **Not modelled** (each with its status):
 

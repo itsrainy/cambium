@@ -126,23 +126,30 @@ closes a real hole with one rule.
 Exit: the globs are gone from the default config and the local bazel
 walk is unchanged.
 
-### Phase 4: autoload providers on Bazel 8+ (#25), local only
+### Phase 4: autoload providers under a Bazel that autoloads (#25), local only
 
-- The externals stage already knows which module a lock or `MODULE.bazel`
-  diff moved, and which repository an input path or a workspace-closure
-  `.bzl` moved. When that module is an autoload provider (`rules_python`,
-  `rules_java`, `rules_shell`, `protobuf`, `rules_android`; not `rules_cc`,
-  which Bazel 8 autoloads nothing from) and the workspace's Bazel autoloads
-  (8 by default, or `--incompatible_autoload_externally` set in `.bazelrc`
-  on 7.4 or later), escalate with a diagnostic.
+- The externals stage already knows which module a lock, a `MODULE.bazel` or
+  a `WORKSPACE` diff moved. When that module is an autoload provider
+  (`rules_python`, `rules_java`, `rules_shell`, `protobuf`, `rules_android`;
+  not `rules_cc`, which no Bazel autoloads from) and the workspace's Bazel
+  autoloads (8 at its default, or a 7.4 with
+  `--incompatible_autoload_externally` set in `.bazelrc`; Bazel 9 disabled
+  autoloads and reads the flag as a no-op), escalate with a diagnostic.
 - Precise variant, if cheap: seed every package whose rule classes include
   a native rule that module autoloads. Only if the rule-class table is
   already in the index; otherwise the escalation is enough.
 - One synthetic test per route, and a bazel-subject step that bumps a
-  provider under Bazel 8 if the history has one (its `rules_cc` bumps are
-  toolchain moves, `CAMBI-W014`).
+  provider under a Bazel that autoloads if the history has one (that
+  subject's `rules_cc` bumps are toolchain moves, `CAMBI-W014`, and its
+  recent steps pin Bazel 9).
+- Left for a phase of its own: the routes that name a provider without a
+  workspace-file diff, an input path under a `local_path_override` or a
+  nested repository and a workspace-closure `.bzl` that defines the
+  repository. Under a Bazel that autoloads those moves are global for the
+  same reason and are not escalated yet.
 
-Exit: a provider bump on Bazel 8+ answers `//...` with a code.
+Exit: a provider bump under a Bazel that autoloads answers `//...` with a
+code.
 
 ### Box run A: phases 1 through 4 together
 
