@@ -672,3 +672,26 @@ fn a_registered_repository_named_only_by_a_generated_target_is_not_global() {
         r.global_reason
     );
 }
+
+/// `MODULE.bazel` is a default invalidator, so a change the externals stage
+/// escalated on used to be reported twice: once as the stage's cause and once
+/// as the invalidator's. The invalidator diagnostic is raised only where
+/// nothing has replaced it, and this is the route that deferral was written
+/// for — a global under `CAMBI-W014`, which the `CAMBI-W023` tests above
+/// never reach.
+#[test]
+fn a_module_edit_the_stage_escalates_on_reports_one_cause() {
+    let (_e, index) = base(&scanning());
+    // An assignment at the top level: not a shape the statement diff reads,
+    // so the stage escalates on the file it has just diffed.
+    let before = format!("{MODULE_BASE}VERSION = \"1\"\n");
+    let after = format!("{MODULE_BASE}VERSION = \"2\"\n");
+    let (r, diags) = run_with_diagnostics(&index, &["MODULE.bazel"], &texts(&before, &after));
+    assert!(r.global, "{:?}", r.global_reason);
+    let causes: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|d| cambium_engine::GlobalReason::is_cause(d.code))
+        .collect();
+    assert_eq!(causes.len(), 1, "one cause, under one code: {diags:?}");
+    assert_eq!(causes[0].code, cambium_engine::Code::W014ExternalsGlobal);
+}
