@@ -1937,20 +1937,52 @@ mod tests {
     }
 
     /// docs/OVER_REPORTING.md carries the same table for readers who never
-    /// open this file, so every flag with a verdict here has a row there.
+    /// open this file, so every flag with a verdict here has exactly one row
+    /// there.
+    ///
+    /// The row is looked for in the evidence table's first column alone, not
+    /// anywhere in the file: four of these names also occur in the prose
+    /// around it, and a whole-file substring check would let their rows be
+    /// deleted without a word. Two entries are not flags (`try-import`, and
+    /// build settings as a family), so those are matched by the name itself
+    /// rather than by its `--` spelling.
     #[test]
     fn the_docs_carry_every_flag_the_evidence_does() {
         let doc = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/OVER_REPORTING.md"),
         )
         .unwrap();
+        let first_cells: Vec<&str> = doc
+            .lines()
+            .skip_while(|l| !l.starts_with("| flag | fired on | verdict |"))
+            .skip(2)
+            .take_while(|l| l.starts_with('|'))
+            .filter_map(|l| l.split('|').nth(1))
+            .collect();
+        // Three rows carry a pair of flags that share their reasoning
+        // (`--enable_bzlmod`/`--enable_workspace`, `--features`/
+        // `--host_features`, the two Java language versions), so the table is
+        // shorter than EVIDENCE; every entry still has to find its row.
+        assert!(!first_cells.is_empty(), "the evidence table was not found");
         for ev in EVIDENCE {
-            // Two entries are not flags (`try-import`, and build settings as
-            // a family), so the row is found by the name, not by a `--`.
             let name = ev.flag.split_whitespace().next().unwrap();
-            assert!(
-                doc.contains(name),
-                "docs/OVER_REPORTING.md does not name {name}"
+            let needle = if name.starts_with('@') || name.contains('-') {
+                name.to_string()
+            } else {
+                format!("--{name}")
+            };
+            let rows = first_cells
+                .iter()
+                .filter(|cell| {
+                    cell.match_indices(&needle).any(|(i, _)| {
+                        !cell[i + needle.len()..]
+                            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    })
+                })
+                .count();
+            assert_eq!(
+                rows, 1,
+                "the evidence table should carry exactly one row naming {needle}, not {rows}"
             );
         }
     }
