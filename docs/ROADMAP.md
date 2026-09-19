@@ -40,7 +40,7 @@ prototype measured the price of chasing them (docs/SKYFRAME_PROTOTYPES.md).
 | envoy | 32 of 300 unsound, all the `@quiche` external round trip (#22) |
 | xla | 10 of 300 unsound: 4 external round trip (#22), 6 main-repo (#23) |
 | rebuild oracle | loading-layer rows now named and classified in `walk/rebuild-<pin>.json`, and an unexplained row fails the walk; the 40-step local bazel walk and box run A decide the residual (#24) |
-| known gaps without a subject step | autoload (#25), toolchain rule class (#26), declined cases (#27) |
+| known gaps without a subject step | declined cases (#27). Autoload (#25) and toolchain rule class (#26) are no longer gaps: both have a rule on this branch and a code of their own (`CAMBI-W024`, `CAMBI-W023`), each with synthetic tests. Neither has a subject step that exercises it, so the rules are tested and unmeasured on a real history |
 | over-reporting | inventoried in docs/OVER_REPORTING.md; the `.bazelrc` screen is the dominant global |
 
 ## The plan, in order
@@ -98,32 +98,62 @@ JSON where it carries enough, and otherwise waits for box run A.
 
 ### Phase 2: the xla main-repo misses (#23), local only
 
-Whatever Phase 1 leaves. Two candidates:
+The plan this section opened with (the `--keep_going` retirement bug fixed in
+b8c8cbc, and a `cc_ir_header` chain at `704cb1bae17e..927b467078fd` whose
+missing link was assumed to be a generated-file edge) predates the
+measurement and is superseded by it. Both candidates were wrong.
 
-- The `--keep_going` retirement bug, fixed in b8c8cbc. If the rerun
-  clears the ifrt/ir, mhlo_to_hlo and mosaic misses, close that half.
-- The `cc_ir_header` chain at `704cb1bae17e..927b467078fd`: two source
-  files reach 132 lit-test targets through a `cc_library`, a custom rule
-  and two genrules. Reproduce with `cambi` at that pair against the rdeps
-  query, find the missing link (generated-file edges are the suspect),
-  fix, add the shape to the synthetic corpus.
+Measured 2026-09-19, on the box, at the six named pairs
+(docs/salvage/2026-09-18/xla-six-pairs-20260919.md). What it found:
 
-Exit: the six named pairs are sound locally. The 300-step confirmation
-is box run A.
+- All six pairs are unsound. Every oracle query exited 3 under
+  `--keep_going`, so each oracle answer is a lower bound: it can disprove
+  soundness and cannot prove it, and a cleaner run can only find more.
+- The `cc_ir_header` chain is not the cause. Its targets
+  (`eigen_unary_32_ll_lib`, `_extract_bc`, `vector_ops` under
+  `//xla/codegen/intrinsic/cpp`) are manual-tagged, and they are in the
+  answer once `--include-manual` is passed, which is what the harness
+  passes (`crates/bench/src/tools/cambi.rs`). Measuring these pairs by hand
+  without that flag invents a 75-label miss that is not there.
+- The dominant cause is the index, not the reverse walk. Most missing
+  labels sit in packages the base index never loaded, so the engine could
+  not have named them; `cambi explain` on representative misses says
+  uniformly that no changed input reached them.
+- Why the index was partial is answered
+  (docs/salvage/2026-09-18/xla-partial-index-cause.md): the packages it
+  lacks are exactly the consumers of `@llvm-project`'s tblgen rules, so one
+  repository that did not fetch explains all of them. The same tree loaded
+  those packages for the rdeps oracle on the same box the same day. It was a
+  transient fetch failure that was then published and reused as the base for
+  all six pairs, which is what `publish_partial` being a blanket boolean
+  allows.
 
-Answered for the six named pairs, 2026-09-19
-(docs/XLA_MAIN_REPO_MISSES.md). Neither candidate was right. The
-`cc_ir_header` chain is reached in full at the failing step, and all six pairs
-are one fault: a package that fails to load under `--keep_going` comes back
-empty (or truncated) and its update tombstones every row it owned, which
-`b8c8cbc` left standing. Such a package now keeps the rows the index has
-(`CAMBI-W028`). The mechanism needs a walk to show, so the measurement is box
-run A, not a per-pair rerun.
+The load-failure fix on this branch stands on its own terms: a package that
+fails to load under `--keep_going` used to come back empty and tombstone
+every row it owned, and it now keeps the rows the index has (`CAMBI-W028`).
+That is a real fault with tests, but the six pairs did not measure it, and a
+walk is what would show it. Unmeasured.
 
-Not answered: the same walk record has ten steps with main-repo misses, not
-six. Steps 46, 234, 256 and 262 (96 labels between them) are outside the
-mechanism and unexamined, so #23 does not close on this. They are the next
-thing to read.
+Genuinely unexplained, and the only work left that a partial index does not
+account for:
+
+- The 32 labels at `704cb1bae17e..927b467078fd` that sit in packages the
+  answer does cover: the triton and tiled lit-test packages, plus
+  `//xla/service/cpu:ir_emitter2` and
+  `//xla/backends/cpu/codegen:fusion_compiler`. These are the only misses at
+  that pair a missing package cannot explain, so they are the candidates for
+  a walk defect.
+- Steps 46, 234, 256 and 262 of the walk record, 96 labels between them. The
+  record has ten steps with main-repo misses, not the six #23 names, and
+  these four are outside the tombstone mechanism and unexamined.
+
+Exit: not met. #23 does not close on this. The numbers above describe the
+index that was available rather than the engine, so the six pairs need
+asking again against an index whose only load errors are the two expected
+`tools/toolchains/win_1803` packages, and the four unexamined steps and the
+32 in-package labels need reading. Standing policy while the engine is under
+active change: every run builds a fresh index, and cached indexes are not
+reused.
 
 ### Phase 3: toolchain rule-class escalation (#26), local only
 
