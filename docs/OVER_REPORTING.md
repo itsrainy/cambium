@@ -33,9 +33,14 @@ postdate those numbers and are unmeasured on a full walk. The last of them is
 the one with room to surprise: a tree whose `MODULE.bazel` registers from an
 extension-defined repository now answers `//...` on any route that dirties
 that repository, where it used to name the repository and stop. The tree to
-check first is bazel's own, which registers this way; the count of such
-repositories there is not recorded here because no mirror was in reach to
-read it, and the next walk that has one should record it.
+check first is bazel's own, which registers this way. At `948b8c70e28` its
+`MODULE.bazel` carries five registration statements, and two of them name an
+extension-defined repository: `@local_config_winsdk//:all` (the
+`winsdk_configure` repository rule) and `@graalvm_ce_toolchains//:gvm` (the
+`bazel_build_deps` module extension). The other three (`//:all`,
+`//:default_host_platform`, `//tools/res:empty_rc_toolchain`) are in the tree
+itself and the rule-class check reads them as ordinary rows. So two
+repositories there carry the wide answer.
 
 ## Cost only, answer exact
 

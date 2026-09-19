@@ -145,18 +145,22 @@ The rule-class half is decided after the query, over the rows it read back,
 so it is the one verdict `affected --dry-run` cannot reach; the plan, the
 README and docs/CLI.md say so rather than promising the plan is final.
 
-Exit: the globs are gone from the default config. The second half of the
-criterion (the local bazel walk is unchanged) is still open: the bazel
-mirror is not on this machine, so no `cambi profile` was run after the
-change and the walk is unmeasured. The measurement this criterion wants is
-`cambi profile --commits 5` on the local bazel mirror at HEAD 948b8c70e28,
-which is the revision the comparison was pinned to; run it there or the
-before and after are not the same walk. The subject's
-generated `cambium.toml` lists the two dropped globs explicitly, so they
-are still live for that walk and the drop is inert there; the next bench
-provisioning regenerates the file from `Config::default()` and drops them,
-which changes the subject's config hash and starts a fresh lineage (a cost
-the walk pays at its start anyway).
+Exit: met, both halves. The globs are gone from the default config, and
+`cambi profile 948b8c70e28 --commits 5` on the local bazel mirror answers
+the same walk before and after: 0 globals either way, no global reason, no
+rebuilt commit, and every one of the five steps reporting the same affected
+count, the same test count and the same index verdict (8 rows rewritten, 1,
+unchanged, unchanged, 18). The before run is the pre-escalation code with
+the two globs live; the after run is this branch with them dropped. Both
+read 4,104 targets at `8aea3daca0`. The `CAMBI-W023` escalation therefore
+costs nothing the globs were not already costing on this subject, and the
+five commits in the window move nothing the rule fires on, so the window is
+evidence that the drop is not a regression rather than evidence that the
+rule is exercised. The subject's generated `cambium.toml` lists the two
+dropped globs explicitly, which is why the before run could keep them
+without a second binary; the next bench provisioning regenerates the file
+from `Config::default()` and drops them, which changes the subject's config
+hash and starts a fresh lineage (a cost the walk pays at its start anyway).
 
 ### Phase 4: autoload providers on Bazel 8+ (#25), local only
 
