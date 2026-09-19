@@ -185,8 +185,12 @@ pub fn walk(
 /// envoy and step 154 have five score commits between them. So every step here
 /// is cold-built at its own parent and answered forward once, which is the
 /// same question the full walk asks of that step without the six hundred that
-/// carried the index to it. Nothing is resumed and nothing is carried between
-/// steps.
+/// carried the index to it. Nothing is carried between steps.
+///
+/// `--resume` continues a record this same set of steps wrote: the steps
+/// already in it are kept and the walk restarts at the first that is missing.
+/// A gate run is hours of cold builds, and re-running the ones that finished
+/// because the last one died is what `--restart` is for.
 pub fn walk_only(
     engine: &Engine,
     driver: &dyn Driver,
@@ -206,7 +210,29 @@ pub fn walk_only(
         "bin",
     ));
 
-    let (result, _) = start(driver, &from, &to, &index_path, opts, &engine_id)?;
+    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
+        Resume::Done(prev) => return Ok(prev),
+        // A `--only` walk cold-builds at every step's own parent, so the
+        // index the last completed step left in the store is not the base the
+        // next one wants; `resume` looked for it anyway, and an answer either
+        // way is one this walk can continue from.
+        Resume::From(prev, at) => (prev, at),
+        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    };
+    if start_at >= steps.len() {
+        let mut w = Runner {
+            engine,
+            driver,
+            live,
+            opts,
+            path: opts.result_path(),
+            index_path,
+            result,
+            state,
+        };
+        w.begin(steps.len(), &from, &to)?;
+        return w.finish();
+    }
     let mut w = Runner {
         engine,
         driver,
@@ -218,9 +244,10 @@ pub fn walk_only(
         state,
     };
     w.begin(steps.len(), &from, &to)?;
-    for (i, step) in steps.iter().enumerate() {
-        // `start` already cold-built at the first step's parent.
-        if i > 0 {
+    for (i, step) in steps.iter().enumerate().skip(start_at) {
+        // `start` already cold-built at the first step's parent; a resumed
+        // walk starts at a step nothing has built for.
+        if i > 0 || start_at > 0 {
             w.driver.checkout(&step.parent)?;
             cold_build(w.driver, &step.parent, &w.index_path, w.opts.publish)
                 .with_context(|| format!("cold build at {}", step.parent))?;
@@ -273,9 +300,15 @@ fn resume(
         .last()
         .map(|s| s.head.clone())
         .unwrap_or_else(|| from.to_string());
+    let done = prev.steps.len();
+    // A `--only` walk needs no stored index to go on with: it cold-builds at
+    // the next step's own parent whatever the store holds.
+    if opts.only {
+        tracing::info!(%last, done, "resuming a walk of named steps");
+        return Ok(Resume::From(prev, done));
+    }
     match engine.fetch_baseline(&last)? {
         Some(_) => {
-            let done = prev.steps.len();
             tracing::info!(%last, done, "resuming walk");
             Ok(Resume::From(prev, done))
         }

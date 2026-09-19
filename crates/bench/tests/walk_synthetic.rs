@@ -306,6 +306,45 @@ fn only_answers_the_named_steps_the_way_the_full_walk_does() {
     assert_eq!(walk::WalkResult::read(&theirs).unwrap().steps.len(), s.len());
 }
 
+/// `--only` with `--resume` continues the record it left, rather than
+/// cold-building the first named step again over it. A gate run is hours of
+/// cold builds and the CLI tells the operator to pass `--resume` after one
+/// dies.
+#[test]
+fn only_resumes_the_steps_it_has_not_answered() {
+    let f = fixture(6, "typical-pr");
+    let (_, s) = steps(&f);
+    assert!(s.len() >= 4);
+    let named = vec![s[1].clone(), s[3].clone()];
+    let mut o = opts(&f);
+    o.only = true;
+    walk::walk_only(&f.engine, &f.engine_driver(), &NoLiveChecks, &named, &o).unwrap();
+
+    // The shape a died run leaves: the first step answered, the second not.
+    let path = walk::WalkResult::path(
+        &f.results.join("walk"),
+        &format!("{}-only", o.pin),
+        Some("synth"),
+    );
+    let mut partial = walk::WalkResult::read(&path).unwrap();
+    partial.steps.truncate(1);
+    partial.done = false;
+    // A mark nothing but a re-run of that step can erase.
+    partial.steps[0].dirty_packages = 4242;
+    partial.write(&path).unwrap();
+
+    o.resume = true;
+    let resumed =
+        walk::walk_only(&f.engine, &f.engine_driver(), &NoLiveChecks, &named, &o).unwrap();
+    assert!(resumed.done);
+    assert_eq!(resumed.steps.len(), 2);
+    assert_eq!(
+        resumed.steps[0].dirty_packages, 4242,
+        "the finished step was answered again instead of resumed"
+    );
+    assert_eq!(resumed.steps[1].head, named[1].head);
+}
+
 #[test]
 fn a_walk_resumes_from_its_last_published_index() {
     let f = fixture(6, "typical-pr");
