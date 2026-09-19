@@ -273,7 +273,7 @@ fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     );
     // Unconfirmed, so nothing routes yet: no mapping, and the origin is
     // still the widest one.
-    assert!(ri.path_maps.get("tsl").is_none(), "{:?}", ri.path_maps);
+    assert!(!ri.path_maps.contains_key("tsl"), "{:?}", ri.path_maps);
 
     // The pre-pass the cold build runs before its universe query finds the
     // same claim from the workspace files alone.
