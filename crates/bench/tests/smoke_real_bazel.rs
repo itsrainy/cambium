@@ -325,6 +325,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
         resume: false,
         diff_cap: 50,
         progress: None,
+        only: false,
     };
     let result = walk::walk(&engine, &driver, &live, &commits, &steps, &opts).unwrap();
 
@@ -539,6 +540,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
         resume: false,
         diff_cap: 50,
         progress: None,
+        only: false,
     };
     let result = walk::walk(&engine, &driver, &live, &commits, &steps, &opts).unwrap();
     assert!(result.steps.len() >= 2);

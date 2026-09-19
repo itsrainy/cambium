@@ -76,6 +76,13 @@ pub enum Args {
         /// history window.
         #[arg(long)]
         steps: Option<usize>,
+        /// Walk only these steps, as `parent..head` pairs, comma-separated.
+        /// Abbreviated revisions are fine. Each named step is cold-built at
+        /// its own parent and answered forward once, and the record is filed
+        /// beside the full walk's rather than over it. The flag is how a gate
+        /// runs seven oracle steps instead of six hundred.
+        #[arg(long = "only", value_delimiter = ',')]
+        only: Vec<String>,
         /// The peers to run alongside cambium: bazel-diff, tango,
         /// target-determinator, or `none`. Comma-separated; default: the
         /// tier's own (peers on `full`, none on `correctness`).
@@ -331,6 +338,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             subject,
             tier,
             steps,
+            only,
             peers,
             oracle_sample,
             peer_sample,
@@ -347,6 +355,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 &verbs::WalkRequest {
                     tier,
                     steps,
+                    only,
                     peers,
                     overrides: cambium_bench::walk::Overrides {
                         oracle_sample,

@@ -102,6 +102,7 @@ fn opts(f: &Fixture) -> WalkOptions {
         resume: false,
         diff_cap: 20,
         progress: None,
+        only: false,
     }
 }
 
