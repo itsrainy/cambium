@@ -499,7 +499,24 @@ impl Engine {
             .map(cambium_index::repo_boundaries)
             .unwrap_or_default();
         let confirmed = crate::repos::confirm_dir_claims(q, &self.cfg.externals, &boundaries);
-        let u = q.universe()?;
+        // Phase 5 stage 2 widens the universe here, to `//...:*` plus one
+        // `@name//...:*` per confirmed in-tree repository, so that their
+        // targets are nodes of this index under their real labels and the
+        // reverse walk crosses back into `//...` through edges that are
+        // leaves today.
+        //
+        // The widening is not on yet, and the list is empty on purpose. The
+        // query half works -- `cambium_bazel::universe_expression` builds the
+        // expression and `PackageQuerier::universe_with` carries it -- but
+        // every row it brings back is dropped one layer down, at
+        // `cambium_bazel::convert`, which files a target under
+        // `label::main_repo_package` and returns `None` for any label outside
+        // the main repository. Until an external package has a key the index
+        // can hold, widening buys a slower query and not one row, and
+        // `repo_indexed` would be a column claiming packages that are not
+        // there.
+        let indexed: Vec<String> = Vec::new();
+        let u = q.universe_with(&indexed)?;
         let mut b = IndexBuilder::new(cambium_index::new_lineage());
         b.set_bazel_version(q.version());
         b.set_config_hash(self.cfg.hash());
@@ -530,7 +547,8 @@ impl Engine {
         // below -- each cost this dump 19 of apollo's 644 packages, measured
         // one at a time on a fresh output base. Neither needs package values,
         // so the dump goes first and they see the server it leaves behind.
-        if let Some(l) = crate::sky::build_layer(q, None, cambium_index::sky::SKYKEY_FILTER, None)?
+        if let Some(l) =
+            crate::sky::build_layer(q, None, cambium_index::sky::SKYKEY_FILTER, None, &indexed)?
         {
             b.set_sky_layer(l);
         }
@@ -541,7 +559,10 @@ impl Engine {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &crate::bzl::dirs(&boundaries),
-            &confirmed,
+            crate::bzl::InTreeRepos {
+                confirmed: &confirmed,
+                indexed: &indexed,
+            },
         ) {
             b.set_bzl_closure(c);
         }

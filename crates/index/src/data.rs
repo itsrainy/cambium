@@ -690,6 +690,22 @@ impl<'a> IndexRef<'a> {
         self.repo_names.get(id)
     }
 
+    /// The apparent names of the repositories whose own packages this index
+    /// holds, in id order.
+    ///
+    /// The universe query that built the index was `//...:*` plus one
+    /// `@name//...:*` per name here (`cambium_bazel::universe_expression`), so
+    /// this is what a refresh has to ask for to leave the layer as a cold
+    /// build at the same commit would. Empty on every index built before the
+    /// universe was widened, which is the behaviour those indexes were built
+    /// with.
+    pub fn indexed_repos(&self) -> Vec<String> {
+        (0..self.num_repos())
+            .filter(|&r| self.repo_origin(r).indexed)
+            .map(|r| self.repo_name(r).to_string())
+            .collect()
+    }
+
     /// The canonical name of a repo id, or its apparent name when the index
     /// was built without a repository mapping.
     #[inline]

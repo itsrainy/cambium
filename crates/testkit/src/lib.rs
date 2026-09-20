@@ -514,7 +514,7 @@ impl PackageQuerier for Scanning {
         true
     }
 
-    fn reload_packages(&self) -> bool {
+    fn reload_packages(&self, _repos: &[String]) -> bool {
         self.reloads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.hides_packages_until_reloaded

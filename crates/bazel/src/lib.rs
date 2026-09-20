@@ -545,6 +545,23 @@ pub struct Bazel {
     runner: Arc<dyn BazelRunner>,
 }
 
+/// `//...:*`, plus `@name//...:*` for each in-tree external repository.
+///
+/// `//...:*` and not `//...`: the latter is shorthand for `//...:all`, which
+/// matches rules only, and a cold index built from it would carry file labels
+/// as unknown nodes while an incremental `//pkg:*` query records them as
+/// source files. The same argument applies to each repository added here, so
+/// each gets the same spelling.
+pub fn universe_expression(repos: &[String]) -> String {
+    let mut expr = String::from("//...:*");
+    for r in repos {
+        expr.push_str(" + @");
+        expr.push_str(r);
+        expr.push_str("//...:*");
+    }
+    expr
+}
+
 impl Bazel {
     /// Locates the workspace root by walking up from `start`, and picks the
     /// binary: explicit override, then `$BAZEL_REAL` (set when running under a
@@ -703,11 +720,18 @@ impl Bazel {
     /// as unknown nodes while an incremental `//pkg:*` query records them as
     /// source files — the same graph described two different ways, which makes
     /// a cold index and a spliced one incomparable.
+    /// `repos` are the in-tree external repositories stage 1 confirmed
+    /// (`crate::repos`), and each adds `@name//...:*` to the expression.
+    /// Their targets are real nodes of this tree written under another
+    /// label, and a reverse walk that stops at the first of them is the
+    /// under-report docs/XLA_MAIN_REPO_MISSES.md measures. Empty is the
+    /// behaviour before Phase 5.
     pub fn query_universe(
         &self,
+        repos: &[String],
         on_batch: impl FnMut(&[u8], &[(usize, usize)]) -> std::result::Result<(), ReadError>,
     ) -> Result<QueryOutcome> {
-        self.run_query("//...:*", on_batch)
+        self.run_query(&universe_expression(repos), on_batch)
     }
 
     fn run_query(
@@ -966,9 +990,10 @@ impl Bazel {
     /// Warm by construction (it runs on the server that just answered the same
     /// pattern), and `--keep_going` so a repository with a package that cannot
     /// load is loaded as far as it goes, exactly as the index's own query is.
-    pub fn load_universe(&self) -> Result<()> {
+    pub fn load_universe(&self, repos: &[String]) -> Result<()> {
+        let expr = universe_expression(repos);
         let mut cmd = self.command("query");
-        cmd.arg("//...:*").arg("--output=label").arg("--keep_going");
+        cmd.arg(&expr).arg("--output=label").arg("--keep_going");
         for f in HYGIENE {
             cmd.arg(f);
         }
@@ -978,7 +1003,7 @@ impl Bazel {
         match out.exit.code {
             Some(0) | Some(3) => Ok(()),
             _ => Err(BazelError::Failed {
-                args: "query //...:* --output=label".into(),
+                args: format!("query {expr} --output=label"),
                 status: out.exit.to_string(),
                 stderr: truncate(&String::from_utf8_lossy(&out.stderr), 2000),
             }),
@@ -1323,7 +1348,7 @@ mod tests {
     #[test]
     fn a_universe_that_exits_zero_is_a_success_with_no_facts() {
         let bazel = canned(0, cambium_proto::encode_stream(&[rule("//a:x")]), "");
-        let out = bazel.query_universe(|_, _| Ok(())).unwrap();
+        let out = bazel.query_universe(&[], |_, _| Ok(())).unwrap();
         assert!(out.success);
         assert_eq!(out.exit_code, Some(0));
         assert!(out.load_errors.is_empty());
@@ -1337,11 +1362,11 @@ mod tests {
         let mut bytes = cambium_proto::encode_stream(&[rule("//a:x")]);
         bytes.truncate(bytes.len() - 2);
         assert!(matches!(
-            canned(0, bytes.clone(), "").query_universe(|_, _| Ok(())),
+            canned(0, bytes.clone(), "").query_universe(&[], |_, _| Ok(())),
             Err(BazelError::Read(_))
         ));
         let out = canned(1, bytes, "ERROR: boom")
-            .query_universe(|_, _| Ok(()))
+            .query_universe(&[], |_, _| Ok(()))
             .unwrap();
         assert_eq!(out.exit_code, Some(1));
         assert_eq!(out.targets_read, 0);
@@ -1372,7 +1397,7 @@ mod tests {
     #[test]
     fn a_binary_that_cannot_be_spawned_is_named() {
         let bazel = Bazel::at(std::env::temp_dir(), Some("/nonexistent/cambium-bazel"));
-        let err = bazel.query_universe(|_, _| Ok(())).unwrap_err();
+        let err = bazel.query_universe(&[], |_, _| Ok(())).unwrap_err();
         assert!(
             matches!(err, BazelError::Spawn { ref binary, .. } if binary.contains("cambium-bazel")),
             "{err}"

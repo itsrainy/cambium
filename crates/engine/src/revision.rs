@@ -193,6 +193,15 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.universe()
     }
 
+    /// Delegated, not defaulted. The default in
+    /// [`crate::query::PackageQuerier`] answers `universe()`, which for a
+    /// wrapper around a real Bazel silently drops the repositories and sends
+    /// the query out as `//...:*` alone: the widened universe is written into
+    /// the index's `repo_indexed` column while none of its rows are there.
+    fn universe_with(&self, repos: &[String]) -> std::result::Result<Rows, EngineError> {
+        self.querier.universe_with(repos)
+    }
+
     fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
         self.querier.load_source()
     }
@@ -228,8 +237,8 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.dump_loading_layer(filter)
     }
 
-    fn reload_packages(&self) -> bool {
-        self.querier.reload_packages()
+    fn reload_packages(&self, repos: &[String]) -> bool {
+        self.querier.reload_packages(repos)
     }
 
     fn reload_named(&self, packages: &[String]) -> bool {

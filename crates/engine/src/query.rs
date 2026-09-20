@@ -80,6 +80,18 @@ pub trait PackageQuerier {
     /// to load all of it.
     fn universe(&self) -> Result<Rows, crate::error::EngineError>;
 
+    /// The universe, widened by the in-tree external repositories stage 1
+    /// confirmed (`crate::repos`).
+    ///
+    /// Defaulted to [`PackageQuerier::universe`], which is the right answer
+    /// for every querier that is not driving a real Bazel: a synthetic row
+    /// source has no external repositories to widen by, and a caller that
+    /// passes some to one is asking a question it cannot answer.
+    fn universe_with(&self, repos: &[String]) -> Result<Rows, crate::error::EngineError> {
+        let _ = repos;
+        self.universe()
+    }
+
     /// Version string recorded in the index header.
     fn version(&self) -> String {
         String::new()
@@ -161,7 +173,8 @@ pub trait PackageQuerier {
     /// on disk has moved, so it re-reads nothing. `false` means this row
     /// source has no server to ask, and the layer stands or falls on the dump
     /// already taken.
-    fn reload_packages(&self) -> bool {
+    fn reload_packages(&self, repos: &[String]) -> bool {
+        let _ = repos;
         false
     }
 
@@ -433,8 +446,8 @@ impl PackageQuerier for BazelQuerier {
         }
     }
 
-    fn reload_packages(&self) -> bool {
-        match self.bazel.load_universe() {
+    fn reload_packages(&self, repos: &[String]) -> bool {
+        match self.bazel.load_universe(repos) {
             Ok(()) => true,
             Err(e) => {
                 // Not fatal in itself: the caller checks the dump that follows
@@ -446,7 +459,11 @@ impl PackageQuerier for BazelQuerier {
     }
 
     fn universe(&self) -> Result<Rows, crate::error::EngineError> {
-        let q = query_universe(&self.bazel, &self.opts, &self.files)?;
+        self.universe_with(&[])
+    }
+
+    fn universe_with(&self, repos: &[String]) -> Result<Rows, crate::error::EngineError> {
+        let q = query_universe(&self.bazel, &self.opts, &self.files, repos)?;
         // Exit 3 is accepted here for the same reason `query` accepts it, and
         // for consistency with it: the incremental path tombstones a package
         // that fails to load *because* a cold build would not have it either.
@@ -457,7 +474,7 @@ impl PackageQuerier for BazelQuerier {
         // did not finish, and a truncated stream is not a partial answer.
         if !q.outcome.success && q.outcome.exit_code != Some(3) {
             return Err(crate::error::EngineError::BazelQuery {
-                what: "//...".into(),
+                what: cambium_bazel::universe_expression(repos),
                 code: q.outcome.exit_code,
                 stderr: q.outcome.stderr_tail,
             });
@@ -639,9 +656,10 @@ pub fn query_universe(
     bazel: &Bazel,
     opts: &ConvertOptions,
     files: &FileSource,
+    repos: &[String],
 ) -> Result<QueryResult, BazelError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    let outcome = bazel.query_universe(group_into(&mut grouped, opts))?;
+    let outcome = bazel.query_universe(repos, group_into(&mut grouped, opts))?;
     Ok(finish(grouped, outcome, files, None))
 }
 

@@ -47,6 +47,7 @@ pub(crate) fn build_layer(
     onto: Option<SkyLayer>,
     filter: &str,
     requeried: Option<&std::collections::BTreeSet<String>>,
+    repos: &[String],
 ) -> Result<Option<SkyLayer>> {
     if !q.can_dump_loading_layer() {
         tracing::debug!(
@@ -90,7 +91,7 @@ pub(crate) fn build_layer(
                 // characters. Past the same threshold the refresh filter
                 // gives up at, ask for the repository.
                 let asked = if short.len() > sky::MAX_FILTERED_PACKAGES {
-                    q.reload_packages()
+                    q.reload_packages(repos)
                 } else {
                     q.reload_named(&short)
                 };
@@ -180,7 +181,7 @@ pub(crate) fn build_layer(
     //
     // This is a repair, not a fall back: if the second dump is no better the
     // run still fails below, and a run that never needed it pays nothing.
-    if cold && !layer.looks_loaded() && q.reload_packages() {
+    if cold && !layer.looks_loaded() && q.reload_packages(repos) {
         let (packages, with_deps) = layer.package_dep_health();
         tracing::warn!(
             packages,

@@ -22,6 +22,20 @@ use std::collections::BTreeSet;
 
 use crate::query::PackageQuerier;
 
+/// What a run knows about the in-tree external repositories: which `path =`
+/// claims Bazel confirmed, and which of those the universe query was actually
+/// widened by.
+///
+/// Two facts and not one. A cold build widens by every claim it confirms, but
+/// an index written before Phase 5 stage 2 holds confirmations and none of
+/// the packages, and a run splicing onto it must not write a flag saying
+/// otherwise.
+#[derive(Clone, Copy)]
+pub(crate) struct InTreeRepos<'a> {
+    pub confirmed: &'a BTreeSet<(String, String)>,
+    pub indexed: &'a [String],
+}
+
 /// Recomputes the static `.bzl` load closure for the packages a run touched.
 ///
 /// `prior` is the base index's closure, carried through the splice: every
@@ -48,7 +62,7 @@ pub(crate) fn rescan_closure(
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
     boundaries: &[String],
-    confirmed: &BTreeSet<(String, String)>,
+    repos: InTreeRepos<'_>,
 ) -> Option<cambium_index::BzlClosure> {
     if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
         return prior;
@@ -90,9 +104,20 @@ pub(crate) fn rescan_closure(
     // incremental run carries the answer forward from the index it splices
     // onto, since a confirmed claim is a fact about the lineage and the
     // declaration that made it is an invalidator.
-    for (r, dir) in confirmed {
+    for (r, dir) in repos.confirmed {
         if c.inputs.confirm_dir(r, dir) {
-            tracing::debug!(repo = %r, %dir, "a confirmed repository claim maps its directory");
+            // Whether the universe query was actually widened by it is a
+            // separate fact, and the caller's: an index built before Phase 5
+            // stage 2 can hold confirmed claims and none of their packages,
+            // and a flag claiming otherwise would send a later refresh
+            // looking for rows that were never written.
+            let indexed = repos.indexed.iter().any(|i| i == r) && c.inputs.mark_indexed(r);
+            tracing::debug!(
+                repo = %r,
+                %dir,
+                indexed,
+                "a confirmed repository claim maps its directory"
+            );
         } else {
             tracing::debug!(
                 repo = %r,

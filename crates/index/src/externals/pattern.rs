@@ -385,6 +385,22 @@ impl RepoInputs {
 }
 
 impl RepoInputs {
+    /// Records that a repository's own packages are in this index: the
+    /// universe query was widened by `@repo//...:*` for it (Phase 5 stage 2).
+    ///
+    /// Only a confirmed `Dir` origin is ever widened by, so this refuses
+    /// anything else rather than writing a flag a later reader would take as
+    /// a promise the index does not keep.
+    pub fn mark_indexed(&mut self, repo: &str) -> bool {
+        match self.origins.get_mut(repo) {
+            Some(o) if o.kind == OriginKind::Dir && o.confirmed => {
+                o.indexed = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The repositories a changed main-repo path feeds.
     pub fn repos_for(&self, path: &str) -> BTreeSet<String> {
         let mut out = BTreeSet::new();

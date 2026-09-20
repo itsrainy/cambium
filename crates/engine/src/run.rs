@@ -1146,6 +1146,10 @@ impl<'a> Run<'a> {
                     first = ?requeried.iter().take(5).collect::<Vec<_>>(),
                     "refreshing the loading layer for the packages this run re-queried"
                 );
+                // The repositories the base index's universe query included.
+                // A refresh has to ask for the same universe, or a reload
+                // would materialise less than the cold build did.
+                let indexed_repos = self.base.indexed_repos();
                 match filter {
                     Some(filter) => {
                         layer = crate::sky::build_layer(
@@ -1153,6 +1157,7 @@ impl<'a> Run<'a> {
                             layer,
                             &filter,
                             Some(&requeried),
+                            &indexed_repos,
                         )?;
                     }
                     None if queried.to_query.is_empty() => {
@@ -1170,6 +1175,7 @@ impl<'a> Run<'a> {
                             layer,
                             cambium_index::sky::SKYKEY_FILTER,
                             Some(&requeried),
+                            &indexed_repos,
                         )?;
                     }
                 }
@@ -1208,7 +1214,10 @@ impl<'a> Run<'a> {
                 &stage.changed_bzl,
                 &gone,
                 &crate::bzl::dirs(&boundaries),
-                &confirmed_repos(base),
+                bzl::InTreeRepos {
+                    confirmed: &confirmed_repos(base),
+                    indexed: &base.indexed_repos(),
+                },
             ) {
                 builder.set_bzl_closure(c);
             }
