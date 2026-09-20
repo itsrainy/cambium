@@ -146,7 +146,7 @@ pub(crate) fn scan_path_maps(
 
 /// A directory with any trailing slash removed, so a boundary (`third_party/tsl`)
 /// and a `local_dir` (`third_party/tsl/`) compare equal.
-fn trimmed(d: &str) -> &str {
+pub(crate) fn trimmed(d: &str) -> &str {
     d.trim_end_matches('/')
 }
 

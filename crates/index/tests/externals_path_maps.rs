@@ -251,6 +251,32 @@ fn a_build_file_label_that_happens_to_name_a_boundary_is_not_a_candidate() {
     assert!(maps.boundary_dirs.is_empty(), "{:?}", maps.boundary_dirs);
 }
 
+/// envoy's shape: the claim is in `MODULE.bazel` itself, not in any `.bzl`
+/// of the workspace closure, so the `.bzl` scan alone never sees it. Without
+/// it the claim is recorded with its directory and never probed, which reads
+/// back as an unconfirmed repository and leaves the universe unwidened.
+#[test]
+fn a_module_bazel_directory_claim_is_a_candidate_too() {
+    let files = support::Files(vec![(
+        "MODULE.bazel",
+        "bazel_dep(name = \"envoy_api\", version = \"0.0.0\")\n\
+         local_path_override(module_name = \"envoy_api\", path = \"api\")\n",
+    )]);
+    let m = RepoMapping::identity();
+    let b = vec!["api".to_string()];
+    let pre = cambium_index::dir_candidates(&files, &m, &b);
+    assert_eq!(pre.get("envoy_api").map(|c| c.dir.as_str()), Some("api/"));
+    assert_eq!(
+        pre.get("envoy_api").map(|c| c.evidence.as_str()),
+        Some("MODULE.bazel")
+    );
+
+    // A claim on a directory that is no boundary is not a candidate: the
+    // same restriction the `.bzl` scanner applies.
+    let none = cambium_index::dir_candidates(&files, &m, &["other".to_string()]);
+    assert!(none.is_empty(), "{none:?}");
+}
+
 #[test]
 fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     let files = support::Files(vec![

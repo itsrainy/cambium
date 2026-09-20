@@ -878,7 +878,15 @@ impl Bazel {
     /// answer means; here it is only reported.
     pub fn probe_repo(&self, repo: &str) -> Option<RepoProbe> {
         let mut cmd = self.command("query");
-        cmd.arg(format!("@{repo}//...")).arg("--output=package");
+        // `//...:*`, not `//...`: the latter is shorthand for `//...:all`,
+        // which matches rules only, so a package holding nothing but source
+        // files contributes no target and drops out of the list entirely.
+        // The claim is then checked against a package set short by exactly
+        // those packages and refused: envoy's `@envoy_api` has two of them
+        // (`examples/service_envoy` and one more), and 533 was compared
+        // against the directory's 535. The same argument as
+        // `Bazel::query_universe`, for the same reason.
+        cmd.arg(format!("@{repo}//...:*")).arg("--output=package");
         for f in HYGIENE {
             cmd.arg(f);
         }

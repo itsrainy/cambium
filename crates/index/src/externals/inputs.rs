@@ -11,7 +11,7 @@ use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 
 use super::bazelrc::{repo_settings, RepoSetting};
 use super::module_facts::{apparent_of, ModuleFacts};
-use super::path_maps::scan_path_maps;
+use super::path_maps::{scan_path_maps, trimmed};
 use super::pattern::{DirCandidate, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
 
 /// What a main-repo label an external repository names can be an input
@@ -213,6 +213,37 @@ pub fn dir_candidates(
             });
         }
     }
+    // `MODULE.bazel`'s own directory claims, which no `.bzl` in the workspace
+    // closure carries: a `local_path_override` on a module whose sources are
+    // a directory of this tree (envoy's `local_path_override(module_name =
+    // "envoy_api", path = "api")`), and the `use_repo_rule` spelling of a
+    // `local_repository`. Both are already read for their path mappings
+    // (`build_repo_inputs`), which is why such a repository reads back with a
+    // `dir` origin; without them here the claim was recorded and never
+    // probed, so it could never be confirmed and the universe was never
+    // widened by it. xla's `@tsl` is claimed from a `.bzl` and so was found
+    // by the loop above; envoy's `@envoy_api` is not, and was not.
+    //
+    // Restricted to boundary directories for the same reason the `.bzl`
+    // scanner is: a claim on an ordinary subdirectory is not a repository
+    // this tree stops at, and minting packages there is what made the
+    // phantoms.
+    let facts = super::read_module_facts(src);
+    let mut claim = |repo: String, dir: &str| {
+        if boundaries.iter().any(|b| trimmed(b) == trimmed(dir)) {
+            out.entry(repo).or_insert(DirCandidate {
+                dir: dir.to_string(),
+                evidence: "MODULE.bazel".to_string(),
+            });
+        }
+    };
+    for (module, dir) in &facts.local_paths {
+        let repo = apparent_of(&facts, module).unwrap_or_else(|| module.clone());
+        claim(repo, dir);
+    }
+    for (repo, dir) in &facts.local_repo_paths {
+        claim(repo.clone(), dir);
+    }
     out
 }
 
@@ -280,6 +311,13 @@ pub fn build_repo_inputs(
             .or_default()
             .insert(PathMap::exhaustive_dir(path.clone()));
         RepoOrigin::claim(&mut out.origins, &repo, dir_origin(path, "MODULE.bazel"));
+        // And as a candidate, so that the confirmation the cold build made
+        // against Bazel's own package list can be carried forward onto this
+        // closure (`RepoInputs::confirm_dir`, which reads `dir_candidates`
+        // and nothing else). Without it the universe is widened and the rows
+        // are written while `confirmed` and `indexed` both read back false,
+        // and the next refresh asks for `//...:*` alone and loses them.
+        module_candidate(&mut out, &repo, path, boundaries);
     }
     // The same shape written as a repository rule in `MODULE.bazel`.
     for (repo, path) in &facts.local_repo_paths {
@@ -295,6 +333,7 @@ pub fn build_repo_inputs(
             .or_default()
             .insert(PathMap::exhaustive_dir(path.clone()));
         RepoOrigin::claim(&mut out.origins, repo, dir_origin(path, "MODULE.bazel"));
+        module_candidate(&mut out, repo, path, boundaries);
     }
     // `new_local_repository(name = "quiche", build_file =
     // "@envoy//bazel/external:quiche.BUILD")`: the sources are fetched and
@@ -622,6 +661,23 @@ pub fn build_repo_inputs(
     out.target_only = embedded.difference(&direct).cloned().collect();
 
     out
+}
+
+/// Records a `MODULE.bazel` directory claim as a candidate for confirmation.
+///
+/// Restricted to boundary directories for the same reason
+/// [`crate::dir_candidates`] is: a claim on an ordinary subdirectory is not a
+/// repository this tree stops at.
+fn module_candidate(out: &mut RepoInputs, repo: &str, dir: &str, boundaries: &[String]) {
+    if !boundaries.iter().any(|b| trimmed(b) == trimmed(dir)) {
+        return;
+    }
+    out.dir_candidates
+        .entry(repo.to_string())
+        .or_insert(DirCandidate {
+            dir: dir.to_string(),
+            evidence: "MODULE.bazel".to_string(),
+        });
 }
 
 /// The three origin claims, spelled once each.

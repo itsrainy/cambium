@@ -754,6 +754,18 @@ pub fn starlark_files(root: &std::path::Path) -> Vec<String> {
 /// `REPO.bazel`. See [`Boundary::traversed`].
 pub const REPO_MARKERS: &[&str] = &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"];
 
+/// Whether `dir` holds a *file* called `name`.
+///
+/// `Path::exists` is not enough. On a case-insensitive filesystem (macOS's
+/// default) a directory called `build` answers to `BUILD`, and envoy's
+/// `api/test/build/` made `api/test` read as a package that Bazel says is
+/// none: the confirmation check then compared Bazel's 534 packages against
+/// the tree's 535 and refused a claim that was true. A marker is a file, so
+/// ask whether it is one.
+fn marker_file(dir: &std::path::Path, name: &str) -> bool {
+    dir.join(name).is_file()
+}
+
 /// A directory below the root that is a Bazel repository of its own.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Boundary {
@@ -836,7 +848,7 @@ pub fn repo_boundaries(root: &std::path::Path) -> Vec<Boundary> {
             let bazelignored = ignored.contains(&rel);
             if REPO_MARKERS
                 .iter()
-                .any(|m| root.join(&rel).join(m).exists())
+                .any(|m| marker_file(&root.join(&rel), m))
             {
                 out.push(Boundary {
                     dir: rel.clone(),
@@ -886,7 +898,7 @@ pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::
         } else {
             base.join(&rel)
         };
-        if ["BUILD", "BUILD.bazel"].iter().any(|b| here.join(b).exists()) {
+        if ["BUILD", "BUILD.bazel"].iter().any(|b| marker_file(&here, b)) {
             out.insert(rel.clone());
         }
         let Ok(entries) = std::fs::read_dir(&here) else {
@@ -913,7 +925,7 @@ pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::
             }
             // A repository of its own, nested inside this one: its packages
             // are its own, not this repository's.
-            if REPO_MARKERS.iter().any(|m| here.join(&name).join(m).exists()) {
+            if REPO_MARKERS.iter().any(|m| marker_file(&here.join(&name), m)) {
                 continue;
             }
             stack.push(child);
@@ -958,6 +970,34 @@ pub fn mark_traversed<'a>(
 mod tests {
     use super::*;
     use crate::testutil::Files;
+
+    /// A directory called `build` is not a `BUILD` file, however the
+    /// filesystem compares names. envoy's `api/test/` holds `build/` and
+    /// `validate/` and no BUILD file at all; on macOS it read as a package,
+    /// and the one package of difference refused `@envoy_api`'s claim.
+    #[test]
+    fn a_directory_named_like_a_marker_is_not_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("api/test/build")).unwrap();
+        std::fs::create_dir_all(root.join("api/real")).unwrap();
+        std::fs::write(root.join("api/real/BUILD"), "").unwrap();
+        // A directory named `MODULE.bazel` does not make a boundary either.
+        std::fs::create_dir_all(root.join("vendor/MODULE.bazel")).unwrap();
+
+        let pkgs = build_dirs_under(root, "api/");
+        assert!(
+            pkgs.contains("real"),
+            "a real BUILD file is still a package: {pkgs:?}"
+        );
+        assert!(
+            !pkgs.contains("test"),
+            "a directory called `build` is not a package: {pkgs:?}"
+        );
+
+        let b: Vec<String> = repo_boundaries(root).into_iter().map(|b| b.dir).collect();
+        assert!(!b.contains(&"vendor".to_string()), "{b:?}");
+    }
 
     /// A WORKSPACE-mode index stores no canonical names; reading them back
     /// must not turn every repository into the main one.
