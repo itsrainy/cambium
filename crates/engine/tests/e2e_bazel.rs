@@ -654,6 +654,106 @@ fn splitting_a_package_dirties_the_parent_too() {
     );
 }
 
+/// The loading layer's absent-file rows, as a change that creates one.
+///
+/// A cold build records every path Bazel looked for and did not find, as
+/// `FILE` / `FILE_STATE` / `DIRECTORY_LISTING_STATE` nodes with no positive
+/// content: 16 468 rows on envoy, 6 690 on apollo, which the splice does not
+/// carry (docs/METHODOLOGY.md). The argument that the absence does not need
+/// carrying is that a file created later is caught by its *path* rather than
+/// by a layer node. These three scenarios are that argument, one per shape of
+/// row, and the harness checks each against a full rebuild at head, so they
+/// prove it rather than restating it.
+///
+/// This one is the `BUILD` probe: a package in a directory that did not exist
+/// at base, so the layer has no `PACKAGE_LOOKUP` to reach and no `PACKAGE`
+/// behind it. `Run::packages_the_layer_cannot_name` is what names it.
+#[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
+fn a_build_file_in_a_directory_bazel_never_statted_dirties_its_package() {
+    require_bazel();
+    let g = golden();
+    let r = g.scenario("add a package under a new directory", |root| {
+        write(
+            root,
+            "brandnew/BUILD.bazel",
+            "load(\"//rules:synth.bzl\", \"mylib\")\n\n\
+             mylib(\n    name = \"fresh\",\n    srcs = [\"fresh.cc\"],\n)\n",
+        );
+        write(root, "brandnew/fresh.cc", "// fresh\n");
+    });
+    assert!(
+        r.dirty_packages.contains(&"brandnew".to_string()),
+        "the path names the package the layer cannot: {:?}",
+        r.dirty_packages
+    );
+    assert!(
+        set(&r).contains("//brandnew:fresh"),
+        "and the query reaches its targets: {:?}",
+        r.affected
+    );
+}
+
+/// The ordinary-path row: a source file under a directory that did not exist
+/// at base, inside an existing package's `glob`. Nothing names it but its
+/// prefix.
+#[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
+fn a_source_file_under_a_new_directory_reaches_the_package_that_globs_it() {
+    require_bazel();
+    let g = golden();
+    let r = g.scenario("add a source under a new directory", |root| {
+        // `//lib:core` globs `**/*.cc`, and `lib/fresh/` is not a directory
+        // the base build ever listed.
+        write(root, "lib/fresh/added.cc", "// added\n");
+    });
+    assert!(
+        set(&r).contains("//lib:core"),
+        "the glob's package owns the new path by prefix: {:?}",
+        r.affected
+    );
+}
+
+/// The repository-marker row, which is the majority of them: 10 178 of
+/// envoy's 16 468 absent paths are `WORKSPACE`, `WORKSPACE.bazel`,
+/// `MODULE.bazel` or `REPO.bazel` under a directory that has none.
+///
+/// Creating one is inert. Bazel walks straight past a marker no repository is
+/// declared from: checked directly at 7.4.1 in bzlmod mode, a `filegroup`
+/// globbing `**/*.cc` still picks up a source under a directory a bare
+/// `WORKSPACE` was just written into. It is the same fact
+/// `subject_repos.toml` records about xla, whose `third_party/tsl/REPO.bazel`
+/// Bazel 8.7 walks past, leaving those files ordinary main-repo packages.
+/// What carves a subtree out is the *declaration*, a `local_repository` or a
+/// `local_path_override` in `MODULE.bazel` or `WORKSPACE`, and those are
+/// root-level invalidators (`a_global_invalidator_short_circuits_everything`).
+///
+/// So the assertion is both halves. The graph does not move, which is why the
+/// absent row costs nothing. And the path is still attributed to the package
+/// that owns it by prefix, which is re-queried: the answer comes from asking
+/// Bazel, not from a layer node, so a Bazel that did carve on a bare marker
+/// would be caught by the same route.
+#[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
+fn a_nested_repository_marker_is_inert_and_its_package_is_re_queried_anyway() {
+    require_bazel();
+    let g = golden();
+    let r = g.scenario("add a nested WORKSPACE", |root| {
+        write(root, "lib/nested/WORKSPACE", "workspace(name = \"carved\")\n");
+    });
+    assert!(
+        r.dirty_packages.contains(&"lib".to_string()),
+        "the owning package is named by prefix and re-queried: {:?}",
+        r.dirty_packages
+    );
+    assert!(!r.global, "a marker alone is not a global answer");
+    assert!(
+        r.affected.is_empty(),
+        "and Bazel walks past it, so nothing moved: {:?}",
+        r.affected
+    );
+}
+
 /// A global invalidator short-circuits everything.
 #[test]
 #[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
