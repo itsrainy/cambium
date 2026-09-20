@@ -148,6 +148,19 @@ pub struct RdepsResult {
     /// climbs back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_route: Vec<String>,
+    /// How many of [`RdepsResult::missing`] the route probe never asked Bazel
+    /// about.
+    ///
+    /// The probe is capped at [`MAX_ROUTE_PROBES`] labels and skips any
+    /// `somepath` Bazel would not evaluate, so `external_route` is a subset of
+    /// the labels that were *probed*, not of `missing`. Without this count a
+    /// reader subtracting one from the other reads a truncated probe as a set
+    /// of unexplained misses, which is how the four xla steps of
+    /// docs/XLA_MAIN_REPO_MISSES.md were filed: 48 missing, 25 probed, all 25
+    /// external routes, and the 23 the probe never reached recorded nowhere.
+    /// Unexplained is `missing - external_route - route_unprobed`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub route_unprobed: usize,
     /// Whether the deleted half of the change set could be checked at all: it
     /// needs the base index, which the caller does not always have.
     #[serde(default)]
@@ -226,6 +239,8 @@ pub struct RdepsOracleSummary {
     pub deleted_missing: usize,
     /// Of those, reached only by leaving `//...` and coming back.
     pub external_route: usize,
+    /// Of those, never probed, so neither an external route nor unexplained.
+    pub route_unprobed: usize,
     /// The `@repo//...` half of the difference, which recall ignores.
     pub missing_external: usize,
 }
@@ -239,6 +254,7 @@ impl RdepsOracleSummary {
         self.missing_external += o.missing_external.len();
         self.deleted_missing += o.deleted_missing.len();
         self.external_route += o.external_route.len();
+        self.route_unprobed += o.route_unprobed;
         if o.partial {
             self.partial_change_sets += 1;
             self.partial_batches += o.partial_batches;
@@ -347,7 +363,9 @@ impl RdepsOracle {
         }
 
         partition(answer, inputs.cambium, &mut result);
-        result.external_route = external_routes(bazel, &result.roots, &result.missing);
+        let (routes, unprobed) = external_routes(bazel, &result.roots, &result.missing);
+        result.external_route = routes;
+        result.route_unprobed = unprobed;
 
         if let Some(base) = inputs.base {
             result.deleted_checked = true;
@@ -518,10 +536,22 @@ pub fn is_external(label: &str) -> bool {
 }
 
 /// How many missing labels the external-route probe is willing to ask Bazel
-/// about. A failing change set's missing set is tens of labels and one
-/// `somepath` on envoy is seconds; the probe is diagnosis, not a gate, so it is
-/// capped.
-pub const MAX_ROUTE_PROBES: usize = 25;
+/// about.
+///
+/// The cap was 25, on a reading of `somepath` cost that was the *first* query
+/// against a cold server rather than the steady state. Measured on xla at
+/// `1725bd8f8409` against a warm output base: the first probe 12.7 s, and
+/// 0.25, 0.37, 0.43 s for the next three. At a third of a second a probe, the
+/// 23 labels the old cap skipped on that step were worth about eight seconds,
+/// on a step that had already failed.
+///
+/// So the cap is a guard against a pathological missing set, not a budget: it
+/// is only reached when a change set is failing, and a run failing hundreds of
+/// labels a step has a bigger problem than its diagnosis being slow. 200 is
+/// about a minute in that case. Whatever it skips is counted in
+/// [`RdepsResult::route_unprobed`], so a reader is never left guessing whether
+/// a label went unexplained or unasked.
+pub const MAX_ROUTE_PROBES: usize = 200;
 
 /// How many roots the probe's `somepath` target set carries. The full oracle's
 /// root list can be thousands of labels; a probe is a hint about *why* a label
@@ -554,28 +584,40 @@ fn partition(answer: BTreeSet<String>, cambium: &BTreeSet<String>, result: &mut 
 /// path, and if that path contains an `@repo//...` node then the only way from
 /// this target down to a root is through an external repository, which is
 /// exactly the edge cambium's `//...`-only index does not carry. A path with
-/// no external node means something else is wrong and the label is left
-/// unexplained — the safe direction, since either way it fails the change set.
-fn external_routes(bazel: &Bazel, roots: &[String], missing: &[String]) -> Vec<String> {
+/// no external node means something else is wrong and the label really is
+/// unexplained, the safe direction, since either way it fails the change set.
+///
+/// Returns the routes and the number of `missing` labels no probe was run for:
+/// the ones past [`MAX_ROUTE_PROBES`], and the ones whose `somepath` Bazel
+/// would not evaluate. A label counted there is not evidence of anything, and
+/// keeping the count is what stops a truncated probe from reading as a set of
+/// unexplained misses.
+fn external_routes(bazel: &Bazel, roots: &[String], missing: &[String]) -> (Vec<String>, usize) {
     if roots.is_empty() || missing.is_empty() {
-        return Vec::new();
+        return (Vec::new(), missing.len());
     }
     let head = &roots[..roots.len().min(MAX_ROUTE_ROOTS)];
     let union = label_set(head);
     let mut out = Vec::new();
+    let mut unprobed = missing.len().saturating_sub(MAX_ROUTE_PROBES);
     for label in missing.iter().take(MAX_ROUTE_PROBES) {
-        // A probe that will not run says nothing either way, and the caller
-        // leaves the label unexplained -- the safe direction, since it fails
-        // the change set whichever way this lands.
+        // A probe that will not run says nothing either way, so it is counted
+        // as unprobed rather than left looking like an unexplained miss.
         let expr = format!("somepath({label}, {union})");
         let Ok((path, _partial)) = bazel_query::labels(bazel, &expr, "somepath") else {
+            unprobed += 1;
             continue;
         };
         if path.iter().any(|l| is_external(l)) {
             out.push(label.clone());
         }
     }
-    out
+    (out, unprobed)
+}
+
+/// `skip_serializing_if` for a count that is zero on every sound change set.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// A deterministic sample of at most `k` labels, sorted so the JSON is stable.
@@ -716,8 +758,11 @@ pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
+
     use cambium_index::{IndexBuilder, PackageUpdate, TargetRow};
+
+    use super::*;
 
     fn labels(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("//p:t{i}")).collect()
@@ -770,6 +815,85 @@ mod tests {
         partition(set(&["@quiche//:quiche"]), &BTreeSet::new(), &mut clean);
         assert!(clean.ok(), "an answer Bazel reached only outside //... is not a miss");
         assert_eq!(clean.missing_external.len(), 1);
+    }
+
+    /// A stub Bazel whose every `query` prints `stdout` and exits `code`.
+    ///
+    /// `bazel_query::labels` spawns the binary rather than going through
+    /// [`cambium_bazel::BazelRunner`], so the seam a test can take here is the
+    /// executable itself.
+    fn bazel_answering(dir: &Path, code: i32, stdout: &str) -> Bazel {
+        let binary = dir.join("bazel");
+        cambium_testkit::executable_script(
+            &binary,
+            &format!("printf '%s' {}\nexit {code}", shell_word(stdout)),
+        );
+        Bazel::at(dir.to_path_buf(), binary.to_str())
+    }
+
+    /// `'...'` with any embedded quote closed and reopened, so the stub script
+    /// prints the text and nothing else.
+    fn shell_word(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn a_truncated_route_probe_is_counted_and_not_left_looking_unexplained() {
+        // More misses than the probe will ask about, all of them the same
+        // external route. This is the shape the four xla steps of
+        // docs/XLA_MAIN_REPO_MISSES.md had under the old cap of 25: 48
+        // missing, 25 probed, and nothing said about the other 23.
+        let missing = labels(MAX_ROUTE_PROBES + 23);
+        let roots = vec!["//xla/tsl/platform:macros.h".to_string()];
+        let dir = cambium_testkit::scratch();
+        // The xla shape: `//xla/service:lockable` reaches
+        // `//xla/tsl/platform:macros.h` only through `@tsl`, whose BUILD files
+        // name `@xla//xla/...` back at the main repository.
+        let bazel = bazel_answering(
+            dir.path(),
+            0,
+            "//xla/service:lockable\n@tsl//tsl/profiler/lib:traceme\n//xla/tsl/platform:macros.h\n",
+        );
+
+        let (routes, unprobed) = external_routes(&bazel, &roots, &missing);
+
+        assert_eq!(routes.len(), MAX_ROUTE_PROBES, "the probe is capped");
+        assert_eq!(unprobed, 23, "and says how many it never asked about");
+        assert_eq!(
+            missing.len() - routes.len() - unprobed,
+            0,
+            "nothing is left unexplained: unexplained is missing - routes - unprobed"
+        );
+    }
+
+    #[test]
+    fn a_probe_bazel_will_not_run_is_unprobed_rather_than_unexplained() {
+        let missing = labels(3);
+        let roots = vec!["//a:a.cc".to_string()];
+
+        let dir = cambium_testkit::scratch();
+        let (routes, unprobed) =
+            external_routes(&bazel_answering(dir.path(), 1, ""), &roots, &missing);
+        assert!(routes.is_empty());
+        assert_eq!(unprobed, 3, "a query that failed is not evidence either way");
+
+        // A path with no external node is the one case that really is
+        // unexplained, and it is counted in neither column.
+        let inside = cambium_testkit::scratch();
+        let (routes, unprobed) = external_routes(
+            &bazel_answering(inside.path(), 0, "//a:t\n//a:a.cc\n"),
+            &roots,
+            &missing,
+        );
+        assert!(routes.is_empty());
+        assert_eq!(unprobed, 0);
+
+        // No roots to walk down to is not a probe either.
+        let none = cambium_testkit::scratch();
+        let (routes, unprobed) =
+            external_routes(&bazel_answering(none.path(), 0, ""), &[], &missing);
+        assert!(routes.is_empty());
+        assert_eq!(unprobed, 3);
     }
 
     #[test]

@@ -79,26 +79,101 @@ is an edge into it. 283 of the 284 steps with an oracle ran against a partial
 `rdeps` query, so xla does have load errors on this history, and they are what
 emptied those packages.
 
-### The four steps this does not explain
+### The four steps this does not explain, and what does
+
+Added 2026-09-20, from box run A's record.
 
 `summary.soundness` of
-`bench-results-box/extracted/cambium/bench-results/xla/walk/walk-076fe93fad26cb2555e3bb86defa6a772d11cf35.json`
-reports `steps_sound 274`, `steps_missing 10`. Six of the ten are above. The
-other four are main-repo misses too and no reading here covers them:
+`bench-results-box/extracted-boxa/bench-results/xla/walk/walk-076fe93fad26cb2555e3bb86defa6a772d11cf35.json`
+reports `steps_sound 292`, `steps_missing 4`. The six above are gone; these
+four are what is left:
 
-| step | pair | missing |
-|---:|---|---:|
-| 46 | `2c72f4acb3b4..f0791dddea19` | 4 |
-| 234 | `aa908163c7ae..0a1ec466320a` | 4 |
-| 256 | `d0abca510ed7..b2d442937e5a` | 48 |
-| 262 | `4052d4ca9439..1725bd8f8409` | 48 |
+| step | pair | roots | missing | external_route |
+|---:|---|---|---:|---:|
+| 46 | `2c72f4acb3b4..f0791dddea19` | `//xla/tsl/profiler/utils:xplane_schema.{cc,h}` | 4 | 4 |
+| 234 | `aa908163c7ae..0a1ec466320a` | `//xla/tsl/profiler/utils:xplane_schema.{cc,h}` | 4 | 4 |
+| 256 | `d0abca510ed7..b2d442937e5a` | `//xla/tsl/platform:macros.h` | 48 | 25 |
+| 262 | `4052d4ca9439..1725bd8f8409` | `//xla/tsl/platform:macros.h` | 48 | 25 |
 
-Steps 46 and 234 miss the same four labels under `//xla/tsl/profiler/...`;
-steps 256 and 262 miss the same 48, scattered over some twenty packages
-(`//third_party/tsl/tsl/platform:dso_loader`,
-`//xla/backends/cpu/codegen:cpu_features` and the rest), which is not the shape
-an emptied package makes. All four re-queried nothing. They are open, and
-issue #23 does not close with them unexamined.
+It is one cause, not two, and it is not a walk mechanism at all. The oracle's
+own `external_route` probe already named it on every step: every label it
+asked about is one Bazel reaches only by leaving `//...` and coming back.
+
+The route is `@tsl`. `third_party/tsl` carries a `REPO.bazel` marker and is
+also the repository the `tsl_extension` of `MODULE.bazel` declares, so Bazel
+loads those BUILD files twice: once as main-repo packages under
+`//third_party/tsl/...`, once as `@tsl//...`. The `@tsl` copies name the main
+repository back, as `@xla//xla/...`, which under bzlmod is the root module.
+So `//xla/tsl/platform:macros` has a consumer at
+`@tsl//tsl/profiler/lib:traceme`, and that has a consumer at
+`//xla/service:lockable`. `rdeps(//..., ...)` expands its universe to the
+transitive closure, so Bazel walks that; the index is `//...` by construction
+and stops at the first node outside it, so the reverse walk never climbs back.
+The `//third_party/tsl` twin is reached and reported, which is where the same
+steps' extra labels come from: step 256 answers 14 `//third_party/tsl/tsl/profiler/lib`
+targets the oracle does not name, the twins of the `@tsl` targets the route
+actually runs through.
+
+The two pairs differ only in their seeds. 46 and 234 walk from
+`xplane_schema`, whose `@tsl` consumers are four; 256 and 262 walk from
+`macros.h`, whose `@tsl` consumers are 48. Reading them as two faults was
+reading two seeds.
+
+All 48 are now confirmed by Bazel rather than by reading BUILD files: with the
+probe cap raised (below) the rerun returns `external_route 48`,
+`route_unprobed 0`, nothing unexplained. The paths are what the BUILD files
+said they would be, for instance
+
+```text
+somepath(//xla/service:lockable, set(//xla/tsl/platform:macros.h))
+  //xla/service:lockable
+  @tsl//tsl/profiler/lib:traceme
+  //xla/tsl/platform:macros
+  //xla/tsl/platform:macros.h
+```
+
+and for the ones a hop further out, `//xla/tsl/cuda:cudart` through
+`:cudart_stub` to `@tsl//tsl/platform:load_library`.
+
+### It reproduces on a fresh index
+
+`cambium-bench walk xla --tier correctness --peers none --oracle-sample 0
+--only <the four pairs>` cold-builds an index at each pair's own parent and
+answers forward once. All four come back label for label the same as box run
+A: missing 4, 4, 48, 48, `external_route` 4, 4, 25, 25, worst recall 0.9802,
+`engine_cold_rebuilds 0`, no global. A fresh index at the parent cannot carry
+the emptied-package mechanism of the six above, and these four are unmoved by
+it, so the cause is the vocabulary of the index and not the history it walked.
+
+Run again with the probe cap at 200, the same four steps report
+`external_route` 4, 4, 48, 48 and `route_unprobed` 0 on every one. Every label
+of every one of these steps is an external route, with no residue.
+
+### Why they were filed as unexplained
+
+`external_routes` probed at most `MAX_ROUTE_PROBES` labels, 25, and recorded
+nothing about the ones it skipped. On steps 256 and 262 that reads as 48
+missing and 25 explained, and the 23 the probe never asked about are
+indistinguishable in the record from 23 it asked about and could not explain.
+
+Two things changed. `route_unprobed` (`crates/bench/src/oracles/rdeps.rs`) now
+carries the count, so unexplained is
+`missing - external_route - route_unprobed` and a truncated probe cannot be
+read as a finding. And the cap itself was wrong: it was set against a reading
+of `somepath` cost that was the first query on a cold server, not the steady
+state. Measured on xla at `1725bd8f8409` against a warm output base, the first
+probe takes 12.7 s and the next three 0.25, 0.37 and 0.43 s, so the 23 skipped
+labels were worth about eight seconds on a step that had already failed. The
+cap is 200 now, which is a guard against a pathological missing set rather
+than a budget.
+
+### What closes them
+
+Phase 5 of docs/ROADMAP.md, stage 2: index the in-tree external repositories,
+`@tsl` among them, so the universe is `//... + @repo//...` and the reverse
+walk carries the edge. Nothing narrower closes them: the edge is real, and the
+index does not have a node at either end of it. Until that lands these four
+steps fail the walk, which is the correct answer for an under-report.
 
 ## The fix
 
@@ -173,7 +248,8 @@ document (carry the rows a failed load would have cost) is worth having
 whatever emptied the package, because a fresh index cannot help a walk that
 loses a package halfway through.
 
-The four steps above are outside this table and outside the mechanism.
+The four steps above are outside this table and outside the mechanism:
+they are the `@tsl` route, and Phase 5 is what closes them.
 
 None of the six is a generated-file edge, and none of them is closed by
 `b8c8cbc` on its own: that commit lets the package be dirtied again, it does
