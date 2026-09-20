@@ -647,7 +647,12 @@ impl<'a> Run<'a> {
                 ext.escalate(cause);
             }
         }
-        keep_surviving_packages(&mut dirty, self.querier, self.engine.workspace());
+        keep_surviving_packages(
+            &mut dirty,
+            self.querier,
+            self.engine.workspace(),
+            &confirmed_repos(self.base),
+        );
         // A package the diff deleted is one this run acted on, so it belongs
         // in the dirty set even though the query stage will not ask for it.
         //
@@ -1641,7 +1646,12 @@ fn build_files_edited(direct_files: &BTreeSet<String>) -> BTreeSet<String> {
 /// working tree is not on is a worktree at that revision — asking the working
 /// tree whether a BUILD file survived would answer for the wrong revision.
 /// `fallback` is for a querier with no checkout at all (the synthetic one).
-fn keep_surviving_packages(dirty: &mut DirtySet, querier: &dyn PackageQuerier, fallback: &Path) {
+fn keep_surviving_packages(
+    dirty: &mut DirtySet,
+    querier: &dyn PackageQuerier,
+    fallback: &Path,
+    confirmed: &std::collections::BTreeSet<(String, String)>,
+) {
     if dirty.global || dirty.deleted_packages.is_empty() {
         return;
     }
@@ -1650,7 +1660,11 @@ fn keep_surviving_packages(dirty: &mut DirtySet, querier: &dyn PackageQuerier, f
         .deleted_packages
         .iter()
         .filter(|p| {
-            let dir = ws.join(p.as_str());
+            // An in-tree external repository's key is `@repo//pkg`, which is
+            // not a path; its BUILD file is under the directory the
+            // repository is. Joining the key itself would name nothing and
+            // read every surviving external package as deleted.
+            let dir = ws.join(crate::bzl::package_dir(p, confirmed));
             dir.join("BUILD").exists() || dir.join("BUILD.bazel").exists()
         })
         .cloned()

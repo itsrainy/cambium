@@ -12,6 +12,13 @@ pub struct ConvertOptions {
     pub test_rule_suffixes: Vec<String>,
     /// Tags that mark a target for exclusion from the default output.
     pub exclude_tags: Vec<String>,
+    /// The in-tree external repositories this index holds the packages of:
+    /// the confirmed repositories the universe query was widened by
+    /// (`crate::universe_expression`). A target of one of them is filed under
+    /// an external package key; a target of any other repository is still
+    /// dropped, because nothing asked for its package and a key without rows
+    /// is a claim the index does not keep.
+    pub indexed_repos: Vec<String>,
 }
 
 impl Default for ConvertOptions {
@@ -19,6 +26,7 @@ impl Default for ConvertOptions {
         Self {
             test_rule_suffixes: vec!["_test".to_string()],
             exclude_tags: vec!["manual".to_string()],
+            indexed_repos: Vec::new(),
         }
     }
 }
@@ -147,10 +155,10 @@ pub fn convert(t: &Target, opts: &ConvertOptions) -> Option<ParsedTarget> {
         }
         Discriminator::EnvironmentGroup => return None,
     };
-    // A label outside the main repository has no package we index. Falling
-    // back to `""` here would file every external target under the *root*
-    // package, which is a real package with real rows.
-    let package = label::main_repo_package(&row.label)?.to_string();
+    // A label of a repository this index does not hold has no package key,
+    // and is dropped. Falling back to `""` here would file every external
+    // target under the *root* package, which is a real package with real rows.
+    let package = label::package_key(&row.label, &opts.indexed_repos)?;
     Some(ParsedTarget { package, row })
 }
 
@@ -181,15 +189,32 @@ mod tests {
     }
 
     #[test]
-    fn skips_targets_outside_the_main_repository() {
-        // `@dep//pkg:t` has no main-repo package; it must be dropped, not
-        // filed under the root package.
+    fn skips_targets_of_repositories_this_index_does_not_hold() {
+        // No repository was widened by, so `@dep//pkg:t` has no key; it must
+        // be dropped, not filed under the root package.
         let opts = ConvertOptions::default();
         for label in ["@dep//pkg:t", "@@dep~1.0//pkg:t"] {
             let mut t = tagged_rule("cc_library", &[]);
             t.rule.as_mut().unwrap().name = label.into();
             assert!(convert(&t, &opts).is_none(), "{label} should be skipped");
         }
+    }
+
+    #[test]
+    fn keeps_targets_of_an_indexed_repository_under_an_external_key() {
+        let opts = ConvertOptions {
+            indexed_repos: vec!["tsl".to_string()],
+            ..ConvertOptions::default()
+        };
+        let mut t = tagged_rule("cc_library", &[]);
+        t.rule.as_mut().unwrap().name = "@tsl//tsl/platform:macros".into();
+        let p = convert(&t, &opts).unwrap();
+        assert_eq!(p.package, "@tsl//tsl/platform");
+        assert_eq!(p.row.label, "@tsl//tsl/platform:macros");
+        // A repository next to it that was not widened by stays a leaf.
+        let mut u = tagged_rule("cc_library", &[]);
+        u.rule.as_mut().unwrap().name = "@other//pkg:t".into();
+        assert!(convert(&u, &opts).is_none());
     }
 
     #[test]

@@ -13,6 +13,8 @@
 //! package, target — and the callers ask it the questions they used to answer
 //! with their own `strip_prefix("@@")` ladders.
 
+use std::borrow::Cow;
+
 use crate::loads::RepoMapping;
 
 /// Returns the package part of a main-repo label, e.g. `//lib/core:core` -> `lib/core`.
@@ -96,6 +98,93 @@ pub fn join_path(package: &str, name: &str) -> String {
 pub fn source_path(label: &str) -> Option<String> {
     let pkg = main_repo_package(label)?;
     Some(join_path(pkg, target_name(label)))
+}
+
+/// The index's key for the package a label belongs to, given the external
+/// repositories this index holds packages of.
+///
+/// `//lib/core:core` -> `lib/core`, the bare path this index has always used.
+/// `@tsl//tsl/platform:macros` -> `@tsl//tsl/platform`, which is Bazel's own
+/// spelling: the loading layer writes its `PACKAGE` keys that way
+/// (`crate::sky`), and `bazel query @tsl//...:*` emits its target labels that
+/// way, so the key and the labels filed under it agree byte for byte.
+///
+/// `None` for a label of a repository not in `repos`. Those are the leaf
+/// placeholders a reverse walk stops at, and minting a key for one would
+/// claim packages the universe query never asked for.
+pub fn package_key(label: &str, repos: &[String]) -> Option<String> {
+    let l = Label::parse(label)?;
+    if l.is_relative() {
+        return None;
+    }
+    match l.repo() {
+        Repo::Main => Some(l.package().to_string()),
+        // `@//pkg` and `@@//pkg` are the main repository spelled out.
+        Repo::Apparent("") | Repo::Canonical("") => Some(l.package().to_string()),
+        Repo::Apparent(r) | Repo::Canonical(r) => {
+            if repos.iter().any(|x| x == r) {
+                Some(external_package_key(r, l.package()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Builds the key of `pkg` inside external repository `repo`.
+pub fn external_package_key(repo: &str, pkg: &str) -> String {
+    let mut s = String::with_capacity(1 + repo.len() + 2 + pkg.len());
+    s.push('@');
+    s.push_str(repo);
+    s.push_str("//");
+    s.push_str(pkg);
+    s
+}
+
+/// The repository of a package key, or `None` for a main-repo key.
+pub fn key_repo(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix('@')?;
+    let (r, _) = rest.split_once("//")?;
+    Some(r)
+}
+
+/// The package part of a key, without its repository: `@tsl//tsl/platform`
+/// -> `tsl/platform`, `lib/core` -> `lib/core`.
+pub fn key_package(key: &str) -> &str {
+    match key.strip_prefix('@').and_then(|r| r.split_once("//")) {
+        Some((_, p)) => p,
+        None => key,
+    }
+}
+
+/// True if the key names a package of the main repository.
+pub fn key_is_main(key: &str) -> bool {
+    !key.starts_with('@')
+}
+
+/// The label prefix a package key writes: `//lib/core`, or the key itself
+/// for an external one, which already carries it.
+///
+/// This is the one place the two spellings are reconciled. Everything that
+/// builds a target pattern or a label from a package key goes through it or
+/// through [`key_label`] / [`key_pattern`].
+pub fn key_prefix(key: &str) -> Cow<'_, str> {
+    if key_is_main(key) {
+        Cow::Owned(format!("//{key}"))
+    } else {
+        Cow::Borrowed(key)
+    }
+}
+
+/// The target pattern that re-queries a package key: `//pkg:*` for a
+/// main-repo key, `@repo//pkg:*` for an external one.
+pub fn key_pattern(key: &str) -> String {
+    format!("{}:*", key_prefix(key))
+}
+
+/// The canonical label of target `name` in the package `key` names.
+pub fn key_label(key: &str, name: &str) -> String {
+    format!("{}:{}", key_prefix(key), name)
 }
 
 /// Parent package path of `pkg`, or `None` for the root package.
@@ -257,6 +346,44 @@ mod tests {
         assert_eq!(main_repo_package("//:root"), Some(""));
         assert_eq!(main_repo_package("//lib/core"), Some("lib/core"));
         assert_eq!(main_repo_package("@abs//x:y"), None);
+    }
+
+    #[test]
+    fn a_package_key_carries_its_repository_and_goes_back_out_as_a_pattern() {
+        let repos = vec!["tsl".to_string()];
+        // The main repository keeps the bare path it has always had.
+        assert_eq!(package_key("//lib/core:core", &repos).as_deref(), Some("lib/core"));
+        assert_eq!(package_key("//:root", &repos).as_deref(), Some(""));
+        // An indexed repository's target gets Bazel's own spelling.
+        assert_eq!(
+            package_key("@tsl//tsl/platform:macros", &repos).as_deref(),
+            Some("@tsl//tsl/platform")
+        );
+        // A repository the universe was not widened by is still dropped: a
+        // key with no rows behind it is a claim the index does not keep.
+        assert_eq!(package_key("@other//pkg:t", &repos), None);
+        assert_eq!(package_key("@@tsl+//tsl/platform:macros", &repos), None);
+        // `@//pkg` and `@@//pkg` are the main repository spelled out.
+        assert_eq!(package_key("@//lib:x", &repos).as_deref(), Some("lib"));
+        assert_eq!(package_key("@@//lib:x", &repos).as_deref(), Some("lib"));
+        // A relative label names no package on its own.
+        assert_eq!(package_key(":x", &repos), None);
+
+        // What the three readers ask of a key.
+        assert_eq!(key_repo("@tsl//tsl/platform"), Some("tsl"));
+        assert_eq!(key_repo("lib/core"), None);
+        assert_eq!(key_package("@tsl//tsl/platform"), "tsl/platform");
+        assert_eq!(key_package("lib/core"), "lib/core");
+        assert!(key_is_main("lib/core"));
+        assert!(!key_is_main("@tsl//tsl/platform"));
+        assert_eq!(key_pattern("lib/core"), "//lib/core:*");
+        assert_eq!(key_pattern("@tsl//tsl/platform"), "@tsl//tsl/platform:*");
+        assert_eq!(key_pattern(""), "//:*");
+        assert_eq!(key_label("lib/core", "x.cc"), "//lib/core:x.cc");
+        assert_eq!(
+            key_label("@tsl//tsl/platform", "macros"),
+            "@tsl//tsl/platform:macros"
+        );
         assert_eq!(target_name("//lib:sub/a:b.cc"), "b.cc");
         assert!(is_external("@com_google_absl//absl:base"));
     }

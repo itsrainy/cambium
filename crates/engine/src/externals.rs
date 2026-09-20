@@ -1000,6 +1000,31 @@ pub fn reach(
     };
     let matches = |token: &str| matching(repos, token);
 
+    // (0) the repository's own packages, when this index holds them.
+    //
+    // Phase 5 stage 2 puts an in-tree external repository's packages in the
+    // index under `@repo//pkg` keys. A repository that moved re-queries those
+    // the same way a main-repo package change re-queries its own package:
+    // without this, `@tsl` would be dirty, its consumers would be re-queried,
+    // and its own rules would stand at whatever the index last recorded.
+    //
+    // A repository whose packages are *not* in the index has none of these
+    // keys and this loop finds nothing, which is the behaviour before the
+    // universe was widened.
+    for p in 0..base.num_packages() {
+        if base.package_tombstoned(p) {
+            continue;
+        }
+        let name = base.package_name(p);
+        let Some(token) = cambium_index::label::key_repo(name) else {
+            continue;
+        };
+        if matches(token) {
+            out.packages.insert(name.to_string());
+            *out.packages_by_repo.entry(token.to_string()).or_default() += 1;
+        }
+    }
+
     // (1) labels. Every external label starts with `@`, and `label_sorted` is
     // in label order, so they are one contiguous run at the end of it: found
     // by binary search rather than by touching every label in the index.
@@ -1083,7 +1108,9 @@ pub fn reach(
                 }
             }
             for (repo, pkgs) in by_repo {
-                out.packages_by_repo.insert(repo.to_string(), pkgs.len());
+                // Added, not assigned: (0) may already have charged this
+                // repository for its own packages.
+                *out.packages_by_repo.entry(repo.to_string()).or_default() += pkgs.len();
             }
         }
     }

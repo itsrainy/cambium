@@ -80,7 +80,14 @@ pub(crate) fn rescan_closure(
         c.package_external.remove(p);
     }
     for p in packages {
-        let pc = c.graph.package_closure(p, src, &mapping);
+        // A package key is a path for the main repository, but an in-tree
+        // external repository's key is `@repo//pkg` and its BUILD file is on
+        // disk under the directory the repository is. Scan the directory and
+        // file the closure under the key: the closure graph is keyed by path
+        // throughout, so a relative `load(":x.bzl")` in one of those BUILD
+        // files resolves to the file that really backs it.
+        let dir = package_dir(p, repos.confirmed);
+        let pc = c.graph.package_closure(&dir, src, &mapping);
         c.packages.insert(p.clone(), pc.bzl);
         if pc.external.is_empty() {
             c.package_external.remove(p);
@@ -268,4 +275,23 @@ pub fn main_alias_mapping(
         }
     }
     m
+}
+
+/// The directory a package key's BUILD file is in.
+///
+/// The key itself for a main-repo package. For an in-tree external one,
+/// the confirmed directory the repository is, plus the package inside it:
+/// `@tsl//tsl/platform` under `third_party/tsl/` is
+/// `third_party/tsl/tsl/platform`. A key whose repository has no confirmed
+/// directory here has no directory to scan, and falls back to the package
+/// part alone rather than inventing one.
+pub(crate) fn package_dir(pkg: &str, confirmed: &BTreeSet<(String, String)>) -> String {
+    let Some(repo) = cambium_index::label::key_repo(pkg) else {
+        return pkg.to_string();
+    };
+    let inner = cambium_index::label::key_package(pkg);
+    match confirmed.iter().find(|(r, _)| r == repo) {
+        Some((_, dir)) => cambium_index::label::join_path(dir.trim_end_matches('/'), inner),
+        None => inner.to_string(),
+    }
 }

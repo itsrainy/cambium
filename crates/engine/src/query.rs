@@ -633,7 +633,11 @@ pub fn query_packages(
     for p in requested {
         grouped.entry(p.clone()).or_default();
     }
-    let outcome = bazel.query_packages(requested, group_into(&mut grouped, opts))?;
+    // What may come back is what was asked for: an external package key in
+    // the request is a repository this index holds, and conversion has to
+    // keep its rows rather than drop them as it does every other repository's.
+    let opts = with_repos(opts, repos_of(requested));
+    let outcome = bazel.query_packages(requested, group_into(&mut grouped, &opts))?;
     Ok(finish(grouped, outcome, files, Some(requested)))
 }
 
@@ -659,8 +663,31 @@ pub fn query_universe(
     repos: &[String],
 ) -> Result<QueryResult, BazelError> {
     let mut grouped: BTreeMap<String, Vec<ParsedTarget>> = BTreeMap::new();
-    let outcome = bazel.query_universe(repos, group_into(&mut grouped, opts))?;
+    // The universe was widened by exactly these repositories, so exactly
+    // these are the ones whose targets get a package key.
+    let opts = with_repos(opts, repos.to_vec());
+    let outcome = bazel.query_universe(repos, group_into(&mut grouped, &opts))?;
     Ok(finish(grouped, outcome, files, None))
+}
+
+/// The external repositories named by a package request.
+fn repos_of(packages: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = packages
+        .iter()
+        .filter_map(|p| cambium_index::label::key_repo(p))
+        .map(|r| r.to_string())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// `opts` with its indexed repositories replaced.
+fn with_repos(opts: &ConvertOptions, repos: Vec<String>) -> ConvertOptions {
+    ConvertOptions {
+        indexed_repos: repos,
+        ..opts.clone()
+    }
 }
 
 /// Decodes one batch of frames.
@@ -795,6 +822,7 @@ mod tests {
             opts: ConvertOptions {
                 test_rule_suffixes: vec!["_test".into()],
                 exclude_tags: vec!["manual".into()],
+                indexed_repos: Vec::new(),
             },
             files: no_files(),
             diags: crate::diag::Diagnostics::new(),

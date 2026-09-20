@@ -953,6 +953,9 @@ impl Config {
         cambium_bazel::ConvertOptions {
             test_rule_suffixes: self.output.test_rule_suffixes.clone(),
             exclude_tags: self.output.exclude_tags.clone(),
+            // Filled in per query from the repositories that query asks for
+            // (`crate::query::with_repos`); there is no configured value.
+            indexed_repos: Vec::new(),
         }
     }
 }

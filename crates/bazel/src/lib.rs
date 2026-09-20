@@ -705,9 +705,10 @@ impl Bazel {
             if i > 0 {
                 expr.push(' ');
             }
-            expr.push_str("//");
-            expr.push_str(p);
-            expr.push_str(":*");
+            // A package key is a path for the main repository and
+            // `@repo//pkg` for an in-tree external one; only the first needs
+            // the `//` put back. See `cambium_index::label::key_pattern`.
+            expr.push_str(&cambium_index::label::key_pattern(p));
         }
         expr.push(')');
         self.run_query(&expr, on_batch)
@@ -1025,7 +1026,7 @@ impl Bazel {
             "set({})",
             packages
                 .iter()
-                .map(|p| format!("//{p}:*"))
+                .map(|p| cambium_index::label::key_pattern(p))
                 .collect::<Vec<_>>()
                 .join(" ")
         );
