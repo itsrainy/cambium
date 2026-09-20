@@ -42,49 +42,38 @@ queries `//...`, so an external label is a leaf in the index (reachable, with
 no outgoing edges), and the reverse walk stops there. envoy has two instances
 at its pin; one of them, `@quiche` re-exporting `@envoy//source/…`, has no
 cheap invalidator, so the change set keeps failing rather than being waved
-through. Indexing external repositories is the precise answer and is not
-implemented. Where the changed side of the round trip is a nameable path an
-invalidator is the sound fix, which is how `subject_repos.toml` came to list
+through. xla is the larger case and the one that still fails: `third_party/tsl`
+is both a set of main-repo packages and the repository `@tsl`, whose BUILD
+files name `@xla//xla/...` back at the main repository, so a change under
+`//xla/tsl` has consumers the reverse walk cannot reach. Four steps of the
+300-step walk under-report for that reason, 4, 4, 48 and 48 labels, every one
+of them confirmed an external route by the oracle's own `somepath` probe
+(docs/XLA_MAIN_REPO_MISSES.md). Indexing external repositories is the precise
+answer, it is Phase 5 of docs/ROADMAP.md, and it is not implemented. It is the
+last engine piece: nothing narrower closes those four, because the index has
+no node at either end of the edge.
+
+Where the changed side of the round trip is a nameable path an invalidator is
+the sound fix, which is how `subject_repos.toml` came to list
 `api/**` and `changelogs/**` for envoy. It no longer does: the external-repository
 stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
 them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
-**The published run, 2026-09-10.** Five subjects, 5 histories over 1 274
-commits, 200 change sets, on the benchmark machine named in the tables below,
-every subject started over on a wiped store. It replaces the run of
-2026-09-09 and was itself the gate for the fallback work that landed the day
-before: the recall oracle, the rebuild oracle and the load oracle all had to
-hold with the invalidator lists of apollo, sourcegraph and xla emptied, as
-envoy's already was. Four subjects' numbers are from the pass under
-`bfa4624`; xla's are from a pass under `8d7524a`, alone on its own wiped
-store, after that pass's derivation fixes. The offline replay of the other
-four under `8d7524a`, with `--rederive`, changes none of their change-set
-answers (apollo's one moved change set is a cold rebuild either way) and
-moves history commits only by the pin-versus-base drift the replay itself
-names. The run recorded no Bazel version for four subjects (`bazel
---version` refuses a startup option and the benchmark always passes one,
-fixed since), so the version column reads the pin's `.bazelversion`. Where
-this paragraph and the generated tables disagree, the tables win.
+**The run these tables are from.** Box run A, 2026-09-19 to 2026-09-20: five
+subjects, 300 first-parent steps each except apollo's 74, the recall oracle on
+every step, the bazel-diff and tango peers on a stratified sample of 40, every
+subject cold-building its own index at its pin. It is the first clean
+five-subject measurement with a fresh index throughout, and it is the first to
+run the whole loading layer.
 
-| subject | change sets | min recall | history: commits / p50 / globals / cold rebuilds |
-|---|---|---|---|
-| bazel | 40/40 | 1.000 | 300 / 2 ms / 3 / 0 |
-| sourcegraph | 40/40 | 1.000 | 300 / 11 ms / 3 / 0 |
-| apollo | 40/40 | 1.000 | 74 / 170 ms / 3 / 4 |
-| envoy | 37/40 | 0.994 | 300 / 119 ms / 18 / 37 |
-| xla | 40/40 | 1.000 | 300 / 6 ms / 7 / 0 |
+The numbers are the generated tables above and below this section, and only
+those. An earlier revision of this page carried a second, hand-copied set
+beside them, which drifted from the tables the moment a run landed; there is
+one set now.
 
-Warm change-set timings, p50 ms (cambium against the foils; Tango has no
-warm path):
-
-| subject | cambium | bazel-diff | Tango (cold) |
-|---|---|---|---|
-| bazel | 21 | 1 717 | 19 333 |
-| sourcegraph | 44 | 4 030 | 55 978 |
-| apollo | 144 | 7 905 | 27 288 |
-| envoy | 382 | 4 477 | 178 168 |
-| xla | 501 | 10 994 | 209 984 |
+The paragraphs that follow describe the run of 2026-09-10 and are kept as
+history. Where any of them disagrees with a generated table, the table wins.
 
 **Globals are the exception now.** Against the previous run the history
 globals went from 4, 24, 11, 22 and 31 to 3, 3, 3, 18 and 7 (bazel,
