@@ -44,6 +44,17 @@ fn rows(pkg: &str) -> PackageUpdate {
             "demo_lib",
             vec!["//lib:lib".into()],
         )],
+        // The repository's own package, as a widened universe returns it:
+        // the rule and the source file it is built from, under the labels
+        // Bazel writes them with.
+        "@tsl//tsl/platform" => vec![
+            TargetRow::rule(
+                "@tsl//tsl/platform:dso_loader",
+                "demo_lib",
+                vec!["@tsl//tsl/platform:x.cc".into()],
+            ),
+            TargetRow::source_file("@tsl//tsl/platform:x.cc"),
+        ],
         _ => Vec::new(),
     };
     PackageUpdate {
@@ -75,7 +86,7 @@ fn scanning(root: &std::path::Path, packages: &[&str], load_error: bool) -> Scan
     m.insert("third_party/repo.bzl".to_string(), REPO_BZL.to_string());
     m.insert("app/BUILD".to_string(), String::new());
     m.insert("lib/BUILD".to_string(), String::new());
-    Scanning::new(&["app", "lib"], rows)
+    Scanning::new(&["app", "lib", "@tsl//tsl/platform"], rows)
         .with_files(Files(m))
         .with_workspace(root)
         .with_repo_probe("tsl", packages, load_error)
@@ -121,11 +132,24 @@ fn a_claim_bazels_own_package_list_agrees_with_maps_the_directory() {
     let r = run(&index, dir.path(), PROBED);
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.stats.repos_dirty_by_input, 1);
-    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
-    assert_eq!(r.direct, vec!["//lib:lib".to_string()]);
+    // The repository's own package is re-queried, which is how its rules are
+    // answered now that the index holds them (Phase 5 stage 3). Before the
+    // universe was widened there was no such package and every label of the
+    // repository was seeded dirty instead.
+    assert_eq!(r.stats.dirty_packages, 1, "{:?}", r.dirty_packages);
+    assert_eq!(
+        r.dirty_packages,
+        vec!["@tsl//tsl/platform".to_string()],
+        "{:?}",
+        r.dirty_packages
+    );
     assert_eq!(
         r.affected_labels(),
-        vec!["//app:app".to_string(), "//lib:lib".to_string()]
+        vec![
+            "//app:app".to_string(),
+            "//lib:lib".to_string(),
+            "@tsl//tsl/platform:dso_loader".to_string()
+        ]
     );
 }
 
@@ -188,4 +212,62 @@ fn a_repository_over_the_cap_keeps_the_wide_answer() {
     assert!(repo.is_none_or(|r| !v.repo_origin(r).confirmed));
     let codes: Vec<Code> = q.diagnostics().unwrap().drain().iter().map(|d| d.code).collect();
     assert!(codes.contains(&Code::W025RepoNotIndexed), "{codes:?}");
+}
+
+/// Phase 5 stage 3: the repository's rules are answered by its own packages,
+/// not by dirtying every label of it.
+///
+/// A file under the directory is a file of two repositories at once. Its
+/// main-repo label reaches nothing here, because `//...` stops at the
+/// boundary; the edge that matters is `@tsl//tsl/platform:x.cc`, which the
+/// rule in that package is built from. Before the universe was widened, that
+/// rule was a leaf and the repository's own dirtiness stood in for it, which
+/// is sound and answers every label of the repository at once. Now the edge
+/// is real and the answer is the reachable part of it -- so this asserts the
+/// soundness half, that the consumers are still reached.
+#[test]
+fn a_change_under_an_indexed_repository_reaches_its_rules_by_edge() {
+    let dir = tree();
+    let root = dir.path();
+    let q = scanning(root, PROBED, false);
+    let e = engine();
+    let index = e.full_build_with("c0", &q).unwrap();
+    let v = index.view();
+
+    // The universe was widened by it, and the rows are there.
+    assert!(
+        v.indexed_repos().contains(&"tsl".to_string()),
+        "{:?}",
+        v.indexed_repos()
+    );
+    let names: Vec<&str> = (0..v.num_packages()).map(|p| v.package_name(p)).collect();
+    assert!(names.contains(&"@tsl//tsl/platform"), "{names:?}");
+
+    // A content edit to the repository's own source file.
+    let changes = vec![Change::new(
+        Status::Modified,
+        "third_party/tsl/tsl/platform/x.cc",
+    )];
+    let report = engine()
+        .compute_with_texts(
+            v,
+            &changes,
+            &scanning(root, PROBED, false),
+            &req(),
+            &FixedText(BTreeMap::new()),
+        )
+        .unwrap()
+        .report;
+
+    let affected: Vec<&str> = report.affected.iter().map(|s| s.label.as_str()).collect();
+    assert!(
+        affected.contains(&"@tsl//tsl/platform:dso_loader"),
+        "the rule built from the changed file is affected: {affected:?}"
+    );
+    // And back out into the main repository through the edge that used to be
+    // a leaf.
+    assert!(
+        affected.contains(&"//lib:lib") && affected.contains(&"//app:app"),
+        "the round trip back into `//...` is carried: {affected:?}"
+    );
 }

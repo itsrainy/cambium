@@ -581,6 +581,27 @@ impl<'a> Run<'a> {
                     );
                     ext.by_input += 1;
                     crate::externals::dirty_by_input(self.base, ext, repo, &paths);
+                    // Phase 5 stage 3. When this index holds the
+                    // repository's packages, the file is not only an input
+                    // that moves the repository: it is a source file of one
+                    // of its rules, under a label of its own
+                    // (`@tsl//tsl/platform:x.cc`). The classifier could not
+                    // name it -- `//...` stops at the boundary, so the main
+                    // repository owns nothing here -- and it is named in the
+                    // splice stage instead, where the builder's interner can
+                    // resolve it (`external_labels`). Without this the
+                    // repository's own rules are reached by nothing at all
+                    // once rule (1) stops seeding every label of it.
+                    if self
+                        .base
+                        .indexed_repos()
+                        .iter()
+                        .any(|r| r == self.base.repo_name(repo))
+                    {
+                        dirty
+                            .direct_files
+                            .extend(paths.iter().map(|p| p.to_string()));
+                    }
                 }
                 // A boundary `//...` walked into anyway is already answered:
                 // the classifier owned its paths as main-repo paths and they
@@ -1242,16 +1263,26 @@ impl<'a> Run<'a> {
         // O(labels), and at a few million labels that is the single most
         // expensive thing in an otherwise change-proportional run.
         let mut changed_file_ids: Vec<(u32, String)> = Vec::with_capacity(dirty.direct_files.len());
+        // The directories of the in-tree repositories whose packages this
+        // index holds. A file under one of them is a file of *two*
+        // repositories at once and owes both labels; see `external_labels`.
+        let indexed_dirs = indexed_repo_dirs(base);
         for path in &dirty.direct_files {
-            let Some(pkg) = stage.packages.owner_of(path) else {
+            let mut labels: Vec<String> = Vec::new();
+            if let Some(pkg) = stage.packages.owner_of(path) {
+                labels.push(cambium_index::label::source_label(pkg, path));
+            }
+            labels.extend(external_labels(&stage.packages, &indexed_dirs, path));
+            if labels.is_empty() {
                 continue;
-            };
-            let label = cambium_index::label::source_label(pkg, path);
-            match builder.label_id(&label) {
-                Some(id) => changed_file_ids.push((id, path.clone())),
-                // The most common "why wasn't my test run?" question: a file
-                // no rule references cannot affect anything.
-                None => tracing::debug!(%label, "changed file is not referenced by any rule"),
+            }
+            for label in labels {
+                match builder.label_id(&label) {
+                    Some(id) => changed_file_ids.push((id, path.clone())),
+                    // The most common "why wasn't my test run?" question: a
+                    // file no rule references cannot affect anything.
+                    None => tracing::debug!(%label, "changed file is not referenced by any rule"),
+                }
             }
         }
 
@@ -1728,6 +1759,67 @@ fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String
 /// The confirmed repository claims of an index, as (apparent name,
 /// directory). The directory is carried because the confirmation was about
 /// one: see `RepoInputs::confirm_dir`.
+/// The directories of the repositories this index holds the packages of, as
+/// `(repo, dir)` with the directory's trailing `/`.
+///
+/// Only a confirmed `Dir` claim is ever widened by, and only a widened one
+/// has packages here, so this is `confirmed_repos` narrowed by
+/// `IndexRef::indexed_repos`.
+fn indexed_repo_dirs(base: IndexRef<'_>) -> Vec<(String, String)> {
+    let indexed = base.indexed_repos();
+    confirmed_repos(base)
+        .into_iter()
+        .filter(|(r, _)| indexed.iter().any(|i| i == r))
+        .map(|(r, d)| (r, format!("{d}/")))
+        .collect()
+}
+
+/// The labels a changed path has inside the in-tree repositories it is also a
+/// file of.
+///
+/// xla's `third_party/tsl/tsl/platform/x.cc` is a file of the main repository
+/// *and* of `@tsl`, where it is `@tsl//tsl/platform:x.cc`, and the rules that
+/// consume it there are reached by that label alone. Before the universe was
+/// widened those rules were leaf nodes and the repository's own dirtiness
+/// stood in for them; now they are real nodes with real edges, and the edge
+/// is found the same way a main-repo source file's is.
+///
+/// The package is the longest prefix of the repo-relative path that this
+/// index holds a package for, which is `PackageSet::owner_of`'s walk against
+/// the external keys.
+fn external_labels(
+    packages: &PackageSet,
+    indexed_dirs: &[(String, String)],
+    path: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (repo, dir) in indexed_dirs {
+        let Some(rel) = path.strip_prefix(dir.as_str()) else {
+            continue;
+        };
+        let mut end = rel.rfind('/');
+        loop {
+            let inner = end.map_or("", |i| &rel[..i]);
+            let key = cambium_index::label::external_package_key(repo, inner);
+            if packages.contains(&key) {
+                // The name is what follows the package; +1 skips the '/'
+                // separator, and the repository's root package takes the
+                // whole repo-relative path.
+                let name = if inner.is_empty() {
+                    rel
+                } else {
+                    &rel[inner.len() + 1..]
+                };
+                out.push(cambium_index::label::key_label(&key, name));
+                break;
+            }
+            let Some(i) = end else { break };
+            end = rel[..i].rfind('/');
+        }
+    }
+    out
+}
+
 fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<(String, String)> {
     (0..base.num_repos())
         .filter_map(|r| {

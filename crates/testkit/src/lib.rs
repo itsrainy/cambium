@@ -426,9 +426,26 @@ impl PackageQuerier for Scanning {
     }
 
     fn universe(&self) -> Result<Rows, EngineError> {
+        self.universe_with(&[])
+    }
+
+    /// Delegated, not defaulted, and for the reason named on
+    /// `PackageQuerier::universe_with`: the default answers `universe()`,
+    /// which would drop the repositories and leave every test that widens the
+    /// universe quietly testing the unwidened one.
+    ///
+    /// A package name of this querier that names an external repository
+    /// (`@tsl//tsl/platform`) is returned only when that repository is one of
+    /// `repos`, which is what a widened query does and what an unwidened one
+    /// does not.
+    fn universe_with(&self, repos: &[String]) -> Result<Rows, EngineError> {
         Ok(self
             .packages
             .iter()
+            .filter(|p| match cambium_index::label::key_repo(p) {
+                Some(r) => repos.iter().any(|x| x == r),
+                None => true,
+            })
             .map(|p| (self.rows)(p))
             .collect::<Vec<_>>()
             .into())

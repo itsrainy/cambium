@@ -1039,9 +1039,29 @@ pub fn reach(
         if base.is_tombstone(id) {
             continue;
         }
-        if label_repo(label).is_some_and(matches) {
-            out.nodes.push(id);
+        if !label_repo(label).is_some_and(matches) {
+            continue;
         }
+        // Phase 5 stage 3. A label whose package rule (0) re-queries is not
+        // seeded here: its rule comes back from Bazel and the splice decides
+        // whether it moved, which is exactly how a main-repo package is
+        // answered. Seeding it as well is the "declaration moved, every leaf
+        // dirty" answer, and on envoy it is 65226 extra labels across 40
+        // change sets.
+        //
+        // The test is the package, not the repository, so a label of a dirty
+        // repository whose package this index does *not* hold -- one that
+        // failed to load, or one outside the widened universe -- is still
+        // seeded and still answered wide. The changed files under the
+        // repository's own directory reach these rules through their real
+        // edges, by the labels `run::external_labels` resolves them to.
+        if cambium_index::label::Label::parse(label)
+            .map(|l| cambium_index::label::external_package_key(l.repo_name(), l.package()))
+            .is_some_and(|k| out.packages.contains(&k))
+        {
+            continue;
+        }
+        out.nodes.push(id);
     }
     out.nodes.sort_unstable();
 
