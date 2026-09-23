@@ -176,15 +176,17 @@ impl BenchBox {
         let host = self.host()?.with_context(|| {
             format!("no running benchmark box and nothing cached for {subject}")
         })?;
-        std::fs::create_dir_all(dir.join("changes"))?;
-        std::fs::create_dir_all(dir.join("history"))?;
+        std::fs::create_dir_all(dir.join("walk"))?;
         std::fs::create_dir_all(dir.join("bases"))?;
         std::fs::create_dir_all(dir.join("heads"))?;
         tracing::info!(%subject, %host, "pulling");
         let remote = self.results_of(subject);
+        // The walk record is what a replay reads (`precheck::load_recorded`);
+        // the rebuild oracle's rows beside it are tens of megabytes a subject
+        // and nothing offline needs them, so they stay on the box.
         let required = [
             (format!("{remote}/index-*.bin"), dir.clone()),
-            (format!("{remote}/changes/*.json"), dir.join("changes")),
+            (format!("{remote}/walk/walk-*.json"), dir.join("walk")),
         ];
         for (from, to) in &required {
             if !self.scp(&host, from, to)? {
@@ -192,14 +194,9 @@ impl BenchBox {
                 anyhow::bail!("could not copy {from} from {host}; nothing cached for {subject}");
             }
         }
-        // The rest is optional: a run published before the history wrote a
-        // result, or before the driver archived its bases and the oracle its
-        // head, has none of it, and scp failing on that must not fail the pull.
-        let _ = self.scp(
-            &host,
-            &format!("{remote}/history/*.json"),
-            &dir.join("history"),
-        )?;
+        // The rest is optional: a run before the driver archived its bases
+        // and the oracle its head has none of it, and scp failing on that
+        // must not fail the pull.
         let bases = self.scp(&host, &format!("{remote}/bases/*.bin"), &dir.join("bases"))?;
         let heads = self.scp(&host, &format!("{remote}/heads/*.bin"), &dir.join("heads"))?;
         let paths = paths && self.pull_paths(&host, subject, &dir)?;
@@ -256,7 +253,9 @@ impl BenchBox {
 }
 
 /// The result files a pull copies, relative to a subject's results directory.
-const RESULT_GLOBS: &str = "changes/*.json history/*.json";
+/// A pull cached from before the walk (`changes/`, `history/`) sums to
+/// nothing here and is pulled again, which is the refresh it needs.
+const RESULT_GLOBS: &str = "walk/walk-*.json";
 
 /// sha256 of the cached result files, the same way the box is asked.
 fn local_sums(dir: &Path) -> BTreeMap<String, String> {
@@ -315,11 +314,11 @@ mod tests {
     fn sums_read_both_spellings_and_skip_noise() {
         let h = "a".repeat(64);
         let sums = parse_sums(&format!(
-            "{h}  changes/changes-x.json\n{h} *history/history-x.json\nsha256sum: nope: No such file\n"
+            "{h}  walk/walk-x.json\n{h} *walk/walk-x-bazel_7.4.1.json\nsha256sum: nope: No such file\n"
         ));
         assert_eq!(sums.len(), 2);
-        assert_eq!(sums["changes/changes-x.json"], h);
-        assert!(sums.contains_key("history/history-x.json"));
+        assert_eq!(sums["walk/walk-x.json"], h);
+        assert!(sums.contains_key("walk/walk-x-bazel_7.4.1.json"));
     }
 
     use super::*;
@@ -346,7 +345,14 @@ mod tests {
         assert_eq!(b.target("h"), "ubuntu@h");
         let cache = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cache.path().join("envoy")).unwrap();
-        let p = b.pull("envoy", cache.path(), true).unwrap();
+        // A host that resolves to nothing, so the test never asks EC2 and a
+        // box that happens to be running cannot turn this into a real pull:
+        // the sums come back empty and the cached pull is kept.
+        let offline = BenchBox {
+            host: Some("box.invalid".into()),
+            ..BenchBox::default()
+        };
+        let p = offline.pull("envoy", cache.path(), true).unwrap();
         assert!(p.cached);
         // An explicit host is taken without asking EC2.
         let b = BenchBox {
