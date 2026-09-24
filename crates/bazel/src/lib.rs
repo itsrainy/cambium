@@ -194,7 +194,12 @@ fn package_of_repo(line: &str, repo: &str) -> Option<String> {
             .rsplit(['+', '~'])
             .next()
             .is_some_and(|last| last == repo);
-    named.then(|| pkg.trim_start_matches('/').to_string())
+    // The package, not the label: `@r//a/b:pkg` is the package `a/b`, which is
+    // the spelling the consumer table is matched against at run time.
+    named.then(|| {
+        let pkg = pkg.split_once(':').map_or(pkg, |(p, _)| p);
+        pkg.trim_start_matches('/').to_string()
+    })
 }
 
 
@@ -984,14 +989,14 @@ impl Bazel {
                 tracing::debug!(status = %o.exit, repo, expr, "the consumer query failed");
                 return None;
             }
-            Some(
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-            )
+            let lines: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            tracing::debug!(status = %o.exit, repo, lines = lines.len(), stderr_len = o.stderr.len(), "consumer query answered");
+            Some(lines)
         };
         let bridge = run(format!(
             "kind(rule, rdeps(//..., @{repo}//...:*)) except //... except @{repo}//...:*"
@@ -1635,6 +1640,12 @@ mod tests {
         );
         // The repository root is a package, and it is not the empty answer.
         assert_eq!(package_of_repo("@@tsl+//", "tsl"), Some(String::new()));
+        // A label, as the consumer query prints one, names its package.
+        assert_eq!(
+            package_of_repo("@envoy_api//envoy/admin/v3:pkg", "envoy_api"),
+            Some("envoy/admin/v3".into())
+        );
+        assert_eq!(package_of_repo("@@tsl+//:root", "tsl"), Some(String::new()));
         // Another repository's packages are not this one's.
         assert_eq!(package_of_repo("@@tsl_other+//pkg", "tsl"), None);
         assert_eq!(package_of_repo("@other//pkg", "tsl"), None);

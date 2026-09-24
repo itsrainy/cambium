@@ -431,10 +431,12 @@ impl PackageQuerier for BazelQuerier {
         &self,
         indexed: &[String],
     ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+        tracing::debug!(?indexed, "asking bazel who consumes each indexed repository");
         indexed
             .iter()
             .filter_map(|r| {
                 let cs = self.bazel.consumer_bridge(r)?;
+                tracing::debug!(repo = %r, consumers = cs.len(), "consumer bridge answered");
                 (!cs.is_empty()).then(|| (r.clone(), cs.into_iter().collect()))
             })
             .collect()

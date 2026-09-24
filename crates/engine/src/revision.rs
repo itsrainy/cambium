@@ -226,6 +226,20 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.probe_repos(repos)
     }
 
+    /// Delegated for the same reason `universe_with` is: the default answers
+    /// an empty table, and a cold build through this wrapper (every one the
+    /// CLI and the bench make) then stored no consumer for any indexed
+    /// repository while the querier underneath could have named them.
+    fn consumer_repos(
+        &self,
+        indexed: &[String],
+    ) -> std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    > {
+        self.querier.consumer_repos(indexed)
+    }
+
     fn can_dump_loading_layer(&self) -> bool {
         self.querier.can_dump_loading_layer()
     }
