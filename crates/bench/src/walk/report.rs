@@ -93,10 +93,29 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             let c = &o.sky;
             let _ = write!(
                 out,
-                " Loading layer: {} missing rows ({} expected: created in the window or a \
-                 package that failed to load; {} unexplained), {} extra ({} for paths deleted \
-                 in the window or a package that failed to load); rows in walk/{file}.",
+                " Loading layer: {} missing rows ({} expected: created in the window, a probe \
+                 for a boundary or build file that does not exist, or a package that failed to \
+                 load; {} unexplained), {} extra ({} for paths deleted in the window or a \
+                 package that failed to load); rows in walk/{file}.",
                 c.missing, c.missing_expected, c.missing_unexplained, c.extra, c.extra_expected
+            );
+        }
+        if !o.rule_hash_mismatch.is_empty() {
+            let _ = write!(
+                out,
+                " Rule hashes differ from the cold rebuild for {}: {}{}.",
+                o.rule_hash_mismatch.len(),
+                o.rule_hash_mismatch
+                    .iter()
+                    .take(6)
+                    .map(|l| format!("`{l}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if o.rule_hash_mismatch.len() > 6 {
+                    format!(" and {} more", o.rule_hash_mismatch.len() - 6)
+                } else {
+                    String::new()
+                }
             );
         }
         let _ = writeln!(out);
@@ -275,6 +294,7 @@ mod tests {
                     extra: 4,
                     extra_expected: 3,
                 },
+                rule_hash_mismatch: Vec::new(),
             }),
             head_index: None,
             summary: WalkSummary::default(),
@@ -298,7 +318,7 @@ mod tests {
         assert!(md.contains("Rebuild oracle at the pin: held"));
         // A held oracle still says how many missing rows it excused.
         assert!(
-            md.contains("6712 missing rows (6712 expected: created in the window or a package that failed to load; 0 unexplained), 4 extra (3 for paths deleted"),
+            md.contains("6712 missing rows (6712 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 0 unexplained), 4 extra (3 for paths deleted"),
             "{md}"
         );
         assert!(
@@ -323,6 +343,7 @@ mod tests {
                 missing_unexplained: 2,
                 ..Default::default()
             },
+            rule_hash_mismatch: Vec::new(),
         });
         r.summarise();
         assert!(!r.summary.pass);
@@ -332,7 +353,7 @@ mod tests {
             "{md}"
         );
         assert!(
-            md.contains("Loading layer: 5 missing rows (3 expected: created in the window or a package that failed to load; 2 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
+            md.contains("Loading layer: 5 missing rows (3 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 2 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-bbbbbbbbbbbb0-7.4.1.json."),
             "{md}"
         );
     }

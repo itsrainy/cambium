@@ -250,6 +250,12 @@ pub struct RebuildOracle {
     /// The sidecar's tallies.
     #[serde(default)]
     pub sky: RowCounts,
+    /// Rules whose hash differs between the applied index and the cold
+    /// rebuild, by label, the first sixty-four. A rule the splice carried
+    /// with a stale hash is a rule whose consumers a later change may not
+    /// have reached, so the record names them rather than counting them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_hash_mismatch: Vec<String>,
 }
 
 /// One subject's walk at one pin.
@@ -560,6 +566,7 @@ mod tests {
             summary: String::new(),
             rows: Some("rebuild-h2.json".into()),
             sky: RowCounts::default(),
+                    rule_hash_mismatch: Vec::new(),
         });
         r.summarise();
         assert!(r.summary.pass);
@@ -572,6 +579,7 @@ mod tests {
                 missing_unexplained: 3,
                 ..Default::default()
             },
+            rule_hash_mismatch: Vec::new(),
         });
         r.summarise();
         assert!(!r.summary.pass);

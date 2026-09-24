@@ -614,6 +614,7 @@ impl Runner<'_> {
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned()),
             sky: rows.counts,
+            rule_hash_mismatch: diff.rule_hash_mismatch.iter().take(64).cloned().collect(),
         });
         let _ = std::fs::remove_file(&fresh_path);
         Ok(())

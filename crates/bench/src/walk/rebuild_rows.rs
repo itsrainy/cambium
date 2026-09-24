@@ -142,6 +142,18 @@ pub enum RowClass {
     /// Missing: its package failed to load in the cold build at the
     /// compared commit. Extra: either index names its package as failed.
     LoadError,
+    /// Missing: a `FILE` or `FILE_STATE` row for a workspace or build file
+    /// that does not exist at the compared commit. Bazel stats `WORKSPACE`,
+    /// `WORKSPACE.bazel`, `REPO.bazel` and `MODULE.bazel` in every package
+    /// directory to find repository boundaries, and `BUILD.bazel` beside
+    /// every `BUILD`; a cold dump carries those absent-file probes and a
+    /// refresh dump of the package does not. The file's later creation is a
+    /// `BUILD` the classifier names from the diff, or a boundary marker,
+    /// which is a default invalidator, so no change travels through the
+    /// missing row. envoy's lineage lost 13755 of them over 300 steps, every
+    /// one a `WORKSPACE` or `WORKSPACE.bazel` probe, and read them as
+    /// unexplained.
+    BoundaryProbe,
     /// Extra, for a path gone at the compared commit.
     DeletedInWindow,
     /// Extra, for a path that still exists: a dropped `load()`, a glob that
@@ -211,7 +223,9 @@ pub fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
     let of = |rows: &[Row], class: RowClass| rows.iter().filter(|r| r.class == class).count();
     RowCounts {
         missing: missing.len(),
-        missing_expected: of(missing, RowClass::CreatedInWindow) + of(missing, RowClass::LoadError),
+        missing_expected: of(missing, RowClass::CreatedInWindow)
+            + of(missing, RowClass::LoadError)
+            + of(missing, RowClass::BoundaryProbe),
         missing_unexplained: of(missing, RowClass::Unexplained),
         extra: extra.len(),
         extra_expected: of(extra, RowClass::DeletedInWindow) + of(extra, RowClass::LoadError),
@@ -446,8 +460,9 @@ fn missing_class(
         .into_iter()
         .map(|n| missing_node_class(n, trees, applied_paths, errors))
         .max_by_key(|c| match c {
-            RowClass::CreatedInWindow => 2,
-            RowClass::LoadError => 1,
+            RowClass::CreatedInWindow => 3,
+            RowClass::LoadError => 2,
+            RowClass::BoundaryProbe => 1,
             _ => 0,
         })
         .unwrap_or(RowClass::Unexplained)
@@ -471,7 +486,27 @@ fn missing_node_class(
     if package.is_some_and(|p| errors.excuses_missing(&p)) {
         return RowClass::LoadError;
     }
+    // The probe is only a probe in a directory that is there to be probed;
+    // a row for a file under a directory that exists nowhere is still
+    // unexplained.
+    if matches!(name.kind, Kind::File | Kind::FileState)
+        && path.as_deref().is_some_and(|p| {
+            let dir = p.rsplit_once('/').map_or("", |(d, _)| d);
+            is_boundary_probe(p) && !exists(to, p) && (dir.is_empty() || is_dir(to, dir))
+        })
+    {
+        return RowClass::BoundaryProbe;
+    }
     RowClass::Unexplained
+}
+
+/// Whether a path is one Bazel stats in a directory without anyone naming
+/// it: a repository boundary marker, or the other spelling of a `BUILD` file.
+fn is_boundary_probe(p: &str) -> bool {
+    matches!(
+        p.rsplit_once('/').map_or(p, |(_, f)| f),
+        "WORKSPACE" | "WORKSPACE.bazel" | "WORKSPACE.bzlmod" | "REPO.bazel" | "MODULE.bazel" | "BUILD" | "BUILD.bazel"
+    )
 }
 
 /// The directory created inside the window that `p` sits under: the
@@ -666,6 +701,42 @@ mod tests {
     }
 
     /// (iii) A path that existed at the base had every chance to be written.
+    #[test]
+    fn a_probe_for_a_boundary_file_that_does_not_exist_is_expected() {
+        // Bazel's stat of `lib/WORKSPACE.bazel` while deciding whether `lib`
+        // is a repository, and of `lib/BUILD.bazel` beside `lib/BUILD`.
+        // Neither exists at either end; a source file that does not exist
+        // is still unexplained, and a probe for a file that *does* exist is
+        // a real row.
+        let d = diff(
+            vec![
+                SkyItem::Node(name(Kind::FileState, "lib/WORKSPACE.bazel")),
+                SkyItem::Node(name(Kind::File, "lib/BUILD.bazel")),
+                SkyItem::Node(name(Kind::File, "lib/gone.cc")),
+                SkyItem::Node(name(Kind::File, "lib/BUILD")),
+            ],
+            vec![],
+        );
+        let (m, _) = classify(
+            &d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(&[]),
+            &errs(&[]),
+        );
+        assert_eq!(
+            classes(&m),
+            vec![
+                RowClass::BoundaryProbe,
+                RowClass::BoundaryProbe,
+                RowClass::Unexplained,
+                RowClass::Unexplained
+            ]
+        );
+        let c = counts(&m, &[]);
+        assert_eq!((c.missing, c.missing_expected, c.missing_unexplained), (4, 2, 2));
+    }
+
     #[test]
     fn a_path_present_at_the_base_is_unexplained() {
         let d = diff(vec![SkyItem::Node(name(Kind::File, "lib/a.cc"))], vec![]);

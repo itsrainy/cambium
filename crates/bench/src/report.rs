@@ -430,6 +430,7 @@ mod tests {
                 summary: String::new(),
                 rows: None,
                 sky: Default::default(),
+                rule_hash_mismatch: Vec::new(),
             }),
             head_index: None,
             summary: WalkSummary::default(),
