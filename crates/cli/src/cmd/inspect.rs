@@ -549,6 +549,11 @@ struct ExternalsRepo {
     path_maps: Vec<String>,
     /// `(pattern, feeds the rule)`.
     inputs: Vec<(String, bool)>,
+    /// External repositories whose rules depend on this (indexed) one, each
+    /// with the packages of it they depend on: `grpc: envoy/config/core/v3,
+    /// ...`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consumers: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -596,6 +601,13 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
                         m.to,
                         if m.exhaustive { " (exhaustive)" } else { "" }
                     )
+                })
+                .collect(),
+            consumers: v
+                .repo_consumers(r)
+                .iter()
+                .map(|(c, pkgs)| {
+                    format!("{c}: {}", pkgs.iter().cloned().collect::<Vec<_>>().join(", "))
                 })
                 .collect(),
             inputs: inputs.remove(&r).unwrap_or_default(),
@@ -651,6 +663,9 @@ fn print_externals(d: &ExternalsDump) {
         );
         for m in &r.path_maps {
             println!("  map     {m}");
+        }
+        for c in &r.consumers {
+            println!("  consumer {c}");
         }
         for (p, feeds) in &r.inputs {
             println!(

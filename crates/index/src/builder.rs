@@ -186,6 +186,14 @@ impl BzlClosure {
             if o != crate::externals::RepoOrigin::default() {
                 inputs.origins.insert(name.clone(), o);
             }
+            // And the consumers, which only a cold build's Bazel can say and
+            // every splice has to carry.
+            let consumers = v.repo_consumers(r);
+            if !consumers.is_empty() {
+                inputs
+                    .consumers
+                    .insert(name.clone(), consumers.into_iter().collect());
+            }
             inputs.repos.insert(name);
         }
         for p in 0..v.repo_input_patterns.len() as u32 {
@@ -915,6 +923,9 @@ impl<'a> IndexBuilder<'a> {
             repo_map_bytes: bzl.repo_map_bytes,
             repo_map_offsets: bzl.repo_map_offsets,
             repo_map_ranges: bzl.repo_map_ranges,
+            repo_consumer_bytes: bzl.repo_consumer_bytes,
+            repo_consumer_offsets: bzl.repo_consumer_offsets,
+            repo_consumer_ranges: bzl.repo_consumer_ranges,
             repo_boundary_bytes,
             repo_boundary_offsets,
             repo_boundary_ignored,
@@ -977,6 +988,9 @@ struct BzlTables {
     repo_map_bytes: Vec<u8>,
     repo_map_offsets: Vec<u32>,
     repo_map_ranges: Vec<u32>,
+    repo_consumer_bytes: Vec<u8>,
+    repo_consumer_offsets: Vec<u32>,
+    repo_consumer_ranges: Vec<u32>,
 }
 
 impl BzlTables {
@@ -998,6 +1012,8 @@ impl BzlTables {
             bzl_repo_offsets: vec![0],
             repo_map_offsets: vec![0],
             repo_map_ranges: vec![0],
+            repo_consumer_offsets: vec![0],
+            repo_consumer_ranges: vec![0],
             ..Default::default()
         }
     }
@@ -1139,6 +1155,22 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
             }
         }
         t.repo_map_ranges.push(t.repo_map_offsets.len() as u32 - 1);
+        // The external consumers of this repository, one run per repo id in
+        // the same order; empty for a repository nothing consumes.
+        if let Some(consumers) = c.inputs.consumers.get(*n) {
+            for (consumer, pkgs) in consumers {
+                let mut entry = consumer.clone();
+                for p in pkgs {
+                    entry.push('\0');
+                    entry.push_str(p);
+                }
+                t.repo_consumer_bytes.extend_from_slice(entry.as_bytes());
+                t.repo_consumer_offsets
+                    .push(t.repo_consumer_bytes.len() as u32);
+            }
+        }
+        t.repo_consumer_ranges
+            .push(t.repo_consumer_offsets.len() as u32 - 1);
     }
     for (pat, repos) in &c.inputs.patterns {
         let mut row: Vec<u32> = repos.iter().filter_map(|r| repo_id(r)).collect();

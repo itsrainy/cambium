@@ -6,7 +6,7 @@
 //! unflattened selects, implicit deps left in — and are the only Bazel surface
 //! cambium depends on.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -151,6 +151,31 @@ impl LoadErrors {
 
 /// How many failing package names an outcome keeps.
 pub const MAX_ERROR_PACKAGES: usize = 32;
+
+/// The repository token of a label as Bazel printed it, without its `@`s:
+/// `grpc+` for `@@grpc+//src/core:x`, `grpc` for `@grpc//:grpc`. `None` for
+/// a main-repository label.
+pub fn label_repo_token(label: &str) -> Option<&str> {
+    let rest = label.strip_prefix('@')?;
+    let rest = rest.strip_prefix('@').unwrap_or(rest);
+    let (repo, _) = rest.split_once("//")?;
+    (!repo.is_empty()).then_some(repo)
+}
+
+/// The apparent name a canonical repository token most likely carries, for a
+/// token read off a label rather than the repository mapping: `grpc+` is
+/// `grpc` (a `bazel_dep`), `+ext+name` is `name` (an extension-generated
+/// repository), and a token with no `+` is already apparent (WORKSPACE
+/// mode). The walk matches either spelling against the index's names
+/// ([`crate::repo_token_matches`]), so a guess that is wrong costs a
+/// consumer that never dirties, never a wrong one.
+pub fn apparent_of_canonical(token: &str) -> String {
+    match token.rsplit_once('+') {
+        Some((_, tail)) if !tail.is_empty() => tail.to_string(),
+        Some((head, _)) => head.rsplit('+').next().unwrap_or(head).to_string(),
+        None => token.to_string(),
+    }
+}
 
 /// The package part of a `@R//pkg` line, if `R` is the repository `repo`
 /// names, in either spelling Bazel prints.
@@ -919,6 +944,85 @@ impl Bazel {
         })
     }
 
+    /// The external repositories whose rules depend on `repo`'s targets, and
+    /// the packages of `repo` they depend on.
+    ///
+    /// Two queries at cold build, for an in-tree repository the universe was
+    /// widened by. The first is the bridge: every rule Bazel reaches from
+    /// `//...` on its way down to `@repo//...`, less the two ends,
+    /// `kind(rule, rdeps(//..., @repo//...:*)) except //... except
+    /// @repo//...:*`. On envoy at its pin that is 101 rules, all of `@grpc`:
+    /// its xDS client is built from the API's protos. The second is what the
+    /// bridge depends on directly inside `@repo`, `deps(set(bridge), 1)
+    /// intersect @repo//...:*`, whose packages say which of the repository's
+    /// packages a consumer cares about. The packages are pooled across
+    /// consumers rather than split per consumer (one query, not one per
+    /// consumer), which is exact when there is one consumer and wide when
+    /// there are several.
+    ///
+    /// Bazel prints canonical names (`@@grpc+//...`); the consumer is recorded
+    /// by its apparent name, which is how the index names repositories and
+    /// how the walk matches labels ([`apparent_of_canonical`]).
+    ///
+    /// Best-effort: a query that will not run is a debug line and `None`, and
+    /// the caller keeps the index it was building, without the table.
+    pub fn consumer_bridge(&self, repo: &str) -> Option<Vec<(String, BTreeSet<String>)>> {
+        let run = |expr: String| -> Option<Vec<String>> {
+            let mut cmd = self.command("query");
+            cmd.arg(&expr).arg("--output=label").arg("--keep_going");
+            for f in HYGIENE {
+                cmd.arg(f);
+            }
+            let o = match self.runner.output(&mut cmd) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::debug!(error = %e, repo, "the consumer query could not run");
+                    return None;
+                }
+            };
+            if !o.exit.success && o.exit.code != Some(3) {
+                tracing::debug!(status = %o.exit, repo, expr, "the consumer query failed");
+                return None;
+            }
+            Some(
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            )
+        };
+        let bridge = run(format!(
+            "kind(rule, rdeps(//..., @{repo}//...:*)) except //... except @{repo}//...:*"
+        ))?;
+        if bridge.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut consumers: BTreeSet<String> = BTreeSet::new();
+        for l in &bridge {
+            if let Some(name) = label_repo_token(l) {
+                consumers.insert(apparent_of_canonical(name));
+            }
+        }
+        let set = bridge
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let used = run(format!("deps(set({set}), 1) intersect @{repo}//...:*")).unwrap_or_default();
+        let packages: BTreeSet<String> = used
+            .iter()
+            .filter_map(|l| package_of_repo(l, repo))
+            .collect();
+        Some(
+            consumers
+                .into_iter()
+                .map(|c| (c, packages.clone()))
+                .collect(),
+        )
+    }
+
     /// `bazel query '//external:*' --output=build`, which prints every
     /// repository the WORKSPACE evaluation declared, rule kind and attributes
     /// and all.
@@ -1612,4 +1716,25 @@ pub struct RepoProbe {
     pub repo: String,
     pub packages: Vec<String>,
     pub load_error: bool,
+}
+
+#[cfg(test)]
+mod consumer_tests {
+    use super::{apparent_of_canonical, label_repo_token};
+
+    #[test]
+    fn a_labels_repository_token_is_read_in_either_spelling() {
+        assert_eq!(label_repo_token("@@grpc+//src/core:x"), Some("grpc+"));
+        assert_eq!(label_repo_token("@grpc//:grpc"), Some("grpc"));
+        assert_eq!(label_repo_token("//a:b"), None);
+        assert_eq!(label_repo_token("@@//a:b"), None);
+    }
+
+    #[test]
+    fn a_canonical_token_gives_back_its_apparent_name() {
+        assert_eq!(apparent_of_canonical("grpc+"), "grpc");
+        assert_eq!(apparent_of_canonical("grpc"), "grpc");
+        assert_eq!(apparent_of_canonical("+xla_extension+tsl"), "tsl");
+        assert_eq!(apparent_of_canonical("envoy_toolshed++llvm_ext+llvm"), "llvm");
+    }
 }

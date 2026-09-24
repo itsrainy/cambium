@@ -110,7 +110,10 @@ use serde::{Deserialize, Serialize};
 ///   source file of one of them, so no package of theirs was re-queried and
 ///   no label of theirs seeded; the changed files reach their consumers by
 ///   label. Purely additive.
-pub const SCHEMA_VERSION: u32 = 13;
+/// - **14** adds `stats.repos_dirty_by_consumer`: external repositories
+///   dirtied because an indexed repository their rules depend on moved,
+///   read from the index's consumer table (format 13). Purely additive.
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -295,6 +298,12 @@ pub struct Stats {
     /// edit does.
     #[serde(default)]
     pub repos_settled: usize,
+    /// External repositories dirtied because an indexed repository they
+    /// consume moved (`RepoInputs::consumers`): envoy's `@grpc` on a change
+    /// under `api/`. Their leaves seed the walk, as any dirty repository's
+    /// do.
+    #[serde(default)]
+    pub repos_dirty_by_consumer: usize,
     /// Targets in those repositories that the main repository names, and whose
     /// consumers were therefore made direct.
     #[serde(default)]

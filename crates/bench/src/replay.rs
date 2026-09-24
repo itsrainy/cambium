@@ -609,6 +609,17 @@ pub fn rederive_externals(
             }
         }
     }
+    // Nor who consumes an indexed repository: Bazel's answer at index time
+    // (`RepoInputs::consumers`), carried as the stored table.
+    for r in 0..base.num_repos() {
+        let cs = base.repo_consumers(r);
+        if !cs.is_empty() {
+            closure
+                .inputs
+                .consumers
+                .insert(base.repo_name(r).to_string(), cs.into_iter().collect());
+        }
+    }
     builder.set_bzl_closure(closure);
     Ok(builder.finish(rev))
 }

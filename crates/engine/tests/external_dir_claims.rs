@@ -33,6 +33,10 @@ const MODULE_BAZEL: &str = "module(name = \"xla\")\n\
      use_repo(tsl_extension, \"tsl\")\n";
 
 fn rows(pkg: &str) -> PackageUpdate {
+    super_rows(pkg)
+}
+
+fn super_rows(pkg: &str) -> PackageUpdate {
     let targets = match pkg {
         "lib" => vec![TargetRow::rule(
             "//lib:lib",
@@ -148,6 +152,79 @@ fn a_claim_bazels_own_package_list_agrees_with_maps_the_directory() {
             "@tsl//tsl/platform:dso_loader".to_string()
         ]
     );
+}
+
+/// envoy's grpc route. `//gapp:gapp` links `@grpc//:grpc`, a leaf with no
+/// outgoing edges; grpc's rules are built from `@tsl//tsl/platform`'s
+/// targets, which only Bazel can say (`consumer_repos`). A modified source
+/// file of that package settles `@tsl` and re-queries nothing, and the
+/// consumer table is what carries the change on to `@grpc`'s consumers: the
+/// table names `grpc` dirty, rule (1) seeds `@grpc//:grpc`, and `//gapp:gapp`
+/// is reached. A consumer that depends on none of the packages that moved
+/// stays clean.
+#[test]
+fn a_consumer_of_a_moved_indexed_repository_is_reached_through_its_leaf() {
+    let dir = tree();
+    let root = dir.path();
+    let rows = |pkg: &str| match pkg {
+        "gapp" => PackageUpdate {
+            package: pkg.to_string(),
+            targets: vec![TargetRow::rule(
+                "//gapp:gapp",
+                "demo_lib",
+                vec!["@grpc//:grpc".into()],
+            )],
+            ..Default::default()
+        },
+        other => super_rows(other),
+    };
+    let scanning = |consumed: &[&str]| {
+        let mut m = BTreeMap::new();
+        m.insert("MODULE.bazel".to_string(), MODULE_BAZEL.to_string());
+        m.insert("third_party/repo.bzl".to_string(), REPO_BZL.to_string());
+        m.insert("app/BUILD".to_string(), String::new());
+        m.insert("lib/BUILD".to_string(), String::new());
+        m.insert("gapp/BUILD".to_string(), String::new());
+        Scanning::new(&["app", "lib", "gapp", "@tsl//tsl/platform"], rows)
+            .with_files(Files(m))
+            .with_workspace(root)
+            .with_repo_probe("tsl", PROBED, false)
+            .with_repo_consumers("tsl", "grpc", consumed)
+    };
+    let changes = vec![Change::new(
+        Status::Modified,
+        "third_party/tsl/tsl/platform/x.cc",
+    )];
+    for (consumed, reached) in [(&["tsl/platform"][..], true), (&["tsl/other"][..], false)] {
+        let q = scanning(consumed);
+        let index = engine().full_build_with("c0", &q).unwrap();
+        let v = index.view();
+        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        assert_eq!(
+            v.repo_consumers(tsl),
+            vec![(
+                "grpc".to_string(),
+                consumed.iter().map(|p| p.to_string()).collect()
+            )],
+            "the table is in the index"
+        );
+        let r = engine()
+            .compute_with_texts(v, &changes, &q, &req(), &FixedText(BTreeMap::new()))
+            .unwrap()
+            .report;
+        assert!(!r.global, "{:?}", r.global_reason);
+        assert_eq!(r.stats.repos_settled, 1);
+        assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+        assert_eq!(r.stats.repos_dirty_by_consumer, usize::from(reached), "{consumed:?}");
+        let affected = r.affected_labels();
+        assert_eq!(
+            affected.contains(&"//gapp:gapp".to_string()),
+            reached,
+            "{consumed:?}: {affected:?}"
+        );
+        // The rest of the answer is the one the settled repository gives.
+        assert!(affected.contains(&"//app:app".to_string()), "{affected:?}");
+    }
 }
 
 /// A settled repository is decided from the shape of every path that

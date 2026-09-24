@@ -1,6 +1,6 @@
 //! The run: load a baseline, work out what is dirty, re-query it, splice, walk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cambium_bazel::Bazel;
@@ -549,7 +549,7 @@ impl Engine {
         {
             b.set_sky_layer(l);
         }
-        if let Some(c) = crate::bzl::rescan_closure(
+        if let Some(mut c) = crate::bzl::rescan_closure(
             q,
             None,
             &packages,
@@ -559,8 +559,20 @@ impl Engine {
             crate::bzl::InTreeRepos {
                 confirmed: &confirmed,
                 indexed: &indexed,
+                consumers: &BTreeMap::new(),
             },
         ) {
+            // Who consumes each indexed repository, asked of Bazel last: two
+            // queries per repository, after the dump and the closure's own
+            // commands, on the server they leave behind.
+            c.inputs.consumers = q.consumer_repos(&indexed);
+            for (r, cs) in &c.inputs.consumers {
+                tracing::debug!(
+                    repo = %r,
+                    consumers = ?cs.keys().collect::<Vec<_>>(),
+                    "external repositories consume an indexed repository"
+                );
+            }
             b.set_bzl_closure(c);
         }
         Ok(b.finish(commit))

@@ -315,7 +315,7 @@ for the repository before a boundary is mapped by it
 (`crates/engine/src/repos.rs`), which is `CAMBI-W025` and `CAMBI-W026` when
 it is not; a `.bazelrc` line that sets an external repository's build
 setting to a target of this tree is an input of that repository
-(`CAMBI-W027`). Index `FORMAT_VERSION` is 12. `cambium-bench walk --only`
+(`CAMBI-W027`). Index `FORMAT_VERSION` is 13. `cambium-bench walk --only`
 landed with it, so a named step of a gate can be rerun without the history.
 Steps 2 through 5 of the plan (extending the universe to `@repo//...`,
 walking back through it, the gate, the cost measurement) are not done, and

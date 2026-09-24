@@ -18,7 +18,7 @@
 //! - [`published_fixture`], a git history with an index published for one of
 //!   its commits, for the two command-line contracts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -272,6 +272,7 @@ pub struct Scanning {
     /// What the repository probe answers, per repository, and which
     /// repositories it has been asked about.
     repo_probes: BTreeMap<String, cambium_bazel::RepoProbe>,
+    repo_consumers: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     probed: std::sync::Mutex<Vec<String>>,
     /// The `--skykey_filter` of every loading-layer dump this querier was
     /// asked for, in order. A dump is the most expensive thing an incremental
@@ -310,6 +311,7 @@ impl Scanning {
             workspace: None,
             external_rules: None,
             repo_probes: BTreeMap::new(),
+            repo_consumers: BTreeMap::new(),
             probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
             hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
@@ -374,6 +376,19 @@ impl Scanning {
 
     /// The repositories the engine has probed, in order. Empty means no
     /// probe ran.
+    /// Answer `consumer_repos` with: `consumer`'s rules depend on these
+    /// packages of the indexed repository `repo`.
+    pub fn with_repo_consumers(mut self, repo: &str, consumer: &str, packages: &[&str]) -> Self {
+        self.repo_consumers
+            .entry(repo.to_string())
+            .or_default()
+            .insert(
+                consumer.to_string(),
+                packages.iter().map(|p| p.to_string()).collect(),
+            );
+        self
+    }
+
     pub fn probed(&self) -> Vec<String> {
         self.probed.lock().unwrap().clone()
     }
@@ -475,6 +490,16 @@ impl PackageQuerier for Scanning {
 
     fn external_rules(&self) -> Option<String> {
         self.external_rules.clone()
+    }
+
+    fn consumer_repos(
+        &self,
+        indexed: &[String],
+    ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+        indexed
+            .iter()
+            .filter_map(|r| self.repo_consumers.get(r).map(|c| (r.clone(), c.clone())))
+            .collect()
     }
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {

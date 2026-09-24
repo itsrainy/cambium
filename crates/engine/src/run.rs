@@ -723,6 +723,8 @@ impl<'a> Run<'a> {
         if !dirty.global && !ext.repos.is_empty() {
             settled = settled_repos(self.base, ext, changes, &packages);
             self.stats.repos_settled = settled.len();
+            self.stats.repos_dirty_by_consumer =
+                dirty_consumers(self.base, ext, &settled, &packages);
             let r = crate::externals::reach(self.base, &ext.repos, &ext.load_repos, &settled);
             tracing::debug!(
                 repos = ?ext.repos,
@@ -1251,6 +1253,7 @@ impl<'a> Run<'a> {
                 &crate::bzl::dirs(&boundaries),
                 bzl::InTreeRepos {
                     confirmed: &confirmed_repos(base),
+                    consumers: &consumers_of(base),
                     indexed: &base.indexed_repos(),
                 },
             ) {
@@ -1804,6 +1807,105 @@ fn indexed_repo_dirs(base: IndexRef<'_>) -> Vec<(String, String)> {
                 .then(|| (name.to_string(), format!("{dir}/")))
         })
         .collect()
+}
+
+/// The external-consumer table of an index, as `RepoInputs::consumers`
+/// holds it, for the splice to carry forward.
+fn consumers_of(base: IndexRef<'_>) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+    (0..base.num_repos())
+        .filter_map(|r| {
+            let cs = base.repo_consumers(r);
+            (!cs.is_empty()).then(|| (base.repo_name(r).to_string(), cs.into_iter().collect()))
+        })
+        .collect()
+}
+
+/// Dirties the external repositories that consume a dirty indexed one, and
+/// says how many it dirtied.
+///
+/// The return path. `//app:test` links `@grpc//:grpc`; grpc's xDS client is
+/// built from `@envoy_api` protos; a `.proto` under `api/` therefore moves
+/// the test. The index holds the first edge as a leaf with no outgoing edges
+/// and the second not at all, so the reverse walk from the proto ends at
+/// `@envoy_api`. The table the cold build asked Bazel for
+/// (`RepoInputs::consumers`) names `grpc` as a consumer of `envoy_api` and
+/// the API packages it consumes; here each consumer is marked dirty when a
+/// package it consumes moved, and `externals::reach` rule (1) then seeds
+/// its leaves, which is the same answer the walk gives any dirty
+/// repository nothing indexes. Box run C measured 510 labels missing on
+/// one such step with recall 0.21; Bazel's own `rdeps` for the proto is
+/// exactly the consumers of `@grpc//:grpc`.
+///
+/// Which packages of the indexed repository moved: for a settled repository
+/// (`settled_repos`), the packages of the changed paths under its directory,
+/// by the same join the splice uses; for one that is not settled (a `BUILD`
+/// or `.bzl` moved, or a `MODULE.bazel` edit named it), every package, since
+/// what its rules will look like is not known until they are re-queried.
+fn dirty_consumers(
+    base: IndexRef<'_>,
+    ext: &mut Externals,
+    settled: &BTreeSet<String>,
+    packages: &PackageSet,
+) -> usize {
+    let indexed_dirs = indexed_repo_dirs(base);
+    let mut added = 0;
+    for r in 0..base.num_repos() {
+        let name = base.repo_name(r);
+        if !ext.repos.contains(name) {
+            continue;
+        }
+        let consumers = base.repo_consumers(r);
+        if consumers.is_empty() {
+            continue;
+        }
+        let paths: Vec<String> = ext.dirtied_by.get(name).cloned().unwrap_or_default();
+        // The packages the change touched, by their part inside the
+        // repository; `None` means every package.
+        let touched: Option<BTreeSet<String>> = if settled.contains(name) {
+            let one: Vec<(String, String)> = indexed_dirs
+                .iter()
+                .filter(|(rr, _)| rr == name)
+                .cloned()
+                .collect();
+            Some(
+                paths
+                    .iter()
+                    .flat_map(|p| external_labels(packages, &one, p))
+                    .filter_map(|l| {
+                        cambium_index::label::Label::parse(&l).map(|l| l.package().to_string())
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        for (consumer, consumed) in consumers {
+            let moved = match &touched {
+                Some(t) => t.iter().any(|p| consumed.contains(p)),
+                None => true,
+            };
+            if !moved {
+                tracing::debug!(
+                    repo = %name,
+                    %consumer,
+                    "a consumer of a settled repository depends on none of the packages that moved"
+                );
+                continue;
+            }
+            if ext.repos.insert(consumer.clone()) {
+                added += 1;
+                tracing::debug!(
+                    repo = %name,
+                    %consumer,
+                    "an external repository that consumes a moved indexed repository is dirty"
+                );
+            }
+            for p in &paths {
+                ext.name(p, std::iter::once(&consumer));
+            }
+        }
+    }
+    added
 }
 
 /// The labels a changed path has inside the in-tree repositories whose

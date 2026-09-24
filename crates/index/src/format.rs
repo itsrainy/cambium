@@ -134,12 +134,21 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// that folding an unrelated column removal into it would make a bisect over
 /// a bad index harder than it needs to be.
 ///
+/// Format 13 added the external-consumer table (`repo_consumer_*`): per
+/// indexed repository, the external repositories whose rules depend on its
+/// targets and the packages of it they depend on, asked of Bazel once at cold
+/// build. It is what routes a change under envoy's `api/` to the tests that
+/// link `@grpc//:grpc`, whose xDS client consumes the API's protos: the leaf
+/// has no outgoing edges, so without the table the return path into
+/// `@envoy_api` did not exist and box run C measured recall 0.21 on such a
+/// step.
+///
 /// Compression is outside this version. A file holds either the layout
 /// verbatim or one zstd frame containing it (see the module docs); this
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means

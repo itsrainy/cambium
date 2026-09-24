@@ -328,6 +328,17 @@ pub struct IndexData {
     pub repo_map_offsets: Vec<u32>,
     pub repo_map_ranges: Vec<u32>,
 
+    // ---- external consumers of an indexed repository (format 13) ----
+    //
+    // `repo_consumer_entries` is a string table of `consumer\0pkg\0pkg...`
+    // runs (the consumer repository's apparent name, then the packages of
+    // the indexed repository its rules depend on); `repo_consumer_ranges`
+    // cuts it into one run per repo id, the id being the *indexed*
+    // repository's. See `RepoInputs::consumers`.
+    pub repo_consumer_bytes: Vec<u8>,
+    pub repo_consumer_offsets: Vec<u32>,
+    pub repo_consumer_ranges: Vec<u32>,
+
     // ---- repository boundaries in the main repository's tree (format 9) ----
     //
     // Directories below the root that carry a `WORKSPACE`, `WORKSPACE.bazel`,
@@ -457,6 +468,11 @@ pub struct IndexRef<'a> {
     pub repo_maps: StrTabRef<'a>,
     /// Repo id -> its run in [`IndexRef::repo_maps`]; length `num_repos + 1`.
     pub repo_map_ranges: &'a [u32],
+    /// `consumer\0pkg\0pkg...` runs, grouped by the indexed repo's id.
+    pub repo_consumers: StrTabRef<'a>,
+    /// Repo id -> its run in [`IndexRef::repo_consumers`]; length
+    /// `num_repos + 1`.
+    pub repo_consumer_ranges: &'a [u32],
     /// Directories of the main repository's tree that are Bazel repositories
     /// of their own, sorted, without a trailing slash.
     pub repo_boundaries: StrTabRef<'a>,
@@ -488,6 +504,7 @@ impl<'a> IndexRef<'a> {
             ("repo_origin_evidence", self.repo_origin_evidence),
             ("repo_input_patterns", self.repo_input_patterns),
             ("repo_maps", self.repo_maps),
+            ("repo_consumers", self.repo_consumers),
             ("repo_boundaries", self.repo_boundaries),
             ("sky_roots", self.sky.roots),
             ("sky_keys", self.sky.keys),
@@ -839,6 +856,24 @@ impl<'a> IndexRef<'a> {
             .collect()
     }
 
+    /// The external repositories whose rules depend on this (indexed)
+    /// repository's targets, each with the packages of it they depend on.
+    /// Empty for a repository nothing outside `//...` consumes, and for
+    /// every index written before format 13.
+    pub fn repo_consumers(&self, repo: u32) -> Vec<(String, std::collections::BTreeSet<String>)> {
+        let i = repo as usize;
+        if i + 1 >= self.repo_consumer_ranges.len() {
+            return Vec::new();
+        }
+        (self.repo_consumer_ranges[i]..self.repo_consumer_ranges[i + 1])
+            .filter_map(|e| {
+                let mut parts = self.repo_consumers.get(e).split('\0');
+                let consumer = parts.next()?.to_string();
+                Some((consumer, parts.map(str::to_string).collect()))
+            })
+            .collect()
+    }
+
     /// The directories of this tree that are Bazel repositories of their own,
     /// and which `//...` therefore never loaded a package under. Sorted, and
     /// without a trailing slash. Empty for an index built before the walk
@@ -1033,6 +1068,11 @@ macro_rules! index_view {
                 offsets: $u32s(&$d.repo_map_offsets),
             },
             repo_map_ranges: $u32s(&$d.repo_map_ranges),
+            repo_consumers: StrTabRef {
+                bytes: &$d.repo_consumer_bytes,
+                offsets: $u32s(&$d.repo_consumer_offsets),
+            },
+            repo_consumer_ranges: $u32s(&$d.repo_consumer_ranges),
             repo_boundaries: StrTabRef {
                 bytes: &$d.repo_boundary_bytes,
                 offsets: $u32s(&$d.repo_boundary_offsets),

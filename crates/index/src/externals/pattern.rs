@@ -322,6 +322,15 @@ pub struct RepoInputs {
     /// An unconfirmed candidate changes no answer: the boundary keeps the
     /// wide treatment it has today.
     pub dir_candidates: BTreeMap<String, DirCandidate>,
+    /// Indexed repository -> the external repositories whose rules depend on
+    /// its targets, each with the packages of it they depend on. Asked of
+    /// Bazel once at cold build (`kind(rule, rdeps(//..., @R//...:*))` less
+    /// `//...` and `@R//...`) and carried through every splice, since no text
+    /// this crate reads can say it. envoy at its pin: `envoy_api -> grpc`,
+    /// grpc's xDS client consuming 101 of the API's proto rules. Without it a
+    /// change under `api/` reached `@grpc//:grpc`'s consumers by nothing:
+    /// the leaf has no outgoing edges and the return path was invisible.
+    pub consumers: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// A `Dir` claim that has not been checked against Bazel yet.

@@ -211,6 +211,19 @@ pub trait PackageQuerier {
         Vec::new()
     }
 
+    /// Asks Bazel which external repositories consume each of these indexed
+    /// repositories, and through which of their packages
+    /// ([`cambium_bazel::Bazel::consumer_bridge`]). At cold build only, after
+    /// the loading-layer dump. A querier with no Bazel behind it knows of no
+    /// consumer, and a change under the repository then reaches only what
+    /// the index's own edges reach.
+    fn consumer_repos(
+        &self,
+        _indexed: &[String],
+    ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+        BTreeMap::new()
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a
@@ -412,6 +425,19 @@ impl PackageQuerier for BazelQuerier {
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
         repos.iter().filter_map(|r| self.bazel.probe_repo(r)).collect()
+    }
+
+    fn consumer_repos(
+        &self,
+        indexed: &[String],
+    ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+        indexed
+            .iter()
+            .filter_map(|r| {
+                let cs = self.bazel.consumer_bridge(r)?;
+                (!cs.is_empty()).then(|| (r.clone(), cs.into_iter().collect()))
+            })
+            .collect()
     }
 
     fn can_dump_loading_layer(&self) -> bool {

@@ -18,7 +18,7 @@
 //! That stage is unchanged, so its closure is rebuilt after every splice
 //! exactly as before.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::query::PackageQuerier;
 
@@ -34,6 +34,9 @@ use crate::query::PackageQuerier;
 pub(crate) struct InTreeRepos<'a> {
     pub confirmed: &'a BTreeSet<(String, String)>,
     pub indexed: &'a [String],
+    /// The external-consumer table to carry: the base index's on a splice,
+    /// empty at cold build, where the caller fills it from Bazel after.
+    pub consumers: &'a BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
 /// Recomputes the static `.bzl` load closure for the packages a run touched.
@@ -105,6 +108,9 @@ pub(crate) fn rescan_closure(
     let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs =
         cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts, boundaries);
+    // No text this reader has says who consumes an indexed repository; the
+    // table is Bazel's answer at cold build, carried through every splice.
+    c.inputs.consumers = repos.consumers.clone();
     // Bazel's own answer for what each nested repository is, in the
     // WORKSPACE world: `query //external:*`. It goes before the confirmation
     // loop because it is also where a WORKSPACE-mode claim's *candidate*
