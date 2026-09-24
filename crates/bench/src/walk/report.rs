@@ -59,6 +59,27 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             format!(" at {}", short_key(&s.soundness.worst_step))
         },
     );
+    if s.oracle_partial_steps > 0 {
+        let _ = writeln!(
+            out,
+            "The oracle's answer was a lower bound on {} of {} steps: Bazel could not resolve {}{}, \
+             and under `--keep_going` every target that depends on an unresolvable one leaves the \
+             `rdeps` universe, so recall is measured against what was left.",
+            s.oracle_partial_steps,
+            s.steps_with_oracle,
+            s.oracle_unresolved
+                .iter()
+                .take(8)
+                .map(|l| format!("`{l}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if s.oracle_unresolved.len() > 8 {
+                format!(" and {} more", s.oracle_unresolved.len() - 8)
+            } else {
+                String::new()
+            },
+        );
+    }
     if let Some(o) = &r.rebuild_oracle {
         let _ = write!(
             out,

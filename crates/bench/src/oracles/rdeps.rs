@@ -196,6 +196,18 @@ pub struct RdepsResult {
     /// How many batches came back partial.
     #[serde(default)]
     pub partial_batches: usize,
+    /// What Bazel said it could not resolve while answering, sorted, the
+    /// first [`MAX_UNRESOLVED`] of them: `no such package`, `no such
+    /// target`, a repository whose fetch failed
+    /// ([`bazel_query::unresolved_labels`]). This is what `partial` *is*:
+    /// under `--keep_going` every target that transitively depends on one of
+    /// these is dropped from the universe, and the answer is a lower bound
+    /// by exactly that much. Empty when the answer was whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
+    /// How many distinct unresolved labels there were, before the cap.
+    #[serde(default)]
+    pub unresolved_total: usize,
 }
 
 impl RdepsResult {
@@ -232,6 +244,9 @@ pub struct RdepsOracleSummary {
     /// Change sets with at least one partial batch.
     pub partial_change_sets: usize,
     pub partial_batches: usize,
+    /// Every label some change set's oracle could not resolve, unioned.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unresolved: BTreeSet<String>,
     /// Rules Bazel reached that cambium's answer did not contain. Must be
     /// zero; it is the count that gates the run.
     pub missing: usize,
@@ -258,6 +273,7 @@ impl RdepsOracleSummary {
         if o.partial {
             self.partial_change_sets += 1;
             self.partial_batches += o.partial_batches;
+            self.unresolved.extend(o.unresolved.iter().cloned());
         }
     }
 
@@ -373,11 +389,14 @@ impl RdepsOracle {
         result.roots = roots.clone();
 
         let mut answer = BTreeSet::new();
+        let mut unresolved: BTreeSet<String> = BTreeSet::new();
         for batch in batches(&roots, self.max_labels, self.max_expr_bytes) {
-            self.run_batch(bazel, batch, &mut answer, &mut result);
+            self.run_batch(bazel, batch, &mut answer, &mut unresolved, &mut result);
         }
 
         partition(answer, inputs.cambium, &mut result);
+        result.unresolved_total = unresolved.len();
+        result.unresolved = unresolved.into_iter().take(MAX_UNRESOLVED).collect();
         let (routes, unprobed) = external_routes(bazel, &result.roots, &result.missing);
         result.external_route = routes;
         result.route_unprobed = unprobed;
@@ -406,15 +425,21 @@ impl RdepsOracle {
         bazel: &Bazel,
         batch: &[String],
         answer: &mut BTreeSet<String>,
+        unresolved: &mut BTreeSet<String>,
         result: &mut RdepsResult,
     ) {
         result.batches += 1;
         match query_rdeps(bazel, batch) {
-            Ok(Batch { labels, partial }) => {
+            Ok(Batch {
+                labels,
+                partial,
+                unresolved: u,
+            }) => {
                 answer.extend(labels);
                 if partial {
                     result.partial = true;
                     result.partial_batches += 1;
+                    unresolved.extend(u);
                 }
             }
             Err(e) if batch.len() > 1 => {
@@ -427,8 +452,8 @@ impl RdepsOracle {
                     "rdeps batch failed; bisecting"
                 );
                 let (a, b) = batch.split_at(batch.len() / 2);
-                self.run_batch(bazel, a, answer, result);
-                self.run_batch(bazel, b, answer, result);
+                self.run_batch(bazel, a, answer, unresolved, result);
+                self.run_batch(bazel, b, answer, unresolved, result);
             }
             Err(e) => {
                 tracing::warn!(
@@ -549,6 +574,11 @@ fn gone_at_head(head: IndexRef<'_>, label: &str) -> bool {
 pub fn is_external(label: &str) -> bool {
     label.starts_with('@') || label.starts_with("//external:")
 }
+
+/// How many unresolved labels a result keeps by name. envoy at its pin has
+/// eleven distinct ones; the cap is against a repository whose every
+/// external dependency failed to fetch, where the count is the story.
+pub const MAX_UNRESOLVED: usize = 32;
 
 /// How many missing labels the external-route probe is willing to ask Bazel
 /// about.
@@ -717,6 +747,7 @@ pub fn rdeps_expression(roots: &[String]) -> String {
 struct Batch {
     labels: BTreeSet<String>,
     partial: bool,
+    unresolved: BTreeSet<String>,
 }
 
 /// Runs one batched `rdeps` query.
@@ -734,15 +765,21 @@ struct Batch {
 /// [`RdepsOracle::run_batch`].
 fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     let expr = rdeps_expression(roots);
-    let (labels, partial) = bazel_query::labels(bazel, &expr, &crate::tools::tail(&expr, 1))?;
-    if partial {
+    let a = bazel_query::answer(bazel, &expr, &crate::tools::tail(&expr, 1))?;
+    if a.partial {
         tracing::warn!(
             roots = roots.len(),
-            labels = labels.len(),
+            labels = a.labels.len(),
+            unresolved = a.unresolved.len(),
+            first = a.unresolved.iter().next().map(String::as_str).unwrap_or(""),
             "the rdeps query exited 3 under --keep_going; the oracle answer for this batch is a lower bound"
         );
     }
-    Ok(Batch { labels, partial })
+    Ok(Batch {
+        labels: a.labels,
+        partial: a.partial,
+        unresolved: a.unresolved,
+    })
 }
 
 /// Every rule target `//...` names, at whatever revision the workspace is on.

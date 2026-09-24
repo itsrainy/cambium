@@ -52,6 +52,25 @@ pub fn parse_labels(out: &str) -> BTreeSet<String> {
 /// `what` names the query in the error, since an expression can be a hundred
 /// thousand characters of `rdeps` union.
 pub fn labels(bazel: &Bazel, expr: &str, what: &str) -> Result<(BTreeSet<String>, bool)> {
+    let a = answer(bazel, expr, what)?;
+    Ok((a.labels, a.partial))
+}
+
+/// What one `--output=label` query said, and what it could not say.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answer {
+    pub labels: BTreeSet<String>,
+    /// Exit 3: finished with errors, the answer a lower bound.
+    pub partial: bool,
+    /// The labels Bazel reported it could not resolve, from stderr: a
+    /// package or target that does not exist, or a repository whose fetch
+    /// failed. See [`unresolved_labels`] for why this is the whole story of
+    /// a partial answer.
+    pub unresolved: BTreeSet<String>,
+}
+
+/// `bazel query <expr> --output=label`, with what it could not resolve.
+pub fn answer(bazel: &Bazel, expr: &str, what: &str) -> Result<Answer> {
     let out = bazel
         .command("query")
         .arg(expr)
@@ -60,13 +79,77 @@ pub fn labels(bazel: &Bazel, expr: &str, what: &str) -> Result<(BTreeSet<String>
         .output()
         .with_context(|| format!("spawning bazel query {what}"))?;
     let partial = out.status.code() == Some(PARTIAL);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     anyhow::ensure!(
         out.status.success() || partial,
         "bazel query {what} failed with {}\n{}",
         out.status,
-        super::tail(&String::from_utf8_lossy(&out.stderr), 20)
+        super::tail(&stderr, 20)
     );
-    Ok((parse_labels(&String::from_utf8_lossy(&out.stdout)), partial))
+    Ok(Answer {
+        labels: parse_labels(&String::from_utf8_lossy(&out.stdout)),
+        partial,
+        unresolved: if partial {
+            unresolved_labels(&stderr)
+        } else {
+            BTreeSet::new()
+        },
+    })
+}
+
+/// The labels a `--keep_going` query said it could not resolve.
+///
+/// Why these matter more than the exit code: `bazel query` evaluates every
+/// `select` branch, so one `@perfetto//:perfetto` that does not exist (envoy
+/// names it under `//bazel:enable_perf_tracing`, and the module's overlay
+/// `BUILD.bazel` shadows the `BUILD` that defines it) is an error on the
+/// target that names it, and under `--keep_going` every target that
+/// transitively depends on an erroring target is dropped from the universe.
+/// On envoy that target is in `source/common/common`, so `rdeps(//..., x)`
+/// loses most of the tree and reports a fraction of the truth as a lower
+/// bound. The exit code says "partial"; these names say what was cut, and
+/// they are the same list step after step, so a run's report can print them
+/// once and a reader can judge the bound.
+///
+/// Three spellings, as Bazel prints them:
+///
+/// - `no such package '<label>': ...`
+/// - `no such target '<label>': ...`
+/// - `An error occurred during the fetch of repository '<canonical>':`
+///
+/// The first two carry a label; the third a canonical repository name, which
+/// is recorded as `@@<name>//` so it sorts and reads like the others. The
+/// `[unknown repo '<n>' requested from @@]` spelling inside a label is kept
+/// as Bazel wrote it.
+pub fn unresolved_labels(stderr: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in stderr.lines() {
+        for marker in ["no such package '", "no such target '"] {
+            if let Some(rest) = line.split_once(marker).map(|(_, r)| r) {
+                // The label ends at the quote Bazel closes it with, which is
+                // the one followed by `: ` and the reason; a label can carry
+                // quotes of its own (`[unknown repo 'x' requested from @@]`).
+                let end = rest.find("': ").or_else(|| rest.rfind('\''));
+                if let Some(end) = end {
+                    let label = &rest[..end];
+                    if !label.is_empty() {
+                        out.insert(label.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(rest) = line
+            .split_once("An error occurred during the fetch of repository '")
+            .map(|(_, r)| r)
+        {
+            if let Some(repo) = rest.split_once('\'').map(|(r, _)| r) {
+                if !repo.is_empty() {
+                    out.insert(format!("@@{repo}//"));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every rule proto `expr` yields, or `None` if the query could not be run at
@@ -103,6 +186,25 @@ pub fn rules(bazel: &Bazel, expr: &str) -> Option<Vec<Rule>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_labels_are_read_from_the_three_spellings() {
+        let err = "ERROR: /ws/source/common/common/BUILD:597:8: no such target '@@perfetto+//:perfetto': target 'perfetto' not declared in package ''\n\
+                   ERROR: /ws/x/BUILD:1:1: no such package '@@[unknown repo 'chrusty' requested from @@]//cmd': The repository could not be resolved\n\
+                   ERROR: /ob/external/bazel_tools/tools/build_defs/repo/http.bzl:159:45: An error occurred during the fetch of repository 'libpfm+':\n\
+                   WARNING: Download from https://x failed\n\
+                   ERROR: Evaluation of query \"rdeps(//..., set(//a:b))\" failed: errors were encountered while computing transitive closure\n";
+        let u = unresolved_labels(err);
+        assert_eq!(
+            u.into_iter().collect::<Vec<_>>(),
+            vec![
+                "@@[unknown repo 'chrusty' requested from @@]//cmd".to_string(),
+                "@@libpfm+//".to_string(),
+                "@@perfetto+//:perfetto".to_string(),
+            ]
+        );
+        assert!(unresolved_labels("INFO: nothing wrong\n").is_empty());
+    }
 
     #[test]
     fn labels_are_one_per_line_and_blank_lines_are_not_labels() {

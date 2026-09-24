@@ -11,7 +11,7 @@
 //! wall in the shape CI pays). cambium is a row in the per-tool tables, never
 //! the denominator: the oracle is ground truth for it too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -199,6 +199,15 @@ pub struct WalkSummary {
     /// Steps the engine answered with a whole-repository re-query. Not
     /// globals: the answer was exact.
     pub engine_cold_rebuilds: usize,
+    /// Steps whose oracle answer was a lower bound: some `rdeps` batch
+    /// exited 3 under `--keep_going`.
+    #[serde(default)]
+    pub oracle_partial_steps: usize,
+    /// What those steps' oracles could not resolve, unioned and sorted:
+    /// the same handful of labels step after step on a real subject, and
+    /// the thing a reader needs to judge how much the bound is short by.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oracle_unresolved: Vec<String>,
     pub pass: bool,
 }
 
@@ -217,6 +226,8 @@ impl Default for WalkSummary {
             cost: Cost::default(),
             globals: 0,
             engine_cold_rebuilds: 0,
+            oracle_partial_steps: 0,
+            oracle_unresolved: Vec::new(),
             pass: true,
         }
     }
@@ -355,6 +366,16 @@ pub fn summarise(
     s.steps_with_peers = peer_sample.len().min(steps.len());
     s.globals = steps.iter().filter(|st| st.global).count();
     s.engine_cold_rebuilds = steps.iter().filter(|st| st.cambium.cold_rebuild).count();
+
+    // What the oracle could not resolve, over the steps it ran on.
+    let mut unresolved: BTreeSet<String> = BTreeSet::new();
+    for o in steps.iter().filter_map(|st| st.oracle.as_ref()) {
+        if o.partial {
+            s.oracle_partial_steps += 1;
+            unresolved.extend(o.unresolved.iter().cloned());
+        }
+    }
+    s.oracle_unresolved = unresolved.into_iter().collect();
 
     // Soundness, from cambium's recall against the oracle.
     for st in steps.iter().filter(|st| st.oracle.is_some()) {

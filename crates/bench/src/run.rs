@@ -378,9 +378,14 @@ fn select_only(steps: &[crate::walk::Step], specs: &[String]) -> Result<Option<V
 pub fn walk_summary(r: &crate::walk::WalkResult) -> String {
     let s = &r.summary;
     format!(
-        "{} steps, {} with the oracle, worst recall {:.4}, walk p50 {} ms; {}",
+        "{} steps, {} with the oracle{}, worst recall {:.4}, walk p50 {} ms; {}",
         s.steps,
         s.steps_with_oracle,
+        if s.oracle_partial_steps > 0 {
+            format!(" ({} partial)", s.oracle_partial_steps)
+        } else {
+            String::new()
+        },
         s.soundness.worst_recall,
         s.cost.cambium_walk.p50_ms,
         if s.pass { "PASS" } else { "FAIL" }
