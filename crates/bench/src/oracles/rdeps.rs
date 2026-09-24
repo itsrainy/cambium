@@ -343,9 +343,24 @@ impl RdepsOracle {
                 deleted.push(path);
                 continue;
             }
-            match packages.owner_of(path) {
-                Some(pkg) => roots.push(source_label(pkg, path)),
-                None => result.unowned_paths += 1,
+            // Every label the path has: its main-repo one, and the one it
+            // has inside an in-tree repository whose packages the index
+            // holds. A `.proto` under envoy's `api/` has no main-repo owner
+            // (`//...` stops at the boundary) and only the second, and an
+            // oracle rooted at main-repo labels alone never asked Bazel what
+            // it reaches: recall read 1.0 on every such step while the
+            // answer under test could have missed all of them.
+            let mut found = false;
+            if let Some(pkg) = packages.owner_of(path) {
+                roots.push(source_label(pkg, path));
+                found = true;
+            }
+            for label in cambium_engine::in_tree_labels(inputs.head, &packages, path) {
+                roots.push(label);
+                found = true;
+            }
+            if !found {
+                result.unowned_paths += 1;
             }
         }
         roots.sort();
