@@ -68,36 +68,56 @@ them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
 **The runs these tables are from.** bazel, sourcegraph and apollo are box
-run A, 2026-09-19 to 2026-09-20; envoy and xla are box run B, 2026-09-23,
-the engine at `7a4abfd` with in-tree external repositories indexed, and only
-those two subjects because they are the only ones the change can reach.
+run A, 2026-09-19 to 2026-09-20; xla is box run B, 2026-09-23, the engine at
+`7a4abfd` with in-tree external repositories indexed; envoy is box run C,
+2026-09-24, the engine at `a07bad7` with the WORKSPACE-mode claim confirming
+and the oracle rooted at in-tree labels. Only the subjects a change can reach
+were re-run.
 Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
 on every step, the bazel-diff and tango peers on a stratified sample of 40,
 every subject cold-building its own index at its pin, no index store in
 play. Run A was the first clean five-subject measurement with a fresh index
 throughout and the first to run the whole loading layer.
 
-**Run B's envoy soundness line is a statement about a blind oracle, and the
-engine it measured under-reported.** Found the day after the run, on the
-laptop, while chasing envoy's 35 new cold rebuilds: at every envoy base
-before its bzlmod migration (the walk's August 2026 commits) the index held
-every `@envoy_api` package but never confirmed the repository, because the
-WORKSPACE-mode claim had no candidate for the confirmation to land on. The
-externals stage then re-queried every package of the repository (the cold
-rebuilds) while the file-to-label join, keyed off the flag the confirmation
-never set, joined a changed path under `api/` to nothing. A modified
-`.proto` changes no rule hash, so its consumers were reached by neither. The
-`rdeps` oracle could not see this: its roots were main-repo labels, and a
-path under `api/` has none. Four of those steps re-measured locally with the
-oracle rooted at the in-tree label as well: run B's answers miss 89, 1, 2706
-and 19 of the oracle's labels (`c1d586785d66..2fb611a3f248`, one edit to
-`envoy/config/core/v3/address.proto`, is the 2706), and the engine at
-`fa524b6` misses none, with no cold rebuild and steps of 1 to 4 s where run
-B took a re-index. The fix is three parts: the WORKSPACE-mode claim confirms
-(`74a124a`), the join decides by the rows exactly as the re-query does, and
-the oracle roots every label a path has. The envoy section below still shows
-run B's numbers; its "0 missing" holds only for what that oracle asked. The
-next box run re-measures envoy with the rooted oracle.
+**envoy's section below is box run C (2026-09-24), the first with an oracle
+that can see a change under `api/`, and it fails: worst recall 0.2142.** Run
+B's envoy line read recall 1.0 because its `rdeps` oracle rooted only
+main-repo labels, and a `.proto` under `api/` has none (`//...` stops at the
+boundary); the engine it measured also joined such a path to nothing at every
+base before envoy's bzlmod migration, so a proto edit reached no consumer and
+nothing noticed. Both are fixed (`74a124a`, `fa524b6`), and the rooted oracle
+then found the miss that remains: four steps, 510, 164, 12 and 1 labels
+short, every one reached by Bazel through `@grpc`. grpc's xDS client
+consumes `@envoy_api` protos (101 rules at the pin, the only external
+repository that does), and a test that links `@grpc//:grpc` depends on
+`fault.proto` through `@grpc//src/core:grpc_xds_client`. cambium indexes
+`//...` and the in-tree repositories, so `@grpc//:grpc` is a leaf with no
+outgoing edges and the path back into `@envoy_api` is invisible. This is the
+external-route limitation with the in-tree repository on the far side, and
+the fix is a table the cold build can ask Bazel for once: which external
+repositories consume each indexed repository, and which of its packages; a
+change to a consumed package then dirties the consumer and its leaves seed
+the walk. Not implemented at this writing.
+
+**What else run C measured for the first time.** The oracle's own answer is
+short on every envoy step by a class the harness now names
+(`oracle_unresolved`, `2868471`): `bazel query` evaluates every `select`
+branch, envoy names `@perfetto//:perfetto` under `//bazel:enable_perf_tracing`
+and the perfetto module's overlay `BUILD.bazel` shadows the `BUILD` that
+defines it, so the target does not exist, and under `--keep_going` every
+target that transitively depends on an unresolvable one leaves the `rdeps`
+universe. `source/common/common` is under most of the tree. The same holds
+for `@libbpf//:libbpf`, `@openssl//:ssl`, `@libpfm//` and two tools packages
+that name repositories envoy's `MODULE.bazel` does not declare. `cquery`
+would resolve the `select` and crashes Bazel with an internal error on one of
+those unknown repositories, so the oracle stays a lower bound and the report
+says by what. The rebuild oracle at the pin was vacuous in run B (its last
+step was a cold rebuild, so the pin was compared with itself); run C's real
+comparison found 13755 missing loading-layer rows, all `WORKSPACE` and
+`WORKSPACE.bazel` probes in package directories where no such file exists,
+which a cold dump carries and a refresh dump does not, now a named class, and
+11 rules whose hash differs from the cold rebuild, which the record now names
+from the next run on.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
@@ -185,7 +205,7 @@ below.
 | subject | pin | bazel | targets | index build | walk p50 | walk p90 | rebuilds | worst recall | tightness p50 | bazel-diff-rust p50 | tango p50 |
 |---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | bazel | 948b8c70e281 | 9.2.0 | 24805 | 3.0 s | 96 ms | 826 ms | 0 | 1.0000 | 1.000 | 6954 ms | 19094 ms |
-| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 25.7 s | 1874 ms | 6841 ms | 0 | 1.0000 | 0.926 | 8462 ms | 27809 ms |
+| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 26.7 s | 1935 ms | 7127 ms | 0 | 0.2142 ⚠ | 0.986 | 8715 ms | 29269 ms |
 | sourcegraph | c864f15af264 | 7.2.0 | 70450 | 10.5 s | 459 ms | 14302 ms | 0 | 1.0000 ⚠ | 1.000 | 12802 ms | 57231 ms |
 | apollo | d53aa3da47a0 | 7.4.1 | 25973 | 5.4 s | 274 ms | 1671 ms | 0 | 1.0000 ⚠ | 0.969 | 13409 ms | 27346 ms |
 | xla | 076fe93fad26 | 8.7.0 | 35050 | 28.9 s | 232 ms | 1188 ms | 0 | 1.0000 ⚠ | 1.000 | 24817 ms | 225536 ms |
@@ -364,30 +384,30 @@ Index build: 2963 ms.
 <!-- bench:envoy:begin -->
 ### envoy — 7ba51266cc60 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (7a4abfd) · tool 7a4abfd · engine f12/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (a07bad7) · tool a07bad7 · engine f12/a8e0ff64
 
 **Soundness**
 
-300 steps, 288 with the oracle. 288 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window or a package that failed to load; 0 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
-Globals: 12. Engine cold rebuilds: 76.
+300 steps, 288 with the oracle. 284 sound, 4 missing; worst recall 0.2142 at 4939d6c3f48c..381031deeb62.
+Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 11; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 13755 (extra: 0); loading layer unexplained: 13755. Loading layer: 13755 missing rows (0 expected: created in the window or a package that failed to load; 13755 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
+Globals: 12. Engine cold rebuilds: 46.
 
 **Tightness against the oracle** (1.0 is exact)
 
 | tool | p50 | p90 | steps |
 |---|--:|--:|--:|
-| cambium | 0.926 | 1.000 | 236 |
-| bazel-diff-rust | 0.909 | 1.002 | 32 |
-| tango | 0.669 | 0.995 | 32 |
+| cambium | 0.986 | 1.000 | 243 |
+| bazel-diff-rust | 0.950 | 1.255 | 33 |
+| tango | 0.831 | 0.997 | 33 |
 
 **Cost** (the two populations kept apart)
 
-Index build: 25690 ms.
+Index build: 26705 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 1874 ms | 6841 ms | 42883 ms | 288 |
-| bazel-diff-rust (full run per step) | 8462 ms | 13544 ms | 49742 ms | 40 |
-| tango (full run per step) | 27809 ms | 89985 ms | 255219 ms | 40 |
+| cambium walk (incremental) | 1935 ms | 7127 ms | 32933 ms | 288 |
+| bazel-diff-rust (full run per step) | 8715 ms | 12528 ms | 48847 ms | 40 |
+| tango (full run per step) | 29269 ms | 79511 ms | 267305 ms | 40 |
 
 **Coverage per tag**
 
