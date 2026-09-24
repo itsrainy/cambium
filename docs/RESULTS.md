@@ -42,16 +42,23 @@ queries `//...`, so an external label is a leaf in the index (reachable, with
 no outgoing edges), and the reverse walk stops there. envoy has two instances
 at its pin; one of them, `@quiche` re-exporting `@envoy//source/…`, has no
 cheap invalidator, so the change set keeps failing rather than being waved
-through. xla is the larger case and the one that still fails: `third_party/tsl`
+through. xla was the larger case: `third_party/tsl`
 is both a set of main-repo packages and the repository `@tsl`, whose BUILD
 files name `@xla//xla/...` back at the main repository, so a change under
-`//xla/tsl` has consumers the reverse walk cannot reach. Four steps of the
-300-step walk under-report for that reason, 4, 4, 48 and 48 labels, every one
-of them confirmed an external route by the oracle's own `somepath` probe
-(docs/XLA_MAIN_REPO_MISSES.md). Indexing external repositories is the precise
-answer, it is Phase 5 of docs/ROADMAP.md, and it is not implemented. It is the
-last engine piece: nothing narrower closes those four, because the index has
-no node at either end of the edge.
+`//xla/tsl` had consumers the reverse walk could not reach. Four steps of the
+300-step walk under-reported for that reason in box run A, 4, 4, 48 and 48
+labels, every one of them confirmed an external route by the oracle's own
+`somepath` probe (docs/XLA_MAIN_REPO_MISSES.md). Indexing the repositories
+whose sources live in the tree (Phase 5 of docs/ROADMAP.md) is the answer,
+and box run B measures it: the universe is widened by `@tsl` on xla and
+`@envoy_api` on envoy, an external package's key is Bazel's own spelling
+(`@tsl//tsl/platform`), and all four steps are sound, worst recall 1.0000
+over 296 oracle steps. On envoy the same change closed the rebuild oracle's
+16468 unexplained loading-layer rows to 0. What is left on xla is the 314
+loading-layer rows its rebuild oracle still names, most of them `.patch`
+files and other repository-rule inputs under `third_party/**`, and none of
+them a target the walk can under-report; the section below records the
+count.
 
 Where the changed side of the round trip is a nameable path an invalidator is
 the sound fix, which is how `subject_repos.toml` came to list
@@ -60,12 +67,15 @@ stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
 them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
-**The run these tables are from.** Box run A, 2026-09-19 to 2026-09-20: five
-subjects, 300 first-parent steps each except apollo's 74, the recall oracle on
-every step, the bazel-diff and tango peers on a stratified sample of 40, every
-subject cold-building its own index at its pin. It is the first clean
-five-subject measurement with a fresh index throughout, and it is the first to
-run the whole loading layer.
+**The runs these tables are from.** bazel, sourcegraph and apollo are box
+run A, 2026-09-19 to 2026-09-20; envoy and xla are box run B, 2026-09-23,
+the engine at `7a4abfd` with in-tree external repositories indexed, and only
+those two subjects because they are the only ones the change can reach.
+Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
+on every step, the bazel-diff and tango peers on a stratified sample of 40,
+every subject cold-building its own index at its pin, no index store in
+play. Run A was the first clean five-subject measurement with a fresh index
+throughout and the first to run the whole loading layer.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
@@ -153,10 +163,10 @@ below.
 | subject | pin | bazel | targets | index build | walk p50 | walk p90 | rebuilds | worst recall | tightness p50 | bazel-diff-rust p50 | tango p50 |
 |---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | bazel | 948b8c70e281 | 9.2.0 | 24805 | 3.0 s | 96 ms | 826 ms | 0 | 1.0000 | 1.000 | 6954 ms | 19094 ms |
-| envoy | 7ba51266cc60 | 8.7.0 | 29008 | 25.3 s | 1945 ms | 7377 ms | 0 | 1.0000 ⚠ | 0.920 | 10948 ms | 211643 ms |
+| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 25.7 s | 1874 ms | 6841 ms | 0 | 1.0000 | 0.926 | 8462 ms | 27809 ms |
 | sourcegraph | c864f15af264 | 7.2.0 | 70450 | 10.5 s | 459 ms | 14302 ms | 0 | 1.0000 ⚠ | 1.000 | 12802 ms | 57231 ms |
 | apollo | d53aa3da47a0 | 7.4.1 | 25973 | 5.4 s | 274 ms | 1671 ms | 0 | 1.0000 ⚠ | 0.969 | 13409 ms | 27346 ms |
-| xla | 076fe93fad26 | 8.7.0 | 34717 | 34.6 s | 167 ms | 1304 ms | 0 | 0.9802 ⚠ | 1.000 | 26534 ms | 231675 ms |
+| xla | 076fe93fad26 | 8.7.0 | 35050 | 28.9 s | 232 ms | 1188 ms | 0 | 1.0000 ⚠ | 1.000 | 24817 ms | 225536 ms |
 <!-- bench:top:end -->
 
 ## Synthetic scaling
@@ -332,30 +342,30 @@ Index build: 2963 ms.
 <!-- bench:envoy:begin -->
 ### envoy — 7ba51266cc60 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (9596789) · tool 9596789 · engine f12/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (7a4abfd) · tool 7a4abfd · engine f12/a8e0ff64
 
 **Soundness**
 
 300 steps, 288 with the oracle. 288 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 16468 (extra: 0); loading layer unexplained: 16468. Loading layer: 16468 missing rows (0 expected: created in the window or a package that failed to load; 16468 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
-Globals: 12. Engine cold rebuilds: 41.
+Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window or a package that failed to load; 0 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
+Globals: 12. Engine cold rebuilds: 76.
 
 **Tightness against the oracle** (1.0 is exact)
 
 | tool | p50 | p90 | steps |
 |---|--:|--:|--:|
-| cambium | 0.920 | 1.000 | 236 |
+| cambium | 0.926 | 1.000 | 236 |
 | bazel-diff-rust | 0.909 | 1.002 | 32 |
 | tango | 0.669 | 0.995 | 32 |
 
 **Cost** (the two populations kept apart)
 
-Index build: 25267 ms.
+Index build: 25690 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 1945 ms | 7377 ms | 51244 ms | 288 |
-| bazel-diff-rust (full run per step) | 10948 ms | 17682 ms | 52628 ms | 40 |
-| tango (full run per step) | 211643 ms | 229433 ms | 371896 ms | 40 |
+| cambium walk (incremental) | 1874 ms | 6841 ms | 42883 ms | 288 |
+| bazel-diff-rust (full run per step) | 8462 ms | 13544 ms | 49742 ms | 40 |
+| tango (full run per step) | 27809 ms | 89985 ms | 255219 ms | 40 |
 
 **Coverage per tag**
 
@@ -458,12 +468,12 @@ Index build: 5356 ms.
 <!-- bench:xla:begin -->
 ### xla — 076fe93fad26 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (9596789) · tool 9596789 · engine f12/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (7a4abfd) · tool 7a4abfd · engine f12/a8e0ff64
 
 **Soundness**
 
-300 steps, 296 with the oracle. 292 sound, 4 missing; worst recall 0.9802 at 2c72f4acb3b4..f0791dddea19.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 316 (extra: 0); loading layer unexplained: 316. Loading layer: 316 missing rows (0 expected: created in the window or a package that failed to load; 316 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
+300 steps, 296 with the oracle. 296 sound, 0 missing; worst recall 1.0000.
+Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 314 (extra: 0); loading layer unexplained: 314. Loading layer: 314 missing rows (0 expected: created in the window or a package that failed to load; 314 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
 Globals: 4. Engine cold rebuilds: 0.
 
 **Tightness against the oracle** (1.0 is exact)
@@ -476,12 +486,12 @@ Globals: 4. Engine cold rebuilds: 0.
 
 **Cost** (the two populations kept apart)
 
-Index build: 34560 ms.
+Index build: 28907 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 167 ms | 1304 ms | 27944 ms | 296 |
-| bazel-diff-rust (full run per step) | 26534 ms | 72382 ms | 129821 ms | 40 |
-| tango (full run per step) | 231675 ms | 280325 ms | 946709 ms | 40 |
+| cambium walk (incremental) | 232 ms | 1188 ms | 11431 ms | 296 |
+| bazel-diff-rust (full run per step) | 24817 ms | 83274 ms | 128665 ms | 40 |
+| tango (full run per step) | 225536 ms | 279492 ms | 651853 ms | 40 |
 
 **Coverage per tag**
 
