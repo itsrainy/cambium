@@ -1765,22 +1765,54 @@ fn log_overflow_contributors(ext: &Externals, packages_by_repo: &BTreeMap<String
     }
 }
 
-/// The confirmed repository claims of an index, as (apparent name,
-/// directory). The directory is carried because the confirmation was about
-/// one: see `RepoInputs::confirm_dir`.
 /// The directories of the repositories this index holds the packages of, as
 /// `(repo, dir)` with the directory's trailing `/`.
 ///
-/// Only a confirmed `Dir` claim is ever widened by, and only a widened one
-/// has packages here, so this is `confirmed_repos` narrowed by
-/// `IndexRef::indexed_repos`.
+/// Decided by the rows, not by the flags. Only a confirmed `Dir` claim is
+/// ever widened by, so a package key under `@repo//` is proof the probe
+/// confirmed the directory at build time, whatever `RepoOrigin::confirmed`
+/// and `indexed` came to say afterwards; and `externals::reach` rule (0)
+/// already decides by the same rows. The two were keyed differently once:
+/// every envoy base before the bzlmod migration held all 534 `@envoy_api`
+/// packages and read both flags false (the confirmation had no candidate to
+/// land on in Bazel's mode), so rule (0) re-queried the packages while the
+/// join here found no directory, and a modified `.proto` under `api/`
+/// reached nothing by its label. Rules that agree on their evidence cannot
+/// come apart like that.
+///
+/// The directory is the origin's, which is the one the candidate carried
+/// and the probe checked (`RepoInputs::confirm_dir`); an origin with no
+/// directory has nothing to join a path under.
 fn indexed_repo_dirs(base: IndexRef<'_>) -> Vec<(String, String)> {
+    let mut with_rows: BTreeSet<&str> = BTreeSet::new();
+    for p in 0..base.num_packages() {
+        if base.package_tombstoned(p) {
+            continue;
+        }
+        if let Some(repo) = cambium_index::label::key_repo(base.package_name(p)) {
+            with_rows.insert(repo);
+        }
+    }
     let indexed = base.indexed_repos();
-    confirmed_repos(base)
-        .into_iter()
-        .filter(|(r, _)| indexed.iter().any(|i| i == r))
-        .map(|(r, d)| (r, format!("{d}/")))
+    (0..base.num_repos())
+        .filter_map(|r| {
+            let name = base.repo_name(r);
+            let o = base.repo_origin(r);
+            let dir = o.dir.trim_end_matches('/');
+            let held = o.indexed || indexed.iter().any(|i| i == name) || with_rows.contains(name);
+            (o.kind == cambium_index::externals::OriginKind::Dir && !dir.is_empty() && held)
+                .then(|| (name.to_string(), format!("{dir}/")))
+        })
         .collect()
+}
+
+/// The labels a changed path has inside the in-tree repositories whose
+/// packages `base` holds: `external_labels` over `indexed_repo_dirs`, for a
+/// caller outside the run (the benchmark's `rdeps` oracle roots a changed
+/// path by every label it has, or it cannot see what a `.proto` under
+/// envoy's `api/` reaches).
+pub fn in_tree_labels(base: IndexRef<'_>, packages: &PackageSet, path: &str) -> Vec<String> {
+    external_labels(packages, &indexed_repo_dirs(base), path)
 }
 
 /// The dirty repositories whose rules cannot have moved: every path that

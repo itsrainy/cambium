@@ -59,5 +59,5 @@ pub use query::{BazelQuerier, PackageQuerier};
 pub use reason::{ExternalsCause, GlobalReason, RuleChange};
 pub use report::{AffectedReport, AffectedTarget, DirectReason, Explanation, Stats, Timings};
 pub use revision::{RevisionQuerier, RevisionWorkspace};
-pub use run::{dirty_stage, DirtyStage};
+pub use run::{dirty_stage, in_tree_labels, DirtyStage};
 pub use synthq::SynthQuerier;

@@ -105,6 +105,18 @@ pub(crate) fn rescan_closure(
     let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs =
         cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts, boundaries);
+    // Bazel's own answer for what each nested repository is, in the
+    // WORKSPACE world: `query //external:*`. It goes before the confirmation
+    // loop because it is also where a WORKSPACE-mode claim's *candidate*
+    // comes from. The probe that widened the universe read the claim out of
+    // `MODULE.bazel` (`crate::repos`, which reads it in either mode, since
+    // envoy's pre-migration trees carry one), but `build_repo_inputs` reads
+    // the tree in the mode Bazel does and so records no candidate from a
+    // `MODULE.bazel` Bazel is not reading. Without one, `confirm_dir` below
+    // had nothing to land on: the index held every `@envoy_api` package and
+    // read `confirmed false, indexed false` for the repository, at every
+    // envoy base before the bzlmod migration.
+    map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     // A repository rule's `path =` claim is only a claim until Bazel's own
     // package list for the repository says it holds (`crate::repos`). The
     // check runs once, at cold build, before the universe query; an
@@ -134,7 +146,6 @@ pub(crate) fn rescan_closure(
         }
     }
     report_repo_settings(querier, src, &mapping, &facts);
-    map_nested_repositories(querier, mode, boundaries, &mut c.inputs);
     Some(c)
 }
 
@@ -214,6 +225,18 @@ fn map_nested_repositories(
             inputs.path_maps.entry(repo.clone()).or_default().insert(
                 cambium_index::externals::PathMap::exhaustive_dir(format!("{dir}/")),
             );
+            // The claim as a candidate too, so that the probe's confirmation
+            // (`RepoInputs::confirm_dir`) has a row to land on. Bazel printed
+            // the directory itself, which is the strongest evidence a
+            // candidate can carry; a static reader's candidate for the same
+            // repository, if there is one, stands.
+            inputs
+                .dir_candidates
+                .entry(repo.clone())
+                .or_insert(cambium_index::externals::DirCandidate {
+                    dir: format!("{dir}/"),
+                    evidence: EVIDENCE.to_string(),
+                });
             cambium_index::externals::RepoOrigin::claim(
                 &mut inputs.origins,
                 &repo,

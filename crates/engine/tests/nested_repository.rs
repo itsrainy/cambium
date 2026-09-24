@@ -248,6 +248,93 @@ fn a_change_in_an_ignored_boundary_a_rule_names_moves_the_repository_it_is() {
     );
 }
 
+/// envoy before its bzlmod migration: the tree carries a `MODULE.bazel` with
+/// `local_path_override(module_name = "envoy_api", path = "api")` that Bazel
+/// is not reading, and the WORKSPACE world's `_default_envoy_api` rule that
+/// Bazel is. The probe reads the claim out of `MODULE.bazel` in either mode
+/// and widens the universe by `@envoy_api`; the confirmation then has to land
+/// on a candidate the closure recorded in *Bazel's* mode, which only
+/// `//external:*` supplies. Before it did, every `@envoy_api` package was in
+/// the index and the repository read `confirmed false, indexed false`, so a
+/// `.proto` edit under `api/` re-queried all of them.
+#[test]
+fn a_workspace_mode_claim_bazel_answers_for_is_confirmed_and_indexed() {
+    let dir = envoy_tree();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("api/envoy/service/ext_proc/v3")).unwrap();
+    std::fs::write(root.join("api/envoy/service/ext_proc/v3/BUILD"), "").unwrap();
+    let rows = |pkg: &str| match pkg {
+        "@envoy_api//envoy/service/ext_proc/v3" => PackageUpdate {
+            package: pkg.to_string(),
+            targets: vec![
+                TargetRow::rule(
+                    "@envoy_api//envoy/service/ext_proc/v3:pkg",
+                    "demo_lib",
+                    vec!["@envoy_api//envoy/service/ext_proc/v3:external_processor.proto".into()],
+                ),
+                TargetRow::source_file(
+                    "@envoy_api//envoy/service/ext_proc/v3:external_processor.proto",
+                ),
+            ],
+            ..Default::default()
+        },
+        other => envoy_rows(other),
+    };
+    let scanning = || {
+        let mut m = BTreeMap::new();
+        m.insert("WORKSPACE".to_string(), String::new());
+        m.insert(
+            "MODULE.bazel".to_string(),
+            "module(name = \"envoy\")\nbazel_dep(name = \"envoy_api\")\n\
+             local_path_override(module_name = \"envoy_api\", path = \"api\")\n"
+                .to_string(),
+        );
+        m.insert(
+            ".bazelrc".to_string(),
+            "common --noenable_bzlmod --enable_workspace\n".to_string(),
+        );
+        m.insert("app/BUILD".to_string(), String::new());
+        m.insert("lib/BUILD".to_string(), String::new());
+        Scanning::new(&["app", "lib", "@envoy_api//envoy/service/ext_proc/v3"], rows)
+            .with_files(Files(m))
+            .with_workspace(root)
+            .with_external_rules(ENVOY_EXTERNAL_RULES)
+            .with_repo_probe("envoy_api", &["envoy/service/ext_proc/v3"], false)
+    };
+    let q = scanning();
+    let index = engine().full_build_with("c0", &q).unwrap();
+    assert_eq!(q.probed(), vec!["envoy_api".to_string()]);
+    let v = index.view();
+    let repo = (0..v.num_repos()).find(|&r| v.repo_name(r) == "envoy_api").unwrap();
+    let origin = v.repo_origin(repo);
+    assert!(origin.confirmed, "{origin:?}");
+    assert!(origin.indexed, "{origin:?}");
+    assert_eq!(origin.dir, "api/");
+    assert_eq!(v.indexed_repos(), vec!["envoy_api".to_string()]);
+
+    // And so a modified `.proto` under `api/` settles the repository: no
+    // package re-queried, the rule reached through the file's own label.
+    let changes = vec![Change::new(
+        Status::Modified,
+        "api/envoy/service/ext_proc/v3/external_processor.proto",
+    )];
+    let r = engine()
+        .compute_with_texts(v, &changes, &scanning(), &req(), &FixedText(BTreeMap::new()))
+        .unwrap()
+        .report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_settled, 1);
+    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
+    assert_eq!(
+        r.affected_labels(),
+        vec![
+            "//app:app".to_string(),
+            "//lib:lib".to_string(),
+            "@envoy_api//envoy/service/ext_proc/v3:pkg".to_string()
+        ]
+    );
+}
+
 #[test]
 fn a_change_in_an_ignored_boundary_nothing_names_is_ignored_rather_than_global() {
     let dir = envoy_tree();
