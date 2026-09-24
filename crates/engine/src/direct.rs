@@ -169,7 +169,7 @@ pub(crate) fn close_over_repository_targets<V: GraphView + ?Sized>(
             );
             let one: BTreeSet<String> = [repo.clone()].into_iter().collect();
             // Rule (1) only: the empty `load_repos` is what says so.
-            let r = crate::externals::reach(li.base, &one, &BTreeSet::new());
+            let r = crate::externals::reach(li.base, &one, &BTreeSet::new(), &BTreeSet::new());
             for id in r.nodes {
                 let consumers: Vec<u32> = view.reverse_row(id, &mut scratch).to_vec();
                 for c in consumers {

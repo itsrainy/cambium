@@ -506,7 +506,7 @@ fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
 
     // `//app`'s closure carries two `@mod` labels; it is one package.
     let repos: BTreeSet<String> = ["mod".to_string()].into_iter().collect();
-    let r = reach(v, &repos, &repos);
+    let r = reach(v, &repos, &repos, &BTreeSet::new());
     assert_eq!(r.packages, ["app".to_string()].into_iter().collect());
     assert_eq!(r.packages_by_repo["mod"], 1);
 }

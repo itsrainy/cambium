@@ -105,7 +105,12 @@ use serde::{Deserialize, Serialize};
 ///   closure and three modelled rules, so there is no stored closure left for
 ///   a witness to find incomplete. `stats.bzl_closure_hits` keeps its name and
 ///   its meaning: dirty packages a changed Starlark file reached.
-pub const SCHEMA_VERSION: u32 = 12;
+/// - **13** adds `stats.repos_settled`: dirty in-tree repositories whose
+///   packages the index holds and whose every dirtying path was a modified
+///   source file of one of them, so no package of theirs was re-queried and
+///   no label of theirs seeded; the changed files reach their consumers by
+///   label. Purely additive.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -283,6 +288,13 @@ pub struct Stats {
     /// package closures are not re-queried.
     #[serde(default)]
     pub repos_label_only: usize,
+    /// Of the dirty repositories whose packages this index holds, how many
+    /// were dirtied only by modified source files of those packages, so that
+    /// nothing was re-queried or seeded for them: their rules stand, and the
+    /// changed files reach their consumers by label, as a main-repo source
+    /// edit does.
+    #[serde(default)]
+    pub repos_settled: usize,
     /// Targets in those repositories that the main repository names, and whose
     /// consumers were therefore made direct.
     #[serde(default)]

@@ -237,6 +237,10 @@ pub struct DirtyStage {
     /// How many packages each moved repository contributed, for the overflow
     /// log.
     pub packages_by_repo: BTreeMap<String, usize>,
+    /// The moved repositories `externals::reach` left alone because every
+    /// path that moved them is a modified source file of a package this
+    /// index holds (`settled_repos`).
+    pub settled: BTreeSet<String>,
     /// Set when the answer is `//...`; the other fields are then irrelevant.
     pub global: Option<GlobalReason>,
 }
@@ -715,11 +719,15 @@ impl<'a> Run<'a> {
         // From dirty repositories to graph work.
         let mut external_nodes: Vec<(u32, String)> = Vec::new();
         let mut packages_by_repo: BTreeMap<String, usize> = BTreeMap::new();
+        let mut settled = BTreeSet::new();
         if !dirty.global && !ext.repos.is_empty() {
-            let r = crate::externals::reach(self.base, &ext.repos, &ext.load_repos);
+            settled = settled_repos(self.base, ext, changes, &packages);
+            self.stats.repos_settled = settled.len();
+            let r = crate::externals::reach(self.base, &ext.repos, &ext.load_repos, &settled);
             tracing::debug!(
                 repos = ?ext.repos,
                 load_repos = ?ext.load_repos,
+                settled = ?settled,
                 nodes = r.nodes.len(),
                 packages = r.packages.len(),
                 "external repositories moved"
@@ -741,6 +749,7 @@ impl<'a> Run<'a> {
             changed_bzl,
             external_nodes,
             packages_by_repo,
+            settled,
             global,
         })
     }
@@ -1772,6 +1781,85 @@ fn indexed_repo_dirs(base: IndexRef<'_>) -> Vec<(String, String)> {
         .filter(|(r, _)| indexed.iter().any(|i| i == r))
         .map(|(r, d)| (r, format!("{d}/")))
         .collect()
+}
+
+/// The dirty repositories whose rules cannot have moved: every path that
+/// dirtied them is a modified source file of a package this index holds.
+///
+/// A main-repo source edit re-queries nothing: the file's label is a node,
+/// the rules built from it are its consumers, and the reverse walk finds them.
+/// An in-tree repository whose packages the universe was widened by has the
+/// same nodes and the same edges (`external_labels` joins the changed path to
+/// its label there), so the same edit deserves the same answer. What it got
+/// instead was `externals::reach` rule (0), every package of the repository
+/// re-queried, which on envoy is `@envoy_api`'s 534 packages for one
+/// `.proto` edit, over `limits.max_dirty_packages` and into a cold rebuild.
+///
+/// Settled is decided per repository and only from evidence that nothing
+/// else could have moved:
+///
+/// - the repository is confirmed at a main-repo directory and indexed, so the
+///   changed path has a label in it to reach anything by;
+/// - every path the externals stage recorded against it lies under that
+///   directory (a `MODULE.bazel` edit, or an input path a repository rule
+///   reads from elsewhere, names the repository too, and keeps it wide);
+/// - every path is `Modified` or `TypeChanged`: an added or deleted file can
+///   enter or leave a `glob`, which is a rule change without a `BUILD` edit;
+/// - no path is a `BUILD` file or a `.bzl`: those define rules, and rule (0)
+///   is exactly how a changed definition is answered;
+/// - every path resolves to a package this index holds, so the label the
+///   splice joins it to exists. A file no rule references has no consumers,
+///   which is the main-repo reading as well.
+///
+/// A `.bzl` inside the repository keeps the whole repository re-queried,
+/// because the stored load closure stops at external labels
+/// (`cambium_index::loads`) and cannot say which of its packages load it.
+fn settled_repos(
+    base: IndexRef<'_>,
+    ext: &Externals,
+    changes: &[&Change],
+    packages: &PackageSet,
+) -> BTreeSet<String> {
+    let status: std::collections::HashMap<&str, cambium_diff::Status> = changes
+        .iter()
+        .map(|c| (c.path.as_str(), c.status))
+        .collect();
+    let content_edit = |path: &str| {
+        matches!(
+            status.get(path),
+            Some(cambium_diff::Status::Modified | cambium_diff::Status::TypeChanged)
+        ) && !cambium_classify::is_build_file(path)
+            && !cambium_classify::is_bzl_file(path)
+    };
+    let indexed_dirs = indexed_repo_dirs(base);
+    let mut out = BTreeSet::new();
+    for repo in &ext.repos {
+        let Some((_, dir)) = indexed_dirs.iter().find(|(r, _)| r == repo) else {
+            continue;
+        };
+        let Some(paths) = ext.dirtied_by.get(repo) else {
+            continue;
+        };
+        if paths.is_empty() {
+            continue;
+        }
+        let one = [(repo.clone(), dir.clone())];
+        let settled = paths.iter().all(|p| {
+            p.starts_with(dir.as_str())
+                && content_edit(p)
+                && !external_labels(packages, &one, p).is_empty()
+        });
+        if settled {
+            tracing::debug!(
+                %repo,
+                paths = paths.len(),
+                "every change is a modified source file of an indexed package; \
+                 the repository's rules stand and its files reach their consumers by label"
+            );
+            out.insert(repo.clone());
+        }
+    }
+    out
 }
 
 /// The labels a changed path has inside the in-tree repositories it is also a

@@ -978,16 +978,28 @@ pub struct RepoReach {
 ///
 /// `repos` are all the dirty repositories, which is what rule (1) needs.
 /// `load_repos` is the subset whose `.bzl` files may have moved, which is what
-/// rule (2) needs; see "Why (2) does not always fire".
+/// rule (2) needs; see "Why (2) does not always fire". `settled` is the subset
+/// rules (0) and (1) leave alone: repositories this index holds the packages
+/// of, whose every dirtying path is a modified source file of one of those
+/// packages (`run::settled_repos`). Their rules cannot have changed, and the
+/// changed files reach their consumers through their own labels, exactly as
+/// a main-repo source edit does; re-querying every package of the repository
+/// for them is the cost that put envoy over `limits.max_dirty_packages` on 35
+/// of 300 steps in box run B, for an answer the file edge already had.
 pub fn reach(
     base: IndexRef<'_>,
     repos: &BTreeSet<String>,
     load_repos: &BTreeSet<String>,
+    settled: &BTreeSet<String>,
 ) -> RepoReach {
     let mut out = RepoReach::default();
     if repos.is_empty() {
         return out;
     }
+    // Rules (0) and (1) act on what is dirty and not settled; rule (2) keeps
+    // its own set, since a settled repository's own `.bzl` files did not move
+    // and `load_repos` already says whether anything else's could have.
+    let active: BTreeSet<String> = repos.difference(settled).cloned().collect();
     // Apparent name -> canonical name as the index recorded it, so a repo the
     // index never heard of still matches by shape.
     let mut canon: BTreeMap<&str, &str> = BTreeMap::new();
@@ -998,7 +1010,7 @@ pub fn reach(
         set.iter()
             .any(|a| repo_token_matches(token, a, canon.get(a.as_str()).copied().unwrap_or("")))
     };
-    let matches = |token: &str| matching(repos, token);
+    let matches = |token: &str| matching(&active, token);
 
     // (0) the repository's own packages, when this index holds them.
     //

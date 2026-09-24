@@ -132,17 +132,14 @@ fn a_claim_bazels_own_package_list_agrees_with_maps_the_directory() {
     let r = run(&index, dir.path(), PROBED);
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.stats.repos_dirty_by_input, 1);
-    // The repository's own package is re-queried, which is how its rules are
-    // answered now that the index holds them (Phase 5 stage 3). Before the
+    // A modified source file of a package the index holds re-queries
+    // nothing, as it would in the main repository: the repository is settled
+    // and its rule is reached through the file's own label. Before the
     // universe was widened there was no such package and every label of the
-    // repository was seeded dirty instead.
-    assert_eq!(r.stats.dirty_packages, 1, "{:?}", r.dirty_packages);
-    assert_eq!(
-        r.dirty_packages,
-        vec!["@tsl//tsl/platform".to_string()],
-        "{:?}",
-        r.dirty_packages
-    );
+    // repository was seeded dirty instead; between that and this, its every
+    // package was re-queried.
+    assert_eq!(r.stats.repos_settled, 1);
+    assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
     assert_eq!(
         r.affected_labels(),
         vec![
@@ -151,6 +148,54 @@ fn a_claim_bazels_own_package_list_agrees_with_maps_the_directory() {
             "@tsl//tsl/platform:dso_loader".to_string()
         ]
     );
+}
+
+/// A settled repository is decided from the shape of every path that
+/// dirtied it, and any one of them can unsettle it: a `BUILD` file or a
+/// `.bzl` defines rules, an added file can enter a `glob`, and a path outside
+/// the directory came through some other route. Each keeps rule (0), the
+/// repository's own package re-queried.
+#[test]
+fn a_repository_is_settled_only_by_modified_source_files_of_its_packages() {
+    let dir = tree();
+    let root = dir.path();
+    let q = scanning(root, PROBED, false);
+    let index = engine().full_build_with("c0", &q).unwrap();
+    let run = |changes: Vec<Change>| {
+        engine()
+            .compute_with_texts(
+                index.view(),
+                &changes,
+                &scanning(root, PROBED, false),
+                &req(),
+                &FixedText(BTreeMap::new()),
+            )
+            .unwrap()
+            .report
+    };
+    let pkg = vec!["@tsl//tsl/platform".to_string()];
+    for (why, changes) in [
+        (
+            "a BUILD edit",
+            vec![Change::new(Status::Modified, "third_party/tsl/tsl/platform/BUILD")],
+        ),
+        (
+            "an added source file",
+            vec![Change::new(Status::Added, "third_party/tsl/tsl/platform/y.cc")],
+        ),
+        (
+            "a source edit beside a .bzl edit",
+            vec![
+                Change::new(Status::Modified, "third_party/tsl/tsl/platform/x.cc"),
+                Change::new(Status::Modified, "third_party/tsl/tsl/platform/defs.bzl"),
+            ],
+        ),
+    ] {
+        let r = run(changes);
+        assert!(!r.global, "{why}: {:?}", r.global_reason);
+        assert_eq!(r.stats.repos_settled, 0, "{why}");
+        assert_eq!(r.dirty_packages, pkg, "{why}: {:?}", r.dirty_packages);
+    }
 }
 
 #[test]
