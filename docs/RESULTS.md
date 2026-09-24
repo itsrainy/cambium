@@ -77,6 +77,28 @@ every subject cold-building its own index at its pin, no index store in
 play. Run A was the first clean five-subject measurement with a fresh index
 throughout and the first to run the whole loading layer.
 
+**Run B's envoy soundness line is a statement about a blind oracle, and the
+engine it measured under-reported.** Found the day after the run, on the
+laptop, while chasing envoy's 35 new cold rebuilds: at every envoy base
+before its bzlmod migration (the walk's August 2026 commits) the index held
+every `@envoy_api` package but never confirmed the repository, because the
+WORKSPACE-mode claim had no candidate for the confirmation to land on. The
+externals stage then re-queried every package of the repository (the cold
+rebuilds) while the file-to-label join, keyed off the flag the confirmation
+never set, joined a changed path under `api/` to nothing. A modified
+`.proto` changes no rule hash, so its consumers were reached by neither. The
+`rdeps` oracle could not see this: its roots were main-repo labels, and a
+path under `api/` has none. Four of those steps re-measured locally with the
+oracle rooted at the in-tree label as well: run B's answers miss 89, 1, 2706
+and 19 of the oracle's labels (`c1d586785d66..2fb611a3f248`, one edit to
+`envoy/config/core/v3/address.proto`, is the 2706), and the engine at
+`fa524b6` misses none, with no cold rebuild and steps of 1 to 4 s where run
+B took a re-index. The fix is three parts: the WORKSPACE-mode claim confirms
+(`74a124a`), the join decides by the rows exactly as the re-query does, and
+the oracle roots every label a path has. The envoy section below still shows
+run B's numbers; its "0 missing" holds only for what that oracle asked. The
+next box run re-measures envoy with the rooted oracle.
+
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
 beside them, which drifted from the tables the moment a run landed; there is
