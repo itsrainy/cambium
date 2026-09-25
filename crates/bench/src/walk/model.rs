@@ -221,15 +221,23 @@ pub struct WalkSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oracle_unresolved: Vec<String>,
     /// Steps on which a repository's recorded inputs (Bazel's marker
-    /// files) named a changed path and added roots to the oracle.
+    /// files) named a changed path and the roots they added reached a
+    /// main-repository rule the changed paths' own labels did not.
     #[serde(default)]
     pub oracle_repository_steps: usize,
     /// Main-repository rules only those roots reached, summed over steps.
     #[serde(default)]
     pub oracle_repository_labels: usize,
-    /// The repositories rooted on any step, unioned and sorted.
+    /// The repositories whose pattern resolved on one of those steps,
+    /// unioned and sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oracle_repositories: Vec<String>,
+    /// Steps on which the markers named a changed path but the patterns
+    /// added nothing: each failed to resolve (`failed`), reached nothing in
+    /// `//...`, or reached only what the changed paths' labels already did.
+    /// Such a step is as vacuous as it was without the markers.
+    #[serde(default)]
+    pub oracle_repository_idle_steps: usize,
     pub pass: bool,
 }
 
@@ -253,6 +261,7 @@ impl Default for WalkSummary {
             oracle_repository_steps: 0,
             oracle_repository_labels: 0,
             oracle_repositories: Vec::new(),
+            oracle_repository_idle_steps: 0,
             pass: true,
         }
     }
@@ -416,11 +425,24 @@ pub fn summarise(
     let mut oracle_wall: Vec<u64> = Vec::new();
     for o in steps.iter().filter_map(|st| st.oracle.as_ref()) {
         oracle_wall.push(o.wall_ms);
-        if let Some(r) = o.repository_inputs.as_ref().filter(|r| !r.roots.is_empty()) {
-            s.oracle_repository_steps += 1;
-            s.oracle_repository_labels += r.labels_added;
-            repositories.extend(r.repositories.iter().map(|d| d.name.clone()));
+        let Some(r) = o.repository_inputs.as_ref().filter(|r| !r.roots.is_empty()) else {
+            continue;
+        };
+        if r.labels_added == 0 {
+            s.oracle_repository_idle_steps += 1;
+            continue;
         }
+        s.oracle_repository_steps += 1;
+        s.oracle_repository_labels += r.labels_added;
+        repositories.extend(
+            r.repositories
+                .iter()
+                .filter(|d| {
+                    !r.failed
+                        .contains(&crate::oracles::repo_inputs::root_pattern(&d.name))
+                })
+                .map(|d| d.name.clone()),
+        );
     }
     s.oracle_repositories = repositories.into_iter().collect();
 
@@ -608,7 +630,7 @@ mod tests {
             summary: String::new(),
             rows: Some("rebuild-h2.json".into()),
             sky: RowCounts::default(),
-                    rule_hash_mismatch: Vec::new(),
+            rule_hash_mismatch: Vec::new(),
         });
         r.summarise();
         assert!(r.summary.pass);
@@ -666,11 +688,25 @@ mod tests {
             labels_added: 9559,
             ..Default::default()
         });
+        // A WORKSPACE-era marker left on a shared output base: its pattern
+        // does not resolve, and the step it named is not counted as rooted.
+        let mut idle = step("h3", true, 1.0);
+        idle.oracle.as_mut().unwrap().repository_inputs = Some(RepositoryRoots {
+            repositories: vec![DirtyRepository {
+                name: "base_pip3".into(),
+                via: vec!["tools/base/requirements.txt".into()],
+            }],
+            roots: vec!["@@base_pip3//...:*".into()],
+            failed: vec!["@@base_pip3//...:*".into()],
+            ..Default::default()
+        });
+        steps.push(idle);
         let sum = summarise(&steps, &Sample::default(), &Sample::default(), 0);
         assert_eq!(sum.oracle_repository_steps, 1);
+        assert_eq!(sum.oracle_repository_idle_steps, 1);
         assert_eq!(sum.oracle_repository_labels, 9559);
         assert_eq!(sum.oracle_repositories, vec!["+third_party_ext+llvm-raw"]);
-        assert_eq!(sum.cost.oracle_wall.samples, 2);
+        assert_eq!(sum.cost.oracle_wall.samples, 3);
         assert_eq!(sum.cost.oracle_wall.max_ms, 9000);
 
         // A record written before the field existed still reads.
@@ -682,5 +718,4 @@ mod tests {
         .unwrap();
         assert_eq!(old.oracle_repository_steps, 0);
     }
-
 }

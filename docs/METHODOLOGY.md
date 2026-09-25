@@ -64,15 +64,27 @@ everything in `//...` that reaches any target of `R`. The markers are read
 twice, before the oracle's first query (the previous step's universe
 checked them at the step's base) and after the changed paths' half (whose
 universe made Bazel check, and refetch where stale, every repository
-`//...` reaches at head), and the two reads are unioned. The limit is a
-repository never fetched on the walk's output base, which has no marker;
-after the walk's cold build and one `rdeps(//...)` that is none the
-universe reaches. In-tree repositories (`local_repository`,
-`local_path_override`) record no inputs, and their files are already rooted
-by label. The step record's `oracle.repository_inputs` names the dirty
-repositories, what dirtied each, the patterns, how many main-repository
-rules only they reached (`labels_added`), and what the marker reads and
-the pattern queries cost.
+`//...` reaches at head), and the two reads are unioned. In-tree
+repositories (`local_repository`, `local_path_override`) record no inputs,
+and their files are already rooted by label. The markers leave three routes
+to a refetch unseen, and a step confined to one of them is still 0 of 0: a
+repository never fetched on the walk's output base has no marker; a module
+extension's file inputs are recorded with the extension, not in the markers
+of the repositories it generates (xla's `pip.parse` reads
+`requirements_lock_3_11.txt`, and no marker names it); and a change to a
+repository's own definition (xla's `LLVM_COMMIT` bump in
+`third_party/llvm/workspace.bzl`) changes the marker's rule key, not a
+recorded input. A marker left on a shared output base by another revision
+can also name a changed path: if the repository is not defined at head its
+pattern fails and roots nothing, and if it still is, the union can root it
+although Bazel would not refetch it between base and head. Snapshotting the
+markers at base, before cambium's run, and rooting every repository whose
+rule key or recorded digests differ after the head universe would close the
+definition route and replace the union; it is not built. The step record's
+`oracle.repository_inputs` names the dirty repositories, what dirtied each,
+the patterns and those that `failed`, how many main-repository rules only
+they reached (`labels_added`), each read's marker count, and what the reads
+and the pattern queries cost.
 
 *The loading-layer rows.* The rebuild oracle also compares the Skyframe
 loading layer (the `FILE`, `DIRECTORY_LISTING`, `PACKAGE`, `GLOB` and

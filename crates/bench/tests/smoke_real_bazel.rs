@@ -603,7 +603,11 @@ patched = repository_rule(
 )
 "#,
     );
-    write(root, "third_party/BUILD.bazel", "exports_files([\"fix.patch\"])\n");
+    write(
+        root,
+        "third_party/BUILD.bazel",
+        "exports_files([\"fix.patch\"])\n",
+    );
     write(root, "third_party/fix.patch", "one\n");
     write(
         root,
@@ -623,10 +627,16 @@ patched = repository_rule(
 /// must root `@@patched+//...:*` and reach `//app:app`, where the changed
 /// path's own label reaches nothing.
 ///
-/// The output base is fresh, so the first marker read finds nothing: the
-/// repository is fetched by the changed paths' half (its universe is
-/// `//...`), and it is the second read that sees the marker. That is the
-/// read the design leans on for every repository `//...` reaches at head.
+/// The marker-aware run goes first, on a fresh output base, so the first
+/// marker read finds nothing: the repository is fetched by the changed
+/// paths' half (its universe is `//...`), and it is the second read that
+/// sees the marker. That is the read the design leans on for every
+/// repository `//...` reaches at head, and the record's per-read counts say
+/// which read it was. The blind run comes after, on the same server; it
+/// reads no markers, so the order cannot help it.
+///
+/// This stands in for a synthetic-subject test: `crates/synth` generates
+/// no repository rules, and a real Bazel is what writes the marker.
 #[test]
 #[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
 fn a_patch_a_repository_rule_reads_roots_the_oracle_at_that_repository() {
@@ -682,15 +692,30 @@ fn a_patch_a_repository_rule_reads_roots_the_oracle_at_that_repository() {
             .unwrap()
     };
 
-    let blind = run(None);
-    assert_eq!(blind.roots, vec!["//third_party:fix.patch"], "{blind:#?}");
-    assert_eq!(blind.oracle_labels, 0, "nothing in the graph depends on a patch: {blind:#?}");
-
+    assert!(
+        !output_base.join("external").exists(),
+        "the output base must be fresh for the first read to be empty"
+    );
     let r = run(Some(&output_base));
     let ri = r.repository_inputs.as_ref().expect("the markers were read");
+    assert_eq!(
+        ri.markers_first, 0,
+        "nothing fetched before the first read: {ri:#?}"
+    );
+    assert!(
+        ri.markers_second.is_some_and(|n| n >= 1),
+        "the changed paths' half fetched @patched and the second read found its marker: {ri:#?}"
+    );
     assert_eq!(ri.repositories.len(), 1, "{ri:#?}");
-    assert_eq!(ri.repositories[0].via, vec!["third_party/fix.patch"], "{ri:#?}");
-    assert!(ri.roots[0].starts_with("@@") && ri.roots[0].ends_with("//...:*"), "{ri:#?}");
+    assert_eq!(
+        ri.repositories[0].via,
+        vec!["third_party/fix.patch"],
+        "{ri:#?}"
+    );
+    assert!(
+        ri.roots[0].starts_with("@@") && ri.roots[0].ends_with("//...:*"),
+        "{ri:#?}"
+    );
     assert_eq!(
         r.oracle_set.iter().cloned().collect::<Vec<_>>(),
         vec!["//app:app"],
@@ -698,6 +723,14 @@ fn a_patch_a_repository_rule_reads_roots_the_oracle_at_that_repository() {
     );
     assert_eq!(ri.labels_added, 1);
     assert_eq!(r.missing, vec!["//app:app"], "an empty answer misses it");
+
+    let blind = run(None);
+    assert_eq!(blind.roots, vec!["//third_party:fix.patch"], "{blind:#?}");
+    assert_eq!(
+        blind.oracle_labels, 0,
+        "nothing in the graph depends on a patch: {blind:#?}"
+    );
+    assert!(blind.repository_inputs.is_none(), "{blind:#?}");
     let _ = std::process::Command::new(&bazelisk)
         .arg(format!("--output_base={}", output_base.display()))
         .arg("shutdown")

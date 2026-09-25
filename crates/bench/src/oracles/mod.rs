@@ -19,5 +19,5 @@
 
 pub mod load;
 pub mod rdeps;
-pub mod repo_inputs;
 pub mod rebuild;
+pub mod repo_inputs;

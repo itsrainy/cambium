@@ -168,9 +168,21 @@ impl<'a> BazelFacts<'a> {
         self
     }
 
-    /// `git diff --name-only base..head` in `repo`.
+    /// `git diff --no-renames --name-only base..head` in `repo`.
+    ///
+    /// Without `--no-renames` git's default rename detection lists only the
+    /// new path of a moved file, and the old one reaches neither the
+    /// deleted half of the oracle nor a marker that recorded it.
     pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::tools::git(repo, &["diff", "--name-only", &format!("{base}..{head}")])?;
+        let out = crate::tools::git(
+            repo,
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                &format!("{base}..{head}"),
+            ],
+        )?;
         Ok(out
             .lines()
             .map(str::trim)
@@ -185,7 +197,13 @@ impl<'a> BazelFacts<'a> {
     pub fn added_or_deleted_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
         let out = crate::tools::git(
             repo,
-            &["diff", "--no-renames", "--name-only", "--diff-filter=AD", &format!("{base}..{head}")],
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "--diff-filter=AD",
+                &format!("{base}..{head}"),
+            ],
         )?;
         Ok(out
             .lines()

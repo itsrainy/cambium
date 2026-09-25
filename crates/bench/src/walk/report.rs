@@ -84,8 +84,9 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         let _ = writeln!(
             out,
             "Repository-rule inputs rooted the oracle on {} of {} steps: Bazel's marker files \
-             named a changed path among the inputs of {}{}, and `@@R//...:*` for each added {} \
-             main-repository rules the changed paths' own labels did not reach.",
+             named a changed path among the inputs of {}{}, and rooting the oracle at each of \
+             them as `@@R//...:*` reached {} main-repository rules that the changed paths' own \
+             labels did not.",
             s.oracle_repository_steps,
             s.steps_with_oracle,
             s.oracle_repositories
@@ -100,6 +101,16 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
                 String::new()
             },
             s.oracle_repository_labels,
+        );
+    }
+    if s.oracle_repository_idle_steps > 0 {
+        let _ = writeln!(
+            out,
+            "Steps on which the marker files named a changed path but the repository roots \
+             added no rule: {} (a pattern that did not resolve at head, or one that reached \
+             nothing the changed paths' labels had not). They are as vacuous as they were \
+             without the markers; `oracle.repository_inputs` on each says which.",
+            s.oracle_repository_idle_steps,
         );
     }
     if let Some(o) = &r.rebuild_oracle {
@@ -351,6 +362,55 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("bazel 7.4.1"));
+    }
+
+    /// The repository-input sentences: the rooted steps with what they
+    /// added, and the steps whose patterns added nothing, apart.
+    #[test]
+    fn the_repository_roots_are_reported_and_an_idle_step_is_not_counted_as_rooted() {
+        use crate::oracles::rdeps::RepositoryRoots;
+        use crate::oracles::repo_inputs::DirtyRepository;
+        let mut r = a_walk();
+        let rooted = RepositoryRoots {
+            repositories: vec![DirtyRepository {
+                name: "+third_party_ext+llvm-raw".into(),
+                via: vec!["third_party/llvm/build.patch".into()],
+            }],
+            roots: vec!["@@+third_party_ext+llvm-raw//...:*".into()],
+            labels_added: 9559,
+            ..Default::default()
+        };
+        let idle = RepositoryRoots {
+            repositories: vec![DirtyRepository {
+                name: "base_pip3".into(),
+                via: vec!["tools/base/requirements.txt".into()],
+            }],
+            roots: vec!["@@base_pip3//...:*".into()],
+            failed: vec!["@@base_pip3//...:*".into()],
+            ..Default::default()
+        };
+        let mut second = r.steps[0].clone();
+        second.head = "cccccccccccc0".into();
+        r.steps[0]
+            .oracle
+            .get_or_insert_with(Default::default)
+            .repository_inputs = Some(rooted);
+        second
+            .oracle
+            .get_or_insert_with(Default::default)
+            .repository_inputs = Some(idle);
+        r.steps.push(second);
+        r.summarise();
+        let md = render(&r);
+        assert!(
+            md.contains("Repository-rule inputs rooted the oracle on 1 of 2 steps: Bazel's marker files named a changed path among the inputs of `@@+third_party_ext+llvm-raw`, and rooting the oracle at each of them as `@@R//...:*` reached 9559 main-repository rules that the changed paths' own labels did not."),
+            "{md}"
+        );
+        assert!(
+            md.contains("Steps on which the marker files named a changed path but the repository roots added no rule: 1 ("),
+            "{md}"
+        );
+        assert!(!md.contains("`@@base_pip3`"), "{md}");
     }
 
     /// A failing oracle names the sidecar and how many rows nothing explains.

@@ -71,6 +71,13 @@
 //! its repository. The oracle reads the markers twice to bound that (see
 //! [`super::rdeps`]); a repository fetched on this output base for another
 //! revision, and never checked since, keeps that revision's inputs.
+//!
+//! A marker also records only what the repository rule itself read. A
+//! module extension's file inputs (a `requirements_lock` that `pip.parse`
+//! reads) belong to the extension's evaluation, not to the markers of the
+//! repositories it generates, and a change to a repository's definition
+//! (its attributes, or the `.bzl` that defines its rule) changes the rule
+//! key on the first line, which is not an input. Neither is seen here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -139,7 +146,8 @@ pub fn unescape(s: &str) -> String {
 }
 
 /// `RepoCacheFriendlyPath.parse`: `@@repo//rel`, `@repo//rel` or `//rel`
-/// inside a repository, anything else an absolute path.
+/// inside a repository, anything else an absolute path. One `@` or two, the
+/// name is taken as canonical (`RepositoryName.create`), and so it is here.
 pub fn parse_place(s: &str) -> Option<Place> {
     if s.starts_with('@') || s.starts_with("//") {
         let skip = if s.starts_with("@@") {
@@ -388,7 +396,10 @@ pub fn dirty(markers: &Markers, changes: &Changes<'_>, workspace: &Path) -> Vec<
         for input in &m.inputs {
             if let Place::Repo { name, .. } = &input.place {
                 if !name.is_empty() && name != repo {
-                    naming.entry(name.as_str()).or_default().insert(repo.as_str());
+                    naming
+                        .entry(name.as_str())
+                        .or_default()
+                        .insert(repo.as_str());
                 }
             }
         }
@@ -570,21 +581,33 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
     fn every_spelling_bazel_parses_is_read() {
         assert_eq!(
             parse_place("@@//a/b.patch"),
-            Some(Place::Repo { name: "".into(), path: "a/b.patch".into() })
+            Some(Place::Repo {
+                name: "".into(),
+                path: "a/b.patch".into()
+            })
         );
         assert_eq!(
             parse_place("//a/b.patch"),
-            Some(Place::Repo { name: "".into(), path: "a/b.patch".into() }),
+            Some(Place::Repo {
+                name: "".into(),
+                path: "a/b.patch".into()
+            }),
             "no `@`"
         );
         assert_eq!(
             parse_place("@foo//x"),
-            Some(Place::Repo { name: "foo".into(), path: "x".into() }),
-            "one `@`, the apparent spelling"
+            Some(Place::Repo {
+                name: "foo".into(),
+                path: "x".into()
+            }),
+            "one `@`: Bazel parses the name as canonical all the same"
         );
         assert_eq!(
             parse_place("@@rules_ml_toolchain+//cc/x.bzl"),
-            Some(Place::Repo { name: "rules_ml_toolchain+".into(), path: "cc/x.bzl".into() })
+            Some(Place::Repo {
+                name: "rules_ml_toolchain+".into(),
+                path: "cc/x.bzl".into()
+            })
         );
         assert_eq!(
             parse_place("/usr/include/stdio.h"),
@@ -601,7 +624,10 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
             m.inputs,
             vec![Input {
                 kind: Kind::DirTree,
-                place: Place::Repo { name: "".into(), path: "vendor/my dir".into() }
+                place: Place::Repo {
+                    name: "".into(),
+                    path: "vendor/my dir".into()
+                }
             }]
         );
     }
@@ -623,7 +649,10 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let changed = set(&["third_party/llvm/build.patch"]);
         let d = dirty(
             &m,
-            &Changes { changed: &changed, added_or_deleted: None },
+            &Changes {
+                changed: &changed,
+                added_or_deleted: None,
+            },
             Path::new("/nonexistent"),
         );
         assert_eq!(
@@ -640,7 +669,10 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let unrelated = set(&["xla/service/foo.cc"]);
         assert!(dirty(
             &m,
-            &Changes { changed: &unrelated, added_or_deleted: None },
+            &Changes {
+                changed: &unrelated,
+                added_or_deleted: None
+            },
             Path::new("/nonexistent"),
         )
         .is_empty());
@@ -648,14 +680,23 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
 
     #[test]
     fn the_workspace_era_pgv_patch_dirties_its_repository() {
-        let m = markers(&[("com_envoyproxy_protoc_gen_validate", PGV), ("envoy_repo", ENVOY_REPO)]);
+        let m = markers(&[
+            ("com_envoyproxy_protoc_gen_validate", PGV),
+            ("envoy_repo", ENVOY_REPO),
+        ]);
         let changed = set(&["bazel/pgv.patch", "VERSION.txt"]);
         let d = dirty(
             &m,
-            &Changes { changed: &changed, added_or_deleted: None },
+            &Changes {
+                changed: &changed,
+                added_or_deleted: None,
+            },
             Path::new("/nonexistent"),
         );
-        assert_eq!(names(&d), vec!["com_envoyproxy_protoc_gen_validate", "envoy_repo"]);
+        assert_eq!(
+            names(&d),
+            vec!["com_envoyproxy_protoc_gen_validate", "envoy_repo"]
+        );
     }
 
     #[test]
@@ -665,23 +706,54 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let none = BTreeSet::new();
         let ws = Path::new("/nonexistent");
         assert!(
-            dirty(&m, &Changes { changed: &edit, added_or_deleted: Some(&none) }, ws).is_empty(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &edit,
+                    added_or_deleted: Some(&none)
+                },
+                ws
+            )
+            .is_empty(),
             "a content edit does not change a listing"
         );
         assert_eq!(
-            dirty(&m, &Changes { changed: &edit, added_or_deleted: Some(&edit) }, ws).len(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &edit,
+                    added_or_deleted: Some(&edit)
+                },
+                ws
+            )
+            .len(),
             1,
             "an added file does"
         );
         assert_eq!(
-            dirty(&m, &Changes { changed: &edit, added_or_deleted: None }, ws).len(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &edit,
+                    added_or_deleted: None
+                },
+                ws
+            )
+            .len(),
             1,
             "unknown: any changed child"
         );
         let deeper = set(&["vendor/sub/a.c"]);
         assert!(
-            dirty(&m, &Changes { changed: &deeper, added_or_deleted: Some(&deeper) }, ws)
-                .is_empty(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &deeper,
+                    added_or_deleted: Some(&deeper)
+                },
+                ws
+            )
+            .is_empty(),
             "a listing is one level"
         );
     }
@@ -693,10 +765,26 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let under = set(&["vendor/lib/deep/x.h"]);
         let sibling = set(&["vendor/library/x.h"]);
         assert_eq!(
-            dirty(&m, &Changes { changed: &under, added_or_deleted: None }, ws).len(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &under,
+                    added_or_deleted: None
+                },
+                ws
+            )
+            .len(),
             1
         );
-        assert!(dirty(&m, &Changes { changed: &sibling, added_or_deleted: None }, ws).is_empty());
+        assert!(dirty(
+            &m,
+            &Changes {
+                changed: &sibling,
+                added_or_deleted: None
+            },
+            ws
+        )
+        .is_empty());
     }
 
     #[test]
@@ -706,11 +794,18 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let changed = set(&["api/bazel/x.bzl"]);
         let d = dirty(
             &m,
-            &Changes { changed: &changed, added_or_deleted: None },
+            &Changes {
+                changed: &changed,
+                added_or_deleted: None,
+            },
             Path::new("/nonexistent"),
         );
         assert_eq!(names(&d), vec!["consumer"]);
-        assert_eq!(d[0].via, vec!["api/bazel/x.bzl"], "reported as the workspace path");
+        assert_eq!(
+            d[0].via,
+            vec!["api/bazel/x.bzl"],
+            "reported as the workspace path"
+        );
     }
 
     #[test]
@@ -722,7 +817,15 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         let m = markers(&[("r", &format!("key\nFILE:{} 1\n", abs.display()))]);
         let changed = set(&["tp/a.patch"]);
         assert_eq!(
-            dirty(&m, &Changes { changed: &changed, added_or_deleted: None }, ws.path()).len(),
+            dirty(
+                &m,
+                &Changes {
+                    changed: &changed,
+                    added_or_deleted: None
+                },
+                ws.path()
+            )
+            .len(),
             1
         );
     }
@@ -743,7 +846,10 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         std::os::unix::fs::symlink("/nonexistent/dangling", ext.join("stale")).unwrap();
 
         let m = Markers::read(ob.path(), ws.path());
-        assert_eq!(m.by_repo.keys().collect::<Vec<_>>(), vec!["+third_party_ext+llvm-raw"]);
+        assert_eq!(
+            m.by_repo.keys().collect::<Vec<_>>(),
+            vec!["+third_party_ext+llvm-raw"]
+        );
         assert_eq!(m.unreadable, set(&["broken"]));
         #[cfg(unix)]
         assert_eq!(
@@ -753,7 +859,10 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
         );
 
         let empty = Markers::read(&ob.path().join("nope"), ws.path());
-        assert!(empty.by_repo.is_empty(), "no external/ is no markers, not an error");
+        assert!(
+            empty.by_repo.is_empty(),
+            "no external/ is no markers, not an error"
+        );
     }
 
     #[test]
@@ -767,12 +876,24 @@ ENV:RULES_PYTHON_REPO_DEBUG_VERBOSITY \\0
 
     #[test]
     fn a_label_is_matched_to_its_repository_in_either_spelling() {
-        assert!(label_in_repo("@llvm-project//llvm:Support", "+llvm_extension+llvm-project"));
-        assert!(label_in_repo("@@+llvm_extension+llvm-project//llvm:Support", "+llvm_extension+llvm-project"));
+        assert!(label_in_repo(
+            "@llvm-project//llvm:Support",
+            "+llvm_extension+llvm-project"
+        ));
+        assert!(label_in_repo(
+            "@@+llvm_extension+llvm-project//llvm:Support",
+            "+llvm_extension+llvm-project"
+        ));
         assert!(label_in_repo("@abseil-cpp//absl:base", "abseil-cpp+"));
         assert!(label_in_repo("@com_github_x//:y", "com_github_x"));
-        assert!(!label_in_repo("@llvm-raw//:x", "+llvm_extension+llvm-project"));
-        assert!(!label_in_repo("//llvm:Support", "+llvm_extension+llvm-project"));
+        assert!(!label_in_repo(
+            "@llvm-raw//:x",
+            "+llvm_extension+llvm-project"
+        ));
+        assert!(!label_in_repo(
+            "//llvm:Support",
+            "+llvm_extension+llvm-project"
+        ));
     }
 
     #[test]
