@@ -562,8 +562,8 @@ struct ExternalsRepo {
     consumer_leaves: Vec<String>,
     /// Per consumer with a leaf map, what the map was derived through
     /// outside this repository: `quiche: //source/common/quic/platform,
-    /// @abseil-cpp, ...`. A run in which one of them moves reads the map as
-    /// not known and the splice asks for it again.
+    /// @abseil-cpp, ...`. A run in which one of them moves asks Bazel for the
+    /// map again rather than trust it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     consumer_via: Vec<String>,
 }

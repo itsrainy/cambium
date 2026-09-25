@@ -40,6 +40,11 @@ pub(crate) fn is_leaf_of(label: &str, consumer: &str, canonical: &str) -> bool {
         .is_some_and(|t| crate::externals::repo_token_matches(t, consumer, canonical))
 }
 
+/// Leaf questions a run already asked at head, by indexed repository: the
+/// leaves asked about, in order, and Bazel's answer. The splice reuses an
+/// answer for the same leaves rather than ask again.
+pub(crate) type Asked = BTreeMap<String, (Vec<String>, Option<BTreeMap<String, LeafReach>>)>;
+
 /// The consumer table Bazel answered (`PackageQuerier::consumer_repos`),
 /// with each consumer's leaf map derived against `labels`, the external
 /// labels of the index the table goes into.
@@ -48,12 +53,14 @@ pub(crate) fn is_leaf_of(label: &str, consumer: &str, canonical: &str) -> bool {
 /// consumers at once. A consumer with no leaf in the index gets an empty map
 /// without asking, since there is nothing rule (1) could seed for it. A
 /// question Bazel will not answer leaves every consumer of that repository
-/// with no map, which is the wide answer.
+/// with no map, which is the wide answer. A question `asked` already holds
+/// the answer to, over exactly these leaves, is not asked again.
 pub(crate) fn with_leaves(
     q: &dyn PackageQuerier,
     table: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     labels: &[String],
     canonical: &BTreeMap<String, String>,
+    asked: &Asked,
 ) -> BTreeMap<String, BTreeMap<String, Consumer>> {
     let mut out = BTreeMap::new();
     for (repo, consumers) in table {
@@ -78,6 +85,13 @@ pub(crate) fn with_leaves(
             .collect();
         let answer = if all.is_empty() {
             Some(BTreeMap::new())
+        } else if let Some((_, a)) = asked.get(&repo).filter(|(l, _)| *l == all) {
+            tracing::debug!(
+                %repo,
+                leaves = all.len(),
+                "the consumer leaf map was already asked for at head in this run"
+            );
+            a.clone()
         } else {
             let started = std::time::Instant::now();
             let a = q.consumer_leaf_packages(&repo, &all);

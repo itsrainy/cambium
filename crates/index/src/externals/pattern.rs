@@ -378,8 +378,9 @@ pub struct Consumer {
     /// `@envoy//source/common/quic/platform:*`, main-repo rules the index
     /// holds and a `BUILD` edit can point at any package of `R` without the
     /// map hearing of it. So a run in which one of these packages or
-    /// repositories moved reads the consumer as having no map, and the
-    /// splice asks Bazel for the map again.
+    /// repositories moved holds the map against Bazel's answer at head
+    /// (or reads it as no map, when there is none), and the splice asks for
+    /// the map again.
     pub via: BTreeSet<String>,
 }
 

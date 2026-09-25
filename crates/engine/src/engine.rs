@@ -579,6 +579,7 @@ impl Engine {
                 table,
                 &crate::consumers::external_labels(&b),
                 &c.inputs.canonical,
+                &Default::default(),
             );
             b.set_bzl_closure(c);
         }

@@ -912,13 +912,14 @@ fn a_build_edit_on_a_leafs_closure_re_derives_the_map() {
 }
 
 /// The same `BUILD` edit in the same commit as the edit it gives a path to:
-/// no splice has asked yet, so the run reads the consumer as having no map
-/// and answers from the pooled packages, every leaf seeded.
+/// no splice has asked yet, so the run asks Bazel at head, reads each leaf
+/// as reaching what it reaches at either end, and seeds by that. The splice
+/// then takes the same answer rather than ask a second time.
 #[test]
-fn a_build_edit_on_a_leafs_closure_reads_the_map_as_not_known_in_its_own_run() {
+fn a_build_edit_on_a_leafs_closure_is_answered_at_head_in_its_own_run() {
     let dir = tree2();
     let root = dir.path();
-    let q = leaf_scanning_via(
+    let before = leaf_scanning_via(
         root,
         LEAF_UNIVERSE,
         &[
@@ -926,23 +927,102 @@ fn a_build_edit_on_a_leafs_closure_reads_the_map_as_not_known_in_its_own_run() {
             ("@grpc//:health", &[], &["@grpc", "//lib"]),
         ],
     );
-    let base = engine().full_build_with("c0", &q).unwrap();
+    let base = engine().full_build_with("c0", &before).unwrap();
+    let after = leaf_scanning_via(
+        root,
+        LEAF_UNIVERSE,
+        &[
+            ("@grpc//:grpc", &["tsl/platform"], &["@grpc"]),
+            ("@grpc//:health", &["tsl/base"], &["@grpc", "//lib"]),
+        ],
+    );
+    let both = vec![
+        Change::new(Status::Modified, "lib/BUILD"),
+        Change::new(Status::Modified, "third_party/tsl/tsl/base/y.cc"),
+    ];
+    let out = materialized(&base, &after, both.clone());
+    let r = &out.report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.consumer_leaves_seeded, 2, "narrowed by the map at head, not dirty");
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert_eq!(after.leaf_questions().len(), 1, "asked once: {:?}", after.leaf_questions());
+    assert_eq!(
+        leaves_of(out.index.as_ref().expect("the spliced index")),
+        Some(map(&[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &["tsl/base"])]))
+    );
+    // Without the `BUILD` edit the map stands, `//lib` did not move, and
+    // nothing is asked.
+    let quiet = leaf_scanning_via(root, LEAF_UNIVERSE, &[]);
+    let r = run_leaves(&base, &quiet, edit("third_party/tsl/tsl/base/y.cc"));
+    assert!(!r.affected_labels().contains(&"//happ:happ".to_string()));
+    assert!(quiet.leaf_questions().is_empty());
+}
+
+/// A leaf that reached a package at base and no longer does at head was cut
+/// from it by the `BUILD` edit, which moves the leaf too: what it reached at
+/// either end is what it is held against.
+#[test]
+fn a_suspect_leaf_is_held_against_what_it_reached_at_base_as_well() {
+    let dir = tree2();
+    let root = dir.path();
+    let before = leaf_scanning_via(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &[], &["@grpc"]), ("@grpc//:health", &["tsl/base"], &["//lib"])],
+    );
+    let base = engine().full_build_with("c0", &before).unwrap();
+    let after = leaf_scanning_via(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &[], &["@grpc"]), ("@grpc//:health", &[], &["//lib"])],
+    );
     let r = run_leaves(
         &base,
-        &q,
+        &after,
         vec![
             Change::new(Status::Modified, "lib/BUILD"),
             Change::new(Status::Modified, "third_party/tsl/tsl/base/y.cc"),
         ],
     );
+    assert_eq!(r.stats.consumer_leaves_seeded, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+}
+
+/// A suspect map Bazel will not answer for at head is no map: the pooled
+/// packages decide, and every leaf of the consumer is seeded.
+#[test]
+fn a_suspect_map_with_no_answer_at_head_is_read_as_no_map() {
+    let dir = tree2();
+    let root = dir.path();
+    let before = leaf_scanning_via(
+        root,
+        LEAF_UNIVERSE,
+        &[
+            ("@grpc//:grpc", &["tsl/platform"], &["@grpc"]),
+            ("@grpc//:health", &[], &["@grpc", "//lib"]),
+        ],
+    );
+    let base = engine().full_build_with("c0", &before).unwrap();
+    // No leaf answer at all for `tsl`.
+    let silent = leaf_scanning(root, LEAF_UNIVERSE, &[]);
+    let r = run_leaves(
+        &base,
+        &silent,
+        vec![
+            Change::new(Status::Modified, "lib/BUILD"),
+            Change::new(Status::Modified, "third_party/tsl/tsl/base/y.cc"),
+        ],
+    );
+    assert_eq!(silent.leaf_questions().len(), 1);
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 0, "the consumer is dirty, not narrowed");
     let affected = r.affected_labels();
     assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
     assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    // Without the `BUILD` edit the map stands: `//lib` did not move.
-    let r = run_leaves(&base, &q, edit("third_party/tsl/tsl/base/y.cc"));
-    assert!(!r.affected_labels().contains(&"//happ:happ".to_string()));
 }
 
 /// A `.bzl` under the repository unsettles it, and a consumer whose `BUILD`

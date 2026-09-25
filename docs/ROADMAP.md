@@ -432,10 +432,15 @@ precision item:
   graph output, walked from each leaf on its own, answers every leaf's
   reach and what it passes through outside the repository; 130 leaves in
   0.5 s on a warm server at envoy's WORKSPACE-era commits. A map is held
-  against what it passed through: a run in which one of those main-repo
-  packages or repositories moved reads the consumer as having no map (the
-  pooled answer), and the splice asks for the map again, as it does when
-  the indexed repository itself is unsettled. Local gate with laptop Bazel on run C's four
+  against what it passed through: in a run in which one of those main-repo
+  packages or repositories moved, the map is asked for again at head (each
+  leaf then held against what it reaches at either end, or the pooled
+  answer if Bazel will not say) and the splice stores the new one, as it
+  does when the indexed repository itself is unsettled. On run E's 288
+  oracle steps, 58 touch `api/`, and at most 16 of those also edit a
+  `BUILD` file on quiche's closure or a `.bzl` under `bazel/` (counting
+  every such `.bzl` edit as one that reaches the closure): those are the
+  steps that pay the extra question. Local gate with laptop Bazel on run C's four
   steps and run E's three: 0 missing against both box oracles on every
   step; step 121 answers 662 (was 5035, oracle 649) and step 244 answers
   2489 (was 5583; run C, without the table, answered 2325, and none of the
