@@ -6,7 +6,9 @@
 //! rules, one test reaches the library only through
 //! `@bazel_tools//tools/test:collect_coverage`, and a `toolchain_type` has
 //! rdeps through toolchain resolution that no query edge in the index
-//! carries.
+//! carries. A second index holds a `toolchain` with a `config_setting` in
+//! its `target_settings`, reached back from the root module through an
+//! external repository, the shape where escalation would hide a real miss.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -23,15 +25,16 @@ const COVERAGE: &str = "@bazel_tools//tools/test:collect_coverage";
 ///   //tests:b -> @bazel_tools//tools/test:collect_coverage (-> //lib:x in Bazel only)
 ///   //tc:type (toolchain_type), required by //tests:a in Bazel only
 /// ```
-fn index() -> IndexData {
-    fn pkg(name: &str, targets: Vec<TargetRow>) -> PackageUpdate {
-        PackageUpdate {
-            package: name.to_string(),
-            build_hash: *blake3::hash(name.as_bytes()).as_bytes(),
-            bzl_hash: [0; 32],
-            targets,
-        }
+fn pkg(name: &str, targets: Vec<TargetRow>) -> PackageUpdate {
+    PackageUpdate {
+        package: name.to_string(),
+        build_hash: *blake3::hash(name.as_bytes()).as_bytes(),
+        bzl_hash: [0; 32],
+        targets,
     }
+}
+
+fn index() -> IndexData {
     let mut b = IndexBuilder::new(new_lineage());
     b.set_bazel_version("test");
     b.apply_packages(&[
@@ -67,6 +70,40 @@ fn index() -> IndexData {
     b.finish("cafe")
 }
 
+const BRIDGE: &str = "@ext//:bridge";
+
+/// ```text
+///   //tc:tc (toolchain) -> //tc:cs (config_setting), //tc:type (toolchain_type)
+///   //app:user -> @ext//:bridge (-> //tc:tc in Bazel only)
+/// ```
+fn toolchain_index() -> IndexData {
+    let mut b = IndexBuilder::new(new_lineage());
+    b.set_bazel_version("test");
+    b.apply_packages(&[
+        pkg(
+            "tc",
+            vec![
+                TargetRow::rule("//tc:type", "toolchain_type", vec![]),
+                TargetRow::rule("//tc:cs", "config_setting", vec![]),
+                TargetRow::rule(
+                    "//tc:tc",
+                    "toolchain",
+                    vec!["//tc:cs".into(), "//tc:type".into()],
+                ),
+            ],
+        ),
+        pkg(
+            "app",
+            vec![TargetRow::rule(
+                "//app:user",
+                "filegroup",
+                vec![BRIDGE.into()],
+            )],
+        ),
+    ]);
+    b.finish("beef")
+}
+
 /// Answers each query by its expression, and refuses any it does not know.
 #[derive(Debug)]
 struct Router;
@@ -87,6 +124,26 @@ impl Router {
             "rdeps(//..., //tests:b)" => "sh_test rule //tests:b\n",
             "rdeps(//..., //tests:c)" => "sh_test rule //tests:c\n",
             "rdeps(//..., //docs:gen)" => "genrule rule //docs:gen\ngenerated file //docs:gen.md\n",
+            "rdeps(//..., //tc:tc)" => {
+                "toolchain rule //tc:tc\n\
+                 filegroup rule @ext//:bridge\n\
+                 filegroup rule //app:user\n"
+            }
+            "rdeps(//..., //tc:cs)" => {
+                "config_setting rule //tc:cs\n\
+                 toolchain rule //tc:tc\n\
+                 filegroup rule @ext//:bridge\n\
+                 filegroup rule //app:user\n"
+            }
+            "rdeps(//..., //app:user)" => "filegroup rule //app:user\n",
+            "allpaths(set(//app:user), //tc:tc)" => {
+                "digraph mygraph {\n  \"//app:user\" -> \"@ext//:bridge\"\n  \
+                 \"@ext//:bridge\" -> \"//tc:tc\"\n}\n"
+            }
+            "allpaths(set(//app:user), //tc:cs)" => {
+                "digraph mygraph {\n  \"//app:user\" -> \"@ext//:bridge\"\n  \
+                 \"@ext//:bridge\" -> \"//tc:tc\"\n  \"//tc:tc\" -> \"//tc:cs\"\n}\n"
+            }
             "allpaths(set(//tests:b), //lib:x)" => {
                 "digraph mygraph {\n  node [shape=box];\n  \"//tests:b\"\n  \
                  \"//tests:b\" -> \"@bazel_tools//tools/test:collect_coverage\"\n  \
@@ -128,7 +185,10 @@ impl BazelRunner for Router {
 }
 
 fn run() -> inspect::VerifyResult {
-    let data = index();
+    run_on(index())
+}
+
+fn run_on(data: IndexData) -> inspect::VerifyResult {
     let bazel = Bazel::at(std::env::temp_dir(), Some("bazel")).with_runner(Arc::new(Router));
     let diags = Diagnostics::new();
     let r = inspect::verify(&bazel, data.view(), 100, 0, &diags).unwrap();
@@ -169,6 +229,28 @@ fn a_toolchain_type_escalates_rather_than_failing() {
     assert_eq!(e.rule_class, "toolchain_type");
     assert_eq!(e.code, "CAMBI-W023");
     assert_eq!(e.missing, vec!["//tests:a"]);
+}
+
+#[test]
+fn a_toolchain_with_a_config_setting_below_it_stays_unsound() {
+    // A change to //tc:cs reaches //tc:tc and moves no toolchain-class row,
+    // so no run escalates for it: the round trip back through @ext is a
+    // real miss, however //tc:tc is classed.
+    let r = run_on(toolchain_index());
+    assert_eq!(r.checked, 4);
+    let mut failing: Vec<&str> = r.failures.iter().map(|f| f.label.as_str()).collect();
+    failing.sort();
+    assert_eq!(failing, vec!["//tc:cs", "//tc:tc"]);
+    assert_eq!(r.unsound, 2);
+    for f in &r.failures {
+        assert_eq!(f.missing, vec!["//app:user"], "{}", f.label);
+        assert_eq!(f.round_trip, vec!["//app:user"], "{}", f.label);
+        assert_eq!(f.via, vec![BRIDGE], "{}", f.label);
+    }
+    // //tc:type depends on nothing, so every change that reaches it moves
+    // its own row and escalates.
+    let escalated: Vec<&str> = r.escalations.iter().map(|e| e.label.as_str()).collect();
+    assert_eq!(escalated, vec!["//tc:type"]);
 }
 
 #[test]

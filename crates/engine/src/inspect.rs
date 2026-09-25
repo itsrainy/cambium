@@ -896,14 +896,16 @@ pub struct VerifyResult {
     /// index reported that Bazel also reports. 100 when the index reported
     /// nothing.
     pub precision_pct: f64,
-    /// Source and generated files Bazel reported, not compared.
+    /// Everything else Bazel reported in the main repository, not compared:
+    /// source and generated files, package groups, and any line of Bazel's
+    /// answer that does not read as a target.
     pub ignored_files: usize,
     /// External-repository targets Bazel reported, not compared.
     pub ignored_external: usize,
     /// One entry per unsound sample.
     pub failures: Vec<VerifyFailure>,
-    /// Samples whose misses a run never depends on, because a change to the
-    /// sample itself already answers `//...`.
+    /// Samples whose misses no run depends on, because every change that
+    /// reaches the sample answers `//...` (see [`VerifyEscalation`]).
     pub escalations: Vec<VerifyEscalation>,
 }
 
@@ -928,11 +930,18 @@ pub struct VerifyFailure {
     pub via: Vec<String>,
 }
 
-/// A sample with misses that a run covers by escalating: a toolchain-class
-/// rule (`toolchain_type`, `toolchain`, `platform`, `constraint_setting`,
-/// `constraint_value`) has rdeps through toolchain resolution that the query
-/// graph the index is built from does not carry, and any change to one makes
-/// a run answer `//...` under `code`.
+/// A sample with misses that every run covers by escalating.
+///
+/// A toolchain-class rule (`toolchain_type`, `toolchain`, `platform`,
+/// `constraint_setting`, `constraint_value`) can have rdeps through toolchain
+/// resolution that Bazel's `rdeps` reports and the index has no edge for. A
+/// run answers `//...` under `code` when the row of such a rule moves, and
+/// only then. So a sample escalates, rather than failing, only when it is of
+/// one of those classes and everything it depends on in the index is too: then
+/// no change can reach it without moving a toolchain-class row. A
+/// toolchain-class sample that depends on anything else (a `toolchain` whose
+/// `target_settings` names a `config_setting`, say) can be reached by a change
+/// that fires nothing, and its misses are failures like any other.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyEscalation {
     pub label: String,
@@ -1172,6 +1181,7 @@ pub fn verify(
         if let Some(class) = view
             .rule_class(id)
             .filter(|c| cambium_index::is_toolchain_rule_class(c))
+            .filter(|_| only_toolchain_rules_below(view, id))
         {
             result.escalations.push(VerifyEscalation {
                 label: label.to_string(),
@@ -1181,7 +1191,7 @@ pub fn verify(
             });
             continue;
         }
-        let (round_trip, via) = round_trips(bazel, label, &missing);
+        let (round_trip, via) = round_trips(bazel, label, &missing, diags);
         result.failures.push(VerifyFailure {
             label: label.to_string(),
             missing,
@@ -1197,27 +1207,74 @@ pub fn verify(
     Ok(result)
 }
 
+/// Whether everything `id` depends on in the index, transitively, is a
+/// main-repository rule of a toolchain class: the condition under which any
+/// change that reaches `id` moves a toolchain-class row, and so fires
+/// `CAMBI-W023`. A file, a rule of another class, or a target in an external
+/// repository anywhere below it is a way in that fires nothing.
+fn only_toolchain_rules_below(view: IndexRef<'_>, id: u32) -> bool {
+    let mut seen = std::collections::HashSet::from([id]);
+    let mut stack = vec![id];
+    while let Some(n) = stack.pop() {
+        for &m in view.forward.row(n) {
+            if !seen.insert(m) {
+                continue;
+            }
+            let toolchain_rule = view.kind_of(m) == NodeKind::Rule
+                && !label::is_external(view.label(m))
+                && view
+                    .rule_class(m)
+                    .is_some_and(cambium_index::is_toolchain_rule_class);
+            if !toolchain_rule {
+                return false;
+            }
+            stack.push(m);
+        }
+    }
+    true
+}
+
 /// Asks Bazel for every path from `missing` back to `target` and splits the
-/// round trips out ([`split_round_trips`]). A query Bazel refuses leaves every
-/// miss a plain miss.
+/// round trips out ([`split_round_trips`]). A query Bazel refuses (or one too
+/// long to start) leaves every miss a plain miss, and says so in `diags`.
 fn round_trips(
     bazel: &cambium_bazel::Bazel,
     target: &str,
     missing: &[String],
+    diags: &crate::diag::Diagnostics,
 ) -> (Vec<String>, Vec<String>) {
     let mut cmd = bazel.command("query");
     cmd.arg(format!("allpaths(set({}), {target})", missing.join(" ")))
         .arg("--output=graph")
         .arg("--nograph:factored")
         .args(VERIFY_QUERY_FLAGS);
-    match bazel.runner().output(&mut cmd) {
-        Ok(out) if out.exit.success => split_round_trips(
-            missing,
-            target,
-            &graph_edges(&String::from_utf8_lossy(&out.stdout)),
+    let why = match bazel.runner().output(&mut cmd) {
+        Ok(out) if out.exit.success => {
+            return split_round_trips(
+                missing,
+                target,
+                &graph_edges(&String::from_utf8_lossy(&out.stdout)),
+            )
+        }
+        Ok(out) => out.exit.to_string(),
+        Err(e) => e.to_string(),
+    };
+    diags.emit(
+        crate::diag::Diagnostic::warning(
+            crate::diag::Code::W021VerifyQueryFailed,
+            format!(
+                "`bazel query allpaths(...)` from the {} targets missing below {target} failed \
+                 ({why}), so none of them was checked for a round trip through an external \
+                 repository",
+                missing.len()
+            ),
+        )
+        .with_help(
+            "the misses are listed as plain misses; the verdict stands, only the round-trip \
+             split is missing",
         ),
-        _ => (Vec::new(), Vec::new()),
-    }
+    );
+    (Vec::new(), Vec::new())
 }
 
 #[cfg(test)]
