@@ -233,6 +233,12 @@ fn oracle(
         .flatten()
         .and_then(|p| IndexFile::open(&p).ok());
     let changed_set: BTreeSet<String> = changed.iter().map(|c| c.path.clone()).collect();
+    let added_or_deleted: BTreeSet<String> = changed
+        .iter()
+        .filter(|c| c.status.starts_with(['A', 'D', 'R']))
+        .map(|c| c.path.clone())
+        .collect();
+    let output_base = crate::oracles::repo_inputs::output_base(engine.bazel());
     let out = RdepsOracle::new(0, run.session.seed).run(
         engine.bazel(),
         &OracleInputs {
@@ -241,6 +247,8 @@ fn oracle(
             changed: &changed_set,
             cambium: answer,
             dirty_packages: dirty,
+            output_base: output_base.as_deref(),
+            added_or_deleted: Some(&added_or_deleted),
         },
     )?;
     // `score` over the oracle's own set, so `missed` and `extra` are two

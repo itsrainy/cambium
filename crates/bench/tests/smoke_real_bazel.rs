@@ -9,7 +9,8 @@
 //! USE_BAZEL_VERSION=9.2.0 cargo test -p cambium-bench --test smoke_real_bazel -- --ignored --nocapture
 //! ```
 //!
-//! Skipped (not failed) when `~/.cache/cambium/bin/bazelisk` or both tools are
+//! Skipped (not failed) when bazelisk (`$CAMBIUM_BAZELISK`, else
+//! `~/.cache/cambium/bin/bazelisk`) or both tools are
 //! absent, so a machine without them can still run `--ignored` for the rest of
 //! the suite. `CAMBIUM_REQUIRE_TOOLS=1` turns each skip into a failure; CI's
 //! matrix job sets it, having just built the tools.
@@ -45,7 +46,12 @@ use cambium_bench::tools::cambi::Cambi;
 use cambium_bench::tools::Tool;
 use cambium_bench::walk;
 
+/// `$CAMBIUM_BAZELISK` when it names a file, else
+/// `~/.cache/cambium/bin/bazelisk`.
 fn bazelisk() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CAMBIUM_BAZELISK").map(PathBuf::from) {
+        return p.exists().then_some(p);
+    }
     let p = PathBuf::from(std::env::var_os("HOME")?).join(".cache/cambium/bin/bazelisk");
     p.exists().then_some(p)
 }
@@ -560,4 +566,141 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
     assert!(src_set.missing.is_empty(), "{src_set:#?}");
     assert_eq!(src_set.recall(), 1.0);
     assert!(result.summary.pass, "{:#?}", result.summary);
+}
+
+/// A module whose repository rule reads a patch from the main repository,
+/// and a main-repo target that consumes the repository. The shape of xla's
+/// `third_party/llvm/*.patch` and envoy's `bazel/pgv.patch`, small enough to
+/// read: nothing in the query graph depends on `//third_party:fix.patch`.
+fn write_patched_repo(root: &Path) {
+    write(
+        root,
+        "MODULE.bazel",
+        r#"module(name = "patched_smoke", version = "0.0.1")
+
+patched = use_repo_rule("//:repo.bzl", "patched")
+
+patched(
+    name = "patched",
+    patch = "//third_party:fix.patch",
+)
+"#,
+    );
+    if bazel_version().is_none() {
+        write(root, ".bazelversion", "8.7.0\n");
+    }
+    write(root, "BUILD.bazel", "");
+    write(
+        root,
+        "repo.bzl",
+        r#"def _impl(rctx):
+    rctx.file("BUILD.bazel", "filegroup(name = 'lib', srcs = ['data.txt'], visibility = ['//visibility:public'])\n")
+    rctx.file("data.txt", rctx.read(rctx.attr.patch))
+
+patched = repository_rule(
+    implementation = _impl,
+    attrs = {"patch": attr.label(allow_single_file = True)},
+)
+"#,
+    );
+    write(root, "third_party/BUILD.bazel", "exports_files([\"fix.patch\"])\n");
+    write(root, "third_party/fix.patch", "one\n");
+    write(
+        root,
+        "app/BUILD.bazel",
+        r#"genrule(
+    name = "app",
+    srcs = ["@patched//:lib"],
+    outs = ["app.out"],
+    cmd = "cat $(SRCS) > $@",
+)
+"#,
+    );
+}
+
+/// The repository-input roots against a real Bazel: the marker Bazel writes
+/// for `@patched` names `FILE:@@//third_party/fix.patch`, and the oracle
+/// must root `@@patched+//...:*` and reach `//app:app`, where the changed
+/// path's own label reaches nothing.
+///
+/// The output base is fresh, so the first marker read finds nothing: the
+/// repository is fetched by the changed paths' half (its universe is
+/// `//...`), and it is the second read that sees the marker. That is the
+/// read the design leans on for every repository `//...` reaches at head.
+#[test]
+#[ignore = "needs bazelisk and a network fetch of a Bazel release; run with --ignored"]
+fn a_patch_a_repository_rule_reads_roots_the_oracle_at_that_repository() {
+    use cambium_bench::oracles::rdeps::{OracleInputs, RdepsOracle};
+    use cambium_index::{IndexBuilder, PackageUpdate, TargetRow};
+    use std::collections::BTreeSet;
+
+    let Some(bazelisk) = bazelisk() else {
+        skip("no bazelisk");
+        return;
+    };
+    let version = bazel_version();
+    let root = scratch_root(version.as_deref());
+    std::fs::create_dir_all(&root).unwrap();
+    let tmp = tempfile::tempdir_in(&root).unwrap();
+    let ws = tmp.path().join("ws");
+    write_patched_repo(&ws);
+    let output_base = tmp.path().join("output");
+    let bazel = cambium_bazel::Bazel::at(ws.clone(), bazelisk.to_str())
+        .with_startup_flags(vec![format!("--output_base={}", output_base.display())]);
+
+    // The head index only has to say which package owns the patch.
+    let mut b = IndexBuilder::new(cambium_index::new_lineage());
+    b.apply_packages(&[
+        PackageUpdate {
+            package: "third_party".into(),
+            targets: vec![TargetRow::source_file("//third_party:fix.patch")],
+            ..Default::default()
+        },
+        PackageUpdate {
+            package: "app".into(),
+            targets: vec![TargetRow::rule("//app:app", "genrule", vec![])],
+            ..Default::default()
+        },
+    ]);
+    let idx = b.finish("head");
+    let changed: BTreeSet<String> = ["third_party/fix.patch".to_string()].into();
+    let empty = BTreeSet::new();
+    let run = |ob: Option<&Path>| {
+        RdepsOracle::default()
+            .run(
+                &bazel,
+                &OracleInputs {
+                    head: idx.view(),
+                    base: None,
+                    changed: &changed,
+                    cambium: &empty,
+                    dirty_packages: &empty,
+                    output_base: ob,
+                    added_or_deleted: None,
+                },
+            )
+            .unwrap()
+    };
+
+    let blind = run(None);
+    assert_eq!(blind.roots, vec!["//third_party:fix.patch"], "{blind:#?}");
+    assert_eq!(blind.oracle_labels, 0, "nothing in the graph depends on a patch: {blind:#?}");
+
+    let r = run(Some(&output_base));
+    let ri = r.repository_inputs.as_ref().expect("the markers were read");
+    assert_eq!(ri.repositories.len(), 1, "{ri:#?}");
+    assert_eq!(ri.repositories[0].via, vec!["third_party/fix.patch"], "{ri:#?}");
+    assert!(ri.roots[0].starts_with("@@") && ri.roots[0].ends_with("//...:*"), "{ri:#?}");
+    assert_eq!(
+        r.oracle_set.iter().cloned().collect::<Vec<_>>(),
+        vec!["//app:app"],
+        "{r:#?}"
+    );
+    assert_eq!(ri.labels_added, 1);
+    assert_eq!(r.missing, vec!["//app:app"], "an empty answer misses it");
+    let _ = std::process::Command::new(&bazelisk)
+        .arg(format!("--output_base={}", output_base.display()))
+        .arg("shutdown")
+        .current_dir(&ws)
+        .status();
 }

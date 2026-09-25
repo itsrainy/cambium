@@ -67,6 +67,15 @@ impl LiveChecks for BazelChecks<'_> {
         let changed =
             BazelFacts::changed_paths(&self.checkout.dir, &ctx.step.parent, &ctx.step.head)?;
         let base = self.base_index(&ctx.step.parent);
+        // For the marker files' directory listings; without it a listing is
+        // matched by any changed child, which only widens the oracle.
+        let added_or_deleted = BazelFacts::added_or_deleted_paths(
+            &self.checkout.dir,
+            &ctx.step.parent,
+            &ctx.step.head,
+        )
+        .ok();
+        let output_base = crate::oracles::repo_inputs::output_base(self.engine.bazel());
         let out = RdepsOracle::new(self.oracle_k, self.seed).run(
             self.engine.bazel(),
             &OracleInputs {
@@ -77,6 +86,8 @@ impl LiveChecks for BazelChecks<'_> {
                 // cambium's own dirty set: the only spelling a wholly-deleted
                 // package has, since every rule in it is tombstoned.
                 dirty_packages: ctx.dirty_packages,
+                output_base: output_base.as_deref(),
+                added_or_deleted: added_or_deleted.as_ref(),
             },
         )?;
         Ok(Some(out))

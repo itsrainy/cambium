@@ -80,6 +80,28 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             },
         );
     }
+    if s.oracle_repository_steps > 0 {
+        let _ = writeln!(
+            out,
+            "Repository-rule inputs rooted the oracle on {} of {} steps: Bazel's marker files \
+             named a changed path among the inputs of {}{}, and `@@R//...:*` for each added {} \
+             main-repository rules the changed paths' own labels did not reach.",
+            s.oracle_repository_steps,
+            s.steps_with_oracle,
+            s.oracle_repositories
+                .iter()
+                .take(8)
+                .map(|l| format!("`@@{l}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if s.oracle_repositories.len() > 8 {
+                format!(" and {} more", s.oracle_repositories.len() - 8)
+            } else {
+                String::new()
+            },
+            s.oracle_repository_labels,
+        );
+    }
     if let Some(o) = &r.rebuild_oracle {
         let _ = write!(
             out,
@@ -160,6 +182,9 @@ fn render_cost(out: &mut String, r: &WalkResult) {
     }
     for (name, w) in &c.peer_wall {
         row(out, &format!("{name} (full run per step)"), w);
+    }
+    if c.oracle_wall.samples > 0 {
+        row(out, "rdeps oracle", &c.oracle_wall);
     }
     let _ = writeln!(out);
 }

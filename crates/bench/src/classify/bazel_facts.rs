@@ -179,6 +179,22 @@ impl<'a> BazelFacts<'a> {
             .collect())
     }
 
+    /// The changed paths git reports as added or deleted (renames count as
+    /// both, since `diff` without `-M` reports them that way): what can
+    /// change a directory listing.
+    pub fn added_or_deleted_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
+        let out = crate::tools::git(
+            repo,
+            &["diff", "--no-renames", "--name-only", "--diff-filter=AD", &format!("{base}..{head}")],
+        )?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     fn rule(
         &self,
         bazel: &Bazel,
