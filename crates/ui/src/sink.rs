@@ -201,7 +201,7 @@ impl<W: Write> Text<W> {
                 self.columns = columns;
                 self.line(&text);
             }
-            Event::Row(cells) => {
+            Event::Row(cells) | Event::DataRow { cells, .. } => {
                 let text = row::render(&self.columns, &cells, self.width, &self.p);
                 self.line(&text);
             }
@@ -383,6 +383,13 @@ impl<W: Write> Sink for Jsonl<W> {
     fn emit(&mut self, event: Event) {
         let value = match &event {
             Event::Row(cells) => json_row(&self.columns, cells),
+            Event::DataRow { cells, key, data } => {
+                let mut row = json_row(&self.columns, cells);
+                if let serde_json::Value::Object(map) = &mut row {
+                    map.insert(key.clone(), data.clone());
+                }
+                row
+            }
             _ => json(&event),
         };
         if let Event::RowHeader(columns) = event {
@@ -420,7 +427,7 @@ fn json(event: &Event) -> serde_json::Value {
             "event": "row_header",
             "columns": columns.iter().map(|c| c.title.clone()).collect::<Vec<_>>(),
         }),
-        Event::Row(_) => json!({"event": "row"}),
+        Event::Row(_) | Event::DataRow { .. } => json!({"event": "row"}),
         Event::Milestone(text) => json!({"event": "milestone", "text": text}),
         Event::Current(text) => json!({"event": "current", "text": text}),
         Event::Log(level, text) => {
@@ -616,6 +623,46 @@ mod tests {
         assert_eq!(row["date"], "09-02 09:14");
         assert_eq!(row["affected"], "375");
         assert_eq!(row["index"], "~  2625 rewritten");
+    }
+
+    #[test]
+    fn a_data_row_draws_as_a_row_and_carries_its_value_in_jsonl() {
+        let cells = vec![Cell::text("e6b1317"), Cell::text("1,198")];
+        let columns = vec![
+            Column::flex("commit"),
+            Column::fixed("affected", 8, Align::Right),
+        ];
+        let data = serde_json::json!({"affected": 1198, "wall_ms": 4300});
+
+        let b = buffer();
+        let mut sink = Jsonl::to_writer(Shared(b.clone()));
+        sink.emit(Event::RowHeader(columns.clone()));
+        sink.emit(Event::DataRow {
+            cells: cells.clone(),
+            key: "step".into(),
+            data: data.clone(),
+        });
+        let text = read(&b);
+        let row: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(row["affected"], "1,198", "the display string stays");
+        assert_eq!(row["step"], data);
+
+        let plain = |event: Event| {
+            let b = buffer();
+            let mut sink = Plain::to_writer(Shared(b.clone()), mode(false));
+            sink.emit(Event::RowHeader(columns.clone()));
+            sink.emit(event);
+            drop(sink);
+            read(&b)
+        };
+        assert_eq!(
+            plain(Event::DataRow {
+                cells: cells.clone(),
+                key: "step".into(),
+                data
+            }),
+            plain(Event::Row(cells))
+        );
     }
 
     /// Frames of the live line, in order: what was written between one erase

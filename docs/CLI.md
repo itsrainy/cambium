@@ -104,36 +104,62 @@ stderr, for the same reason `affected` does.
 ### `profile`
 
 The numbers for a proposal to adopt the tool, measured on the repo itself,
-not the benchmark corpus: target count, cold build time and disk size,
-incremental answer time on a typical commit, how often a commit invalidates
-the whole graph.
+not on the benchmark's subjects: target count, cold build time and disk
+size, incremental answer time on a typical commit, the share of the
+repository's targets and tests a typical commit affects, and how often a
+commit invalidates the whole graph. It needs no `cambium.toml`, and leaves
+the checkout and the store alone, so it is the first thing to run on a new
+repository.
 
 It's an incremental walk over the repo's own history in one process: a cold
-build at the last `--commits N` first-parent commits (30 default), one
-incremental step per commit to `REV` (HEAD default), a cold rebuild wherever
-a commit went
-global, counted as its cost. Steps run in a detached worktree, never the
-working tree, one Bazel server. Per-commit time is the engine's own
-(`timings_ms.total`, as `affected` reports it), index held in memory
-between steps; opening the index file, which every real `affected` pays
-first, is measured once, printed beside it.
+build at the oldest of the last `--commits N` first-parent commits (30
+default), one incremental step per commit to `REV` (HEAD default), a cold
+rebuild wherever a commit went global, counted as its cost. `FROM..TO` walks
+from `FROM` to `TO` along `TO`'s first-parent line instead (`FROM..` means
+`FROM..HEAD`), and takes no `--commits`. The header says how many commits
+the walk covers and that the oldest is indexed cold first; that commit is
+the likeliest not to build, and a smaller `--commits` or a `FROM..` range
+moves it. Steps run in a detached worktree, never the working tree, one
+Bazel server. Per-commit time is the engine's own (`timings_ms.total`, as
+`affected` reports it), index held in memory between steps; opening the
+index file, which every real `affected` pays first, is measured once,
+printed beside it. The numbers exclude what a CI job starts with: they come
+from one warm Bazel server across steps and the index in memory; a cold CI
+runner also pays the store fetch, a server start and external fetches.
+
+A commit that fails (`bazel query` cannot load it, a fetch fails) does not
+end the profile. Its step is recorded as failed with the error, the next
+commit is indexed cold and counted as a rebuild with that reason, and three
+failures in a row stop the walk. Either way the report covers what was
+walked. Only a walk in which nothing built at all exits with the error.
 
 While it runs it narrates itself on stderr in the shared grammar below: a
 `worktree` phase, a `cold index` phase with the target count it found, and a
 `commits` phase with one row per commit (`commit / time / affected / tests /
 index`, the commit as `sha7 MM-DD HH:MM subject`). The `index` column is what
 the commit did to the stored index: `= unchanged` when it changed nothing the
-graph models, `~ N rewritten` with the rows the splice actually wrote, or
-`rebuilt` when the commit went global.
+graph models, `~ N rewritten` with the rows the splice actually wrote,
+`rebuilt` when the commit went global (its `affected` and `tests` read
+`all`), or `x failed`. With `--format jsonl` each `row` event also carries
+`step`, the raw step with typed numbers, beside the display strings.
 
 On stdout, `--report kv` (the default) is an aligned key/value block and the
-table; `--report prose` is the paragraphs that block replaced, kept one
-release, and then the same table. `--format json` is the same document as
-ever, with two fields added per commit: `date` and `index` (`{"kind":
-"identical"}`, `{"kind": "spliced", "rows_rewritten": N}` or `{"kind":
-"rebuilt", "reason": "..."}`). `--out <file>` keeps the walk's final index
-(`REV`'s, `cambi index publish`-able), so a profile doubles as the first cold
-build; without it, the index goes to a deleted scratch file.
+table. The block reads: `repository`; `measured` (the warm-server sentence
+above); `targets`; `full index` (where the cold index was built, its targets
+and tests, size, load time); `per commit` (mean, p50, p90 and max over the
+incremental steps, and the mean over every step with its rebuilds);
+`affected` and `tests` (the median incremental commit's count and its share
+of the cold index's targets or tests, manual targets included, with mean and
+p90); `global` (how many commits answered `//...` and their share, then one
+line per reason with its `CAMBI-W` code and `help:` line); `rebuilds`
+(globals and `limits.max_dirty_packages` re-queries counted and timed apart);
+`index work`; and `failed` and `stopped` when a commit failed. `--report
+prose` is the paragraphs that block replaced, kept one release, and then the
+same table. `--format json` is the document behind both, carrying every
+figure the block shows (the JSON contract, version 17, lists the fields).
+`--out <file>` keeps the walk's final index (`REV`'s, or the last commit
+that built), `cambi index publish`-able, so a profile doubles as the first
+cold build; without it, the index goes to a deleted scratch file.
 
 ### `index`
 

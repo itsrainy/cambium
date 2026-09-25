@@ -845,6 +845,7 @@ impl Engine {
                             commit: base.to_string(),
                             parent: anc.clone(),
                             date: self.commit_date(base),
+                            subject: String::new(),
                             changed_files: r.stats.changed_files,
                             dirty_packages: r.stats.dirty_packages,
                             affected: r.affected.len(),
@@ -852,7 +853,10 @@ impl Engine {
                             wall_ms: elapsed_ms,
                             global: false,
                             global_reason: None,
+                            global_cause: None,
                             engine_cold_rebuild: r.stats.cold_rebuild,
+                            cold_after_failure: false,
+                            failed: None,
                             index: crate::profile::IndexWork::Spliced {
                                 rows_rewritten: r.stats.spliced_rows,
                             },

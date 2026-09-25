@@ -239,12 +239,28 @@ push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
 finding is a diagnostic with a code and a `help:` line.
 
 ```console
-$ cambi index build --publish
+$ cambi profile --commits 30 --out ./cambium-index.bin
+$ cambi index publish ./cambium-index.bin
 ```
 
-One cold `bazel query //...:*`, minting a lineage and uploading the first
-index; everything after is incremental. `cambi status` says where the checkout
-is and which index a run would load.
+What cambium costs and saves on this repository, from its own history: one
+cold index at the oldest of the last 30 first-parent commits, then one
+incremental step per commit up to `HEAD`, in a scratch worktree (the checkout
+and the store are left alone). The report gives the graph's size, the cold
+index's time and size, what a typical commit costs and affects as a share of
+the repository's targets and tests, and how often a commit goes global and
+under which `CAMBI-W` code. Its times come from one warm Bazel server with
+the index in memory; a cold CI runner also pays the store fetch, a server
+start and external fetches. A commit that does not build is reported as
+failed and the walk goes on; if the oldest one is the problem, a smaller
+`--commits` or a `FROM..` range moves the cold index to a newer commit.
+
+`--out` keeps the index the walk ends with, and `index publish` uploads it as
+the first index of a lineage, so the profile doubles as the first cold build:
+one build, not two. Everything after is incremental. To skip the profile,
+`cambi index build --publish` is the same cold `bazel query //...:*` on its
+own. `cambi status` says where the checkout is and which index a run would
+load.
 
 ```console
 $ cambi affected origin/main..HEAD --tests-only
@@ -519,7 +535,11 @@ tell the answer is `//...`, which is also exit code 2.
 | 10 | `depth_histogram`: how many affected targets sit at each reverse-dependency depth, index 0 first. Purely additive; the per-target `depth` it summarises has been in the document since 3 |
 | 11 | `affected[].package_depth` and `package_depth_histogram`: the same walk counted in package boundaries crossed, an edge inside one package being free. A target's `package_depth` never exceeds its `depth` |
 | 12 | `stats.sky_seeds`, `stats.sky_unknown_seeds`, `stats.sky_visited` and `stats.sky_new_packages`, describing the reverse walk over the Skyframe loading layer that now decides which packages a change moved; the four `stats.bzl_witness*` counters go with the witness they described. `stats.bzl_closure_hits` keeps its name and its meaning (dirty packages a changed Starlark file reached). `inspect stats` gained `counts.sky_nodes`, `counts.sky_edges`, `counts.sky_layer`, `counts.sky_by_kind` and `bytes.sky_layer` |
+| 13 | `stats.repos_settled`: dirty in-tree repositories whose every dirtying path was a modified source file of one of them, so no package of theirs was re-queried and their changed files reach their consumers by label |
+| 14 | `stats.repos_dirty_by_consumer`: external repositories dirtied because an indexed repository their rules depend on moved, read from the index's consumer table |
+| 15 | `stats.repos_dirty_by_loader`: external repositories dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that defines them loads from a repository whose `.bzl` files may have moved |
 | 16 | `inspect verify` compares main-repository rule targets on both sides, which is all `affected` reports: `theirs_total` no longer counts the source and generated files or external targets Bazel's `rdeps` names, which are counted in the new `ignored_files` and `ignored_external` instead. `precision_pct` is now `agreed_total / ours_total`, the share of what the index reported that Bazel also reports (it was `theirs_total / ours_total`, which could pass 100%). `failures[].missing` is sorted and gained `round_trip` and `via`: the misses Bazel connects to the sample only through an external repository, and the external targets on those paths. `escalations` (`{label, rule_class, code, missing}`) lists the toolchain-class samples that depend in the index on nothing but toolchain-class rules: any change that reaches one moves a toolchain-class row, which a run answers with `//...` under `CAMBI-W023`, so their misses no longer count as unsound. A toolchain-class sample that depends on anything else is a failure like any other |
+| 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints: `index` (targets, tests, packages,
@@ -533,7 +553,12 @@ what the step did to the stored index: `{"kind": "identical"}`,
 `p90_ms`, `max_ms` over every step; `incremental` and `rebuild`, the same
 four plus `commits` over the steps answered incrementally and the steps a
 cold build answered; `globals`, `rebuild_every_commits`, `global_reasons`,
-`engine_cold_rebuilds`, `mean_affected`, `zero_dirty_fraction`).
+`engine_cold_rebuilds`, `mean_affected`, `zero_dirty_fraction`). Version
+17 adds to it what the report prints beside those: the share of the cold
+index's targets and tests a typical (median incremental) commit affects, the
+share of commits that go global with each reason's code and help, globals
+and `limits.max_dirty_packages` re-queries timed apart, and the commits that
+failed (see the table).
 
 The version is shared, so a bump for one document moves all. The affected
 report did not change shape between 1 and 2; it did at 3, and

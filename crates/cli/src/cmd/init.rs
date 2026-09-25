@@ -367,9 +367,13 @@ fn warn_about_gitignore(ctx: &Context, config_path: &Path) {
     );
 }
 
+/// With a store, the profile first: it measures the repository and its
+/// `--out` is the first cold index, so publishing that file costs no second
+/// build. `index build --publish` stays the way to skip the measuring.
 fn next_command(store_configured: bool) -> &'static str {
     if store_configured {
-        "cambi index build --publish"
+        "cambi profile --commits 30 --out ./cambium-index.bin, then cambi index publish \
+         ./cambium-index.bin (or cambi index build --publish to skip the profile)"
     } else {
         "cambi doctor"
     }
@@ -465,7 +469,16 @@ mod tests {
 
     #[test]
     fn the_next_command_is_the_one_that_makes_the_store_useful() {
-        assert_eq!(next_command(true), "cambi index build --publish");
+        let next = next_command(true);
+        assert!(
+            next.starts_with("cambi profile --commits 30 --out "),
+            "{next}"
+        );
+        assert!(
+            next.contains("then cambi index publish ./cambium-index.bin"),
+            "{next}"
+        );
+        assert!(next.ends_with("(or cambi index build --publish to skip the profile)"));
         assert_eq!(next_command(false), "cambi doctor");
     }
 
