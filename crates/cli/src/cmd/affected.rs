@@ -508,6 +508,7 @@ fn index_cell(work: &cambium_engine::profile::IndexWork) -> Cell {
             Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
         }
         IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
+        IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
     }
 }
 
@@ -806,6 +807,7 @@ mod tests {
                     commit: "3f2a9c1abc".into(),
                     parent: "dbaed12def".into(),
                     date: "09-02 09:14".into(),
+                    subject: String::new(),
                     changed_files: 312,
                     dirty_packages: 41,
                     affected: 2_100,
@@ -813,7 +815,10 @@ mod tests {
                     wall_ms: 1_800,
                     global: false,
                     global_reason: None,
+                    global_cause: None,
                     engine_cold_rebuild: false,
+                    cold_after_failure: false,
+                    failed: None,
                     index: IndexWork::Spliced {
                         rows_rewritten: 2_625,
                     },

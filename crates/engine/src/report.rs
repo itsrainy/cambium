@@ -117,7 +117,23 @@ use serde::{Deserialize, Serialize};
 ///   dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that
 ///   defines them loads from a repository whose `.bzl` files may have moved.
 ///   Purely additive.
-pub const SCHEMA_VERSION: u32 = 15;
+/// - **17** is `cambi profile`'s (16 is the consumer leaf map's). A commit that fails no longer ends the profile: its step
+///   carries `failed` (the error as a diagnostic) and `index: {"kind":
+///   "failed"}`, the next one is indexed cold with `cold_after_failure`, the
+///   walk stops after three failures in a row with `stopped` set, and
+///   `from_failed` says when the cold build moved off the range's first
+///   commit. `cold` gains `targets` and `tests`; each step gains `subject`
+///   and `global_cause`; `summary.global_reasons[]` gains `code` and `help`;
+///   `summary` gains `global_rebuild` and `requery` (the two halves of
+///   `rebuild`), `incremental_affected` and `incremental_tests` (mean, p50,
+///   p90), `affected_share`, `tests_share`, `global_share`,
+///   `index_spliced`, `index_unchanged`, `failed` and
+///   `rebuilt_after_failure`; the document gains `repository`. The jsonl
+///   `row` event of `profile` gains `step`, the raw step, beside the display
+///   strings it already had. Existing fields keep their meaning: a global
+///   step is still `affected: 0` with `global: true`, and `mean_affected`
+///   still averages it in. Purely additive.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
