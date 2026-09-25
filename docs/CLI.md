@@ -155,12 +155,18 @@ missing target (`--limit n` lists n and counts the rest), and the command
 exits 1. Misses Bazel connects to the sample only through an external
 repository (`@bazel_tools//tools/test:collect_coverage` depending back on
 the root module's `//shell/runfiles`, say) are listed apart as round trips,
-naming the external targets on the path. A toolchain-class sample
-(`toolchain_type`, `toolchain`, `platform`, `constraint_setting`,
-`constraint_value`) whose rdeps come through toolchain resolution prints
-`ESCALATED` rather than `UNSOUND`: a change to one answers `//...` under
-`CAMBI-W023`. Precision is the share of the targets the index reported
-that Bazel also reports.
+naming the external targets on the path. A run answers `//...` under
+`CAMBI-W023` when the row of a toolchain-class rule (`toolchain_type`,
+`toolchain`, `platform`, `constraint_setting`, `constraint_value`) moves,
+and a sample of one of those classes that depends in the index on nothing
+but other toolchain-class rules cannot be reached by any change that does
+not move such a row. Its misses (the rdeps toolchain resolution adds) are
+covered by that answer, so it prints `ESCALATED` rather than `UNSOUND` and
+does not fail the check. A toolchain-class sample that depends on anything
+else (a `toolchain` whose `target_settings` names a `config_setting`, say)
+can be reached by a change that fires nothing, and its misses fail like any
+other. Precision is the share of the targets the index reported that Bazel
+also reports.
 
 `inspect stats` reports the Skyframe loading layer alongside the target
 graph: its node and edge counts, a line per node kind (`FILE_STATE`, `FILE`,
