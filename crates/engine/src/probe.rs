@@ -334,7 +334,14 @@ pub fn store(cfg: &Config, store: Option<&dyn ArtifactStore>) -> StoreProbe {
         Ok(names) => {
             p.listable = true;
             p.reachable = Some(true);
-            p.indexes = Some(names.iter().filter(|n| n.ends_with(".bin")).count());
+            // The lineage-less copies (`baseline.lineage_less_copies`) repeat
+            // an index already counted under its lineage.
+            p.indexes = Some(
+                names
+                    .iter()
+                    .filter(|n| n.ends_with(".bin") && !n.starts_with("indexes/by-tree/"))
+                    .count(),
+            );
             let mut lineages: Vec<String> = names.iter().filter_map(|n| lineage_of(n)).collect();
             lineages.sort();
             lineages.dedup();
@@ -1330,6 +1337,8 @@ mod tests {
         backend
             .publish(&format!("indexes/{lineage}/abc.bin"), &blob)
             .unwrap();
+        // Its lineage-less copy is the same index, not a second one.
+        backend.publish("indexes/by-tree/abc.bin", &blob).unwrap();
         let mut cfg = Config::default();
         cfg.baseline.store = StoreConfig::Dir {
             path: d.path().to_path_buf(),
