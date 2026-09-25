@@ -44,7 +44,12 @@ impl SubjectsDir {
         crate::util::cache_dir("subjects")
     }
 
+    /// A relative `root` is made absolute against the working directory now:
+    /// the paths built from it land in a subject's config, where a relative
+    /// store path is read from the subject's workspace and startup flags from
+    /// wherever Bazel runs, so one relative root would name three places.
     pub fn new(root: PathBuf) -> Self {
+        let root = std::path::absolute(&root).unwrap_or(root);
         Self { root }
     }
 
@@ -466,6 +471,22 @@ mod tests {
             repo: Repo::new("/tmp/wt"),
             subjects: SubjectsDir::new(PathBuf::from("/tmp/subjects")),
         }
+    }
+
+    #[test]
+    fn a_relative_subjects_dir_gives_a_subject_an_absolute_store() {
+        let subjects = SubjectsDir::new(PathBuf::from("subjects"));
+        assert!(subjects.root().is_absolute());
+        let c = Checkout {
+            subjects,
+            ..checkout()
+        };
+        let cambium_engine::config::StoreConfig::Dir { path } =
+            c.config_for(&entry(5), None).baseline.store
+        else {
+            panic!("a subject's store is a directory");
+        };
+        assert!(path.is_absolute(), "{}", path.display());
     }
 
     #[test]
