@@ -393,3 +393,111 @@ fn a_change_under_an_indexed_repository_reaches_its_rules_by_edge() {
         "the round trip back into `//...` is carried: {affected:?}"
     );
 }
+
+/// envoy's rename. The consumer table is Bazel's answer at the commit that
+/// asked, and the walk carries it. Step 32 of envoy's history renamed
+/// `com_github_grpc_grpc` to `grpc`: every re-queried package then spelled
+/// its deps `@grpc//...`, and the carried table kept naming a repository no
+/// label spelled, so rule (1) seeded nothing and the one target whose only
+/// route into `@envoy_api` was a `@grpc` proto went missing at the next
+/// overflow while a cold build at the same commit had it. The overflow
+/// re-query is on the server that just loaded everything, so the table is
+/// asked again there: the head index names the new repository, and the
+/// next source edit under the indexed repository reaches the consumer.
+#[test]
+fn an_overflow_re_query_re_derives_the_consumer_table() {
+    let dir = tree();
+    let root = dir.path();
+    let scanning = |grpc: &'static str, rows: fn(&str) -> PackageUpdate| {
+        let mut m = BTreeMap::new();
+        m.insert("MODULE.bazel".to_string(), MODULE_BAZEL.to_string());
+        m.insert("third_party/repo.bzl".to_string(), REPO_BZL.to_string());
+        m.insert("app/BUILD".to_string(), String::new());
+        m.insert("lib/BUILD".to_string(), String::new());
+        m.insert("gapp/BUILD".to_string(), String::new());
+        Scanning::new(&["app", "lib", "gapp", "@tsl//tsl/platform"], rows)
+            .with_files(Files(m))
+            .with_workspace(root)
+            .with_repo_probe("tsl", PROBED, false)
+            .with_repo_consumers("tsl", grpc, &["tsl/platform"])
+    };
+    fn old_rows(pkg: &str) -> PackageUpdate {
+        match pkg {
+            "gapp" => PackageUpdate {
+                package: pkg.to_string(),
+                targets: vec![TargetRow::rule(
+                    "//gapp:gapp",
+                    "demo_lib",
+                    vec!["@com_github_grpc_grpc//:grpc".into()],
+                )],
+                ..Default::default()
+            },
+            other => super_rows(other),
+        }
+    }
+    fn new_rows(pkg: &str) -> PackageUpdate {
+        match pkg {
+            "gapp" => PackageUpdate {
+                package: pkg.to_string(),
+                targets: vec![TargetRow::rule(
+                    "//gapp:gapp",
+                    "demo_lib",
+                    vec!["@grpc//:grpc".into()],
+                )],
+                ..Default::default()
+            },
+            other => super_rows(other),
+        }
+    }
+    let consumer_of = |index: &IndexData| -> Vec<String> {
+        let v = index.view();
+        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        v.repo_consumers(tsl).into_iter().map(|(c, _)| c).collect()
+    };
+    // The base, at the commit before the rename.
+    let base = engine()
+        .full_build_with("c0", &scanning("com_github_grpc_grpc", old_rows))
+        .unwrap();
+    assert_eq!(consumer_of(&base), vec!["com_github_grpc_grpc".to_string()]);
+
+    // The rename: a workspace-closure change that overflows the dirty limit
+    // and re-queries `//...`, under a limit of one so the overflow is certain.
+    let mut cfg = cambium_engine::Config::default();
+    cfg.limits.max_dirty_packages = 1;
+    let renamed = scanning("grpc", new_rows);
+    let rename = vec![
+        Change::new(Status::Modified, "app/BUILD"),
+        Change::new(Status::Modified, "lib/BUILD"),
+    ];
+    let out = cambium_testkit::engine_with(cfg)
+        .compute_with_texts(
+            base.view(),
+            &rename,
+            &renamed,
+            &cambium_engine::AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+            &FixedText(BTreeMap::new()),
+        )
+        .unwrap();
+    assert!(out.report.stats.cold_rebuild, "{:?}", out.report.cold_rebuild_reason);
+    assert!(!out.report.global, "{:?}", out.report.global_reason);
+    let head = out.index.expect("the spliced index");
+    assert_eq!(consumer_of(&head), vec!["grpc".to_string()], "re-derived on the overflow");
+
+    // The next step: a source edit under the indexed repository, settled,
+    // reaches `//gapp:gapp` through the leaf the new name spells.
+    let edit = vec![Change::new(
+        Status::Modified,
+        "third_party/tsl/tsl/platform/x.cc",
+    )];
+    let r = engine()
+        .compute_with_texts(head.view(), &edit, &renamed, &req(), &FixedText(BTreeMap::new()))
+        .unwrap()
+        .report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert_eq!(r.stats.repos_dirty_by_consumer, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+}

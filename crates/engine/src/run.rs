@@ -1244,6 +1244,32 @@ impl<'a> Run<'a> {
             if let Some(l) = layer {
                 builder.set_sky_layer(l);
             }
+            // Who consumes each indexed repository is Bazel's answer, and
+            // the base's copy is the answer at whatever commit last asked.
+            // A run that re-queried `//...` is the one place to ask again
+            // cheaply, on the server that just loaded the whole repository,
+            // and the one place it is needed: a repository rename is a
+            // workspace-closure change, which is exactly what overflows the
+            // dirty limit. envoy's `com_github_grpc_grpc` became `grpc` at
+            // one such step, every re-queried package then named its deps
+            // `@grpc//...`, and the carried table kept seeding the leaves
+            // of a repository no label spelled any more: one target whose
+            // only route in was that proto went missing at the next
+            // overflow, and a cold build at the same commit had it.
+            // A repository Bazel cannot answer for keeps the carried entry:
+            // a stale consumer over-reports, an absent one under-reports.
+            let indexed = base.indexed_repos();
+            let mut consumers = consumers_of(base);
+            if queried.cold_reason.is_some() {
+                for (r, cs) in self.querier.consumer_repos(&indexed) {
+                    tracing::debug!(
+                        repo = %r,
+                        consumers = ?cs.keys().collect::<Vec<_>>(),
+                        "the consumer table was re-derived on the re-queried server"
+                    );
+                    consumers.insert(r, cs);
+                }
+            }
             if let Some(c) = bzl::rescan_closure(
                 self.querier,
                 builder.take_bzl_closure(),
@@ -1253,8 +1279,8 @@ impl<'a> Run<'a> {
                 &crate::bzl::dirs(&boundaries),
                 bzl::InTreeRepos {
                     confirmed: &confirmed_repos(base),
-                    consumers: &consumers_of(base),
-                    indexed: &base.indexed_repos(),
+                    consumers: &consumers,
+                    indexed: &indexed,
                 },
             ) {
                 builder.set_bzl_closure(c);
