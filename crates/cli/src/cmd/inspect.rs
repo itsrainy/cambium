@@ -56,6 +56,8 @@ impl From<&Reach> for QueryOptions {
 /// own arm of [`Args`] rather than a [`Query`].
 #[derive(ClapArgs)]
 pub struct Verify {
+    /// Index file to check, as `index build --out` or `profile --out` wrote
+    /// it. Checked against the workspace as it is checked out now.
     file: PathBuf,
     /// How many targets to sample.
     #[arg(long, default_value_t = 200)]
@@ -63,6 +65,10 @@ pub struct Verify {
     /// Seed for the sample, so a failure can be reproduced.
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// List at most this many missing targets per sample, and count the
+    /// rest. Every one is listed by default; JSON always carries them all.
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 /// `cambi inspect <verb>`: the questions against one index file, and the
@@ -71,8 +77,10 @@ pub struct Verify {
 pub enum Args {
     #[command(flatten)]
     Query(Query),
-    /// Check an index against Bazel (spec 12.3): sample rule targets and
-    /// compare our reverse closure with `bazel query rdeps(//..., label)`.
+    /// Check an index against Bazel: sample rule targets and compare the
+    /// index's reverse closure with `bazel query rdeps(//..., label)`, over
+    /// main-repository rule targets (what `affected` reports). Exits 1 when
+    /// Bazel reports a target the index misses.
     Verify(Verify),
 }
 
@@ -202,10 +210,11 @@ fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     for d in engine.diagnostics().drain() {
         ctx.render.warn(&d);
     }
+    let limit = args.limit;
     emit(
         &result,
         ctx.format.data("cambi inspect verify")?,
-        print_verify,
+        |r: &inspect::VerifyResult| print_verify(r, limit),
     )?;
     Ok(if result.is_sound() {
         crate::EXIT_OK
@@ -214,23 +223,87 @@ fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     })
 }
 
-fn print_verify(r: &inspect::VerifyResult) {
+/// Up to `limit` labels, indented, then how many were left out.
+fn print_labels(labels: &[String], limit: Option<usize>) {
+    let shown = limit.unwrap_or(labels.len()).min(labels.len());
+    for l in &labels[..shown] {
+        eprintln!("    {l}");
+    }
+    if shown < labels.len() {
+        eprintln!("    ... and {} more", labels.len() - shown);
+    }
+}
+
+fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
     for f in &r.failures {
         eprintln!(
-            "UNSOUND {}: {} targets Bazel reports as rdeps are missing from the index",
+            "UNSOUND {}: {} {} Bazel reports as rdeps {} missing from the index",
             f.label,
-            f.missing.len()
+            f.missing.len(),
+            plural(f.missing.len(), "target", "targets"),
+            plural(f.missing.len(), "is", "are"),
         );
-        for m in f.missing.iter().take(10) {
-            eprintln!("    {m}");
+        let plain: Vec<String> = f
+            .missing
+            .iter()
+            .filter(|m| !f.round_trip.contains(m))
+            .cloned()
+            .collect();
+        print_labels(&plain, limit);
+        if !f.round_trip.is_empty() {
+            eprintln!(
+                "  {} of them {} it only through {}, a main -> external -> main round trip \
+                 the index does not model:",
+                f.round_trip.len(),
+                plural(f.round_trip.len(), "reaches", "reach"),
+                f.via.join(", "),
+            );
+            print_labels(&f.round_trip, limit);
         }
+    }
+    for e in &r.escalations {
+        eprintln!(
+            "ESCALATED {} ({}): {} {} Bazel reports as rdeps {} not in the index; a change to \
+             this rule answers //... under {}",
+            e.label,
+            e.rule_class,
+            e.missing.len(),
+            plural(e.missing.len(), "target", "targets"),
+            plural(e.missing.len(), "is", "are"),
+            e.code,
+        );
+        print_labels(&e.missing, limit);
     }
     println!("checked {} targets against bazel", r.checked);
     println!("unsound: {}", r.unsound);
+    if !r.escalations.is_empty() {
+        println!(
+            "escalated: {} (toolchain-class rules; a run answers //... when one changes)",
+            r.escalations.len()
+        );
+    }
     println!(
-        "precision: {:.1}% ({} of {} reported targets are real rdeps)",
-        r.precision_pct, r.theirs_total, r.ours_total
+        "precision: {:.1}% ({} of {} targets the index reported are rdeps Bazel reports)",
+        r.precision_pct, r.agreed_total, r.ours_total
     );
+    if r.ignored_files + r.ignored_external > 0 {
+        println!(
+            "compared main-repository rule targets only; not compared: {} file {} and {} \
+             external {} Bazel reported",
+            r.ignored_files,
+            plural(r.ignored_files, "target", "targets"),
+            r.ignored_external,
+            plural(r.ignored_external, "target", "targets"),
+        );
+    }
+}
+
+fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 {
+        one
+    } else {
+        many
+    }
 }
 
 /// One question against the index.
