@@ -113,7 +113,11 @@ use serde::{Deserialize, Serialize};
 /// - **14** adds `stats.repos_dirty_by_consumer`: external repositories
 ///   dirtied because an indexed repository their rules depend on moved,
 ///   read from the index's consumer table (format 13). Purely additive.
-pub const SCHEMA_VERSION: u32 = 14;
+/// - **15** adds `stats.repos_dirty_by_loader`: external repositories
+///   dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that
+///   defines them loads from a repository whose `.bzl` files may have moved.
+///   Purely additive.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -304,6 +308,12 @@ pub struct Stats {
     /// do.
     #[serde(default)]
     pub repos_dirty_by_consumer: usize,
+    /// External repositories dirtied because the definition that makes them
+    /// loads a `.bzl` from a repository whose `.bzl` files may have moved:
+    /// xla's `@llvm-project`, which a module extension defines by calling
+    /// `llvm_configure` from `@llvm-raw`, when an input of `@llvm-raw` moves.
+    #[serde(default)]
+    pub repos_dirty_by_loader: usize,
     /// Targets in those repositories that the main repository names, and whose
     /// consumers were therefore made direct.
     #[serde(default)]

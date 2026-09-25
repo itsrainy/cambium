@@ -649,6 +649,15 @@ impl<'a> Run<'a> {
                 global = Some(reason);
             }
         }
+        // A repository whose `.bzl` files may have moved moves every
+        // repository defined through a load from it: xla's `@llvm-project`,
+        // which a module extension defines by calling `llvm_configure` from
+        // `@llvm-raw`. After every other route, so that a repository any of
+        // them dirtied is followed; see `externals::defined_through_loads`.
+        if !dirty.global && self.engine.config().externals.enabled {
+            self.stats.repos_dirty_by_loader =
+                crate::externals::defined_through_loads(self.base, ext, texts, &self.req.head);
+        }
 
         // Every route that dirties a repository is in by now: the stage's
         // own, the nested checkouts above, and the workspace-level `.bzl`
