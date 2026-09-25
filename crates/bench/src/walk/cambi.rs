@@ -43,6 +43,20 @@ pub trait Driver {
     fn paths(&self, _rev: &str) -> Result<Option<BTreeSet<String>>> {
         Ok(None)
     }
+
+    /// Stops the Bazel server this driver's builds run on, so the next
+    /// [`build`](Self::build) starts on an empty Skyframe graph. The output
+    /// base stays, and with it every repository already fetched into it: a
+    /// restarted server finds their marker files up to date and does not
+    /// fetch them again. An error when the server could not be stopped, since
+    /// the caller is about to rely on the graph being empty.
+    ///
+    /// The rebuild oracle's reference build is what needs it (see
+    /// `Runner::reference_build` in the walk driver). A no-op for a driver
+    /// with no server, whose every build is fresh already.
+    fn restart_server(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// `git ls-tree -r --name-only` at `rev`, NUL-separated so a path with a
@@ -75,6 +89,10 @@ pub struct Update {
 pub struct CambiDriver<'a> {
     pub checkout: &'a crate::checkout::Checkout,
     pub cambi: &'a crate::tools::cambi::Cambi,
+    /// The Bazel `cambi` runs in the checkout: the same workspace, startup
+    /// flags and environment, so the same server. Only
+    /// [`Driver::restart_server`] uses it; `cambi` starts its own.
+    pub bazel: &'a cambium_bazel::Bazel,
 }
 
 impl Driver for CambiDriver<'_> {
@@ -108,6 +126,54 @@ impl Driver for CambiDriver<'_> {
     fn paths(&self, rev: &str) -> Result<Option<BTreeSet<String>>> {
         tree_paths(&self.checkout.dir, rev).map(Some)
     }
+
+    fn restart_server(&self) -> Result<()> {
+        stop_server(self.bazel, SERVER_STOP_WAIT)
+    }
+}
+
+/// How long a stopped server gets to exit after `bazel shutdown` returns.
+const SERVER_STOP_WAIT: Duration = Duration::from_secs(60);
+
+/// `bazel shutdown` on `bazel`'s output base, checked: the command has to
+/// succeed and, when the startup flags name the output base, no server may
+/// be left running on it by `wait`.
+///
+/// Not [`cambium_bazel::Bazel::shutdown`], which is best effort by design
+/// (it runs on the way out of a run, where a failure spoils nothing). Here
+/// a server that survives would serve the next build its whole history.
+pub fn stop_server(bazel: &cambium_bazel::Bazel, wait: Duration) -> Result<()> {
+    let mut cmd = bazel.command("shutdown");
+    let out = cmd
+        .output()
+        .with_context(|| format!("running bazel shutdown in {}", bazel.workspace().display()))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "bazel shutdown in {} exited with {}: {}",
+        bazel.workspace().display(),
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let Some(base) = bazel
+        .startup_flags()
+        .iter()
+        .find_map(|f| f.strip_prefix("--output_base="))
+    else {
+        return Ok(());
+    };
+    let base = Path::new(base);
+    let deadline = Instant::now() + wait;
+    while let Some(pid) = crate::servers::running_on(base) {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "bazel shutdown returned but the server on {} (pid {pid}) is still running after {}s",
+            base.display(),
+            wait.as_secs()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    tracing::info!(output_base = %base.display(), "stopped the bazel server for a fresh graph");
+    Ok(())
 }
 
 /// Where a driver that does not run Bazel gets its package rows.
