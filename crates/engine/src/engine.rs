@@ -592,6 +592,7 @@ impl Engine {
         self.store.as_deref().map(|s| {
             BaselineCache::new(s, &self.cache_dir, self.cfg.hash())
                 .with_diagnostics(self.diagnostics.clone())
+                .with_lineage_less_copies(self.cfg.baseline.lineage_less_copies)
         })
     }
 
