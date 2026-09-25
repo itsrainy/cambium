@@ -80,7 +80,10 @@ pub enum Args {
     /// Check an index against Bazel: sample rule targets and compare the
     /// index's reverse closure with `bazel query rdeps(//..., label)`, over
     /// main-repository rule targets (what `affected` reports). Exits 1 when
-    /// Bazel reports a target the index misses.
+    /// Bazel reports a target the index misses, unless the sample is a
+    /// toolchain-class rule that depends only on toolchain-class rules: any
+    /// change that reaches one makes a run answer `//...`, so it prints
+    /// ESCALATED instead.
     Verify(Verify),
 }
 
@@ -263,8 +266,9 @@ fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
     }
     for e in &r.escalations {
         eprintln!(
-            "ESCALATED {} ({}): {} {} Bazel reports as rdeps {} not in the index; a change to \
-             this rule answers //... under {}",
+            "ESCALATED {} ({}): {} {} Bazel reports as rdeps {} not in the index; it depends \
+             on nothing but toolchain-class rules, so any change that reaches it answers //... \
+             under {}",
             e.label,
             e.rule_class,
             e.missing.len(),
@@ -274,11 +278,16 @@ fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
         );
         print_labels(&e.missing, limit);
     }
-    println!("checked {} targets against bazel", r.checked);
+    println!(
+        "checked {} {} against bazel",
+        r.checked,
+        plural(r.checked, "target", "targets")
+    );
     println!("unsound: {}", r.unsound);
     if !r.escalations.is_empty() {
         println!(
-            "escalated: {} (toolchain-class rules; a run answers //... when one changes)",
+            "escalated: {} (toolchain-class rules over toolchain-class rules only; any change \
+             that reaches one answers //...)",
             r.escalations.len()
         );
     }
