@@ -1,0 +1,88 @@
+name: release
+
+# On a v* tag: build cambi for four targets with scripts/package-release.sh,
+# then put the tarballs and one SHA256SUMS on a draft GitHub release, which is
+# published by hand once it has been looked at. scripts/install.sh installs
+# from the published release.
+#
+# Everything a build does is in the script, which runs the same way on a
+# laptop (`scripts/package-release.sh --target <triple>`); this file only
+# fans it out and collects the results.
+#
+# Linux builds are glibc (gnu), built on the oldest hosted Ubuntu so the
+# binary runs on that glibc and anything newer. musl is left for later: the
+# workspace sets no global allocator, and musl's default malloc is slow for
+# allocation-heavy multithreaded code, which would make `cambi profile`
+# under-report what cambi can do. A musl build should come with a measured
+# gnu/musl comparison, or with a different allocator.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          # Arm hosted runners are free for public repositories only.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # Cross-built on the arm64 runner. package-release.sh checks
+          # --version only when the target is the host, so this one is not
+          # run before upload.
+          - target: x86_64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml names the toolchain.
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - run: scripts/package-release.sh --target ${{ matrix.target }} --tag "$GITHUB_REF_NAME" --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cambi-${{ matrix.target }}
+          # The tarball and its .sha256 line; the release job writes the
+          # one SHA256SUMS from all of them.
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          cat *.tar.gz.sha256 > SHA256SUMS
+          rm *.tar.gz.sha256
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+      - name: draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag --draft --generate-notes
+          --title "cambi ${GITHUB_REF_NAME#v}"
+          dist/*.tar.gz dist/SHA256SUMS
