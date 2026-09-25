@@ -103,6 +103,7 @@ pub fn from_config(
             list_cmd: list_cmd.clone(),
             not_found_exit: *not_found_exit,
             diags: diags.clone(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
         })),
     }
 }
@@ -206,6 +207,22 @@ impl DirStore {
                 path: self.root.clone(),
                 source: std::io::Error::other("the store path is not a directory"),
             }),
+            // A symlink whose target is missing is not a store nobody has
+            // published to: a publish cannot create through it (the link
+            // itself is in the way), and on a CI runner it is usually a cache
+            // mount that did not come up.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&self.root)
+                        .is_ok_and(|m| m.file_type().is_symlink()) =>
+            {
+                Err(StoreError::Io {
+                    path: self.root.clone(),
+                    source: std::io::Error::other(
+                        "the store path is a symlink to something that does not exist",
+                    ),
+                })
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.say_absent();
                 Ok(false)
@@ -426,9 +443,11 @@ impl ArtifactStore for HttpStore {
             // S3 and GCS answer 403 rather than 404 for a missing key when the
             // caller may not list the bucket, which is the usual shape of a
             // read-only CI credential. The ancestor walk asks for many keys
-            // that do not exist, so this is a miss, not an outage; a
-            // credential that is actually wrong shows up as the publish
-            // failing, which is loud.
+            // that do not exist, so this is a miss, not an outage. The cost:
+            // a wrong credential reads as a miss too. A publisher finds out
+            // (its PUT fails), but a read-only CI reader never publishes, so
+            // for it a bad `headers` value is a cold build with nothing said
+            // above `--log debug`. docs/STORE.md says so.
             Err(ureq::Error::Status(403, _)) => {
                 tracing::debug!(name, "403 on GET; reading it as not found");
                 Ok(false)
@@ -479,6 +498,10 @@ pub struct CommandStore {
     /// turns into a cold build; that is worth a diagnostic and not only a log
     /// line, so the store carries the engine's sink.
     diags: crate::diag::Diagnostics,
+    /// Whether that warning has been given. An outage fails every fetch of
+    /// the ancestor walk the same way, so it is said once and the rest are
+    /// logged.
+    said_failed: std::sync::atomic::AtomicBool,
 }
 
 impl CommandStore {
@@ -533,6 +556,16 @@ impl ArtifactStore for CommandStore {
             _ => {
                 if stderr.is_empty() {
                     tracing::debug!(name, status = ?code, "fetch command reported no artifact");
+                } else if self
+                    .said_failed
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        name,
+                        status = ?code,
+                        %stderr,
+                        "fetch command failed again; treating the artifact as absent"
+                    );
                 } else {
                     tracing::warn!(
                         name,
@@ -550,8 +583,8 @@ impl ArtifactStore for CommandStore {
                             ),
                         )
                         .with_help(
-                            "check the credentials and the location in [baseline].store; a \
-                             real miss is silent",
+                            "check the credentials and the location in [baseline].store; said \
+                             once per run, later failing fetches are logged at `--log warn`",
                         ),
                     );
                 }
@@ -710,6 +743,7 @@ mod tests {
             list_cmd: vec!["ls".into(), dir.path().display().to_string()],
             not_found_exit: None,
             diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
         };
         let dest = dir.path().join("out.bin");
         assert!(store.fetch("cambium-index-x-1.bin", &dest).unwrap());
@@ -760,6 +794,7 @@ mod tests {
             list_cmd: vec![],
             not_found_exit: Some(1),
             diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(store.fetch("x", &dir.path().join("x")).is_err());
         let store = CommandStore {
@@ -768,6 +803,7 @@ mod tests {
             list_cmd: vec![],
             not_found_exit: Some(1),
             diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(!store.fetch("x", &dir.path().join("x")).unwrap());
     }
@@ -854,6 +890,55 @@ mod tests {
             assert!(matches!(listed, Err(StoreError::Io { .. })), "{listed:?}");
             assert!(matches!(fetched, Err(StoreError::Io { .. })), "{fetched:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_store_behind_a_dangling_symlink_is_an_error_not_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("cache-mount");
+        std::os::unix::fs::symlink(dir.path().join("not-mounted"), &link).unwrap();
+        let diags = crate::diag::Diagnostics::new();
+        let store = DirStore::new(link).with_diagnostics(diags.clone());
+        assert!(matches!(store.list(), Err(StoreError::Io { .. })));
+        assert!(matches!(
+            store.fetch("indexes/a/b.bin", &dir.path().join("out.bin")),
+            Err(StoreError::Io { .. })
+        ));
+        assert!(diags.is_empty(), "no W007 for it: {:?}", diags.drain());
+    }
+
+    #[test]
+    fn a_command_store_says_a_failing_fetch_once_per_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let diags = crate::diag::Diagnostics::new();
+        let store = CommandStore {
+            fetch_cmd: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo 'fatal error: Could not connect' >&2; exit 1".into(),
+            ],
+            push_cmd: vec![],
+            list_cmd: vec![],
+            not_found_exit: None,
+            diags: diags.clone(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        for k in [
+            "indexes/by-tree/a.bin",
+            "indexes/by-tree/b.bin",
+            "commits/by-commit/c",
+        ] {
+            assert!(!store.fetch(k, &dir.path().join("out")).unwrap());
+        }
+        let said = diags.drain();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].code, crate::diag::Code::W007StoreFetchFailed);
+        assert!(
+            said[0].message.contains("Could not connect"),
+            "{}",
+            said[0].message
+        );
     }
 
     #[test]
