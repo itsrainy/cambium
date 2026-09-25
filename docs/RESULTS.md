@@ -69,38 +69,63 @@ and the mapping is what the rebuild oracle checks.
 
 **The runs these tables are from.** bazel, sourcegraph and apollo are box
 run A, 2026-09-19 to 2026-09-20; xla is box run B, 2026-09-23, the engine at
-`7a4abfd` with in-tree external repositories indexed; envoy is box run C,
-2026-09-24, the engine at `a07bad7` with the WORKSPACE-mode claim confirming
-and the oracle rooted at in-tree labels. Only the subjects a change can reach
-were re-run.
+`7a4abfd` with in-tree external repositories indexed; envoy is box run E,
+2026-09-25, the engine at `a1606bf` with the consumer table and the oracle
+rooted at in-tree labels. Only the subjects a change can reach were re-run.
 Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
 on every step, the bazel-diff and tango peers on a stratified sample of 40,
 every subject cold-building its own index at its pin, no index store in
 play. Run A was the first clean five-subject measurement with a fresh index
 throughout and the first to run the whole loading layer.
 
-**envoy's section below is box run C (2026-09-24), the first with an oracle
-that can see a change under `api/`, and it fails: worst recall 0.2142.** Run
-B's envoy line read recall 1.0 because its `rdeps` oracle rooted only
-main-repo labels, and a `.proto` under `api/` has none (`//...` stops at the
-boundary); the engine it measured also joined such a path to nothing at every
-base before envoy's bzlmod migration, so a proto edit reached no consumer and
-nothing noticed. Both are fixed (`74a124a`, `fa524b6`), and the rooted oracle
-then found the miss that remains: four steps, 510, 164, 12 and 1 labels
-short, every one reached by Bazel through `@grpc`. grpc's xDS client
-consumes `@envoy_api` protos (101 rules at the pin, the only external
-repository that does), and a test that links `@grpc//:grpc` depends on
-`fault.proto` through `@grpc//src/core:grpc_xds_client`. cambium indexes
-`//...` and the in-tree repositories, so `@grpc//:grpc` is a leaf with no
-outgoing edges and the path back into `@envoy_api` is invisible. This is the
-external-route limitation with the in-tree repository on the far side, and
-the fix is a table the cold build can ask Bazel for once: which external
-repositories consume each indexed repository, and which of its packages; a
-change to a consumed package then dirties the consumer and its leaves seed
-the walk. Not implemented at this writing.
+**envoy's section below is box run E (2026-09-25): 288 oracle steps, 0
+missing, worst recall 1.0.** Three runs got it there. Run B's envoy line
+read recall 1.0 because its `rdeps` oracle rooted only main-repo labels, and
+a `.proto` under `api/` has none (`//...` stops at the boundary); the engine
+it measured also joined such a path to nothing at every base before envoy's
+bzlmod migration, so a proto edit reached no consumer and nothing noticed.
+Both were fixed (`74a124a`, `fa524b6`), and run C (2026-09-24, `a07bad7`)
+then failed at 0.2142: four steps, 510, 164, 12 and 1 labels short, every
+one reached by Bazel through `@grpc`. grpc's xDS client consumes
+`@envoy_api` protos (101 rules at the pin, the only external repository
+that does), and a test that links `@grpc//:grpc` depends on `fault.proto`
+through `@grpc//src/core:grpc_xds_client`; cambium indexes `//...` and the
+in-tree repositories, so `@grpc//:grpc` was a leaf with no outgoing edges
+and the path back into `@envoy_api` invisible. The fix is a table the cold
+build asks Bazel for, once per indexed repository: which external
+repositories consume it and which of its packages (`b11c1b1`, format 13);
+a change to a consumed package dirties the consumer and its leaves seed the
+walk. Run D (2026-09-25, `ec2421a`) closed those four and missed one label
+on one step, the same label run C had also missed there:
+`//source/extensions/transport_sockets/alts:handshaker_cc_grpc`, whose only
+route into `@envoy_api` is a `@grpc` proto. The table is built at the
+walk's first commit, where the repository is named `com_github_grpc_grpc`;
+step 32 renames it to `grpc`, every package re-queried after that spells
+its deps `@grpc//...`, and the carried table kept naming a repository no
+label spelled, so nothing was seeded. A run that overflows the dirty limit
+re-queries `//...` on a server that has just loaded everything, and now
+asks for the table again there (`a1606bf`). Run E is that engine. Its
+answer is coarse where the route is: a change to a consumed `@envoy_api`
+package seeds every `@grpc` leaf, so the step whose oracle is 649 labels
+answers 5035, which is the tightness p50 of 0.973 against run C's 0.986.
 
-**What else run C measured for the first time.** The oracle's own answer is
-short on every envoy step by a class the harness now names
+**What the rebuild oracle still reports on envoy.** 306 loading-layer rows
+the cold build at the pin holds and the walked index does not, all `FILE`
+and `FILE_STATE` rows for repository-rule inputs and the subtrees under
+them: `bazel/*.patch`, `bazel/external/*.BUILD`, the `BUILD`, `BUILD.bazel`,
+`WORKSPACE` and `WORKSPACE.bazel` probes Bazel makes in every directory of
+`bazel/external/c-ares/**` and `bazel/foreign_cc`, `compat/openssl`,
+`test/extensions/*/wasm/test_data`, `contrib/{dlb,vcl,kafka}`. Only 19 of
+the 261 distinct paths are inputs the externals tables record; the rest are
+Bazel walking a subtree a repository rule or a glob names. What a miss
+there would cost is an edit to one of those files reaching no rule; the
+externals stage answers a recorded input by name and a subtree by prefix,
+and no walk step has yet found a label short because of one. The rows fail
+the walk verdict (the ⚠ in the table) and are not yet a named class; xla's
+314 are the same shape. This is issue #27.
+
+**What else runs C to E measured.** The oracle's own answer is
+short on 123 of envoy's 288 steps by a class the harness names
 (`oracle_unresolved`, `2868471`): `bazel query` evaluates every `select`
 branch, envoy names `@perfetto//:perfetto` under `//bazel:enable_perf_tracing`
 and the perfetto module's overlay `BUILD.bazel` shadows the `BUILD` that
@@ -115,9 +140,11 @@ says by what. The rebuild oracle at the pin was vacuous in run B (its last
 step was a cold rebuild, so the pin was compared with itself); run C's real
 comparison found 13755 missing loading-layer rows, all `WORKSPACE` and
 `WORKSPACE.bazel` probes in package directories where no such file exists,
-which a cold dump carries and a refresh dump does not, now a named class, and
-11 rules whose hash differs from the cold rebuild, which the record now names
-from the next run on.
+which a cold dump carries and a refresh dump does not, now a named class
+(13449 of run E's 13755 are it), and 11 rules whose hash differs from the
+cold rebuild, all under `tools/` (`//tools/code:check`,
+`//tools/code_format:check_format`, `//tools/coverage:report_generator_script`
+and eight more), which the record names.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
@@ -205,7 +232,7 @@ below.
 | subject | pin | bazel | targets | index build | walk p50 | walk p90 | rebuilds | worst recall | tightness p50 | bazel-diff-rust p50 | tango p50 |
 |---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | bazel | 948b8c70e281 | 9.2.0 | 24805 | 3.0 s | 96 ms | 826 ms | 0 | 1.0000 | 1.000 | 6954 ms | 19094 ms |
-| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 26.7 s | 1935 ms | 7127 ms | 0 | 0.2142 ⚠ | 0.986 | 8715 ms | 29269 ms |
+| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 20.3 s | 3107 ms | 10436 ms | 0 | 1.0000 ⚠ | 0.973 | 9041 ms | 99621 ms |
 | sourcegraph | c864f15af264 | 7.2.0 | 70450 | 10.5 s | 459 ms | 14302 ms | 0 | 1.0000 ⚠ | 1.000 | 12802 ms | 57231 ms |
 | apollo | d53aa3da47a0 | 7.4.1 | 25973 | 5.4 s | 274 ms | 1671 ms | 0 | 1.0000 ⚠ | 0.969 | 13409 ms | 27346 ms |
 | xla | 076fe93fad26 | 8.7.0 | 35050 | 28.9 s | 232 ms | 1188 ms | 0 | 1.0000 ⚠ | 1.000 | 24817 ms | 225536 ms |
@@ -347,7 +374,7 @@ Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 9.2.0
 **Soundness**
 
 300 steps, 288 with the oracle. 288 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window or a package that failed to load; 0 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-948b8c70e281c2fe42aa5468dad543c7af9f0ccc.json.
+Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 0 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-948b8c70e281c2fe42aa5468dad543c7af9f0ccc.json.
 Globals: 12. Engine cold rebuilds: 0.
 
 **Tightness against the oracle** (1.0 is exact)
@@ -384,30 +411,31 @@ Index build: 2963 ms.
 <!-- bench:envoy:begin -->
 ### envoy — 7ba51266cc60 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (a07bad7) · tool a07bad7 · engine f12/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (a1606bf) · tool a1606bf · engine f13/a8e0ff64
 
 **Soundness**
 
-300 steps, 288 with the oracle. 284 sound, 4 missing; worst recall 0.2142 at 4939d6c3f48c..381031deeb62.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 11; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 13755 (extra: 0); loading layer unexplained: 13755. Loading layer: 13755 missing rows (0 expected: created in the window or a package that failed to load; 13755 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
+300 steps, 288 with the oracle. 288 sound, 0 missing; worst recall 1.0000.
+The oracle's answer was a lower bound on 123 of 288 steps: Bazel could not resolve `//:.bazelci/presubmit.yml`, `//:.bazelrc`, `//:.github/workflows/_check_build.yml`, `//:.github/workflows/_check_build_openssl.yml`, `//:.github/workflows/_check_coverage.yml`, `//:.github/workflows/_check_runtime.yml`, `//:.github/workflows/_check_san.yml`, `//:.github/workflows/_cve_fetch.yml` and 153 more, and under `--keep_going` every target that depends on an unresolvable one leaves the `rdeps` universe, so recall is measured against what was left.
+Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 11; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 13755 (extra: 0); loading layer unexplained: 306. Loading layer: 13755 missing rows (13449 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 306 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json. Rule hashes differ from the cold rebuild for 11: `//tools/clang-tidy:collect_fixes`, `//tools/code:check`, `//tools/code:checked`, `//tools/code_format:check_format`, `//tools/coverage:report_generator_script`, `//tools/dependency:cve_update` and 5 more.
 Globals: 12. Engine cold rebuilds: 46.
 
 **Tightness against the oracle** (1.0 is exact)
 
 | tool | p50 | p90 | steps |
 |---|--:|--:|--:|
-| cambium | 0.986 | 1.000 | 243 |
+| cambium | 0.973 | 1.000 | 243 |
 | bazel-diff-rust | 0.950 | 1.255 | 33 |
 | tango | 0.831 | 0.997 | 33 |
 
 **Cost** (the two populations kept apart)
 
-Index build: 26705 ms.
+Index build: 20330 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 1935 ms | 7127 ms | 32933 ms | 288 |
-| bazel-diff-rust (full run per step) | 8715 ms | 12528 ms | 48847 ms | 40 |
-| tango (full run per step) | 29269 ms | 79511 ms | 267305 ms | 40 |
+| cambium walk (incremental) | 3107 ms | 10436 ms | 40275 ms | 288 |
+| bazel-diff-rust (full run per step) | 9041 ms | 11510 ms | 47026 ms | 40 |
+| tango (full run per step) | 99621 ms | 166573 ms | 364186 ms | 40 |
 
 **Coverage per tag**
 
@@ -431,7 +459,7 @@ Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 7.2.0
 **Soundness**
 
 300 steps, 297 with the oracle. 297 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: nodes only in applied: 10231, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 1873, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 280 (extra: 2161); loading layer unexplained: 280. Loading layer: 280 missing rows (0 expected: created in the window or a package that failed to load; 280 unexplained), 2161 extra (1146 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-c864f15af264f0f456a6d8a83290b5c940715349.json.
+Rebuild oracle at the pin: nodes only in applied: 10231, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 1873, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 280 (extra: 2161); loading layer unexplained: 280. Loading layer: 280 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 280 unexplained), 2161 extra (1146 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-c864f15af264f0f456a6d8a83290b5c940715349.json.
 Globals: 3. Engine cold rebuilds: 1.
 
 **Tightness against the oracle** (1.0 is exact)
@@ -473,7 +501,7 @@ Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 7.4.1
 **Soundness**
 
 74 steps, 73 with the oracle. 73 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 6690 (extra: 0); loading layer unexplained: 6690. Loading layer: 6690 missing rows (0 expected: created in the window or a package that failed to load; 6690 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa-7.4.1.json.
+Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 6690 (extra: 0); loading layer unexplained: 6690. Loading layer: 6690 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 6690 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa-7.4.1.json.
 Globals: 1. Engine cold rebuilds: 6.
 
 **Tightness against the oracle** (1.0 is exact)
@@ -515,7 +543,7 @@ Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0
 **Soundness**
 
 300 steps, 296 with the oracle. 296 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 314 (extra: 0); loading layer unexplained: 314. Loading layer: 314 missing rows (0 expected: created in the window or a package that failed to load; 314 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
+Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 314 (extra: 0); loading layer unexplained: 314. Loading layer: 314 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 314 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
 Globals: 4. Engine cold rebuilds: 0.
 
 **Tightness against the oracle** (1.0 is exact)
