@@ -1050,3 +1050,55 @@ fn a_missing_revision_names_the_spelling_and_the_fetch() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("`origin/main`"), "{stderr}");
 }
+
+/// `cambi ... | head`: the reader leaves, and the run ends quietly with exit
+/// 0 rather than a panic.
+#[test]
+fn a_reader_that_closes_stdout_early_is_not_a_failure() {
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    // The read end is closed before the child starts, so its first write
+    // meets a pipe with no reader, every time.
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let out = Command::new(CAMBI)
+        .args([
+            "inspect",
+            "stats",
+            index.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .output()
+        .expect("the binary should be runnable");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// `--log` lines go to the same stderr the narration does and colour by the
+/// same rule: none in a pipe.
+#[test]
+fn log_lines_in_a_pipe_carry_no_escape_codes() {
+    let f = published_fixture(1);
+    let base = &f.commits[1];
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "--log",
+        "info",
+        "affected",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("INFO"),
+        "the test needs a log line to look at:\n{stderr}"
+    );
+    assert!(!stderr.contains('\x1b'), "{stderr:?}");
+}

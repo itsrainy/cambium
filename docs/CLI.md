@@ -262,11 +262,15 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   The `|| rc=$?` keeps a `set -e` shell (a GitHub Actions `run:` step is
   one) from stopping at exit 2 before the `case` reads it. An empty file is
   skipped because `bazel test` with no targets fails.
+- A reader that closes stdout early (`cambi ... | head`) ends the run
+  quietly with exit 0: the answer was computed and the reader took what it
+  wanted, and a non-zero exit would fail a `set -o pipefail` pipeline whose
+  consumer succeeded.
 - Results to stdout; progress and diagnostics to stderr, and nothing at all
   on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
   loses the live line, not the run. Colour only when stderr is a TTY, never
   under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under `--color
-  always` or `CLICOLOR_FORCE`.
+  always` or `CLICOLOR_FORCE`. `--log` lines follow the same rule.
 - A long run narrates itself on stderr in one grammar, the same for every
   verb that has one (`profile` is the first on it): a
   header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per
