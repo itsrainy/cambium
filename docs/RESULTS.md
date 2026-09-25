@@ -70,9 +70,10 @@ run A, 2026-09-19 to 2026-09-20; xla is box run B, 2026-09-23, the engine at
 rooted at in-tree labels. Only the subjects a change can reach were re-run.
 Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
 on every step, the bazel-diff and tango peers on a stratified sample of 40,
-every subject cold-building its own index at its pin, no index store in
-play. Run A was the first clean five-subject measurement with a fresh index
-throughout and the first to run the whole loading layer.
+every subject cold-building its own index at the start of its window (and
+again at the pin for the rebuild oracle), no index store in play. Run A
+was the first clean five-subject measurement with a fresh index throughout
+and the first to run the whole loading layer.
 
 **envoy's section below is box run E (2026-09-25): 288 oracle steps, 0
 missing, worst recall 1.0.** Three runs got it there. Run B's envoy line
@@ -117,7 +118,8 @@ step's queries had run on, and every `rdeps(//..., ...)` of the oracle too,
 which fetches every external repository `//...` reaches; the lineage's base
 had been cold-built on a fresh server (envoy at `b6e7e12`, xla at
 `aa90816`, the heads of their last global steps). envoy ran
-`--enable_workspace` until step 293, and Bazel probes for a `WORKSPACE`
+`--enable_workspace` until step 293 (steps in these paragraphs are indices
+into the walk record, counted from 0), and Bazel probes for a `WORKSPACE`
 file in a package directory only in that mode. 298 of the 306 are rows no
 build at the pin writes (patches and `build_file` inputs of WORKSPACE-era
 repository rules, most of them deleted inside the window and the oldest at
@@ -126,8 +128,11 @@ window), and the other 8 only a dependency traversal writes. The 13449 are
 the same leftovers, every one a `WORKSPACE`, `WORKSPACE.bazel` or
 `WORKSPACE.bzlmod` probe: the reference layer held 1737 `FILE` rows for a
 `WORKSPACE` against the walked layer's 25. xla has never enabled WORKSPACE.
-280 of its 314 are inputs a repository fetch watches (61 `patch_file`
-patches under `third_party/**`, 32 `build_file` files, a pip lock file), 30
+280 of its 314 are inputs of external repositories (244 rows for 61
+`patch_file` patches under `third_party/**`, which the fetch watches; 32
+for `build_file` files, which it does not watch and which were statted
+through the external repository's `BUILD.bazel` symlink when its root
+package loaded; 4 for a pip lock file the module extension reads), 30
 are two main-repo packages (`tsl/platform`, `tsl/profiler/protobuf`) that
 dead labels in xla's own Starlark name and only a dependency traversal
 visits, and 4 are the root `WORKSPACE`, whose reader is not identified; the

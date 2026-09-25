@@ -24,12 +24,12 @@ index carried between runs. Done is:
    or externals row that differs from its reference build. Not met today.
    The oracle fails at four of the five recorded pins: envoy on 306 rows
    and 11 rule hashes, xla on 314 rows, sourcegraph on 10231 nodes and
-   1873 edges only in the walked index and 280 rows, apollo on 6690 rows. All four were
-   measured against a reference build that ran on the walk's own Bazel
-   server rather than a fresh one, and envoy's and xla's rows turned out
-   to be that server's history (docs/METHODOLOGY.md). No run has measured
-   any of the four against a fresh reference build yet, and envoy's rule
-   hashes are not diagnosed.
+   1873 edges only in the walked index and 280 rows, apollo on 6690
+   rows. All four were measured against a reference build that ran on the
+   walk's own Bazel server rather than a fresh one, and envoy's and xla's
+   rows turned out to be that server's history (docs/METHODOLOGY.md). No
+   run has measured any of the four against a fresh reference build yet,
+   and envoy's rule hashes are not diagnosed.
 5. **A CI operator can trust the output without reading the code.** The
    diagnostics and the docs are enough to decide whether a `//...` answer
    was reasonable.
@@ -378,9 +378,10 @@ run A's 41): all 534 `@envoy_api` packages re-queried whenever `api/**`
 moved, over `limits.max_dirty_packages`. The settled-repositories change
 (`36b9613`) answers a modified source file of an indexed repository by its
 label, which removed 29 of the 35 on replay against run B, and runs C, D
-and E, with that change and the consumer table, each recorded 46. What the
-filter would still buy is precision on a `BUILD` or `.bzl` edit inside an
-indexed repository, the six of the 35 that stay wide. Lifting it needs the
+and E, all with that change, each recorded 46 (the consumer table, first in
+run D, left the count where run C had it). What the filter would still
+buy is precision on a `BUILD` or `.bzl` edit inside an indexed repository,
+the six of the 35 that stay wide. Lifting it needs the
 canonical-to-apparent join (`@@tsl+//pkg` against `@tsl//pkg`), and a
 change to it makes the next box run all five subjects.
 
@@ -388,7 +389,8 @@ change to it makes the next box run all five subjects.
 precision item:
 
 - The `@llvm-raw` route on xla. Steps 13, 29 and 181 of box run B
-  (`e5dd39c1c9dc..97370e2accee`, `5af974627851..5244879ec449`,
+  (indices into the walk record, counted from 0;
+  `e5dd39c1c9dc..97370e2accee`, `5af974627851..5244879ec449`,
   `6fda17ebbac0..0fdc404c1278`) edit only `third_party/llvm/*.patch`
   files, recorded inputs of `@llvm-raw`, and cambium answered 0 labels, as
   did the oracle rooted at the patches' own labels. Main-repo code
@@ -582,7 +584,7 @@ twenty-four the last single run cost.
 
 The order is by information per hour until Phase 5, which is the only
 phase whose outcome is uncertain. Phase 5's cost is measured, and there is
-no budget yet for it to fail (Phase 0). If a budget written later fails
-the measured numbers, the fallback is an explicit, documented invalidator
+no budget yet for it to fail (Phase 0). If the measured numbers fail a
+budget written later, the fallback is an explicit, documented invalidator
 per in-tree repository, which is sound and over-reports, and the engine is
 still done by the definition above.

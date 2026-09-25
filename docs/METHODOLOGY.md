@@ -107,14 +107,23 @@ compared commit: the nearest `BUILD` or `BUILD.bazel` above it), and a
   few packages writes only theirs. Such rows are inert: the file's later
   creation is an added path the diff names, not an edit that has to travel
   through the row. A row for a file under a directory that exists nowhere
-  is not a probe and stays unexplained. The class was written (`2868471`)
-  for the 13449 rows envoy's pin recorded in box run E, every one a
-  `WORKSPACE`, `WORKSPACE.bazel` or `WORKSPACE.bzlmod` probe. envoy's pin
-  runs `--noenable_workspace`, so those were not probes a build at the pin
+  is not a probe and stays unexplained. The `BUILD` and `BUILD.bazel`
+  spellings are for the package lookup, which stats `BUILD.bazel` before
+  `BUILD`, so a package spelled `BUILD`, or a directory that is no
+  package, can hold a row for a file that is absent; apollo's run A rows,
+  recorded before the class existed, include 926 `FILE_STATE` rows for
+  each of `BUILD` and `BUILD.bazel` (and as many for `WORKSPACE` and
+  `WORKSPACE.bazel`), not read further. The class was written (`2868471`)
+  for the rows run A (16468) and run C (13755) had found missing on envoy
+  and read as unexplained, on the reading that a cold dump carries such
+  probes and a refresh dump does not. Runs D and E each counted 13449 of
+  envoy's missing rows in it (of 13755 in run E), every one a `WORKSPACE`,
+  `WORKSPACE.bazel` or `WORKSPACE.bzlmod` probe. envoy's pin runs
+  `--noenable_workspace`, so those were not probes a build at the pin
   makes: they were left on the reference build's server by the walk's
   WORKSPACE-era steps (the reference build, below). A pin in bzlmod mode
-  built on a fresh server is expected to put nothing in this class; no box
-  run has measured that yet.
+  built on a fresh server is expected to put no `WORKSPACE` row in this
+  class; no box run has measured that yet.
 - `deleted_in_window` (extra, expected): the row's path is gone at the
   compared commit. A refresh cannot remove a node, so a file, package or
   `.bzl` that stopped existing leaves its row behind.
@@ -137,8 +146,9 @@ whatever every step said. Extras never fail. The tallies (`missing`,
 travel in the walk record's `rebuild_oracle.sky`, and the report prints
 all of them beside the verdict whether or not the oracle held, so a PASS
 reached by excusing thousands of missing rows says so where the verdict
-is read. The 40-step local walk on the bazel subject ran against this
-classification with nothing to excuse (docs/ROADMAP.md, Phase 1). The
+is read. The 40-step local walk on the bazel subject found no missing row
+at all (docs/ROADMAP.md, Phase 1), so it passes under any set of classes
+and tests none of them. The
 classes of missing row allowed are the three marked expected above and no
 others, and an allowed class is one written down here. They excuse
 loading-layer rows only: a node, an edge, a rule hash or an externals row
@@ -153,23 +163,32 @@ descends from a build of that kind (after a global step the engine
 cold-builds the new lineage's base in a worktree of its own, on an output
 base and a server of its own), so a reference built on any other server
 compares the lineage against that server's history as well as against the
-pin. The runs in RESULTS.md up to box run E did exactly that. Their
-reference build ran in the walk's checkout on the walk's output base, on
-the one server every step's queries had used and every rdeps oracle query
-had run on, and `rdeps(//..., ...)` loads the transitive closure of
-`//...` and fetches every external repository it reaches. What those runs
-report as loading-layer rows missing from the applied index is mostly that
-server's history. On envoy (box run E) the reference build held 13755 rows
-the applied index did not, 13449 of them classed `boundary_probe` and 306
-unexplained, none extra, and its layer had 1737 `FILE` rows for a
-`WORKSPACE` against the applied layer's 25. envoy ran `--enable_workspace`
+pin. The descent is not pure: a step that overflows into a re-query, or
+refreshes more than 500 packages or the root package, dumps the walk's
+server with the full key filter and merges what it holds into the applied
+layer, which can only add rows the reference lacks. Those are extras,
+which never fail. The runs in RESULTS.md up to box run E built their
+reference on another server. It ran in the walk's checkout on the walk's
+output base, on the one server every step's queries had used and every
+rdeps oracle query had run on, and `rdeps(//..., ...)` loads the
+transitive closure of `//...` and fetches every external repository it
+reaches. What those runs report as loading-layer rows missing from the
+applied index is mostly that server's history. On envoy (box run E) the
+reference build held 13755 rows the applied index did not, 13449 of them
+classed `boundary_probe` and 306 unexplained, none extra, and its layer
+had 1737 `FILE` rows for a `WORKSPACE` against the applied layer's 25.
+(Steps here are indices into the walk record's `steps`, counted from 0;
+the walk's progress output counts from 1.) envoy ran `--enable_workspace`
 until step 293; 298 of the 306 are rows no build at the pin writes (inputs
 of WORKSPACE-era repository rules, most of them deleted inside the window,
 the oldest at step 10; `WORKSPACE` probes, which the pin's mode never
 makes; probes of package directories deleted in the window), and the other
 8 only a dependency traversal writes. On xla (box run B) it held 314, all
-unexplained, none extra: 280 for the patches, `build_file` files and pip
-lock file that repository fetches watch, 30 for two main-repo packages
+unexplained, none extra: 280 for inputs of external repositories (244 for
+the patches repository fetches watch, 32 for `build_file` files, which the
+fetch does not watch and which were statted through the external
+repository's `BUILD.bazel` symlink when its root package loaded, and 4 for
+a pip lock file the module extension reads), 30 for two main-repo packages
 only dead labels name (`tsl/platform`, `tsl/profiler/protobuf`), which
 only a dependency traversal visits, and 4 for the root `WORKSPACE`, whose
 reader is not identified. xla's lineage base, cold-built on a fresh server
