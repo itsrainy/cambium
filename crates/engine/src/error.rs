@@ -139,7 +139,10 @@ impl EngineError {
             ),
             EngineError::Git(_) => (
                 Code::E003Git,
-                Some("check that the revisions passed to --base and --head exist here"),
+                Some(
+                    "check that both revisions of the range exist in this clone; a shallow \
+                     clone may need more history (`git fetch --deepen=N`)",
+                ),
             ),
             EngineError::Bazel(_) => (
                 Code::E004Bazel,

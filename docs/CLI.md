@@ -41,6 +41,13 @@ it's for.
 The range is positional, like `git diff`: `cambi affected
 origin/main..HEAD`. A single ref means `<ref>..HEAD`; no ref means the
 default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
+When `[git].default_branch` has no local branch here (a CI checkout
+usually makes none), its remote-tracking branch `origin/<branch>` stands in,
+and the narration says so. A revision the clone does not have is
+`CAMBI-E003` naming it as typed, with the fetch that brings it in: a shallow
+clone needs the base fetched into its remote-tracking ref, `git fetch origin
+main:refs/remotes/origin/main --depth=N`, since `git fetch --depth=1 origin
+main` can leave it only in `FETCH_HEAD`.
 
 `--dry-run` prints the plan and exits: which index would load (revision,
 lineage, age), whether the answer is a splice, cold rebuild or global, and

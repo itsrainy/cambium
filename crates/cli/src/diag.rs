@@ -125,11 +125,20 @@ pub fn render_human(d: &Diagnostic, color: bool) -> String {
 /// A usage error: the command line does not make sense. Its own type so the
 /// top level can give it `CAMBI-E013` rather than the generic code.
 #[derive(Debug)]
-pub struct UsageError(pub String);
+pub struct UsageError {
+    pub message: String,
+    /// What to type instead, when there is something more specific to say
+    /// than [`USAGE_HELP`].
+    pub help: Option<String>,
+}
+
+/// The `help:` line of a usage error that has nothing more specific to say,
+/// which is what `docs/DIAGNOSTICS.md` promises every `CAMBI-E013` carries.
+pub const USAGE_HELP: &str = "`cambi <verb> --help` lists what each verb takes";
 
 impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -139,9 +148,35 @@ impl UsageError {
     /// A usage error ready to `?`: it only ever travels as an `anyhow::Error`,
     /// because nothing branches on the type beyond the code it is given.
     pub fn raised(message: impl Into<String>) -> anyhow::Error {
-        anyhow::Error::new(UsageError(message.into()))
+        anyhow::Error::new(UsageError {
+            message: message.into(),
+            help: None,
+        })
+    }
+
+    /// The same, with a `help:` line naming the fix.
+    pub fn raised_with_help(message: impl Into<String>, help: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(UsageError {
+            message: message.into(),
+            help: Some(help.into()),
+        })
     }
 }
+
+/// A failure the CLI diagnosed itself, with the code and `help:` line it
+/// already knows. A revision missing from this clone is one: the engine would
+/// meet it later as git's own error text, and could not name the spelling the
+/// caller typed or the fetch that fixes it.
+#[derive(Debug)]
+pub struct Raised(pub Diagnostic);
+
+impl std::fmt::Display for Raised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.message)
+    }
+}
+
+impl std::error::Error for Raised {}
 
 /// Whatever went wrong, as a diagnostic.
 ///
@@ -154,7 +189,11 @@ pub fn of_error(e: &anyhow::Error) -> Diagnostic {
         return engine.diagnostic();
     }
     if let Some(usage) = e.downcast_ref::<UsageError>() {
-        return Diagnostic::error(Code::E013Usage, usage.0.clone());
+        return Diagnostic::error(Code::E013Usage, usage.message.clone())
+            .with_help(usage.help.as_deref().unwrap_or(USAGE_HELP));
+    }
+    if let Some(Raised(d)) = e.downcast_ref::<Raised>() {
+        return d.clone();
     }
     Diagnostic::error(Code::E001Internal, chain(e))
 }
@@ -280,5 +319,23 @@ mod tests {
     fn a_usage_error_is_its_own_code() {
         let d = of_error(&UsageError::raised("--format query is only for affected"));
         assert_eq!(d.code, Code::E013Usage);
+    }
+
+    /// `docs/DIAGNOSTICS.md` promises every usage error a `help:` line, and a
+    /// usage error that knows the fix names it instead of the generic one.
+    #[test]
+    fn a_usage_error_always_has_a_help_line() {
+        let d = of_error(&UsageError::raised("no such flag"));
+        assert_eq!(d.help.as_deref(), Some(USAGE_HELP));
+        let d = of_error(&UsageError::raised_with_help("no range", "pass a range"));
+        assert_eq!(d.help.as_deref(), Some("pass a range"));
+    }
+
+    #[test]
+    fn a_raised_diagnostic_is_passed_through_whole() {
+        let d = Diagnostic::error(Code::E003Git, "`origin/main` is not here").with_help("fetch it");
+        let e = anyhow::Error::new(Raised(d.clone()));
+        assert_eq!(of_error(&e), d);
+        assert_eq!(e.to_string(), "`origin/main` is not here");
     }
 }

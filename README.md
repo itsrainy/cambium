@@ -228,7 +228,8 @@ case $rc in 0|2) [ ! -s targets.txt ] || bazel test --target_pattern_file=target
 ```
 
 The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
-no range means the merge base of `[git].default_branch` with `HEAD`.
+no range means the merge base of `[git].default_branch` with `HEAD` (or with
+`origin/<branch>` in a CI checkout that has no local branch).
 `--dry-run` prints the plan (which index would load, how the diff classifies,
 whether the run would splice, cold-rebuild or go global) and exits before any
 Bazel query. One verdict is pending that query: the toolchain check reads rule

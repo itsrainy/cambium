@@ -972,3 +972,81 @@ fn asking_a_data_query_for_labels_is_a_usage_error() {
         "every E013 has a help line:\n{stderr}"
     );
 }
+
+/// A clone the way `actions/checkout` leaves one: a detached HEAD, no local
+/// `main`, and `origin/main` present or not.
+fn ci_clone(f: &cambium_testkit::PublishedFixture) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clone = dir.path().join("clone");
+    let url = format!("file://{}", f.ws.display());
+    cambium_testkit::git(dir.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
+    cambium_testkit::git(&clone, &["checkout", "-q", "--detach"]);
+    cambium_testkit::git(&clone, &["branch", "-q", "-D", "main"]);
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    dir
+}
+
+/// With no range, `[git].default_branch` is `main`, and a CI checkout has
+/// only `origin/main`: that stands in, and the narration says so.
+#[test]
+fn the_default_branch_falls_back_to_its_remote_tracking_branch() {
+    let f = published_fixture(1);
+    let dir = ci_clone(&f);
+    let clone = dir.path().join("clone");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        clone.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "{stderr}{stdout}");
+    assert!(
+        stderr.contains("no local branch main; comparing from origin/main"),
+        "the fallback is said, not silent:\n{stderr}"
+    );
+
+    // Neither `main` nor `origin/main`: a usage error whose help names the
+    // fetch that makes the ref.
+    cambium_testkit::git(&clone, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let (code, _, stderr) = run(&["-C", clone.to_str().unwrap(), "affected", "--dry-run"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("CAMBI-E013"), "{stderr}");
+    assert!(
+        stderr.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+        "{stderr}"
+    );
+}
+
+/// A revision the clone does not have is E003 naming the spelling typed and
+/// the fetch that brings it in, never git's usage text or the `--base` and
+/// `--head` flags nobody passed.
+#[test]
+fn a_missing_revision_names_the_spelling_and_the_fetch() {
+    let f = published_fixture(1);
+    let dir = ci_clone(&f);
+    let clone = dir.path().join("clone");
+    let c = clone.to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", c, "affected", "origin/nope"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(
+        stderr.contains("error[CAMBI-E003]: `origin/nope` does not name a commit in this clone"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("git fetch origin nope:refs/remotes/origin/nope --depth=N"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("--base") && !stderr.contains("Use '--'"),
+        "{stderr}"
+    );
+
+    // `main` typed where only `origin/main` exists: say which one is here.
+    let (code, _, stderr) = run(&["-C", c, "affected", "main..HEAD"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("`origin/main`"), "{stderr}");
+}

@@ -52,20 +52,18 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     // `--dry-run` is one of the flags `explain` shares with `affected`, and it
     // means the same thing here: say what a run would do and stop.
     if args.affected.dry_run {
-        return crate::cmd::plan::run(
-            ctx,
-            &engine,
-            &crate::cmd::affected::request(&engine, &args.affected, Shape::PLAN)?,
-        );
+        let resolved = crate::cmd::affected::request(&engine, &args.affected, Shape::PLAN)?;
+        crate::cmd::affected::say_note(ctx, &resolved);
+        return crate::cmd::plan::run(ctx, &engine, &resolved.req);
     }
-    let req = crate::cmd::affected::request(
+    let resolved = crate::cmd::affected::request(
         &engine,
         &args.affected,
         Shape::explain(args.label.as_deref()),
     )?;
     // The same computation `affected` runs is the same three phases on
     // stderr, drawn by the same renderer.
-    let outcome = crate::cmd::affected::narrate(ctx, &engine, &req, "explain")?;
+    let outcome = crate::cmd::affected::narrate(ctx, &engine, &resolved, "explain")?;
     let report = &outcome.report;
 
     let about = match &args.label {
