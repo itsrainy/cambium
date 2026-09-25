@@ -29,15 +29,29 @@
 //! every walk step and every `rdeps` oracle query, and a dump prints every
 //! done node a server holds, so the reference carried rows the walk had left
 //! there and this module read them as the applied layer's shortfall. On
-//! envoy at `7ba51266` that was every one of the 306 unexplained rows
-//! (patches and build files deleted inside the window, `WORKSPACE` probes
-//! under directories absent at the pin, probes of packages deleted inside
-//! the window) and every one of the 13449 rows filed as boundary probes; on
-//! xla at `076fe93f` it was the 314 rows of `patch_file`, `build_file` and
-//! requirements-lock inputs that dependency traversals had fetched, plus two
-//! packages only a traversal reaches. No class below was written for those,
-//! and none should be: a leftover on the cold side is a fault in the
-//! reference, not a row to excuse.
+//! envoy at `7ba51266` that was every one of the 306 unexplained rows and
+//! every one of the 13449 rows filed as boundary probes. Most of the 306
+//! name paths absent at the pin (patches and build files deleted inside the
+//! window, `WORKSPACE` probes under directories absent at the pin, probes of
+//! packages deleted inside the window); 8 name paths live at the pin that
+//! only a dependency traversal reaches (`BUILD.protobuf-2.28.0.bazel` under
+//! `bazel/external/cargo/remote`, the `api` directory `envoy_api`'s local
+//! override watches, and `api/buf.yaml`). On xla at `076fe93f` the 314 are
+//! expected to be the same kind: `patch_file`, `build_file` and
+//! requirements-lock inputs that fetches on the walk's server wrote, and two
+//! packages only a traversal reaches. That was read from the rows, not
+//! reproduced on a fresh server, and the 4 rows for xla's root `WORKSPACE`
+//! (a file that exists at the pin and that nothing in Starlark names) are
+//! still unaccounted for; they may be the same root probes the variant's
+//! doc describes for envoy.
+//!
+//! [`RowClass::BoundaryProbe`] was written for these envoy rows (in
+//! `2868471`, after run A's 16468 and run C's 13755), on the premise that a
+//! cold `//...` load stats `WORKSPACE` in every package directory. That
+//! premise holds only under `--enable_workspace` and was wrong for envoy at
+//! its pin (see the variant), so the class excused leftovers there. A leftover on the cold side is a
+//! fault in the reference, not a row to excuse, and no class should be
+//! written for one.
 //!
 //! # Why a row can legitimately be missing
 //!
@@ -178,10 +192,18 @@ pub enum RowClass {
     ///
     /// The class is right for a WORKSPACE-mode subject at its own pin. It is
     /// not what envoy's 13449 were: envoy's pin runs `--noenable_workspace`,
-    /// so a build there writes no `WORKSPACE` probe, and those rows (every
-    /// one a `WORKSPACE`, `WORKSPACE.bazel` or `WORKSPACE.bzlmod` row) came
-    /// from the walk's WORKSPACE-era steps, left on the server the reference
-    /// build used to share. See "What the cold side is" above.
+    /// so a `//...:*` load there writes no per-directory `WORKSPACE` probe.
+    /// Those rows (every one a `WORKSPACE`, `WORKSPACE.bazel` or
+    /// `WORKSPACE.bzlmod` row) were left on the server the reference build
+    /// used to share. The per-directory ones came from the walk's
+    /// WORKSPACE-era steps. The root ones came from some other command on
+    /// that server, and not from WORKSPACE mode: a 3-step window
+    /// `b6e7e12..7ba5126`, entirely after envoy's switch to
+    /// `--noenable_workspace` and started on a fresh server, still put the
+    /// root `WORKSPACE`, `WORKSPACE.bazel` and `WORKSPACE.bzlmod` rows (12
+    /// with their edges) in a shared-server reference, and none in a fresh
+    /// one. Which command writes them is not established. See "What the cold
+    /// side is" above.
     BoundaryProbe,
     /// Extra, for a path gone at the compared commit.
     DeletedInWindow,
