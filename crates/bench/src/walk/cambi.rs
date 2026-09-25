@@ -47,8 +47,9 @@ pub trait Driver {
     /// Stops the Bazel server this driver's builds run on, so the next
     /// [`build`](Self::build) starts on an empty Skyframe graph. The output
     /// base stays, and with it every repository already fetched into it: a
-    /// restarted server finds their marker files up to date and does not
-    /// fetch them again. An error when the server could not be stopped, since
+    /// restarted server finds the downloaded ones' marker files up to date
+    /// and does not fetch them again (local and configure repositories run
+    /// again, as they do on any server start). An error when the server could not be stopped, since
     /// the caller is about to rely on the graph being empty.
     ///
     /// The rebuild oracle's reference build is what needs it (see

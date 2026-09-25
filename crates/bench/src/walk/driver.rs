@@ -563,24 +563,27 @@ impl Runner<'_> {
     /// --skyframe` prints every done node that server holds, not what the
     /// build at `rev` evaluated. So the reference carried the walk's history:
     /// on envoy at `7ba51266` it had 33017 nodes against the walked 26062,
-    /// and its 306 unexplained rows and 13449 "boundary probes" were
-    /// WORKSPACE-era leftovers (patches deleted mid-window, `WORKSPACE`
+    /// and its 306 unexplained rows and 13449 "boundary probes" were rows
+    /// the walk had left there (patches deleted mid-window, `WORKSPACE`
     /// probes under directories absent at the pin, packages deleted inside
-    /// the window); on xla at `076fe93f` its 314 were patch and `build_file`
-    /// inputs that the oracle's dependency traversals fetched, and packages
-    /// only a traversal reaches. None of them is anything a cold build at the
-    /// pin writes, and the applied lineage's own base never had them: the
-    /// engine builds that on a fresh server in a detached worktree with its
-    /// own output base (`crates/engine/src/revision.rs`).
+    /// the window, a few files live at the pin that only a dependency
+    /// traversal reaches, and root `WORKSPACE` probes from some command
+    /// other than the `//...:*` load). On xla at `076fe93f` its 314 are
+    /// expected to be the same kind (patch and `build_file` inputs that
+    /// fetches on the walk's server wrote, and packages only a traversal
+    /// reaches), though that was read from the rows and not reproduced. The
+    /// applied lineage's own base is built by the engine on a fresh server in
+    /// a detached worktree with its own output base
+    /// (`crates/engine/src/revision.rs`).
     ///
     /// Two ways to get a fresh graph. Building through a detached worktree
     /// on an output base of its own, as the lineage base is built, gives the
-    /// same provenance but refetches every external repository (gigabytes
-    /// for envoy) for each reference build. Stopping the checkout's server
-    /// gives the same empty graph for the price of one server start: Bazel
-    /// keeps the Skyframe graph in memory, while the fetched repositories
-    /// stay on disk and are reused through their marker files. This does the
-    /// second. It rests on nothing persisting the graph across a restart:
+    /// same provenance but fetches every external repository (gigabytes for
+    /// envoy) into a new output base for each revision it builds, since that
+    /// base is kept per revision. Stopping the checkout's server gives the
+    /// same empty graph for the price of one server start: Bazel keeps the
+    /// Skyframe graph in memory, while the fetched repositories stay on disk
+    /// and are reused through their marker files. This does the second. It rests on nothing persisting the graph across a restart:
     /// Skyframe serialization (a remote analysis cache) would, and neither
     /// the bench's rc file and startup flags nor the rc files of envoy, xla
     /// and bazel at their pins configure one. A subject that did would need
