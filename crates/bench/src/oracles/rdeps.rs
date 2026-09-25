@@ -217,6 +217,10 @@ pub struct RdepsResult {
     /// file and points its `label_flag`s back at main-repo platform impls).
     /// cambium stops at the first external node, so the reverse walk never
     /// climbs back.
+    ///
+    /// A miss that only the repository-input roots reached is here too,
+    /// without a probe: it depends on a target of a repository whose
+    /// recorded inputs changed and on no changed path's own label.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_route: Vec<String>,
     /// How many of [`RdepsResult::missing`] the route probe never asked Bazel
@@ -532,8 +536,8 @@ impl RdepsOracle {
 
         // The second read, after a universe that checked every repository
         // `//...` reaches at head; then the repository patterns.
-        let mut probe_roots = result.roots.clone();
         let mut own: Vec<String> = Vec::new();
+        let mut repo_only: BTreeSet<String> = BTreeSet::new();
         if let (Some(before), Some(ob)) = (before, inputs.output_base) {
             let read_at = std::time::Instant::now();
             let markers = match result.batches {
@@ -559,14 +563,14 @@ impl RdepsOracle {
                 self.run_batch(bazel, batch, &mut from_repos, &mut unresolved, &mut result);
             }
             let query_ms = query_at.elapsed().as_millis() as u64;
-            let labels_added = from_repos
+            repo_only = from_repos
                 .iter()
                 .filter(|l| !is_external(l) && !answer.contains(*l))
-                .count();
+                .cloned()
+                .collect();
+            let labels_added = repo_only.len();
             own = repos.iter().map(|r| r.name.clone()).collect();
             answer.extend(from_repos);
-            // First, so the probe's capped root list always carries them.
-            probe_roots = patterns.iter().cloned().chain(probe_roots).collect();
             result.repository_inputs = Some(RepositoryRoots {
                 markers: markers.by_repo.len(),
                 unreadable: markers.unreadable.into_iter().collect(),
@@ -591,8 +595,20 @@ impl RdepsOracle {
         }
         result.unresolved_total = unresolved.len();
         result.unresolved = unresolved.into_iter().take(MAX_UNRESOLVED).collect();
-        let (routes, unprobed) = external_routes(bazel, &probe_roots, &result.missing);
-        result.external_route = routes;
+        // A miss only the repository patterns reached depends on a target of
+        // a dirty repository and on no changed path's label, so every path
+        // from it to a root runs through that repository: an external route
+        // by construction, and no `somepath` is spent on it. Probing them
+        // cost 4 s each on xla (the pattern is re-evaluated per probe), 200
+        // probes on a step whose 9559 misses were all of this kind.
+        let (via_repo, rest): (Vec<String>, Vec<String>) = result
+            .missing
+            .iter()
+            .cloned()
+            .partition(|l| repo_only.contains(l));
+        let (routes, unprobed) = external_routes(bazel, &result.roots, &rest);
+        result.external_route = via_repo.into_iter().chain(routes).collect();
+        result.external_route.sort();
         result.route_unprobed = unprobed;
 
         if let Some(base) = inputs.base {
@@ -1715,6 +1731,12 @@ mod tests {
         assert_eq!(r.oracle_labels, 1);
         assert_eq!(r.missing, vec!["//xla/service:cpu"]);
         assert!(!r.ok(), "the engine that missed the route fails");
+        assert_eq!(
+            r.external_route,
+            vec!["//xla/service:cpu"],
+            "reached only through the repository: a route, with no probe spent"
+        );
+        assert_eq!(r.route_unprobed, 0);
 
         // And the engine that covers it passes.
         let covered = run(&set(&["//xla/service:cpu"]), Some(ob.path()));
