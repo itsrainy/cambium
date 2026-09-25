@@ -53,12 +53,8 @@ whose sources live in the tree (Phase 5 of docs/ROADMAP.md) is the answer,
 and box run B measures it: the universe is widened by `@tsl` on xla and
 `@envoy_api` on envoy, an external package's key is Bazel's own spelling
 (`@tsl//tsl/platform`), and all four steps are sound, worst recall 1.0000
-over 296 oracle steps. On envoy the same change closed the rebuild oracle's
-16468 unexplained loading-layer rows to 0. What is left on xla is the 314
-loading-layer rows its rebuild oracle still names, most of them `.patch`
-files and other repository-rule inputs under `third_party/**`, and none of
-them a target the walk can under-report; the section below records the
-count.
+over 296 oracle steps. The rebuild oracle still fails at both pins, and
+what its rows were is further down this section.
 
 Where the changed side of the round trip is a nameable path an invalidator is
 the sound fix, which is how `subject_repos.toml` came to list
@@ -74,9 +70,10 @@ run A, 2026-09-19 to 2026-09-20; xla is box run B, 2026-09-23, the engine at
 rooted at in-tree labels. Only the subjects a change can reach were re-run.
 Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
 on every step, the bazel-diff and tango peers on a stratified sample of 40,
-every subject cold-building its own index at its pin, no index store in
-play. Run A was the first clean five-subject measurement with a fresh index
-throughout and the first to run the whole loading layer.
+every subject cold-building its own index at the start of its window (and
+again at the pin for the rebuild oracle), no index store in play. Run A
+was the first clean five-subject measurement with a fresh index throughout
+and the first to run the whole loading layer.
 
 **envoy's section below is box run E (2026-09-25): 288 oracle steps, 0
 missing, worst recall 1.0.** Three runs got it there. Run B's envoy line
@@ -109,20 +106,46 @@ answer is coarse where the route is: a change to a consumed `@envoy_api`
 package seeds every `@grpc` leaf, so the step whose oracle is 649 labels
 answers 5035, which is the tightness p50 of 0.973 against run C's 0.986.
 
-**What the rebuild oracle still reports on envoy.** 306 loading-layer rows
-the cold build at the pin holds and the walked index does not, all `FILE`
-and `FILE_STATE` rows for repository-rule inputs and the subtrees under
-them: `bazel/*.patch`, `bazel/external/*.BUILD`, the `BUILD`, `BUILD.bazel`,
-`WORKSPACE` and `WORKSPACE.bazel` probes Bazel makes in every directory of
-`bazel/external/c-ares/**` and `bazel/foreign_cc`, `compat/openssl`,
-`test/extensions/*/wasm/test_data`, `contrib/{dlb,vcl,kafka}`. Only 19 of
-the 261 distinct paths are inputs the externals tables record; the rest are
-Bazel walking a subtree a repository rule or a glob names. What a miss
-there would cost is an edit to one of those files reaching no rule; the
-externals stage answers a recorded input by name and a subtree by prefix,
-and no walk step has yet found a label short because of one. The rows fail
-the walk verdict (the ⚠ in the table) and are not yet a named class; xla's
-314 are the same shape. This is issue #27.
+**What the rebuild oracle's rows were.** Every walk in the table except
+bazel's fails its rebuild oracle (the ⚠). On envoy (run E) and xla (run B)
+the failure is loading-layer rows the reference build at the pin holds and
+the walked index does not: 306 unexplained on envoy, beside 13449 counted
+as `boundary_probe`, and 314 on xla. Read row by row, they are the
+reference build's and not the lineage's. The reference build ran
+`cambi index build` in the walk's own checkout on the walk's own output
+base, so it dumped the Skyframe graph of the one Bazel server that every
+step's queries had run on, and every `rdeps(//..., ...)` of the oracle too,
+which fetches every external repository `//...` reaches; the lineage's base
+had been cold-built on a fresh server (envoy at `b6e7e12`, xla at
+`aa90816`, the heads of their last global steps). envoy ran
+`--enable_workspace` until step 293 (steps in these paragraphs are indices
+into the walk record, counted from 0), and Bazel probes for a `WORKSPACE`
+file in a package directory only in that mode. 298 of the 306 are rows no
+build at the pin writes (patches and `build_file` inputs of WORKSPACE-era
+repository rules, most of them deleted inside the window and the oldest at
+step 10; `WORKSPACE` probes; probes of package directories deleted in the
+window), and the other 8 only a dependency traversal writes. The 13449 are
+the same leftovers, every one a `WORKSPACE`, `WORKSPACE.bazel` or
+`WORKSPACE.bzlmod` probe: the reference layer held 1737 `FILE` rows for a
+`WORKSPACE` against the walked layer's 25. xla has never enabled WORKSPACE.
+280 of its 314 are inputs of external repositories (244 rows for 61
+`patch_file` patches under `third_party/**`, which the fetch watches; 32
+for `build_file` files, which it does not watch and which were statted
+through the external repository's `BUILD.bazel` symlink when its root
+package loaded; 4 for a pip lock file the module extension reads), 30
+are two main-repo packages (`tsl/platform`, `tsl/profiler/protobuf`) that
+dead labels in xla's own Starlark name and only a dependency traversal
+visits, and 4 are the root `WORKSPACE`, whose reader is not identified; the
+fresh base at `aa90816` holds none of them. Walking the reverse rows up
+from every one of them reaches no `PACKAGE`, `GLOB` or `BZL_LOAD` node
+except those two dead packages, which have no targets. The reference build
+is being moved onto a fresh Bazel server (docs/METHODOLOGY.md), and until a
+box run measures that, the ⚠ on envoy and xla stands as recorded.
+sourcegraph's (its graph) and apollo's (6690 rows), both from run A, ran
+against the same kind of reference build and have not been read row by row.
+The rows were issue #27. Reading them turned up two real under-reports they
+did not cause, an `@llvm-raw` route on xla and two WORKSPACE-era patches on
+envoy (docs/ROADMAP.md, Phase 5).
 
 **What else runs C to E measured.** The oracle's own answer is
 short on 123 of envoy's 288 steps by a class the harness names
@@ -138,13 +161,17 @@ would resolve the `select` and crashes Bazel with an internal error on one of
 those unknown repositories, so the oracle stays a lower bound and the report
 says by what. The rebuild oracle at the pin was vacuous in run B (its last
 step was a cold rebuild, so the pin was compared with itself); run C's real
-comparison found 13755 missing loading-layer rows, all `WORKSPACE` and
-`WORKSPACE.bazel` probes in package directories where no such file exists,
-which a cold dump carries and a refresh dump does not, now a named class
-(13449 of run E's 13755 are it), and 11 rules whose hash differs from the
-cold rebuild, all under `tools/` (`//tools/code:check`,
-`//tools/code_format:check_format`, `//tools/coverage:report_generator_script`
-and eight more), which the record names.
+comparison found 13755 missing loading-layer rows, most of them `WORKSPACE`
+and `WORKSPACE.bazel` probes in package directories where no such file
+exists. `2868471` made those a class (`boundary_probe`, 13449 of run E's
+13755) on the reading that a cold dump carries such probes and a refresh
+dump does not; the paragraph above has what they were instead. The same
+comparison names 11 rules whose hash differs from the cold rebuild, all
+under `tools/` (`//tools/code:check`, `//tools/code_format:check_format`,
+`//tools/coverage:report_generator_script` and eight more). Each fails the
+rebuild oracle on its own, whatever the rows say; why the hashes differ is
+not diagnosed, and whether they survive a fresh reference build is for the
+next run to show.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
