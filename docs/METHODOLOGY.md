@@ -41,7 +41,7 @@ peers, and invocation detail is in [Tools](#tools).
 | oracle | question it answers | how |
 |---|---|---|
 | reverse-dependency (rdeps) | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path in a head package, rooted at every label the path has: its main-repo one, and its label inside an in-tree repository whose packages the index holds (a `.proto` under envoy's `api/` has only the second; rooted at main-repo labels alone the oracle asked nothing about it and scored a miss there as recall 1.0). Batched by command-line length and unioned. A tool's answer must be a superset of the result. A file *deleted* at head has no label, so its consumers come from the parent index's file rows instead and must appear by label, by package, or in `dirty_packages` (the only spelling when a whole package is deleted, since every rule in it is tombstoned). The package spelling is offered only to a consumer that is itself gone at head; one that survives in another package must appear by label however dirty its own package is. This is the only ground truth, and every tool including cambium is scored against it. `--oracle-sample N` caps the steps queried; the full tier runs it on every step. |
-| rebuild | is the incremental updater exact? | the applied index at the pin (the one the walk carried step to step) is diffed node by node, edge by edge and rule hash by rule hash against an index cold-built fresh at the pin, and its Skyframe loading layer row by row. Any difference in the graph fails; a loading-layer row the applied index lacks fails unless the walk can explain it (below). It always runs at the pin; `--rebuild-every N` also runs it every N steps. |
+| rebuild | is the incremental updater exact? | the applied index at the pin (the one the walk carried step to step) is diffed node by node, edge by edge and rule hash by rule hash against an index cold-built at the pin on a fresh Bazel server (the reference build, below), and its Skyframe loading layer row by row. Any difference in the graph fails; a loading-layer row the applied index lacks fails unless the walk can explain it (below). It always runs at the pin; `--rebuild-every N` also runs it every N steps. |
 
 *The loading-layer rows.* The rebuild oracle also compares the Skyframe
 loading layer (the `FILE`, `DIRECTORY_LISTING`, `PACKAGE`, `GLOB` and
@@ -96,6 +96,25 @@ compared commit: the nearest `BUILD` or `BUILD.bazel` above it), and a
   package that failed to load has its glob inputs and `BUILD` probes on
   one side and not the other, and those rows, which name their package
   only through the tree, are the failure's and not a hole.
+- `boundary_probe` (missing, expected): a `FILE` or `FILE_STATE` row for a
+  `WORKSPACE`, `WORKSPACE.bazel`, `WORKSPACE.bzlmod`, `REPO.bazel`,
+  `MODULE.bazel`, `BUILD` or `BUILD.bazel` that does not exist at the
+  compared commit, in a directory that does: Bazel's stat of a file no one
+  named. Under `--enable_workspace`, and only then, Bazel looks for a
+  `WORKSPACE` file in every package directory it looks up, to find
+  repository boundaries, so a server that has loaded packages in WORKSPACE
+  mode holds a probe row for each of them, and a refresh that re-queries a
+  few packages writes only theirs. Such rows are inert: the file's later
+  creation is an added path the diff names, not an edit that has to travel
+  through the row. A row for a file under a directory that exists nowhere
+  is not a probe and stays unexplained. The class was written (`2868471`)
+  for the 13449 rows envoy's pin recorded in box run E, every one a
+  `WORKSPACE`, `WORKSPACE.bazel` or `WORKSPACE.bzlmod` probe. envoy's pin
+  runs `--noenable_workspace`, so those were not probes a build at the pin
+  makes: they were left on the reference build's server by the walk's
+  WORKSPACE-era steps (the reference build, below). A pin in bzlmod mode
+  built on a fresh server is expected to put nothing in this class; no box
+  run has measured that yet.
 - `deleted_in_window` (extra, expected): the row's path is gone at the
   compared commit. A refresh cannot remove a node, so a file, package or
   `.bzl` that stopped existing leaves its row behind.
@@ -118,9 +137,46 @@ whatever every step said. Extras never fail. The tallies (`missing`,
 travel in the walk record's `rebuild_oracle.sky`, and the report prints
 all of them beside the verdict whether or not the oracle held, so a PASS
 reached by excusing thousands of missing rows says so where the verdict
-is read. Until the 40-step local walk on the bazel subject has run
-against this classification, the rule stands as coded: no class of
-missing row is allowed beyond the two above.
+is read. The 40-step local walk on the bazel subject ran against this
+classification with nothing to excuse (docs/ROADMAP.md, Phase 1). The
+classes of missing row allowed are the three marked expected above and no
+others, and an allowed class is one written down here. They excuse
+loading-layer rows only: a node, an edge, a rule hash or an externals row
+that differs from the reference build fails the oracle whatever the rows
+say.
+
+*The reference build.* The index the rebuild oracle compares against is a
+cold `cambi index build` at the pin on a fresh Skyframe graph: a Bazel
+server that has evaluated nothing before that build. A dump prints every
+node its server has finished, whatever asked for it. The applied index
+descends from a build of that kind (after a global step the engine
+cold-builds the new lineage's base in a worktree of its own, on an output
+base and a server of its own), so a reference built on any other server
+compares the lineage against that server's history as well as against the
+pin. The runs in RESULTS.md up to box run E did exactly that. Their
+reference build ran in the walk's checkout on the walk's output base, on
+the one server every step's queries had used and every rdeps oracle query
+had run on, and `rdeps(//..., ...)` loads the transitive closure of
+`//...` and fetches every external repository it reaches. What those runs
+report as loading-layer rows missing from the applied index is mostly that
+server's history. On envoy (box run E) the reference build held 13755 rows
+the applied index did not, 13449 of them classed `boundary_probe` and 306
+unexplained, none extra, and its layer had 1737 `FILE` rows for a
+`WORKSPACE` against the applied layer's 25. envoy ran `--enable_workspace`
+until step 293; 298 of the 306 are rows no build at the pin writes (inputs
+of WORKSPACE-era repository rules, most of them deleted inside the window,
+the oldest at step 10; `WORKSPACE` probes, which the pin's mode never
+makes; probes of package directories deleted in the window), and the other
+8 only a dependency traversal writes. On xla (box run B) it held 314, all
+unexplained, none extra: 280 for the patches, `build_file` files and pip
+lock file that repository fetches watch, 30 for two main-repo packages
+only dead labels name (`tsl/platform`, `tsl/profiler/protobuf`), which
+only a dependency traversal visits, and 4 for the root `WORKSPACE`, whose
+reader is not identified. xla's lineage base, cold-built on a fresh server
+at the head of step 233, holds none of them. RESULTS.md has the rows in
+more detail. The classes and the pass rule above are unchanged by this: a
+row the fresh reference build holds and the applied index lacks still
+needs a class, and a non-zero `unexplained` count still fails the walk.
 
 **Workload.** What tools are run on. There is one: the walk.
 
@@ -450,7 +506,7 @@ reproduced against that parent). The driver archives each parent at
 parent, naming which it used and skipping the drift guards for those steps
 (`--index` overrides this).
 
-Symmetrically: the rebuild oracle's fresh index at the pin is the only
+Symmetrically: the rebuild oracle's reference index at the pin is the only
 artefact stating what Bazel's graph and externals tables *are* there, and
 the run discards it. Archived at
 `bench-results/<subject>/heads/<pin>.bin`, `cambium-bench replay <subject>
