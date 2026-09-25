@@ -11,7 +11,9 @@
 //!    so it exists only in packaged sources (`cargo install cambium-cli`, a
 //!    `cargo publish` verify), and it names the commit that was packaged.
 //! 3. `git rev-parse HEAD`, accepted only when the repository's top level is
-//!    this workspace's root. Without that check a crate unpacked under a
+//!    this workspace's root. This covers a clone, a worktree, and
+//!    `cargo install --git`, whose checkout keeps its `.git` and has no
+//!    `.cargo_vcs_info.json`. Without the check a crate unpacked under a
 //!    directory that is itself some other repository (a dotfiles `$HOME`, a
 //!    tarball inside another checkout) would stamp that repository's sha.
 //! 4. `unknown`.
