@@ -633,11 +633,10 @@ fn init_writes_a_config_the_engine_loads_and_explain_attributes() {
         stdout.contains("bzlmod"),
         "it shows what it detected:\n{stdout}"
     );
+    let last = stdout.trim_end().lines().last().unwrap_or_default();
     assert!(
-        stdout
-            .trim_end()
-            .ends_with("next: cambi index build --publish"),
-        "the last line is the next command:\n{stdout}"
+        last.starts_with("next: cambi profile ") && last.contains("cambi index build --publish"),
+        "the last line is the next command, the profile before the cold build:\n{stdout}"
     );
     let written = std::fs::read_to_string(dir.path().join("cambium.toml")).expect("a config file");
     assert!(written.contains("kind = \"dir\""), "{written}");
