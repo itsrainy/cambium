@@ -31,6 +31,15 @@ pub enum Event {
     RowHeader(Vec<Column>),
     /// One row, one cell per column.
     Row(Vec<Cell>),
+    /// A row that also carries the value it was drawn from. A terminal draws
+    /// the cells exactly as [`Event::Row`]; the jsonl sink adds `data` to
+    /// the row's object under `key`, typed, so a program reads numbers
+    /// rather than the display strings (`"1,198"`, `"4.3 s"`).
+    DataRow {
+        cells: Vec<Cell>,
+        key: String,
+        data: serde_json::Value,
+    },
     /// Something worth recording once. The live line is already showing it
     /// with a count that ticks, so only the plain renderer prints it.
     Milestone(String),
