@@ -28,6 +28,122 @@
 //! the *changed paths* instead makes the oracle independent of cambium's
 //! seeding decisions, which is the only way it can catch one being wrong.
 //!
+//! ## Repository-rule inputs: the second root source
+//!
+//! A changed path's own label is not enough. A path that is an input of a
+//! repository rule (a `patches` entry, a `build_file`, a lock file a rule
+//! reads, a `local_repository` directory) is not a dependency of anything in
+//! the query graph, so `rdeps` of it is empty and "recall 1.0" on such a step
+//! proves nothing. Two real under-reports passed five box runs that way:
+//! xla's `third_party/llvm/*.patch` (inputs of `@llvm-raw`, consumed only
+//! through `@llvm-project`, generated from it by a module extension; run B
+//! steps 13, 29 and 181 answered 0 of 0) and envoy's WORKSPACE-era
+//! `bazel/pgv.patch` (issue #28).
+//!
+//! So the oracle has a second root source, and it does not come from
+//! cambium's tables: Bazel's own repository marker files
+//! (`<output_base>/external/@<canonical>.marker`, parsed in
+//! [`super::repo_inputs`]). A marker lists every file, directory listing and
+//! directory tree the repository rule read, and it is what Bazel itself
+//! consults to decide a refetch, so it is the closest thing to ground truth
+//! there is. A repository with a changed path among its recorded inputs is
+//! dirty; so, to a fixpoint, is every repository whose marker records a file
+//! of a dirty one. For each dirty repository `R` the roots gain
+//! `@@R//...:*`: a refetch re-evaluates all of `R`, and a patch can change
+//! any file of it, so what Bazel could rebuild is everything in `//...` that
+//! reaches any target of `R`. `rdeps(//..., …)` already restricts that to
+//! what the universe reaches. The question stays one question:
+//!
+//! ```text
+//! kind(rule, rdeps(//..., set(<changed paths' labels> @@R1//...:* @@R2//...:* …)))
+//! ```
+//!
+//! asked in two halves (the changed paths' labels, then the repository
+//! patterns), whose union is the answer because `rdeps` distributes over
+//! `set`. `roots` keeps its meaning (the changed paths' labels);
+//! [`RdepsResult::repository_inputs`] records which repositories were dirty,
+//! why, the patterns, and how many main-repository rules only they reached.
+//! A pattern Bazel will not evaluate (a repository that is not defined at
+//! head) is bisected out like any root and lands in `skipped_roots`, or in
+//! `unresolved` when `--keep_going` absorbed it.
+//!
+//! **When the markers are read.** The oracle runs with the checkout at head,
+//! after cambium's own run for the step. It reads the markers twice: before
+//! its first query, and again after the changed paths' half, and a
+//! repository's inputs are the union of the two reads. The record keeps each
+//! read's count (`markers_first`, `markers_second`).
+//!
+//! - The first read sees what the last fetch or up-to-date check wrote. On a
+//!   carried walk that is mostly the previous step's oracle, whose
+//!   `rdeps(//...)` universe checked every repository `//...` reaches at this
+//!   step's *base*; but cambium's own queries at head come between, and any
+//!   repository they refetched already holds head's inputs. So the first
+//!   read holds base's inputs only where nothing since has touched them,
+//!   which is what can catch a patch deleted at head (the head marker no
+//!   longer names it); it is not a guarantee.
+//! - The second read follows a query whose universe is the transitive closure
+//!   of `//...` at *head*, which makes Bazel check every repository that
+//!   universe reaches against its marker and refetch (rewriting the marker)
+//!   any that is out of date. So every repository the answer could come
+//!   through has a marker current at head.
+//! - When no changed path has a label (every one is outside every package),
+//!   the changed paths' half runs no query, there is no second read, and the
+//!   first read is all there is; a repository first fetched at head behind
+//!   such a step is not seen.
+//!
+//! **Could a marker mislead?** A repository added at head has no marker
+//! from the first read; the second read has it once the head universe
+//! fetched it. A marker written for another revision and never checked
+//! since can name a changed path the step's own definition does not read:
+//!
+//! - If the repository is not defined at head (a WORKSPACE-era repository on
+//!   an output base that also serves bzlmod revisions, such as envoy's
+//!   `@base_pip3`), its pattern fails to resolve and lands in `failed`; if
+//!   `//...` does not reach it, its pattern reaches nothing. Either way it
+//!   adds no rule, and the summary counts the step as idle, not rooted.
+//! - If the repository is still defined and still reached at head, but its
+//!   definition stopped reading the path some revisions ago and nothing
+//!   checked it at this step's base, the union roots it wholesale although
+//!   Bazel going from base to head would not refetch it: a miss the oracle
+//!   invents. It needs a marker older than the base, so the first step of a
+//!   window or a resume, a step after one `--oracle-sample` skipped, or an
+//!   output base shared across revisions or agents. No instance is known in
+//!   the current windows; a snapshot at base (below) would remove it.
+//!
+//! **What the markers do not see.** Three routes make Bazel refetch or
+//! re-evaluate a repository and leave the step as vacuous as it was:
+//!
+//! - A repository never fetched on this output base has no marker at all.
+//!   After the walk's cold build and one `rdeps(//...)` that is none the
+//!   universe reaches.
+//! - A module extension's file inputs are recorded with the extension's
+//!   evaluation (the lockfile's `recordedFileInputs`), not in the markers of
+//!   the repositories it generates. xla's `pip.parse(requirements_lock =
+//!   "//:requirements_lock_3_11.txt")` reads the lock file, and no marker on
+//!   `output/xla` names it; a step that edits only a requirements lock is
+//!   0 of 0 still. At envoy's bzlmod pin `@rules_python++pip+base_pip3`'s
+//!   marker names only rules_python templates, and the one marker naming
+//!   `tools/base/requirements.txt` is the stale WORKSPACE-era `@base_pip3`
+//!   above, which fails to resolve.
+//! - A change to a repository's own definition changes its rule key (the
+//!   marker's first line), not a recorded input. xla's `LLVM_COMMIT` bump in
+//!   `third_party/llvm/workspace.bzl` refetches `@llvm-raw` and
+//!   `@llvm-project`, and nothing here roots them; the changed `.bzl`'s own
+//!   label reaches only rules that list it in `srcs`. An LLVM integrate that
+//!   also edits a patch is rooted through the patch.
+//!
+//! And `rdeps` follows no load edges, so a main-repository package that only
+//! `load`s a `.bzl` from a rooted repository is not reached from its
+//! pattern; the changed paths' half has the same blind spot, and the load
+//! oracle covers in-tree `.bzl` files only.
+//!
+//! The follow-up that closes the second and third routes without leaving
+//! Bazel's own records: snapshot the markers at base, before cambium's run,
+//! and root every repository whose rule key or recorded digests differ after
+//! the head universe. That catches a definition change and a generated
+//! repository whose attributes a module extension changed, and it replaces
+//! the union, so the invented miss above goes too.
+//!
 //! ## Batching
 //!
 //! `rdeps(//..., set(a b c))` is the union of the individual answers, so the
@@ -70,6 +186,7 @@ use std::path::Path;
 use anyhow::Result;
 use cambium_bazel::{query_word, Bazel};
 
+use super::repo_inputs::{self, Changes, DirtyRepository, Markers};
 use crate::tools::bazel_query;
 use cambium_classify::PackageSet;
 use cambium_index::IndexRef;
@@ -146,6 +263,10 @@ pub struct RdepsResult {
     /// file and points its `label_flag`s back at main-repo platform impls).
     /// cambium stops at the first external node, so the reverse walk never
     /// climbs back.
+    ///
+    /// A miss that only the repository-input roots reached is here too,
+    /// without a probe: it depends on a target of a repository whose
+    /// recorded inputs changed and on no changed path's own label.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_route: Vec<String>,
     /// How many of [`RdepsResult::missing`] the route probe never asked Bazel
@@ -208,6 +329,59 @@ pub struct RdepsResult {
     /// How many distinct unresolved labels there were, before the cap.
     #[serde(default)]
     pub unresolved_total: usize,
+    /// The second root source: repositories with a changed path among their
+    /// recorded inputs, from Bazel's marker files. `None` when no output base
+    /// was given, so the markers were not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_inputs: Option<RepositoryRoots>,
+    /// The oracle's whole wall for this step, queries and marker reads
+    /// included.
+    #[serde(default)]
+    pub wall_ms: u64,
+}
+
+/// What the repository-input half of the oracle found and cost.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepositoryRoots {
+    /// Marker files parsed, over both reads.
+    pub markers: usize,
+    /// Marker files the first read parsed, before the oracle's first query.
+    #[serde(default)]
+    pub markers_first: usize,
+    /// Marker files the second read parsed, after the changed paths' half;
+    /// `None` when that half ran no query, so there was no second read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markers_second: Option<usize>,
+    /// Repositories whose marker would not parse; their inputs are unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
+    /// The dirty repositories and why, sorted by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<DirtyRepository>,
+    /// The `@@R//...:*` patterns queried, one per dirty repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
+    /// The patterns Bazel would not evaluate even alone (a repository not
+    /// defined at head, such as a WORKSPACE-era marker left on an output
+    /// base that now serves bzlmod revisions). A subset of `roots`, also
+    /// in [`RdepsResult::skipped_roots`]; they rooted nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+    /// Main-repository rules the patterns reached that the changed paths'
+    /// labels did not: how much of `oracle_labels` this half contributed.
+    #[serde(default)]
+    pub labels_added: usize,
+    /// Targets of the rooted repositories themselves in Bazel's answer and
+    /// not in cambium's. They are roots, not reverse dependencies, so they
+    /// are counted here and left out of `missing_external`.
+    #[serde(default)]
+    pub own_labels: usize,
+    /// Both marker reads.
+    #[serde(default)]
+    pub read_ms: u64,
+    /// The pattern queries.
+    #[serde(default)]
+    pub query_ms: u64,
 }
 
 impl RdepsResult {
@@ -258,6 +432,13 @@ pub struct RdepsOracleSummary {
     pub route_unprobed: usize,
     /// The `@repo//...` half of the difference, which recall ignores.
     pub missing_external: usize,
+    /// Change sets on which a repository's recorded inputs added roots that
+    /// reached a main-repository rule the changed paths' labels did not.
+    #[serde(default)]
+    pub repository_change_sets: usize,
+    /// Main-repository rules only those roots reached, summed.
+    #[serde(default)]
+    pub repository_labels: usize,
 }
 
 impl RdepsOracleSummary {
@@ -270,6 +451,10 @@ impl RdepsOracleSummary {
         self.deleted_missing += o.deleted_missing.len();
         self.external_route += o.external_route.len();
         self.route_unprobed += o.route_unprobed;
+        if let Some(r) = o.repository_inputs.as_ref().filter(|r| r.labels_added > 0) {
+            self.repository_change_sets += 1;
+            self.repository_labels += r.labels_added;
+        }
         if o.partial {
             self.partial_change_sets += 1;
             self.partial_batches += o.partial_batches;
@@ -335,6 +520,14 @@ pub struct OracleInputs<'a> {
     /// [`deleted_consumers`] — "the rule, or its package" — is unsatisfiable
     /// by construction for exactly the case it was written for.
     pub dirty_packages: &'a BTreeSet<String>,
+    /// The output base the queries run on, whose `external/@*.marker` files
+    /// are the second root source. `None` skips it and leaves
+    /// [`RdepsResult::repository_inputs`] unset.
+    pub output_base: Option<&'a Path>,
+    /// The changed paths that were added or deleted, for a marker's
+    /// `DIRENTS` inputs (a directory listing changes only then). `None`
+    /// matches a listing on any changed child.
+    pub added_or_deleted: Option<&'a BTreeSet<String>>,
 }
 
 impl RdepsOracle {
@@ -348,6 +541,7 @@ impl RdepsOracle {
 
     /// Runs the oracle over one change set.
     pub fn run(&self, bazel: &Bazel, inputs: &OracleInputs<'_>) -> Result<RdepsResult> {
+        let started = std::time::Instant::now();
         let mut result = RdepsResult::default();
         let packages = PackageSet::from_index(inputs.head);
         let ws = bazel.workspace();
@@ -388,17 +582,109 @@ impl RdepsOracle {
         }
         result.roots = roots.clone();
 
+        // The first marker read: before any query of ours has touched the
+        // server, so base's inputs where the last check was at base.
+        let read_at = std::time::Instant::now();
+        let before = inputs.output_base.map(|ob| Markers::read(ob, ws));
+        let markers_first = before.as_ref().map_or(0, |m| m.by_repo.len());
+        let mut read_ms = read_at.elapsed().as_millis() as u64;
+
         let mut answer = BTreeSet::new();
         let mut unresolved: BTreeSet<String> = BTreeSet::new();
         for batch in batches(&roots, self.max_labels, self.max_expr_bytes) {
             self.run_batch(bazel, batch, &mut answer, &mut unresolved, &mut result);
         }
 
+        // The second read, after a universe that checked every repository
+        // `//...` reaches at head; then the repository patterns.
+        let mut own: Vec<String> = Vec::new();
+        let mut repo_only: BTreeSet<String> = BTreeSet::new();
+        if let (Some(before), Some(ob)) = (before, inputs.output_base) {
+            let read_at = std::time::Instant::now();
+            // With no changed path's label to ask about, no query has run
+            // yet, the markers are as the first read found them, and a
+            // second read would only repeat it.
+            let (markers, markers_second) = match result.batches {
+                0 => (before, None),
+                _ => {
+                    let after = Markers::read(ob, ws);
+                    let n = after.by_repo.len();
+                    (before.union(after), Some(n))
+                }
+            };
+            let repos = repo_inputs::dirty(
+                &markers,
+                &Changes {
+                    changed: inputs.changed,
+                    added_or_deleted: inputs.added_or_deleted,
+                },
+                ws,
+            );
+            read_ms += read_at.elapsed().as_millis() as u64;
+            let patterns: Vec<String> = repos
+                .iter()
+                .map(|r| repo_inputs::root_pattern(&r.name))
+                .collect();
+            let query_at = std::time::Instant::now();
+            let mut from_repos = BTreeSet::new();
+            for batch in batches(&patterns, self.max_labels, self.max_expr_bytes) {
+                self.run_batch(bazel, batch, &mut from_repos, &mut unresolved, &mut result);
+            }
+            let query_ms = query_at.elapsed().as_millis() as u64;
+            let failed: Vec<String> = patterns
+                .iter()
+                .filter(|p| result.skipped_roots.contains(p))
+                .cloned()
+                .collect();
+            repo_only = from_repos
+                .iter()
+                .filter(|l| !is_external(l) && !answer.contains(*l))
+                .cloned()
+                .collect();
+            let labels_added = repo_only.len();
+            own = repos.iter().map(|r| r.name.clone()).collect();
+            answer.extend(from_repos);
+            result.repository_inputs = Some(RepositoryRoots {
+                markers: markers.by_repo.len(),
+                markers_first,
+                markers_second,
+                unreadable: markers.unreadable.into_iter().collect(),
+                repositories: repos,
+                roots: patterns,
+                failed,
+                labels_added,
+                own_labels: 0,
+                read_ms,
+                query_ms,
+            });
+        }
+
         partition(answer, inputs.cambium, &mut result);
+        // A rooted repository's own targets are roots, not targets that
+        // depend on one: counted, and kept out of the external listing.
+        if let Some(r) = result.repository_inputs.as_mut() {
+            let before = result.missing_external.len();
+            result
+                .missing_external
+                .retain(|l| !own.iter().any(|repo| repo_inputs::label_in_repo(l, repo)));
+            r.own_labels = before - result.missing_external.len();
+        }
         result.unresolved_total = unresolved.len();
         result.unresolved = unresolved.into_iter().take(MAX_UNRESOLVED).collect();
-        let (routes, unprobed) = external_routes(bazel, &result.roots, &result.missing);
-        result.external_route = routes;
+        // A miss only the repository patterns reached depends on a target of
+        // a dirty repository and on no changed path's label, so every path
+        // from it to a root runs through that repository: an external route
+        // by construction, and no `somepath` is spent on it. Probing them
+        // cost 4 s each on xla (the pattern is re-evaluated per probe), 200
+        // probes on a step whose 9559 misses were all of this kind.
+        let (via_repo, rest): (Vec<String>, Vec<String>) = result
+            .missing
+            .iter()
+            .cloned()
+            .partition(|l| repo_only.contains(l));
+        let (routes, unprobed) = external_routes(bazel, &result.roots, &rest);
+        result.external_route = via_repo.into_iter().chain(routes).collect();
+        result.external_route.sort();
         result.route_unprobed = unprobed;
 
         if let Some(base) = inputs.base {
@@ -417,6 +703,7 @@ impl RdepsOracle {
             result.missing.sort();
             result.missing.dedup();
         }
+        result.wall_ms = started.elapsed().as_millis() as u64;
         Ok(result)
     }
 
@@ -619,7 +906,10 @@ fn partition(answer: BTreeSet<String>, cambium: &BTreeSet<String>, result: &mut 
     result.oracle_labels = main.len();
     result.matched = main.intersection(cambium).count();
     result.missing = main.difference(cambium).cloned().collect();
-    result.missing_external = external.into_iter().filter(|l| !cambium.contains(l)).collect();
+    result.missing_external = external
+        .into_iter()
+        .filter(|l| !cambium.contains(l))
+        .collect();
     result.oracle_set = main;
 }
 
@@ -837,12 +1127,18 @@ mod tests {
         let mut r = RdepsResult::default();
         partition(answer, &cambium, &mut r);
 
-        assert_eq!(r.oracle_labels, 3, "recall is over the main repository only");
+        assert_eq!(
+            r.oracle_labels, 3,
+            "recall is over the main repository only"
+        );
         assert_eq!(r.matched, 1);
         assert_eq!(r.missing, vec!["//b:b".to_string(), "//c:c".to_string()]);
         assert_eq!(
             r.missing_external,
-            vec!["//external:thing".to_string(), "@quiche//:quiche".to_string()],
+            vec![
+                "//external:thing".to_string(),
+                "@quiche//:quiche".to_string()
+            ],
             "the other vocabulary is recorded, never in the verdict"
         );
         assert!(!r.ok(), "a main-repo miss fails the change set");
@@ -865,7 +1161,10 @@ mod tests {
         // bookkeeping can pass or fail a step by itself.
         let mut clean = RdepsResult::default();
         partition(set(&["@quiche//:quiche"]), &BTreeSet::new(), &mut clean);
-        assert!(clean.ok(), "an answer Bazel reached only outside //... is not a miss");
+        assert!(
+            clean.ok(),
+            "an answer Bazel reached only outside //... is not a miss"
+        );
         assert_eq!(clean.missing_external.len(), 1);
     }
 
@@ -927,7 +1226,10 @@ mod tests {
         let (routes, unprobed) =
             external_routes(&bazel_answering(dir.path(), 1, ""), &roots, &missing);
         assert!(routes.is_empty());
-        assert_eq!(unprobed, 3, "a query that failed is not evidence either way");
+        assert_eq!(
+            unprobed, 3,
+            "a query that failed is not evidence either way"
+        );
 
         // A path with no external node is the one case that really is
         // unexplained, and it is counted in neither column.
@@ -1090,6 +1392,8 @@ mod tests {
                     changed: &changed,
                     cambium: &loads_only,
                     dirty_packages: &BTreeSet::new(),
+                    output_base: None,
+                    added_or_deleted: None,
                 },
             )
             .unwrap();
@@ -1116,6 +1420,8 @@ mod tests {
                     changed: &changed,
                     cambium: &with_consumers,
                     dirty_packages: &BTreeSet::new(),
+                    output_base: None,
+                    added_or_deleted: None,
                 },
             )
             .unwrap();
@@ -1143,6 +1449,8 @@ mod tests {
                     changed: &changed,
                     cambium: &BTreeSet::new(),
                     dirty_packages: &BTreeSet::new(),
+                    output_base: None,
+                    added_or_deleted: None,
                 },
             )
             .unwrap();
@@ -1170,6 +1478,8 @@ mod tests {
                     changed: &set(&["defs/defs.bzl"]),
                     cambium: &set(&["//defs:bzl_srcs"]),
                     dirty_packages: &BTreeSet::new(),
+                    output_base: None,
+                    added_or_deleted: None,
                 },
             )
             .unwrap();
@@ -1247,6 +1557,8 @@ mod tests {
                         changed: &changed,
                         cambium,
                         dirty_packages: dirty,
+                        output_base: None,
+                        added_or_deleted: None,
                     },
                 )
                 .unwrap()
@@ -1312,6 +1624,8 @@ mod tests {
                         changed: &changed,
                         cambium,
                         dirty_packages: dirty,
+                        output_base: None,
+                        added_or_deleted: None,
                     },
                 )
                 .unwrap()
@@ -1354,6 +1668,8 @@ mod tests {
                     changed: &changed,
                     cambium: &BTreeSet::new(),
                     dirty_packages: &BTreeSet::new(),
+                    output_base: None,
+                    added_or_deleted: None,
                 },
             )
             .unwrap();
@@ -1380,6 +1696,8 @@ mod tests {
             changed: &changed,
             cambium: &changed,
             dirty_packages: &BTreeSet::new(),
+            output_base: None,
+            added_or_deleted: None,
         };
         let full = RdepsOracle::default().run(&bazel, &inputs).unwrap();
         assert_eq!(full.roots.len(), 10);
@@ -1387,5 +1705,231 @@ mod tests {
         let capped = RdepsOracle::new(3, 7).run(&bazel, &inputs).unwrap();
         assert_eq!(capped.roots.len(), 3);
         assert!(capped.sampled);
+    }
+
+    /// xla at step 29 of run B, reduced: `third_party/llvm/build.patch` is
+    /// the only changed path, it is a source file of `//third_party/llvm`
+    /// that no rule consumes, and it is a `patches` entry of `@llvm-raw`,
+    /// from which `@llvm-project` is generated.
+    fn patch_step_index() -> cambium_index::IndexData {
+        let mut b = IndexBuilder::new(cambium_index::new_lineage());
+        b.apply_packages(&[
+            PackageUpdate {
+                package: "third_party/llvm".into(),
+                targets: vec![TargetRow::source_file("//third_party/llvm:build.patch")],
+                ..Default::default()
+            },
+            PackageUpdate {
+                package: "xla/service".into(),
+                targets: vec![TargetRow::rule("//xla/service:cpu", "cc_library", vec![])],
+                ..Default::default()
+            },
+        ]);
+        b.finish("head")
+    }
+
+    /// A Bazel that reaches nothing from a changed path's label and, from a
+    /// repository pattern, a main-repo rule and a target of the repository
+    /// itself: what `rdeps` says on that step.
+    #[cfg(unix)]
+    fn patch_step_bazel(dir: &Path) -> Bazel {
+        let bin = dir.join("stub-bazel");
+        cambium_testkit::executable_script(
+            &bin,
+            "case \"$*\" in\n\
+             *'//...:*'*) printf '%s\\n' //xla/service:cpu @llvm-project//llvm:Support ;;\n\
+             *) ;;\n\
+             esac",
+        );
+        Bazel::at(dir.to_path_buf(), Some(bin.to_str().unwrap()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_patch_only_step_is_rooted_at_the_repositories_its_marker_names() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("third_party/llvm")).unwrap();
+        std::fs::write(ws.path().join("third_party/llvm/build.patch"), "x").unwrap();
+        let ob = tempfile::tempdir().unwrap();
+        let ext = ob.path().join("external");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(
+            ext.join("@+third_party_ext+llvm-raw.marker"),
+            "e2ec\nFILE:@@//third_party/llvm/build.patch 9d52\nFILE:@@//third_party/llvm/toolchains.patch dba1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("@+llvm_extension+llvm-project.marker"),
+            "9abd\nDIRENTS:@@+third_party_ext+llvm-raw// f1a3\nFILE:@@+third_party_ext+llvm-raw//llvm/CMakeLists.txt c1e3\nREPO_MAPPING:+third_party_ext+llvm-raw,llvm-raw +third_party_ext+llvm-raw\n",
+        )
+        .unwrap();
+        std::fs::write(ext.join("@unrelated.marker"), "k\nFILE:@@//other.patch 1\n").unwrap();
+
+        let bazel = patch_step_bazel(ws.path());
+        let idx = patch_step_index();
+        let changed = set(&["third_party/llvm/build.patch"]);
+        let run = |cambium: &BTreeSet<String>, ob: Option<&Path>| {
+            RdepsOracle::default()
+                .run(
+                    &bazel,
+                    &OracleInputs {
+                        head: idx.view(),
+                        base: None,
+                        changed: &changed,
+                        cambium,
+                        dirty_packages: &BTreeSet::new(),
+                        output_base: ob,
+                        added_or_deleted: None,
+                    },
+                )
+                .unwrap()
+        };
+
+        // Without the markers: the vacuous answer every box run recorded.
+        let blind = run(&BTreeSet::new(), None);
+        assert_eq!(blind.roots, vec!["//third_party/llvm:build.patch"]);
+        assert_eq!(blind.oracle_labels, 0);
+        assert!(blind.ok(), "0 of 0 passes, and proves nothing");
+        assert!(blind.repository_inputs.is_none());
+
+        // With them: both repositories, the patterns, and the miss.
+        let r = run(&BTreeSet::new(), Some(ob.path()));
+        assert_eq!(
+            r.roots,
+            vec!["//third_party/llvm:build.patch"],
+            "`roots` keeps its meaning: the changed paths' labels"
+        );
+        let ri = r.repository_inputs.as_ref().expect("the markers were read");
+        assert_eq!(ri.markers, 3);
+        assert_eq!(ri.markers_first, 3);
+        assert_eq!(ri.markers_second, Some(3), "the stub fetches nothing new");
+        assert!(ri.failed.is_empty());
+        assert_eq!(
+            ri.repositories
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["+llvm_extension+llvm-project", "+third_party_ext+llvm-raw"]
+        );
+        assert_eq!(
+            ri.roots,
+            vec![
+                "@@+llvm_extension+llvm-project//...:*",
+                "@@+third_party_ext+llvm-raw//...:*"
+            ]
+        );
+        assert_eq!(ri.labels_added, 1);
+        assert_eq!(ri.own_labels, 1, "@llvm-project//llvm:Support is a root");
+        assert!(r.missing_external.is_empty(), "{:?}", r.missing_external);
+        assert_eq!(r.batches, 2, "the changed paths' half, then the patterns");
+        assert_eq!(r.oracle_labels, 1);
+        assert_eq!(r.missing, vec!["//xla/service:cpu"]);
+        assert!(!r.ok(), "the engine that missed the route fails");
+        assert_eq!(
+            r.external_route,
+            vec!["//xla/service:cpu"],
+            "reached only through the repository: a route, with no probe spent"
+        );
+        assert_eq!(r.route_unprobed, 0);
+
+        // And the engine that covers it passes.
+        let covered = run(&set(&["//xla/service:cpu"]), Some(ob.path()));
+        assert!(covered.ok());
+        assert_eq!(covered.recall(), 1.0);
+
+        // A step that touches no recorded input roots no repository.
+        let quiet_changed = set(&["xla/service/a.cc"]);
+        let quiet = RdepsOracle::default()
+            .run(
+                &bazel,
+                &OracleInputs {
+                    head: idx.view(),
+                    base: None,
+                    changed: &quiet_changed,
+                    cambium: &BTreeSet::new(),
+                    dirty_packages: &BTreeSet::new(),
+                    output_base: Some(ob.path()),
+                    added_or_deleted: None,
+                },
+            )
+            .unwrap();
+        let qi = quiet.repository_inputs.as_ref().unwrap();
+        assert!(qi.repositories.is_empty() && qi.roots.is_empty());
+    }
+
+    /// A marker left on the output base by a revision that defined the
+    /// repository differently (envoy's WORKSPACE-era `@base_pip3` on a base
+    /// that now serves bzlmod revisions) names a changed path, but its
+    /// pattern does not resolve at head: it is recorded as `failed` and
+    /// roots nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_for_a_repository_not_defined_at_head_is_recorded_as_failed() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("third_party/llvm")).unwrap();
+        std::fs::write(ws.path().join("third_party/llvm/build.patch"), "x").unwrap();
+        let ob = tempfile::tempdir().unwrap();
+        let ext = ob.path().join("external");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(
+            ext.join("@base_pip3.marker"),
+            "k\nFILE:@@//third_party/llvm/build.patch 1\n",
+        )
+        .unwrap();
+        let bin = ws.path().join("stub-bazel");
+        cambium_testkit::executable_script(
+            &bin,
+            "case \"$*\" in\n\
+             *'@@base_pip3//...:*'*) echo \"ERROR: no such repository '@@base_pip3'\" >&2; exit 7 ;;\n\
+             *) ;;\n\
+             esac",
+        );
+        let bazel = Bazel::at(ws.path().to_path_buf(), Some(bin.to_str().unwrap()));
+        let idx = patch_step_index();
+        let changed = set(&["third_party/llvm/build.patch"]);
+        let r = RdepsOracle::default()
+            .run(
+                &bazel,
+                &OracleInputs {
+                    head: idx.view(),
+                    base: None,
+                    changed: &changed,
+                    cambium: &BTreeSet::new(),
+                    dirty_packages: &BTreeSet::new(),
+                    output_base: Some(ob.path()),
+                    added_or_deleted: None,
+                },
+            )
+            .unwrap();
+        let ri = r.repository_inputs.as_ref().unwrap();
+        assert_eq!(ri.roots, vec!["@@base_pip3//...:*"]);
+        assert_eq!(ri.failed, vec!["@@base_pip3//...:*"], "{r:#?}");
+        assert_eq!(ri.labels_added, 0);
+        assert!(r.skipped_roots.contains(&"@@base_pip3//...:*".to_string()));
+        let mut sum = RdepsOracleSummary::default();
+        sum.add(&r);
+        assert_eq!(sum.repository_change_sets, 0, "not counted as rooted");
+    }
+
+    #[test]
+    fn the_summary_counts_the_steps_the_repository_half_added_roots_on() {
+        let mut sum = RdepsOracleSummary::default();
+        let mut o = RdepsResult::default();
+        sum.add(&o);
+        o.repository_inputs = Some(RepositoryRoots {
+            roots: vec!["@@r//...:*".into()],
+            labels_added: 7,
+            ..Default::default()
+        });
+        sum.add(&o);
+        // A pattern that reached nothing new is not a rooted change set.
+        o.repository_inputs = Some(RepositoryRoots {
+            roots: vec!["@@gone//...:*".into()],
+            failed: vec!["@@gone//...:*".into()],
+            ..Default::default()
+        });
+        sum.add(&o);
+        assert_eq!(sum.repository_change_sets, 1);
+        assert_eq!(sum.repository_labels, 7);
     }
 }

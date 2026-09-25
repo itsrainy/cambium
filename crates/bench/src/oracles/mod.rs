@@ -13,7 +13,11 @@
 //! - [`load`] — *is the static `.bzl` load closure complete?* On every change
 //!   set touching a `.bzl`, Bazel's `rbuildfiles` must be a subset of the
 //!   packages cambium dirtied.
+//!
+//! [`repo_inputs`] is not an oracle of its own: it reads Bazel's repository
+//! marker files for the `rdeps` oracle's second root source.
 
 pub mod load;
 pub mod rdeps;
 pub mod rebuild;
+pub mod repo_inputs;

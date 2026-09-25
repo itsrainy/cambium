@@ -40,8 +40,51 @@ peers, and invocation detail is in [Tools](#tools).
 
 | oracle | question it answers | how |
 |---|---|---|
-| reverse-dependency (rdeps) | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path in a head package, rooted at every label the path has: its main-repo one, and its label inside an in-tree repository whose packages the index holds (a `.proto` under envoy's `api/` has only the second; rooted at main-repo labels alone the oracle asked nothing about it and scored a miss there as recall 1.0). Batched by command-line length and unioned. A tool's answer must be a superset of the result. A file *deleted* at head has no label, so its consumers come from the parent index's file rows instead and must appear by label, by package, or in `dirty_packages` (the only spelling when a whole package is deleted, since every rule in it is tombstoned). The package spelling is offered only to a consumer that is itself gone at head; one that survives in another package must appear by label however dirty its own package is. This is the only ground truth, and every tool including cambium is scored against it. `--oracle-sample N` caps the steps queried; the full tier runs it on every step. |
+| reverse-dependency (rdeps) | did a tool miss a target? | `bazel query "kind(rule, rdeps(//..., set(<every changed file's label>)))"` on the head revision, over every changed path in a head package, rooted at every label the path has: its main-repo one, and its label inside an in-tree repository whose packages the index holds (a `.proto` under envoy's `api/` has only the second; rooted at main-repo labels alone the oracle asked nothing about it and scored a miss there as recall 1.0), and at `@@R//...:*` for every external repository `R` whose recorded inputs include a changed path (below). Batched by command-line length and unioned. A tool's answer must be a superset of the result. A file *deleted* at head has no label, so its consumers come from the parent index's file rows instead and must appear by label, by package, or in `dirty_packages` (the only spelling when a whole package is deleted, since every rule in it is tombstoned). The package spelling is offered only to a consumer that is itself gone at head; one that survives in another package must appear by label however dirty its own package is. This is the only ground truth, and every tool including cambium is scored against it. `--oracle-sample N` caps the steps queried; the full tier runs it on every step. |
 | rebuild | is the incremental updater exact? | the applied index at the pin (the one the walk carried step to step) is diffed node by node, edge by edge and rule hash by rule hash against an index cold-built at the pin on a fresh Bazel server (the reference build, below), and its Skyframe loading layer row by row. Any difference in the graph fails; a loading-layer row the applied index lacks fails unless the walk can explain it (below). It always runs at the pin; `--rebuild-every N` also runs it every N steps. |
+
+*The repository-input roots.* A changed path's own label is not enough
+when the path is an input of a repository rule: a `patches` entry, a
+`build_file`, a lock file a rule reads. Nothing in the query graph depends
+on it, so `rdeps` of it is empty and recall 1.0 on that step proves
+nothing. That is how xla's `third_party/llvm/*.patch` (inputs of
+`@llvm-raw`, consumed only through `@llvm-project`, which a module
+extension generates from it) and envoy's WORKSPACE-era `bazel/pgv.patch`
+(issue #28) passed five box runs as 0 of 0. So the oracle has a second root
+source, and it does not come from cambium's tables: Bazel's own repository
+marker files, `<output_base>/external/@<canonical>.marker`, which list every
+file (`FILE:`), directory listing (`DIRENTS:`) and directory tree
+(`DIRTREE:`) the repository rule read, and which Bazel itself consults to
+decide a refetch. A repository with a changed path among them is dirty, and
+so, to a fixpoint, is every repository whose marker records a file of a
+dirty one (`@llvm-project`'s marker names `@llvm-raw`'s files). Each dirty
+repository adds `@@R//...:*` to the roots: a refetch re-evaluates all of it
+and a patch can change any of its files, so what Bazel could rebuild is
+everything in `//...` that reaches any target of `R`. The markers are read
+twice, before the oracle's first query (the previous step's universe
+checked them at the step's base) and after the changed paths' half (whose
+universe made Bazel check, and refetch where stale, every repository
+`//...` reaches at head), and the two reads are unioned. In-tree
+repositories (`local_repository`, `local_path_override`) record no inputs,
+and their files are already rooted by label. The markers leave three routes
+to a refetch unseen, and a step confined to one of them is still 0 of 0: a
+repository never fetched on the walk's output base has no marker; a module
+extension's file inputs are recorded with the extension, not in the markers
+of the repositories it generates (xla's `pip.parse` reads
+`requirements_lock_3_11.txt`, and no marker names it); and a change to a
+repository's own definition (xla's `LLVM_COMMIT` bump in
+`third_party/llvm/workspace.bzl`) changes the marker's rule key, not a
+recorded input. A marker left on a shared output base by another revision
+can also name a changed path: if the repository is not defined at head its
+pattern fails and roots nothing, and if it still is, the union can root it
+although Bazel would not refetch it between base and head. Snapshotting the
+markers at base, before cambium's run, and rooting every repository whose
+rule key or recorded digests differ after the head universe would close the
+definition route and replace the union; it is not built. The step record's
+`oracle.repository_inputs` names the dirty repositories, what dirtied each,
+the patterns and those that `failed`, how many main-repository rules only
+they reached (`labels_added`), each read's marker count, and what the reads
+and the pattern queries cost.
 
 *The loading-layer rows.* The rebuild oracle also compares the Skyframe
 loading layer (the `FILE`, `DIRECTORY_LISTING`, `PACKAGE`, `GLOB` and
