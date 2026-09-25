@@ -973,6 +973,27 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
         "a read creates nothing"
     );
 
+    // Under `jsonl` the warning is a `diagnostic` event on stdout, as it
+    // would be on success; the error stays on stderr.
+    let mut j = a.clone();
+    j.splice(2..2, ["--format".to_string(), "jsonl".to_string()]);
+    let (code, stdout, stderr) = run(&j.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(code, 4, "{stderr}");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every stdout line is JSON"))
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "diagnostic" && e["code"] == "CAMBI-W007")
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stderr.contains("CAMBI-W007"), "{stderr}");
+    assert!(stderr.contains("CAMBI-E006"), "{stderr}");
+
     // A file where the directory should be: `/dev/null/nope`'s shape.
     point_store_at(&f.ws, "cambium.toml/nope");
     let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
