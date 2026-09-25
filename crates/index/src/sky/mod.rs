@@ -577,6 +577,15 @@ impl SkyLayer {
     /// stopped being comparable. The rebuild oracle is what found that, with
     /// four stale `@@bazel_ci_rules+...` packages after five steps.
     ///
+    /// Dropping another repository's keys does not stop the accumulation in
+    /// this repository's rows. A long-lived server also holds main-repository
+    /// `FILE` and `FILE_STATE` rows that no build at the current commit would
+    /// write (a patch a repository rule once watched, a `WORKSPACE` probe of
+    /// a directory since deleted), and a dump prints them with their
+    /// requesters dropped here. That is why the rebuild oracle's reference is
+    /// now built on a fresh server; it used to share the walk's, and read
+    /// those rows as the applied layer's shortfall.
+    ///
     /// `BZL_LOAD` is kept whatever repository it names, and that is not an
     /// inconsistency. An external `.bzl` can be a main-repository *file*: a
     /// `local_path_override` on a module whose sources are in this tree (which
