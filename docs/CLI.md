@@ -144,6 +144,24 @@ package owns a path, a package's targets, byte accounting, externals
 tables, and `verify` against Bazel. Plumbing, for checking a surprising
 `explain` answer without reading the index by hand.
 
+`inspect verify FILE` samples rule targets (`--sample`, `--seed`) and
+checks that the index's reverse closure of each holds every target `bazel
+query rdeps(//..., target)` reports, run against the checkout as it is now.
+Both sides are compared as main-repository rule targets, because that is
+what `affected` reports: the source and generated files between rules (a
+stardoc `.md`, a `.binaryproto`) and targets in external repositories are
+counted and left out. A sample with a miss prints `UNSOUND` and every
+missing target (`--limit n` lists n and counts the rest), and the command
+exits 1. Misses Bazel connects to the sample only through an external
+repository (`@bazel_tools//tools/test:collect_coverage` depending back on
+the root module's `//shell/runfiles`, say) are listed apart as round trips,
+naming the external targets on the path. A toolchain-class sample
+(`toolchain_type`, `toolchain`, `platform`, `constraint_setting`,
+`constraint_value`) whose rdeps come through toolchain resolution prints
+`ESCALATED` rather than `UNSOUND`: a change to one answers `//...` under
+`CAMBI-W023`. Precision is the share of the targets the index reported
+that Bazel also reports.
+
 `inspect stats` reports the Skyframe loading layer alongside the target
 graph: its node and edge counts, a line per node kind (`FILE_STATE`, `FILE`,
 `DIRECTORY_LISTING_STATE`, `DIRECTORY_LISTING`, `GLOB`, `PACKAGE_LOOKUP`,
