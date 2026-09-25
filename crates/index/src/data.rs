@@ -345,9 +345,12 @@ pub struct IndexData {
     // repo id like the table above: `consumer` alone says the consumer's
     // leaf map is known (it may name no leaf at all), and
     // `consumer\0leaf\0pkg\0pkg...` names one leaf of it and the packages of
-    // the indexed repository its transitive deps reach. A consumer with no
-    // `consumer` entry has no map, which is what every index before this
-    // format reads as. See `externals::Consumer::leaves`.
+    // the indexed repository its transitive deps reach. An entry whose leaf
+    // is empty, `consumer\0\0via\0via...`, is what the map was derived
+    // through (`externals::Consumer::via`); no label is empty, so it cannot
+    // be read as a leaf. A consumer with no `consumer` entry has no map,
+    // which is what every index before this format reads as. See
+    // `externals::Consumer::leaves`.
     pub repo_consumer_leaf_bytes: Vec<u8>,
     pub repo_consumer_leaf_offsets: Vec<u32>,
     pub repo_consumer_leaf_ranges: Vec<u32>,
@@ -530,6 +533,23 @@ impl<'a> IndexRef<'a> {
             ("sky_keys", self.sky.keys),
         ] {
             t.validate(what)?;
+        }
+        // The per-repository runs over three of those tables are read by
+        // slicing, so a run that ends past its table or before it starts
+        // would panic at the first lookup rather than fail the open.
+        for (what, ranges, t) in [
+            ("repo_map_ranges", self.repo_map_ranges, self.repo_maps),
+            ("repo_consumer_ranges", self.repo_consumer_ranges, self.repo_consumers),
+            (
+                "repo_consumer_leaf_ranges",
+                self.repo_consumer_leaf_ranges,
+                self.repo_consumer_leaves,
+            ),
+        ] {
+            let len = t.len() as u32;
+            if ranges.windows(2).any(|w| w[0] > w[1]) || ranges.iter().any(|&r| r > len) {
+                return Err(format!("{what}: a run is out of order or past its table of {len}"));
+            }
         }
         Ok(())
     }
@@ -903,6 +923,7 @@ impl<'a> IndexRef<'a> {
             return out;
         }
         let mut leaves: BTreeMap<&str, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+        let mut via: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
         for e in self.repo_consumer_leaf_ranges[i]..self.repo_consumer_leaf_ranges[i + 1] {
             let entry = self.repo_consumer_leaves.get(e);
             let mut parts = entry.split('\0');
@@ -910,14 +931,21 @@ impl<'a> IndexRef<'a> {
                 continue;
             };
             let map = leaves.entry(consumer).or_default();
-            if let Some(leaf) = parts.next() {
-                map.entry(leaf.to_string())
+            match parts.next() {
+                Some("") => via
+                    .entry(consumer)
                     .or_default()
-                    .extend(parts.map(str::to_string));
+                    .extend(parts.map(str::to_string)),
+                Some(leaf) => map
+                    .entry(leaf.to_string())
+                    .or_default()
+                    .extend(parts.map(str::to_string)),
+                None => {}
             }
         }
         for (c, entry) in &mut out {
             entry.leaves = leaves.remove(c.as_str());
+            entry.via = via.remove(c.as_str()).unwrap_or_default();
         }
         out
     }

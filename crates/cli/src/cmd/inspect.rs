@@ -560,6 +560,12 @@ struct ExternalsRepo {
     /// with no leaf map, whose every leaf a change seeds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     consumer_leaves: Vec<String>,
+    /// Per consumer with a leaf map, what the map was derived through
+    /// outside this repository: `quiche: //source/common/quic/platform,
+    /// @abseil-cpp, ...`. A run in which one of them moves reads the map as
+    /// not known and the splice asks for it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consumer_via: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -640,6 +646,14 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
                         .collect(),
                 })
                 .collect(),
+            consumer_via: v
+                .repo_consumers(r)
+                .iter()
+                .filter(|(_, used)| used.leaves.is_some())
+                .map(|(c, used)| {
+                    format!("{c}: {}", used.via.iter().cloned().collect::<Vec<_>>().join(", "))
+                })
+                .collect(),
             inputs: inputs.remove(&r).unwrap_or_default(),
         }})
         .collect();
@@ -696,6 +710,9 @@ fn print_externals(d: &ExternalsDump) {
         }
         for c in &r.consumers {
             println!("  consumer {c}");
+        }
+        for l in &r.consumer_via {
+            println!("  via     {l}");
         }
         for l in &r.consumer_leaves {
             println!("  leaf    {l}");

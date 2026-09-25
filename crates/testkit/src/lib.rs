@@ -274,9 +274,9 @@ pub struct Scanning {
     repo_probes: BTreeMap<String, cambium_bazel::RepoProbe>,
     repo_consumers: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     /// What `consumer_leaf_packages` answers: indexed repository -> leaf ->
-    /// the packages of it the leaf reaches. A repository with no entry
-    /// answers `None`.
-    consumer_leaves: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    /// the packages of it the leaf reaches and what it reaches them
+    /// through. A repository with no entry answers `None`.
+    consumer_leaves: BTreeMap<String, BTreeMap<String, cambium_index::externals::LeafReach>>,
     /// Every `consumer_leaf_packages` question, as `(repo, leaves)`.
     leaf_questions: std::sync::Mutex<Vec<(String, Vec<String>)>>,
     probed: std::sync::Mutex<Vec<String>>,
@@ -399,13 +399,30 @@ impl Scanning {
     /// reaches these packages of it (none at all is "reaches nothing"). A
     /// leaf asked about and never named here is left out of the answer, as
     /// Bazel leaves out a label it could not resolve.
-    pub fn with_consumer_leaf(mut self, repo: &str, leaf: &str, packages: &[&str]) -> Self {
+    pub fn with_consumer_leaf(self, repo: &str, leaf: &str, packages: &[&str]) -> Self {
+        self.with_consumer_leaf_via(repo, leaf, packages, &[])
+    }
+
+    /// [`Scanning::with_consumer_leaf`], and the leaf's closure runs through
+    /// `via` outside the repository (`//pkg` for a main-repo package, `@name`
+    /// for another repository), which is what a run holds the map's
+    /// freshness against (`Consumer::via`).
+    pub fn with_consumer_leaf_via(
+        mut self,
+        repo: &str,
+        leaf: &str,
+        packages: &[&str],
+        via: &[&str],
+    ) -> Self {
         self.consumer_leaves
             .entry(repo.to_string())
             .or_default()
             .insert(
                 leaf.to_string(),
-                packages.iter().map(|p| p.to_string()).collect(),
+                cambium_index::externals::LeafReach {
+                    packages: packages.iter().map(|p| p.to_string()).collect(),
+                    via: via.iter().map(|p| p.to_string()).collect(),
+                },
             );
         self
     }
@@ -534,7 +551,7 @@ impl PackageQuerier for Scanning {
         &self,
         repo: &str,
         leaves: &[String],
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    ) -> Option<BTreeMap<String, cambium_index::externals::LeafReach>> {
         self.leaf_questions
             .lock()
             .unwrap()

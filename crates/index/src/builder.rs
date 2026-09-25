@@ -1187,6 +1187,17 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
                         .extend_from_slice(consumer.as_bytes());
                     t.repo_consumer_leaf_offsets
                         .push(t.repo_consumer_leaf_bytes.len() as u32);
+                    // What it was derived through, under an empty leaf.
+                    if !used.via.is_empty() {
+                        let mut entry = format!("{consumer}\0");
+                        for v in &used.via {
+                            entry.push('\0');
+                            entry.push_str(v);
+                        }
+                        t.repo_consumer_leaf_bytes.extend_from_slice(entry.as_bytes());
+                        t.repo_consumer_leaf_offsets
+                            .push(t.repo_consumer_leaf_bytes.len() as u32);
+                    }
                     for (leaf, pkgs) in leaves {
                         let mut entry = format!("{consumer}\0{leaf}");
                         for p in pkgs {

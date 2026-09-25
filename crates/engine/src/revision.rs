@@ -247,9 +247,7 @@ impl PackageQuerier for RevisionQuerier {
         &self,
         repo: &str,
         leaves: &[String],
-    ) -> Option<
-        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-    > {
+    ) -> Option<std::collections::BTreeMap<String, cambium_index::externals::LeafReach>> {
         self.querier.consumer_leaf_packages(repo, leaves)
     }
 
@@ -394,7 +392,7 @@ mod tests {
         assert!(
             asked
                 .iter()
-                .any(|a| a.contains("allpaths(set(\"@grpc//:grpc++\"), @envoy_api//...:*)")),
+                .any(|a| a.contains("let d = deps(set(\"@grpc//:grpc++\")) in")),
             "{asked:?}"
         );
     }

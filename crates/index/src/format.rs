@@ -150,7 +150,11 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// re-query. A change then seeds only the leaves whose closure it can have
 /// moved, rather than every leaf of the consumer: on envoy the step whose
 /// oracle is 649 labels answered 5035, because `@grpc//:grpc++` is the one
-/// leaf of five that reaches `@envoy_api` and all five were seeded. The same
+/// leaf of five that reaches `@envoy_api` and all five were seeded. Beside
+/// the map, per consumer, what the leaves' closures run through outside the
+/// indexed repository (main-repo packages and other repositories, an entry
+/// with an empty leaf): a run in which one of those moves reads the map as
+/// not known, and a splice asks for it again. The same
 /// bump made the table's packages transitive, which the depth-1 query behind
 /// format 13 was not (36 packages recorded at envoy's pin against a closure
 /// of 48). Every index written at format 13, in the store, in a

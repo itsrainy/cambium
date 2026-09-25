@@ -428,10 +428,14 @@ precision item:
   12, main-repo edges already reach every consumer the `@grpc` route
   would.
   Built on branch `engine-consumer-leaves` (index format 14, report schema
-  16): one Bazel query per indexed repository,
-  `set(leaves) + allpaths(set(leaves), @R//...:*)` with graph output,
-  answers every leaf's reach, 130 leaves in about one second on envoy's
-  WORKSPACE-era commits. Local gate with laptop Bazel on run C's four
+  16): one Bazel query per indexed repository, the leaves' closure with
+  graph output, walked from each leaf on its own, answers every leaf's
+  reach and what it passes through outside the repository; 130 leaves in
+  0.5 s on a warm server at envoy's WORKSPACE-era commits. A map is held
+  against what it passed through: a run in which one of those main-repo
+  packages or repositories moved reads the consumer as having no map (the
+  pooled answer), and the splice asks for the map again, as it does when
+  the indexed repository itself is unsettled. Local gate with laptop Bazel on run C's four
   steps and run E's three: 0 missing against both box oracles on every
   step; step 121 answers 662 (was 5035, oracle 649) and step 244 answers
   2489 (was 5583; run C, without the table, answered 2325, and none of the

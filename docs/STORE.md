@@ -150,6 +150,22 @@ Three separate things, not interchangeable:
   repositories are dropped (they are sinks for this walk, and keeping them
   put the machine's output base in the payload), except `BZL_LOAD`, because
   an external `.bzl` can be a file of this tree.
+  **12**: what each external repository *is* to this tree (the
+  `repo_origin_*` columns, `repo_confirmed`, `repo_indexed`), and per
+  repository boundary whether the cold universe query returned a main-repo
+  package under it (`repo_boundary_traversed`).
+  **13**: the *external-consumer table* (`repo_consumer_*`): per indexed
+  repository, the external repositories whose rules depend on it and the
+  packages of it they use. It is the return path from envoy's `api/` into
+  the tests that link `@grpc//:grpc`, a leaf with no outgoing edges.
+  **14**: the consumer *leaf map* (`repo_consumer_leaf_*`): per consumer,
+  each of its leaves the index holds and the packages of the indexed
+  repository its closure reaches, plus what that closure runs through
+  outside it, so a change seeds only the leaves it can have moved and a
+  run can tell when the map went stale. The same bump made the table's
+  packages transitive. Every format-13 index, in a store, a
+  `bench-precheck/` pull or a results directory, is unreadable at 14 and is
+  rebuilt.
   At each bump, an empty table in an older index would otherwise misread as
   "no mapping needed" rather than "never looked".
 

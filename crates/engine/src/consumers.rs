@@ -10,11 +10,13 @@
 //! five leaves reaches the API and the other four brought the answer to 5035.
 //! The map here is what narrows it, and it is Bazel's answer, asked once per
 //! indexed repository with every leaf of every consumer in one query
-//! ([`cambium_bazel::Bazel::leaf_reaches`]).
+//! ([`cambium_bazel::Bazel::leaf_reaches`]). The same answer says what each
+//! leaf's closure runs through outside the repository (`Consumer::via`),
+//! which is what a later run holds the map's freshness against.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cambium_index::externals::Consumer;
+use cambium_index::externals::{Consumer, LeafReach};
 use cambium_index::IndexBuilder;
 
 use crate::query::PackageQuerier;
@@ -83,7 +85,9 @@ pub(crate) fn with_leaves(
                 %repo,
                 leaves = all.len(),
                 answered = a.as_ref().map(BTreeMap::len),
-                reaching = a.as_ref().map(|m| m.values().filter(|p| !p.is_empty()).count()),
+                reaching = a
+                    .as_ref()
+                    .map(|m| m.values().filter(|r| !r.packages.is_empty()).count()),
                 ms = started.elapsed().as_millis() as u64,
                 "the consumer leaf map was asked for"
             );
@@ -92,17 +96,25 @@ pub(crate) fn with_leaves(
         let entry: BTreeMap<String, Consumer> = consumers
             .iter()
             .map(|(c, packages)| {
-                let leaves = answer.as_ref().map(|a| {
-                    own[c.as_str()]
+                let known: Vec<(&String, &LeafReach)> = answer
+                    .iter()
+                    .flat_map(|a| own[c.as_str()].iter().filter_map(|l| a.get(l).map(|r| (l, r))))
+                    .collect();
+                let leaves = answer.as_ref().map(|_| {
+                    known
                         .iter()
-                        .filter_map(|l| a.get(l).map(|p| (l.clone(), p.clone())))
+                        .map(|(l, r)| ((*l).clone(), r.packages.clone()))
                         .collect()
                 });
+                // Pooled over the consumer's leaves: what any of them was
+                // derived through moving makes the whole map suspect.
+                let via = known.iter().flat_map(|(_, r)| r.via.iter().cloned()).collect();
                 (
                     c.clone(),
                     Consumer {
                         packages: packages.clone(),
                         leaves,
+                        via,
                     },
                 )
             })

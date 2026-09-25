@@ -347,9 +347,9 @@ pub struct Consumer {
     /// every consumer of `R`, since the query that finds them is one query.
     pub packages: BTreeSet<String>,
     /// Leaf label of `C`, as the index spells it -> the packages of `R` its
-    /// transitive deps reach, in Bazel's own answer
-    /// (`allpaths(set(leaves), @R//...:*)`). A leaf that reaches nothing of
-    /// `R` is here with an empty set.
+    /// transitive deps reach, in Bazel's own answer (`deps(set(leaves))`,
+    /// walked from each leaf on its own). A leaf that reaches nothing of `R`
+    /// is here with an empty set.
     ///
     /// The index holds no graph for `C`: `//app:test` depends on
     /// `@grpc//:grpc++`, which is a node with no outgoing edges, and the
@@ -362,11 +362,25 @@ pub struct Consumer {
     ///
     /// `None` is "not known": an index written before format 14, a query
     /// that failed, a querier with no Bazel behind it. The run then seeds
-    /// every leaf of `C`, which is the answer before the map existed. A leaf
-    /// of `C` the index holds and the map does not name (the label was
-    /// spelled after the map was derived, or Bazel could not resolve it) is
-    /// seeded whenever `R` moves.
+    /// every leaf of `C` when the pooled [`Consumer::packages`] meet what
+    /// moved, which is the answer before the map existed. A leaf of `C` the
+    /// index holds and the map does not name (the label was spelled after
+    /// the map was derived, or Bazel could not resolve it) gets that same
+    /// answer.
     pub leaves: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// What the leaf map was derived through, outside `R`: every main-repo
+    /// package (`//pkg`, the root package `//`) and every other repository
+    /// (`@name`, as Bazel spelled it) among the rules of the leaves'
+    /// transitive deps. Meaningful only with [`Consumer::leaves`].
+    ///
+    /// The map is a closure, and a closure moves when a rule on it does. The
+    /// quiche leaves reach `@envoy_api` only through
+    /// `@envoy//source/common/quic/platform:*`, main-repo rules the index
+    /// holds and a `BUILD` edit can point at any package of `R` without the
+    /// map hearing of it. So a run in which one of these packages or
+    /// repositories moved reads the consumer as having no map, and the
+    /// splice asks Bazel for the map again.
+    pub via: BTreeSet<String>,
 }
 
 impl Consumer {
@@ -375,8 +389,18 @@ impl Consumer {
         Self {
             packages,
             leaves: None,
+            via: BTreeSet::new(),
         }
     }
+}
+
+/// Bazel's answer for one leaf of a consumer ([`Consumer::leaves`]): the
+/// packages of the indexed repository its transitive deps reach, and what
+/// outside that repository they pass through ([`Consumer::via`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeafReach {
+    pub packages: BTreeSet<String>,
+    pub via: BTreeSet<String>,
 }
 
 /// A `Dir` claim that has not been checked against Bazel yet.

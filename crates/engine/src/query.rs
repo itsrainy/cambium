@@ -225,19 +225,20 @@ pub trait PackageQuerier {
     }
 
     /// Asks Bazel which packages of the indexed repository `repo` each of
-    /// these leaves reaches through its transitive deps
-    /// ([`cambium_bazel::Bazel::leaf_reaches`]). The leaves are a consumer's
-    /// labels as the index spells them, and the answer is keyed the same
-    /// way; a leaf missing from it is one Bazel could not say anything
-    /// about. At cold build and on an overflow's re-query, after
-    /// [`PackageQuerier::consumer_repos`]. A querier with no Bazel behind it
-    /// answers `None`, and every leaf of the consumer is seeded when a
-    /// package it consumes moves, which is the answer before the map.
+    /// these leaves reaches through its transitive deps, and through what
+    /// outside it ([`cambium_bazel::Bazel::leaf_reaches`]). The leaves are a
+    /// consumer's labels as the index spells them, and the answer is keyed
+    /// the same way; a leaf missing from it is one Bazel could not say
+    /// anything about. At cold build, on an overflow's re-query, and on a
+    /// splice in which something the map was derived through moved
+    /// (`Consumer::via`). A querier with no Bazel behind it answers `None`,
+    /// and every leaf of the consumer is seeded when a package it consumes
+    /// moves, which is the answer before the map.
     fn consumer_leaf_packages(
         &self,
         _repo: &str,
         _leaves: &[String],
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    ) -> Option<BTreeMap<String, cambium_index::externals::LeafReach>> {
         None
     }
 
@@ -463,7 +464,7 @@ impl PackageQuerier for BazelQuerier {
         &self,
         repo: &str,
         leaves: &[String],
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    ) -> Option<BTreeMap<String, cambium_index::externals::LeafReach>> {
         self.bazel.leaf_reaches(repo, leaves)
     }
 

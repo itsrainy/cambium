@@ -1123,26 +1123,34 @@ pub fn repo_token_matches(token: &str, apparent: &str, canonical: &str) -> bool 
 /// The leaves of consumers a leaf map narrowed (`Consumer::leaves`), for
 /// [`reach`] rule (1).
 ///
-/// Per consumer, one `(known, seeded)` pair per moved indexed repository
-/// whose table names it: the leaves the map knows, and those of them whose
-/// recorded packages meet what moved. A leaf of the consumer is seeded if
-/// some pair seeds it or does not know it, so a leaf named after the map
-/// was derived is seeded whenever the repository moves.
+/// Per consumer, one [`MapSeeds`] per moved indexed repository whose table
+/// names it. A leaf of the consumer is seeded if some entry seeds it: the
+/// map knows it and its recorded packages meet what moved, or the map does
+/// not know it (the label was spelled after the map was derived) and the
+/// consumer's pooled packages meet what moved, which is the answer such a
+/// leaf had before the map existed.
 #[derive(Default, Debug)]
 pub struct LeafSeeds {
-    pub by_consumer: BTreeMap<String, Vec<KnownAndSeeded>>,
+    pub by_consumer: BTreeMap<String, Vec<MapSeeds>>,
 }
 
-/// One moved repository's word on a consumer's leaves: the leaves its map
-/// knows, and those of them it seeds.
-pub type KnownAndSeeded = (BTreeSet<String>, BTreeSet<String>);
+/// One moved repository's word on a consumer's leaves.
+#[derive(Default, Debug)]
+pub struct MapSeeds {
+    /// The leaves the map knows.
+    pub known: BTreeSet<String>,
+    /// Of those, the ones it seeds.
+    pub seeded: BTreeSet<String>,
+    /// Whether a leaf the map does not know is seeded.
+    pub unknown: bool,
+}
 
 impl LeafSeeds {
     fn seeds(&self, consumer: &str, label: &str) -> bool {
-        self.by_consumer.get(consumer).is_some_and(|pairs| {
-            pairs
-                .iter()
-                .any(|(known, seeded)| seeded.contains(label) || !known.contains(label))
+        self.by_consumer.get(consumer).is_some_and(|entries| {
+            entries.iter().any(|m| {
+                m.seeded.contains(label) || (m.unknown && !m.known.contains(label))
+            })
         })
     }
 }
