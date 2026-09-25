@@ -905,3 +905,200 @@ fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
         "the diff was classified without Bazel:\n{stdout}"
     );
 }
+
+/// `--format labels` is the CI format: one label per line and nothing else,
+/// so `bazel test --target_pattern_file` reads stdout as it is. An empty
+/// answer is an empty stdout, not a header, and a global one is `//...` with
+/// exit 2.
+#[test]
+fn labels_is_the_answer_one_per_line_and_nothing_else() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let base = &f.commits[1];
+
+    // Nothing changed: no lines at all, exit 0.
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "--format",
+        "labels",
+        "affected",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "", "an empty answer is an empty stdout");
+
+    // A commit on the indexed base that adds a .bazelrc: the whole graph.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    std::fs::write(f.ws.join(".bazelrc"), "build --jobs=4\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", ".bazelrc"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "add a bazelrc"]);
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        base,
+        "--tests-only",
+        "--format",
+        "labels",
+    ]);
+    assert_eq!(code, 2, "global is exit 2: {stderr}");
+    assert_eq!(stdout, "//...\n", "a global answer is the one pattern");
+}
+
+/// `labels` has no meaning off `affected`, like `query`: a usage error with a
+/// code and a help line, not a silent fallback to another shape.
+#[test]
+fn asking_a_data_query_for_labels_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let (code, stdout, stderr) = run(&[
+        "inspect",
+        "stats",
+        index.to_str().unwrap(),
+        "--format",
+        "labels",
+    ]);
+    assert_eq!(code, 1, "a usage error is exit 1");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("CAMBI-E013"), "{stderr}");
+    assert!(
+        stderr.contains("= help:"),
+        "every E013 has a help line:\n{stderr}"
+    );
+}
+
+/// A clone the way `actions/checkout` leaves one: a detached HEAD, no local
+/// `main`, and `origin/main` present or not.
+fn ci_clone(f: &cambium_testkit::PublishedFixture) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clone = dir.path().join("clone");
+    let url = format!("file://{}", f.ws.display());
+    cambium_testkit::git(dir.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
+    cambium_testkit::git(&clone, &["checkout", "-q", "--detach"]);
+    cambium_testkit::git(&clone, &["branch", "-q", "-D", "main"]);
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    dir
+}
+
+/// With no range, `[git].default_branch` is `main`, and a CI checkout has
+/// only `origin/main`: that stands in, and the narration says so.
+#[test]
+fn the_default_branch_falls_back_to_its_remote_tracking_branch() {
+    let f = published_fixture(1);
+    let dir = ci_clone(&f);
+    let clone = dir.path().join("clone");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        clone.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "{stderr}{stdout}");
+    assert!(
+        stderr.contains("no local branch main; comparing from origin/main"),
+        "the fallback is said, not silent:\n{stderr}"
+    );
+
+    // Neither `main` nor `origin/main`: a usage error whose help names the
+    // fetch that makes the ref.
+    cambium_testkit::git(&clone, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let (code, _, stderr) = run(&["-C", clone.to_str().unwrap(), "affected", "--dry-run"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("CAMBI-E013"), "{stderr}");
+    assert!(
+        stderr.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+        "{stderr}"
+    );
+}
+
+/// A revision the clone does not have is E003 naming the spelling typed and
+/// the fetch that brings it in, never git's usage text or the `--base` and
+/// `--head` flags nobody passed.
+#[test]
+fn a_missing_revision_names_the_spelling_and_the_fetch() {
+    let f = published_fixture(1);
+    let dir = ci_clone(&f);
+    let clone = dir.path().join("clone");
+    let c = clone.to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", c, "affected", "origin/nope"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(
+        stderr.contains("error[CAMBI-E003]: `origin/nope` does not name a commit in this clone"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("git fetch origin nope:refs/remotes/origin/nope --depth=N"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("--base") && !stderr.contains("Use '--'"),
+        "{stderr}"
+    );
+
+    // `main` typed where only `origin/main` exists: say which one is here.
+    let (code, _, stderr) = run(&["-C", c, "affected", "main..HEAD"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("`origin/main`"), "{stderr}");
+}
+
+/// `cambi ... | head`: the reader leaves, and the run ends quietly with exit
+/// 0 rather than a panic.
+#[test]
+fn a_reader_that_closes_stdout_early_is_not_a_failure() {
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    // The read end is closed before the child starts, so its first write
+    // meets a pipe with no reader, every time.
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let out = Command::new(CAMBI)
+        .args([
+            "inspect",
+            "stats",
+            index.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .output()
+        .expect("the binary should be runnable");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+/// `--log` lines go to the same stderr the narration does and colour by the
+/// same rule: none in a pipe.
+#[test]
+fn log_lines_in_a_pipe_carry_no_escape_codes() {
+    let f = published_fixture(1);
+    let base = &f.commits[1];
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "--log",
+        "info",
+        "affected",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("INFO"),
+        "the test needs a log line to look at:\n{stderr}"
+    );
+    assert!(!stderr.contains('\x1b'), "{stderr:?}");
+}

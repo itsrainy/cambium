@@ -11,7 +11,7 @@ use std::io::IsTerminal as _;
 
 use anyhow::Result;
 use cambium_engine::progress::Progress;
-use cambium_engine::AffectedRequest;
+use cambium_engine::{AffectedRequest, Code, Diagnostic};
 use cambium_ui::report::{group, human_ms};
 use cambium_ui::{hist, Align, Cell, Column, Event, Level, Paint, Sink, Style};
 use clap::Args as ClapArgs;
@@ -87,11 +87,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     // rather than that there is no workspace.
     check_usage(&args)?;
     let engine = ctx.engine()?;
-    let req = request(&engine, &args, Shape::affected(&args))?;
+    let resolved = request(&engine, &args, Shape::affected(&args))?;
     if args.dry_run {
-        return crate::cmd::plan::run(ctx, &engine, &req);
+        say_note(ctx, &resolved);
+        return crate::cmd::plan::run(ctx, &engine, &resolved.req);
     }
-    let outcome = narrate(ctx, &engine, &req, "affected")?;
+    let outcome = narrate(ctx, &engine, &resolved, "affected")?;
     let report = &outcome.report;
     ctx.render.report(&report.diagnostics)?;
 
@@ -116,6 +117,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
         Format::Query => {
             println!("{}", report.as_query_expression(args.tests_only));
+        }
+        Format::Labels => {
+            for l in labels(report, args.tests_only) {
+                println!("{l}");
+            }
         }
         Format::Human => {
             if report.global {
@@ -174,30 +180,198 @@ pub fn check_usage(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// The two revisions this run compares: the range, the old flags, or — with
-/// neither — the merge base of the default branch with HEAD.
-pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<(String, String)> {
-    if let Some(range) = &args.range {
-        return Ok(match range.split_once("..") {
+/// The two revisions a run compares, and anything the resolution did that
+/// the caller did not type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Range {
+    pub base: String,
+    pub head: String,
+    /// Said once in the narration: `[git].default_branch` names a branch this
+    /// clone has no local copy of, and its remote-tracking branch stood in.
+    pub note: Option<String>,
+}
+
+/// The two revisions this run compares: the range, the old flags, or (with
+/// neither) the merge base of the default branch with HEAD.
+///
+/// Both are checked here, before the engine sees them, so that a revision
+/// this clone does not have is `CAMBI-E003` naming the spelling the caller
+/// typed and the fetch that brings it in, not git's own text from a
+/// `rev-list` three calls into the run. A CI checkout is where this happens:
+/// `actions/checkout` makes no local branch, and a shallow fetch of a branch
+/// by bare name can leave it only in `FETCH_HEAD`.
+pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<Range> {
+    let repo = engine.repo();
+    let (base, head) = if let Some(range) = &args.range {
+        match range.split_once("..") {
             Some((base, "")) => (base.to_string(), "HEAD".to_string()),
             Some((base, head)) => (base.to_string(), head.to_string()),
             None => (range.clone(), "HEAD".to_string()),
-        });
+        }
+    } else {
+        let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
+        match &args.base {
+            Some(base) => (base.clone(), head),
+            None => {
+                // No range at all: what someone on a feature branch means by
+                // "what did I change": the merge base of the default branch
+                // with where they are.
+                require_commit(repo, &head)?;
+                let (branch, note) = default_base(repo, &engine.config().git.default_branch)?;
+                let base = repo.merge_base(&branch, &head).map_err(|e| {
+                    let why = git_detail(&e)
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default();
+                    crate::diag::UsageError::raised_with_help(
+                        format!("no merge base between {branch} and {head} in this clone{why}"),
+                        format!(
+                            "a shallow clone can stop short of it: fetch more history \
+                             (`git fetch --deepen=N`, or `--unshallow`), or pass a range \
+                             such as `cambi affected {branch}..{head}`"
+                        ),
+                    )
+                })?;
+                return Ok(Range { base, head, note });
+            }
+        }
+    };
+    require_commit(repo, &base)?;
+    require_commit(repo, &head)?;
+    Ok(Range {
+        base,
+        head,
+        note: None,
+    })
+}
+
+/// The revision `[git].default_branch` stands for in this clone: the branch
+/// itself, or, when there is no local copy (what `actions/checkout` and most
+/// CI checkouts leave), its remote-tracking branch, with the note that says
+/// so.
+fn default_base(repo: &cambium_diff::Repo, branch: &str) -> Result<(String, Option<String>)> {
+    if has_commit(repo, branch) {
+        return Ok((branch.to_string(), None));
     }
-    let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
-    if let Some(base) = &args.base {
-        return Ok((base.clone(), head));
+    let twin = remote_twin(branch, &remotes(repo));
+    if let Some(t) = twin.as_deref().filter(|t| has_commit(repo, t)) {
+        return Ok((
+            t.to_string(),
+            Some(format!(
+                "no local branch {branch}; comparing from {t}, its remote-tracking branch"
+            )),
+        ));
     }
-    // No range at all: what someone on a feature branch means by "what did I
-    // change" — the merge base of the default branch with where they are.
-    let branch = &engine.config().git.default_branch;
-    let base = engine.repo().merge_base(branch, &head).map_err(|e| {
-        crate::diag::UsageError::raised(format!(
-            "no merge base between {branch} and {head} ({e}); pass a range, or set \
-             [git].default_branch in cambium.toml"
-        ))
-    })?;
-    Ok((base, head))
+    Err(match twin.as_deref().and_then(|t| t.split_once('/')) {
+        Some((remote, name)) => crate::diag::UsageError::raised_with_help(
+            format!(
+                "[git].default_branch is {branch}, and neither {branch} nor {remote}/{name} \
+                 names a commit in this clone"
+            ),
+            format!(
+                "fetch it by name, `git fetch {remote} {name}:refs/remotes/{remote}/{name} \
+                 --depth=N`, or pass a range such as `cambi affected <base>..HEAD`"
+            ),
+        ),
+        None => crate::diag::UsageError::raised_with_help(
+            format!("[git].default_branch is {branch}, which names no commit in this clone"),
+            "pass a range such as `cambi affected <base>..HEAD`, or set \
+             [git].default_branch in cambium.toml",
+        ),
+    })
+}
+
+/// `Ok` when `rev` names a commit here; otherwise `CAMBI-E003` with the
+/// spelling the caller typed and what brings it in.
+fn require_commit(repo: &cambium_diff::Repo, rev: &str) -> Result<()> {
+    if has_commit(repo, rev) {
+        return Ok(());
+    }
+    let remotes = remotes(repo);
+    let twin = remote_twin(rev, &remotes).filter(|t| has_commit(repo, t));
+    Err(anyhow::Error::new(crate::diag::Raised(missing_revision(
+        rev,
+        &remotes,
+        twin.as_deref(),
+    ))))
+}
+
+fn has_commit(repo: &cambium_diff::Repo, rev: &str) -> bool {
+    repo.rev_parse(rev).is_ok()
+}
+
+/// This clone's remotes, `origin` first when there is one.
+fn remotes(repo: &cambium_diff::Repo) -> Vec<String> {
+    let mut out: Vec<String> = repo
+        .git(&["remote"])
+        .map(|o| o.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    out.sort_by_key(|r| r != "origin");
+    out
+}
+
+/// The remote-tracking branch a bare branch name would be in a clone that
+/// has no local copy: `origin/<branch>`, or `<remote>/<branch>` when there is
+/// one remote and it is not `origin`. Nothing for a spelling that is not a
+/// bare branch name: a sha, `HEAD`, `main~2`, `origin/main` itself.
+fn remote_twin(rev: &str, remotes: &[String]) -> Option<String> {
+    let bare = !rev.is_empty()
+        && !rev.ends_with("HEAD")
+        && !looks_like_sha(rev)
+        && !rev.contains(['/', '~', '^', '@', ':', '{']);
+    if !bare {
+        return None;
+    }
+    let remote = match remotes {
+        [] => return None,
+        [only] => only,
+        many => many.iter().find(|r| *r == "origin")?,
+    };
+    Some(format!("{remote}/{rev}"))
+}
+
+fn looks_like_sha(rev: &str) -> bool {
+    (7..=64).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `CAMBI-E003` for a revision this clone does not have. `twin` is its
+/// remote-tracking branch when that one is here.
+fn missing_revision(rev: &str, remotes: &[String], twin: Option<&str>) -> Diagnostic {
+    let message = format!("`{rev}` does not name a commit in this clone");
+    let tracking = rev
+        .split_once('/')
+        .filter(|(remote, name)| !name.is_empty() && remotes.iter().any(|r| r == remote));
+    let help = if let Some(t) = twin {
+        format!(
+            "there is no local `{rev}` (a CI checkout usually makes none); its \
+             remote-tracking branch `{t}` is here, so pass that"
+        )
+    } else if let Some((remote, name)) = tracking {
+        format!(
+            "fetch it by name: `git fetch {remote} {name}:refs/remotes/{remote}/{name} \
+             --depth=N` (in a shallow clone, `git fetch {remote} {name}` can leave it only in \
+             FETCH_HEAD)"
+        )
+    } else if let (true, Some(remote)) = (looks_like_sha(rev), remotes.first()) {
+        format!(
+            "fetch it: `git fetch {remote} {rev} --depth=N`, or deepen a shallow clone with \
+             `git fetch --deepen=N`"
+        )
+    } else {
+        format!("check the spelling: `git rev-parse --verify {rev}` names it when it is here")
+    };
+    Diagnostic::error(Code::E003Git, message).with_help(help)
+}
+
+/// The first line of what git said, when it said anything.
+fn git_detail(e: &cambium_diff::GitError) -> Option<String> {
+    match e {
+        cambium_diff::GitError::Failed { stderr, .. } => stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 /// What a run is for, beyond what its flags say: whether it explains itself,
@@ -242,13 +416,9 @@ impl Shape {
 /// One construction for the two verbs: `explain` is the same computation with
 /// the explanations on, so anything that changes what a run means — a new
 /// flag, a different default — has to change it for both or for neither.
-pub fn request(
-    engine: &cambium_engine::Engine,
-    args: &Args,
-    shape: Shape,
-) -> Result<AffectedRequest> {
-    let (base, head) = resolve_range(engine, args)?;
-    Ok(AffectedRequest {
+pub fn request(engine: &cambium_engine::Engine, args: &Args, shape: Shape) -> Result<Resolved> {
+    let Range { base, head, note } = resolve_range(engine, args)?;
+    let req = AffectedRequest {
         base,
         head,
         include_manual: args.include_manual,
@@ -259,7 +429,24 @@ pub fn request(
         // `--publish-base` follows the config's `baseline.publish_partial`.
         allow_partial: false,
         max_depth: args.max_depth,
-    })
+    };
+    Ok(Resolved { req, note })
+}
+
+/// A request, and the note [`resolve_range`] left for the narration.
+pub struct Resolved {
+    pub req: AffectedRequest,
+    pub note: Option<String>,
+}
+
+/// The resolution's note on its own, for `--dry-run`, which has no narration
+/// to carry it.
+pub fn say_note(ctx: &Context, resolved: &Resolved) {
+    if let Some(note) = &resolved.note {
+        let mut sink = cambium_ui::boxed(ctx.ui);
+        sink.emit(Event::Log(Level::Info, note.clone()));
+        sink.emit(Event::Done);
+    }
 }
 
 /// Runs `affected`, narrating it on stderr through the shared renderer.
@@ -270,9 +457,10 @@ pub fn request(
 pub fn narrate(
     ctx: &Context,
     engine: &cambium_engine::Engine,
-    req: &AffectedRequest,
+    resolved: &Resolved,
     verb: &str,
 ) -> Result<cambium_engine::RunOutcome> {
+    let req = &resolved.req;
     let mut sink = cambium_ui::boxed(ctx.ui);
     let repo = engine
         .workspace()
@@ -285,6 +473,9 @@ pub fn narrate(
         range: format!("{}..{}", short(&req.base), short(&req.head)),
         note: commits_in_range(engine, req),
     });
+    if let Some(note) = &resolved.note {
+        sink.emit(Event::Log(Level::Info, note.clone()));
+    }
     let mut render = Narrator {
         sink: sink.as_mut(),
         rows_open: false,
@@ -526,13 +717,28 @@ fn plural_hops(n: u32) -> String {
     format!("{n} commit{}", if n == 1 { "" } else { "s" })
 }
 
-/// Stdout: the count line, the labels, and the distribution underneath.
-fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_kind: Hist) {
-    let items: Vec<&str> = if tests_only {
+/// The answer as `--format labels` prints it, one per line: what `bazel test
+/// --target_pattern_file` and `bazel build --target_pattern_file` read.
+///
+/// The same labels `--format query` wraps in `set(...)` and the human form
+/// lists under its count line, in the same order, and nothing else: an empty
+/// answer is no lines at all, so a caller tests for an empty file rather than
+/// parsing a header. A global answer is the one pattern `//...`, as it is on
+/// every other stdout, with exit 2.
+fn labels(report: &cambium_engine::AffectedReport, tests_only: bool) -> Vec<&str> {
+    if report.global {
+        return vec!["//..."];
+    }
+    if tests_only {
         report.tests.iter().map(String::as_str).collect()
     } else {
         report.affected.iter().map(|t| t.label.as_str()).collect()
-    };
+    }
+}
+
+/// Stdout: the count line, the labels, and the distribution underneath.
+fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_kind: Hist) {
+    let items = labels(report, tests_only);
     let paint = Paint::new(std::io::stdout().is_terminal());
     let depth = match (report.max_depth(), report.max_package_depth()) {
         (Some(d), Some(p)) => format!("  max depth {d}  ({p} package hops)"),
@@ -906,6 +1112,24 @@ mod tests {
         assert_eq!(super::package_depth_counts(&r, true), vec![2]);
     }
 
+    /// `--format labels`: the labels and nothing else, the tests alone under
+    /// `--tests-only`, no lines for an empty answer, `//...` for a global one.
+    #[test]
+    fn labels_are_the_answer_and_nothing_else() {
+        let r = report_with_depths(&[(0, false), (1, true), (3, true)]);
+        assert_eq!(
+            super::labels(&r, false),
+            vec!["//pkg0:t", "//pkg1:t", "//pkg2:t"]
+        );
+        assert_eq!(super::labels(&r, true), vec!["//pkg1:t", "//pkg2:t"]);
+        assert!(super::labels(&AffectedReport::default(), false).is_empty());
+        let global = AffectedReport {
+            global: true,
+            ..AffectedReport::default()
+        };
+        assert_eq!(super::labels(&global, true), vec!["//..."]);
+    }
+
     /// Parses `cambi affected <args>` the way `main` would.
     fn parse(args: &[&str]) -> super::Args {
         #[derive(Parser)]
@@ -924,6 +1148,79 @@ mod tests {
         assert!(err.to_string().contains("drop --head"), "{err}");
         assert!(super::check_usage(&parse(&["a..b"])).is_ok());
         assert!(super::check_usage(&parse(&["--base", "a"])).is_ok());
+    }
+
+    fn remotes(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bare_branch_name_has_a_remote_tracking_twin_and_nothing_else_does() {
+        let origin = remotes(&["origin"]);
+        assert_eq!(
+            super::remote_twin("main", &origin).as_deref(),
+            Some("origin/main")
+        );
+        for not_bare in [
+            "origin/main",
+            "HEAD",
+            "FETCH_HEAD",
+            "main~2",
+            "main^",
+            "0a4a001",
+        ] {
+            assert_eq!(super::remote_twin(not_bare, &origin), None, "{not_bare}");
+        }
+        assert_eq!(super::remote_twin("main", &[]), None, "no remotes, no twin");
+        assert_eq!(
+            super::remote_twin("main", &remotes(&["upstream"])).as_deref(),
+            Some("upstream/main"),
+            "a single remote is the one"
+        );
+        assert_eq!(
+            super::remote_twin("main", &remotes(&["upstream", "fork"])),
+            None,
+            "two remotes and no origin: nothing to guess"
+        );
+    }
+
+    /// The shallow CI clone: `origin/main` was typed and never fetched into
+    /// its ref. The help names that spelling and the refspec that makes it,
+    /// and never the `--base`/`--head` flags nobody passed.
+    #[test]
+    fn a_missing_remote_tracking_branch_is_fetched_by_name() {
+        let d = super::missing_revision("origin/main", &remotes(&["origin"]), None);
+        assert_eq!(d.code, cambium_engine::Code::E003Git);
+        assert!(d.message.contains("`origin/main`"), "{}", d.message);
+        let help = d.help.expect("a help line");
+        assert!(
+            help.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+            "{help}"
+        );
+        assert!(
+            !help.contains("--base") && !help.contains("--head"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn a_missing_local_branch_points_at_its_remote_tracking_twin() {
+        let d = super::missing_revision("main", &remotes(&["origin"]), Some("origin/main"));
+        let help = d.help.expect("a help line");
+        assert!(help.contains("`origin/main`"), "{help}");
+    }
+
+    #[test]
+    fn a_missing_sha_is_fetched_or_deepened() {
+        let d = super::missing_revision("0a4a001", &remotes(&["origin"]), None);
+        let help = d.help.expect("a help line");
+        assert!(
+            help.contains("git fetch origin 0a4a001 --depth=N"),
+            "{help}"
+        );
+        assert!(help.contains("--deepen"), "{help}");
+        let d = super::missing_revision("0a4a001", &[], None);
+        assert!(d.help.expect("a help line").contains("check the spelling"));
     }
 
     #[test]

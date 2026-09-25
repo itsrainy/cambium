@@ -423,7 +423,11 @@ impl Default for AffectedReport {
 }
 
 impl AffectedReport {
-    /// A `set(...)` expression for `bazel test` / `bazel build`.
+    /// A `set(...)` expression for `bazel query` / `bazel cquery`.
+    ///
+    /// Not a target pattern: `bazel build` and `bazel test` reject it (`invalid
+    /// package name 'set(//a'`), and read `cambi affected --format labels`
+    /// through `--target_pattern_file` instead.
     pub fn as_query_expression(&self, tests_only: bool) -> String {
         if self.global {
             return "//...".to_string();
@@ -434,8 +438,9 @@ impl AffectedReport {
             self.affected.iter().map(|t| t.label.as_str()).collect()
         };
         if items.is_empty() {
-            // `set()` is a valid empty expression; bazel accepts it and builds
-            // nothing, which is what callers want in a pipeline.
+            // `set()` is a valid empty query expression: `bazel query 'set()'`
+            // answers with nothing. (`bazel build 'set()'` is an error, like
+            // every other `set(...)` handed to a build.)
             return "set()".to_string();
         }
         format!("set({})", items.join(" "))

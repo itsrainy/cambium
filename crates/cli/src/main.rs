@@ -142,9 +142,14 @@ pub enum Format {
     Json,
     /// One JSON event per line, so a watcher can follow a long run.
     Jsonl,
-    /// A `set(...)` expression for `bazel build` / `bazel test`. `affected`
-    /// only; anywhere else it is a usage error.
+    /// A `set(...)` expression for `bazel query` / `bazel cquery`; `bazel
+    /// build` and `bazel test` reject it, and take `labels` instead.
+    /// `affected` only; anywhere else it is a usage error.
     Query,
+    /// One label per line and nothing else, for `bazel test
+    /// --target_pattern_file`: empty on an empty answer, `//...` on a global
+    /// one. `affected` only; anywhere else it is a usage error.
+    Labels,
     /// Nothing on stdout; the exit code is the whole answer.
     Null,
 }
@@ -166,9 +171,9 @@ impl Format {
     /// a set of targets.
     ///
     /// `None` is `--format null`: the command runs and sets the exit code and
-    /// prints nothing. `query` has no meaning here — there is no Bazel
-    /// expression for a byte count — so it is a usage error rather than a
-    /// silent fallback to something else.
+    /// prints nothing. `query` and `labels` have no meaning here (there is no
+    /// Bazel expression or label list for a byte count), so they are a usage
+    /// error rather than a silent fallback to something else.
     pub fn data(self, verb: &str) -> anyhow::Result<Option<DataFormat>> {
         match self {
             Format::Human => Ok(Some(DataFormat::Text)),
@@ -178,6 +183,10 @@ impl Format {
             Format::Query => Err(diag::UsageError::raised(format!(
                 "--format query is only meaningful for `cambi affected`; {verb} has no Bazel \
                  expression form"
+            ))),
+            Format::Labels => Err(diag::UsageError::raised(format!(
+                "--format labels is only meaningful for `cambi affected`; {verb} has no \
+                 target list"
             ))),
         }
     }
@@ -209,6 +218,7 @@ impl ColorChoice {
 }
 
 fn main() -> ExitCode {
+    quiet_on_a_closed_stdout();
     // The deprecated spellings are rewritten into the current ones before
     // clap sees them (see `compat`); the diagnostics they raised are printed
     // below, once `--quiet` and `--format` are known.
@@ -219,7 +229,6 @@ fn main() -> ExitCode {
     // which one set it.
     let matches = Cli::command().get_matches_from(argv);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    init_logging(&cli.log);
     let overrides = overrides(&cli, &matches);
 
     let root = match cli.workspace.clone() {
@@ -246,6 +255,10 @@ fn main() -> ExitCode {
             ColorChoice::Never => cambium_ui::ColorChoice::Never,
         },
     );
+    // After the output mode, because the log lines go to the same stderr and
+    // colour by the same rule: escape codes on a terminal, plain bytes in a
+    // pipe or a CI log.
+    init_logging(&cli.log, ui.colour);
     let ctx = cmd::Context {
         root,
         config: cli.config.clone(),
@@ -318,7 +331,38 @@ fn overrides(cli: &Cli, matches: &clap::ArgMatches) -> cambium_engine::config::O
     }
 }
 
-fn init_logging(level: &str) {
+/// A reader that closed stdout early is not a failure of this run.
+///
+/// `cambi affected --format json | head` stops reading after ten lines, and
+/// the next `println!` fails with `EPIPE` (Rust ignores `SIGPIPE`, so the
+/// write returns an error rather than killing the process), which `println!`
+/// turns into a panic: exit 101 and a panic message on stderr. Every stdout
+/// write in this binary is a `println!` or `print!`, so the panic hook is the
+/// one place to catch it.
+///
+/// The exit is 0, not 1. The answer was computed; the reader took what it
+/// wanted and left. A 1 would fail a `set -o pipefail` pipeline whose own
+/// consumer succeeded, and when the consumer did fail, its status is the one
+/// the pipeline reports. Any other stdout failure (a full disk behind a
+/// redirect) is still the panic it was.
+fn quiet_on_a_closed_stdout() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.payload_as_str().is_some_and(is_closed_stdout) {
+            std::process::exit(EXIT_OK.into());
+        }
+        default(info);
+    }));
+}
+
+/// `println!`'s panic message for a write to a pipe with no reader:
+/// `failed printing to stdout: Broken pipe (os error 32)`.
+fn is_closed_stdout(panic: &str) -> bool {
+    panic.starts_with("failed printing to stdout")
+        && panic.to_ascii_lowercase().contains("broken pipe")
+}
+
+fn init_logging(level: &str, colour: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
     // `cli.log` already carries $CAMBIUM_LOG's value via clap's `env =
     // "CAMBIUM_LOG"` (an explicit `--log` still wins over it there), so this
@@ -328,6 +372,7 @@ fn init_logging(level: &str) {
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(colour)
         .with_target(false)
         .try_init();
 }
@@ -381,6 +426,20 @@ mod tests {
             }),
             EXIT_BAZEL
         );
+    }
+
+    #[test]
+    fn only_a_reader_that_left_is_a_quiet_exit() {
+        assert!(is_closed_stdout(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(
+            !is_closed_stdout("failed printing to stdout: No space left on device (os error 28)"),
+            "a full disk behind a redirect is a real failure"
+        );
+        assert!(!is_closed_stdout(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
     }
 
     #[test]

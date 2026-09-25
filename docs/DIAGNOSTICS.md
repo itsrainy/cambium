@@ -43,7 +43,7 @@ An error ends the run; exit codes are in the README's table.
 |---|---|---|
 | `CAMBI-E001` | internal failure with no specific code: io, protobuf, index or classification | Check the message; bug reports should carry `--log debug` output |
 | `CAMBI-E002` | `cambium.toml` couldn't be read or doesn't parse | Fix the file, or point `--config` elsewhere |
-| `CAMBI-E003` | git failed | Carries git's error; check the revisions exist here |
+| `CAMBI-E003` | git failed, or a revision is not in this clone | Names the revision as typed and the fetch that brings it in (a shallow clone: `git fetch origin main:refs/remotes/origin/main --depth=N`); otherwise carries git's error |
 | `CAMBI-E004` | Bazel failed, or no workspace was found | Run inside the workspace, or pass `-C`; check `--bazel-binary` |
 | `CAMBI-E005` | a `bazel query` failed | Carries Bazel's stderr; the query must succeed first |
 | `CAMBI-E006` | no baseline index is available for the base and `--no-full-build` was given | `cambi index build --publish`, or drop `--no-full-build` |
@@ -53,7 +53,7 @@ An error ends the run; exit codes are in the README's table.
 | `CAMBI-E010` | the store backend failed | Check `[baseline].store` is reachable, credentials current; exit 5, retryable |
 | `CAMBI-E011` | an io error against the store | Check path/permissions on `[baseline].store`; exit 5 |
 | `CAMBI-E012` | the store backend doesn't support the operation (listing, gc) | Use a backend that does, or skip it |
-| `CAMBI-E013` | the command line doesn't make sense, e.g. a format a verb can't render | Message names the flag; `cambi <verb> --help` lists what it takes |
+| `CAMBI-E013` | the command line doesn't make sense, e.g. a format a verb can't render, or no range given and no merge base with `[git].default_branch` in this clone | Message names the flag; the `help:` line names the fix, or says `cambi <verb> --help` lists what it takes |
 | `CAMBI-E014` | `cambium.local.toml` sets a key that's part of the config hash, deciding the graph, not the machine | Move it into `cambium.toml`; only `bazel.binary`, `bazel.startup_flags`, `baseline.cache_dir`, `baseline.compress_indexes`, `baseline.publish_partial` may appear locally. Of those, the rc-chain startup flags (`--bazelrc=`, `--noworkspace_rc`) are still hashed, so setting them locally makes that machine its own lineage |
 | `CAMBI-E015` | the Bazel binary wasn't found on `$PATH`, or printed no version | Install Bazel/bazelisk, or name it via `--bazel-binary` / `[bazel].binary` / `bazel.binary` |
 | `CAMBI-E016` | `cambi doctor` published a probe object to the store and couldn't read it back | Same calls `--publish` uses; confirm `[baseline].store` writable |

@@ -41,6 +41,13 @@ it's for.
 The range is positional, like `git diff`: `cambi affected
 origin/main..HEAD`. A single ref means `<ref>..HEAD`; no ref means the
 default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
+When `[git].default_branch` has no local branch here (a CI checkout
+usually makes none), its remote-tracking branch `origin/<branch>` stands in,
+and the narration says so. A revision the clone does not have is
+`CAMBI-E003` naming it as typed, with the fetch that brings it in: a shallow
+clone needs the base fetched into its remote-tracking ref, `git fetch origin
+main:refs/remotes/origin/main --depth=N`, since `git fetch --depth=1 origin
+main` can leave it only in `FETCH_HEAD`.
 
 `--dry-run` prints the plan and exits: which index would load (revision,
 lineage, age), whether the answer is a splice, cold rebuild or global, and
@@ -74,7 +81,9 @@ so a target nine hops down a chain in one package is one package hop away.
 The two charts have different axes, which is why they are not one chart.
 `--tests-only` draws the tests' own distances, so the charts always match the
 list above them. A global run prints `//...`, says `everything is
-affected: <reason>` on stderr, and has no distribution to draw.
+affected: <reason>` on stderr, and has no distribution to draw. For a
+script, `--format labels` prints the labels alone, one per line (see the
+output contract below).
 
 Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
 `--no-full-build`, `--publish-base`, `--out`. `--explain` is kept one
@@ -231,16 +240,37 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
 
 ## The output contract
 
-- `--format human` (default on a TTY), `json` (one document), `jsonl` (one
-  event per line, so a watcher can follow), `query` (the Bazel `set(...)`
-  expression, `affected` only), `null` (exit code only). `--output` stays an
-  alias one release. No field selection: `--format json`/`jq` are the whole
-  story.
+- `--format human` (the default, on a terminal or not), `json` (one
+  document), `jsonl` (one event per line, so a watcher can follow), `labels`
+  (one label per line and nothing else, `affected` only), `query` (a
+  `set(...)` expression for `bazel query`, `affected` only), `null` (exit
+  code only). `--output` stays an alias one release. No field selection:
+  `--format json`/`jq` are the whole story.
+- `labels` is the format for CI: `bazel test --target_pattern_file` reads it
+  as it is. It prints the same labels `human` lists under its count line (the
+  tests alone under `--tests-only`), with no header, blank line or chart; an
+  empty answer is an empty stdout, and a global one is the single line
+  `//...` with exit 2, which the same file runs as everything. `query`'s
+  `set(...)` is a query expression, not a target pattern: `bazel build` and
+  `bazel test` reject it.
+
+  ```sh
+  rc=0; cambi affected origin/main --tests-only --format labels > targets.txt || rc=$?
+  case $rc in 0|2) [ ! -s targets.txt ] || bazel test --target_pattern_file=targets.txt ;; *) exit $rc ;; esac
+  ```
+
+  The `|| rc=$?` keeps a `set -e` shell (a GitHub Actions `run:` step is
+  one) from stopping at exit 2 before the `case` reads it. An empty file is
+  skipped because `bazel test` with no targets fails.
+- A reader that closes stdout early (`cambi ... | head`) ends the run
+  quietly with exit 0: the answer was computed and the reader took what it
+  wanted, and a non-zero exit would fail a `set -o pipefail` pipeline whose
+  consumer succeeded.
 - Results to stdout; progress and diagnostics to stderr, and nothing at all
   on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
   loses the live line, not the run. Colour only when stderr is a TTY, never
   under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under `--color
-  always` or `CLICOLOR_FORCE`.
+  always` or `CLICOLOR_FORCE`. `--log` lines follow the same rule.
 - A long run narrates itself on stderr in one grammar, the same for every
   verb that has one (`profile` is the first on it): a
   header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per
