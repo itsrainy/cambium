@@ -153,6 +153,30 @@ package owns a path, a package's targets, byte accounting, externals
 tables, and `verify` against Bazel. Plumbing, for checking a surprising
 `explain` answer without reading the index by hand.
 
+`inspect verify FILE` samples rule targets (`--sample`, `--seed`) and
+checks that the index's reverse closure of each holds every target `bazel
+query rdeps(//..., target)` reports, run against the checkout as it is now.
+Both sides are compared as main-repository rule targets, because that is
+what `affected` reports: the source and generated files between rules (a
+stardoc `.md`, a `.binaryproto`) and targets in external repositories are
+counted and left out. A sample with a miss prints `UNSOUND` and every
+missing target (`--limit n` lists n and counts the rest), and the command
+exits 1. Misses Bazel connects to the sample only through an external
+repository (`@bazel_tools//tools/test:collect_coverage` depending back on
+the root module's `//shell/runfiles`, say) are listed apart as round trips,
+naming the external targets on the path. A run answers `//...` under
+`CAMBI-W023` when the row of a toolchain-class rule (`toolchain_type`,
+`toolchain`, `platform`, `constraint_setting`, `constraint_value`) moves,
+and a sample of one of those classes that depends in the index on nothing
+but other toolchain-class rules cannot be reached by any change that does
+not move such a row. Its misses (the rdeps toolchain resolution adds) are
+covered by that answer, so it prints `ESCALATED` rather than `UNSOUND` and
+does not fail the check. A toolchain-class sample that depends on anything
+else (a `toolchain` whose `target_settings` names a `config_setting`, say)
+can be reached by a change that fires nothing, and its misses fail like any
+other. Precision is the share of the targets the index reported that Bazel
+also reports.
+
 `inspect stats` reports the Skyframe loading layer alongside the target
 graph: its node and edge counts, a line per node kind (`FILE_STATE`, `FILE`,
 `DIRECTORY_LISTING_STATE`, `DIRECTORY_LISTING`, `GLOB`, `PACKAGE_LOOKUP`,

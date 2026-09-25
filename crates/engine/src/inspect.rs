@@ -862,23 +862,51 @@ pub fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Differential check against Bazel (spec 12.3).
+/// Differential check against Bazel.
 ///
-/// For a random sample of rule targets, our reverse closure must be a superset
-/// of `bazel query rdeps(//..., label)`. Missing targets are soundness bugs and
-/// fail the check; extra targets are the over-approximation the design accepts,
-/// and are reported as a precision percentage.
+/// For a sample of rule targets, the index's reverse closure must contain
+/// everything `bazel query rdeps(//..., label)` reports. Missing targets are
+/// soundness bugs and fail the check; extra targets are the over-approximation
+/// the design accepts, and are reported as a precision percentage.
+///
+/// Both sides are compared as main-repository rule targets, because that is
+/// all `affected` ever reports. Bazel's answer also names the source and
+/// generated files between the rules (a stardoc `.md`, a `.binaryproto`)
+/// and targets in external repositories (`@bazel_tools//tools/test:...`);
+/// those are counted in `ignored_files` and `ignored_external` and not
+/// compared. A generated file is an rdep only through the rule that
+/// generates it, which is compared in its place.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyResult {
     #[serde(default = "schema_version")]
     pub schema: u32,
     pub query: String,
+    /// Samples compared: the ones whose `rdeps` query Bazel answered.
     pub checked: usize,
+    /// Samples with at least one miss, the length of `failures`.
     pub unsound: usize,
+    /// Main-repository rule targets the index reported, summed over the
+    /// samples.
     pub ours_total: usize,
+    /// Main-repository rule targets Bazel reported, summed over the samples.
     pub theirs_total: usize,
+    /// Targets both reported, summed over the samples.
+    pub agreed_total: usize,
+    /// `agreed_total / ours_total` as a percentage: the share of what the
+    /// index reported that Bazel also reports. 100 when the index reported
+    /// nothing.
     pub precision_pct: f64,
+    /// Everything else Bazel reported in the main repository, not compared:
+    /// source and generated files, package groups, and any line of Bazel's
+    /// answer that does not read as a target.
+    pub ignored_files: usize,
+    /// External-repository targets Bazel reported, not compared.
+    pub ignored_external: usize,
+    /// One entry per unsound sample.
     pub failures: Vec<VerifyFailure>,
+    /// Samples whose misses no run depends on, because every change that
+    /// reaches the sample answers `//...` (see [`VerifyEscalation`]).
+    pub escalations: Vec<VerifyEscalation>,
 }
 
 impl VerifyResult {
@@ -891,15 +919,156 @@ impl VerifyResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyFailure {
     pub label: String,
+    /// Every missing target, sorted.
+    pub missing: Vec<String>,
+    /// The subset of `missing` that Bazel connects to `label` only through a
+    /// target in an external repository: a main -> external -> main round
+    /// trip, which the index does not model. Empty when there is none, or
+    /// when the `allpaths` query that tells them apart failed.
+    pub round_trip: Vec<String>,
+    /// The external targets on those round trips, sorted.
+    pub via: Vec<String>,
+}
+
+/// A sample with misses that every run covers by escalating.
+///
+/// A toolchain-class rule (`toolchain_type`, `toolchain`, `platform`,
+/// `constraint_setting`, `constraint_value`) can have rdeps through toolchain
+/// resolution that Bazel's `rdeps` reports and the index has no edge for. A
+/// run answers `//...` under `code` when the row of such a rule moves, and
+/// only then. So a sample escalates, rather than failing, only when it is of
+/// one of those classes and everything it depends on in the index is too: then
+/// no change can reach it without moving a toolchain-class row. A
+/// toolchain-class sample that depends on anything else (a `toolchain` whose
+/// `target_settings` names a `config_setting`, say) can be reached by a change
+/// that fires nothing, and its misses are failures like any other.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyEscalation {
+    pub label: String,
+    pub rule_class: String,
+    pub code: String,
     pub missing: Vec<String>,
 }
 
+/// How one line of `bazel query --output=label_kind` classifies.
+#[derive(Debug, PartialEq, Eq)]
+enum Reported<'a> {
+    Rule(&'a str),
+    File,
+    External,
+}
+
+/// Reads one `--output=label_kind` line: `<class> rule <label>` for a rule,
+/// `source file <label>`, `generated file <label>` or `package group <label>`
+/// otherwise. A main-repository label printed with an explicit `@@//` or `@//`
+/// is the same target as `//`.
+fn classify_reported(line: &str) -> Option<Reported<'_>> {
+    let (_, rest) = line.split_once(' ')?;
+    let (is_rule, label) = match rest.strip_prefix("rule ") {
+        Some(label) => (true, label),
+        None => (false, rest.split_once(' ')?.1),
+    };
+    let label = main_repo_label(label.trim());
+    Some(if label::is_external(label) {
+        Reported::External
+    } else if is_rule {
+        Reported::Rule(label)
+    } else {
+        Reported::File
+    })
+}
+
+/// `@@//a:b` and `@//a:b` name the main repository, as `//a:b` does.
+fn main_repo_label(label: &str) -> &str {
+    label
+        .strip_prefix("@@")
+        .or_else(|| label.strip_prefix('@'))
+        .filter(|rest| rest.starts_with("//"))
+        .unwrap_or(label)
+}
+
+/// The edges of a `--output=graph --nograph:factored` document, as
+/// `(from, to)` label pairs.
+fn graph_edges(dot: &str) -> Vec<(String, String)> {
+    let unquote = |s: &str| main_repo_label(s.trim().trim_matches('"')).to_string();
+    dot.lines()
+        .filter_map(|l| l.trim().trim_end_matches(';').split_once(" -> "))
+        .map(|(a, b)| (unquote(a), unquote(b)))
+        .collect()
+}
+
+/// Which of `missing` reach `target` in Bazel's graph only through an
+/// external repository, and the external targets on those paths.
+///
+/// `edges` is `allpaths(set(missing), target)`, so every node in it lies on a
+/// path from some missing target to `target`. A missing target with a path
+/// through main-repository nodes alone is a plain miss; one without is a
+/// round trip. A target the graph does not mention stays a plain miss, the
+/// conservative reading.
+fn split_round_trips(
+    missing: &[String],
+    target: &str,
+    edges: &[(String, String)],
+) -> (Vec<String>, Vec<String>) {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let mut fwd: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (a, b) in edges {
+        fwd.entry(a.as_str()).or_default().push(b.as_str());
+    }
+    fn reach<'a>(
+        fwd: &HashMap<&'a str, Vec<&'a str>>,
+        from: &'a str,
+        main_only: bool,
+    ) -> HashSet<&'a str> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            for &m in fwd.get(n).map(Vec::as_slice).unwrap_or(&[]) {
+                if !(main_only && label::is_external(m)) {
+                    stack.push(m);
+                }
+            }
+        }
+        seen
+    }
+    let mut round_trip = Vec::new();
+    let mut via: BTreeSet<String> = BTreeSet::new();
+    for m in missing {
+        let all = reach(&fwd, m, false);
+        if !all.contains(target) || reach(&fwd, m, true).contains(target) {
+            continue;
+        }
+        round_trip.push(m.clone());
+        via.extend(
+            all.into_iter()
+                .filter(|n| label::is_external(n))
+                .map(str::to_string),
+        );
+    }
+    (round_trip, via.into_iter().collect())
+}
+
+/// The flags every query here runs with. Matches `cambium_bazel::QUERY_FLAGS`
+/// on what matters: the index carries implicit edges, so the cross-check must
+/// too.
+const VERIFY_QUERY_FLAGS: &[&str] = &[
+    "--order_output=no",
+    "--keep_going",
+    "--noshow_progress",
+    "--ui_event_filters=-info",
+];
+
 /// Runs the sampled cross-check described by [`VerifyResult`] against a live
-/// `bazel query` for a random sample of rule targets in `view`.
+/// `bazel query` for a sample of rule targets in `view`.
 ///
 /// A sampled target whose query Bazel refuses is skipped and reported into
 /// `diags` (`CAMBI-W021`), so the verdict is over the targets that were
-/// actually compared and the caller can say which were not.
+/// actually compared and the caller can say which were not. A sample with
+/// misses costs one more query, `allpaths` from the missing targets back to
+/// it, to tell the round trips through an external repository apart.
 pub fn verify(
     bazel: &cambium_bazel::Bazel,
     view: IndexRef<'_>,
@@ -907,12 +1076,18 @@ pub fn verify(
     seed: u64,
     diags: &crate::diag::Diagnostics,
 ) -> Result<VerifyResult> {
+    use std::collections::BTreeSet;
+
     if sample == 0 {
         return Err(QueryError::ZeroSample.into());
     }
 
     let rules: Vec<u32> = (0..view.num_nodes())
-        .filter(|&i| view.kind_of(i) == NodeKind::Rule && !view.is_tombstone(i))
+        .filter(|&i| {
+            view.kind_of(i) == NodeKind::Rule
+                && !view.is_tombstone(i)
+                && !label::is_external(view.label(i))
+        })
         .collect();
     if rules.is_empty() {
         return Err(QueryError::NoRuleTargets.into());
@@ -925,24 +1100,27 @@ pub fn verify(
         .map(|i| rules[(start + i * stride) % rules.len()])
         .collect();
 
-    let mut checked = 0usize;
-    let mut ours_total = 0usize;
-    let mut theirs_total = 0usize;
-    let mut failures = Vec::new();
+    let mut result = VerifyResult {
+        schema: SCHEMA_VERSION,
+        query: "verify".into(),
+        checked: 0,
+        unsound: 0,
+        ours_total: 0,
+        theirs_total: 0,
+        agreed_total: 0,
+        precision_pct: 100.0,
+        ignored_files: 0,
+        ignored_external: 0,
+        failures: Vec::new(),
+        escalations: Vec::new(),
+    };
 
     for id in picked {
         let label = view.label(id);
         let mut cmd = bazel.command("query");
-        cmd.args([
-            &format!("rdeps(//..., {label})"),
-            "--output=label",
-            // Matches `cambium_bazel::QUERY_FLAGS`: the index carries
-            // implicit edges, so the cross-check must too.
-            "--order_output=no",
-            "--keep_going",
-            "--noshow_progress",
-            "--ui_event_filters=-info",
-        ]);
+        cmd.arg(format!("rdeps(//..., {label})"))
+            .arg("--output=label_kind")
+            .args(VERIFY_QUERY_FLAGS);
         // Through the same seam every other query uses, so a test can hand
         // the check a canned Bazel.
         let out = bazel.runner().output(&mut cmd)?;
@@ -963,11 +1141,17 @@ pub fn verify(
             );
             continue;
         }
-        let theirs: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut theirs: BTreeSet<&str> = BTreeSet::new();
+        for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            match classify_reported(line) {
+                Some(Reported::Rule(l)) => {
+                    theirs.insert(l);
+                }
+                Some(Reported::External) => result.ignored_external += 1,
+                Some(Reported::File) | None => result.ignored_files += 1,
+            }
+        }
         let r = walk::walk(
             view,
             &[id],
@@ -977,36 +1161,172 @@ pub fn verify(
                 max_depth: None,
             },
         );
-        let ours: std::collections::HashSet<String> = view::labels_sorted(&view, &r.affected)
+        let ours: BTreeSet<String> = view::labels_sorted(&view, &r.affected)
             .into_iter()
+            .filter(|l| !label::is_external(l))
             .collect();
 
-        let missing: Vec<String> = theirs.difference(&ours).cloned().collect();
-        checked += 1;
-        ours_total += ours.len();
-        theirs_total += theirs.len();
-        if !missing.is_empty() {
-            failures.push(VerifyFailure {
+        let missing: Vec<String> = theirs
+            .iter()
+            .filter(|l| !ours.contains(**l))
+            .map(|l| l.to_string())
+            .collect();
+        result.checked += 1;
+        result.ours_total += ours.len();
+        result.theirs_total += theirs.len();
+        result.agreed_total += theirs.len() - missing.len();
+        if missing.is_empty() {
+            continue;
+        }
+        if let Some(class) = view
+            .rule_class(id)
+            .filter(|c| cambium_index::is_toolchain_rule_class(c))
+            .filter(|_| only_toolchain_rules_below(view, id))
+        {
+            result.escalations.push(VerifyEscalation {
                 label: label.to_string(),
+                rule_class: class.to_string(),
+                code: crate::diag::Code::W023ToolchainMoved.as_str().to_string(),
                 missing,
             });
+            continue;
         }
+        let (round_trip, via) = round_trips(bazel, label, &missing, diags);
+        result.failures.push(VerifyFailure {
+            label: label.to_string(),
+            missing,
+            round_trip,
+            via,
+        });
     }
 
-    let precision_pct = if ours_total == 0 {
-        100.0
-    } else {
-        theirs_total as f64 / ours_total as f64 * 100.0
-    };
+    result.unsound = result.failures.len();
+    if result.ours_total > 0 {
+        result.precision_pct = result.agreed_total as f64 / result.ours_total as f64 * 100.0;
+    }
+    Ok(result)
+}
 
-    Ok(VerifyResult {
-        schema: SCHEMA_VERSION,
-        query: "verify".into(),
-        checked,
-        unsound: failures.len(),
-        ours_total,
-        theirs_total,
-        precision_pct,
-        failures,
-    })
+/// Whether everything `id` depends on in the index, transitively, is a
+/// main-repository rule of a toolchain class: the condition under which any
+/// change that reaches `id` moves a toolchain-class row, and so fires
+/// `CAMBI-W023`. A file, a rule of another class, or a target in an external
+/// repository anywhere below it is a way in that fires nothing.
+fn only_toolchain_rules_below(view: IndexRef<'_>, id: u32) -> bool {
+    let mut seen = std::collections::HashSet::from([id]);
+    let mut stack = vec![id];
+    while let Some(n) = stack.pop() {
+        for &m in view.forward.row(n) {
+            if !seen.insert(m) {
+                continue;
+            }
+            let toolchain_rule = view.kind_of(m) == NodeKind::Rule
+                && !label::is_external(view.label(m))
+                && view
+                    .rule_class(m)
+                    .is_some_and(cambium_index::is_toolchain_rule_class);
+            if !toolchain_rule {
+                return false;
+            }
+            stack.push(m);
+        }
+    }
+    true
+}
+
+/// Asks Bazel for every path from `missing` back to `target` and splits the
+/// round trips out ([`split_round_trips`]). A query Bazel refuses (or one too
+/// long to start) leaves every miss a plain miss, and says so in `diags`.
+fn round_trips(
+    bazel: &cambium_bazel::Bazel,
+    target: &str,
+    missing: &[String],
+    diags: &crate::diag::Diagnostics,
+) -> (Vec<String>, Vec<String>) {
+    let mut cmd = bazel.command("query");
+    cmd.arg(format!("allpaths(set({}), {target})", missing.join(" ")))
+        .arg("--output=graph")
+        .arg("--nograph:factored")
+        .args(VERIFY_QUERY_FLAGS);
+    let why = match bazel.runner().output(&mut cmd) {
+        Ok(out) if out.exit.success => {
+            return split_round_trips(
+                missing,
+                target,
+                &graph_edges(&String::from_utf8_lossy(&out.stdout)),
+            )
+        }
+        Ok(out) => out.exit.to_string(),
+        Err(e) => e.to_string(),
+    };
+    diags.emit(
+        crate::diag::Diagnostic::warning(
+            crate::diag::Code::W021VerifyQueryFailed,
+            format!(
+                "`bazel query allpaths(...)` from the {} targets missing below {target} failed \
+                 ({why}), so none of them was checked for a round trip through an external \
+                 repository",
+                missing.len()
+            ),
+        )
+        .with_help(
+            "the misses are listed as plain misses; the verdict stands, only the round-trip \
+             split is missing",
+        ),
+    );
+    (Vec::new(), Vec::new())
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+
+    #[test]
+    fn label_kind_lines_split_into_rules_files_and_externals() {
+        assert_eq!(
+            classify_reported("sh_library rule //shell/runfiles:runfiles_impl"),
+            Some(Reported::Rule("//shell/runfiles:runfiles_impl"))
+        );
+        assert_eq!(
+            classify_reported("generated file //docs:sh_toolchain.md"),
+            Some(Reported::File)
+        );
+        assert_eq!(
+            classify_reported("source file //shell:sh_binary.bzl"),
+            Some(Reported::File)
+        );
+        assert_eq!(
+            classify_reported("sh_binary rule @bazel_tools//tools/test:collect_coverage"),
+            Some(Reported::External)
+        );
+        assert_eq!(
+            classify_reported("alias rule @@//shell/runfiles:runfiles"),
+            Some(Reported::Rule("//shell/runfiles:runfiles"))
+        );
+        assert_eq!(classify_reported("garbage"), None);
+    }
+
+    #[test]
+    fn a_miss_reached_only_through_an_external_is_a_round_trip() {
+        let dot = r#"digraph mygraph {
+  node [shape=box];
+  "//tests:a"
+  "//tests:a" -> "//lib:x"
+  "//tests:a" -> "@bazel_tools//tools/test:collect_coverage"
+  "//tests:b"
+  "//tests:b" -> "@bazel_tools//tools/test:collect_coverage"
+  "@bazel_tools//tools/test:collect_coverage"
+  "@bazel_tools//tools/test:collect_coverage" -> "//lib:x"
+  "//lib:x"
+}"#;
+        let edges = graph_edges(dot);
+        let missing = vec![
+            "//tests:a".to_string(),
+            "//tests:b".to_string(),
+            "//tests:unseen".to_string(),
+        ];
+        let (rt, via) = split_round_trips(&missing, "//lib:x", &edges);
+        assert_eq!(rt, vec!["//tests:b"]);
+        assert_eq!(via, vec!["@bazel_tools//tools/test:collect_coverage"]);
+    }
 }

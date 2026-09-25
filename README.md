@@ -519,6 +519,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 10 | `depth_histogram`: how many affected targets sit at each reverse-dependency depth, index 0 first. Purely additive; the per-target `depth` it summarises has been in the document since 3 |
 | 11 | `affected[].package_depth` and `package_depth_histogram`: the same walk counted in package boundaries crossed, an edge inside one package being free. A target's `package_depth` never exceeds its `depth` |
 | 12 | `stats.sky_seeds`, `stats.sky_unknown_seeds`, `stats.sky_visited` and `stats.sky_new_packages`, describing the reverse walk over the Skyframe loading layer that now decides which packages a change moved; the four `stats.bzl_witness*` counters go with the witness they described. `stats.bzl_closure_hits` keeps its name and its meaning (dirty packages a changed Starlark file reached). `inspect stats` gained `counts.sky_nodes`, `counts.sky_edges`, `counts.sky_layer`, `counts.sky_by_kind` and `bytes.sky_layer` |
+| 16 | `inspect verify` compares main-repository rule targets on both sides, which is all `affected` reports: `theirs_total` no longer counts the source and generated files or external targets Bazel's `rdeps` names, which are counted in the new `ignored_files` and `ignored_external` instead. `precision_pct` is now `agreed_total / ours_total`, the share of what the index reported that Bazel also reports (it was `theirs_total / ours_total`, which could pass 100%). `failures[].missing` is sorted and gained `round_trip` and `via`: the misses Bazel connects to the sample only through an external repository, and the external targets on those paths. `escalations` (`{label, rule_class, code, missing}`) lists the toolchain-class samples that depend in the index on nothing but toolchain-class rules: any change that reaches one moves a toolchain-class row, which a run answers with `//...` under `CAMBI-W023`, so their misses no longer count as unsound. A toolchain-class sample that depends on anything else is a failure like any other |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints: `index` (targets, tests, packages,
@@ -678,9 +679,10 @@ Four oracles, in increasing order of cost:
    a global invalidator, an ignored path. Each is also checked against a full
    rebuild, so the expectations cannot drift.
 4. **`cambi inspect verify`**, for a sample of targets: the computed reverse
-   closure must contain everything `bazel query rdeps(//..., target)` reports.
-   This is the soundness oracle, and it runs against production indexes too,
-   reporting precision as a percentage.
+   closure must contain every main-repository rule target `bazel query
+   rdeps(//..., target)` reports. This is the soundness oracle, and it runs
+   against production indexes too, reporting precision as the share of the
+   index's answer that Bazel also reports.
 
 Oracles three and four are opt-in because they need Bazel; they are green
 against Bazel 7.4.1, at 100% precision on the emitted workspaces.
