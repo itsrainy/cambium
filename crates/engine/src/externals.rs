@@ -40,6 +40,14 @@
 //!    any other dirty package, and the splice then compares rule hashes as
 //!    usual.
 //!
+//! A repository can also reach a main-repo target through *another
+//! repository's definition*: a workspace-closure `.bzl` (or `MODULE.bazel`)
+//! that loads a rule from `@r` and calls it to define `@g` makes `@g` a
+//! function of `@r`'s code, exactly as a package that loads from `@r` is. So
+//! when rule (2) applies to `@r`, `@g` moves too, and (1) and (2) are applied
+//! to it in turn; see [`defined_through_loads`]. xla's `@llvm-project`, which
+//! `llvm_configure` from `@llvm-raw` generates, is the case that found it.
+//!
 //! # Why (2) does not always fire
 //!
 //! A repository built from a main-repo directory is the common case, and it is
@@ -234,6 +242,10 @@ pub struct Externals {
     pub by_module: usize,
     /// How many were named by a changed workspace-closure `.bzl`.
     pub by_bzl: usize,
+    /// How many were named because a workspace-closure `.bzl` (or
+    /// `MODULE.bazel` itself) that defines them loads from a repository whose
+    /// `.bzl` files may have moved. See [`defined_through_loads`].
+    pub by_loader: usize,
     /// How many input-dirtied repositories were spared rule (2) — by the
     /// path mapping, or because the only thing naming the path is a target
     /// the repository rule writes: their label consumers are dirty, their
@@ -918,6 +930,154 @@ pub fn repos_of_workspace_bzl(base: IndexRef<'_>, bzl_id: u32) -> Option<Vec<Str
         return None;
     }
     Some(row.iter().map(|&r| base.repo_name(r).to_string()).collect())
+}
+
+/// Rule (2) seen from the workspace side: the repositories *defined through*
+/// a `.bzl` of a repository whose `.bzl` files may have moved.
+///
+/// Rule (2) re-queries the packages that load from a moved repository, because
+/// a `.bzl` in it may have changed and a package's rules are a function of the
+/// `.bzl` files it loads. A repository is a function of the `.bzl` files its
+/// definition loads in exactly the same way, and a definition can load from
+/// another repository too: xla's module extension
+/// `third_party/extensions/llvm.bzl` loads `llvm_configure` from
+/// `@llvm-raw//utils/bazel:configure.bzl` and calls it to define
+/// `@llvm-project`, which is what the main repository's rules consume. An edit
+/// to `third_party/llvm/build.patch`, a recorded input of `@llvm-raw`, dirties
+/// `@llvm-raw`, which has no label in the graph and which no package loads
+/// from; Bazel refetches it, re-runs `llvm_configure`, regenerates
+/// `@llvm-project` and rebuilds every consumer. Without this step the stage
+/// answered nothing at all (box run B, xla steps 13, 29 and 181).
+///
+/// So for every repository in [`Externals::load_repos`], every
+/// workspace-closure `.bzl` whose load walk stopped at one of its labels (the
+/// index's `bzl_ext` row, the same record rule (2) reads for packages) makes
+/// the repositories that file defines (its `bzl_repos` row) dirty with rule
+/// (2), as a changed workspace `.bzl` does: the code that writes them may have
+/// moved, so anything they hold may have. The same holds for a module
+/// extension or a `use_repo_rule` that `MODULE.bazel` takes from the moved
+/// repository directly, whose `use_repo` names are what it defines. A
+/// repository dirtied this way is itself loaded from in turn, so the step runs
+/// to a fixpoint, bounded by the number of repositories.
+///
+/// The trigger is [`Externals::load_repos`] rather than every dirty
+/// repository, and the difference is only the in-tree repositories a path
+/// mapping spared rule (2): a repository with no mapping (every fetched
+/// repository, `@llvm-raw` among them) is in `load_repos` whenever an input
+/// moved it. For the rest the mapping showed the edit is not one of the `.bzl`
+/// files the closure loads from there, so no definition read through a load
+/// moved; a repository rule defined there that reads a *data* file of its own
+/// repository is the gap stated on [`cambium_index::externals`], a
+/// repository-rule input no label this index reads names. A repository
+/// dirtied only through a target its rule writes is never in `load_repos`:
+/// nothing it holds moved.
+///
+/// Wide by construction: a file whose repositories the index could only give
+/// the fallback set for (envoy's WORKSPACE-era `bazel/toolchains.bzl`, which
+/// loads `@envoy_repo//:compiler.bzl`) makes all of them dirty. That is the
+/// index's answer for a change to the file itself, and it is the sound one.
+///
+/// Returns how many repositories this step named that were not already in
+/// `load_repos`.
+pub fn defined_through_loads(
+    base: IndexRef<'_>,
+    ext: &mut Externals,
+    texts: &dyn WorkspaceText,
+    head_rev: &str,
+) -> usize {
+    if ext.load_repos.is_empty() {
+        return 0;
+    }
+    let mut canon: BTreeMap<&str, &str> = BTreeMap::new();
+    for r in 0..base.num_repos() {
+        canon.insert(base.repo_name(r), base.repo_canonical.get(r));
+    }
+    let owns = |token: &str, repo: &str| {
+        repo_token_matches(token, repo, canon.get(repo).copied().unwrap_or(""))
+    };
+    // Each definition that loads from another repository: the file that
+    // holds it, the repository tokens it loads from, and what it defines.
+    let mut definers: Vec<(String, BTreeSet<String>, Vec<String>)> = Vec::new();
+    if base.bzl_closure {
+        for &id in base.bzl_workspace {
+            let from: BTreeSet<String> = base
+                .bzl_external(id)
+                .into_iter()
+                .filter_map(label_repo)
+                .map(str::to_string)
+                .collect();
+            if from.is_empty() {
+                continue;
+            }
+            let defines: Vec<String> = base
+                .bzl_repos_of(id)
+                .iter()
+                .map(|&r| base.repo_name(r).to_string())
+                .collect();
+            definers.push((base.bzl_path(id).to_string(), from, defines));
+        }
+    }
+    // `MODULE.bazel` itself, read at head only when there is something to
+    // hold it against: its extensions and `use_repo_rule`s whose `.bzl` is in
+    // another repository. One it takes from the main repository is a closure
+    // file and was covered above.
+    if texts.text_at(head_rev, MODULE_FILE).is_some() {
+        let facts = facts_at(texts, head_rev);
+        let module = facts
+            .extensions
+            .values()
+            .map(|e| (&e.bzl, &e.repos))
+            .chain(facts.repo_rules.values().map(|r| (&r.bzl, &r.repos)));
+        for (bzl, repos) in module {
+            let Some(token) = label_repo(bzl) else {
+                continue;
+            };
+            if token == facts.module_name {
+                continue;
+            }
+            definers.push((
+                MODULE_FILE.to_string(),
+                std::iter::once(token.to_string()).collect(),
+                repos.iter().cloned().collect(),
+            ));
+        }
+    }
+    if definers.is_empty() {
+        return 0;
+    }
+    let mut named = 0;
+    let mut todo: Vec<String> = ext.load_repos.iter().cloned().collect();
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    while let Some(moved) = todo.pop() {
+        if !done.insert(moved.clone()) {
+            continue;
+        }
+        for (file, from, defines) in &definers {
+            if !from.iter().any(|t| owns(t, &moved)) {
+                continue;
+            }
+            for g in defines {
+                if g == &moved {
+                    continue;
+                }
+                ext.name(file, std::iter::once(g));
+                ext.target_only.remove(g);
+                ext.repos.insert(g.clone());
+                if ext.load_repos.insert(g.clone()) {
+                    named += 1;
+                    tracing::debug!(
+                        repo = %g,
+                        via = %moved,
+                        %file,
+                        "a repository defined through a load from a moved repository moved with it"
+                    );
+                    todo.push(g.clone());
+                }
+            }
+        }
+    }
+    ext.by_loader += named;
+    named
 }
 
 // ------------------------------------------------- repositories to targets
