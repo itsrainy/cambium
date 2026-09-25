@@ -117,7 +117,18 @@ use serde::{Deserialize, Serialize};
 ///   dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that
 ///   defines them loads from a repository whose `.bzl` files may have moved.
 ///   Purely additive.
-pub const SCHEMA_VERSION: u32 = 15;
+/// - **16** changes `inspect verify`: both sides are compared as
+///   main-repository rule targets, so `theirs_total` no longer counts the
+///   source and generated files or external targets Bazel's `rdeps` names
+///   (now `ignored_files` and `ignored_external`). `precision_pct` is
+///   redefined as `agreed_total / ours_total` (it was `theirs_total /
+///   ours_total`, which could pass 100). `failures[].missing` is sorted and
+///   gained `round_trip` and `via` (misses Bazel connects only through an
+///   external repository, and the external targets on those paths).
+///   `escalations` lists toolchain-class samples whose misses a run covers
+///   by answering `//...` under `CAMBI-W023`; they no longer count as
+///   unsound.
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
