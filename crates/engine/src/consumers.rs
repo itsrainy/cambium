@@ -1,0 +1,113 @@
+//! The consumer table's leaf map: which leaves of an external repository
+//! that consumes an indexed one reach which of its packages.
+//!
+//! The table itself (`RepoInputs::consumers`) says that `@grpc` consumes
+//! `@envoy_api` and through which packages. The index holds no graph for
+//! `@grpc`, only the labels of it that `//...` names, each a node with no
+//! outgoing edges, so the unit a change can seed is one of those leaves.
+//! Seeding every leaf of a consumer whenever a package it consumes moves is
+//! sound and wide: on envoy's step whose oracle is 649 labels, one of grpc's
+//! five leaves reaches the API and the other four brought the answer to 5035.
+//! The map here is what narrows it, and it is Bazel's answer, asked once per
+//! indexed repository with every leaf of every consumer in one query
+//! ([`cambium_bazel::Bazel::leaf_reaches`]).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use cambium_index::externals::Consumer;
+use cambium_index::IndexBuilder;
+
+use crate::query::PackageQuerier;
+
+/// The external labels an index being built holds, less its tombstones:
+/// the candidates for a consumer's leaves.
+pub(crate) fn external_labels(b: &IndexBuilder<'_>) -> Vec<String> {
+    (0..b.num_nodes())
+        .filter(|&id| !b.is_tombstone(id))
+        .map(|id| b.label(id))
+        .filter(|l| l.starts_with('@'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `label` is a label of the consumer repository `consumer`, matched
+/// the way `externals::reach` rule (1) matches a dirty repository's labels,
+/// so that the leaves the map knows are the leaves rule (1) would seed.
+pub(crate) fn is_leaf_of(label: &str, consumer: &str, canonical: &str) -> bool {
+    cambium_bazel::label_repo_token(label)
+        .is_some_and(|t| crate::externals::repo_token_matches(t, consumer, canonical))
+}
+
+/// The consumer table Bazel answered (`PackageQuerier::consumer_repos`),
+/// with each consumer's leaf map derived against `labels`, the external
+/// labels of the index the table goes into.
+///
+/// One question per indexed repository, over the leaves of all its
+/// consumers at once. A consumer with no leaf in the index gets an empty map
+/// without asking, since there is nothing rule (1) could seed for it. A
+/// question Bazel will not answer leaves every consumer of that repository
+/// with no map, which is the wide answer.
+pub(crate) fn with_leaves(
+    q: &dyn PackageQuerier,
+    table: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    labels: &[String],
+    canonical: &BTreeMap<String, String>,
+) -> BTreeMap<String, BTreeMap<String, Consumer>> {
+    let mut out = BTreeMap::new();
+    for (repo, consumers) in table {
+        let own: BTreeMap<&str, Vec<String>> = consumers
+            .keys()
+            .map(|c| {
+                let canon = canonical.get(c).map_or("", String::as_str);
+                let leaves = labels
+                    .iter()
+                    .filter(|l| is_leaf_of(l, c, canon))
+                    .cloned()
+                    .collect();
+                (c.as_str(), leaves)
+            })
+            .collect();
+        let all: Vec<String> = own
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let answer = if all.is_empty() {
+            Some(BTreeMap::new())
+        } else {
+            let started = std::time::Instant::now();
+            let a = q.consumer_leaf_packages(&repo, &all);
+            tracing::debug!(
+                %repo,
+                leaves = all.len(),
+                answered = a.as_ref().map(BTreeMap::len),
+                reaching = a.as_ref().map(|m| m.values().filter(|p| !p.is_empty()).count()),
+                ms = started.elapsed().as_millis() as u64,
+                "the consumer leaf map was asked for"
+            );
+            a
+        };
+        let entry: BTreeMap<String, Consumer> = consumers
+            .iter()
+            .map(|(c, packages)| {
+                let leaves = answer.as_ref().map(|a| {
+                    own[c.as_str()]
+                        .iter()
+                        .filter_map(|l| a.get(l).map(|p| (l.clone(), p.clone())))
+                        .collect()
+                });
+                (
+                    c.clone(),
+                    Consumer {
+                        packages: packages.clone(),
+                        leaves,
+                    },
+                )
+            })
+            .collect();
+        out.insert(repo, entry);
+    }
+    out
+}

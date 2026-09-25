@@ -564,15 +564,22 @@ impl Engine {
         ) {
             // Who consumes each indexed repository, asked of Bazel last: two
             // queries per repository, after the dump and the closure's own
-            // commands, on the server they leave behind.
-            c.inputs.consumers = q.consumer_repos(&indexed);
-            for (r, cs) in &c.inputs.consumers {
+            // commands, on the server they leave behind; then a third for
+            // which of each consumer's leaves reach what.
+            let table = q.consumer_repos(&indexed);
+            for (r, cs) in &table {
                 tracing::debug!(
                     repo = %r,
                     consumers = ?cs.keys().collect::<Vec<_>>(),
                     "external repositories consume an indexed repository"
                 );
             }
+            c.inputs.consumers = crate::consumers::with_leaves(
+                q,
+                table,
+                &crate::consumers::external_labels(&b),
+                &c.inputs.canonical,
+            );
             b.set_bzl_closure(c);
         }
         Ok(b.finish(commit))

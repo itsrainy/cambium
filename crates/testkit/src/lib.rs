@@ -273,6 +273,12 @@ pub struct Scanning {
     /// repositories it has been asked about.
     repo_probes: BTreeMap<String, cambium_bazel::RepoProbe>,
     repo_consumers: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    /// What `consumer_leaf_packages` answers: indexed repository -> leaf ->
+    /// the packages of it the leaf reaches. A repository with no entry
+    /// answers `None`.
+    consumer_leaves: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    /// Every `consumer_leaf_packages` question, as `(repo, leaves)`.
+    leaf_questions: std::sync::Mutex<Vec<(String, Vec<String>)>>,
     probed: std::sync::Mutex<Vec<String>>,
     /// The `--skykey_filter` of every loading-layer dump this querier was
     /// asked for, in order. A dump is the most expensive thing an incremental
@@ -312,6 +318,8 @@ impl Scanning {
             external_rules: None,
             repo_probes: BTreeMap::new(),
             repo_consumers: BTreeMap::new(),
+            consumer_leaves: BTreeMap::new(),
+            leaf_questions: std::sync::Mutex::new(Vec::new()),
             probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
             hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
@@ -374,8 +382,6 @@ impl Scanning {
         self
     }
 
-    /// The repositories the engine has probed, in order. Empty means no
-    /// probe ran.
     /// Answer `consumer_repos` with: `consumer`'s rules depend on these
     /// packages of the indexed repository `repo`.
     pub fn with_repo_consumers(mut self, repo: &str, consumer: &str, packages: &[&str]) -> Self {
@@ -389,6 +395,28 @@ impl Scanning {
         self
     }
 
+    /// Answer `consumer_leaf_packages` for `repo` with: the leaf `leaf`
+    /// reaches these packages of it (none at all is "reaches nothing"). A
+    /// leaf asked about and never named here is left out of the answer, as
+    /// Bazel leaves out a label it could not resolve.
+    pub fn with_consumer_leaf(mut self, repo: &str, leaf: &str, packages: &[&str]) -> Self {
+        self.consumer_leaves
+            .entry(repo.to_string())
+            .or_default()
+            .insert(
+                leaf.to_string(),
+                packages.iter().map(|p| p.to_string()).collect(),
+            );
+        self
+    }
+
+    /// Every leaf question the engine asked, as `(repo, leaves)`, in order.
+    pub fn leaf_questions(&self) -> Vec<(String, Vec<String>)> {
+        self.leaf_questions.lock().unwrap().clone()
+    }
+
+    /// The repositories the engine has probed, in order. Empty means no
+    /// probe ran.
     pub fn probed(&self) -> Vec<String> {
         self.probed.lock().unwrap().clone()
     }
@@ -500,6 +528,24 @@ impl PackageQuerier for Scanning {
             .iter()
             .filter_map(|r| self.repo_consumers.get(r).map(|c| (r.clone(), c.clone())))
             .collect()
+    }
+
+    fn consumer_leaf_packages(
+        &self,
+        repo: &str,
+        leaves: &[String],
+    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+        self.leaf_questions
+            .lock()
+            .unwrap()
+            .push((repo.to_string(), leaves.to_vec()));
+        let known = self.consumer_leaves.get(repo)?;
+        Some(
+            leaves
+                .iter()
+                .filter_map(|l| known.get(l).map(|p| (l.clone(), p.clone())))
+                .collect(),
+        )
     }
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {

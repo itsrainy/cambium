@@ -554,6 +554,12 @@ struct ExternalsRepo {
     /// ...`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     consumers: Vec<String>,
+    /// Per consumer, each leaf of it the index holds and the packages of this
+    /// repository its transitive deps reach: `grpc @grpc//:grpc++:
+    /// envoy/annotations, ...`, or `grpc (leaves not known)` for a consumer
+    /// with no leaf map, whose every leaf a change seeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    consumer_leaves: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -606,8 +612,32 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
             consumers: v
                 .repo_consumers(r)
                 .iter()
-                .map(|(c, pkgs)| {
-                    format!("{c}: {}", pkgs.iter().cloned().collect::<Vec<_>>().join(", "))
+                .map(|(c, used)| {
+                    format!(
+                        "{c}: {}",
+                        used.packages.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                })
+                .collect(),
+            consumer_leaves: v
+                .repo_consumers(r)
+                .iter()
+                .flat_map(|(c, used)| match &used.leaves {
+                    None => vec![format!("{c} (leaves not known)")],
+                    Some(leaves) if leaves.is_empty() => vec![format!("{c} (no leaf in this index)")],
+                    Some(leaves) => leaves
+                        .iter()
+                        .map(|(leaf, pkgs)| {
+                            format!(
+                                "{c} {leaf}: {}",
+                                if pkgs.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    pkgs.iter().cloned().collect::<Vec<_>>().join(", ")
+                                }
+                            )
+                        })
+                        .collect(),
                 })
                 .collect(),
             inputs: inputs.remove(&r).unwrap_or_default(),
@@ -666,6 +696,9 @@ fn print_externals(d: &ExternalsDump) {
         }
         for c in &r.consumers {
             println!("  consumer {c}");
+        }
+        for l in &r.consumer_leaves {
+            println!("  leaf    {l}");
         }
         for (p, feeds) in &r.inputs {
             println!(

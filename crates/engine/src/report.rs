@@ -117,7 +117,14 @@ use serde::{Deserialize, Serialize};
 ///   dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that
 ///   defines them loads from a repository whose `.bzl` files may have moved.
 ///   Purely additive.
-pub const SCHEMA_VERSION: u32 = 15;
+/// - **16** adds `stats.consumer_leaves_seeded`: leaves of external
+///   repositories seeded because the consumer table's leaf map (index
+///   format 14) says their transitive deps reach a package of an indexed
+///   repository that moved, or does not know the leaf. A consumer seeded
+///   this way is counted in `repos_dirty_by_consumer` as before, but only
+///   its reaching leaves are seeded rather than all of them. Purely
+///   additive.
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -308,6 +315,12 @@ pub struct Stats {
     /// do.
     #[serde(default)]
     pub repos_dirty_by_consumer: usize,
+    /// Leaves seeded through a consumer's leaf map
+    /// (`Consumer::leaves`): the leaves of a consumer whose transitive deps
+    /// reach a package of a moved indexed repository, plus any leaf the map
+    /// does not know. The consumer's other leaves are not seeded.
+    #[serde(default)]
+    pub consumer_leaves_seeded: usize,
     /// External repositories dirtied because the definition that makes them
     /// loads a `.bzl` from a repository whose `.bzl` files may have moved:
     /// xla's `@llvm-project`, which a module extension defines by calling

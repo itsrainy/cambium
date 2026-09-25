@@ -204,7 +204,9 @@ fn a_consumer_of_a_moved_indexed_repository_is_reached_through_its_leaf() {
             v.repo_consumers(tsl),
             vec![(
                 "grpc".to_string(),
-                consumed.iter().map(|p| p.to_string()).collect()
+                cambium_index::externals::Consumer::of_packages(
+                    consumed.iter().map(|p| p.to_string()).collect()
+                )
             )],
             "the table is in the index"
         );
@@ -420,6 +422,10 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
             .with_workspace(root)
             .with_repo_probe("tsl", PROBED, false)
             .with_repo_consumers("tsl", grpc, &["tsl/platform"])
+            // Bazel's leaf answer knows either spelling; which one is asked
+            // for is the index's business.
+            .with_consumer_leaf("tsl", "@com_github_grpc_grpc//:grpc", &["tsl/platform"])
+            .with_consumer_leaf("tsl", "@grpc//:grpc", &["tsl/platform"])
     };
     fn old_rows(pkg: &str) -> PackageUpdate {
         match pkg {
@@ -454,11 +460,27 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
         let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
         v.repo_consumers(tsl).into_iter().map(|(c, _)| c).collect()
     };
+    let leaf_map_of = |index: &IndexData| -> Vec<(String, Vec<String>)> {
+        let v = index.view();
+        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        v.repo_consumers(tsl)
+            .into_iter()
+            .flat_map(|(_, used)| used.leaves.expect("a leaf map"))
+            .map(|(l, ps)| (l, ps.into_iter().collect()))
+            .collect()
+    };
     // The base, at the commit before the rename.
     let base = engine()
         .full_build_with("c0", &scanning("com_github_grpc_grpc", old_rows))
         .unwrap();
     assert_eq!(consumer_of(&base), vec!["com_github_grpc_grpc".to_string()]);
+    assert_eq!(
+        leaf_map_of(&base),
+        vec![(
+            "@com_github_grpc_grpc//:grpc".to_string(),
+            vec!["tsl/platform".to_string()]
+        )]
+    );
 
     // The rename: a workspace-closure change that overflows the dirty limit
     // and re-queries `//...`, under a limit of one so the overflow is certain.
@@ -485,6 +507,22 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
     assert!(!out.report.global, "{:?}", out.report.global_reason);
     let head = out.index.expect("the spliced index");
     assert_eq!(consumer_of(&head), vec!["grpc".to_string()], "re-derived on the overflow");
+    // And its leaves under the head's spelling, which exists only once the
+    // re-queried packages are spliced in: derived before the splice, the
+    // index held no `@grpc//` label and the map would be empty.
+    assert_eq!(
+        leaf_map_of(&head),
+        vec![("@grpc//:grpc".to_string(), vec!["tsl/platform".to_string()])],
+        "the leaf map is re-derived under the new spelling"
+    );
+    assert!(
+        renamed
+            .leaf_questions()
+            .iter()
+            .any(|(r, ls)| r == "tsl" && ls == &vec!["@grpc//:grpc".to_string()]),
+        "{:?}",
+        renamed.leaf_questions()
+    );
 
     // The next step: a source edit under the indexed repository, settled,
     // reaches `//gapp:gapp` through the leaf the new name spells.
@@ -498,6 +536,291 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
         .report;
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
+    assert_eq!(r.stats.consumer_leaves_seeded, 1, "seeded by the map");
     let affected = r.affected_labels();
     assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+}
+
+// ------------------------------------------------ the consumer's leaf map
+//
+// envoy's step whose oracle is 649 labels answered 5035: the table dirtied
+// `@grpc`, and rule (1) seeded all five of its leaves, of which only
+// `@grpc//:grpc++` reaches `@envoy_api`. The tree below has two in-tree
+// packages, `tsl/platform` depending on `tsl/base`, and two `@grpc` leaves,
+// each linked by one main-repo target: `//gapp:gapp` on `@grpc//:grpc` and
+// `//happ:happ` on `@grpc//:health`.
+
+/// The packages of the two-package repository, as the probe prints them.
+const PROBED2: &[&str] = &["", "tsl/base", "tsl/platform"];
+
+fn tree2() -> tempfile::TempDir {
+    let dir = tree();
+    std::fs::create_dir_all(dir.path().join(DIR).join("tsl/base")).unwrap();
+    std::fs::write(dir.path().join(DIR).join("tsl/base/BUILD"), "").unwrap();
+    dir
+}
+
+fn leaf_rows(pkg: &str) -> PackageUpdate {
+    let targets = match pkg {
+        "gapp" => vec![TargetRow::rule(
+            "//gapp:gapp",
+            "demo_lib",
+            vec!["@grpc//:grpc".into()],
+        )],
+        "happ" => vec![TargetRow::rule(
+            "//happ:happ",
+            "demo_lib",
+            vec!["@grpc//:health".into()],
+        )],
+        "@tsl//tsl/platform" => vec![
+            TargetRow::rule(
+                "@tsl//tsl/platform:dso_loader",
+                "demo_lib",
+                vec![
+                    "@tsl//tsl/platform:x.cc".into(),
+                    "@tsl//tsl/base:base".into(),
+                ],
+            ),
+            TargetRow::source_file("@tsl//tsl/platform:x.cc"),
+        ],
+        "@tsl//tsl/base" => vec![
+            TargetRow::rule(
+                "@tsl//tsl/base:base",
+                "demo_lib",
+                vec!["@tsl//tsl/base:y.cc".into()],
+            ),
+            TargetRow::source_file("@tsl//tsl/base:y.cc"),
+        ],
+        other => return super_rows(other),
+    };
+    PackageUpdate {
+        package: pkg.to_string(),
+        targets,
+        ..Default::default()
+    }
+}
+
+const LEAF_UNIVERSE: &[&str] = &[
+    "app",
+    "lib",
+    "gapp",
+    "happ",
+    "@tsl//tsl/platform",
+    "@tsl//tsl/base",
+];
+
+/// A querier over the two-package tree whose consumer table names `grpc` as
+/// consuming both packages, pooled, and whose leaf map is `leaves`.
+fn leaf_scanning(
+    root: &std::path::Path,
+    universe: &'static [&'static str],
+    leaves: &[(&str, &[&str])],
+) -> Scanning {
+    let mut m = BTreeMap::new();
+    m.insert("MODULE.bazel".to_string(), MODULE_BAZEL.to_string());
+    m.insert("third_party/repo.bzl".to_string(), REPO_BZL.to_string());
+    for p in ["app", "lib", "gapp", "happ"] {
+        m.insert(format!("{p}/BUILD"), String::new());
+    }
+    let mut q = Scanning::new(universe, leaf_rows)
+        .with_files(Files(m))
+        .with_workspace(root)
+        .with_repo_probe("tsl", PROBED2, false)
+        .with_repo_consumers("tsl", "grpc", &["tsl/base", "tsl/platform"]);
+    for (leaf, pkgs) in leaves {
+        q = q.with_consumer_leaf("tsl", leaf, pkgs);
+    }
+    q
+}
+
+fn leaves_of(index: &IndexData) -> Option<BTreeMap<String, std::collections::BTreeSet<String>>> {
+    let v = index.view();
+    let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+    let cs = v.repo_consumers(tsl);
+    assert_eq!(cs.len(), 1, "{cs:?}");
+    assert_eq!(cs[0].0, "grpc");
+    cs[0].1.leaves.clone()
+}
+
+fn map(entries: &[(&str, &[&str])]) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+    entries
+        .iter()
+        .map(|(l, ps)| (l.to_string(), ps.iter().map(|p| p.to_string()).collect()))
+        .collect()
+}
+
+fn run_leaves(index: &IndexData, q: &Scanning, changes: Vec<Change>) -> AffectedReport {
+    let r = engine()
+        .compute_with_texts(index.view(), &changes, q, &req(), &FixedText(BTreeMap::new()))
+        .unwrap()
+        .report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    r
+}
+
+fn edit(path: &str) -> Vec<Change> {
+    vec![Change::new(Status::Modified, path)]
+}
+
+/// Two leaves of one consumer, one whose deps reach the package that moved
+/// and one that reaches nothing of the repository: only the first is seeded,
+/// and the consumer of the second is not affected. Before the map both were,
+/// which is the 5035 against 649.
+#[test]
+fn only_the_leaf_whose_closure_reaches_what_moved_is_seeded() {
+    let dir = tree2();
+    let root = dir.path();
+    let leaves: &[(&str, &[&str])] = &[
+        ("@grpc//:grpc", &["tsl/base", "tsl/platform"]),
+        ("@grpc//:health", &[]),
+    ];
+    let q = leaf_scanning(root, LEAF_UNIVERSE, leaves);
+    let index = engine().full_build_with("c0", &q).unwrap();
+    // The map is in the index, both leaves known, and it was asked for in one
+    // question over every leaf of the consumer.
+    assert_eq!(leaves_of(&index), Some(map(leaves)));
+    assert_eq!(
+        q.leaf_questions(),
+        vec![(
+            "tsl".to_string(),
+            vec!["@grpc//:grpc".to_string(), "@grpc//:health".to_string()]
+        )]
+    );
+
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/platform/x.cc"));
+    assert_eq!(r.stats.repos_settled, 1);
+    assert_eq!(r.stats.repos_dirty_by_consumer, 1);
+    assert_eq!(r.stats.consumer_leaves_seeded, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(affected.contains(&"//app:app".to_string()), "{affected:?}");
+}
+
+/// A leaf whose map names only another package of the repository is not
+/// seeded when this one moves, although the consumer's pooled packages
+/// include it: the pooled set is every consumer rule's, the map is the leaf's.
+#[test]
+fn a_leaf_keyed_to_another_package_is_not_seeded() {
+    let dir = tree2();
+    let root = dir.path();
+    // `tsl/platform` depends on `tsl/base`, not the other way round, so an
+    // edit to `tsl/platform` moves nothing `@grpc//:grpc` reaches.
+    let q = leaf_scanning(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &["tsl/base"]), ("@grpc//:health", &[])],
+    );
+    let index = engine().full_build_with("c0", &q).unwrap();
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/platform/x.cc"));
+    assert_eq!(r.stats.consumer_leaves_seeded, 0);
+    assert_eq!(r.stats.repos_dirty_by_consumer, 0);
+    let affected = r.affected_labels();
+    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+}
+
+/// The map is the cold build's answer, and an edge inside the repository can
+/// arrive after it: here the map says `@grpc//:grpc` reaches `tsl/platform`
+/// only, and the index says `tsl/platform` depends on `tsl/base`. An edit to
+/// `tsl/base` reaches the leaf through that edge, so it is seeded; the reverse
+/// rows of the repository's own nodes are what say so.
+#[test]
+fn an_edge_inside_the_repository_carries_a_change_to_the_leaf_above_it() {
+    let dir = tree2();
+    let root = dir.path();
+    let q = leaf_scanning(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &[])],
+    );
+    let index = engine().full_build_with("c0", &q).unwrap();
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/base/y.cc"));
+    assert_eq!(r.stats.repos_settled, 1);
+    assert_eq!(r.stats.consumer_leaves_seeded, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+}
+
+/// A `BUILD` edit under the repository unsettles it, and what moved is then
+/// every package: each leaf that reaches anything of the repository is
+/// seeded, and one that reaches nothing still is not.
+#[test]
+fn an_unsettled_repository_seeds_every_leaf_that_reaches_it() {
+    let dir = tree2();
+    let root = dir.path();
+    let q = leaf_scanning(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &["tsl/base"]), ("@grpc//:health", &[])],
+    );
+    let index = engine().full_build_with("c0", &q).unwrap();
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/platform/BUILD"));
+    assert_eq!(r.stats.repos_settled, 0);
+    assert_eq!(r.stats.consumer_leaves_seeded, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+}
+
+/// A leaf the map does not know is seeded whenever the repository moves: it
+/// was named after the map was derived (here a package added by a later
+/// commit links it), and nothing says what it reaches. The leaf the map does
+/// know, and knows reaches only `tsl/base`, stays unseeded.
+#[test]
+fn a_leaf_named_after_the_map_was_derived_is_seeded() {
+    let dir = tree2();
+    let root = dir.path();
+    const BEFORE: &[&str] = &["app", "lib", "gapp", "@tsl//tsl/platform", "@tsl//tsl/base"];
+    let leaves: &[(&str, &[&str])] = &[("@grpc//:grpc", &["tsl/base"]), ("@grpc//:health", &[])];
+    let base = engine()
+        .full_build_with("c0", &leaf_scanning(root, BEFORE, leaves))
+        .unwrap();
+    // Only `@grpc//:grpc` was a label then, so only it is known.
+    assert_eq!(leaves_of(&base), Some(map(&[("@grpc//:grpc", &["tsl/base"])])));
+
+    // The commit that adds `//happ:happ` and with it the label
+    // `@grpc//:health`, spliced without an overflow, so the map is carried.
+    let q = leaf_scanning(root, LEAF_UNIVERSE, leaves);
+    let out = engine()
+        .compute_with_texts(
+            base.view(),
+            &[Change::new(Status::Added, "happ/BUILD")],
+            &q,
+            &cambium_engine::AffectedRequest {
+                materialize: true,
+                ..req()
+            },
+            &FixedText(BTreeMap::new()),
+        )
+        .unwrap();
+    assert!(!out.report.stats.cold_rebuild);
+    let head = out.index.expect("the spliced index");
+    assert!(head.view().id_of("@grpc//:health").is_some());
+    assert_eq!(leaves_of(&head), leaves_of(&base), "carried, not re-derived");
+
+    let r = run_leaves(&head, &q, edit("third_party/tsl/tsl/platform/x.cc"));
+    assert_eq!(r.stats.consumer_leaves_seeded, 1);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+}
+
+/// A consumer with no map is the answer before the map: every leaf seeded.
+/// That is what an index from before format 14 carries, and what a leaf
+/// question Bazel would not answer leaves behind.
+#[test]
+fn a_consumer_with_no_leaf_map_seeds_every_leaf() {
+    let dir = tree2();
+    let root = dir.path();
+    let q = leaf_scanning(root, LEAF_UNIVERSE, &[]);
+    let index = engine().full_build_with("c0", &q).unwrap();
+    assert_eq!(leaves_of(&index), None);
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/platform/x.cc"));
+    assert_eq!(r.stats.repos_dirty_by_consumer, 1);
+    assert_eq!(r.stats.consumer_leaves_seeded, 0);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
 }

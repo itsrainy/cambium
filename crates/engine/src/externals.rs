@@ -1120,11 +1120,42 @@ pub fn repo_token_matches(token: &str, apparent: &str, canonical: &str) -> bool 
         .is_some_and(|last| last == apparent)
 }
 
+/// The leaves of consumers a leaf map narrowed (`Consumer::leaves`), for
+/// [`reach`] rule (1).
+///
+/// Per consumer, one `(known, seeded)` pair per moved indexed repository
+/// whose table names it: the leaves the map knows, and those of them whose
+/// recorded packages meet what moved. A leaf of the consumer is seeded if
+/// some pair seeds it or does not know it, so a leaf named after the map
+/// was derived is seeded whenever the repository moves.
+#[derive(Default, Debug)]
+pub struct LeafSeeds {
+    pub by_consumer: BTreeMap<String, Vec<KnownAndSeeded>>,
+}
+
+/// One moved repository's word on a consumer's leaves: the leaves its map
+/// knows, and those of them it seeds.
+pub type KnownAndSeeded = (BTreeSet<String>, BTreeSet<String>);
+
+impl LeafSeeds {
+    fn seeds(&self, consumer: &str, label: &str) -> bool {
+        self.by_consumer.get(consumer).is_some_and(|pairs| {
+            pairs
+                .iter()
+                .any(|(known, seeded)| seeded.contains(label) || !known.contains(label))
+        })
+    }
+}
+
 /// Everything a set of dirty repositories reaches in the base index.
 #[derive(Default, Debug)]
 pub struct RepoReach {
     /// External leaf nodes to seed the direct set with.
     pub nodes: Vec<u32>,
+    /// Of [`RepoReach::nodes`], how many were seeded through a consumer's
+    /// leaf map ([`LeafSeeds`]) rather than because their repository is
+    /// dirty.
+    pub consumer_leaves: usize,
     /// Packages whose `.bzl` closure loads from one of the repositories.
     pub packages: BTreeSet<String>,
     /// How many of [`RepoReach::packages`] each repository accounted for.
@@ -1146,14 +1177,18 @@ pub struct RepoReach {
 /// a main-repo source edit does; re-querying every package of the repository
 /// for them is the cost that put envoy over `limits.max_dirty_packages` on 35
 /// of 300 steps in box run B, for an answer the file edge already had.
+/// `seeds` are the leaves of consumers whose leaf map narrowed them
+/// (`run::dirty_consumers`), which rule (1) seeds as well without the
+/// consumer being dirty.
 pub fn reach(
     base: IndexRef<'_>,
     repos: &BTreeSet<String>,
     load_repos: &BTreeSet<String>,
     settled: &BTreeSet<String>,
+    seeds: &LeafSeeds,
 ) -> RepoReach {
     let mut out = RepoReach::default();
-    if repos.is_empty() {
+    if repos.is_empty() && seeds.by_consumer.is_empty() {
         return out;
     }
     // Rules (0) and (1) act on what is dirty and not settled; rule (2) keeps
@@ -1211,7 +1246,16 @@ pub fn reach(
         if base.is_tombstone(id) {
             continue;
         }
-        if !label_repo(label).is_some_and(matches) {
+        let Some(token) = label_repo(label) else {
+            continue;
+        };
+        // A label of a dirty repository, or a leaf a consumer's map seeds.
+        let by_map = !matches(token)
+            && seeds.by_consumer.keys().any(|c| {
+                repo_token_matches(token, c, canon.get(c.as_str()).copied().unwrap_or(""))
+                    && seeds.seeds(c, label)
+            });
+        if !matches(token) && !by_map {
             continue;
         }
         // Phase 5 stage 3. A label whose package rule (0) re-queries is not
@@ -1233,6 +1277,7 @@ pub fn reach(
         {
             continue;
         }
+        out.consumer_leaves += usize::from(by_map);
         out.nodes.push(id);
     }
     out.nodes.sort_unstable();

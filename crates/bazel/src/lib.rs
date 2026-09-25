@@ -6,7 +6,7 @@
 //! unflattened selects, implicit deps left in — and are the only Bazel surface
 //! cambium depends on.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -202,6 +202,116 @@ fn package_of_repo(line: &str, repo: &str) -> Option<String> {
     })
 }
 
+
+/// `set("a" "b" ...)`, each label quoted: `@grpc//:grpc++` is a syntax
+/// error bare, since `+` is the union operator.
+fn quoted_set(labels: &[String]) -> String {
+    let inner = labels
+        .iter()
+        .map(|l| format!("\"{l}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("set({inner})")
+}
+
+/// The consumer table's second query: what the bridge rules depend on inside
+/// `@repo`, transitively.
+///
+/// It was `deps(set(bridge), 1)` once, which records the packages a bridge
+/// rule names and not the ones those name in turn: 36 packages of
+/// `@envoy_api` at envoy's pin against a transitive closure of 48, the
+/// twelve missing including `envoy/type/metadata/v3` and
+/// `envoy/annotations`, which `envoy/config/route/v3` depends on. An edit
+/// confined to one of those skipped the consumer.
+fn consumed_expr(repo: &str, bridge: &[String]) -> String {
+    format!("deps({}) intersect @{repo}//...:*", quoted_set(bridge))
+}
+
+/// A label's identity up to how its repository is spelled: the apparent
+/// name ([`apparent_of_canonical`]) and what follows `//`. `@@grpc+//:grpc++`
+/// and `@grpc//:grpc++` are one key; a main-repo label keeps an empty name.
+fn spelling_key(label: &str) -> Option<(String, &str)> {
+    let rest = label.strip_prefix('@').map_or(label, |r| r.strip_prefix('@').unwrap_or(r));
+    let (repo, target) = rest.split_once("//")?;
+    Some((apparent_of_canonical(repo), target))
+}
+
+/// Reads [`Bazel::leaf_reaches`]'s graph: per leaf, the packages of `repo`
+/// among the nodes reachable from it.
+///
+/// `--output=graph --nograph:factored` prints one node per line (`"a"`), one
+/// edge per line (`"a" -> "b"`), and for a `select` edge a following
+/// `[label="..."]` line, which carries no quoted node at its start and is
+/// skipped. The leaves are matched to the graph's nodes by
+/// [`spelling_key`], and the answer is keyed by the caller's spelling; a
+/// leaf no node matches is left out.
+fn parse_leaf_reach(
+    graph: &str,
+    repo: &str,
+    leaves: &[String],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut ids: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut names: Vec<&str> = Vec::new();
+    let mut edges: Vec<Vec<usize>> = Vec::new();
+    for line in graph.lines() {
+        let line = line.trim();
+        let Some(body) = line.strip_prefix('"') else {
+            continue;
+        };
+        let Some((from, rest)) = body.split_once('"') else {
+            continue;
+        };
+        let from_id = *ids.entry(from).or_insert_with(|| {
+            names.push(from);
+            edges.push(Vec::new());
+            names.len() - 1
+        });
+        let Some(to) = rest
+            .trim_start()
+            .strip_prefix("->")
+            .map(str::trim_start)
+            .and_then(|r| r.strip_prefix('"'))
+            .and_then(|r| r.split_once('"'))
+            .map(|(to, _)| to)
+        else {
+            continue;
+        };
+        let to_id = *ids.entry(to).or_insert_with(|| {
+            names.push(to);
+            edges.push(Vec::new());
+            names.len() - 1
+        });
+        edges[from_id].push(to_id);
+    }
+    let by_key: BTreeMap<(String, &str), usize> = names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| spelling_key(n).map(|k| (k, i)))
+        .collect();
+    let mut out = BTreeMap::new();
+    for leaf in leaves {
+        let Some(&start) = spelling_key(leaf).and_then(|k| by_key.get(&k)) else {
+            continue;
+        };
+        let mut seen = vec![false; names.len()];
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut packages = BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            if let Some(p) = package_of_repo(names[n], repo) {
+                packages.insert(p);
+            }
+            for &m in &edges[n] {
+                if !seen[m] {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        out.insert(leaf.clone(), packages);
+    }
+    out
+}
 
 /// The package named by one Bazel load-error line, if it is one.
 ///
@@ -958,12 +1068,12 @@ impl Bazel {
     /// `kind(rule, rdeps(//..., @repo//...:*)) except //... except
     /// @repo//...:*`. On envoy at its pin that is 101 rules, all of `@grpc`:
     /// its xDS client is built from the API's protos. The second is what the
-    /// bridge depends on directly inside `@repo`, `deps(set(bridge), 1)
-    /// intersect @repo//...:*`, whose packages say which of the repository's
-    /// packages a consumer cares about. The packages are pooled across
-    /// consumers rather than split per consumer (one query, not one per
-    /// consumer), which is exact when there is one consumer and wide when
-    /// there are several.
+    /// bridge depends on inside `@repo`, transitively ([`consumed_expr`]),
+    /// whose packages say which of the repository's packages a consumer
+    /// cares about. The packages are pooled across consumers rather than
+    /// split per consumer (one query, not one per consumer), which is exact
+    /// when there is one consumer and wide when there are several; which
+    /// leaf of a consumer reaches what is [`Bazel::leaf_reaches`].
     ///
     /// Bazel prints canonical names (`@@grpc+//...`); the consumer is recorded
     /// by its apparent name, which is how the index names repositories and
@@ -1010,12 +1120,7 @@ impl Bazel {
                 consumers.insert(apparent_of_canonical(name));
             }
         }
-        let set = bridge
-            .iter()
-            .map(|l| format!("\"{l}\""))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let used = run(format!("deps(set({set}), 1) intersect @{repo}//...:*")).unwrap_or_default();
+        let used = run(consumed_expr(repo, &bridge)).unwrap_or_default();
         let packages: BTreeSet<String> = used
             .iter()
             .filter_map(|l| package_of_repo(l, repo))
@@ -1026,6 +1131,71 @@ impl Bazel {
                 .map(|c| (c, packages.clone()))
                 .collect(),
         )
+    }
+
+    /// Which packages of `repo` each of these leaves reaches through its
+    /// transitive deps: leaf -> packages, a leaf that reaches nothing of the
+    /// repository with an empty set.
+    ///
+    /// The leaves are the labels of a consumer repository that an index
+    /// holds, spelled as the index spells them (`@grpc//:grpc++`). One query
+    /// answers all of them, `set(leaves) + allpaths(set(leaves),
+    /// @repo//...:*)` with `--output=graph`: every node on a path from a
+    /// leaf into the repository, with the edges among them, which is enough
+    /// to walk each leaf forward on its own and so to attribute per leaf what
+    /// `deps(set(leaves)) intersect @repo//...:*` would have pooled. The
+    /// `set(leaves)` term puts every leaf Bazel resolved in the answer even
+    /// when no path leaves it, which is what tells "reaches nothing" from
+    /// "Bazel did not know the label". No `kind()` filter: a path through a
+    /// generated file is a path.
+    ///
+    /// A leaf missing from the answer is missing from the map, which the
+    /// caller reads as not known; the whole answer is `None` when the query
+    /// will not run. Exit 3 (`--keep_going` over a closure with load errors,
+    /// which envoy's `@grpc` has on every platform through `@openssl`) is an
+    /// answer, as it is for [`Bazel::consumer_bridge`].
+    pub fn leaf_reaches(
+        &self,
+        repo: &str,
+        leaves: &[String],
+    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+        if leaves.is_empty() {
+            return Some(BTreeMap::new());
+        }
+        let set = quoted_set(leaves);
+        let expr = format!("{set} + allpaths({set}, @{repo}//...:*)");
+        let mut cmd = self.command("query");
+        cmd.arg(&expr)
+            .arg("--output=graph")
+            .arg("--nograph:factored")
+            .arg("--graph:node_limit=-1")
+            .arg("--keep_going");
+        for f in HYGIENE {
+            cmd.arg(f);
+        }
+        let started = std::time::Instant::now();
+        let o = match self.runner.output(&mut cmd) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(error = %e, repo, "the leaf query could not run");
+                return None;
+            }
+        };
+        if !o.exit.success && o.exit.code != Some(3) {
+            tracing::debug!(status = %o.exit, repo, leaves = leaves.len(), "the leaf query failed");
+            return None;
+        }
+        let out = parse_leaf_reach(&String::from_utf8_lossy(&o.stdout), repo, leaves);
+        tracing::debug!(
+            status = %o.exit,
+            repo,
+            leaves = leaves.len(),
+            resolved = out.len(),
+            reaching = out.values().filter(|p| !p.is_empty()).count(),
+            ms = started.elapsed().as_millis() as u64,
+            "leaf query answered"
+        );
+        Some(out)
     }
 
     /// `bazel query '//external:*' --output=build`, which prints every
@@ -1731,7 +1901,90 @@ pub struct RepoProbe {
 
 #[cfg(test)]
 mod consumer_tests {
-    use super::{apparent_of_canonical, label_repo_token};
+    use super::{apparent_of_canonical, consumed_expr, label_repo_token, parse_leaf_reach};
+    use std::collections::BTreeSet;
+
+    fn set(ps: &[&str]) -> BTreeSet<String> {
+        ps.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// The table's packages are the bridge's transitive closure inside the
+    /// repository. The depth-1 query recorded 36 `@envoy_api` packages at
+    /// envoy's pin against a closure of 48, and an edit to one of the twelve
+    /// (`envoy/type/metadata/v3`, under `envoy/config/route/v3`) skipped the
+    /// consumer.
+    #[test]
+    fn the_consumed_packages_are_asked_for_transitively() {
+        let bridge = vec![
+            "@@grpc+//src/core:grpc_xds_client".to_string(),
+            "@@grpc+//:grpc++".to_string(),
+        ];
+        assert_eq!(
+            consumed_expr("envoy_api", &bridge),
+            "deps(set(\"@@grpc+//src/core:grpc_xds_client\" \"@@grpc+//:grpc++\")) \
+             intersect @envoy_api//...:*"
+        );
+        assert!(!consumed_expr("envoy_api", &bridge).contains(", 1)"));
+    }
+
+    /// A graph as Bazel 8.7 prints it for `set(leaves) + allpaths(set(leaves),
+    /// @envoy_api//...:*)`, cut down: one leaf with a path in, through two
+    /// hops of `@grpc` and a `select` edge, into one API package that depends
+    /// on a second; one leaf with no path (in the answer only through
+    /// `set(leaves)`); and one leaf Bazel never printed.
+    const GRAPH: &str = r#"digraph mygraph {
+  node [shape=box];
+  "@grpc//src/proto/grpc/health/v1:health_cc_proto"
+  "@grpc//:grpc++"
+  "@grpc//:grpc++" -> "@grpc//:grpc++_xds_client"
+  [label="//conditions:default"];
+  "@grpc//:grpc++_xds_client" -> "@grpc//src/core:grpc_xds_client"
+  "@grpc//src/core:grpc_xds_client" -> "@envoy_api//envoy/extensions/filters/http/fault/v3:pkg"
+  "@envoy_api//envoy/extensions/filters/http/fault/v3:pkg" -> "@envoy_api//envoy/type/metadata/v3:pkg"
+  "@envoy_api//envoy/type/metadata/v3:pkg" -> "@envoy_api//envoy/type/metadata/v3:metadata.proto"
+  "@envoy_api//envoy/type/metadata/v3:metadata.proto"
+}
+"#;
+
+    #[test]
+    fn each_leaf_is_walked_on_its_own_through_the_graph() {
+        let leaves = vec![
+            "@grpc//:grpc++".to_string(),
+            "@grpc//src/proto/grpc/health/v1:health_cc_proto".to_string(),
+            "@grpc//src/compiler:grpc_cpp_plugin".to_string(),
+        ];
+        let r = parse_leaf_reach(GRAPH, "envoy_api", &leaves);
+        // Transitive, and packages rather than labels.
+        assert_eq!(
+            r["@grpc//:grpc++"],
+            set(&["envoy/extensions/filters/http/fault/v3", "envoy/type/metadata/v3"])
+        );
+        // Resolved, no path: known to reach nothing.
+        assert_eq!(r["@grpc//src/proto/grpc/health/v1:health_cc_proto"], set(&[]));
+        // Never printed: not known, and so not in the map at all.
+        assert!(!r.contains_key("@grpc//src/compiler:grpc_cpp_plugin"), "{r:?}");
+        assert_eq!(r.len(), 2);
+    }
+
+    /// Bazel may print canonical names where the index spells apparent ones;
+    /// the answer is keyed by the caller's spelling either way, and the
+    /// repository's packages are read in either spelling too.
+    #[test]
+    fn a_leaf_is_matched_whichever_way_the_graph_spells_its_repository() {
+        let canonical = GRAPH.replace("@grpc//", "@@grpc+//").replace("@envoy_api//", "@@envoy_api+//");
+        for g in [GRAPH.to_string(), canonical] {
+            for leaf in ["@grpc//:grpc++", "@@grpc+//:grpc++"] {
+                let r = parse_leaf_reach(&g, "envoy_api", &[leaf.to_string()]);
+                assert_eq!(r.len(), 1, "{leaf}: {r:?}");
+                assert_eq!(r[leaf].len(), 2, "{leaf}: {r:?}");
+            }
+        }
+        // Another repository's packages are not this one's.
+        let r = parse_leaf_reach(GRAPH, "envoy_api_other", &["@grpc//:grpc++".to_string()]);
+        assert_eq!(r["@grpc//:grpc++"], set(&[]));
+        // Nothing printed, nothing known.
+        assert!(parse_leaf_reach("", "envoy_api", &["@grpc//:grpc++".to_string()]).is_empty());
+    }
 
     #[test]
     fn a_labels_repository_token_is_read_in_either_spelling() {

@@ -143,12 +143,26 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// `@envoy_api` did not exist and box run C measured recall 0.21 on such a
 /// step.
 ///
+/// Format 14 added the consumer leaf map (`repo_consumer_leaf_*`): per
+/// consumer of an indexed repository, each of the consumer's leaves this
+/// index holds and the packages of the indexed repository its transitive
+/// deps reach, asked of Bazel at cold build and again on an overflow's
+/// re-query. A change then seeds only the leaves whose closure it can have
+/// moved, rather than every leaf of the consumer: on envoy the step whose
+/// oracle is 649 labels answered 5035, because `@grpc//:grpc++` is the one
+/// leaf of five that reaches `@envoy_api` and all five were seeded. The same
+/// bump made the table's packages transitive, which the depth-1 query behind
+/// format 13 was not (36 packages recorded at envoy's pin against a closure
+/// of 48). Every index written at format 13, in the store, in a
+/// `bench-precheck/` pull or in a results directory, is unreadable to an
+/// engine at this version and is rebuilt rather than read.
+///
 /// Compression is outside this version. A file holds either the layout
 /// verbatim or one zstd frame containing it (see the module docs); this
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means

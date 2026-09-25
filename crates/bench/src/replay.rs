@@ -825,7 +825,14 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
     // or a changed file of its own.
     let routes = package_routes(base, &ext.load_repos);
     let reached: BTreeSet<String> = if !dirty.global && !ext.repos.is_empty() {
-        externals::reach(base, &ext.repos, &ext.load_repos, &stage.settled).packages
+        externals::reach(
+            base,
+            &ext.repos,
+            &ext.load_repos,
+            &stage.settled,
+            &externals::LeafSeeds::default(),
+        )
+        .packages
     } else {
         BTreeSet::new()
     };

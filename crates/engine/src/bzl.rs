@@ -36,7 +36,7 @@ pub(crate) struct InTreeRepos<'a> {
     pub indexed: &'a [String],
     /// The external-consumer table to carry: the base index's on a splice,
     /// empty at cold build, where the caller fills it from Bazel after.
-    pub consumers: &'a BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    pub consumers: &'a BTreeMap<String, BTreeMap<String, cambium_index::externals::Consumer>>,
 }
 
 /// Recomputes the static `.bzl` load closure for the packages a run touched.

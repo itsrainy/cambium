@@ -49,7 +49,7 @@ pub use data::{
 pub use externals::{
     build_repo_inputs, bzlmod_live, diff_module, dir_candidates, is_autoload_provider,
     is_toolchain_module, read_live_module_facts, read_module_facts, read_module_facts_in,
-    repo_setting_inputs, scan_module, Autoload, DirCandidate, Mode, ModuleChange, ModuleFacts,
+    repo_setting_inputs, scan_module, Autoload, Consumer, DirCandidate, Mode, ModuleChange, ModuleFacts,
     PathMap, Pattern, RepoInputs, RepoSetting,
 };
 pub use format::{

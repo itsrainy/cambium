@@ -339,6 +339,19 @@ pub struct IndexData {
     pub repo_consumer_offsets: Vec<u32>,
     pub repo_consumer_ranges: Vec<u32>,
 
+    // ---- which leaves of each consumer reach what (format 14) ----
+    //
+    // A string table of two kinds of entry, cut into one run per indexed
+    // repo id like the table above: `consumer` alone says the consumer's
+    // leaf map is known (it may name no leaf at all), and
+    // `consumer\0leaf\0pkg\0pkg...` names one leaf of it and the packages of
+    // the indexed repository its transitive deps reach. A consumer with no
+    // `consumer` entry has no map, which is what every index before this
+    // format reads as. See `externals::Consumer::leaves`.
+    pub repo_consumer_leaf_bytes: Vec<u8>,
+    pub repo_consumer_leaf_offsets: Vec<u32>,
+    pub repo_consumer_leaf_ranges: Vec<u32>,
+
     // ---- repository boundaries in the main repository's tree (format 9) ----
     //
     // Directories below the root that carry a `WORKSPACE`, `WORKSPACE.bazel`,
@@ -473,6 +486,12 @@ pub struct IndexRef<'a> {
     /// Repo id -> its run in [`IndexRef::repo_consumers`]; length
     /// `num_repos + 1`.
     pub repo_consumer_ranges: &'a [u32],
+    /// `consumer` and `consumer\0leaf\0pkg...` entries, grouped by the
+    /// indexed repo's id; see [`IndexData::repo_consumer_leaf_bytes`].
+    pub repo_consumer_leaves: StrTabRef<'a>,
+    /// Repo id -> its run in [`IndexRef::repo_consumer_leaves`]; length
+    /// `num_repos + 1`.
+    pub repo_consumer_leaf_ranges: &'a [u32],
     /// Directories of the main repository's tree that are Bazel repositories
     /// of their own, sorted, without a trailing slash.
     pub repo_boundaries: StrTabRef<'a>,
@@ -505,6 +524,7 @@ impl<'a> IndexRef<'a> {
             ("repo_input_patterns", self.repo_input_patterns),
             ("repo_maps", self.repo_maps),
             ("repo_consumers", self.repo_consumers),
+            ("repo_consumer_leaves", self.repo_consumer_leaves),
             ("repo_boundaries", self.repo_boundaries),
             ("sky_roots", self.sky.roots),
             ("sky_keys", self.sky.keys),
@@ -857,21 +877,49 @@ impl<'a> IndexRef<'a> {
     }
 
     /// The external repositories whose rules depend on this (indexed)
-    /// repository's targets, each with the packages of it they depend on.
-    /// Empty for a repository nothing outside `//...` consumes, and for
-    /// every index written before format 13.
-    pub fn repo_consumers(&self, repo: u32) -> Vec<(String, std::collections::BTreeSet<String>)> {
+    /// repository's targets, each with the packages of it they depend on and,
+    /// where the index records one, which of its leaves reach which of those
+    /// packages. Empty for a repository nothing outside `//...` consumes, and
+    /// for every index written before format 13; every leaf map is `None` in
+    /// an index written before format 14.
+    pub fn repo_consumers(&self, repo: u32) -> Vec<(String, crate::externals::Consumer)> {
+        use std::collections::{BTreeMap, BTreeSet};
         let i = repo as usize;
         if i + 1 >= self.repo_consumer_ranges.len() {
             return Vec::new();
         }
-        (self.repo_consumer_ranges[i]..self.repo_consumer_ranges[i + 1])
+        let mut out: Vec<(String, crate::externals::Consumer)> = (self.repo_consumer_ranges[i]
+            ..self.repo_consumer_ranges[i + 1])
             .filter_map(|e| {
                 let mut parts = self.repo_consumers.get(e).split('\0');
                 let consumer = parts.next()?.to_string();
-                Some((consumer, parts.map(str::to_string).collect()))
+                Some((
+                    consumer,
+                    crate::externals::Consumer::of_packages(parts.map(str::to_string).collect()),
+                ))
             })
-            .collect()
+            .collect();
+        if i + 1 >= self.repo_consumer_leaf_ranges.len() {
+            return out;
+        }
+        let mut leaves: BTreeMap<&str, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+        for e in self.repo_consumer_leaf_ranges[i]..self.repo_consumer_leaf_ranges[i + 1] {
+            let entry = self.repo_consumer_leaves.get(e);
+            let mut parts = entry.split('\0');
+            let Some(consumer) = parts.next() else {
+                continue;
+            };
+            let map = leaves.entry(consumer).or_default();
+            if let Some(leaf) = parts.next() {
+                map.entry(leaf.to_string())
+                    .or_default()
+                    .extend(parts.map(str::to_string));
+            }
+        }
+        for (c, entry) in &mut out {
+            entry.leaves = leaves.remove(c.as_str());
+        }
+        out
     }
 
     /// The directories of this tree that are Bazel repositories of their own,
@@ -1073,6 +1121,11 @@ macro_rules! index_view {
                 offsets: $u32s(&$d.repo_consumer_offsets),
             },
             repo_consumer_ranges: $u32s(&$d.repo_consumer_ranges),
+            repo_consumer_leaves: StrTabRef {
+                bytes: &$d.repo_consumer_leaf_bytes,
+                offsets: $u32s(&$d.repo_consumer_leaf_offsets),
+            },
+            repo_consumer_leaf_ranges: $u32s(&$d.repo_consumer_leaf_ranges),
             repo_boundaries: StrTabRef {
                 bytes: &$d.repo_boundary_bytes,
                 offsets: $u32s(&$d.repo_boundary_offsets),

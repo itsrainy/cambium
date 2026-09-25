@@ -829,3 +829,69 @@ fn a_boundary_is_traversed_when_the_universe_returned_a_package_under_it() {
     // directory name that merely shares a prefix is not under the boundary.
     assert!(!bs[1].traversed);
 }
+
+/// The consumer table's leaf map (format 14) survives the file and a splice,
+/// and keeps apart the three things a consumer can say about its leaves: no
+/// map at all (every leaf seeded), a map naming no leaf, and a map whose
+/// leaves reach nothing or reach the repository's root package.
+#[test]
+fn the_consumer_leaf_map_round_trips_and_survives_a_splice() {
+    use cambium_index::externals::Consumer;
+    use std::collections::{BTreeMap, BTreeSet};
+    let set = |ps: &[&str]| -> BTreeSet<String> { ps.iter().map(|p| p.to_string()).collect() };
+    let mut closure = BzlClosure::default();
+    closure.inputs.repos = set(&["envoy_api", "tsl", "unconsumed"]);
+    let grpc = Consumer {
+        packages: set(&["envoy/admin/v3", "envoy/type/metadata/v3"]),
+        leaves: Some(
+            [
+                ("@grpc//:grpc++".to_string(), set(&["envoy/admin/v3", ""])),
+                ("@grpc//src/proto/grpc/health/v1:health_cc_proto".to_string(), set(&[])),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    };
+    let quiche = Consumer::of_packages(set(&["envoy/admin/v3"]));
+    let bare = Consumer {
+        packages: set(&["tsl/platform"]),
+        leaves: Some(BTreeMap::new()),
+    };
+    closure.inputs.consumers.insert(
+        "envoy_api".into(),
+        [("grpc".to_string(), grpc.clone()), ("quiche".to_string(), quiche.clone())]
+            .into_iter()
+            .collect(),
+    );
+    closure
+        .inputs
+        .consumers
+        .insert("tsl".into(), [("xla".to_string(), bare.clone())].into_iter().collect());
+    let mut b = IndexBuilder::new(new_lineage());
+    b.apply_packages(&[pkg("a", vec![rule("a", "a", &[], &[])])]);
+    b.set_bzl_closure(closure);
+    let d = b.finish("deadbeef");
+
+    let check = |v: IndexRef<'_>| {
+        let id = |n: &str| (0..v.num_repos()).find(|&r| v.repo_name(r) == n).unwrap();
+        assert_eq!(
+            v.repo_consumers(id("envoy_api")),
+            vec![("grpc".to_string(), grpc.clone()), ("quiche".to_string(), quiche.clone())]
+        );
+        assert_eq!(v.repo_consumers(id("tsl")), vec![("xla".to_string(), bare.clone())]);
+        assert!(v.repo_consumers(id("unconsumed")).is_empty());
+    };
+    check(d.view());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(index_file_name(&d.header.lineage, "deadbeef"));
+    format::write_index(&path, &d).unwrap();
+    let f = IndexFile::open(&path).unwrap();
+    check(f.view());
+
+    // A splice carries the table, leaf maps and all.
+    let mut b = IndexBuilder::from_view(f.view());
+    b.apply_packages(&[pkg("e", vec![rule("e", "e", &[], &[])])]);
+    check(b.finish("f00d").view());
+}

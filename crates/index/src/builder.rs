@@ -451,6 +451,11 @@ impl<'a> IndexBuilder<'a> {
         self.labels.get(id)
     }
 
+    /// Whether `id` names a node this index has retired.
+    pub fn is_tombstone(&self, id: u32) -> bool {
+        self.nodes.get(id).flags & flags::TOMBSTONE != 0
+    }
+
     /// Forward row of `id` in the base, or empty for a node this generation
     /// created.
     fn base_forward_row(&self, id: u32) -> &[u32] {
@@ -926,6 +931,9 @@ impl<'a> IndexBuilder<'a> {
             repo_consumer_bytes: bzl.repo_consumer_bytes,
             repo_consumer_offsets: bzl.repo_consumer_offsets,
             repo_consumer_ranges: bzl.repo_consumer_ranges,
+            repo_consumer_leaf_bytes: bzl.repo_consumer_leaf_bytes,
+            repo_consumer_leaf_offsets: bzl.repo_consumer_leaf_offsets,
+            repo_consumer_leaf_ranges: bzl.repo_consumer_leaf_ranges,
             repo_boundary_bytes,
             repo_boundary_offsets,
             repo_boundary_ignored,
@@ -991,6 +999,9 @@ struct BzlTables {
     repo_consumer_bytes: Vec<u8>,
     repo_consumer_offsets: Vec<u32>,
     repo_consumer_ranges: Vec<u32>,
+    repo_consumer_leaf_bytes: Vec<u8>,
+    repo_consumer_leaf_offsets: Vec<u32>,
+    repo_consumer_leaf_ranges: Vec<u32>,
 }
 
 impl BzlTables {
@@ -1014,6 +1025,8 @@ impl BzlTables {
             repo_map_ranges: vec![0],
             repo_consumer_offsets: vec![0],
             repo_consumer_ranges: vec![0],
+            repo_consumer_leaf_offsets: vec![0],
+            repo_consumer_leaf_ranges: vec![0],
             ..Default::default()
         }
     }
@@ -1158,19 +1171,39 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
         // The external consumers of this repository, one run per repo id in
         // the same order; empty for a repository nothing consumes.
         if let Some(consumers) = c.inputs.consumers.get(*n) {
-            for (consumer, pkgs) in consumers {
+            for (consumer, used) in consumers {
                 let mut entry = consumer.clone();
-                for p in pkgs {
+                for p in &used.packages {
                     entry.push('\0');
                     entry.push_str(p);
                 }
                 t.repo_consumer_bytes.extend_from_slice(entry.as_bytes());
                 t.repo_consumer_offsets
                     .push(t.repo_consumer_bytes.len() as u32);
+                // Its leaf map, when there is one: the bare name first, which
+                // is what says "known" for a map that names no leaf.
+                if let Some(leaves) = &used.leaves {
+                    t.repo_consumer_leaf_bytes
+                        .extend_from_slice(consumer.as_bytes());
+                    t.repo_consumer_leaf_offsets
+                        .push(t.repo_consumer_leaf_bytes.len() as u32);
+                    for (leaf, pkgs) in leaves {
+                        let mut entry = format!("{consumer}\0{leaf}");
+                        for p in pkgs {
+                            entry.push('\0');
+                            entry.push_str(p);
+                        }
+                        t.repo_consumer_leaf_bytes.extend_from_slice(entry.as_bytes());
+                        t.repo_consumer_leaf_offsets
+                            .push(t.repo_consumer_leaf_bytes.len() as u32);
+                    }
+                }
             }
         }
         t.repo_consumer_ranges
             .push(t.repo_consumer_offsets.len() as u32 - 1);
+        t.repo_consumer_leaf_ranges
+            .push(t.repo_consumer_leaf_offsets.len() as u32 - 1);
     }
     for (pat, repos) in &c.inputs.patterns {
         let mut row: Vec<u32> = repos.iter().filter_map(|r| repo_id(r)).collect();
