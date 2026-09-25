@@ -42,7 +42,7 @@ const VERSION: &str = concat!(
     name = "cambi",
     // `cambi 0.1.0 (7f2c666)`: the commit the binary was built from, so a
     // driver can refuse to run a tree the binary is not. The sha is stamped
-    // at build time by the bench crate's build.rs.
+    // at build time by this crate's build.rs, which says where it comes from.
     version = VERSION,
     about = "Incremental changed-target computation for large Bazel monorepos",
     long_about = "Computes the set of Bazel targets whose outputs could differ between two \

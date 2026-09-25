@@ -11,3 +11,5 @@ bench-precheck/
 .cambium-logs/
 # Benchmark result tarballs pulled off the box.
 bench-results*.tar.gz
+# Release tarballs from scripts/package-release.sh.
+/dist/

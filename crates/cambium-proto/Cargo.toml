@@ -3,7 +3,8 @@ name = "cambium-proto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# proto/build.proto is vendored from Bazel under its Apache-2.0 header.
+license = "MIT AND Apache-2.0"
 repository.workspace = true
 description = "blaze_query proto types and streamed_proto reader for cambium"
 

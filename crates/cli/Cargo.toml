@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "cambi, the cambium command line interface"
+readme = "../../README.md"
+keywords = ["bazel", "monorepo", "ci", "build", "incremental"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [[bin]]
 name = "cambi"

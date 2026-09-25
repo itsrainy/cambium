@@ -26,14 +26,18 @@ license = "MIT"
 repository = "https://github.com/itsrainy/cambium"
 
 [workspace.dependencies]
-cambium-index = { path = "crates/index" }
-cambium-proto = { path = "crates/cambium-proto" }
-cambium-bazel = { path = "crates/bazel" }
-cambium-diff = { path = "crates/diff" }
-cambium-classify = { path = "crates/classify" }
-cambium-engine = { path = "crates/engine" }
-cambium-ui = { path = "crates/ui" }
-cambium-synth = { path = "crates/synth" }
+# The crates cambi is built from carry a version as well as a path, because
+# crates.io refuses a path-only dependency. Keep it equal to
+# workspace.package.version. The bench and testkit crates are never
+# published (publish = false), so they stay path-only.
+cambium-index = { path = "crates/index", version = "0.1.0" }
+cambium-proto = { path = "crates/cambium-proto", version = "0.1.0" }
+cambium-bazel = { path = "crates/bazel", version = "0.1.0" }
+cambium-diff = { path = "crates/diff", version = "0.1.0" }
+cambium-classify = { path = "crates/classify", version = "0.1.0" }
+cambium-engine = { path = "crates/engine", version = "0.1.0" }
+cambium-ui = { path = "crates/ui", version = "0.1.0" }
+cambium-synth = { path = "crates/synth", version = "0.1.0" }
 cambium-bench = { path = "crates/bench" }
 # Test fixtures only: a dev-dependency of the crates whose `tests/` share them.
 cambium-testkit = { path = "crates/testkit" }
@@ -86,6 +90,14 @@ zstd = "0.13"
 debug = 1
 lto = "thin"
 codegen-units = 4
+
+# What scripts/package-release.sh builds for a release tarball: the release
+# profile without the line tables, stripped. On Linux `debug = 1` links the
+# DWARF into the binary itself, which a download does not need.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
 
 [profile.bench]
 debug = 1
