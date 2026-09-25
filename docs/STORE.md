@@ -278,8 +278,8 @@ runs in.
 ```toml
 [baseline.store]
 kind = "command"
-fetch_cmd = ["aws", "s3", "cp", "--quiet", "s3://my-bucket/cambium/{name}", "{path}"]
-push_cmd = ["aws", "s3", "cp", "--quiet", "{path}", "s3://my-bucket/cambium/{name}"]
+fetch_cmd = ["aws", "s3", "cp", "--only-show-errors", "s3://my-bucket/cambium/{name}", "{path}"]
+push_cmd = ["aws", "s3", "cp", "--only-show-errors", "{path}", "s3://my-bucket/cambium/{name}"]
 list_cmd = ["aws", "s3", "ls", "--recursive", "s3://my-bucket/cambium/"]
 not_found_exit = 1
 ```
@@ -295,8 +295,9 @@ list_cmd = ["gsutil", "ls", "-r", "gs://my-bucket/cambium/"]
 not_found_exit = 1
 ```
 
-`cambi init --store-s3` and `--store-gcs` write the same shape, without
-the quiet flags. Read
+`cambi init --store-s3` and `--store-gcs` write the same shape without
+`--only-show-errors` or `-q`: the tools' progress then goes to stdout,
+which `cambi` does not read, and their errors to stderr as above. Read
 [Misses and outages](#misses-and-outages) before relying on them in CI:
 with these templates an outage reads as a miss.
 
@@ -305,7 +306,21 @@ In practice:
 - **`fetch_cmd` must tolerate a missing object**: the ancestor walk asks for
   keys that do not exist, and a miss is an ordinary answer. A failed fetch
   that printed something on stderr is also reported as `CAMBI-W007`, with
-  that text, so a cold build caused by a failing fetch is not silent.
+  that text, once per run (the rest are logged at `--log warn`).
+- **Keep the tool's errors on stderr**, because that text is the only sign
+  a cold build came from a failing fetch. `aws s3 cp --quiet` prints nothing
+  at all when it fails (aws-cli attaches no result printer under
+  `--quiet`), so with it an outage is a cold build with nothing said, or
+  exit 4 under `--no-full-build` with only `CAMBI-E006`. Use
+  `--only-show-errors`, which hides the progress lines and keeps the
+  errors, as the templates above do. `gsutil -q` only lowers the log level
+  to warnings; the message it exits with still goes to stderr.
+- **A real miss stays quiet when the listing works**: a store that lists
+  is only asked for keys it listed. `aws s3 ls` exits 1 on a prefix that
+  holds nothing, though, so a store nobody has published to reads as one
+  that cannot list, and the blind fetches' `(404)` is said once as
+  `CAMBI-W007`: the same notice a `dir` store gives for a directory that
+  does not exist yet.
 - **`not_found_exit` names the exit status meaning "no such object"**. With
   it set, every other non-zero exit is a store error (`CAMBI-E010`, exit 5)
   and the run fails instead of quietly rebuilding; without it, any non-zero
@@ -343,9 +358,9 @@ each backend reads as which:
 
 | backend | miss (cold build, or exit 4) | outage (exit 5) |
 |---|---|---|
-| `dir` | the key's file is absent; the root directory does not exist (said once as `CAMBI-W007`: a store nobody has published to has no directory yet) | any other I/O failure on the root or a key, such as a file where a directory should be (`/dev/null/nope`) or a permission refused (`CAMBI-E011`) |
+| `dir` | the key's file is absent; the root directory does not exist (said once as `CAMBI-W007`: a store nobody has published to has no directory yet) | any other I/O failure on the root or a key, such as a file where a directory should be (`/dev/null/nope`), a permission refused, or a root that is a symlink to nothing, such as a cache mount that did not come up (`CAMBI-E011`) |
 | `http` | `404`; also `403`, because S3 and GCS answer `403` for a missing key to a caller that may not list (logged at `--log debug` only) | any other status, `5xx` and `401` included; a refused connection, a DNS failure, or 60 seconds without a byte (`CAMBI-E010`) |
-| `command` | the exit status `not_found_exit` names, or any non-zero exit when it is unset (`CAMBI-W007` when the command printed on stderr) | any other exit status or a signal when `not_found_exit` is set; a command that cannot be started (`CAMBI-E010`) |
+| `command` | the exit status `not_found_exit` names, or any non-zero exit when it is unset (`CAMBI-W007`, once per run, when the command printed on stderr; nothing when it printed nothing) | any other exit status or a signal when `not_found_exit` is set; a command that cannot be started (`CAMBI-E010`) |
 
 Two consequences for the shipped templates and for HTTP:
 
@@ -358,9 +373,10 @@ Two consequences for the shipped templates and for HTTP:
   give 1 as "one or more Amazon S3 transfer operations failed". gsutil's
   top level exits 1 for every exception it handles. With these templates an
   S3 or GCS outage, an expired credential or a wrong bucket reads as a
-  miss: `CAMBI-W007` carrying the tool's message, then a cold build, or
-  exit 4 under `--no-full-build`. Never exit 5, so a retry-on-5 loop never
-  fires.
+  miss: a cold build, or exit 4 under `--no-full-build`, never exit 5, so
+  a retry-on-5 loop never fires. What says so is `CAMBI-W007` carrying the
+  tool's message, and only while the template keeps errors on stderr: with
+  `aws s3 cp --quiet` the outage says nothing at all.
 - **An `http` credential that is wrong reads as a miss** when the server
   answers `403`, for the same reason: a `403` is what a missing key looks
   like to a reader that may not list.
@@ -377,13 +393,13 @@ kind = "command"
 fetch_cmd = ["sh", "-c", '''
 k="cambium/$1"
 if e=$(aws s3api head-object --bucket my-bucket --key "$k" 2>&1 >/dev/null); then
-  exec aws s3 cp --quiet "s3://my-bucket/$k" "$2"
+  exec aws s3 cp --only-show-errors "s3://my-bucket/$k" "$2"
 fi
 case $e in *"(404)"*) exit 3 ;; esac
 printf '%s\n' "$e" >&2
 exit 1
 ''', "sh", "{name}", "{path}"]
-push_cmd = ["aws", "s3", "cp", "--quiet", "{path}", "s3://my-bucket/cambium/{name}"]
+push_cmd = ["aws", "s3", "cp", "--only-show-errors", "{path}", "s3://my-bucket/cambium/{name}"]
 list_cmd = ["aws", "s3", "ls", "--recursive", "s3://my-bucket/cambium/"]
 not_found_exit = 3
 ```

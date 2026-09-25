@@ -240,8 +240,8 @@ store = { kind = "http", url = "https://indexes.example.com/cambium", headers = 
 # or, for S3, GCS or any CLI (the full templates are in docs/STORE.md)
 [baseline.store]
 kind = "command"
-fetch_cmd = ["aws", "s3", "cp", "--quiet", "s3://my-bucket/cambium/{name}", "{path}"]
-push_cmd = ["aws", "s3", "cp", "--quiet", "{path}", "s3://my-bucket/cambium/{name}"]
+fetch_cmd = ["aws", "s3", "cp", "--only-show-errors", "s3://my-bucket/cambium/{name}", "{path}"]
+push_cmd = ["aws", "s3", "cp", "--only-show-errors", "{path}", "s3://my-bucket/cambium/{name}"]
 list_cmd = ["aws", "s3", "ls", "--recursive", "s3://my-bucket/cambium/"]
 not_found_exit = 1
 ```
@@ -249,14 +249,19 @@ not_found_exit = 1
 - `dir`: a relative `path` is read from the workspace root, not the working
   directory, so `-C` reaches the same store. A directory that does not
   exist yet is an empty store (said once as `CAMBI-W007`), and the first
-  `--publish` creates it.
+  `--publish` creates it. A symlink to nothing is not: it reads as
+  `CAMBI-E011`, exit 5.
 - `http`: `GET` and `PUT` on `url` + `/` + key. `headers` are
   `Name: value` strings, used as written (no environment expansion). HTTP
   cannot list, so it only finds indexes a publisher wrote under the
   lineage-less keys: a publisher that can list writes those only with
   `baseline.lineage_less_copies = true`.
 - `command`: `{name}` and `{path}` substituted in each argument;
-  `not_found_exit` is the fetch exit status meaning "no such object".
+  `not_found_exit` is the fetch exit status meaning "no such object". A
+  failing fetch is reported from what the command prints on stderr, so keep
+  errors there: `aws s3 cp --quiet` prints nothing when it fails, and an
+  outage then reads as a miss with nothing said; `--only-show-errors`
+  hides the progress and keeps the errors.
 
 Other `[baseline]` keys: `max_ancestor_walk` (20), `retention_days` (30,
 what `cambi index gc` keeps), `cache_dir`, `compress_indexes` (true),
@@ -321,13 +326,13 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   | 2 | global invalidation; everything is affected |
   | 3 | Bazel failed |
   | 4 | no index available and `--no-full-build` was given |
-  | 5 | store unreachable |
+  | 5 | the store is there and could not be read |
 
   0-4 keep their numbers. 5 is new: a store that is there and cannot be
   read differs from one with no index; CI retries the first, builds for the
   second. A directory store whose directory does not exist is the second
   (it has never been published to); one whose path is a file, or sits
-  under one, or is refused, is the first. With the `aws s3 cp` and `gsutil
+  under one, or is refused, or is a symlink to nothing, is the first. With the `aws s3 cp` and `gsutil
   cp` templates an outage exits 1 like a miss, so it reads as the second;
   [docs/STORE.md](STORE.md#misses-and-outages) has the per-backend table
   and a fetch wrapper that tells them apart.
