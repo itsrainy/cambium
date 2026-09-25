@@ -338,7 +338,7 @@ impl Engine {
         for d in cfg.removed_key_diagnostics() {
             diagnostics.emit(d);
         }
-        let store = store::from_config(&cfg.baseline.store, &diagnostics);
+        let store = store::from_config(&cfg.baseline.store, bazel.workspace(), &diagnostics);
         let cache_dir = cfg
             .baseline
             .cache_dir

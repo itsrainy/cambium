@@ -372,8 +372,9 @@ fn unreachable_diagnostic(detail: &str) -> Diagnostic {
         format!("the index store could not be reached: {detail}"),
     )
     .with_help(
-        "check the path, URL or credentials in [baseline].store; until it answers, every \
-         run builds its own index from scratch",
+        "check the path, URL or credentials in [baseline].store; until it answers, a run \
+         either fails with exit 5 or, where the backend reads the failure as a miss, builds \
+         its own index from scratch (docs/STORE.md, \"Misses and outages\")",
     )
 }
 
@@ -1057,7 +1058,7 @@ pub fn collect(opts: &Options) -> Probes {
     // The store's own diagnostics (a `command` backend's failed fetch) go into
     // the store probe, not into a sink nobody drains.
     let sink = Diagnostics::new();
-    let backend = crate::store::from_config(&effective.baseline.store, &sink);
+    let backend = crate::store::from_config(&effective.baseline.store, &root, &sink);
     let mut store_probe = store(&effective, backend.as_deref());
     store_probe.diagnostics.extend(sink.drain());
 
