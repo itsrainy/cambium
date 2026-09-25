@@ -20,6 +20,25 @@
 //! base and at the compared commit (`git ls-tree`), the applied layer
 //! itself, and the two indexes' `error_packages`.
 //!
+//! # What the cold side is
+//!
+//! The cold index is built on a fresh Bazel server: the walk stops the
+//! checkout's server before it (`Runner::reference_build` in the walk
+//! driver), so its layer holds what a `//...:*` load at the compared commit
+//! evaluates and nothing else. It used to share the server that answered
+//! every walk step and every `rdeps` oracle query, and a dump prints every
+//! done node a server holds, so the reference carried rows the walk had left
+//! there and this module read them as the applied layer's shortfall. On
+//! envoy at `7ba51266` that was every one of the 306 unexplained rows
+//! (patches and build files deleted inside the window, `WORKSPACE` probes
+//! under directories absent at the pin, probes of packages deleted inside
+//! the window) and every one of the 13449 rows filed as boundary probes; on
+//! xla at `076fe93f` it was the 314 rows of `patch_file`, `build_file` and
+//! requirements-lock inputs that dependency traversals had fetched, plus two
+//! packages only a traversal reaches. No class below was written for those,
+//! and none should be: a leftover on the cold side is a fault in the
+//! reference, not a row to excuse.
+//!
 //! # Why a row can legitimately be missing
 //!
 //! A refresh dumps only what re-querying the dirty packages made Bazel
@@ -143,16 +162,26 @@ pub enum RowClass {
     /// compared commit. Extra: either index names its package as failed.
     LoadError,
     /// Missing: a `FILE` or `FILE_STATE` row for a workspace or build file
-    /// that does not exist at the compared commit. Bazel stats `WORKSPACE`,
-    /// `WORKSPACE.bazel`, `REPO.bazel` and `MODULE.bazel` in every package
-    /// directory to find repository boundaries, and `BUILD.bazel` beside
-    /// every `BUILD`; a cold dump carries those absent-file probes and a
-    /// refresh dump of the package does not. The file's later creation is a
-    /// `BUILD` the classifier names from the diff, or a boundary marker,
-    /// which is a default invalidator, so no change travels through the
-    /// missing row. envoy's lineage lost 13755 of them over 300 steps, every
-    /// one a `WORKSPACE` or `WORKSPACE.bazel` probe, and read them as
-    /// unexplained.
+    /// that does not exist at the compared commit, in a directory that does.
+    /// Under `--enable_workspace`, Bazel stats `WORKSPACE` and
+    /// `WORKSPACE.bazel` in every directory whose package it looks up, to
+    /// find local repository boundaries (with it off, Bazel 8.7.0's
+    /// `LocalRepositoryLookupFunction` returns before any stat); in either
+    /// mode it probes the `BUILD` file names in turn, so `BUILD.bazel` is
+    /// statted beside every `BUILD`. `REPO.bazel` and `MODULE.bazel` are in
+    /// the list as the other boundary markers. A cold dump carries those
+    /// absent-file probes for every directory `//...` visits and a refresh
+    /// dump only for the packages it re-queried. The file's later creation
+    /// is a `BUILD` the classifier names from the diff, or a boundary
+    /// marker, which is a default invalidator, so no change travels through
+    /// the missing row.
+    ///
+    /// The class is right for a WORKSPACE-mode subject at its own pin. It is
+    /// not what envoy's 13449 were: envoy's pin runs `--noenable_workspace`,
+    /// so a build there writes no `WORKSPACE` probe, and those rows (every
+    /// one a `WORKSPACE`, `WORKSPACE.bazel` or `WORKSPACE.bzlmod` row) came
+    /// from the walk's WORKSPACE-era steps, left on the server the reference
+    /// build used to share. See "What the cold side is" above.
     BoundaryProbe,
     /// Extra, for a path gone at the compared commit.
     DeletedInWindow,
