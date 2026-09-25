@@ -72,10 +72,12 @@ impl Args {
 
 /// An object-store backend as a command template.
 ///
-/// `aws s3 cp` and `gsutil cp` take the same shape and both exit 1 for a
-/// missing key, which `not_found_exit` records so that any *other* failure — an
-/// expired credential, a wrong bucket — is a store error rather than a silent
-/// miss that turns into a cold build.
+/// `aws s3 cp` and `gsutil cp` take the same shape, and both exit 1 for a
+/// missing key, which `not_found_exit` records so that an exit with any other
+/// status is a store error. Both also exit 1 for a refused credential or a
+/// refused connection, so with these templates an outage reads as a miss;
+/// docs/STORE.md ("Misses and outages") says so and gives a fetch wrapper
+/// that tells the two apart.
 fn command_store(scheme: &str, location: &str) -> StoreConfig {
     let base = format!("{scheme}://{}", location.trim_matches('/'));
     let tool = if scheme == "s3" {
@@ -152,7 +154,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         let mut cfg = cambium_engine::Config::default();
         cfg.baseline.store = store.clone();
         let sink = cambium_engine::Diagnostics::new();
-        let backend = cambium_engine::store::from_config(&cfg.baseline.store, &sink);
+        let backend = cambium_engine::store::from_config(
+            &cfg.baseline.store,
+            &workspace_root(&probes, ctx),
+            &sink,
+        );
         let sp = probe::store(&cfg, backend.as_deref());
         match sp.reachable {
             Some(false) => {

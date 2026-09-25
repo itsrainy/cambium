@@ -338,7 +338,7 @@ impl Engine {
         for d in cfg.removed_key_diagnostics() {
             diagnostics.emit(d);
         }
-        let store = store::from_config(&cfg.baseline.store, &diagnostics);
+        let store = store::from_config(&cfg.baseline.store, bazel.workspace(), &diagnostics);
         let cache_dir = cfg
             .baseline
             .cache_dir
@@ -592,6 +592,7 @@ impl Engine {
         self.store.as_deref().map(|s| {
             BaselineCache::new(s, &self.cache_dir, self.cfg.hash())
                 .with_diagnostics(self.diagnostics.clone())
+                .with_lineage_less_copies(self.cfg.baseline.lineage_less_copies)
         })
     }
 

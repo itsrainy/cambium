@@ -26,6 +26,9 @@ pub struct BaselineCache<'a> {
     /// Lineages (hex) of the indexes a fetch refused for their config hash,
     /// so the lineage probe can name them without reading the W003 text.
     refused: std::cell::RefCell<Vec<String>>,
+    /// Write the lineage-less keys on publish even to a store that can list
+    /// (`baseline.lineage_less_copies`).
+    lineage_less_copies: bool,
 }
 
 impl<'a> BaselineCache<'a> {
@@ -36,7 +39,16 @@ impl<'a> BaselineCache<'a> {
             config_hash,
             diags: crate::diag::Diagnostics::new(),
             refused: std::cell::RefCell::new(Vec::new()),
+            lineage_less_copies: false,
         }
+    }
+
+    /// Also writes `indexes/by-tree/<tree>.bin` and
+    /// `commits/by-commit/<sha>` when the store can list, for readers of the
+    /// same bytes that cannot (`baseline.lineage_less_copies`).
+    pub fn with_lineage_less_copies(mut self, on: bool) -> Self {
+        self.lineage_less_copies = on;
+        self
     }
 
     /// Reports into the engine's sink rather than into a buffer nobody reads.
@@ -75,7 +87,16 @@ impl<'a> BaselineCache<'a> {
             suffixes.push(format!("/{commit}.bin"));
         }
         suffixes.push(format!("-{commit}.bin"));
-        if let Ok(names) = self.store.list() {
+        // A backend that cannot enumerate falls back to the blind keys below.
+        // An io failure is not that: it is a store that is there and cannot
+        // be read (a directory store whose root is a file, or refused), which
+        // is exit 5, not a walk over keys that cannot be there either.
+        let listing = match self.store.list() {
+            Ok(names) => Some(names),
+            Err(e @ crate::store::StoreError::Io { .. }) => return Err(e.into()),
+            Err(_) => None,
+        };
+        if let Some(names) = listing {
             // Several lineages can hold this tree: every `baseline build`
             // mints one, and a config change (or a rule-hash version bump)
             // leaves the old lineage's blobs behind. Take the first one built
@@ -189,8 +210,9 @@ impl<'a> BaselineCache<'a> {
 
     /// Publishes an index under `indexes/<lineage>/<tree>.bin`, with a
     /// `commits/<lineage>/<sha>` pointer naming the tree, plus lineage-less
-    /// copies of both when the store cannot be listed. Returns every key
-    /// written.
+    /// copies of both when the store cannot be listed or
+    /// [`with_lineage_less_copies`](Self::with_lineage_less_copies) asks for
+    /// them. Returns every key written.
     ///
     /// Idempotent: the payload is a function of the graph, so republishing the
     /// same tree rewrites identical bytes and concurrent publishers cannot
@@ -204,9 +226,13 @@ impl<'a> BaselineCache<'a> {
         commit: &str,
         tree: &str,
     ) -> Result<Vec<String>> {
-        let listable = self.store.list().is_ok();
+        // The lineage-less copies go wherever a reader may not be able to
+        // list: always when this store cannot, and on request when it can but
+        // a reader in front of the same bytes cannot (plain HTTP over the
+        // bucket an `aws s3` publisher writes).
+        let lineage_less = self.lineage_less_copies || !self.store.listable();
         let mut names = vec![format::index_key(lineage, tree)];
-        if !listable {
+        if lineage_less {
             names.push(tree_addressed_key(tree));
         }
         for n in &names {
@@ -220,7 +246,7 @@ impl<'a> BaselineCache<'a> {
             std::fs::write(&pointer_file, format!("{tree}\n"))
                 .map_err(EngineError::io_at(&pointer_file))?;
             let mut pointers = vec![format::commit_pointer_key(lineage, commit)];
-            if !listable {
+            if lineage_less {
                 pointers.push(commit_addressed_pointer(commit));
             }
             let published = pointers
@@ -365,6 +391,69 @@ mod tests {
             .unwrap();
         let got = c.fetch("sha1", "tree1").unwrap().expect("found");
         assert_eq!(IndexFile::open(&got).unwrap().view().lineage, [3; 16]);
+    }
+
+    #[test]
+    fn a_listable_publisher_writes_lineage_less_copies_when_asked_so_a_blind_reader_finds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let idx = index("sha1", [2; 16], HASH);
+        let path = write(dir.path(), &idx);
+
+        // Off: the listable publisher writes lineage keys only, and a reader
+        // that cannot list (plain HTTP over the same bytes) finds nothing.
+        let writer = DirStore::new(root.clone());
+        BaselineCache::new(&writer, &dir.path().join("w"), HASH)
+            .publish(&path, &[2; 16], "sha1", "tree1")
+            .unwrap();
+        let reader = Unlistable(DirStore::new(root.clone()));
+        let r1 = dir.path().join("r1");
+        let blind = BaselineCache::new(&reader, &r1, HASH);
+        assert!(blind.fetch("sha1", "tree1").unwrap().is_none());
+
+        // On: the same publish also writes the by-tree and by-commit keys.
+        let names = BaselineCache::new(&writer, &dir.path().join("w"), HASH)
+            .with_lineage_less_copies(true)
+            .publish(&path, &[2; 16], "sha1", "tree1")
+            .unwrap();
+        assert!(names.contains(&tree_addressed_key("tree1")), "{names:?}");
+        assert!(
+            names.contains(&commit_addressed_pointer("sha1")),
+            "{names:?}"
+        );
+        let r2 = dir.path().join("r2");
+        let blind = BaselineCache::new(&reader, &r2, HASH);
+        assert!(blind.fetch("sha1", "tree1").unwrap().is_some());
+        assert!(
+            blind.fetch("sha1", "sha1").unwrap().is_some(),
+            "via the pointer"
+        );
+    }
+
+    #[test]
+    fn a_directory_store_that_cannot_be_read_fails_the_lookup_with_exit_5() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let store = DirStore::new(file.join("nope"));
+        let cache = dir.path().join("cache");
+        let c = BaselineCache::new(&store, &cache, HASH);
+        let err = c.fetch("sha1", "tree1").unwrap_err();
+        assert_eq!(err.exit_code(), 5, "{err}");
+        assert_eq!(err.diagnostic().code, crate::diag::Code::E011StoreIo);
+    }
+
+    #[test]
+    fn a_directory_store_that_does_not_exist_is_a_miss_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let diags = crate::diag::Diagnostics::new();
+        let store = DirStore::new(dir.path().join("none")).with_diagnostics(diags.clone());
+        let cache = dir.path().join("cache");
+        let c = BaselineCache::new(&store, &cache, HASH);
+        assert!(c.fetch("sha1", "tree1").unwrap().is_none());
+        assert!(c.fetch("sha0", "tree0").unwrap().is_none());
+        let said: Vec<_> = diags.drain().iter().map(|d| d.code).collect();
+        assert_eq!(said, vec![crate::diag::Code::W007StoreFetchFailed]);
     }
 
     #[test]

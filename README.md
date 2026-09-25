@@ -335,7 +335,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | 2 | global invalidation: everything is affected; stdout is `//...` |
 | 3 | Bazel failed |
 | 4 | no index available and `--no-full-build` was given |
-| 5 | the store could not be reached (as against holding no index, which is 4): a CI job can retry this one |
+| 5 | the store is there and could not be read (as against holding no index, which is 4): a CI job can retry this one. A directory store whose directory does not exist holds no index; the `aws s3 cp`/`gsutil cp` templates cannot tell an outage from a miss ([docs/STORE.md](docs/STORE.md#misses-and-outages)) |
 
 ### Diagnostics
 
@@ -574,8 +574,9 @@ asks Bazel for the whole repository once and reports `stats.cold_rebuild` with
 `cold_rebuild_reason`. The answer is exact either way: a cold rebuild is a
 slower route to the same affected set, not a surrender to `//...`.
 
-Every section, default and store backend is in
-[docs/CLI.md](docs/CLI.md#configuration).
+Every section and default is in [docs/CLI.md](docs/CLI.md#configuration)
+(`cambi config explain` prints them), and the store's syntax for each
+backend is under [The store](docs/CLI.md#the-store) there.
 
 ## Benchmarks
 

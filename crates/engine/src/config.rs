@@ -334,6 +334,16 @@ pub struct Baseline {
     /// graph is.
     #[serde(default = "yes")]
     pub compress_indexes: bool,
+    /// Also write the lineage-less keys (`indexes/by-tree/<tree>.bin`,
+    /// `commits/by-commit/<sha>`) when publishing to a store that can list.
+    /// A store that cannot list always gets them; this is for a reader that
+    /// cannot list in front of a store whose publisher can, such as plain
+    /// HTTP over the bucket an `aws s3` template writes, which otherwise finds
+    /// nothing. Off by default. Outside the config hash with the rest of
+    /// `[baseline]`, and never serialised at its default, so adding it moved
+    /// no existing hash.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lineage_less_copies: bool,
 }
 
 fn yes() -> bool {
@@ -482,6 +492,7 @@ impl Default for Baseline {
             cache_dir: None,
             publish_partial: PartialPolicy::default(),
             compress_indexes: true,
+            lineage_less_copies: false,
         }
     }
 }
@@ -1292,6 +1303,24 @@ retention_days = 30
             covered, allowed,
             "the allowlist and this test must name the same keys"
         );
+    }
+
+    #[test]
+    fn where_indexes_live_and_how_they_are_named_is_outside_the_config_hash() {
+        let base = Config::default();
+        let mut c = base.clone();
+        c.baseline.lineage_less_copies = true;
+        assert_eq!(c.hash(), base.hash(), "baseline.lineage_less_copies");
+        let mut c = base.clone();
+        c.baseline.store = StoreConfig::Dir {
+            path: ".cambium-store".into(),
+        };
+        assert_eq!(c.hash(), base.hash(), "baseline.store");
+        // At its default the key is not written at all, so every hash taken
+        // before it existed still matches.
+        assert!(!base.to_toml().contains("lineage_less_copies"));
+        let read: Config = toml::from_str("[baseline]\nlineage_less_copies = true\n").unwrap();
+        assert!(read.baseline.lineage_less_copies);
     }
 
     fn layered(dir: &Path, main: &str, local: Option<&str>) -> Result<Layered, ConfigError> {

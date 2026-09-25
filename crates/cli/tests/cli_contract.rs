@@ -1101,4 +1101,102 @@ fn log_lines_in_a_pipe_carry_no_escape_codes() {
         "the test needs a log line to look at:\n{stderr}"
     );
     assert!(!stderr.contains('\x1b'), "{stderr:?}");
+
+/// Rewrites the fixture's `cambium.toml` to point `[baseline].store` at a
+/// directory given as `path`, written as-is.
+fn point_store_at(ws: &std::path::Path, path: &str) {
+    let mut cfg = cambium_engine::Config::load(ws).unwrap();
+    cfg.baseline.store = cambium_engine::config::StoreConfig::Dir { path: path.into() };
+    std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+}
+
+/// A relative directory store in the checked-in `cambium.toml` is read from
+/// the workspace root, so `-C` from anywhere else reaches the same store.
+#[test]
+fn a_relative_directory_store_is_read_from_the_workspace_root() {
+    let f = published_fixture(1);
+    // The fixture keeps the store beside the workspace, at `../store`.
+    point_store_at(&f.ws, "../store");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = Command::new(CAMBI)
+        .current_dir(elsewhere.path())
+        .args(["-C", f.ws.to_str().unwrap(), "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("reachable, 1 indexes"),
+        "the store should be found from another working directory:\n{stdout}"
+    );
+}
+
+/// The directory store's one rule, end to end: a root that does not exist
+/// is an empty store (exit 4 under `--no-full-build`, and the warning says
+/// why), and a root that cannot be read is the store failing (exit 5).
+#[test]
+fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
+    let f = published_fixture(1);
+    let range = format!("{}..{}", f.commits[2], f.commits[3]);
+    let args = |ws: &str| -> Vec<String> {
+        [
+            "-C",
+            ws,
+            "--cache-dir",
+            f.cache.to_str().unwrap(),
+            "affected",
+            "--no-full-build",
+            &range,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    };
+    let ws = f.ws.to_str().unwrap();
+
+    point_store_at(&f.ws, "never-published");
+    let a = args(ws);
+    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(code, 4, "{stderr}");
+    assert_eq!(
+        stderr.matches("CAMBI-W007").count(),
+        1,
+        "a missing directory is said once, before the no-index error:\n{stderr}"
+    );
+    assert!(stderr.contains("CAMBI-E006"), "{stderr}");
+    assert!(
+        !f.ws.join("never-published").exists(),
+        "a read creates nothing"
+    );
+
+    // Under `jsonl` the warning is a `diagnostic` event on stdout, as it
+    // would be on success; the error stays on stderr.
+    let mut j = a.clone();
+    j.splice(2..2, ["--format".to_string(), "jsonl".to_string()]);
+    let (code, stdout, stderr) = run(&j.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(code, 4, "{stderr}");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every stdout line is JSON"))
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "diagnostic" && e["code"] == "CAMBI-W007")
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stderr.contains("CAMBI-W007"), "{stderr}");
+    assert!(stderr.contains("CAMBI-E006"), "{stderr}");
+
+    // A file where the directory should be: `/dev/null/nope`'s shape.
+    point_store_at(&f.ws, "cambium.toml/nope");
+    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains("CAMBI-E011"), "{stderr}");
+    assert!(
+        !stderr.contains("CAMBI-W007"),
+        "an error is not also a miss:\n{stderr}"
+    );
 }

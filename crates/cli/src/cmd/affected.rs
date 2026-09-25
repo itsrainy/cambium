@@ -482,6 +482,18 @@ pub fn narrate(
     };
     let out = engine.affected_narrated(req, &mut |p| render.on(p));
     sink.emit(Event::Done);
+    // A run that fails still said things on the way (a store read as empty,
+    // an index refused for its configuration), and they are what explain the
+    // error; with no report to carry them they are said here, before it.
+    // Under `jsonl` they are `diagnostic` events on stdout, as on success;
+    // under `json` there is no document to hold them, so stderr it is.
+    if out.is_err() {
+        let said = engine.diagnostics().drain();
+        match ctx.render.format {
+            Format::Jsonl => ctx.render.report(&said)?,
+            _ => said.iter().for_each(|d| ctx.render.warn(d)),
+        }
+    }
     Ok(out?)
 }
 
