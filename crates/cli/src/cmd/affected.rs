@@ -117,6 +117,11 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         Format::Query => {
             println!("{}", report.as_query_expression(args.tests_only));
         }
+        Format::Labels => {
+            for l in labels(report, args.tests_only) {
+                println!("{l}");
+            }
+        }
         Format::Human => {
             if report.global {
                 // Exit code 2 says "global"; stdout still carries a usable
@@ -526,13 +531,28 @@ fn plural_hops(n: u32) -> String {
     format!("{n} commit{}", if n == 1 { "" } else { "s" })
 }
 
-/// Stdout: the count line, the labels, and the distribution underneath.
-fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_kind: Hist) {
-    let items: Vec<&str> = if tests_only {
+/// The answer as `--format labels` prints it, one per line: what `bazel test
+/// --target_pattern_file` and `bazel build --target_pattern_file` read.
+///
+/// The same labels `--format query` wraps in `set(...)` and the human form
+/// lists under its count line, in the same order, and nothing else: an empty
+/// answer is no lines at all, so a caller tests for an empty file rather than
+/// parsing a header. A global answer is the one pattern `//...`, as it is on
+/// every other stdout, with exit 2.
+fn labels(report: &cambium_engine::AffectedReport, tests_only: bool) -> Vec<&str> {
+    if report.global {
+        return vec!["//..."];
+    }
+    if tests_only {
         report.tests.iter().map(String::as_str).collect()
     } else {
         report.affected.iter().map(|t| t.label.as_str()).collect()
-    };
+    }
+}
+
+/// Stdout: the count line, the labels, and the distribution underneath.
+fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_kind: Hist) {
+    let items = labels(report, tests_only);
     let paint = Paint::new(std::io::stdout().is_terminal());
     let depth = match (report.max_depth(), report.max_package_depth()) {
         (Some(d), Some(p)) => format!("  max depth {d}  ({p} package hops)"),
@@ -904,6 +924,24 @@ mod tests {
         assert_eq!(super::depth_counts(&r, true), vec![0, 2]);
         assert_eq!(super::package_depth_counts(&r, false), vec![3, 1]);
         assert_eq!(super::package_depth_counts(&r, true), vec![2]);
+    }
+
+    /// `--format labels`: the labels and nothing else, the tests alone under
+    /// `--tests-only`, no lines for an empty answer, `//...` for a global one.
+    #[test]
+    fn labels_are_the_answer_and_nothing_else() {
+        let r = report_with_depths(&[(0, false), (1, true), (3, true)]);
+        assert_eq!(
+            super::labels(&r, false),
+            vec!["//pkg0:t", "//pkg1:t", "//pkg2:t"]
+        );
+        assert_eq!(super::labels(&r, true), vec!["//pkg1:t", "//pkg2:t"]);
+        assert!(super::labels(&AffectedReport::default(), false).is_empty());
+        let global = AffectedReport {
+            global: true,
+            ..AffectedReport::default()
+        };
+        assert_eq!(super::labels(&global, true), vec!["//..."]);
     }
 
     /// Parses `cambi affected <args>` the way `main` would.

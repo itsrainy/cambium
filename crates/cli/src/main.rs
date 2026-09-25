@@ -142,9 +142,14 @@ pub enum Format {
     Json,
     /// One JSON event per line, so a watcher can follow a long run.
     Jsonl,
-    /// A `set(...)` expression for `bazel build` / `bazel test`. `affected`
-    /// only; anywhere else it is a usage error.
+    /// A `set(...)` expression for `bazel query` / `bazel cquery`; `bazel
+    /// build` and `bazel test` reject it, and take `labels` instead.
+    /// `affected` only; anywhere else it is a usage error.
     Query,
+    /// One label per line and nothing else, for `bazel test
+    /// --target_pattern_file`: empty on an empty answer, `//...` on a global
+    /// one. `affected` only; anywhere else it is a usage error.
+    Labels,
     /// Nothing on stdout; the exit code is the whole answer.
     Null,
 }
@@ -166,9 +171,9 @@ impl Format {
     /// a set of targets.
     ///
     /// `None` is `--format null`: the command runs and sets the exit code and
-    /// prints nothing. `query` has no meaning here — there is no Bazel
-    /// expression for a byte count — so it is a usage error rather than a
-    /// silent fallback to something else.
+    /// prints nothing. `query` and `labels` have no meaning here (there is no
+    /// Bazel expression or label list for a byte count), so they are a usage
+    /// error rather than a silent fallback to something else.
     pub fn data(self, verb: &str) -> anyhow::Result<Option<DataFormat>> {
         match self {
             Format::Human => Ok(Some(DataFormat::Text)),
@@ -178,6 +183,10 @@ impl Format {
             Format::Query => Err(diag::UsageError::raised(format!(
                 "--format query is only meaningful for `cambi affected`; {verb} has no Bazel \
                  expression form"
+            ))),
+            Format::Labels => Err(diag::UsageError::raised(format!(
+                "--format labels is only meaningful for `cambi affected`; {verb} has no \
+                 target list"
             ))),
         }
     }

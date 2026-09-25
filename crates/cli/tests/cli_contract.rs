@@ -905,3 +905,70 @@ fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
         "the diff was classified without Bazel:\n{stdout}"
     );
 }
+
+/// `--format labels` is the CI format: one label per line and nothing else,
+/// so `bazel test --target_pattern_file` reads stdout as it is. An empty
+/// answer is an empty stdout, not a header, and a global one is `//...` with
+/// exit 2.
+#[test]
+fn labels_is_the_answer_one_per_line_and_nothing_else() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let base = &f.commits[1];
+
+    // Nothing changed: no lines at all, exit 0.
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "--format",
+        "labels",
+        "affected",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "", "an empty answer is an empty stdout");
+
+    // A commit on the indexed base that adds a .bazelrc: the whole graph.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    std::fs::write(f.ws.join(".bazelrc"), "build --jobs=4\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", ".bazelrc"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "add a bazelrc"]);
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        base,
+        "--tests-only",
+        "--format",
+        "labels",
+    ]);
+    assert_eq!(code, 2, "global is exit 2: {stderr}");
+    assert_eq!(stdout, "//...\n", "a global answer is the one pattern");
+}
+
+/// `labels` has no meaning off `affected`, like `query`: a usage error with a
+/// code and a help line, not a silent fallback to another shape.
+#[test]
+fn asking_a_data_query_for_labels_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let (code, stdout, stderr) = run(&[
+        "inspect",
+        "stats",
+        index.to_str().unwrap(),
+        "--format",
+        "labels",
+    ]);
+    assert_eq!(code, 1, "a usage error is exit 1");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("CAMBI-E013"), "{stderr}");
+    assert!(
+        stderr.contains("= help:"),
+        "every E013 has a help line:\n{stderr}"
+    );
+}

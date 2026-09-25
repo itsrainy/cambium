@@ -9,7 +9,7 @@ repository.
 The project is cambium; the binary it installs is `cambi`.
 
 ```console
-$ cambi affected origin/main..HEAD --tests-only
+$ cambi affected origin/main..HEAD --tests-only --format labels
 //app:main_test
 //lib/core:core_test
 ```
@@ -215,7 +215,16 @@ is and which index a run would load.
 
 ```console
 $ cambi affected origin/main..HEAD --tests-only
-$ bazel test $(cambi affected origin/main --tests-only --format query)
+```
+
+On a terminal that is a count line, the labels, and two charts of how far
+from the change they sit. For CI, `--format labels` prints the labels alone,
+one per line, for `bazel test --target_pattern_file`; exit 2 means the change
+reached everything, and stdout is then `//...`:
+
+```sh
+rc=0; cambi affected origin/main --tests-only --format labels > targets.txt || rc=$?
+case $rc in 0|2) [ ! -s targets.txt ] || bazel test --target_pattern_file=targets.txt ;; *) exit $rc ;; esac
 ```
 
 The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
