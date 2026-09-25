@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "cambium-bench, the benchmark harness: subjects, workloads, replay and the report"
 
 [[bin]]
