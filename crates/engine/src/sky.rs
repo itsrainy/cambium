@@ -6,13 +6,28 @@
 //!
 //! # When the dump runs
 //!
-//! Always on the server that has just loaded the packages, never on a fresh
-//! one. A cold build dumps after `bazel query //...:*`, so the graph holds the
-//! whole repository. An incremental run dumps after the splice query, so the
-//! graph holds exactly the packages that run re-queried, and applying that
-//! dump refreshes their rows and touches nothing else. There is no
-//! package-name filter on the second dump and none is needed: a server only
-//! holds what it loaded.
+//! On the server that has just loaded the packages: a cold build dumps after
+//! `bazel query //...:*`, an incremental run after the splice query. But a
+//! dump prints every done node the server holds, and a server holds
+//! everything it has loaded since it started, not only what this command
+//! loaded. So what a dump says depends on the server's history.
+//!
+//! - A cold build is a picture of its commit only on a fresh server. The
+//!   engine's own cold builds at a revision the checkout is not at are (a
+//!   detached worktree with its own output base, its server stopped when the
+//!   run ends: [`crate::revision`]). `cambi index build` in a checkout that is
+//!   already at the revision runs on the checkout's server, and on a server
+//!   that has served other commits its dump also carries their leftovers:
+//!   files and probes that no longer exist, repository-rule inputs fetched
+//!   by some earlier `deps` traversal. The bench's rebuild oracle stops that
+//!   server before its reference build for this reason
+//!   (`crates/bench/src/walk/driver.rs`, `Runner::reference_build`).
+//! - A refresh is filtered to the packages the run re-queried
+//!   ([`cambium_index::sky::refresh_filter`]), which keeps most leftovers
+//!   out. Not all of them: past `MAX_FILTERED_PACKAGES` re-queried packages,
+//!   or when `//...` was re-queried, the refresh takes the unfiltered dump
+//!   (`crate::run`), and a re-queried root package's subtree is the whole
+//!   tree; either way every block the dump names is merged into the layer.
 //!
 //! # A failure is a failure
 //!

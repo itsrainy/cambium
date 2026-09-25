@@ -551,13 +551,66 @@ impl Runner<'_> {
         )
     }
 
-    /// A mid-walk rebuild oracle: cold-build at the step's head and compare,
-    /// without publishing (that would overwrite the walk's own carried
-    /// index). The rows go beside the step's label sets.
+    /// The rebuild oracle's reference: a cold build at `rev` on a server
+    /// with an empty Skyframe graph, written to `out` and never published.
+    ///
+    /// # Why the server is restarted first
+    ///
+    /// `cambi index build` in the walk's checkout makes no worktree (the
+    /// checkout is already at `rev`), so it runs on the checkout's output
+    /// base and on the one server that answered every step of the walk, and
+    /// every `rdeps(//..., ...)` query the oracle asked. A `bazel dump
+    /// --skyframe` prints every done node that server holds, not what the
+    /// build at `rev` evaluated. So the reference carried the walk's history:
+    /// on envoy at `7ba51266` it had 33017 nodes against the walked 26062,
+    /// and its 306 unexplained rows and 13449 "boundary probes" were rows
+    /// the walk had left there (patches deleted mid-window, `WORKSPACE`
+    /// probes under directories absent at the pin, packages deleted inside
+    /// the window, a few files live at the pin that only a dependency
+    /// traversal reaches, and root `WORKSPACE` probes from some command
+    /// other than the `//...:*` load). On xla at `076fe93f` its 314 are
+    /// expected to be the same kind (patch and `build_file` inputs that
+    /// fetches on the walk's server wrote, and packages only a traversal
+    /// reaches), though that was read from the rows and not reproduced. The
+    /// applied lineage's own base is built by the engine on a fresh server in
+    /// a detached worktree with its own output base
+    /// (`crates/engine/src/revision.rs`).
+    ///
+    /// Two ways to get a fresh graph. Building through a detached worktree
+    /// on an output base of its own, as the lineage base is built, gives the
+    /// same provenance but fetches every external repository (gigabytes for
+    /// envoy) into a new output base for each revision it builds, since that
+    /// base is kept per revision. Stopping the checkout's server gives the
+    /// same empty graph for the price of one server start: Bazel keeps the
+    /// Skyframe graph in memory, while the fetched repositories stay on disk
+    /// and are reused through their marker files. This does the second. It rests on nothing persisting the graph across a restart:
+    /// Skyframe serialization (a remote analysis cache) would, and neither
+    /// the bench's rc file and startup flags nor the rc files of envoy, xla
+    /// and bazel at their pins configure one. A subject that did would need
+    /// the worktree route.
+    ///
+    /// The cost falls on whatever runs next on that server. At the pin
+    /// nothing does. Mid-walk (`--rebuild-every`) the rebuild itself pays a
+    /// full cold load instead of an incremental one over the warm graph, and
+    /// the steps after it run on a server whose history starts at that
+    /// rebuild, not at the walk's first cold build; the step record says so
+    /// through `rebuild_step`. A `--rebuild-every` walk's steps therefore do
+    /// not run on the same server history as a walk without it.
+    fn reference_build(&self, rev: &str, out: &Path) -> Result<()> {
+        self.driver
+            .restart_server()
+            .with_context(|| format!("restarting the bazel server before the rebuild at {rev}"))?;
+        let _ = cold_build(self.driver, rev, out, false)?;
+        Ok(())
+    }
+
+    /// A mid-walk rebuild oracle: cold-build at the step's head on a fresh
+    /// server and compare, without publishing (that would overwrite the
+    /// walk's own carried index). The rows go beside the step's label sets.
     fn mid_walk_rebuild(&mut self, step: &Step) -> Result<()> {
         let head = step.head.as_str();
         let fresh = self.index_path.with_extension("rebuild.bin");
-        let _ = cold_build(self.driver, head, &fresh, false)?;
+        self.reference_build(head, &fresh)?;
         let applied = IndexFile::open(&self.index_path)?;
         let rebuilt = IndexFile::open(&fresh)?;
         let (diff, sky) =
@@ -573,8 +626,9 @@ impl Runner<'_> {
         Ok(())
     }
 
-    /// The rebuild oracle at the pin: the applied index must equal a fresh
-    /// cold build, and the fresh index is archived for `replay --head-check`.
+    /// The rebuild oracle at the pin: the applied index must equal a cold
+    /// build on a fresh server ([`Self::reference_build`]), and that index is
+    /// archived for `replay --head-check`.
     ///
     /// The loading-layer half is judged on its unexplained rows
     /// ([`rebuild_rows`]): a row a refresh could never have written is
@@ -584,7 +638,7 @@ impl Runner<'_> {
             p.item(self.result.steps.len(), "rebuild oracle");
         }
         let fresh_path = self.index_path.with_extension("rebuild.bin");
-        let _ = cold_build(self.driver, to, &fresh_path, false)?;
+        self.reference_build(to, &fresh_path)?;
         let applied = IndexFile::open(&self.index_path)?;
         let fresh = IndexFile::open(&fresh_path)?;
         let (diff, sky) =

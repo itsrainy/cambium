@@ -287,6 +287,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
     let driver = walk::CambiDriver {
         checkout: &checkout,
         cambi: &cambi,
+        bazel: engine.bazel(),
     };
     let scratch = tmp.path().join("scratch");
     let live = walk::BazelChecks {
@@ -489,6 +490,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
     let driver = walk::CambiDriver {
         checkout: &checkout,
         cambi: &cambi,
+        bazel: engine.bazel(),
     };
     let scratch = tmp.path().join("scratch");
     let results = tmp.path().join("results/oracle/walk");

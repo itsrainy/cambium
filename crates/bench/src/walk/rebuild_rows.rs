@@ -20,6 +20,39 @@
 //! base and at the compared commit (`git ls-tree`), the applied layer
 //! itself, and the two indexes' `error_packages`.
 //!
+//! # What the cold side is
+//!
+//! The cold index is built on a fresh Bazel server: the walk stops the
+//! checkout's server before it (`Runner::reference_build` in the walk
+//! driver), so its layer holds what a `//...:*` load at the compared commit
+//! evaluates and nothing else. It used to share the server that answered
+//! every walk step and every `rdeps` oracle query, and a dump prints every
+//! done node a server holds, so the reference carried rows the walk had left
+//! there and this module read them as the applied layer's shortfall. On
+//! envoy at `7ba51266` that was every one of the 306 unexplained rows and
+//! every one of the 13449 rows filed as boundary probes. Most of the 306
+//! name paths absent at the pin (patches and build files deleted inside the
+//! window, `WORKSPACE` probes under directories absent at the pin, probes of
+//! packages deleted inside the window); 8 name paths live at the pin that
+//! only a dependency traversal reaches (`BUILD.protobuf-2.28.0.bazel` under
+//! `bazel/external/cargo/remote`, the `api` directory `envoy_api`'s local
+//! override watches, and `api/buf.yaml`). On xla at `076fe93f` the 314 are
+//! expected to be the same kind: `patch_file`, `build_file` and
+//! requirements-lock inputs that fetches on the walk's server wrote, and two
+//! packages only a traversal reaches. That was read from the rows, not
+//! reproduced on a fresh server, and the 4 rows for xla's root `WORKSPACE`
+//! (a file that exists at the pin and that nothing in Starlark names) are
+//! still unaccounted for; they may be the same root probes the variant's
+//! doc describes for envoy.
+//!
+//! [`RowClass::BoundaryProbe`] was written for these envoy rows (in
+//! `2868471`, after run A's 16468 and run C's 13755), on the premise that a
+//! cold `//...` load stats `WORKSPACE` in every package directory. That
+//! premise holds only under `--enable_workspace` and was wrong for envoy at
+//! its pin (see the variant), so the class excused leftovers there. A leftover on the cold side is a
+//! fault in the reference, not a row to excuse, and no class should be
+//! written for one.
+//!
 //! # Why a row can legitimately be missing
 //!
 //! A refresh dumps only what re-querying the dirty packages made Bazel
@@ -143,16 +176,34 @@ pub enum RowClass {
     /// compared commit. Extra: either index names its package as failed.
     LoadError,
     /// Missing: a `FILE` or `FILE_STATE` row for a workspace or build file
-    /// that does not exist at the compared commit. Bazel stats `WORKSPACE`,
-    /// `WORKSPACE.bazel`, `REPO.bazel` and `MODULE.bazel` in every package
-    /// directory to find repository boundaries, and `BUILD.bazel` beside
-    /// every `BUILD`; a cold dump carries those absent-file probes and a
-    /// refresh dump of the package does not. The file's later creation is a
-    /// `BUILD` the classifier names from the diff, or a boundary marker,
-    /// which is a default invalidator, so no change travels through the
-    /// missing row. envoy's lineage lost 13755 of them over 300 steps, every
-    /// one a `WORKSPACE` or `WORKSPACE.bazel` probe, and read them as
-    /// unexplained.
+    /// that does not exist at the compared commit, in a directory that does.
+    /// Under `--enable_workspace`, Bazel stats `WORKSPACE` and
+    /// `WORKSPACE.bazel` in every directory whose package it looks up, to
+    /// find local repository boundaries (with it off, Bazel 8.7.0's
+    /// `LocalRepositoryLookupFunction` returns before any stat); in either
+    /// mode it probes the `BUILD` file names in turn, so `BUILD.bazel` is
+    /// statted beside every `BUILD`. `REPO.bazel` and `MODULE.bazel` are in
+    /// the list as the other boundary markers. A cold dump carries those
+    /// absent-file probes for every directory `//...` visits and a refresh
+    /// dump only for the packages it re-queried. The file's later creation
+    /// is a `BUILD` the classifier names from the diff, or a boundary
+    /// marker, which is a default invalidator, so no change travels through
+    /// the missing row.
+    ///
+    /// The class is right for a WORKSPACE-mode subject at its own pin. It is
+    /// not what envoy's 13449 were: envoy's pin runs `--noenable_workspace`,
+    /// so a `//...:*` load there writes no per-directory `WORKSPACE` probe.
+    /// Those rows (every one a `WORKSPACE`, `WORKSPACE.bazel` or
+    /// `WORKSPACE.bzlmod` row) were left on the server the reference build
+    /// used to share. The per-directory ones came from the walk's
+    /// WORKSPACE-era steps. The root ones came from some other command on
+    /// that server, and not from WORKSPACE mode: a 3-step window
+    /// `b6e7e12..7ba5126`, entirely after envoy's switch to
+    /// `--noenable_workspace` and started on a fresh server, still put the
+    /// root `WORKSPACE`, `WORKSPACE.bazel` and `WORKSPACE.bzlmod` rows (12
+    /// with their edges) in a shared-server reference, and none in a fresh
+    /// one. Which command writes them is not established. See "What the cold
+    /// side is" above.
     BoundaryProbe,
     /// Extra, for a path gone at the compared commit.
     DeletedInWindow,

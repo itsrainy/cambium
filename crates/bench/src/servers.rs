@@ -110,6 +110,22 @@ fn running(s: &Server) -> bool {
         .contains(&format!("--output_base={}", s.output_base.display()))
 }
 
+/// The pid of the server running on `output_base`, if one is: its pid file
+/// names a live process whose arguments name that output base.
+pub fn running_on(output_base: &Path) -> Option<u32> {
+    let pid = std::fs::read_to_string(output_base.join("server/server.pid.txt"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let s = Server {
+        output_base: output_base.to_path_buf(),
+        workspace: PathBuf::new(),
+        pid,
+    };
+    running(&s).then_some(pid)
+}
+
 /// Stops every running server [`find`] reports and waits up to `wait` for
 /// them to exit. Answers how many were stopped.
 pub fn stop(search: &[PathBuf], roots: &[PathBuf], wait: Duration) -> usize {
@@ -232,5 +248,27 @@ mod tests {
         let _ = reused.kill();
         let _ = theirs.wait();
         let _ = reused.wait();
+    }
+
+    #[test]
+    fn a_server_is_running_on_its_own_output_base_only_while_it_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let ob = root.join("output/envoy");
+        let mut server = fake_server(&ob, &root.join("envoy"), true);
+        let mut impostor = fake_server(&root.join("output/xla"), &root.join("xla"), false);
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert_eq!(running_on(&ob), Some(server.id()));
+        // A pid file whose process does not name the output base.
+        assert_eq!(running_on(&root.join("output/xla")), None);
+        // No pid file at all.
+        assert_eq!(running_on(&root.join("output/bazel")), None);
+
+        let _ = server.kill();
+        let _ = server.wait();
+        assert_eq!(running_on(&ob), None, "a pid file outlives its server");
+        let _ = impostor.kill();
+        let _ = impostor.wait();
     }
 }

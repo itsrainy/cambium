@@ -69,6 +69,13 @@ pub struct StepRecord {
     /// not built. False on the first step after a cold rebuild.
     pub carried_index: bool,
     /// This step ran a mid-walk rebuild oracle.
+    ///
+    /// The rebuild stops the checkout's Bazel server first, so its reference
+    /// is a fresh graph, not the walk's history. Every step after one runs on
+    /// a server whose history starts at that rebuild: the rdeps oracle's
+    /// next `//...` traversal loads the external repositories' packages
+    /// again (the fetches themselves stay on disk), and the steps are not on
+    /// the server history a walk without `--rebuild-every` has.
     #[serde(default)]
     pub rebuild_step: bool,
     /// cambium answered `//...`.
@@ -233,7 +240,10 @@ impl Default for WalkSummary {
     }
 }
 
-/// The rebuild oracle at the pin: applied index versus a fresh cold build.
+/// The rebuild oracle at the pin: applied index versus a cold build on a
+/// fresh Bazel server (the checkout's server is stopped first, so the
+/// reference holds what a build at the pin evaluates and nothing the walk
+/// left on the server).
 ///
 /// `ok` counts the loading layer by its unexplained missing rows
 /// ([`super::rebuild_rows`]), and it is folded into [`WalkSummary::pass`].

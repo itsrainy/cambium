@@ -308,6 +308,7 @@ pub fn run_walk(
     let driver = crate::walk::CambiDriver {
         checkout: &checkout,
         cambi: &cambi,
+        bazel: engine.bazel(),
     };
     let live = crate::walk::BazelChecks {
         engine: &engine,

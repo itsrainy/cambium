@@ -406,6 +406,96 @@ fn a_walk_runs_and_the_rebuild_oracle_holds() {
     assert!(on_disk.done);
 }
 
+/// What a walk asked its driver, in order.
+struct Recording<'a> {
+    inner: EngineDriver<'a>,
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+impl walk::Driver for Recording<'_> {
+    fn checkout(&self, rev: &str) -> anyhow::Result<()> {
+        self.inner.checkout(rev)
+    }
+    fn build(
+        &self,
+        rev: &str,
+        out: &std::path::Path,
+        publish: bool,
+    ) -> anyhow::Result<std::time::Duration> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("build {rev} publish={publish}"));
+        self.inner.build(rev, out, publish)
+    }
+    fn update(
+        &self,
+        base: &str,
+        head: &str,
+        out: &std::path::Path,
+        publish: bool,
+    ) -> anyhow::Result<walk::Update> {
+        self.events.lock().unwrap().push(format!("update {head}"));
+        self.inner.update(base, head, out, publish)
+    }
+    fn paths(&self, rev: &str) -> anyhow::Result<Option<std::collections::BTreeSet<String>>> {
+        self.inner.paths(rev)
+    }
+    fn restart_server(&self) -> anyhow::Result<()> {
+        self.events.lock().unwrap().push("restart".to_string());
+        Ok(())
+    }
+}
+
+/// The rebuild oracle's reference build runs on a fresh server, at the pin
+/// and mid-walk, and the walk's own builds keep the server they have.
+///
+/// The reference used to be built on the server that answered every step
+/// and every oracle query of the walk, and its dump carried all of it: rows
+/// no build at the pin writes, read as the applied layer's shortfall.
+#[test]
+fn every_reference_build_and_only_those_starts_on_a_fresh_server() {
+    let f = fixture(6, "typical-pr");
+    let (commits, s) = steps(&f);
+    let driver = Recording {
+        inner: f.engine_driver(),
+        events: Default::default(),
+    };
+    let mut o = opts(&f);
+    o.schedule.rebuild_every = Some(2);
+    let r = walk::walk(&f.engine, &driver, &NoLiveChecks, &commits, &s, &o).unwrap();
+    assert!(r.rebuild_oracle.as_ref().is_some_and(|ro| ro.ok));
+
+    let events = driver.events.into_inner().unwrap();
+    let restarts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| *e == "restart")
+        .map(|(i, _)| i)
+        .collect();
+    let mid_walk: Vec<&str> = r
+        .steps
+        .iter()
+        .filter(|st| st.rebuild_step)
+        .map(|st| st.head.as_str())
+        .collect();
+    assert!(!mid_walk.is_empty(), "the schedule asked for mid-walk rebuilds");
+    assert_eq!(restarts.len(), mid_walk.len() + 1, "{events:#?}");
+    // Each restart is followed by the reference build it was for, which is
+    // never published.
+    let mut expected: Vec<String> = mid_walk
+        .iter()
+        .map(|h| format!("build {h} publish=false"))
+        .collect();
+    expected.push(format!("build {} publish=false", o.pin));
+    let got: Vec<String> = restarts.iter().map(|i| events[i + 1].clone()).collect();
+    assert_eq!(got, expected, "{events:#?}");
+    // The walk's own cold build at the window start is not preceded by one.
+    assert_eq!(events[0], format!("build {} publish=true", commits[0]));
+    // The pin's reference build is the last thing the walk asked for.
+    assert_eq!(events.last(), expected.last());
+}
+
 /// A directory created inside the window that no re-queried package's glob
 /// descends into has its rows on the cold side only. They reach the sidecar
 /// as `created_in_window`, and the walk passes with them: the whole path
