@@ -260,6 +260,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
         Args::Publish { file } => {
             let engine = ctx.engine()?;
+            // No store is E008 before the header, as `index gc` does: a
+            // header announcing a publish that cannot start reads as one
+            // that started and failed.
+            configured_store(&engine)?;
             let f = cambium_index::IndexFile::open(&file)?;
             let v = f.view();
             let (lineage, commit) = (v.lineage, v.commit.to_string());
