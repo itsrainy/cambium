@@ -56,7 +56,7 @@ pub trait Tree {
 
 /// A tree from a map of path to text, which is what the engine's in-memory
 /// test queriers hold.
-pub struct InMemory<'a>(pub &'a std::collections::BTreeMap<String, String>);
+pub struct InMemory<'a>(pub &'a BTreeMap<String, String>);
 
 impl Tree for InMemory<'_> {
     fn paths(&self) -> Vec<String> {
@@ -382,7 +382,7 @@ mod tests {
     use super::*;
     use cambium_index::sky::{seeds, Kind, SkyLayer};
 
-    fn tree() -> std::collections::BTreeMap<String, String> {
+    fn tree() -> BTreeMap<String, String> {
         [
             ("BUILD", ""),
             ("a/BUILD", "load(\":rules.bzl\", \"r\")"),
