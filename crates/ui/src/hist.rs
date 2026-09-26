@@ -213,6 +213,29 @@ mod tests {
         lines.iter().map(|l| l.chars().count()).max().unwrap_or(0)
     }
 
+    fn is_block(c: char) -> bool {
+        c == '█' || EIGHTHS.contains(&c)
+    }
+
+    /// Whether anything is drawn in the column the label `label` sits under,
+    /// in any row above the axis.
+    fn drawn_above(lines: &[String], label: &str) -> bool {
+        let x = lines.last().unwrap().find(label).expect(label);
+        lines[..lines.len() - 2]
+            .iter()
+            .any(|l| l.chars().nth(x).is_some_and(is_block))
+    }
+
+    /// How many columns wide a bar is drawn: the longest run of blocks in
+    /// the bottom row, where every bin with a count has one.
+    fn bar_width(lines: &[String]) -> usize {
+        lines[lines.len() - 3]
+            .split(|c: char| !is_block(c))
+            .map(|run| run.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
     #[test]
     fn seven_bins_draw_every_value_and_every_label() {
         let counts = vec![12, 340, 1, 0, 76, 9, 250];
@@ -228,7 +251,9 @@ mod tests {
             ["0", "1", "2", "3", "4", "5", "6"]
         );
         // A bin with one item in it is still visible, and an empty one is not.
-        assert!(text.contains('▁'));
+        assert!(drawn_above(&lines, "2"), "bin 2 holds one: {lines:#?}");
+        assert!(!drawn_above(&lines, "3"), "bin 3 is empty: {lines:#?}");
+        assert_eq!(bar_width(&lines), 3, "{lines:#?}");
     }
 
     #[test]
@@ -243,6 +268,7 @@ mod tests {
             "25 bins still fit inside the cap: {drawn:?}"
         );
         assert_eq!(drawn.last(), Some(&"24"));
+        assert_eq!(bar_width(&lines), 2, "the bars narrowed: {lines:#?}");
     }
 
     #[test]
