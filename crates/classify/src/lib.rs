@@ -136,8 +136,10 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ClassifyError> {
 /// The main repository's package layout: which package owns a path, and
 /// which nested repository a path is in.
 ///
-/// Built from the base index. [`dirty_set`] overlays the diff's BUILD file
-/// additions and deletions on it, so the answers are the ones for head.
+/// Built from an index by [`PackageSet::from_index`], and answers for the
+/// tree that index was built from. Given the base index, [`dirty_set`]
+/// overlays the diff's BUILD file additions and deletions, so its answers
+/// are the ones for head.
 pub struct PackageSet {
     packages: FxHashSet<String>,
     /// Directories that are Bazel repositories of their own, each with a
