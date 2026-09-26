@@ -357,12 +357,7 @@ fn generate<R: Rng>(
             // repository can make. Pick a rule that has attributes.
             let target = (0..8)
                 .filter_map(|_| pick_target(g, spec, rng))
-                .find(|&t| {
-                    !matches!(
-                        g.targets[t as usize].kind,
-                        crate::graph::Kind::Alias | crate::graph::Kind::TestSuite
-                    )
-                })?;
+                .find(|&t| !matches!(g.targets[t as usize].kind, Kind::Alias | Kind::TestSuite))?;
             Mutation::EditRuleAttr { target }
         }
         MutKind::AddDep => {
