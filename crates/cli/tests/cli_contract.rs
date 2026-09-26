@@ -144,9 +144,9 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
 /// Builds a synthetic index in `dir` and returns its path.
 ///
 /// The generator never goes near Bazel or git, so everything below runs in a
-/// bare sandbox. It is built in process because the verb that used to do it
-/// (`cambium-bench synth build-index`) is `cambium-bench synth build-index` now, and a
-/// `cambi` test must not need another binary to have been built.
+/// bare sandbox. It is built in process because the verb that builds one
+/// moved out of `cambi` into `cambium-bench synth build-index`, and a `cambi`
+/// test must not need another binary to have been built.
 fn synth_index(dir: &std::path::Path) -> std::path::PathBuf {
     let out = dir.join("synth.cmbx");
     let spec = cambium_synth::GraphSpec::preset("tiny").expect("the tiny preset");
@@ -157,10 +157,10 @@ fn synth_index(dir: &std::path::Path) -> std::path::PathBuf {
 
 #[test]
 fn the_exit_codes_are_the_ones_the_readme_documents() {
-    // 0 for an answer, 1 for a failure the caller caused. The Bazel- and
-    // baseline-specific codes (3, 4) need a workspace, so they are pinned
-    // against `EngineError` in the unit tests instead; these two are the ones
-    // every caller branches on, and they must hold with nothing installed.
+    // 0 for an answer, 1 for a failure the caller caused: the two every
+    // caller branches on, which must hold with nothing installed, so this
+    // runs against a synthetic index and no workspace. The codes that need
+    // one (3, 4 and 5) are pinned end to end by the fixture tests below.
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
 
