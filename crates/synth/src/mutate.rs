@@ -1064,10 +1064,27 @@ mod tests {
         }
     }
 
+    /// Every listed preset resolves, to a spec no other name gives, and a
+    /// name that is not listed does not.
     #[test]
-    fn presets_resolve() {
-        for p in ChangeSpec::PRESETS {
-            assert!(ChangeSpec::preset(p).is_some(), "{p}");
+    fn every_listed_preset_resolves_and_nothing_else_does() {
+        let specs: Vec<ChangeSpec> = ChangeSpec::PRESETS
+            .iter()
+            .map(|p| ChangeSpec::preset(p).unwrap_or_else(|| panic!("{p} does not resolve")))
+            .collect();
+        for (i, a) in specs.iter().enumerate() {
+            for (j, b) in specs.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    a,
+                    b,
+                    "{} and {} are the same preset",
+                    ChangeSpec::PRESETS[i],
+                    ChangeSpec::PRESETS[j]
+                );
+            }
         }
+        assert!(ChangeSpec::preset("nope").is_none());
+        assert!(ChangeSpec::preset("").is_none());
+        assert!(ChangeSpec::preset("typical-pr-2").is_none());
     }
 }
