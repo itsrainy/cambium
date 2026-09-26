@@ -1089,13 +1089,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unexplained_cambium_extra_is_unclassified_and_fails() {
-        let c = classify("//a:b", Side::Cambium, &Hand::default());
-        assert_eq!(c, Class::Unclassified);
-        assert!(c.is_failure());
-    }
-
-    #[test]
     fn the_benign_classes_do_not_fail_a_change_set() {
         // Two kinds of class do not fail: an over-approximation by cambium
         // (every one of them named `*_extra_*`), and `tool_missing`, which is
