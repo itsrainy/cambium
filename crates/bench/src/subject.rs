@@ -65,9 +65,10 @@ impl Synthetic {
         }
     }
 
-    /// The filesystem-safe id: `synth-small`.
+    /// The filesystem-safe id: `synth-small`, by the one rule every subject
+    /// name is filed under ([`crate::session::subject_dir_name`]).
     pub fn id(&self) -> String {
-        format!("synth-{}", self.preset)
+        crate::session::subject_dir_name(&self.name())
     }
 
     /// The name a person types: `synth:small`.
