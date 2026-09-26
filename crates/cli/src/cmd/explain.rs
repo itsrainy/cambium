@@ -63,7 +63,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     )?;
     // The same computation `affected` runs is the same three phases on
     // stderr, drawn by the same renderer.
-    let outcome = crate::cmd::affected::narrate(ctx, &engine, &resolved, "explain")?;
+    let outcome = crate::cmd::affected::narrate(ctx, &engine, &resolved, "explain", None)?;
     let report = &outcome.report;
 
     let about = match &args.label {
