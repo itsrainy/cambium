@@ -207,21 +207,13 @@ pub fn run_walk(
         .ok_or_else(|| anyhow::anyhow!("unknown tier {:?}: correctness, full", req.tier))?;
     let schedule = tier.schedule(&req.overrides);
 
-    // The peers are the named tools, cambium excluded (it is the driver, not
-    // a peer). `--peers none` and a schedule with peers off both mean none.
+    // `--peers none` and a schedule with peers off both mean none.
     let peers_off = req.peers.iter().any(|p| p == "none") || !schedule.peers;
-    let wanted = if peers_off {
+    let owned = if peers_off {
         Vec::new()
     } else {
-        tools::wanted(&req.peers)?
+        open_peers(&req.peers, locations)?
     };
-    let owned: Vec<Box<dyn tools::Tool>> = wanted
-        .iter()
-        .map(|n| tools::open(n, locations))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
     let tool_refs: Vec<&dyn tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
     let checkout = run.checkout()?;
@@ -243,24 +235,7 @@ pub fn run_walk(
     let only = select_only(&steps, &req.only)?;
     let steps = only.clone().unwrap_or(steps);
 
-    let oracle_sample = if schedule.oracle_every_step {
-        crate::walk::Sample::all(&steps)
-    } else {
-        crate::walk::sample(
-            &steps,
-            run.session.seed,
-            schedule.per_tag,
-            Some(schedule.oracle_sample),
-        )
-    };
-    let peer_sample = if peers_off {
-        crate::walk::Sample::default()
-    } else {
-        match schedule.peer_sample {
-            Some(n) => crate::walk::sample(&steps, run.session.seed, schedule.per_tag, Some(n)),
-            None => crate::walk::Sample::all(&steps),
-        }
-    };
+    let (oracle_sample, peer_sample) = samples(&steps, &schedule, run.session.seed, peers_off);
 
     let results = run.workload("walk")?;
     let environment = crate::env::Environment {
@@ -322,6 +297,43 @@ pub fn run_walk(
         None => crate::walk::walk(&engine, &driver, &live, &commits, &steps, &opts)?,
     };
     Ok(Walked { result, path })
+}
+
+/// The peers a walk runs: the tools `names` asks for, cambium excluded (it is
+/// the driver, not a peer). One that is not installed is skipped with a
+/// warning rather than failing the walk ([`tools::open`]).
+fn open_peers(names: &[String], locations: &ToolLocations) -> Result<Vec<Box<dyn tools::Tool>>> {
+    Ok(tools::wanted(names)?
+        .iter()
+        .map(|n| tools::open(n, locations))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
+/// The steps the oracle runs on and the steps the peers run on, as the
+/// schedule draws them from `steps` at `seed`.
+fn samples(
+    steps: &[crate::walk::Step],
+    schedule: &crate::walk::Schedule,
+    seed: u64,
+    peers_off: bool,
+) -> (crate::walk::Sample, crate::walk::Sample) {
+    let oracle = if schedule.oracle_every_step {
+        crate::walk::Sample::all(steps)
+    } else {
+        crate::walk::sample(steps, seed, schedule.per_tag, Some(schedule.oracle_sample))
+    };
+    let peers = if peers_off {
+        crate::walk::Sample::default()
+    } else {
+        match schedule.peer_sample {
+            Some(n) => crate::walk::sample(steps, seed, schedule.per_tag, Some(n)),
+            None => crate::walk::Sample::all(steps),
+        }
+    };
+    (oracle, peers)
 }
 
 /// The steps `--only` names, in the order they were typed, or `None` when it
