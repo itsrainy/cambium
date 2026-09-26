@@ -363,9 +363,16 @@ impl PackageQuerier for BazelQuerier {
             // batch that lost count falls back to the shape -- no targets and
             // a `BUILD` file on disk -- which keeps stale rows for a declared
             // deleted package but never clears rows an error swallowed.
+            //
+            // A batch that exited 3 with no line this parser recognises lost
+            // every name, not some of them: a stderr shape nobody has taught
+            // `parse_load_error_line` yet (the `Skipping` line was one until
+            // box run F tombstoned seventeen xla packages through it). It
+            // falls back to the shape too, rather than reading "no package
+            // named" as "every empty package was deleted".
             let names_lost = partial
                 .as_ref()
-                .is_some_and(|e| e.count as usize > e.packages.len());
+                .is_some_and(|e| e.count == 0 || e.count as usize > e.packages.len());
             let mut unloaded = Vec::new();
             if partial.is_some() {
                 let mut kept = Vec::with_capacity(q.updates.len());
@@ -1123,6 +1130,130 @@ mod tests {
         let rows = q.query(&["a".into(), "b".into()]).unwrap();
         assert_eq!(applied(&rows), vec!["a"]);
         assert_eq!(carried(&rows), vec!["b"]);
+    }
+
+    /// Exit 3 with a stderr none of whose lines is a shape the parser knows:
+    /// no package is named and the count is zero, which is every name lost,
+    /// not none. The empty package with a `BUILD` file on disk falls back to
+    /// the shape and keeps its rows; the one with no `BUILD` file is still a
+    /// deletion.
+    #[test]
+    fn an_exit_3_with_no_recognised_line_falls_back_to_the_shape() {
+        let stderr = "ERROR: something bazel has never printed before about '//b:*'\n";
+        let (_tree, q) = in_tree(3, &[rule("//a:x")], stderr, &["a", "b"]);
+        let rows = q.query(&["a".into(), "b".into(), "gone".into()]).unwrap();
+        assert_eq!(
+            applied(&rows),
+            vec!["a", "gone"],
+            "gone has no BUILD file, so its empty update is a deletion"
+        );
+        assert_eq!(carried(&rows), vec!["b"], "b's rows are not cleared");
+        let partial = rows.partial.expect("an unexplained exit 3 stays partial");
+        assert_eq!(partial.count, 0);
+        assert_eq!(
+            codes(&q),
+            vec![Code::W028PackageLoadFailed, Code::W005PackagesTombstoned]
+        );
+    }
+
+    /// What Bazel 8.7.0 printed for the dirty-package query at xla
+    /// `e5dd39c1c9dc`, an LLVM integrate whose `platforms_config.patch` no
+    /// longer applied: `@llvm-raw` failed to fetch, and every one of the 17
+    /// main-repository packages that load `@llvm-project//mlir:tblgen.bzl` or
+    /// `llvm/lit_test.bzl` was skipped. Verbatim but for the worktree and
+    /// output base paths, shortened to `/ws` and `/ob`.
+    const XLA_E5DD39C1C9DC: &str = include_str!("fixtures/xla-e5dd39c1c9dc-dirty-query.stderr");
+
+    /// The 17 packages the fixture skips.
+    const XLA_SKIPPED: [&str; 17] = [
+        "xla/backends/cpu/codegen/emitters/ir",
+        "xla/backends/cpu/codegen/emitters/transforms",
+        "xla/backends/cpu/codegen/tiled/transforms",
+        "xla/backends/gpu/codegen/emitters/ir",
+        "xla/backends/gpu/codegen/emitters/transforms",
+        "xla/backends/gpu/codegen/triton/ir",
+        "xla/backends/gpu/codegen/triton/transforms",
+        "xla/codegen/emitters/ir",
+        "xla/codegen/emitters/transforms",
+        "xla/codegen/xtile/ir",
+        "xla/codegen/xtile/ir/transforms",
+        "xla/hlo/translate/mhlo_to_hlo",
+        "xla/mlir_hlo",
+        "xla/mlir_hlo/tests",
+        "xla/mosaic",
+        "xla/python/ifrt/ir",
+        "xla/python/ifrt/ir/transforms",
+    ];
+
+    /// Box run F, end to end through the querier: the 17 packages the
+    /// fixture skips all have their `BUILD` files on disk, and a package
+    /// that loaded comes back beside them. Every skipped package lands in
+    /// `unloaded`, keeps its rows, and is named in the partial answer, and
+    /// the run says W028 once and tombstones nothing. Before the `Skipping`
+    /// shape was read, all 17 came back in `updates`, empty, and their rows
+    /// were cleared (8001 edges at step 12).
+    #[test]
+    fn xlas_seventeen_skipped_packages_are_carried_not_tombstoned() {
+        let mut packages: Vec<&str> = XLA_SKIPPED.to_vec();
+        packages.push("xla/service");
+        let (_tree, q) = in_tree(3, &[rule("//xla/service:hlo")], XLA_E5DD39C1C9DC, &packages);
+        let asked: Vec<String> = packages.iter().map(|p| p.to_string()).collect();
+        let rows = q.query(&asked).unwrap();
+        assert_eq!(applied(&rows), vec!["xla/service"]);
+        let mut carried = carried(&rows);
+        carried.sort_unstable();
+        assert_eq!(carried, XLA_SKIPPED.to_vec());
+        let partial = rows.partial.expect("the failures make the answer partial");
+        assert_eq!(partial.count, 17);
+        let mut named = partial.packages.clone();
+        named.sort();
+        assert_eq!(named, XLA_SKIPPED.to_vec());
+        assert_eq!(codes(&q), vec![Code::W028PackageLoadFailed]);
+    }
+
+    /// A package whose load fails inside a repository rule is skipped with a
+    /// reason that names only the repository, `no such package
+    /// '@@<repo>//'`, and no `error loading package` clause at all (Bazel
+    /// 8.7.0, a workspace whose `a/BUILD` loads from a repository rule that
+    /// calls `fail`). The pattern is the only place the package is named.
+    const SKIPPED_FOR_A_REPOSITORY: &str = "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0mSkipping \
+         '//b:*': no such package '@@+_repo_rules+broken//': patch does not apply \
+         (simulated)\n";
+
+    /// A package skipped because something it loads would not load failed
+    /// to load, and keeps the rows the index has, exactly as one Bazel names
+    /// in an `error loading package` line does.
+    #[test]
+    fn a_package_skipped_for_a_failing_repository_keeps_the_rows_the_index_has() {
+        let (_tree, q) = in_tree(3, &[rule("//a:x")], SKIPPED_FOR_A_REPOSITORY, &["a", "b"]);
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(applied(&rows), vec!["a"], "b keeps whatever the index has");
+        assert_eq!(carried(&rows), vec!["b"]);
+        let partial = rows
+            .partial
+            .expect("a load failure makes the answer partial");
+        assert_eq!(partial.packages, vec!["b".to_string()]);
+        assert_eq!(codes(&q), vec![Code::W028PackageLoadFailed]);
+    }
+
+    /// The same, with the fetch error Bazel prints first: the fetch line
+    /// names no package, the `Skipping` line names `b`, and `b` keeps its
+    /// rows.
+    #[test]
+    fn a_package_skipped_for_a_repository_that_would_not_fetch_keeps_its_rows() {
+        let stderr = "ERROR: /ob/external/bazel_tools/tools/build_defs/repo/local.bzl:55:13: \
+                      An error occurred during the fetch of repository '+_repo_rules+ext':\n\
+                      ERROR: Skipping '//b:*': no such package '@@+_repo_rules+ext//': \
+                      The repository's path is \"/nonexistent\" but it does not exist\n";
+        let (_tree, q) = in_tree(3, &[rule("//a:x")], stderr, &["a", "b"]);
+        let rows = q.query(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(
+            applied(&rows),
+            vec!["a"],
+            "b's empty update would tombstone it"
+        );
+        assert_eq!(carried(&rows), vec!["b"]);
+        assert_eq!(codes(&q), vec![Code::W028PackageLoadFailed]);
     }
 
     /// Any other failure while a requested package is missing is not a

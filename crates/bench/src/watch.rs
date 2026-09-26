@@ -623,6 +623,7 @@ mod tests {
                     nodes: 10,
                     edges: 20,
                     lineage: String::new(),
+                    ..Default::default()
                 },
                 cambium: CambiumAnswer {
                     direct: 1,

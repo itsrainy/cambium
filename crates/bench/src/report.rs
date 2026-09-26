@@ -195,6 +195,9 @@ pub struct TopRow {
     /// The peers' wall p50 over the steps they ran on.
     pub peer_wall_p50: std::collections::BTreeMap<String, u64>,
     pub pass: bool,
+    /// Steps the oracle could not see, printed beside the recall so a PASS
+    /// over them is read as one.
+    pub blind_steps: usize,
 }
 
 pub fn top_row(r: &SubjectResults) -> TopRow {
@@ -216,6 +219,7 @@ pub fn top_row(r: &SubjectResults) -> TopRow {
         walk_p90_ms: s.map(|s| s.cost.cambium_walk.p90_ms).unwrap_or(0),
         rebuild_steps: s.map(|s| s.cost.rebuild_steps).unwrap_or(0),
         worst_recall: s.map(|s| s.soundness.worst_recall).unwrap_or(1.0),
+        blind_steps: s.map(|s| s.soundness.steps_blind).unwrap_or(0),
         tightness_p50: s
             .and_then(|s| s.tightness.get(crate::tools::cambi::NAME))
             .map(|t| t.p50),
@@ -278,7 +282,11 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
             r.walk_p90_ms,
             r.rebuild_steps,
             r.worst_recall,
-            if r.pass { "" } else { " ⚠" },
+            match (r.pass, r.blind_steps) {
+                (false, _) => " ⚠".to_string(),
+                (true, 0) => String::new(),
+                (true, n) => format!(" ({n} blind)"),
+            },
             tight,
         );
         for p in &peers {
@@ -560,6 +568,7 @@ mod tests {
                 nodes: 1234,
                 edges: 5,
                 lineage: String::new(),
+                ..Default::default()
             },
             cambium: CambiumAnswer::default(),
             oracle: Some(crate::oracles::rdeps::RdepsResult {

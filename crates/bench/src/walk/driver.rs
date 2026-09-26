@@ -379,17 +379,20 @@ impl<'a> Runner<'a> {
         let index = if run.wrote_index || !r.global {
             let f = IndexFile::open(&self.index_path)?;
             let v = f.view();
+            let partial = cambium_engine::inspect::PartialLoad::from(v);
             IndexCounts {
                 nodes: v.counts().nodes,
                 edges: v.counts().edges,
                 lineage: cambium_engine::inspect::hex(&v.lineage),
+                carried: super::model::carried_packages(
+                    v,
+                    &partial,
+                    &self.engine.config().baseline.publish_partial,
+                ),
+                partial,
             }
         } else {
-            IndexCounts {
-                nodes: 0,
-                edges: 0,
-                lineage: String::new(),
-            }
+            IndexCounts::default()
         };
 
         // The live checks, scheduled per step. cambium's oracle scoring is
@@ -693,7 +696,9 @@ fn record(
     rebuild_step: bool,
 ) -> StepRecord {
     let r = &answer.run.report;
-    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
+    // A blind oracle found nothing missing because it could not look at
+    // every changed path; that is not a pass (`StepRecord::oracle_blind`).
+    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok() && !o.blind());
     let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
     StepRecord {
         parent: step.parent.clone(),

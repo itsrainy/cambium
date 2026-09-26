@@ -245,10 +245,13 @@ impl Cambi {
         self.run(&mut cmd, &format!("cambi index build {rev}"))
     }
 
-    /// `cambi index publish <file>`.
-    pub fn index_publish(&self, ws: &Path, file: &Path) -> Result<Duration> {
+    /// `cambi index publish <file>`, with `--allow-partial` when asked.
+    pub fn index_publish(&self, ws: &Path, file: &Path, allow_partial: bool) -> Result<Duration> {
         let mut cmd = self.command(ws);
         cmd.arg("index").arg("publish").arg(file);
+        if allow_partial {
+            cmd.arg("--allow-partial");
+        }
         self.run(&mut cmd, &format!("cambi index publish {}", file.display()))
     }
 
@@ -406,10 +409,17 @@ mod tests {
         let c = Cambi::at(&bin).unwrap();
         let out = dir.path().join("i.bin");
         c.index_build(dir.path(), "abc", &out, true).unwrap();
-        c.index_publish(dir.path(), &out).unwrap();
+        c.index_publish(dir.path(), &out, false).unwrap();
+        c.index_publish(dir.path(), &out, true).unwrap();
         let log = std::fs::read_to_string(&argv).unwrap();
         assert!(log.contains("index build abc"), "{log}");
         assert!(log.contains("--publish"), "{log}");
-        assert!(log.contains("index publish"), "{log}");
+        let publishes: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("index publish"))
+            .collect();
+        assert_eq!(publishes.len(), 2, "{log}");
+        assert!(!publishes[0].contains("--allow-partial"), "{log}");
+        assert!(publishes[1].ends_with("--allow-partial"), "{log}");
     }
 }

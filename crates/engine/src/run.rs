@@ -1186,12 +1186,38 @@ impl<'a> Run<'a> {
         let mut builder = IndexBuilder::from_view(base);
         builder.set_config_hash(self.engine.config().hash());
         // A query that exited 3 under `--keep_going` loaded some of what it
-        // was asked for, and the index has to say so — a package that failed
-        // to load was tombstoned as if deleted, and only this flag tells a
-        // reader that its targets are missing rather than gone.
-        if let Some(e) = &queried.rows.partial {
-            builder.set_partial(e.count, e.packages.clone());
-        }
+        // was asked for, and the index has to say so: a package that failed
+        // to load has rows as old as the last query that loaded it (or none,
+        // after a cold build that could not load it), and only this state
+        // tells a reader so. It describes this index, not its lineage:
+        // recomputed from what the base still has in error, what this
+        // splice re-queried, and what failed here (`splice_partial`).
+        let reloaded: BTreeSet<&str> = queried
+            .rows
+            .updates
+            .iter()
+            .map(|u| u.package.as_str())
+            .chain(dirty.deleted_packages.iter().map(String::as_str))
+            .collect();
+        let carried: Vec<String> = queried
+            .rows
+            .unloaded
+            .iter()
+            .map(|u| u.package.clone())
+            .collect();
+        let (was_partial, was_count, was_named) = builder.partial_state();
+        let state = splice_partial(
+            PartialState {
+                partial: was_partial,
+                count: was_count,
+                named: was_named,
+            },
+            queried.rows.partial.as_ref(),
+            &carried,
+            &reloaded,
+            queried.cold_reason.is_some(),
+        );
+        builder.replace_partial(state);
         // A nested repository can appear or vanish in any commit, so the
         // boundary list is re-walked from the checkout these rows came from
         // rather than carried forward from the base.
@@ -2613,6 +2639,209 @@ fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<(String, St
             })
         })
         .collect()
+}
+
+/// The partial state a base index carries into a splice.
+pub(crate) struct PartialState<'b> {
+    pub partial: bool,
+    /// Error lines; more than `named` means names were lost past
+    /// `cambium_bazel::MAX_ERROR_PACKAGES`, and zero while partial means the
+    /// query exited 3 with no line anyone could read.
+    pub count: u32,
+    pub named: &'b [String],
+}
+
+/// The partial state of a spliced index, describing that index.
+///
+/// Carried from the base as it stood (the larger count, the base's names),
+/// one failed step made every later splice of the lineage partial until a
+/// cold build, and named the packages of the step that broke rather than
+/// the ones still in error: xla's run F walk would have refused to publish
+/// from its step 12 to its next global rebuild. So a splice recomputes it:
+///
+/// - A package the base named is still in error unless this splice
+///   re-queried it and got an answer (`reloaded`: it loaded, or it is
+///   gone), in which case its rows are current and it has healed. One this
+///   splice did not ask about is still in error, whatever else moved.
+/// - Every package this head's query named in a load error is in error, and
+///   so is every package carried because it failed to load, whether named
+///   or found by the shape rule.
+/// - Lines whose names were lost (past `MAX_ERROR_PACKAGES`, or an exit 3
+///   with no readable line) cannot heal by name, so they are kept as a count
+///   above the names, from the base and from this head alike. A base whose
+///   count is zero while partial is one whose failure nobody could read,
+///   and it stays partial until a cold build.
+/// - An overflow re-queried the whole repository (`whole`): the base's
+///   state is replaced by this head's alone.
+///
+/// `None` is a complete index. Names are sorted, deduplicated, and capped at
+/// `MAX_ERROR_PACKAGES`, the count covering the ones past the cap.
+pub(crate) fn splice_partial(
+    base: PartialState<'_>,
+    head: Option<&cambium_bazel::LoadErrors>,
+    carried: &[String],
+    reloaded: &BTreeSet<&str>,
+    whole: bool,
+) -> Option<(u32, Vec<String>)> {
+    // Error lines no name stands for; an unreadable exit 3 counts as one.
+    let lost = |count: u32, named: usize| match count {
+        0 => 1,
+        _ => count.saturating_sub(named as u32),
+    };
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut unnamed = 0u32;
+    if !whole && base.partial {
+        unnamed += lost(base.count, base.named.len());
+        names.extend(
+            base.named
+                .iter()
+                .filter(|p| !reloaded.contains(p.as_str()))
+                .cloned(),
+        );
+    }
+    if let Some(h) = head {
+        unnamed += lost(h.count, h.packages.len());
+        names.extend(h.packages.iter().cloned());
+    }
+    names.extend(carried.iter().cloned());
+    if names.is_empty() && unnamed == 0 {
+        return None;
+    }
+    let total = names.len() as u32 + unnamed;
+    let names = names
+        .into_iter()
+        .take(cambium_bazel::MAX_ERROR_PACKAGES)
+        .collect();
+    Some((total, names))
+}
+
+#[cfg(test)]
+mod partial_tests {
+    use super::{splice_partial, PartialState};
+    use std::collections::BTreeSet;
+
+    fn errors(count: u32, names: &[&str]) -> cambium_bazel::LoadErrors {
+        cambium_bazel::LoadErrors {
+            count,
+            packages: names.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn base<'b>(count: u32, named: &'b [String]) -> PartialState<'b> {
+        PartialState {
+            partial: true,
+            count,
+            named,
+        }
+    }
+
+    fn strings(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    const COMPLETE: PartialState<'static> = PartialState {
+        partial: false,
+        count: 0,
+        named: &[],
+    };
+
+    /// The step that breaks: seventeen packages carried, named in the head's
+    /// errors; the index is partial and names them.
+    #[test]
+    fn a_splice_that_carries_packages_is_partial_and_names_them() {
+        let head = errors(2, &["a", "b"]);
+        let got = splice_partial(
+            COMPLETE,
+            Some(&head),
+            &strings(&["a", "b"]),
+            &BTreeSet::new(),
+            false,
+        );
+        assert_eq!(got, Some((2, strings(&["a", "b"]))));
+    }
+
+    /// The next step re-queried `a` and it loaded: `a` has healed, `b` was
+    /// not asked about and is still carried from before.
+    #[test]
+    fn a_re_queried_package_heals_and_an_untouched_one_does_not() {
+        let named = strings(&["a", "b"]);
+        let reloaded: BTreeSet<&str> = ["a", "z"].into_iter().collect();
+        let got = splice_partial(base(2, &named), None, &[], &reloaded, false);
+        assert_eq!(got, Some((1, strings(&["b"]))));
+
+        let reloaded: BTreeSet<&str> = ["a", "b"].into_iter().collect();
+        assert_eq!(
+            splice_partial(base(2, &named), None, &[], &reloaded, false),
+            None
+        );
+    }
+
+    /// The head's own errors replace nothing they do not name: a package
+    /// named at base and failing again is named once.
+    #[test]
+    fn a_package_failing_again_is_named_once() {
+        let named = strings(&["a"]);
+        let reloaded: BTreeSet<&str> = ["a"].into_iter().collect();
+        let head = errors(1, &["a"]);
+        let got = splice_partial(
+            base(1, &named),
+            Some(&head),
+            &strings(&["a"]),
+            &reloaded,
+            false,
+        );
+        assert_eq!(got, Some((1, strings(&["a"]))));
+    }
+
+    /// Lost names cannot heal by name: past the cap, or an unreadable exit 3,
+    /// the count stays above the names and the index stays partial.
+    #[test]
+    fn lost_names_keep_the_index_partial() {
+        let named = strings(&["a"]);
+        let reloaded: BTreeSet<&str> = ["a"].into_iter().collect();
+        assert_eq!(
+            splice_partial(base(40, &named), None, &[], &reloaded, false),
+            Some((39, vec![]))
+        );
+        assert_eq!(
+            splice_partial(base(0, &[]), None, &[], &BTreeSet::new(), false),
+            Some((1, vec![]))
+        );
+        let unreadable = errors(0, &[]);
+        assert_eq!(
+            splice_partial(
+                COMPLETE,
+                Some(&unreadable),
+                &strings(&["c"]),
+                &BTreeSet::new(),
+                false
+            ),
+            Some((2, strings(&["c"])))
+        );
+    }
+
+    /// An overflow re-queried everything: only the head's errors count.
+    #[test]
+    fn an_overflow_describes_its_head_alone() {
+        let named = strings(&["a", "b"]);
+        let head = errors(1, &["c"]);
+        let got = splice_partial(base(2, &named), Some(&head), &[], &BTreeSet::new(), true);
+        assert_eq!(got, Some((1, strings(&["c"]))));
+        assert_eq!(
+            splice_partial(base(40, &named), None, &[], &BTreeSet::new(), true),
+            None
+        );
+    }
+
+    /// Names are capped at `MAX_ERROR_PACKAGES`; the count covers the rest.
+    #[test]
+    fn names_are_capped_and_the_count_covers_the_rest() {
+        let carried: Vec<String> = (0..40).map(|i| format!("p{i:02}")).collect();
+        let (count, names) =
+            splice_partial(COMPLETE, None, &carried, &BTreeSet::new(), false).unwrap();
+        assert_eq!(count, 40);
+        assert_eq!(names.len(), cambium_bazel::MAX_ERROR_PACKAGES);
+    }
 }
 
 #[cfg(test)]

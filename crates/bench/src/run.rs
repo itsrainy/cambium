@@ -395,8 +395,35 @@ pub fn walk_summary(r: &crate::walk::WalkResult) -> String {
         },
         s.soundness.worst_recall,
         s.cost.cambium_walk.p50_ms,
-        if s.pass { "PASS" } else { "FAIL" }
+        match (s.pass, s.soundness.steps_blind) {
+            (false, _) => "FAIL".to_string(),
+            (true, 0) => "PASS".to_string(),
+            (true, n) => format!("PASS ({n} oracle-blind)"),
+        }
     )
+}
+
+#[cfg(test)]
+mod walk_summary_tests {
+    /// A PASS with blind steps says so on the one line a terminal shows.
+    #[test]
+    fn a_pass_with_blind_steps_says_so() {
+        let mut r: crate::walk::WalkResult = serde_json::from_value(serde_json::json!({
+            "schema": crate::RESULT_SCHEMA, "repo": "r", "pin": "p", "from": "f", "to": "p",
+            "tier": "correctness", "schedule": crate::walk::Tier::Correctness.defaults(),
+            "oracle_sample": crate::walk::Sample::default(),
+            "peer_sample": crate::walk::Sample::default(),
+            "environment": crate::env::Environment::default(),
+            "started_unix": 0, "index_build_ms": 0, "steps": [],
+            "summary": crate::walk::model::WalkSummary::default(), "done": true
+        }))
+        .unwrap();
+        assert!(super::walk_summary(&r).ends_with("; PASS"));
+        r.summary.soundness.steps_blind = 1;
+        assert!(super::walk_summary(&r).ends_with("; PASS (1 oracle-blind)"));
+        r.summary.pass = false;
+        assert!(super::walk_summary(&r).ends_with("; FAIL"));
+    }
 }
 
 // ------------------------------------------------------------------ labels

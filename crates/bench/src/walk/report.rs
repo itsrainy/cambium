@@ -48,11 +48,16 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "{} steps, {} with the oracle. {} sound, {} missing; worst recall {:.4}{}.",
+        "{} steps, {} with the oracle. {} sound, {} missing{}; worst recall {:.4}{}.",
         s.steps,
         s.steps_with_oracle,
         s.soundness.steps_sound,
         s.soundness.steps_missing,
+        if s.soundness.steps_blind > 0 {
+            format!(", {} oracle-blind", s.soundness.steps_blind)
+        } else {
+            String::new()
+        },
         s.soundness.worst_recall,
         if s.soundness.worst_step.is_empty() {
             String::new()
@@ -60,6 +65,19 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             format!(" at {}", short_key(&s.soundness.worst_step))
         },
     );
+    if s.soundness.steps_blind > 0 {
+        let _ = writeln!(
+            out,
+            "Oracle-blind on {} steps ({}): a changed path's package did not load at head, so \
+             the oracle could not see what it reaches. They are not scored as sound, they do \
+             not fail the verdict, and each step's `oracle.blind_roots` names the paths.",
+            s.soundness.steps_blind,
+            listed(&s.soundness.blind_steps, 6, |k| format!(
+                "`{}`",
+                short_key(k)
+            )),
+        );
+    }
     if s.oracle_partial_steps > 0 {
         let _ = writeln!(
             out,
@@ -129,6 +147,33 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         "Globals: {}. Engine cold rebuilds: {}.",
         s.globals, s.engine_cold_rebuilds
     );
+    if s.carried_index_steps > 0 {
+        let _ = writeln!(
+            out,
+            "Steps whose index carried packages that failed to load: {} of {} ({}). They were \
+             walked, scored and published to the walk's own store; the carried rows are as \
+             old as the last query that loaded each package.",
+            s.carried_index_steps,
+            s.steps,
+            listed(&s.carried_index_packages, 8, |l| format!("`{l}`")),
+        );
+    }
+    // Every step of a lineage whose cold build could not load a package is
+    // partial for it (xla's `tools/toolchains/win_1803/...`), carried or
+    // not, so this is said apart from the carried count rather than as it.
+    if !s.partial_index_packages.is_empty() || s.partial_index_steps > s.carried_index_steps {
+        let names = if s.partial_index_packages.is_empty() {
+            "none by name".to_string()
+        } else {
+            listed(&s.partial_index_packages, 8, |l| format!("`{l}`"))
+        };
+        let _ = writeln!(
+            out,
+            "Steps whose index was partial for any reason: {} of {}. Packages it named that \
+             it held no rows for (missing from the answer, not carried): {names}.",
+            s.partial_index_steps, s.steps,
+        );
+    }
     let _ = writeln!(out);
 }
 

@@ -630,14 +630,37 @@ fn parse_round_trips(
 
 /// The package named by one Bazel load-error line, if it is one.
 ///
-/// Two shapes, both emitted under `--keep_going`, and both interleaved with the
-/// ANSI colour codes Bazel writes even when stderr is a pipe:
+/// Four shapes, all emitted under `--keep_going`, and all interleaved with
+/// the ANSI colour codes Bazel writes even when stderr is a pipe:
 ///
 /// ```text
 /// ERROR: error loading package 'modules/planning': at /...: ...
 /// ERROR: package contains errors: third_party/bazel: name 'py_library' ...
 /// ERROR: no such package '@@local_config_cuda//cuda': ...
+/// ERROR: Skipping '//xla/mlir_hlo:*': error loading package 'xla/mlir_hlo': Encountered error while reading extension file 'mlir/tblgen.bzl': no such package '@@+llvm_extension+llvm-project//mlir': ...
 /// ```
+///
+/// The first three are what a `//...` query prints. A query of named
+/// packages, `set(//p:* ...)`, which is how a run re-queries its dirty set,
+/// prints each failure as the last: `Skipping`, the pattern it skipped, then
+/// why. The reason is often one of the first three shapes (Bazel 8.7.0 on
+/// xla at `e5dd39c1c9dc` says `error loading package 'xla/mlir_hlo'` there,
+/// then the repository that would not fetch), but not always: a package
+/// whose load fails inside a repository rule is skipped with only `no such
+/// package '@@<repo>//'`, naming the repository and not the package. So a
+/// whole-package pattern (`//p:*`, `@r//p:*`) names its package whatever
+/// the reason says. Before this shape was read, the line began `Skipping`
+/// and matched none of the others, so the packages were never named, came
+/// back empty, and were tombstoned as deletions (box run F, xla steps 12
+/// and 174: the 17 packages that load `@llvm-project//mlir:tblgen.bzl` or
+/// `llvm/lit_test.bzl`).
+///
+/// A whole-package pattern whose reason says that very package is missing
+/// (`no such package 'gone': BUILD file not found`, or for an external one
+/// `no such package '@@tsl//tsl/gone'` against the pattern's `@tsl`) is a
+/// deletion, not a load failure, and names nothing. Any other pattern (a single target, a
+/// `...` walk) names no one package, and the line is read by its reason
+/// alone, as if the `Skipping '<pattern>': ` prefix were not there.
 ///
 /// The root package comes back as `""`, which is a real package name, so the
 /// answer is an `Option` rather than a non-empty string.
@@ -650,7 +673,21 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
     if deleted_package_of(&l).is_some() {
         return None;
     }
-    let rest = l.trim().strip_prefix("ERROR: ")?.trim_start();
+    let mut rest = l.trim().strip_prefix("ERROR: ")?.trim_start();
+    if let Some(r) = rest.strip_prefix("Skipping '") {
+        let (pattern, why) = r.split_once("': ")?;
+        let why = why.trim_start();
+        match skipped_package(pattern) {
+            Some(pkg) => {
+                let own = why
+                    .strip_prefix("no such package '")
+                    .and_then(|w| w.split_once('\''))
+                    .is_some_and(|(named, _)| same_package(named, pkg));
+                return (!own).then(|| pkg.to_string());
+            }
+            None => rest = why,
+        }
+    }
     if let Some(r) = rest.strip_prefix("error loading package ") {
         // `'pkg': msg` — quoted, and the message itself may contain quotes.
         let r = r.trim_start().strip_prefix('\'')?;
@@ -671,6 +708,48 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
         return Some(r.split(':').next().unwrap_or(r).trim().to_string());
     }
     None
+}
+
+/// Whether Bazel's spelling of a package in a reason (`named`) is the
+/// package key a pattern stands for (`pkg`).
+///
+/// The same text for a main-repository package. For an external one Bazel
+/// prints the canonical repository (`@@tsl//tsl/gone`, or under bzlmod
+/// `@@tsl+//...` or `@@+ext+tsl//...`) where the pattern, and so the key, has
+/// the apparent name (`@tsl//tsl/gone`): the package paths must be equal and
+/// the canonical name must end in the apparent one, after the `+` or `~`
+/// Bazel splices extension and version segments in with.
+fn same_package(named: &str, pkg: &str) -> bool {
+    if named == pkg {
+        return true;
+    }
+    let (Some((named_repo, named_path)), Some((repo, path))) =
+        (named.split_once("//"), pkg.split_once("//"))
+    else {
+        return false;
+    };
+    if named_path != path {
+        return false;
+    }
+    let repo = repo.trim_start_matches('@');
+    let canonical = named_repo.trim_start_matches('@');
+    !repo.is_empty()
+        && (canonical == repo || canonical.rsplit(['+', '~']).find(|s| !s.is_empty()) == Some(repo))
+}
+
+/// The package key a skipped `<package>:*` pattern stands for, the inverse
+/// of `cambium_index::label::key_pattern`: `xla/mlir_hlo` for
+/// `//xla/mlir_hlo:*`, `@tsl//tsl/platform` for `@tsl//tsl/platform:*`.
+/// `None` for any other pattern (a single target, or a `...` walk).
+fn skipped_package(pattern: &str) -> Option<&str> {
+    let pkg = pattern.strip_suffix(":*")?;
+    if pkg.split('/').any(|seg| seg == "...") || pkg.contains(':') {
+        return None;
+    }
+    if let Some(main) = pkg.strip_prefix("//") {
+        return Some(main);
+    }
+    pkg.starts_with('@').then_some(pkg)
 }
 
 /// The package one line names as *declared deleted*, if it is such a line.
@@ -2221,6 +2300,148 @@ mod tests {
             )
             .as_deref(),
             Some("@@local_config_cuda//cuda")
+        );
+    }
+
+    /// Every load failure a package query (`set(//p:* ...)`, the dirty set's
+    /// re-query) reports comes as `Skipping '<pattern>': <why>`, and a
+    /// whole-package pattern names its package whatever the reason names.
+    /// The first two lines are verbatim from Bazel 8.7.0 on xla at
+    /// `e5dd39c1c9dc` (only the worktree and output base paths shortened to
+    /// `/ws` and `/ob`), the next two from a two-package workspace whose
+    /// `a/BUILD` loads from a repository rule that fails and whose `c/BUILD`
+    /// loads from a repository that does not exist.
+    #[test]
+    fn a_skipped_package_pattern_names_its_package() {
+        for (line, want) in [
+            (
+                "ERROR: Skipping '//xla/mlir_hlo:*': error loading package 'xla/mlir_hlo': \
+                 Encountered error while reading extension file 'mlir/tblgen.bzl': no such \
+                 package '@@+llvm_extension+llvm-project//mlir': no such package \
+                 '@@+third_party_ext+llvm-raw//utils/bazel': Error applying patch \
+                 /ws/third_party/llvm/platforms_config.patch: in patch applied to \
+                 /ob/external/+third_party_ext+llvm-raw/utils/bazel/llvm-project-overlay/llvm/\
+                 config.bzl: could not apply patch due to CONTENT_DOES_NOT_MATCH_TARGET, error \
+                 applying change near line 49",
+                "xla/mlir_hlo",
+            ),
+            (
+                "ERROR: Skipping '//xla/mlir_hlo/tests:*': error loading package \
+                 'xla/mlir_hlo/tests': Encountered error while reading extension file \
+                 'llvm/lit_test.bzl': no such package '@@+llvm_extension+llvm-project//llvm': \
+                 no such package '@@+third_party_ext+llvm-raw//utils/bazel': Error applying \
+                 patch /ws/third_party/llvm/platforms_config.patch",
+                "xla/mlir_hlo/tests",
+            ),
+            (
+                "ERROR: Skipping '//a:*': no such package '@@+_repo_rules+broken//': patch \
+                 does not apply (simulated)",
+                "a",
+            ),
+            (
+                "ERROR: Skipping '//c:*': error loading package 'c': Unable to find package \
+                 for @@[unknown repo 'nope' requested from @@]//:x.bzl: The repository \
+                 '@@[unknown repo 'nope' requested from @@]' could not be resolved: No \
+                 repository visible as '@nope' from main repository.",
+                "c",
+            ),
+            (
+                "\u{1b}[31m\u{1b}[1mERROR: \u{1b}[0mSkipping '//pkg:*': no such package \
+                 '@@+_repo_rules+brk//': patch failed to apply",
+                "pkg",
+            ),
+            (
+                "ERROR: Skipping '//:*': no such package '@@ext//': boom",
+                "",
+            ),
+            (
+                "ERROR: Skipping '@tsl//tsl/platform:*': no such package '@@foo//': boom",
+                "@tsl//tsl/platform",
+            ),
+        ] {
+            assert_eq!(
+                parse_load_error_line(line).as_deref(),
+                Some(want),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// A pattern that is not one whole package names no package of its own,
+    /// so the line is read by its reason, exactly as the same reason on a
+    /// line of its own would be: a repository that failed is still a load
+    /// error, a missing target or an empty walk is not one.
+    #[test]
+    fn a_skipped_pattern_that_is_not_a_package_is_read_by_its_reason() {
+        for (line, want) in [
+            (
+                "ERROR: Skipping '//...:*': no such package '@@ext//': boom",
+                Some("@@ext//"),
+            ),
+            (
+                "ERROR: Skipping '//foo:bar': error loading package 'foo': boom",
+                Some("foo"),
+            ),
+            ("ERROR: Skipping '//foo:bar': no such target", None),
+            (
+                "ERROR: Skipping '//a/...': no targets found beneath 'a'",
+                None,
+            ),
+        ] {
+            assert_eq!(parse_load_error_line(line).as_deref(), want, "{line:?}");
+        }
+    }
+
+    /// A skipped pattern whose package itself is not there was not a load
+    /// failure: its directory has no `BUILD` file, which is a deletion.
+    #[test]
+    fn a_skipped_package_with_no_build_file_is_not_a_load_error() {
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '//gone:*': no such package 'gone': BUILD file not found in \
+                 any of the following directories. Add a BUILD file to a directory to mark it \
+                 as a package."
+            ),
+            None
+        );
+    }
+
+    /// An external package that is gone is skipped with Bazel's canonical
+    /// spelling in the reason and the apparent one in the pattern; it is a
+    /// deletion all the same. One that failed to load, or a different
+    /// package or repository in the reason, is still a load error.
+    #[test]
+    fn a_skipped_external_package_that_is_gone_is_not_a_load_error() {
+        for canonical in ["@@tsl", "@@tsl+", "@@+_repo_rules+tsl", "@@_main~ext~tsl"] {
+            let line = format!(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '{canonical}//tsl/gone': \
+                 BUILD file not found in any of the following directories."
+            );
+            assert_eq!(parse_load_error_line(&line), None, "{canonical}");
+        }
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '@@+ext+other_tsl//': \
+                 patch does not apply"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/gone")
+        );
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/x:*': no such package '@@tsl//tsl/gone': \
+                 BUILD file not found"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/x")
+        );
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '@@notsl//tsl/gone': \
+                 BUILD file not found"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/gone")
         );
     }
 

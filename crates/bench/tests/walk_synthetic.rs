@@ -23,6 +23,10 @@ struct SynthDriver {
     loose: Option<(String, Vec<String>)>,
     /// A commit whose querier has no loading layer to dump at all.
     layerless: Option<String>,
+    /// A commit at which every package a dirty-package query names fails to
+    /// load, as xla's did at an LLVM integrate whose patches no longer
+    /// applied.
+    failing: Option<String>,
 }
 
 impl RowSource for SynthDriver {
@@ -34,6 +38,9 @@ impl RowSource for SynthDriver {
             .ok_or_else(|| anyhow::anyhow!("unknown revision {rev}"))?;
         if self.layerless.as_deref() == Some(rev) {
             return Ok(Box::new(Layerless(SynthQuerier::new(&self.graphs[i]))));
+        }
+        if self.failing.as_deref() == Some(rev) {
+            return Ok(Box::new(Failing(SynthQuerier::new(&self.graphs[i]))));
         }
         match &self.loose {
             Some((at, paths)) if at == rev => {
@@ -150,6 +157,69 @@ impl PackageQuerier for Layerless<'_> {
     }
 }
 
+/// A synthetic querier whose dirty-package queries fail to load every
+/// package they name: the rows come back unloaded and the answer partial,
+/// the way `BazelQuerier` answers a `Skipping` line.
+struct Failing<'a>(SynthQuerier<'a>);
+
+impl PackageQuerier for Failing<'_> {
+    fn query(
+        &self,
+        packages: &[String],
+    ) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        let rows = self.0.query(packages)?;
+        let stderr: String = rows
+            .updates
+            .iter()
+            .map(|u| {
+                format!(
+                    "ERROR: Skipping '//{p}:*': error loading package '{p}': boom\n",
+                    p = u.package
+                )
+            })
+            .collect();
+        Ok(cambium_engine::query::Rows {
+            updates: Vec::new(),
+            partial: Some(cambium_bazel::parse_load_errors(&stderr)),
+            unloaded: rows
+                .updates
+                .into_iter()
+                .map(|mut u| {
+                    u.targets.clear();
+                    u
+                })
+                .collect(),
+        })
+    }
+
+    fn universe(&self) -> Result<cambium_engine::query::Rows, cambium_engine::EngineError> {
+        self.0.universe()
+    }
+
+    fn version(&self) -> String {
+        self.0.version()
+    }
+
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        self.0.load_source()
+    }
+
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        self.0.starlark_files()
+    }
+
+    fn can_dump_loading_layer(&self) -> bool {
+        self.0.can_dump_loading_layer()
+    }
+
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), cambium_engine::EngineError> {
+        self.0.dump_loading_layer(filter)
+    }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     engine: Engine,
@@ -190,6 +260,7 @@ fn fixture(revisions: u64, preset: &str) -> Fixture {
             graphs: repo.graphs,
             loose: None,
             layerless: None,
+            failing: None,
         },
     }
 }
@@ -780,6 +851,75 @@ fn a_walk_resumes_from_its_last_published_index() {
     );
     assert!(sidecar.exists(), "the resumed walk rewrote the sidecar");
     assert_eq!(walk::RebuildRows::read(&sidecar).unwrap().counts, ro.sky);
+}
+
+/// A step whose head cannot load the packages it dirtied leaves a partial
+/// index. The walk publishes it to its own store, records the partial state
+/// on the step, counts it in the summary, and walks on: the default publish
+/// policy used to stop the walk here with CAMBI-E009.
+#[test]
+fn a_step_whose_index_carries_unloaded_packages_is_walked_and_published() {
+    // Which step re-queries something, from a walk over the same history.
+    let probe = fixture(6, "typical-pr");
+    let (commits, s) = steps(&probe);
+    let full = walk::walk(
+        &probe.engine,
+        &probe.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&probe),
+    )
+    .unwrap();
+    let at = full
+        .steps
+        .iter()
+        .position(|st| st.dirty_packages > 0 && !st.global)
+        .expect("a step that re-queried packages");
+
+    // The same history, fresh store, with that step's head broken.
+    let mut f = fixture(6, "typical-pr");
+    let (commits, s) = steps(&f);
+    let broken = s[at].head.clone();
+    f.driver.failing = Some(broken.clone());
+    let r = walk::walk(
+        &f.engine,
+        &f.engine_driver(),
+        &NoLiveChecks,
+        &commits,
+        &s,
+        &opts(&f),
+    )
+    .expect("a partial step index does not stop the walk");
+    assert!(r.done);
+    assert_eq!(r.steps.len(), commits.len() - 1);
+    let st = &r.steps[at];
+    assert_eq!(st.head, broken);
+    assert!(st.index.partial.partial, "{:?}", st.index);
+    assert!(!st.index.partial.packages.is_empty());
+    assert!(r.summary.partial_index_steps >= 1);
+    // The packages that failed and had rows from the step before are
+    // carried; one this step added has none to carry and is only missing.
+    assert!(!st.index.carried.is_empty(), "{:?}", st.index);
+    assert!(
+        st.index
+            .carried
+            .iter()
+            .all(|p| st.index.partial.packages.contains(p)),
+        "{:?}",
+        st.index
+    );
+    assert_eq!(r.summary.carried_index_steps, r.summary.partial_index_steps);
+    assert_eq!(r.summary.carried_index_packages, st.index.carried);
+    assert!(
+        f.engine.fetch_baseline(&broken).unwrap().is_some(),
+        "the partial index was published to the walk's store"
+    );
+    let text = walk::report::render(&r);
+    assert!(
+        text.contains("Steps whose index carried packages that failed to load"),
+        "{text}"
+    );
 }
 
 #[test]

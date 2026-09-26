@@ -16,7 +16,7 @@
 //! excuse a disagreement -- so the partial answer is kept and the caller is
 //! told it was partial. Any other non-zero exit is a real failure.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result};
 use cambium_bazel::Bazel;
@@ -67,6 +67,9 @@ pub struct Answer {
     /// failed. See [`unresolved_labels`] for why this is the whole story of
     /// a partial answer.
     pub unresolved: BTreeSet<String>,
+    /// Every pattern Bazel said it skipped, with the reason it gave
+    /// ([`skipped_patterns`]).
+    pub skipped: BTreeMap<String, String>,
 }
 
 /// `bazel query <expr> --output=label`, with what it could not resolve.
@@ -93,6 +96,11 @@ pub fn answer(bazel: &Bazel, expr: &str, what: &str) -> Result<Answer> {
             unresolved_labels(&stderr)
         } else {
             BTreeSet::new()
+        },
+        skipped: if partial {
+            skipped_patterns(&stderr)
+        } else {
+            BTreeMap::new()
         },
     })
 }
@@ -152,6 +160,36 @@ pub fn unresolved_labels(stderr: &str) -> BTreeSet<String> {
     out
 }
 
+/// The patterns a `--keep_going` query skipped, and why, from its
+/// `Skipping '<pattern>': <reason>` lines.
+///
+/// A root the query was asked about and could not resolve is reported this
+/// way, and the reason is where the difference lies. `no such target
+/// '//b:x': target 'x' not declared in package 'b'` is a file no rule can
+/// name (a patch, a README): nothing depends on it, and the empty answer is
+/// the true one. Any other reason (`error loading package 'b': ...`, `no
+/// such package '@@repo//': ...` for a package whose loads reach a
+/// repository that will not fetch) means the root's package did not load,
+/// and the answer for that root is not empty but unknown. Verbatim from
+/// Bazel 8.7.0:
+///
+/// ```text
+/// ERROR: Skipping '//b:undeclared.txt': no such target '//b:undeclared.txt': target 'undeclared.txt' not declared in package 'b' defined by /ws/b/BUILD; however, a source file of this name exists. ...
+/// ERROR: Skipping '//a:src.txt': no such package '@@+_repo_rules+broken//': patch does not apply (simulated)
+/// ```
+pub fn skipped_patterns(stderr: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in stderr.lines() {
+        let Some(rest) = line.split_once("Skipping '").map(|(_, r)| r) else {
+            continue;
+        };
+        if let Some((pattern, why)) = rest.split_once("': ") {
+            out.insert(pattern.to_string(), why.trim().to_string());
+        }
+    }
+    out
+}
+
 /// Every rule proto `expr` yields, or `None` if the query could not be run at
 /// all.
 ///
@@ -204,6 +242,20 @@ mod tests {
             ]
         );
         assert!(unresolved_labels("INFO: nothing wrong\n").is_empty());
+    }
+
+    /// Verbatim from Bazel 8.7.0 (`rdeps(//..., set(...))` under
+    /// `--keep_going`), the workspace path shortened to `/ws`.
+    #[test]
+    fn skipped_patterns_keep_the_reason() {
+        let err = "ERROR: /ws/defs.bzl:2:9: An error occurred during the fetch of repository '+_repo_rules+broken':\n\
+                   ERROR: no such package '@@+_repo_rules+broken//': patch does not apply (simulated)\n\
+                   ERROR: Skipping '//a:src.txt': no such package '@@+_repo_rules+broken//': patch does not apply (simulated)\n\
+                   ERROR: Skipping '//b:sub/x.txt': no such target '//b:sub/x.txt': target 'sub/x.txt' not declared in package 'b' defined by /ws/b/BUILD; however, a source file of this name exists.  (Perhaps add 'exports_files([\"sub/x.txt\"])' to b/BUILD?)\n";
+        let s = skipped_patterns(err);
+        assert_eq!(s.len(), 2);
+        assert!(s["//a:src.txt"].starts_with("no such package '@@+_repo_rules+broken//'"));
+        assert!(s["//b:sub/x.txt"].starts_with("no such target '//b:sub/x.txt'"));
     }
 
     #[test]

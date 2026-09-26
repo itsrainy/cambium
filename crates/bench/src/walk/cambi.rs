@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use cambium_engine::report::AffectedReport;
-use cambium_engine::{AffectedRequest, Engine, IndexQuery, PackageQuerier};
+use cambium_engine::{
+    AffectedRequest, Engine, IndexQuery, PackageQuerier, PublishPolicy, PublishSource,
+};
 use cambium_index::{IndexFile, IndexRef};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +73,25 @@ pub fn tree_paths(dir: &Path, rev: &str) -> Result<BTreeSet<String>> {
         .collect())
 }
 
+/// How a walk publishes the index each step leaves, to the walk's own store.
+///
+/// A partial one is published anyway. The walk measures correctness, and
+/// the step after one whose head carried packages that failed to load (xla
+/// at an LLVM integrate whose patches no longer apply) is exactly a step
+/// worth measuring: refusing the publish stopped the walk there with
+/// CAMBI-E009, and a walk that skipped it would never see whether the
+/// carried packages heal. The partial state is recorded on the step
+/// (`IndexCounts::partial`) and counted in the summary instead.
+///
+/// A cold build is not a step and keeps the default policy: the subject's
+/// `publish_partial` from the manifest decides, as it would for a user, so
+/// a subject that cannot load its own tree at the window's start still
+/// stops the walk rather than measuring against an index that never had
+/// those packages.
+pub const STEP_PUBLISH: PublishPolicy = PublishPolicy {
+    allow_partial: true,
+};
+
 /// One forward step's result: the answer, its affected set, what it cost, and
 /// whether an index came out of it.
 pub struct Update {
@@ -114,7 +135,11 @@ impl Driver for CambiDriver<'_> {
         )?;
         let wrote_index = run.index.is_some();
         if publish && wrote_index {
-            self.cambi.index_publish(&self.checkout.dir, out)?;
+            // A step's index may be partial (packages carried because they
+            // failed to load at this head), and the walk publishes it to its
+            // own store anyway: see `STEP_PUBLISH`.
+            self.cambi
+                .index_publish(&self.checkout.dir, out, STEP_PUBLISH.allow_partial)?;
         }
         Ok(Update {
             labels: run.report.affected_labels().into_iter().collect(),
@@ -198,13 +223,13 @@ pub struct EngineDriver<'a> {
 }
 
 impl EngineDriver<'_> {
-    fn publish_file(&self, path: &Path) -> Result<()> {
+    fn publish_file(&self, path: &Path, policy: PublishPolicy) -> Result<()> {
         if self.engine.store().is_none() {
             return Ok(());
         }
         let index = IndexFile::open(path)?.deserialize()?;
         self.engine
-            .publish_base_index(&index)
+            .publish(PublishSource::Memory(&index), policy)
             .with_context(|| format!("publishing the index for {}", index.provenance.commit))?;
         Ok(())
     }
@@ -225,7 +250,7 @@ impl Driver for EngineDriver<'_> {
         let wall = t.elapsed();
         cambium_index::format::write_index(out, &index)?;
         if publish {
-            self.publish_file(out)?;
+            self.publish_file(out, PublishPolicy::default())?;
         }
         Ok(wall)
     }
@@ -263,7 +288,7 @@ impl Driver for EngineDriver<'_> {
             None => false,
         };
         if publish && wrote_index {
-            self.publish_file(out)?;
+            self.publish_file(out, STEP_PUBLISH)?;
         }
         Ok(Update {
             labels: out_run.report.affected_labels().into_iter().collect(),

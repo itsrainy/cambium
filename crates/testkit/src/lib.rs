@@ -313,6 +313,13 @@ pub struct Scanning {
     /// Where a diagnostic the index-building side raises while reading this
     /// querier's checkout goes, so a test can assert on the code.
     diags: cambium_engine::Diagnostics,
+    /// Packages that fail to load when a query names them: they come back
+    /// in [`Rows::unloaded`] with no targets, named in a `Skipping` load
+    /// error, and W028 is raised, which is what the real querier does with a
+    /// package whose `.bzl` load reaches a repository that will not fetch.
+    failing: BTreeSet<String>,
+    /// Every dirty-package query, as the packages it named.
+    queries: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl Scanning {
@@ -341,7 +348,22 @@ impl Scanning {
             hides_from_dump: std::sync::atomic::AtomicUsize::new(0),
             dumps_served: std::sync::atomic::AtomicUsize::new(0),
             diags: cambium_engine::Diagnostics::new(),
+            failing: BTreeSet::new(),
+            queries: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Make these packages fail to load whenever a dirty-package query names
+    /// them (see [`Scanning::failing`]). The universe still loads them: a
+    /// cold build is not what this stands in for.
+    pub fn failing_to_load(mut self, packages: &[&str]) -> Self {
+        self.failing = packages.iter().map(|p| p.to_string()).collect();
+        self
+    }
+
+    /// Every dirty-package query this querier answered, in order.
+    pub fn queries(&self) -> Vec<Vec<String>> {
+        self.queries.lock().unwrap().clone()
     }
 
     /// The diagnostics raised while reading this querier's checkout.
@@ -531,11 +553,40 @@ impl PackageQuerier for Scanning {
     }
 
     fn query(&self, packages: &[String]) -> Result<Rows, EngineError> {
-        Ok(packages
+        self.queries.lock().unwrap().push(packages.to_vec());
+        let (unloaded, updates): (Vec<_>, Vec<_>) = packages
             .iter()
             .map(|p| (self.rows)(p))
-            .collect::<Vec<_>>()
-            .into())
+            .partition(|u| self.failing.contains(&u.package));
+        if unloaded.is_empty() {
+            return Ok(updates.into());
+        }
+        let stderr: String = unloaded
+            .iter()
+            .map(|u| {
+                format!(
+                    "ERROR: Skipping '//{p}:*': error loading package '{p}': Encountered error \
+                     while reading extension file 'defs.bzl': no such package '@@broken//': \
+                     patch does not apply\n",
+                    p = u.package
+                )
+            })
+            .collect();
+        self.diags.emit(cambium_engine::diag::Diagnostic::warning(
+            cambium_engine::diag::Code::W028PackageLoadFailed,
+            format!("{} dirty package(s) failed to load", unloaded.len()),
+        ));
+        Ok(Rows {
+            updates,
+            partial: Some(cambium_bazel::parse_load_errors(&stderr)),
+            unloaded: unloaded
+                .into_iter()
+                .map(|mut u| {
+                    u.targets.clear();
+                    u
+                })
+                .collect(),
+        })
     }
 
     fn universe(&self) -> Result<Rows, EngineError> {
