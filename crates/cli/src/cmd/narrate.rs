@@ -1,8 +1,9 @@
 //! The pieces of the stderr narration more than one verb draws.
 //!
-//! `affected` and `profile` both lay a commit out as a row; each piece of it
-//! lives here once, so the two verbs read alike and a new [`IndexWork`]
-//! variant is drawn the same way in both.
+//! Every long-running verb opens with a header naming the repository, and
+//! `affected` and `profile` both lay a commit out as a row; each piece lives
+//! here once, so the verbs read alike and a new [`IndexWork`] variant is
+//! drawn the same way in both.
 
 use cambium_engine::profile::IndexWork;
 use cambium_ui::{Align, Cell, Column, Style};
@@ -31,4 +32,13 @@ pub(crate) fn index_cell(work: &IndexWork) -> Cell {
         IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
         IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
     }
+}
+
+/// The workspace directory's name, which the narration header calls the repo.
+pub(crate) fn repo_name(engine: &cambium_engine::Engine) -> String {
+    engine
+        .workspace()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }

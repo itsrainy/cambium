@@ -20,7 +20,7 @@ use cambium_ui::report::{group, human_bytes, human_ms, kv, Pair};
 use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
-use crate::cmd::narrate::{commit_columns, index_cell};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name};
 use crate::cmd::{emit, short, Context};
 
 /// What lands on stdout above the table.
@@ -173,18 +173,13 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     };
 
     let mut sink = cambium_ui::boxed(ctx.ui);
-    let repo_name = engine
-        .workspace()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
     // The range the header names is one git call, before any Bazel runs, so
     // the first line is on screen while the cold build starts.
     let log = engine.repo().first_parent_log(&head, commits + 1)?;
     let from = log.first().cloned().unwrap_or_else(|| head.clone());
     sink.emit(Event::Header {
         verb: "profile".into(),
-        repo: repo_name,
+        repo: repo_name(&engine),
         range: format!("{}..{}", short(&from), short(&head)),
         note: header_note(log.len().saturating_sub(1)),
     });

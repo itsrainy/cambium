@@ -15,6 +15,7 @@ use cambium_engine::{Code, Diagnostic};
 use cambium_ui::report::{group, human_bytes};
 use cambium_ui::{Event, Level, Sink};
 
+use crate::cmd::narrate::repo_name;
 use crate::cmd::{hex, short, Context};
 
 #[derive(Subcommand)]
@@ -292,15 +293,6 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
     }
-}
-
-/// The workspace directory's name, which the narration header calls the repo.
-fn repo_name(engine: &cambium_engine::Engine) -> String {
-    engine
-        .workspace()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default()
 }
 
 /// `1 file`, `3 files`.

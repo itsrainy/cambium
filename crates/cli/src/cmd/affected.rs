@@ -16,7 +16,7 @@ use cambium_ui::report::{group, human_ms};
 use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
-use crate::cmd::narrate::{commit_columns, index_cell};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name};
 use crate::cmd::{emit_json, short, Context};
 use crate::Format;
 
@@ -524,14 +524,9 @@ pub fn narrate(
 ) -> Result<cambium_engine::RunOutcome> {
     let req = &resolved.req;
     let mut sink = cambium_ui::boxed(ctx.ui);
-    let repo = engine
-        .workspace()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
     sink.emit(Event::Header {
         verb: verb.to_string(),
-        repo,
+        repo: repo_name(engine),
         range: format!("{}..{}", short(&req.base), short(&req.head)),
         note: commits_in_range(engine, req),
     });
