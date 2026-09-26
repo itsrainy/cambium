@@ -1013,6 +1013,15 @@ impl<'a> Run<'a> {
     /// come back byte-identical and contribute nothing to the direct set.
     /// The soundness sweep asserts exactly that, by running each synthetic
     /// revision both ways.
+    ///
+    /// "The universe" is the one the base's cold build asked for: `//...:*`
+    /// and one `@name//...:*` per indexed repository. The dirty set names
+    /// those repositories' packages like any other, and a re-query of
+    /// `//...:*` alone carried their rows as old as the last run that asked
+    /// for them: envoy's 73-step walk ended with 1634 `@envoy_api` rule
+    /// hashes, two whole packages and four thousand edges a cold build at
+    /// the pin disagreed with, all from `api/` changes that landed on
+    /// overflow steps.
     fn query(&mut self, stage: &DirtyStage, ext: &Externals) -> Result<Queried> {
         let dirty = &stage.dirty;
         self.stats.dirty_packages = dirty.dirty.len();
@@ -1037,7 +1046,7 @@ impl<'a> Run<'a> {
                  (lineage kept, answer still exact)"
             );
             log_overflow_contributors(ext, &stage.packages_by_repo);
-            let rows = self.querier.universe()?;
+            let rows = self.querier.universe_with(&self.base.indexed_repos())?;
             Queried {
                 to_query: rows.updates.iter().map(|p| p.package.clone()).collect(),
                 rows,
