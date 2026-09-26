@@ -151,6 +151,9 @@ impl Repo {
             &self.root,
             &[
                 "log",
+                // log.showSignature in a user's config would otherwise put
+                // gpg's verdict on stdout among the formatted lines.
+                "--no-show-signature",
                 "--first-parent",
                 &format!("--max-count={max}"),
                 "--date=format:%m-%d %H:%M",
@@ -470,6 +473,54 @@ mod tests {
         assert_eq!(meta[0].sha, f.first);
         assert_eq!(meta[1].sha, f.second);
         assert_eq!(meta[0].date.len(), "MM-DD HH:MM".len(), "{:?}", meta[0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_parent_log_meta_is_not_confused_by_signature_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = TwoCommits::new();
+        // A stand-in for gpg that vouches for every signature on stderr, as
+        // gpg does. With log.showSignature set, git copies that into the log
+        // output, among the formatted lines.
+        let gpg = f.dir.path().join("gpg");
+        std::fs::write(&gpg, "#!/bin/sh\necho 'gpg: Good signature' >&2\n").unwrap();
+        std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A commit carrying a signature, written by hand so no real gpg or
+        // key is involved.
+        let tree = f.git(&["rev-parse", "HEAD^{tree}"]);
+        let object = f.dir.path().join("signed-commit");
+        std::fs::write(
+            &object,
+            format!(
+                "tree {tree}\nparent {}\n\
+                 author t <t@example.com> 1700000000 +0000\n\
+                 committer t <t@example.com> 1700000000 +0000\n\
+                 gpgsig -----BEGIN PGP SIGNATURE-----\n \n c2lnbmVk\n -----END PGP SIGNATURE-----\n\
+                 \nsigned\n",
+                f.second
+            ),
+        )
+        .unwrap();
+        let signed = f.git(&[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            object.to_str().unwrap(),
+        ]);
+        f.git(&["update-ref", "refs/heads/main", &signed]);
+        f.git(&["config", "gpg.program", gpg.to_str().unwrap()]);
+        f.git(&["config", "log.showSignature", "true"]);
+
+        let meta = Repo::new(&f.root)
+            .first_parent_log_meta("HEAD", 10)
+            .unwrap();
+        assert_eq!(
+            meta.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+            vec![f.first.as_str(), f.second.as_str(), signed.as_str()]
+        );
+        assert_eq!(meta[2].subject, "signed");
     }
 
     #[test]
