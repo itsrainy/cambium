@@ -48,12 +48,27 @@ pub trait Revisions {
 /// server shut down when this drops. Using it for the head commit too — even
 /// though the working tree may already be there — is deliberate: the profile
 /// then describes committed history and never a half-edited checkout.
+///
+/// The walk crosses commits that pin different Bazels, and bazelisk starts
+/// whichever one the checkout names on the worktree's one output base. A
+/// `bazel shutdown` reaches only a server of the client's own version, so
+/// the server is stopped before the checkout moves to a commit that names
+/// another version, while the checkout still names the one that started it;
+/// otherwise the last server of an older version outlives the walk, on a
+/// worktree that is then deleted and a directory no later `bazel shutdown`
+/// can be run in.
 pub struct WorktreeRevisions {
     workspace: RevisionWorkspace,
     bazel: Bazel,
     opts: ConvertOptions,
     diags: Diagnostics,
+    /// A querier has been handed out since the last shutdown, so a server
+    /// may be running.
+    served: std::sync::atomic::AtomicBool,
 }
+
+/// The files that decide which Bazel bazelisk runs in a checkout.
+const VERSION_FILES: [&str; 2] = [".bazelversion", ".bazeliskrc"];
 
 impl WorktreeRevisions {
     /// A worktree at `sha`, named for it under the engine's cache directory.
@@ -66,6 +81,18 @@ impl WorktreeRevisions {
             bazel,
             opts: engine.config().convert_options(),
             diags: engine.diagnostics().clone(),
+            served: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Whether `sha` names a different Bazel than the checkout does now: any
+    /// of [`VERSION_FILES`] differs, or is there on one side only.
+    fn moves_bazel(&self, sha: &str) -> bool {
+        let repo = cambium_diff::Repo::new(self.workspace.path());
+        VERSION_FILES.iter().any(|f| {
+            let now = std::fs::read_to_string(self.workspace.path().join(f)).ok();
+            let next = repo.git(&["show", &format!("{sha}:{f}")]).ok();
+            now.as_deref().map(str::trim) != next.as_deref().map(str::trim)
         })
     }
 }
@@ -78,6 +105,13 @@ impl Drop for WorktreeRevisions {
 
 impl Revisions for WorktreeRevisions {
     fn querier(&self, sha: &str) -> Result<Box<dyn PackageQuerier + '_>> {
+        use std::sync::atomic::Ordering;
+        // Stopped under the version that started it, before the checkout
+        // moves to one that names another (see the type's docs).
+        if self.served.load(Ordering::Relaxed) && self.moves_bazel(sha) {
+            self.bazel.shutdown();
+        }
+        self.served.store(true, Ordering::Relaxed);
         self.workspace.checkout(sha)?;
         Ok(Box::new(BazelQuerier {
             bazel: self.bazel.clone(),

@@ -79,6 +79,126 @@ const MARKER_FILES: &[&str] = &[
     "WORKSPACE.bzlmod",
 ];
 
+/// Whether a `.bazeliskrc` at `root` names the Bazel version, which pins
+/// it as `.bazelversion` would.
+fn bazeliskrc_pins(root: &Path) -> bool {
+    std::fs::read_to_string(root.join(".bazeliskrc")).is_ok_and(|t| {
+        t.lines()
+            .any(|l| l.trim_start().starts_with("USE_BAZEL_VERSION="))
+    })
+}
+
+/// Whether the file at `path` declares nothing: every line blank or a
+/// comment. The `MODULE.bazel` Bazel 7 and later write on their first run in
+/// a tree without one is such a file, and any run leaves it behind, cambium's
+/// own cold query included.
+fn declares_nothing(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|t| {
+        t.lines().all(|l| {
+            let l = l.trim();
+            l.is_empty() || l.starts_with('#')
+        })
+    })
+}
+
+/// Whether the tree's `MODULE.bazel` counts as a marker. Beside a `WORKSPACE`
+/// file, one that declares nothing does not: the dependencies are all in the
+/// `WORKSPACE`, and the stub Bazel writes would otherwise make every such
+/// tree read as having both files once any Bazel had run in it.
+fn module_counts(root: &Path, markers: &[String]) -> bool {
+    markers.iter().any(|m| m == "MODULE.bazel")
+        && !(markers.iter().any(|m| m != "MODULE.bazel")
+            && declares_nothing(&root.join("MODULE.bazel")))
+}
+
+/// Whether the root `.bazelrc` leaves `--enable_bzlmod` on, the last setting
+/// of it winning as it does in Bazel. `--noenable_bzlmod` and
+/// `--enable_bzlmod=false` turn it off.
+fn bazelrc_enables_bzlmod(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root.join(".bazelrc")) else {
+        return false;
+    };
+    let mut on = false;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        for tok in line.split_whitespace().skip(1) {
+            match tok {
+                "--enable_bzlmod" => on = true,
+                "--noenable_bzlmod" => on = false,
+                _ => {
+                    if let Some(v) = tok.strip_prefix("--enable_bzlmod=") {
+                        on = matches!(v, "true" | "1" | "yes");
+                    }
+                }
+            }
+        }
+    }
+    on
+}
+
+/// `CAMBI-E015` when the Bazel that answered `--version` cannot read the
+/// workspace in the mode its marker files leave it: a tree with only a
+/// `WORKSPACE` file under Bazel 9, which reads none; or a tree with only
+/// `MODULE.bazel` under a Bazel before 6, which has no bzlmod, or under 6
+/// with no `--enable_bzlmod` in the root `.bazelrc`. A `MODULE.bazel` that
+/// declares nothing beside a `WORKSPACE` does not count (see
+/// [`module_counts`]). Either way every query
+/// a run makes loads a different graph from the one the build uses, or a
+/// fraction of it.
+pub fn mode_misfit(ws: &WorkspaceProbe, major: Option<u32>) -> Option<Diagnostic> {
+    let (root, major) = (ws.root.as_ref()?, major?);
+    let module = module_counts(root, &ws.markers);
+    let stub = !module && ws.markers.iter().any(|m| m == "MODULE.bazel");
+    let marker = ws.markers.iter().find(|m| *m != "MODULE.bazel");
+    match (module, marker) {
+        (false, Some(marker)) if major >= 9 => Some(
+            Diagnostic::error(
+                Code::E015BazelNotFound,
+                format!(
+                    "Bazel {major} cannot read this workspace: its dependencies are only in \
+                     a {marker} file{}, and Bazel 9 reads no WORKSPACE file, so a query \
+                     here loads a fraction of the packages",
+                    if stub {
+                        " (the MODULE.bazel beside it declares nothing)"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+            .at(marker.clone(), None)
+            .with_help(
+                "pin a Bazel that reads WORKSPACE in .bazelversion (7.x, or 8.x with \
+                 --enable_workspace in .bazelrc), or move the dependencies to MODULE.bazel",
+            ),
+        ),
+        (true, None) if major < 6 => Some(
+            Diagnostic::error(
+                Code::E015BazelNotFound,
+                format!(
+                    "Bazel {major} cannot read this workspace: it has only a MODULE.bazel \
+                     file, and Bazel before 6 has no bzlmod"
+                ),
+            )
+            .at("MODULE.bazel", None)
+            .with_help("pin Bazel 7 or later in .bazelversion"),
+        ),
+        (true, None) if major == 6 && !bazelrc_enables_bzlmod(root) => Some(
+            Diagnostic::error(
+                Code::E015BazelNotFound,
+                "Bazel 6 cannot read this workspace as it stands: it has only a \
+                     MODULE.bazel file, and Bazel 6 reads one only under --enable_bzlmod, \
+                     which the root .bazelrc does not leave on",
+            )
+            .at("MODULE.bazel", None)
+            .with_help(
+                "pin Bazel 7 or later in .bazelversion, or add `common --enable_bzlmod` \
+                     to .bazelrc",
+            ),
+        ),
+        _ => None,
+    }
+}
+
 /// Walks up from `start` for a workspace root and reads what is there.
 pub fn workspace(start: &Path) -> WorkspaceProbe {
     let mut p = WorkspaceProbe {
@@ -104,11 +224,45 @@ pub fn workspace(start: &Path) -> WorkspaceProbe {
     p.bazelversion = read_trimmed(&root.join(".bazelversion"));
     p.bazelversion_major = p.bazelversion.as_deref().and_then(leading_major);
 
-    let module = p.markers.iter().any(|m| m == "MODULE.bazel");
+    let module = module_counts(&root, &p.markers);
+    let stub = !module && p.markers.iter().any(|m| m == "MODULE.bazel");
     let workspace = p.markers.iter().any(|m| m != "MODULE.bazel");
     p.mode = match (module, workspace) {
         (true, false) => Some(WorkspaceMode::Bzlmod),
-        (false, true) => Some(WorkspaceMode::Workspace),
+        (false, true) => {
+            // Only a WORKSPACE file, and nothing that pins a Bazel: bazelisk
+            // runs the latest, and the latest reads no WORKSPACE at all.
+            if p.bazelversion.is_none() && !bazeliskrc_pins(&root) {
+                let marker = p
+                    .markers
+                    .iter()
+                    .find(|m| *m != "MODULE.bazel")
+                    .cloned()
+                    .unwrap_or_default();
+                p.diagnostics.push(
+                    Diagnostic::warning(
+                        Code::W016WorkspaceModeAmbiguous,
+                        format!(
+                            "this workspace has only a {marker} file{} and no .bazelversion, \
+                             so which Bazel runs here (and whether it reads {marker} at all) \
+                             depends on the machine: bazelisk picks the latest release, and \
+                             Bazel 9 reads no WORKSPACE file",
+                            if stub {
+                                " (the MODULE.bazel beside it declares nothing)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )
+                    .at(marker, None)
+                    .with_help(
+                        "pin a Bazel that reads WORKSPACE in .bazelversion: 7.x, or 8.x with \
+                         --enable_workspace in .bazelrc",
+                    ),
+                );
+            }
+            Some(WorkspaceMode::Workspace)
+        }
         (false, false) => None,
         // Both. Which one Bazel reads is a function of its version — bzlmod is
         // the default from 7 on — so the pin decides, and without a pin
@@ -851,6 +1005,13 @@ pub fn judge(p: &Probes) -> Vec<Check> {
                 .cloned()
                 .expect("an ambiguous mode always carries its diagnostic"),
         ),
+        (Some(root), Some(WorkspaceMode::Workspace)) if !p.workspace.diagnostics.is_empty() => {
+            Check::from(
+                "workspace",
+                format!("{} (WORKSPACE, no Bazel pinned)", root.display()),
+                p.workspace.diagnostics[0].clone(),
+            )
+        }
         (Some(root), mode) => Check::ok(
             "workspace",
             format!(
@@ -872,7 +1033,14 @@ pub fn judge(p: &Probes) -> Vec<Check> {
     // ---- bazel ----
     if let Some(b) = &p.bazel {
         checks.push(match (b.diagnostics.first(), &b.version) {
-            (Some(d), _) => Check::from("bazel", b.binary.clone(), d.clone()),
+            // The version when there is one: "bazel 9.2.0" is what a
+            // version finding is about, and the binary is what a missing one
+            // is.
+            (Some(d), v) => Check::from(
+                "bazel",
+                v.clone().unwrap_or_else(|| b.binary.clone()),
+                d.clone(),
+            ),
             (None, Some(v)) => Check::ok("bazel", v.clone()),
             (None, None) => Check::ok("bazel", b.binary.clone()),
         });
@@ -1062,7 +1230,15 @@ pub fn collect(opts: &Options) -> Probes {
     let (cfg, config_probe) = config(&root, opts.config_path.as_deref(), &opts.overrides);
     let effective = cfg.clone().unwrap_or_default();
 
-    let bazel_probe = opts.run_bazel.then(|| bazel(&root, &effective));
+    let bazel_probe = opts.run_bazel.then(|| {
+        let mut b = bazel(&root, &effective);
+        // First, so the check is graded by it: a Bazel that runs and cannot
+        // read this tree is worse than one that is merely untested.
+        if let Some(d) = mode_misfit(&ws, b.major) {
+            b.diagnostics.insert(0, d);
+        }
+        b
+    });
 
     // The store's own diagnostics (a `command` backend's failed fetch) go into
     // the store probe, not into a sink nobody drains.
@@ -1228,10 +1404,111 @@ mod tests {
         assert_eq!(p.bazelversion_major, Some(7));
     }
 
+    /// A `.bazeliskrc` that names the version pins it as well as
+    /// `.bazelversion` does; with neither, a `WORKSPACE`-only tree is warned
+    /// about.
+    #[test]
+    fn a_workspace_only_tree_needs_a_pin_from_either_file() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "WORKSPACE.bazel", "");
+        let p = workspace(d.path());
+        assert_eq!(p.mode, Some(WorkspaceMode::Workspace));
+        assert_eq!(p.diagnostics.len(), 1);
+        assert_eq!(p.diagnostics[0].code, Code::W016WorkspaceModeAmbiguous);
+        assert!(p.diagnostics[0].message.contains("WORKSPACE.bazel"));
+        write(d.path(), ".bazeliskrc", "USE_BAZEL_VERSION=7.4.1\n");
+        assert!(workspace(d.path()).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_bazel_that_cannot_read_the_mode_is_named() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "WORKSPACE", "");
+        let ws = workspace(d.path());
+        assert_eq!(
+            mode_misfit(&ws, Some(9)).map(|d| d.code),
+            Some(Code::E015BazelNotFound)
+        );
+        assert!(mode_misfit(&ws, Some(8)).is_none());
+        assert!(
+            mode_misfit(&ws, None).is_none(),
+            "an unknown version is not judged"
+        );
+        write(d.path(), "MODULE.bazel", "module(name = \"x\")\n");
+        let both = workspace(d.path());
+        assert!(
+            mode_misfit(&both, Some(9)).is_none(),
+            "9 reads the MODULE.bazel"
+        );
+        assert!(
+            mode_misfit(&both, Some(5)).is_none(),
+            "5 reads the WORKSPACE"
+        );
+    }
+
+    /// The comment-only `MODULE.bazel` Bazel writes on its first run beside a
+    /// `WORKSPACE` is not a second marker: the tree stays `WORKSPACE`-only,
+    /// for the mode and for the Bazel it needs.
+    #[test]
+    fn a_module_bazel_that_declares_nothing_is_not_a_marker_beside_workspace() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "WORKSPACE", "workspace(name = \"x\")\n");
+        write(
+            d.path(),
+            "MODULE.bazel",
+            "#####\n# Bazel now uses Bzlmod by default to manage external dependencies.\n\n#####\n",
+        );
+        let p = workspace(d.path());
+        assert_eq!(p.mode, Some(WorkspaceMode::Workspace));
+        assert!(!p.inert_module_bazel && !p.inert_workspace);
+        assert_eq!(p.diagnostics.len(), 1);
+        assert_eq!(p.diagnostics[0].code, Code::W016WorkspaceModeAmbiguous);
+        assert!(
+            p.diagnostics[0].message.contains("only a WORKSPACE file"),
+            "{}",
+            p.diagnostics[0].message
+        );
+        assert!(p.diagnostics[0].message.contains("declares nothing"));
+        let misfit = mode_misfit(&p, Some(9)).expect("9 reads only the stub");
+        assert_eq!(misfit.code, Code::E015BazelNotFound);
+        assert!(
+            misfit.message.contains("declares nothing"),
+            "{}",
+            misfit.message
+        );
+        assert!(mode_misfit(&p, Some(7)).is_none());
+
+        // With no WORKSPACE, an empty MODULE.bazel is the tree's only marker,
+        // and a bzlmod tree with no dependencies is a real one.
+        let m = tempfile::tempdir().unwrap();
+        write(m.path(), "MODULE.bazel", "");
+        assert_eq!(workspace(m.path()).mode, Some(WorkspaceMode::Bzlmod));
+    }
+
+    /// Bazel 6 reads `MODULE.bazel` only under `--enable_bzlmod`, the last
+    /// setting in the root `.bazelrc` winning; turning it off is not turning
+    /// it on.
+    #[test]
+    fn bazel_6_needs_bzlmod_turned_on_and_left_on() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "MODULE.bazel", "module(name = \"x\")\n");
+        let misfit = |rc: &str| {
+            write(d.path(), ".bazelrc", rc);
+            mode_misfit(&workspace(d.path()), Some(6)).is_some()
+        };
+        assert!(misfit(""));
+        assert!(!misfit("common --enable_bzlmod\n"));
+        assert!(!misfit("build --enable_bzlmod=true\n"));
+        assert!(misfit("common --noenable_bzlmod\n"));
+        assert!(misfit("common --enable_bzlmod=false\n"));
+        assert!(misfit("common --enable_bzlmod\nbuild --noenable_bzlmod\n"));
+        assert!(misfit("# common --enable_bzlmod\n"));
+    }
+
     #[test]
     fn both_files_and_no_pin_is_ambiguous_and_says_so() {
         let d = tempfile::tempdir().unwrap();
-        write(d.path(), "MODULE.bazel", "");
+        write(d.path(), "MODULE.bazel", "module(name = \"x\")\n");
         write(d.path(), "WORKSPACE", "");
         let p = workspace(d.path());
         assert_eq!(p.mode, Some(WorkspaceMode::Ambiguous));

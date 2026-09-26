@@ -279,3 +279,44 @@ fn a_carried_package_survives_an_unrelated_step_and_heals_after_it() {
     let partial = partial_on_disk(&healed);
     assert!(!partial.partial, "{partial:?}");
 }
+
+/// The step that carries `//tbl` answers from rows older than this head, so
+/// as an answer someone acts on it is everything, under `CAMBI-W028` naming
+/// the package, unless the configuration expects `//tbl` to fail or the
+/// caller asked for the answer anyway. The index it writes is the same
+/// either way; only the answer changes.
+#[test]
+fn an_answer_that_carries_a_package_is_everything_unless_expected() {
+    let (_base, out) = broken_step();
+    assert_eq!(
+        out.partial.as_ref().map(|p| p.carried.clone()),
+        Some(vec!["tbl".to_string()]),
+        "the run knows what it carried"
+    );
+    let e = engine();
+    let gated = e.trust_partial(&req(), out);
+    assert!(gated.report.global);
+    assert!(gated.report.affected.is_empty());
+    let reason = gated.report.global_reason.clone().unwrap();
+    assert!(reason.contains("tbl"), "{reason}");
+    let said = e.diagnostics().drain();
+    let cause = said
+        .iter()
+        .find(|d| cambium_engine::GlobalReason::explains(d, Some(&reason)))
+        .expect("the cause is said");
+    assert_eq!(cause.code, Code::W028PackageLoadFailed);
+
+    // Asked for, or expected: the carried answer stands.
+    let (_base, out) = broken_step();
+    let allowed = AffectedRequest {
+        allow_partial: true,
+        ..req()
+    };
+    assert!(!e.trust_partial(&allowed, out).report.global);
+    let (_base, out) = broken_step();
+    let mut cfg = e.config().clone();
+    cfg.baseline.publish_partial =
+        cambium_engine::config::PartialPolicy::Expected(vec!["//tbl".into()]);
+    let e = cambium_testkit::engine_with(cfg);
+    assert!(!e.trust_partial(&req(), out).report.global);
+}

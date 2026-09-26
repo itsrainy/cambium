@@ -50,7 +50,7 @@ pub use config::Config;
 pub use diag::{Code, Diagnostic, Diagnostics, Level, Location};
 pub use engine::{
     AffectedRequest, BaseIndex, Baseline, BaselineOrigin, Engine, IndexUpdate, LabelPresence,
-    OnGlobal, PublishPolicy, PublishSource, RunOutcome,
+    OnGlobal, PartialAnswer, PublishPolicy, PublishSource, RunOutcome,
 };
 pub use error::{EngineError, Result};
 pub use externals::Externals;

@@ -89,6 +89,9 @@ pub struct AffectedArgs {
     pub publish_base: bool,
     /// Where the head index goes.
     pub out: Option<PathBuf>,
+    /// `--allow-partial`: answer from an index short of packages the
+    /// subject's `publish_partial` does not name, rather than `//...`.
+    pub allow_partial: bool,
 }
 
 impl AffectedArgs {
@@ -103,14 +106,19 @@ impl AffectedArgs {
     /// The one flag set the harness measures with: `--include-manual`
     /// ([`INCLUDE_MANUAL`]), `--explain` (the classifier needs the per-target
     /// reason), `--publish-base` (so the next step finds its base in the
-    /// store) and `--out` at `out`. Every workload builds its request here,
-    /// so a wall time from one is comparable with a wall time from another.
+    /// store), `--out` at `out`, and `--allow-partial`: a walk step that
+    /// carries a package is measured on the answer its index gives, and its
+    /// partial state recorded on the step (`IndexCounts::partial`), where a
+    /// user's run would answer `//...`. Every workload builds its request
+    /// here, so a wall time from one is comparable with a wall time from
+    /// another.
     pub fn harness(base: &str, head: &str, out: &Path) -> Self {
         Self {
             include_manual: INCLUDE_MANUAL,
             explain: true,
             publish_base: true,
             out: Some(out.to_path_buf()),
+            allow_partial: true,
             ..Self::new(base, head)
         }
     }
@@ -210,6 +218,9 @@ impl Cambi {
         }
         if args.publish_base {
             cmd.arg("--publish-base");
+        }
+        if args.allow_partial {
+            cmd.arg("--allow-partial");
         }
         if let Some(out) = &args.out {
             // A stale file from the previous change set must not be read back

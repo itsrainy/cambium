@@ -106,6 +106,11 @@ fn command_store(scheme: &str, location: &str) -> StoreConfig {
 pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
     report_detected(&probes);
+    // What the detection found wrong (a mode that depends on which Bazel
+    // runs) is said now, while the person is choosing, not left to `doctor`.
+    for d in &probes.workspace.diagnostics {
+        ctx.render.warn(d);
+    }
 
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let store = match args.store() {

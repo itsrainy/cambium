@@ -42,6 +42,14 @@ what it's for.
 The range is positional, like `git diff`: `cambi affected
 origin/main..HEAD`. A single ref means `<ref>..HEAD`; no ref means the
 default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
+Every spelling compares `HEAD` with where it forked from the base: the merge
+base of the two, which is the base itself when `HEAD` descends from it, so
+`A..B` and `A...B` are the same range. When the base is not an ancestor (a
+branch behind `origin/main`), the narration says so and names the merge base
+it compares from; with no merge base in the clone the run is `CAMBI-E013`,
+whose help says to deepen a shallow clone. A reversed range (`HEAD..HEAD~3`)
+has the head itself as the merge base, so nothing is compared (exit 0), and
+the narration says so and names `HEAD~3..HEAD`, the commits between them.
 When `[git].default_branch` has no local branch here (a CI checkout
 usually makes none), its remote-tracking branch `origin/<branch>` stands in,
 and the narration says so. A revision the clone does not have is
@@ -88,8 +96,19 @@ script, `--format labels` prints the labels alone, one per line (see the
 output contract below).
 
 Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
-`--no-full-build`, `--publish-base`, `--out`. `--explain` is kept one
-release; the verb below replaces it.
+`--no-full-build`, `--publish-base`, `--allow-partial`, `--out`. `--explain`
+is kept one release; the verb below replaces it.
+
+An index Bazel could not fully load (a cold one, one the store held, or a
+splice that carried a dirty package forward because it failed to load) is
+short of targets and edges, and an answer from it can leave out whatever the
+change reaches through them. So unless `baseline.publish_partial` names every
+package it is short of, the run answers `//...` (exit 2) under `CAMBI-W006`,
+or `CAMBI-W028` when this run carried them, naming the packages.
+`--allow-partial` answers from the index anyway, and lets `--publish-base`
+publish a partial base; `publish_partial = true` publishes such indexes but
+names nothing, so it does not make their answers stand. A range with no
+changed files affects nothing either way.
 
 `--out FILE` writes the head index the run built. A global run builds none
 (the answer is `//...` and nothing is spliced to keep), and `affected` does
@@ -257,8 +276,12 @@ frequency:
 ### `doctor`
 
 What a new user runs first, and a bug report asks for: Bazel found and
-version supported; workspace mode consistent (an inert `MODULE.bazel`
-beside WORKSPACE named, not guessed); config parses, every value's origin
+version supported, and able to read the workspace's mode (a `WORKSPACE`-only
+tree under Bazel 9, or a `MODULE.bazel`-only one under a Bazel with no
+bzlmod, fails under `CAMBI-E015`); workspace mode consistent (an inert
+`MODULE.bazel` beside WORKSPACE named, not guessed; a `WORKSPACE`-only tree
+with no `.bazelversion` warned about under `CAMBI-W016`, since bazelisk then
+runs the latest Bazel); config parses, every value's origin
 known; store answers a probe fetch/push; index format current; packages
 `bazel query` couldn't load last time. Each finding is a diagnostic with a
 code and `help:` line. Exit 0 if a run can work, 1 otherwise.

@@ -45,6 +45,14 @@ pub enum EngineError {
          disagree with a full build. Run `cambi index build` to mint a new lineage."
     )]
     ConfigHashMismatch { path: PathBuf },
+    /// A publish was handed an index whose `config_hash` is not this
+    /// workspace's. Every run here would skip it (`CAMBI-W003`), so storing
+    /// it only fills the store with something nothing here can use.
+    #[error(
+        "refusing to publish {path}: it was built with a different cambium.toml than this \
+         workspace's, so no run here could use it"
+    )]
+    PublishConfigMismatch { path: PathBuf },
     #[error("no index store is configured")]
     NoStore,
     #[error(
@@ -127,6 +135,23 @@ impl EngineError {
         use crate::diag::{Code, Diagnostic};
         use crate::store::StoreError;
 
+        // A Bazel that could not be started at all is the fact `doctor`
+        // reports as `CAMBI-E015`, and it gets the same code and help here:
+        // the workspace is fine, the binary is what is missing.
+        if let EngineError::Bazel(cambium_bazel::BazelError::Spawn { source, .. }) = self {
+            let help = match source.kind() {
+                std::io::ErrorKind::NotFound => {
+                    "install Bazel or bazelisk, or name the binary with --bazel-binary, \
+                     [bazel].binary in cambium.toml, or bazel.binary in cambium.local.toml"
+                }
+                _ => {
+                    "check that the binary can be run by this user, or name another with \
+                     --bazel-binary, [bazel].binary in cambium.toml, or bazel.binary in \
+                     cambium.local.toml"
+                }
+            };
+            return Diagnostic::error(Code::E015BazelNotFound, self.to_string()).with_help(help);
+        }
         let (code, help): (Code, Option<&str>) = match self {
             EngineError::Config(crate::config::ConfigError::LocalOverrideKey { .. }) => (
                 Code::E014LocalOverrideKey,
@@ -159,6 +184,13 @@ impl EngineError {
             EngineError::ConfigHashMismatch { .. } => (
                 Code::E007ConfigHashMismatch,
                 Some("mint a new lineage: `cambi index build --publish`"),
+            ),
+            EngineError::PublishConfigMismatch { .. } => (
+                Code::E007ConfigHashMismatch,
+                Some(
+                    "publish it from the workspace whose cambium.toml built it, or build one \
+                     under this configuration: `cambi index build --publish`",
+                ),
             ),
             EngineError::NoStore => (
                 Code::E008NoStore,

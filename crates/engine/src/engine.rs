@@ -37,13 +37,19 @@ pub struct AffectedRequest {
     /// ancestor, or built cold. The head-side index is never published from
     /// `affected`; only `baseline update` publishes that.
     pub publish_base: bool,
-    /// Let `publish_base` publish an index Bazel could not load all of.
+    /// Accept an index Bazel could not load all of: answer from it, and let
+    /// `publish_base` publish it.
     ///
     /// A partial index answers `affected` correctly about the packages it has
-    /// and knows nothing about the rest, and once it is in the store every
-    /// later run splices onto it. So a run publishes one only when told to,
-    /// here or by `baseline.publish_partial` in the config; otherwise the
-    /// index is kept locally and the publish is skipped with a warning.
+    /// and knows nothing about the rest: a target in a package it is short
+    /// of is missing with every edge it had, so a change it depends on
+    /// cannot reach it. So without this, [`Engine::affected`] answers
+    /// everything when the index it answered from is short of a package
+    /// `baseline.publish_partial` does not name (see [`PartialAnswer`]).
+    /// And once a partial index is in the store every later run splices
+    /// onto it, so a run publishes one only when told to, here or by
+    /// `baseline.publish_partial` in the config; otherwise the index is kept
+    /// locally and the publish is skipped with a warning.
     pub allow_partial: bool,
     /// Stop the reverse walk after this many hops from the direct set.
     /// `None` reports the whole closure.
@@ -209,6 +215,26 @@ pub enum PublishSource<'a> {
     Memory(&'a IndexData),
 }
 
+/// What the index an answer came from is short of: the packages whose rows
+/// it lacks or holds from an older query, because Bazel could not load them.
+///
+/// The base's own failures that this run did not reload, the dirty packages
+/// carried forward because they failed to load here, and, after an overflow
+/// re-queried `//...`, every package that query failed on. A dirty package
+/// tombstoned because it failed to load is not here: its consumers are
+/// reported through the deletion.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartialAnswer {
+    /// The packages, as Bazel names them, capped at
+    /// `cambium_bazel::MAX_ERROR_PACKAGES`.
+    pub packages: Vec<String>,
+    /// Error lines no name stands for: past the cap, or an exit 3 with no
+    /// line anyone could read.
+    pub unnamed: u32,
+    /// Those of `packages` carried forward by this run.
+    pub carried: Vec<String>,
+}
+
 /// A completed run: the answer, plus the head index it produced.
 pub struct RunOutcome {
     pub report: AffectedReport,
@@ -222,6 +248,9 @@ pub struct RunOutcome {
     /// not in [`AffectedReport`]: that JSON is a contract, and this is a local
     /// fact about one machine's cache.
     pub base_index: Option<BaseIndex>,
+    /// What the index the answer came from is short of; `None` when it is
+    /// complete, and on a global run.
+    pub partial: Option<PartialAnswer>,
 }
 
 /// Whether a label exists at either end of a run, for `cambi explain` to
@@ -678,8 +707,15 @@ impl Engine {
                 lineage,
                 commit,
             } => {
+                let f = IndexFile::open(path)?;
+                // An index built under another configuration is one every
+                // run here skips (`CAMBI-W003`); no policy makes it usable.
+                if f.view().config_hash != self.cfg.hash() {
+                    return Err(EngineError::PublishConfigMismatch {
+                        path: path.to_path_buf(),
+                    });
+                }
                 if !policy.allow_partial {
-                    let f = IndexFile::open(path)?;
                     let load = crate::inspect::PartialLoad::from(f.view());
                     if load.partial {
                         use crate::config::PartialVerdict;
@@ -712,6 +748,7 @@ impl Engine {
                         }
                     }
                 }
+                drop(f);
                 cache.publish(path, lineage, commit, &self.tree_of(commit))
             }
         }
@@ -1033,6 +1070,19 @@ impl Engine {
         req: &AffectedRequest,
         on: &mut dyn FnMut(Progress),
     ) -> Result<RunOutcome> {
+        self.run_narrated(req, on, true)
+    }
+
+    /// The run behind [`Engine::affected_narrated`]. `answer` is whether the
+    /// report is an answer someone acts on, which is what an answer from a
+    /// partial index cannot be trusted as ([`Engine::trust_partial`]); `index
+    /// update` wants the index, whose partial state its publish judges.
+    fn run_narrated(
+        &self,
+        req: &AffectedRequest,
+        on: &mut dyn FnMut(Progress),
+        answer: bool,
+    ) -> Result<RunOutcome> {
         let mut sw = Stopwatch::start();
         let total = Stopwatch::start();
         let base = self
@@ -1087,6 +1137,9 @@ impl Engine {
         on(Progress::QueryStart);
         let query = Stopwatch::start();
         let mut out = self.run_incremental(base_index.view(), &req)?;
+        if answer {
+            out = self.trust_partial(&req, out);
+        }
         let r = &out.report;
         match (&r.global, &r.global_reason) {
             (true, reason) => on(Progress::Global {
@@ -1123,7 +1176,7 @@ impl Engine {
             materialize: true,
             ..req.clone()
         };
-        let outcome = self.affected(&req)?;
+        let outcome = self.run_narrated(&req, &mut crate::progress::quiet, false)?;
         let diagnostics = outcome.report.diagnostics;
         if let Some(index) = outcome.index {
             return Ok(IndexUpdate {
@@ -1150,6 +1203,64 @@ impl Engine {
                     diagnostics,
                 })
             }
+        }
+    }
+
+    /// An answer from an index short of packages the configuration does not
+    /// expect to fail is not an answer: a target in one of them is missing
+    /// from the graph with every edge it had, so nothing the change reaches
+    /// through it is reported, and a WORKSPACE-only tree under Bazel 9,
+    /// which loads a fraction of its packages, answers "nothing affected"
+    /// with exit 0. So such a run answers everything, under `CAMBI-W006`
+    /// (the index is partial) or `CAMBI-W028` (this run carried the packages
+    /// forward), naming the packages.
+    ///
+    /// It stands when `--allow-partial` asked for the answer anyway, when
+    /// `baseline.publish_partial` lists every package it is short of (the
+    /// blanket `true` names none, so it does not count), and when nothing
+    /// changed, since an empty diff affects nothing whatever the index
+    /// lacks.
+    pub fn trust_partial(&self, req: &AffectedRequest, out: RunOutcome) -> RunOutcome {
+        let Some(partial) = &out.partial else {
+            return out;
+        };
+        if req.allow_partial || out.report.global || out.report.stats.changed_files == 0 {
+            return out;
+        }
+        let policy = &self.cfg.baseline.publish_partial;
+        let packages: Vec<String> = partial
+            .packages
+            .iter()
+            .filter(|p| !policy.expects(p))
+            .cloned()
+            .collect();
+        if packages.is_empty() && partial.unnamed == 0 {
+            return out;
+        }
+        let carried_only =
+            packages.iter().all(|p| partial.carried.contains(p)) && partial.unnamed == 0;
+        let reason = crate::reason::GlobalReason::PartialIndex {
+            packages,
+            unnamed: partial.unnamed,
+            carried_only,
+        };
+        tracing::info!(%reason, "the index this run answered from is partial; answering everything");
+        self.diagnostics.emit(reason.diagnostic());
+        let r = out.report;
+        RunOutcome {
+            report: AffectedReport {
+                schema: r.schema,
+                base: r.base,
+                head: r.head,
+                global: true,
+                global_reason: Some(reason.to_string()),
+                timings_ms: r.timings_ms,
+                stats: r.stats,
+                ..AffectedReport::default()
+            },
+            index: None,
+            base_index: out.base_index,
+            partial: None,
         }
     }
 

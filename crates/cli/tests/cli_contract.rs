@@ -144,7 +144,7 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
 
 /// The `schema` every JSON document carries. Pinned here, not read from
 /// `SCHEMA_VERSION`, so a bump is a deliberate edit to this file as well.
-const SCHEMA: u64 = 19;
+const SCHEMA: u64 = 20;
 
 /// Builds a synthetic index in `dir` and returns its path.
 ///
@@ -1771,4 +1771,416 @@ fn publish_base_on_a_global_run_publishes_the_base_and_nothing_else() {
         2,
         "the fixture's index and the computed base: {stdout}"
     );
+}
+
+/// A run that has to query Bazel and cannot start it says so under the code
+/// `doctor` gives the same fact, `CAMBI-E015`, with the help that names where
+/// the binary is configured; not `CAMBI-E004`, whose help sends the caller
+/// looking for a workspace that is there. The exit code stays 3: a Bazel
+/// that never ran is a Bazel that failed.
+#[test]
+fn a_bazel_that_cannot_be_started_is_e015_not_e004() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let base = &f.commits[1];
+    // A commit on the indexed base that edits a BUILD file: the run has to
+    // ask Bazel for that package.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    let build = std::fs::read_dir(&f.ws)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("BUILD.bazel"))
+        .find(|p| p.is_file())
+        .expect("the synthetic tree has a package");
+    let mut text = std::fs::read_to_string(&build).unwrap();
+    text.push_str("\n# touched\n");
+    std::fs::write(&build, text).unwrap();
+    cambium_testkit::git(&f.ws, &["commit", "-qam", "touch a BUILD file"]);
+
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "--bazel-binary",
+        "/nonexistent/bazel",
+        "affected",
+        &format!("{base}..HEAD"),
+    ]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E015]"), "{stderr}");
+    assert!(!stderr.contains("CAMBI-E004"), "{stderr}");
+    assert!(stderr.contains("/nonexistent/bazel"), "{stderr}");
+    assert!(stderr.contains("--bazel-binary"), "{stderr}");
+    assert!(!stderr.contains("pass -C"), "{stderr}");
+}
+
+/// `index publish` refuses an index built under another `cambium.toml`: a
+/// run here skips such an index with `CAMBI-W003`, so publishing one only
+/// fills the store with something nothing here can use (another
+/// repository's index, left at a shared path). Refused before anything is
+/// written, under the code that means "built with a different
+/// cambium.toml".
+#[test]
+fn index_publish_refuses_an_index_built_under_another_configuration() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let file = f.cache.join("published.cmbx");
+    move_the_configuration(&f.ws);
+
+    let (code, stdout, stderr) = run(&["-C", ws, "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E007]"), "{stderr}");
+    assert!(stderr.contains("refusing to publish"), "{stderr}");
+    assert!(stderr.contains("cambi index build --publish"), "{stderr}");
+    let (_, listing, _) = run(&["-C", ws, "index", "list"]);
+    assert_eq!(
+        listing
+            .lines()
+            .filter(|l| l.starts_with("indexes/"))
+            .count(),
+        1,
+        "nothing new reached the store: {listing}"
+    );
+
+    // `--allow-partial` is about load errors, not about whose index it is.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "index",
+        "publish",
+        "--allow-partial",
+        file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("CAMBI-E007"), "{stderr}");
+}
+
+/// A stub Bazel that answers `--version` with `version` and nothing else.
+fn stub_bazel(dir: &std::path::Path, version: &str) -> String {
+    let path = dir.join(format!("bazel-{version}"));
+    cambium_testkit::executable_script(&path, &format!("echo \"bazel {version}\""));
+    path.display().to_string()
+}
+
+/// `doctor` fails a Bazel that cannot read the workspace it is in: Bazel 9
+/// reads no `WORKSPACE`, so on a tree with only that file every query loads
+/// a fraction of the packages and a run answers from a partial index; and a
+/// Bazel before 6 has no bzlmod, and 6 has it only when `.bazelrc` turns it
+/// on, so a tree with only `MODULE.bazel` has no external repositories
+/// under it. A Bazel that can read the tree passes.
+#[test]
+fn doctor_fails_a_bazel_that_cannot_read_the_workspace_mode() {
+    let bins = tempfile::tempdir().expect("tempdir");
+    let doctor = |ws: &std::path::Path, version: &str| {
+        let bazel = stub_bazel(bins.path(), version);
+        run(&[
+            "-C",
+            ws.to_str().unwrap(),
+            "--bazel-binary",
+            &bazel,
+            "doctor",
+        ])
+    };
+
+    let ws_only = tempfile::tempdir().expect("tempdir");
+    std::fs::write(ws_only.path().join("WORKSPACE"), "").unwrap();
+    std::fs::write(ws_only.path().join(".bazelversion"), "9.2.0\n").unwrap();
+    let (code, stdout, stderr) = doctor(ws_only.path(), "9.2.0");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("fail   bazel"), "{stdout}");
+    assert!(
+        stdout.contains("bazel 9.2.0"),
+        "the check names the version:\n{stdout}"
+    );
+    assert!(stdout.contains("error[CAMBI-E015]"), "{stdout}");
+    assert!(stdout.contains("WORKSPACE"), "{stdout}");
+    assert!(
+        stdout.contains(".bazelversion"),
+        "the help names the pin:\n{stdout}"
+    );
+    let (code, stdout, stderr) = doctor(ws_only.path(), "7.4.1");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let module_only = tempfile::tempdir().expect("tempdir");
+    std::fs::write(module_only.path().join("MODULE.bazel"), "").unwrap();
+    for old in ["5.4.1", "6.5.0"] {
+        let (code, stdout, stderr) = doctor(module_only.path(), old);
+        assert_eq!(code, 1, "{old}: {stdout}{stderr}");
+        assert!(stdout.contains("error[CAMBI-E015]"), "{old}: {stdout}");
+        assert!(stdout.contains("MODULE.bazel"), "{old}: {stdout}");
+    }
+    std::fs::write(
+        module_only.path().join(".bazelrc"),
+        "common --enable_bzlmod\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = doctor(module_only.path(), "6.5.0");
+    assert_eq!(
+        code, 0,
+        "6 with bzlmod turned on reads it: {stdout}{stderr}"
+    );
+    let (code, stdout, stderr) = doctor(module_only.path(), "8.4.2");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+/// The `MODULE.bazel` Bazel 7 and later write on their first run in a tree
+/// that has none: comments only, untracked. It declares nothing, so beside a
+/// `WORKSPACE` the tree is still `WORKSPACE`-only as far as its dependencies
+/// go, and a Bazel 9 reading the stub instead of the `WORKSPACE` still loads a
+/// fraction of the packages. Any run leaves the stub behind, cambium's own
+/// cold query included, so `doctor` must not be passed by it.
+#[test]
+fn doctor_sees_through_the_module_bazel_stub_bazel_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("WORKSPACE"),
+        "workspace(name = \"x\")\nload(\"//:deps.bzl\", \"deps\")\ndeps()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("MODULE.bazel"),
+        "###############################################################################\n\
+         # Bazel now uses Bzlmod by default to manage external dependencies.\n\
+         # Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.\n\
+         #\n\
+         # For more details, please check https://github.com/bazelbuild/bazel/issues/18958\n\
+         ###############################################################################\n",
+    )
+    .unwrap();
+    let ws = dir.path().to_str().unwrap();
+    let bins = tempfile::tempdir().expect("tempdir");
+
+    let bazel = stub_bazel(bins.path(), "9.2.0");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("fail   bazel"), "{stdout}");
+    assert!(stdout.contains("error[CAMBI-E015]"), "{stdout}");
+    assert!(
+        stdout.contains("warn   workspace"),
+        "unpinned, and the stub does not make the mode undecided:\n{stdout}"
+    );
+    assert!(!stdout.contains("mode undecided"), "{stdout}");
+
+    let bazel = stub_bazel(bins.path(), "7.4.1");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 0, "7 reads the WORKSPACE: {stdout}{stderr}");
+
+    // A MODULE.bazel that declares something is a real one: Bazel 9 reads it.
+    std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"x\")\n").unwrap();
+    let bazel = stub_bazel(bins.path(), "9.2.0");
+    let (_, stdout, _) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert!(!stdout.contains("CAMBI-E015"), "{stdout}");
+}
+
+/// A tree with only a `WORKSPACE` file and no `.bazelversion` runs whatever
+/// Bazel bazelisk picks, which is the latest, and the latest reads no
+/// `WORKSPACE`. `init` says so when it detects the mode, and so do `status`
+/// and `doctor`, under `CAMBI-W016`, whose fix is the pin.
+#[test]
+fn an_unpinned_workspace_only_tree_is_warned_about() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("WORKSPACE"), "").unwrap();
+    let ws = dir.path().to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", ws, "init", "--store-none"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("warning[CAMBI-W016]"), "{stdout}{stderr}");
+    assert!(stderr.contains(".bazelversion"), "{stderr}");
+
+    let (code, stdout, stderr) = run(&["-C", ws, "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("CAMBI-W016"),
+        "{stdout}{stderr}"
+    );
+
+    let bins = tempfile::tempdir().expect("tempdir");
+    let bazel = stub_bazel(bins.path(), "7.4.1");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 0, "a warning, not a failure: {stdout}{stderr}");
+    assert!(stdout.contains("warn   workspace"), "{stdout}");
+    assert!(stdout.contains("CAMBI-W016"), "{stdout}");
+
+    // Pinned, there is nothing to say.
+    std::fs::write(dir.path().join(".bazelversion"), "7.4.1\n").unwrap();
+    let (_, stdout, stderr) = run(&["-C", ws, "status"]);
+    assert!(
+        !format!("{stdout}{stderr}").contains("CAMBI-W016"),
+        "{stdout}{stderr}"
+    );
+}
+
+/// A branch behind `main`: every spelling of the range compares HEAD with
+/// where it forked, the merge base, and says so when that is not the base
+/// that was typed. `main..HEAD` used to diff main's tip against HEAD, which
+/// for a branch 127 commits behind reads as reverting all of them; `main...HEAD`,
+/// which is git's own spelling of the merge base, was refused.
+#[test]
+fn every_spelling_of_a_range_compares_from_the_merge_base() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let fork = &f.commits[1];
+    // `main` is at the last commit; the branch forks two commits back.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "-b", "feature", fork]);
+    std::fs::create_dir_all(f.ws.join("notes")).unwrap();
+    std::fs::write(f.ws.join("notes/README.md"), "notes\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", "notes"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "notes"]);
+    let head = cambium_testkit::git(&f.ws, &["rev-parse", "HEAD"]);
+    let expected = format!("plan for {}..{}", &fork[..7], &head[..7]);
+
+    let plan = |argv: &[&str]| {
+        let mut a = vec!["-C", ws, "--cache-dir", cache, "affected", "--dry-run"];
+        a.extend_from_slice(argv);
+        let (code, stdout, stderr) = run(&a);
+        assert_eq!(code, 0, "{argv:?}: {stderr}{stdout}");
+        (
+            stdout.lines().next().unwrap_or_default().to_string(),
+            stderr,
+        )
+    };
+    for argv in [
+        &["main..HEAD"][..],
+        &["main...HEAD"],
+        &["main"],
+        &["--base", "main"],
+    ] {
+        let (first, stderr) = plan(argv);
+        assert_eq!(first, expected, "{argv:?}");
+        assert!(
+            stderr.contains(&format!("comparing from their merge base {}", &fork[..7])),
+            "{argv:?}: the moved base is said:\n{stderr}"
+        );
+        assert!(!stderr.contains("CAMBI-E013"), "{argv:?}: {stderr}");
+    }
+    // No range at all already meant this; it still does.
+    let (first, _) = plan(&[]);
+    assert_eq!(first, expected);
+    // A base HEAD descends from is the base, and nothing is said about it.
+    let (first, stderr) = plan(&[&format!("{fork}..HEAD")]);
+    assert_eq!(first, expected);
+    assert!(!stderr.contains("merge base"), "{stderr}");
+
+    // A reversed range: HEAD changed nothing since it forked from a commit
+    // that descends from it, so nothing is compared, and the narration says
+    // so and names the range that was probably meant.
+    let (first, stderr) = plan(&[&format!("HEAD..{fork}")]);
+    assert_eq!(first, format!("plan for {}..{}", &fork[..7], &fork[..7]));
+    assert!(stderr.contains("descends from"), "{stderr}");
+    assert!(stderr.contains(&format!("{fork}..HEAD")), "{stderr}");
+
+    // A range that cannot be anchored is an error that says why, not a diff
+    // against an unrelated tip.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--orphan", "island"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "unrelated"]);
+    let (code, stdout, stderr) = run(&["-C", ws, "affected", "--dry-run", "main..HEAD"]);
+    assert_eq!(code, 1, "{stderr}{stdout}");
+    assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
+    assert!(stderr.contains("no merge base"), "{stderr}");
+}
+
+/// An index Bazel could not fully load (a `WORKSPACE`-only tree under Bazel
+/// 9 loads a fraction of it) knows nothing about the packages it is short
+/// of, so an answer from it can leave out every target in them the change
+/// reaches: the stranger's run said "0 affected targets" where Bazel 7 found
+/// 92 tests. Such a run answers `//...`, exit 2, under `CAMBI-W006` naming
+/// the packages, unless `baseline.publish_partial` names them as expected
+/// here or `--allow-partial` asks for the answer anyway. Here the partial
+/// index is the one the store already holds, which is where one comes from
+/// on every run after the first.
+#[test]
+fn an_answer_from_a_partial_index_is_everything() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let base = &f.commits[1];
+    let file = f.cache.join("published.cmbx");
+    let mut index = cambium_index::IndexFile::open(&file)
+        .unwrap()
+        .deserialize()
+        .unwrap();
+    index.provenance.partial = true;
+    index.provenance.packages_in_error = 1;
+    index.provenance.error_packages = vec!["tests/copy_file".into()];
+    let partial = f.cache.join("partial.cmbx");
+    cambium_index::format::write_index(&partial, &index).unwrap();
+    // The store's index for the base is now the partial one.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "index",
+        "publish",
+        "--allow-partial",
+        partial.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let _ = std::fs::remove_dir_all(f.cache.join("indexes"));
+
+    // A change on the base the index would answer from.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    std::fs::create_dir_all(f.ws.join("notes")).unwrap();
+    std::fs::write(f.ws.join("notes/README.md"), "notes\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", "notes"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "notes"]);
+    let range = format!("{base}..HEAD");
+    let affected = |extra: &[&str]| {
+        let mut a = vec![
+            "-C",
+            ws,
+            "--cache-dir",
+            cache,
+            "--format",
+            "labels",
+            "affected",
+            &range,
+        ];
+        a.extend_from_slice(extra);
+        run(&a)
+    };
+
+    let (code, stdout, stderr) = affected(&[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(stdout, "//...\n", "{stderr}");
+    assert!(stderr.contains("warning[CAMBI-W006]"), "{stderr}");
+    assert!(stderr.contains("tests/copy_file"), "{stderr}");
+    assert!(stderr.contains("--allow-partial"), "{stderr}");
+
+    // The JSON says why, as for any global run.
+    let (code, stdout, _) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "--format",
+        "json",
+        "affected",
+        &range,
+    ]);
+    assert_eq!(code, 2);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["global"], true);
+    assert!(
+        doc["global_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("tests/copy_file")),
+        "{stdout}"
+    );
+
+    // Asked for, the answer is the partial index's.
+    let (code, stdout, stderr) = affected(&["--allow-partial"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "", "{stderr}");
+
+    // Expected here, it is the answer without asking.
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.baseline.publish_partial =
+        cambium_engine::config::PartialPolicy::Expected(vec!["//tests/...".into()]);
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    let (code, _, stderr) = affected(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("everything is affected"), "{stderr}");
 }

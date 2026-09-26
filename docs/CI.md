@@ -188,20 +188,24 @@ The workflow: [docs/ci/affected-tests.yml](ci/affected-tests.yml).
 | `fetch-depth: 2` | `HEAD^1` is there; the run finds an index only if the post-merge job indexed `HEAD^1` itself, and otherwise exits 4 (`none within 0 ancestors`), since the clone has no history for the walk |
 | `fetch-depth: 2`, then `git fetch --no-tags --deepen=20 origin` | the walk has 20 commits behind `HEAD^1`: an index the post-merge job left a few merges back is found and replayed forward |
 | `fetch-depth: 0` (the workflow) | everything |
+| `fetch-depth: 1`, then the `origin/main` fetch below | `HEAD` has no parent in the clone, so it shares no merge base with `origin/main`: `CAMBI-E013`, exit 1. The branch-name spelling needs `HEAD^1` in the clone too: `fetch-depth: 2`, or `git fetch --deepen=1` |
 
 The other spelling of the base is the branch by name. A shallow clone
 fetched by bare name can leave the branch only in `FETCH_HEAD`, which is
-why `CAMBI-E003`'s help names a refspec:
+why `CAMBI-E003`'s help names a refspec. The range compares from the merge
+base of the two, which is only reachable when the checkout has `HEAD`'s
+parent (`fetch-depth: 2` at least):
 
 ```console
 $ git fetch --no-tags --depth=20 origin main:refs/remotes/origin/main
 $ cambi affected origin/main..HEAD --tests-only --no-full-build --format labels
 ```
 
-Prefer `HEAD^1` on a merge commit: `origin/main` fetched during the job
-can already be ahead of the commit GitHub merged onto, and the range then
-starts from a different commit than the one the change was merged with.
-With no range at all, `cambi affected` compares from the merge base of
+`HEAD^1` on a merge commit needs no remote-tracking branch at all.
+`origin/main` fetched during the job can already be ahead of the commit
+GitHub merged onto; the range still compares from the merge base of the
+two, which is that commit (`HEAD^1`), and the narration names it. With no
+range at all, `cambi affected` compares from the merge base of
 `[git].default_branch` with `HEAD`, using `origin/<branch>` when the clone
 has no local branch; in a shallow clone that merge base may be missing
 (`CAMBI-E013`, whose help says to deepen).

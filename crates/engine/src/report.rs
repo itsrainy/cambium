@@ -156,7 +156,22 @@ use serde::{Deserialize, Serialize};
 ///   transitive deps closure runs through a repository that moved (index
 ///   format 16), and for no other reason. `external_direct_targets` counts
 ///   the rules above them as before. Purely additive.
-pub const SCHEMA_VERSION: u32 = 19;
+/// - **20** changes what `global` covers, not the shape: a run whose index
+///   is short of packages Bazel could not load, and that
+///   `baseline.publish_partial` does not name, is global (exit 2, stdout
+///   `//...`), with `CAMBI-W006` (the index is partial) or `CAMBI-W028`
+///   (this run carried the packages forward) as its cause, naming them in
+///   `global_reason`. Such a run used to answer from the partial index with
+///   `global: false`. `--allow-partial` on `affected` and `explain` answers
+///   from it as before. `doctor` and `status` values change with it: the
+///   `bazel` check fails under `CAMBI-E015` for a Bazel that cannot read
+///   the workspace's mode, and its `detail` is the version, not the binary,
+///   whenever it carries a finding; a `WORKSPACE`-only tree with no pinned
+///   Bazel grades the `workspace` check warn and puts `CAMBI-W016` in
+///   `status`'s `workspace.diagnostics`; and a comment-only `MODULE.bazel`
+///   beside a `WORKSPACE` (the stub Bazel writes) is not a marker, so such
+///   a tree's `workspace.mode` is `workspace`, not `ambiguous`.
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -525,7 +540,7 @@ impl AffectedReport {
     pub fn global_cause(&self) -> Option<&crate::diag::Diagnostic> {
         self.diagnostics
             .iter()
-            .find(|d| crate::reason::GlobalReason::is_cause(d.code))
+            .find(|d| crate::reason::GlobalReason::explains(d, self.global_reason.as_deref()))
     }
 
     /// The diagnostic that says why this run re-indexed the whole repository

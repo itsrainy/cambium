@@ -77,18 +77,22 @@ $ cambi init --store-dir .cambium-store
 Writes `cambium.toml` and nothing else (no index, no Bazel, no credentials),
 detecting `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
 `try-import`s and the default branch, and asking only for the store. A
-relative store path is read from the workspace root, so
-`.cambium-store/` goes in `.gitignore` beside the `cambium.local.toml` line
-`init` asks for.
+relative store path is read from the workspace root, so `.cambium-store/`
+goes in `.gitignore` beside the `cambium.local.toml` line `init` asks for.
+A tree with only a `WORKSPACE` file and no `.bazelversion` is warned about
+(`CAMBI-W016`): bazelisk then runs the latest Bazel, which reads no
+`WORKSPACE`, so pin one that does.
 
 ```console
 $ cambi doctor
 ```
 
-Grades what a run needs: Bazel found and its version supported, the workspace
-mode unambiguous, the config parsed, the store answering both a fetch and a
-push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
-finding is a diagnostic with a code and a `help:` line.
+Grades what a run needs: Bazel found, its version supported and able to
+read the workspace's mode (Bazel 9 on a `WORKSPACE`-only tree fails under
+`CAMBI-E015`), the workspace mode unambiguous, the config parsed, the store
+answering both a fetch and a push of a probe object. Exit 0 if a run can
+work here, 1 otherwise. Every finding is a diagnostic with a code and a
+`help:` line.
 
 ```console
 $ cambi profile --commits 30 --out /tmp/cambium-index.bin
@@ -138,8 +142,19 @@ An empty file is skipped, because `bazel test` with no targets fails. Exit
 there and could not be read. A mistyped flag exits 1, with the parser's
 message on stderr and nothing on stdout, so the `*)` arm fails the job.
 
-The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
-no range means the merge base of `[git].default_branch` with `HEAD` (or with
+The range answers one question: what did `HEAD` change since it forked from
+the base. `origin/main..HEAD`, `origin/main...HEAD` and a single ref
+(`origin/main`, meaning `origin/main..HEAD`) all compare from the merge base
+of the two, which is the base itself whenever `HEAD` descends from it. On a
+branch behind `origin/main` it is not, and the run says so (`origin/main is
+not an ancestor of HEAD; comparing from their merge base <sha>`) rather than
+reading every commit `main` gained since as a change the branch reverted.
+Two commits with no merge base in the clone (a shallow clone cut above it)
+are `CAMBI-E013`, whose help says to deepen; in a CI checkout that means
+`HEAD`'s parent must be in the clone (`fetch-depth: 2`). A reversed range
+(`HEAD..HEAD~3`, the base descending from `HEAD~3`) compares nothing, exit 0,
+and the narration says so and names the range the other way round. No
+range means the merge base of `[git].default_branch` with `HEAD` (or with
 `origin/<branch>` in a CI checkout that has no local branch).
 `--dry-run` prints the plan (which index would load, how the diff classifies,
 whether the run would splice, cold-rebuild or go global) and exits before any
@@ -414,7 +429,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 19, "base": "...", "head": "...", ... }
+{ "schema": 20, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -429,8 +444,8 @@ affected report's shape and fails with instructions if it moves without a bump;
 |---:|---|
 | 0 | success |
 | 1 | error, or a usage error: one `cambi` diagnoses (`CAMBI-E013`), or a command line the argument parser rejects (an unknown flag or verb, a missing value), which prints the parser's message on stderr and nothing on stdout |
-| 2 | global invalidation: everything is affected; stdout is `//...` |
-| 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`) |
+| 2 | global invalidation: everything is affected; stdout is `//...`. Also a run whose index is short of packages Bazel could not load that `baseline.publish_partial` does not name (`CAMBI-W006`, or `CAMBI-W028` for packages the run carried): the answer cannot be trusted to include what the change reaches through them; `--allow-partial` answers from the index instead |
+| 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`), or the Bazel binary could not be started (`CAMBI-E015`) |
 | 4 | no index available and `--no-full-build` was given |
 | 5 | the store is there and could not be read (as against holding no index, which is 4): a CI job can retry this one. A directory store whose directory does not exist holds no index; the `aws s3 cp`/`gsutil cp` templates cannot tell an outage from a miss ([docs/STORE.md](docs/STORE.md#misses-and-outages)) |
 
@@ -490,7 +505,7 @@ not also show:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -528,7 +543,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -552,7 +567,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -587,7 +602,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
@@ -626,6 +641,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
 | 18 | `stats.consumer_leaves_seeded`: leaves of external repositories seeded because the consumer table's leaf map (index format 14) says their transitive deps reach a package of an indexed repository that moved, or does not know the leaf; a consumer seeded this way is still counted in `repos_dirty_by_consumer`, but only its reaching leaves are seeded rather than all of them |
 | 19 | `stats.closure_leaves_seeded`: leaves seeded because their transitive deps closure runs through an external repository that moved (index format 16), and for no other reason: envoy's `@grpc//:grpc++` when an input of `@c-ares` moves |
+| 20 | What `global` covers, not the shape: a run whose index is short of packages Bazel could not load, and that `baseline.publish_partial` does not name, is global (exit 2, stdout `//...`) with `CAMBI-W006` (the index is partial) or `CAMBI-W028` (this run carried the packages forward) as its cause, naming them in `global_reason`. Such a run used to answer from the partial index with `global: false`. `--allow-partial` on `affected` and `explain` answers from it as before. `doctor` and `status` values change with it: the `bazel` check fails under `CAMBI-E015` for a Bazel that cannot read the workspace's mode, and its `detail` is the version, not the binary, whenever it carries a finding; a `WORKSPACE`-only tree with no pinned Bazel grades the `workspace` check warn and puts `CAMBI-W016` in `status`'s `workspace.diagnostics`; and a comment-only `MODULE.bazel` beside a `WORKSPACE` (the stub Bazel writes) is not a marker, so such a tree's `workspace.mode` is `workspace`, not `ambiguous` |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints. As of 17 it holds `repository`, `from` and

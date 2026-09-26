@@ -153,3 +153,73 @@ fn a_cold_base_index_is_built_from_the_base_tree_not_from_head() {
     let head_index = f.engine.full_build_with(&f.head, &dqh).unwrap();
     assert!(head_index.view().id_of("//lib:b").is_some());
 }
+
+/// `cambi profile` moves one worktree across history, and bazelisk starts
+/// whichever Bazel each commit's `.bazelversion` names on the worktree's one
+/// output base. A `bazel shutdown` reaches only a server of the version the
+/// client is, so the server a walk leaves running is stopped only if the
+/// shutdown is run under the version that started it. Before this, the drop
+/// ran one shutdown under the last commit's version; a walk whose last query
+/// ran under an older `.bazelversion` (rules_shell: 8.2.1 queried, 9.1.1 at
+/// head) left that server running on a worktree that was then deleted, where
+/// nothing could reach it again.
+///
+/// The stub Bazel logs each command with the `.bazelversion` it ran under;
+/// every version that ran a server command must end with a shutdown.
+#[test]
+fn a_profile_worktree_stops_every_server_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    init_repo(&root);
+    write(&root, "MODULE.bazel", "");
+    write(&root, "lib/BUILD", "a\n");
+    write(&root, ".bazelversion", "8.2.1\n");
+    let old = commit_all(&root, "8.2.1");
+    write(&root, ".bazelversion", "9.1.1\n");
+    let mid = commit_all(&root, "9.1.1");
+    write(&root, "README", "no query needed here\n");
+    let head = commit_all(&root, "a file no package owns");
+
+    let log = dir.path().join("bazel.log");
+    let stub = dir.path().join("bazel");
+    cambium_testkit::executable_script(
+        &stub,
+        &format!(
+            "echo \"$(cat .bazelversion 2>/dev/null | tr -d '\\n') $*\" >> '{}'\nexit 0",
+            log.display()
+        ),
+    );
+    let engine = Engine::with_parts(
+        Config::default(),
+        cambium_diff::Repo::new(root.clone()),
+        cambium_bazel::Bazel::at(root.clone(), Some(stub.to_str().unwrap())),
+    )
+    .with_cache_dir(dir.path().join("cache"));
+
+    use cambium_engine::Revisions as _;
+    let revs = cambium_engine::WorktreeRevisions::create(&engine, &head).unwrap();
+    // The walk: a query at the old version, one at the new, then a commit
+    // that asks Bazel nothing, and the walk ends.
+    let _ = revs.querier(&old).unwrap().query(&["lib".to_string()]);
+    let _ = revs.querier(&mid).unwrap().query(&["lib".to_string()]);
+    let _ = revs.querier(&old).unwrap().query(&["lib".to_string()]);
+    drop(revs.querier(&head).unwrap());
+    drop(revs);
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<(&str, &str)> = text
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, cmd)| !cmd.starts_with("--"))
+        .collect();
+    let versions: std::collections::BTreeSet<&str> = lines.iter().map(|(v, _)| *v).collect();
+    assert!(versions.len() >= 2, "both versions ran something:\n{text}");
+    for v in versions {
+        let last = lines.iter().rev().find(|(w, _)| *w == v).unwrap();
+        assert!(
+            last.1.starts_with("shutdown"),
+            "the {v} server was left running; its last command was `{}`:\n{text}",
+            last.1
+        );
+    }
+}
