@@ -114,18 +114,9 @@ impl Repo {
     /// First-parent history of `rev`, oldest first, at most `max` commits
     /// (including `rev`).
     pub fn first_parent_log(&self, rev: &str, max: usize) -> Result<Vec<String>> {
-        let out = run(
-            &self.root,
-            &[
-                "rev-list",
-                "--first-parent",
-                &format!("--max-count={max}"),
-                rev,
-            ],
-        )?;
-        let mut v: Vec<String> = out.lines().map(|s| s.to_string()).collect();
-        v.reverse();
-        Ok(v)
+        let mut log = self.first_parent_walk(rev, max)?;
+        log.reverse();
+        Ok(log)
     }
 
     /// The same history with the date and subject of each commit, for a
@@ -212,16 +203,24 @@ impl Repo {
         if max == 0 {
             return Ok(Vec::new());
         }
+        let walk = self.first_parent_walk(rev, max + 1)?;
+        Ok(walk.into_iter().skip(1).collect())
+    }
+
+    /// `rev` and its first-parent ancestors, nearest first, at most `count`
+    /// commits: the one walk behind both the oldest-first log and the
+    /// ancestor search.
+    fn first_parent_walk(&self, rev: &str, count: usize) -> Result<Vec<String>> {
         let out = run(
             &self.root,
             &[
                 "rev-list",
                 "--first-parent",
-                &format!("--max-count={}", max + 1),
+                &format!("--max-count={count}"),
                 rev,
             ],
         )?;
-        Ok(out.lines().skip(1).map(|s| s.to_string()).collect())
+        Ok(out.lines().map(str::to_string).collect())
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
