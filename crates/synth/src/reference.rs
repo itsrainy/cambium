@@ -44,11 +44,12 @@ pub fn deep_hashes(g: &SynthGraph) -> BTreeMap<String, [u8; 32]> {
             if !g.targets[d as usize].alive {
                 continue;
             }
-            match memo[d as usize] {
-                Some(dh) => h.update(&dh),
-                // Only possible if a mutation broke the layering invariant.
-                None => h.update(&g.target_hash(d)),
-            };
+            // A missing entry means a mutation broke the layering invariant.
+            // Falling back to the dep's own hash would quietly weaken the
+            // ground truth, so it stops the test instead.
+            let dh = memo[d as usize]
+                .unwrap_or_else(|| panic!("t{id} depends on t{d}, which is not on a lower layer"));
+            h.update(&dh);
         }
         let digest = *h.finalize().as_bytes();
         memo[id as usize] = Some(digest);
