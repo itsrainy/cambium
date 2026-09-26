@@ -3,12 +3,12 @@
 //! `main` turns the command line into a [`Context`] and hands it to one
 //! verb's `run`. What a new verb uses rather than writes again lives here:
 //! [`emit`] and [`emit_json`] print a document the way `--format` asked,
-//! [`tagged_event`] is the `jsonl` framing, and [`short`], [`plural`],
-//! [`duration`] and [`human_bytes`] are the units a revision, a count, an age
-//! and a size are said in.
-//! `narrate` holds the pieces of the stderr narration more than one verb
-//! draws. `cambi config` has no module of its own: each of its three
-//! subcommands is one document, printed here.
+//! [`tagged_event`] is the `jsonl` framing, [`two_dot`] reads a range, and
+//! [`short`], [`plural`], [`duration`] and [`human_bytes`] are the units a
+//! revision, a count, an age and a size are said in. `narrate` holds the
+//! pieces of the stderr narration more than one verb draws. `cambi config`
+//! has no module of its own: each of its three subcommands is one document,
+//! printed here.
 
 pub mod affected;
 pub mod doctor;
