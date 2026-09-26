@@ -239,11 +239,6 @@ impl Repo {
         parse_name_status_z(&out)
     }
 
-    /// Files changed by a single commit relative to its first parent.
-    pub fn diff_commit(&self, commit: &str) -> Result<Vec<Change>> {
-        self.diff(&format!("{commit}^"), commit)
-    }
-
     /// Reads a blob at a revision. `None` if the path does not exist there.
     pub fn read_at(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
         let out = Command::new("git")
