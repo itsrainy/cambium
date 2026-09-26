@@ -425,9 +425,10 @@ in place of `head-object`, matching the message your `gsutil` prints for a
 missing object. The `list_cmd` is the other half: when it fails, the run
 reads the store as one that cannot list and fetches the lineage-less keys
 blind. In a real outage those fetches fail too, and the wrapper turns that
-into exit 5; a listing that fails on its own (a reader without
-`s3:ListBucket`) ends as a miss, because a listing publisher does not write
-the lineage-less keys.
+into exit 5. A listing that fails on its own (a reader without
+`s3:ListBucket`) also ends as exit 5 with the wrapper: a listing publisher
+does not write the lineage-less keys, and S3 answers `403` for them to a
+reader that may not list. With the plain templates it is a miss.
 
 ## Garbage collection
 
