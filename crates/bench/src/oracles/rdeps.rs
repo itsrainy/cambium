@@ -1140,7 +1140,7 @@ mod tests {
     /// [`cambium_bazel::BazelRunner`], so the seam a test can take here is the
     /// executable itself.
     fn bazel_answering(dir: &Path, code: i32, stdout: &str) -> Bazel {
-        let binary = dir.join("bazel");
+        let binary = dir.join("stub-bazel");
         cambium_testkit::executable_script(
             &binary,
             &format!("printf '%s' {}\nexit {code}", shell_word(stdout)),
@@ -1286,19 +1286,13 @@ mod tests {
         assert_eq!(RdepsResult::default().recall(), 1.0);
     }
 
-    // ---- the stub Bazel ----
+    // ---- `run` end to end over a stub Bazel ----
     //
     // `Bazel::at` runs whatever binary it is given, so a script that ignores
-    // its arguments and prints a fixed answer is a complete Bazel as far as
-    // the oracle is concerned. That is enough to drive `run` end to end: what
-    // is under test here is which labels are asked about and how the answer is
-    // scored, not Bazel.
-    #[cfg(unix)]
-    fn stub_bazel(dir: &Path, answer: &str) -> Bazel {
-        let bin = dir.join("stub-bazel");
-        cambium_testkit::executable_script(&bin, &format!("cat <<'EOF'\n{answer}\nEOF"));
-        Bazel::at(dir.to_path_buf(), Some(bin.to_str().unwrap()))
-    }
+    // its arguments and prints a fixed answer ([`bazel_answering`]) is a
+    // complete Bazel as far as the oracle is concerned. That is enough to
+    // drive `run` end to end: what is under test here is which labels are
+    // asked about and how the answer is scored, not Bazel.
 
     /// The scenario of 11ae8e0: `defs/defs.bzl` is listed in the `srcs` of a
     /// filegroup in its own package. Bazel's `rdeps` names the filegroup; if
@@ -1338,7 +1332,7 @@ mod tests {
         // Bazel reaches the filegroup from the changed `.bzl`; the loading
         // package's rule is reached through the load, which `rdeps` over a
         // source label does not see, so the oracle names only the filegroup.
-        let bazel = stub_bazel(ws, "//defs:bzl_srcs");
+        let bazel = bazel_answering(ws, 0, "//defs:bzl_srcs\n");
         let idx = bzl_filegroup_index();
         let changed = set(&["defs/defs.bzl"]);
 
@@ -1398,7 +1392,7 @@ mod tests {
         let ws = tmp.path();
         std::fs::create_dir_all(ws.join("docs")).unwrap();
         std::fs::write(ws.join("docs/README.md"), "hi\n").unwrap();
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let idx = bzl_filegroup_index();
         let changed = set(&["docs/README.md"]);
         let r = RdepsOracle::default()
@@ -1428,7 +1422,7 @@ mod tests {
         let ws = tmp.path();
         std::fs::create_dir_all(ws.join("defs")).unwrap();
         std::fs::write(ws.join("defs/defs.bzl"), "x\n").unwrap();
-        let bazel = stub_bazel(ws, "//defs:bzl_srcs\n@quiche//:x\n//external:y");
+        let bazel = bazel_answering(ws, 0, "//defs:bzl_srcs\n@quiche//:x\n//external:y\n");
         let idx = bzl_filegroup_index();
         let r = RdepsOracle::default()
             .run(
@@ -1504,7 +1498,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         // Neither `lib/BUILD` nor `lib/gone.cc` is on disk at head.
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let head = head_index_without_the_deleted_package();
         let base = base_index_with_a_deleted_package();
         let changed = set(&["lib/BUILD", "lib/gone.cc"]);
@@ -1571,7 +1565,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         // `lib/gone.cc` is not on disk: that is what makes it deleted.
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let head = bzl_filegroup_index();
         let base = base_index_with_a_consumed_source();
         let changed = set(&["lib/gone.cc"]);
@@ -1649,7 +1643,7 @@ mod tests {
             std::fs::write(ws.join(format!("defs/f{i}.bzl")), "x\n").unwrap();
             changed.insert(format!("defs/f{i}.bzl"));
         }
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let idx = bzl_filegroup_index();
         let inputs = OracleInputs {
             head: idx.view(),
