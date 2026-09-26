@@ -452,6 +452,52 @@ precision item:
   `@envoy_api` rule hashes; nothing on this branch writes rule rows. No
   box run has been done on it.
 
+**Round trips through repositories fetched from elsewhere, 2026-09-25**
+(branch `engine-external-round-trip`, not merged). Item 4's "a
+declared-only repository can still round trip" is now modelled: every
+external label the index holds carries a forward edge to each target of
+the universe it reaches through targets outside it, Bazel's answer at cold
+build (`crates/engine/src/round_trip.rs`), so the ordinary reverse walk
+closes the loop. The walk stops at the first inside node, so a main-repo
+`BUILD` edit never makes an answer stale. The part outside is not a
+function of the repositories outside alone: the packages there load
+`.bzl` files, and a rule class the root module defines (rules_shell's
+`sh_binary`, the class of `collect_coverage`, whose implicit
+`_runfiles_dep` is the edge back in) moves what a leaf reaches with nothing
+outside moving. A review reproduced it: an implicit attribute added to
+`sh_binary.bzl`, spliced, left an edit below it at 1 label where a cold
+build answered 25. So the answer is stored with what it was derived
+through (the main-repo files the closure's external packages load, the
+indexed repositories whose files they load, the packages of entries that
+had no node), read by the same code as the consumer table's leaf map
+(`crates/engine/src/via.rs`), which now records the loaded files too. It
+is asked again at head in a run that moves one of those or a repository
+outside, for every leaf after an overflow, and for a leaf a splice adds.
+The via set is a column, so the format went to 15. `bazelbuild/rules_shell`
+at `b1eed28`, the root module, where every test depends on
+`@bazel_tools//tools/test:collect_coverage` and so on
+`//shell/runfiles:runfiles`: an edit to `runfiles.bash` answered 5 labels
+(2 tests) on main and answers 27 (24 tests) on the branch, equal to
+`kind(rule, rdeps(//..., //shell/runfiles:runfiles.bash))`; `inspect
+verify` went from 3 unsound samples (69 round-trip misses) to 0 of 71.
+Cost at the pins, measured again with the `loadfiles` question, on the
+output bases the builds warmed and a laptop load average near 100: envoy
+752 leaves, a closure of 1399 packages, 13.1 s of a 482 s cold build, 2
+leaves with edges (`@grpc//:grpc++` into 36 `@envoy_api` packages, which
+the consumer table also covers, and `@envoy_repo//:project` into
+`//:VERSION.txt` and `//changelogs`), no main-repo file loaded outside;
+xla 636 leaves, 488 packages, 6.3 s of 174 s, 34 leaves with 74 edges
+(`@local_config_rocm//rocm:*` into `//third_party/libdrm`, `@nanobind`
+into `//third_party/python_runtime`, `@transformer_engine` into
+`//xla/ffi/api`, `select()` keys into `//xla/tsl:*` config settings among
+them), each a route the index could not see before, and 14 main-repo
+`.bzl` files loaded outside (`xla/tsl/tsl.bzl`, `xla/py_strict.bzl`
+among them), each an edit that now asks again at head. Timed alone on a
+warm xla server the closure is 0.9 s and the `loadfiles` 0.8 s. On an
+xla output base that had fetched nothing, the closure alone took 952 s;
+how much of that a cold build's own universe query already pays is not
+measured.
+
 ### Box run B: phase 5, and phase 6 if it is ready
 
 envoy and xla only, 300 steps, unless the change touched the loading

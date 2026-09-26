@@ -250,6 +250,10 @@ pub struct DirtyStage {
     /// The leaf questions this run asked at head for a consumer whose map
     /// was suspect ([`ask_at_head`]), for the splice to reuse.
     pub leaf_answers: crate::consumers::Asked,
+    /// The round-trip edges at head, asked because a repository outside the
+    /// index's universe moved (`crate::round_trip::at_head`); the splice
+    /// writes them over the base's rows.
+    pub round_trip: Option<crate::round_trip::Answer>,
     /// Set when the answer is `//...`; the other fields are then irrelevant.
     pub global: Option<GlobalReason>,
 }
@@ -652,6 +656,9 @@ impl<'a> Run<'a> {
             .filter(|c| cambium_classify::is_bzl_file(&c.path))
             .map(|c| c.path.clone())
             .collect();
+        // Every path the change set names, for the closures stored beside
+        // the graph to hold their via entries against (`crate::via`).
+        let paths: BTreeSet<String> = changes.iter().map(|c| c.path.clone()).collect();
         if !dirty.global {
             if let Some(reason) = self.workspace_bzl(&changed_bzl, ext) {
                 dirty.global = true;
@@ -746,9 +753,18 @@ impl<'a> Run<'a> {
             // Before `dirty_consumers` adds the consumers it dirties: a
             // consumer dirty because what it consumes moved has not had its
             // own rules move.
-            stale = stale_leaf_maps(self.base, &ext.repos, &settled, &dirty.dirty);
+            stale = stale_leaf_maps(self.base, &ext.repos, &settled, &dirty.dirty, &paths);
         }
         let leaf_answers = ask_at_head(self.base, self.querier, &stale, &ext.repos);
+        // An indexed repository whose rules may have moved (not settled) is
+        // one whose files the round-trip closure may load.
+        let unsettled: BTreeSet<String> = ext.repos.difference(&settled).cloned().collect();
+        let round_trip = (!dirty.global && self.engine.config().externals.enabled)
+            .then(|| {
+                let through = crate::via::Moved::new(self.base, &dirty.dirty, &paths, &unsettled);
+                crate::round_trip::at_head(self.base, self.querier, ext, &through)
+            })
+            .flatten();
         if !dirty.global && !ext.repos.is_empty() {
             self.stats.repos_settled = settled.len();
             let mut seeds = LeafSeeds::default();
@@ -797,6 +813,7 @@ impl<'a> Run<'a> {
             settled,
             stale_leaf_maps: stale.repos,
             leaf_answers,
+            round_trip,
             global,
         })
     }
@@ -1403,6 +1420,26 @@ impl<'a> Run<'a> {
                 builder.set_bzl_closure(c);
             }
         }
+
+        // The leaves' edges back into the universe: Bazel's answer at head
+        // when a repository outside moved, and for an index this run writes,
+        // the leaves an overflow's re-query or this splice's rows put in.
+        // After the rows, so that the leaves are the head's.
+        let want = match (
+            self.req.materialize && self.engine.config().externals.enabled,
+            queried.cold_reason.is_some(),
+        ) {
+            (false, _) => crate::round_trip::Want::Nothing,
+            (true, true) => crate::round_trip::Want::All,
+            (true, false) => crate::round_trip::Want::AddedSince(base.num_nodes()),
+        };
+        crate::round_trip::refresh(
+            self.querier,
+            &mut builder,
+            &base.indexed_repos(),
+            stage.round_trip.as_ref(),
+            want,
+        );
 
         // Resolve changed source files to node ids while the builder still has
         // its interner: rebuilding a label map over a finished index costs
@@ -2254,9 +2291,12 @@ struct StaleMaps {
 /// things can move it without an overflow, which is the one place the whole
 /// table is asked for again:
 ///
-/// - something the map was derived through (`Consumer::via`): a main-repo
-///   package in `main_dirty` (a `BUILD` edit, or a `.bzl` it loads), or
-///   another repository in `moved`, the consumer's own definition included.
+/// - something the map was derived through (`Consumer::via`, read by
+///   [`crate::via::Moved`], which the round-trip rows share): a main-repo
+///   package in `main_dirty` (a `BUILD` edit, or a `.bzl` it loads), a
+///   main-repo file the closure's external packages load that `paths` names,
+///   or another repository in `moved`, the consumer's own definition
+///   included.
 ///   envoy's quiche leaves reach `@envoy_api` only through
 ///   `@envoy//source/common/quic/platform:*`; a `BUILD` edit on that closure
 ///   can give a leaf a path into any package of the API, and a later edit
@@ -2276,11 +2316,10 @@ fn stale_leaf_maps(
     moved: &BTreeSet<String>,
     settled: &BTreeSet<String>,
     main_dirty: &BTreeSet<String>,
+    paths: &BTreeSet<String>,
 ) -> StaleMaps {
     let mut out = StaleMaps::default();
-    let canonical: BTreeMap<&str, &str> = (0..base.num_repos())
-        .map(|r| (base.repo_name(r), base.repo_canonical.get(r)))
-        .collect();
+    let through = crate::via::Moved::new(base, main_dirty, paths, moved);
     for r in 0..base.num_repos() {
         let name = base.repo_name(r);
         let consumers = base.repo_consumers(r);
@@ -2294,20 +2333,7 @@ fn stale_leaf_maps(
             if used.leaves.is_none() {
                 continue;
             }
-            let hit = used.via.iter().find(|v| match v.strip_prefix("//") {
-                Some(pkg) => main_dirty.contains(pkg),
-                None => v.strip_prefix('@').is_some_and(|token| {
-                    moved.iter().any(|m| {
-                        m != name
-                            && crate::externals::repo_token_matches(
-                                token,
-                                m,
-                                canonical.get(m.as_str()).copied().unwrap_or(""),
-                            )
-                    })
-                }),
-            });
-            if let Some(v) = hit {
+            if let Some(v) = through.hit(used.via.iter().map(String::as_str), Some(name)) {
                 tracing::debug!(
                     repo = %name,
                     %consumer,
@@ -2576,7 +2602,7 @@ mod stale_tests {
         let grpc = Consumer {
             packages: set(&["envoy/type/v3"]),
             leaves: leaf("@grpc//:grpc++"),
-            via: set(&["@grpc", "@abseil-cpp"]),
+            via: set(&["@grpc", "@abseil-cpp", "//bazel:grpc_rules.bzl"]),
         };
         let quiche = Consumer {
             packages: set(&["envoy/type/v3"]),
@@ -2601,15 +2627,47 @@ mod stale_tests {
     #[test]
     fn a_main_repo_package_a_map_was_derived_through_makes_it_suspect() {
         let d = index();
-        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&["source/common/quic/platform"]));
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&[]),
+            &set(&[]),
+            &set(&["source/common/quic/platform"]),
+            &set(&[]),
+        );
         assert_eq!(s.repos, set(&["envoy_api"]));
         assert_eq!(s.suspect["envoy_api"], set(&["quiche"]));
         // The root package is spelled `//`, and is the empty package.
-        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&[""]));
+        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&[""]), &set(&[]));
         assert_eq!(s.suspect["envoy_api"], set(&["quiche"]));
         // A package no map was derived through moves none.
-        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&["source/server"]));
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&[]),
+            &set(&[]),
+            &set(&["source/server"]),
+            &set(&[]),
+        );
         assert!(s.repos.is_empty() && s.suspect.is_empty(), "{s:?}");
+    }
+
+    /// A main-repo `.bzl` the consumer's packages load (a rule class whose
+    /// implicit dependency can point into the indexed repository) moves the
+    /// map when the change set names it, though no main-repo package the
+    /// map runs through is dirty.
+    #[test]
+    fn a_main_repo_file_the_closure_loads_makes_it_suspect() {
+        let d = index();
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&[]),
+            &set(&[]),
+            &set(&[]),
+            &set(&["bazel/grpc_rules.bzl"]),
+        );
+        assert_eq!(s.repos, set(&["envoy_api"]));
+        assert_eq!(s.suspect["envoy_api"], set(&["grpc"]));
+        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&["bazel"]), &set(&[]));
+        assert!(s.suspect.is_empty(), "the package is not the file: {s:?}");
     }
 
     /// The consumer's own definition moving (a version bump of `@grpc`) is
@@ -2617,9 +2675,15 @@ mod stale_tests {
     #[test]
     fn a_repository_a_map_was_derived_through_moving_makes_it_suspect() {
         let d = index();
-        let s = stale_leaf_maps(d.view(), &set(&["grpc"]), &set(&[]), &set(&[]));
+        let s = stale_leaf_maps(d.view(), &set(&["grpc"]), &set(&[]), &set(&[]), &set(&[]));
         assert_eq!(s.suspect["envoy_api"], set(&["grpc"]));
-        let s = stale_leaf_maps(d.view(), &set(&["abseil-cpp"]), &set(&[]), &set(&[]));
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&["abseil-cpp"]),
+            &set(&[]),
+            &set(&[]),
+            &set(&[]),
+        );
         assert_eq!(s.suspect["envoy_api"], set(&["grpc"]));
     }
 
@@ -2630,10 +2694,22 @@ mod stale_tests {
     #[test]
     fn an_unsettled_indexed_repository_is_asked_for_again() {
         let d = index();
-        let s = stale_leaf_maps(d.view(), &set(&["envoy_api", "tsl"]), &set(&[]), &set(&[]));
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&["envoy_api", "tsl"]),
+            &set(&[]),
+            &set(&[]),
+            &set(&[]),
+        );
         assert_eq!(s.repos, set(&["envoy_api"]));
         assert!(s.suspect.is_empty(), "{s:?}");
-        let s = stale_leaf_maps(d.view(), &set(&["envoy_api"]), &set(&["envoy_api"]), &set(&[]));
+        let s = stale_leaf_maps(
+            d.view(),
+            &set(&["envoy_api"]),
+            &set(&["envoy_api"]),
+            &set(&[]),
+            &set(&[]),
+        );
         assert!(s.repos.is_empty(), "{s:?}");
     }
 }

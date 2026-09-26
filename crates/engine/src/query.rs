@@ -242,6 +242,26 @@ pub trait PackageQuerier {
         None
     }
 
+    /// Asks Bazel which targets inside the index's universe (`//...:*` and
+    /// the `indexed` repositories) each of these leaves reaches through
+    /// targets outside it alone ([`cambium_bazel::Bazel::round_trips`]).
+    /// The leaves are external labels the index holds that no package owns,
+    /// spelled as the index spells them, and so are the answer's keys; its
+    /// values are inside labels as the index spells them. A leaf missing from
+    /// the answer reaches nothing inside. At cold build, on an overflow's
+    /// re-query, for a leaf a splice added, and at head when something the
+    /// edges were derived through moved (`crate::round_trip`). Beside the
+    /// edges, the answer says what they were derived through
+    /// ([`cambium_bazel::RoundTrips::via`]). A querier with no Bazel behind
+    /// it answers `None`, and every leaf keeps the row it has.
+    fn round_trips(
+        &self,
+        _indexed: &[String],
+        _leaves: &[String],
+    ) -> Option<cambium_bazel::RoundTrips> {
+        None
+    }
+
     /// The directory whose files these rows describe, when there is one.
     ///
     /// The engine reads the tree directly in one place — deciding whether a
@@ -467,6 +487,14 @@ impl PackageQuerier for BazelQuerier {
         leaves: &[String],
     ) -> Option<BTreeMap<String, cambium_index::externals::LeafReach>> {
         self.bazel.leaf_reaches(repo, leaves)
+    }
+
+    fn round_trips(
+        &self,
+        indexed: &[String],
+        leaves: &[String],
+    ) -> Option<cambium_bazel::RoundTrips> {
+        self.bazel.round_trips(indexed, leaves)
     }
 
     fn can_dump_loading_layer(&self) -> bool {

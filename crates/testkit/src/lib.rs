@@ -279,6 +279,13 @@ pub struct Scanning {
     consumer_leaves: BTreeMap<String, BTreeMap<String, cambium_index::externals::LeafReach>>,
     /// Every `consumer_leaf_packages` question, as `(repo, leaves)`.
     leaf_questions: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+    /// What `round_trips` answers: leaf -> the inside labels it reaches.
+    /// `None` answers `None`, which is a querier with no Bazel behind it.
+    round_trips: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// What `round_trips` says its answer was derived through.
+    round_trip_via: BTreeSet<String>,
+    /// Every `round_trips` question, as the leaves asked about.
+    round_trip_questions: std::sync::Mutex<Vec<Vec<String>>>,
     probed: std::sync::Mutex<Vec<String>>,
     /// The `--skykey_filter` of every loading-layer dump this querier was
     /// asked for, in order. A dump is the most expensive thing an incremental
@@ -320,6 +327,9 @@ impl Scanning {
             repo_consumers: BTreeMap::new(),
             consumer_leaves: BTreeMap::new(),
             leaf_questions: std::sync::Mutex::new(Vec::new()),
+            round_trips: None,
+            round_trip_via: BTreeSet::new(),
+            round_trip_questions: std::sync::Mutex::new(Vec::new()),
             probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
             hides_packages_until_reloaded: std::sync::atomic::AtomicBool::new(false),
@@ -425,6 +435,37 @@ impl Scanning {
                 },
             );
         self
+    }
+
+    /// Answer `round_trips` (which until this is called answers `None`)
+    /// with: the leaf `leaf` reaches these targets inside the universe. A
+    /// leaf asked about and never named here reaches nothing; with no
+    /// entries at all, this says Bazel answers and no leaf reaches anything.
+    pub fn with_round_trip(mut self, leaf: &str, entries: &[&str]) -> Self {
+        let m = self.round_trips.get_or_insert_with(BTreeMap::new);
+        if !entries.is_empty() {
+            m.entry(leaf.to_string())
+                .or_default()
+                .extend(entries.iter().map(|e| e.to_string()));
+        }
+        self
+    }
+
+    /// Answer `round_trips` with these via entries beside the edges
+    /// (`cambium_bazel::RoundTrips::via`): `//pkg:file` for a main-repo file
+    /// the closure's external packages load, `@name` for an indexed
+    /// repository's.
+    pub fn with_round_trip_via(mut self, via: &[&str]) -> Self {
+        self.round_trips.get_or_insert_with(BTreeMap::new);
+        self.round_trip_via
+            .extend(via.iter().map(|v| v.to_string()));
+        self
+    }
+
+    /// Every round-trip question the engine asked, as the leaves asked about,
+    /// in order.
+    pub fn round_trip_questions(&self) -> Vec<Vec<String>> {
+        self.round_trip_questions.lock().unwrap().clone()
     }
 
     /// Every leaf question the engine asked, as `(repo, leaves)`, in order.
@@ -563,6 +604,25 @@ impl PackageQuerier for Scanning {
                 .filter_map(|l| known.get(l).map(|p| (l.clone(), p.clone())))
                 .collect(),
         )
+    }
+
+    fn round_trips(
+        &self,
+        _indexed: &[String],
+        leaves: &[String],
+    ) -> Option<cambium_bazel::RoundTrips> {
+        self.round_trip_questions
+            .lock()
+            .unwrap()
+            .push(leaves.to_vec());
+        let known = self.round_trips.as_ref()?;
+        Some(cambium_bazel::RoundTrips {
+            reach: leaves
+                .iter()
+                .filter_map(|l| known.get(l).map(|e| (l.clone(), e.clone())))
+                .collect(),
+            via: self.round_trip_via.clone(),
+        })
     }
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {

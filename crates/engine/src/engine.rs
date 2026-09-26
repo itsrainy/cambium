@@ -587,6 +587,13 @@ impl Engine {
             );
             b.set_bzl_closure(c);
         }
+        // Where the leaves lead back into the universe, asked last of all:
+        // the closure of every leaf, which on a server that has loaded the
+        // repository costs the external packages it reaches and nothing else.
+        // Only with the externals stage on, which is what asks again at head.
+        if self.config().externals.enabled {
+            crate::round_trip::refresh(q, &mut b, &indexed, None, crate::round_trip::Want::All);
+        }
         Ok(b.finish(commit))
     }
 

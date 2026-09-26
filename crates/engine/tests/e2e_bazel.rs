@@ -1297,6 +1297,134 @@ fn an_external_repository_edit_reaches_only_its_consumers() {
     }
 }
 
+/// The `bazelbuild/rules_shell` shape: a module that depends on the root
+/// module, so a label it writes as `@root//lib` is a main-repository target.
+/// Every rules_shell test depends on `@bazel_tools//tools/test:collect_coverage`,
+/// which names `@rules_shell//shell/runfiles` and so comes back into the main
+/// repository. Here `@mod_b//:b` is that leaf: `//app:uses_b` depends on it,
+/// it depends on `//lib:lib`, and an edit to `lib/lib.txt` has to reach
+/// `//app:uses_b` the way `rdeps` does. Before the leaf carried its edges
+/// back in, the index cut the path at `@mod_b//:b` and the answer was
+/// `//lib:lib` alone.
+#[test]
+#[ignore = "needs a real Bazel; run with --ignored and CAMBIUM_E2E=1"]
+fn a_round_trip_through_a_module_that_names_the_root_module() {
+    require_bazel();
+    for version in ["7.4.1", "9.2.0"] {
+        let dir = tempfile::tempdir().unwrap();
+        // The module lives outside the checkout, as `@bazel_tools` does: a
+        // module whose sources are a directory of this tree is indexed, and
+        // its own rows already come back in.
+        let root = dir.path().join("ws");
+        let mod_b = dir.path().join("mod_b");
+        let store = root.join("_store");
+        std::fs::create_dir_all(&store).unwrap();
+        write(&root, ".bazelversion", &format!("{version}\n"));
+        write(&root, ".gitignore", "MODULE.bazel.lock\nbazel-*\n_store/\n");
+        write(
+            &root,
+            "MODULE.bazel",
+            &format!(
+                "module(name = \"root\", version = \"0.0.1\")\n\
+                 bazel_dep(name = \"mod_b\", version = \"0.0.1\")\n\
+                 local_path_override(\n    module_name = \"mod_b\",\n    path = \"{}\",\n)\n",
+                mod_b.display()
+            ),
+        );
+        write(
+            &mod_b,
+            "MODULE.bazel",
+            "module(name = \"mod_b\", version = \"0.0.1\")\n\
+             bazel_dep(name = \"root\", version = \"0.0.1\")\n",
+        );
+        write(
+            &mod_b,
+            "BUILD.bazel",
+            "filegroup(name = \"b\", srcs = [\"@root//lib\"], visibility = [\"//visibility:public\"])\n",
+        );
+        write(
+            &root,
+            "lib/BUILD.bazel",
+            "filegroup(name = \"lib\", srcs = [\"lib.txt\"], visibility = [\"//visibility:public\"])\n",
+        );
+        write(&root, "lib/lib.txt", "l1\n");
+        write(
+            &root,
+            "app/BUILD.bazel",
+            "genrule(\n    name = \"uses_b\",\n    srcs = [\"@mod_b//:b\"],\n\
+            \x20   outs = [\"b.txt\"],\n    cmd = \"cat $(SRCS) > $@\",\n)\n\n\
+             genrule(\n    name = \"unrelated\",\n    outs = [\"u.txt\"],\n    cmd = \"echo hi > $@\",\n)\n",
+        );
+        write(
+            &root,
+            "cambium.toml",
+            &format!(
+                "[baseline]\nstore = {{ kind = \"dir\", path = \"{}\" }}\n",
+                store.display()
+            ),
+        );
+        init_repo(&root);
+        let base = commit_all(&root, "base");
+
+        let config = root.join("cambium.toml");
+        let engine = engine_for(&root, &config);
+        let base_index = engine
+            .full_build(&base)
+            .unwrap_or_else(|e| panic!("{version}: cold build: {e}"));
+        // The leaf's row names the main-repository target it reaches.
+        let v = base_index.view();
+        let leaf = (0..v.num_nodes())
+            .find(|&id| {
+                v.kind_of(id) == NodeKind::Unknown
+                    && v.label(id).contains("mod_b")
+                    && v.label(id).ends_with("//:b")
+            })
+            .unwrap_or_else(|| {
+                let all: Vec<String> = (0..v.num_nodes())
+                    .map(|id| {
+                        let row: Vec<&str> =
+                            v.forward.row(id).iter().map(|&d| v.label(d)).collect();
+                        format!("{} {:?} -> {row:?}", v.label(id), v.kind_of(id))
+                    })
+                    .collect();
+                panic!("{version}: no @mod_b//:b leaf: {all:#?}")
+            });
+        let row: Vec<&str> = v.forward.row(leaf).iter().map(|&d| v.label(d)).collect();
+        assert_eq!(row, vec!["//lib:lib"], "{version}: {}", v.label(leaf));
+
+        write(&root, "lib/lib.txt", "l2\n");
+        let head = commit_all(&root, "edit lib");
+        let engine = engine_for(&root, &config);
+        let out = engine
+            .compute(
+                base_index.view(),
+                &engine.repo().diff(&base, &head).expect("git diff"),
+                &engine.bazel_querier(&head).expect("querier"),
+                &AffectedRequest {
+                    base: base.clone(),
+                    head: head.clone(),
+                    include_manual: true,
+                    explain: true,
+                    no_full_build: true,
+                    materialize: false,
+                    publish_base: false,
+                    max_depth: None,
+                    allow_partial: false,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{version}: {e}"));
+        assert!(
+            !out.report.global,
+            "{version}: {:?}",
+            out.report.global_reason
+        );
+        let ours: BTreeSet<String> = out.report.affected_labels().into_iter().collect();
+        let theirs = rdeps_oracle(&engine, "//lib:lib.txt");
+        assert!(theirs.contains("//app:uses_b"), "{version}: {theirs:?}");
+        assert_eq!(ours, theirs, "{version}: cambium and rdeps disagree");
+    }
+}
+
 /// Issue #4: the same `@mod_a//:defs.bzl` edit, reached by a BUILD file's
 /// *own* `load()` rather than through a main-repo `.bzl` intermediary.
 ///

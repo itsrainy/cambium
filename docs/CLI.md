@@ -196,7 +196,10 @@ missing target (`--limit n` lists n and counts the rest), and the command
 exits 1. Misses Bazel connects to the sample only through an external
 repository (`@bazel_tools//tools/test:collect_coverage` depending back on
 the root module's `//shell/runfiles`, say) are listed apart as round trips,
-naming the external targets on the path. A run answers `//...` under
+naming the external targets on the path. An index carries those paths as
+edges of the external label, asked of Bazel when it is built, so a round
+trip listed here is an index without them: one written before they
+existed, or one whose question Bazel did not answer. A run answers `//...` under
 `CAMBI-W023` when the row of a toolchain-class rule (`toolchain_type`,
 `toolchain`, `platform`, `constraint_setting`, `constraint_value`) moves,
 and a sample of one of those classes that depends in the index on nothing

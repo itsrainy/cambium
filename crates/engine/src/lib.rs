@@ -28,10 +28,12 @@ pub mod reason;
 pub mod report;
 pub mod revision;
 mod repos;
+mod round_trip;
 mod run;
 mod sky;
 pub mod store;
 pub mod synthq;
+mod via;
 
 /// The Bazel workspace root containing `start`, if there is one.
 ///

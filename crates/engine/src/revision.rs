@@ -251,6 +251,16 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.consumer_leaf_packages(repo, leaves)
     }
 
+    /// Delegated, or no index built through this wrapper would carry a
+    /// round-trip edge: the fault class `consumer_repos` had.
+    fn round_trips(
+        &self,
+        indexed: &[String],
+        leaves: &[String],
+    ) -> Option<cambium_bazel::RoundTrips> {
+        self.querier.round_trips(indexed, leaves)
+    }
+
     fn can_dump_loading_layer(&self) -> bool {
         self.querier.can_dump_loading_layer()
     }
@@ -381,6 +391,13 @@ mod tests {
         let q = querier_with(&recorder, None);
         let _ = q.consumer_repos(&["envoy_api".to_string()]);
         let leaves = q.consumer_leaf_packages("envoy_api", &["@grpc//:grpc++".to_string()]);
+        let trips = q.round_trips(
+            &[],
+            &["@bazel_tools//tools/test:collect_coverage".to_string()],
+        );
+        // Nothing printed is an answer too: no leaf reaches the universe,
+        // and the closure loads nothing of it.
+        assert_eq!(trips, Some(cambium_bazel::RoundTrips::default()));
         // An empty graph is an answer, and it knows no leaf; the default
         // would have been no answer at all.
         assert_eq!(leaves, Some(std::collections::BTreeMap::new()));
@@ -393,6 +410,17 @@ mod tests {
             asked
                 .iter()
                 .any(|a| a.contains("let d = deps(set(\"@grpc//:grpc++\")) in")),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|a| a
+                .contains("deps(set(\"@bazel_tools//tools/test:collect_coverage\"))")
+                && a.contains("--output=package")),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|a| a
+                .contains("loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")))")),
             "{asked:?}"
         );
     }

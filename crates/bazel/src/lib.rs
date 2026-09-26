@@ -189,12 +189,7 @@ pub fn apparent_of_canonical(token: &str) -> String {
 /// packages at all.
 fn package_of_repo(line: &str, repo: &str) -> Option<String> {
     let (name, pkg) = line.trim_start_matches('@').split_once("//")?;
-    let named = name == repo
-        || name
-            .trim_end_matches(['+', '~'])
-            .rsplit(['+', '~'])
-            .next()
-            .is_some_and(|last| last == repo);
+    let named = token_names(name, repo);
     // The package, not the label: `@r//a/b:pkg` is the package `a/b`, which is
     // the spelling the consumer table is matched against at run time.
     named.then(|| {
@@ -203,6 +198,18 @@ fn package_of_repo(line: &str, repo: &str) -> Option<String> {
     })
 }
 
+
+/// Whether a repository token as Bazel printed it (`grpc`, `grpc+`,
+/// `+xla_extension+tsl`, Bazel 7's `grpc~`) names the repository `repo`
+/// goes by: the token itself, or the last segment of its canonical form.
+fn token_names(token: &str, repo: &str) -> bool {
+    token == repo
+        || token
+            .trim_end_matches(['+', '~'])
+            .rsplit(['+', '~'])
+            .next()
+            .is_some_and(|last| last == repo)
+}
 
 /// `set("a" "b" ...)`, each label quoted: `@grpc//:grpc++` is a syntax
 /// error bare, since `+` is the union operator.
@@ -273,65 +280,96 @@ fn via_of(label: &str) -> Option<String> {
     }
 }
 
+/// A graph as `bazel query --output=graph --nograph:factored` prints it,
+/// read into adjacency lists: one node per line (`"a"`), one edge per line
+/// (`"a" -> "b"`), and for a `select` edge a following `[label="..."]` line,
+/// which carries no quoted node at its start and is skipped.
+struct LabelGraph<'g> {
+    names: Vec<&'g str>,
+    edges: Vec<Vec<usize>>,
+    by_key: BTreeMap<(&'g str, &'g str), Vec<usize>>,
+}
+
+impl<'g> LabelGraph<'g> {
+    fn parse(graph: &'g str) -> Self {
+        let mut ids: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut names: Vec<&str> = Vec::new();
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        for line in graph.lines() {
+            let line = line.trim();
+            let Some(body) = line.strip_prefix('"') else {
+                continue;
+            };
+            let Some((from, rest)) = body.split_once('"') else {
+                continue;
+            };
+            let from_id = *ids.entry(from).or_insert_with(|| {
+                names.push(from);
+                edges.push(Vec::new());
+                names.len() - 1
+            });
+            let Some(to) = rest
+                .trim_start()
+                .strip_prefix("->")
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('"'))
+                .and_then(|r| r.split_once('"'))
+                .map(|(to, _)| to)
+            else {
+                continue;
+            };
+            let to_id = *ids.entry(to).or_insert_with(|| {
+                names.push(to);
+                edges.push(Vec::new());
+                names.len() - 1
+            });
+            edges[from_id].push(to_id);
+        }
+        let mut by_key: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+        for (i, n) in names.iter().enumerate() {
+            if let Some(k) = spelling_key(n) {
+                by_key.entry(k).or_default().push(i);
+            }
+        }
+        Self {
+            names,
+            edges,
+            by_key,
+        }
+    }
+
+    /// Every node that is `label` up to how its repository is spelled
+    /// ([`spelling_key`]); empty when the graph never printed it.
+    fn starts<'a>(&'a self, label: &'a str) -> Vec<usize> {
+        // Read as a map whose keys live as long as `label` does, which the
+        // map's covariance allows.
+        let by_key: &'a BTreeMap<(&'a str, &'a str), Vec<usize>> = &self.by_key;
+        spelling_key(label)
+            .and_then(|k| by_key.get(&k))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// Reads [`Bazel::leaf_reaches`]'s graph: per leaf, the packages of `repo`
 /// among the nodes reachable from it, and what outside `repo` they are
 /// reached through.
 ///
-/// `--output=graph --nograph:factored` prints one node per line (`"a"`), one
-/// edge per line (`"a" -> "b"`), and for a `select` edge a following
-/// `[label="..."]` line, which carries no quoted node at its start and is
-/// skipped. The leaves are matched to the graph's nodes by
-/// [`spelling_key`], every node that shares the key being a start, and the
-/// answer is keyed by the caller's spelling; a leaf no node matches is left
-/// out.
+/// The leaves are matched to the graph's nodes by [`spelling_key`], every
+/// node that shares the key being a start, and the answer is keyed by the
+/// caller's spelling; a leaf no node matches is left out.
 fn parse_leaf_reach(graph: &str, repo: &str, leaves: &[String]) -> BTreeMap<String, LeafReach> {
-    let mut ids: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut names: Vec<&str> = Vec::new();
-    let mut edges: Vec<Vec<usize>> = Vec::new();
-    for line in graph.lines() {
-        let line = line.trim();
-        let Some(body) = line.strip_prefix('"') else {
-            continue;
-        };
-        let Some((from, rest)) = body.split_once('"') else {
-            continue;
-        };
-        let from_id = *ids.entry(from).or_insert_with(|| {
-            names.push(from);
-            edges.push(Vec::new());
-            names.len() - 1
-        });
-        let Some(to) = rest
-            .trim_start()
-            .strip_prefix("->")
-            .map(str::trim_start)
-            .and_then(|r| r.strip_prefix('"'))
-            .and_then(|r| r.split_once('"'))
-            .map(|(to, _)| to)
-        else {
-            continue;
-        };
-        let to_id = *ids.entry(to).or_insert_with(|| {
-            names.push(to);
-            edges.push(Vec::new());
-            names.len() - 1
-        });
-        edges[from_id].push(to_id);
-    }
-    let mut by_key: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
-    for (i, n) in names.iter().enumerate() {
-        if let Some(k) = spelling_key(n) {
-            by_key.entry(k).or_default().push(i);
-        }
-    }
+    let g = LabelGraph::parse(graph);
+    let (names, edges) = (&g.names, &g.edges);
     let mut out = BTreeMap::new();
     for leaf in leaves {
-        let Some(starts) = spelling_key(leaf).and_then(|k| by_key.get(&k)) else {
+        let starts = g.starts(leaf);
+        if starts.is_empty() {
             continue;
-        };
+        }
         let mut seen = vec![false; names.len()];
         let mut stack = Vec::new();
-        for &s in starts {
+        for &s in &starts {
             seen[s] = true;
             stack.push(s);
         }
@@ -355,6 +393,172 @@ fn parse_leaf_reach(graph: &str, repo: &str, leaves: &[String]) -> BTreeMap<Stri
             }
         }
         out.insert(leaf.clone(), reach);
+    }
+    out
+}
+
+/// What a label of the round-trip graph is to the index: `Some` for a node
+/// inside the index's universe, spelled the way the index spells it
+/// (`//pkg:name` for the main repository, `@name//pkg:name` for an indexed
+/// repository under the name the index knows it by), `None` for a node
+/// outside it.
+fn inside_label(label: &str, indexed: &[String]) -> Option<String> {
+    let main = label
+        .strip_prefix("@@//")
+        .or_else(|| label.strip_prefix("@//"))
+        .or_else(|| label.strip_prefix("//"));
+    if let Some(rest) = main {
+        return Some(format!("//{rest}"));
+    }
+    let token = label_repo_token(label)?;
+    let (_, rest) = label.split_once("//")?;
+    indexed
+        .iter()
+        .find(|r| token_names(token, r))
+        .map(|r| format!("@{r}//{rest}"))
+}
+
+/// The package patterns of the universe a closure reached, from
+/// `--output=package` lines: `//pkg:*` for a main-repository package (a line
+/// with no repository, `""` being the root package), `@R//pkg:*` for one of
+/// an indexed repository, spelled as Bazel printed it. Everything else is
+/// outside and dropped.
+fn inside_patterns(packages: &str, indexed: &[String]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in packages.lines().map(str::trim) {
+        let main = line
+            .strip_prefix("@@//")
+            .or_else(|| line.strip_prefix("@//"))
+            .or_else(|| (!line.starts_with('@')).then_some(line));
+        if let Some(pkg) = main {
+            out.insert(format!("//{pkg}:*"));
+            continue;
+        }
+        let Some((repo, pkg)) = line.trim_start_matches('@').split_once("//") else {
+            continue;
+        };
+        if indexed.iter().any(|r| token_names(repo, r)) {
+            out.insert(format!("{}//{pkg}:*", &line[..line.len() - pkg.len() - 2]));
+        }
+    }
+    out
+}
+
+/// The second question behind [`Bazel::round_trips`]: the paths from the
+/// leaves into the packages of the universe their closure reached.
+fn round_trip_expr(leaves: &[String], patterns: &BTreeSet<String>) -> String {
+    let inside = patterns.iter().cloned().collect::<Vec<_>>().join(" + ");
+    format!(
+        "let l = {} in allpaths($l, deps($l) intersect ({inside}))",
+        quoted_set(leaves)
+    )
+}
+
+/// Bazel's answer to [`Bazel::round_trips`]: the edges, and what they were
+/// derived through that a run can see move without a repository outside the
+/// universe moving.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundTrips {
+    /// Leaf -> the labels inside the universe it reaches through labels
+    /// outside it alone, spelled as the index spells them. A leaf that
+    /// reaches nothing inside, or that Bazel could not resolve, is left out.
+    pub reach: BTreeMap<String, BTreeSet<String>>,
+    /// The files the packages outside the universe on the leaves' closure
+    /// load that are not themselves outside it ([`closure_loads_via`]):
+    /// `//pkg:file` for the main repository's, `@name` for an indexed
+    /// repository's.
+    pub via: BTreeSet<String>,
+}
+
+/// The query behind [`Bazel::closure_loads`]: every `.bzl` (and `.scl`) file
+/// loaded to load the packages of the leaves' closure, less the packages
+/// `except` names.
+fn loads_expr(leaves: &[String], except: &BTreeSet<String>) -> String {
+    let d = format!("deps({})", quoted_set(leaves));
+    if except.is_empty() {
+        return format!("loadfiles({d})");
+    }
+    let except = except.iter().cloned().collect::<Vec<_>>().join(" + ");
+    format!("loadfiles({d} except ({except}))")
+}
+
+/// Reads [`Bazel::closure_loads`]'s `--output=label` lines into via entries:
+/// `//pkg:file` for a file of the main repository (the root package's
+/// `//:file`), `@name` for one of an `indexed` repository, under the name
+/// the index knows it by. Every other repository's files are dropped: a run
+/// in which such a repository moves asks for the edges again whatever they
+/// were derived through.
+///
+/// This is what makes an answer about a path through an external rule
+/// depend on the main repository. On `bazelbuild/rules_shell` at `b1eed28`
+/// `@bazel_tools//tools/test:collect_coverage` is an `sh_binary`, whose rule
+/// class is the root module's own `//shell/private:sh_binary.bzl`, and its
+/// edge to `//shell/runfiles:runfiles` is that class's implicit
+/// `_runfiles_dep`: an edit to the `.bzl` moves the leaf's edges, and no
+/// `BUILD` file or repository outside moved.
+fn closure_loads_via(labels: &str, indexed: &[String]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in labels.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let main = line
+            .strip_prefix("@@//")
+            .or_else(|| line.strip_prefix("@//"))
+            .or_else(|| line.strip_prefix("//"));
+        if let Some(rest) = main {
+            out.insert(format!("//{rest}"));
+            continue;
+        }
+        if let Some(r) =
+            label_repo_token(line).and_then(|t| indexed.iter().find(|r| token_names(t, r)))
+        {
+            out.insert(format!("@{r}"));
+        }
+    }
+    out
+}
+
+/// Reads [`Bazel::round_trips`]'s graph: per leaf, the nodes inside the
+/// universe it reaches through nodes outside it alone.
+///
+/// The walk from a leaf goes on through every outside node and stops at the
+/// first inside one, which it records. What lies beyond that node is the
+/// index's own rows, re-queried with its package, so a `BUILD` edit there
+/// never makes an answer stale; a path that leaves again through another
+/// leaf is that leaf's answer. What the outside part was derived through is
+/// the other half of the answer ([`RoundTrips::via`]). A leaf that reaches
+/// nothing, or that the graph never printed, is left out.
+fn parse_round_trips(
+    graph: &str,
+    indexed: &[String],
+    leaves: &[String],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let g = LabelGraph::parse(graph);
+    let inside: Vec<Option<String>> = g.names.iter().map(|n| inside_label(n, indexed)).collect();
+    let mut out = BTreeMap::new();
+    for leaf in leaves {
+        let starts = g.starts(leaf);
+        let mut seen = vec![false; g.names.len()];
+        let mut stack: Vec<usize> = Vec::new();
+        for &s in &starts {
+            seen[s] = true;
+            stack.push(s);
+        }
+        let mut entries = BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            // A leaf is never its own entry, whatever its spelling says.
+            if let Some(l) = inside[n].as_ref().filter(|_| !starts.contains(&n)) {
+                entries.insert(l.clone());
+                continue;
+            }
+            for &m in &g.edges[n] {
+                if !seen[m] {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        if !entries.is_empty() {
+            out.insert(leaf.clone(), entries);
+        }
     }
     out
 }
@@ -927,22 +1131,7 @@ impl Bazel {
         on_batch: impl FnMut(&[u8], &[(usize, usize)]) -> std::result::Result<(), ReadError>,
     ) -> Result<QueryOutcome> {
         let mut cmd = self.command("query");
-
-        // Long expressions go in a file: argv limits are OS-dependent and a
-        // dirty set of thousands of packages will exceed them.
-        let _scratch_file = if expr.len() > MAX_INLINE_QUERY {
-            let path = self.scratch.join(format!(
-                "cambium-query-{}-{}.txt",
-                std::process::id(),
-                now_nanos()
-            ));
-            std::fs::write(&path, expr)?;
-            cmd.arg(format!("--query_file={}", path.display()));
-            Some(ScratchFile(path))
-        } else {
-            cmd.arg(expr);
-            None
-        };
+        let _scratch_file = self.expression_arg(&mut cmd, expr, "query")?;
 
         for f in QUERY_FLAGS.iter().chain(HYGIENE.iter()) {
             cmd.arg(f);
@@ -1213,40 +1402,210 @@ impl Bazel {
         if leaves.is_empty() {
             return Some(BTreeMap::new());
         }
-        let mut cmd = self.command("query");
-        cmd.arg(leaf_expr(repo, leaves))
-            .arg("--output=graph")
-            .arg("--nograph:factored")
-            .arg("--graph:node_limit=-1")
-            .arg("--keep_going");
-        for f in HYGIENE {
-            cmd.arg(f);
-        }
         let started = std::time::Instant::now();
-        let o = match self.runner.output(&mut cmd) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::debug!(error = %e, repo, "the leaf query could not run");
-                return None;
-            }
-        };
-        if !o.exit.success && o.exit.code != Some(3) {
-            tracing::debug!(status = %o.exit, repo, leaves = leaves.len(), "the leaf query failed");
-            return None;
+        let graph = self.text_query(
+            &leaf_expr(repo, leaves),
+            &[
+                "--output=graph",
+                "--nograph:factored",
+                "--graph:node_limit=-1",
+            ],
+            "leaf map",
+        )?;
+        let mut out = parse_leaf_reach(&graph, repo, leaves);
+        // The main-repo files the closure's packages load are part of what
+        // the map was derived through, pooled over the leaves: a rule class
+        // defined there can give an external rule an implicit edge into the
+        // repository ([`closure_loads_via`]).
+        let loads = self.closure_loads(leaves, &BTreeSet::new(), &[])?;
+        for reach in out.values_mut() {
+            reach.via.extend(loads.iter().cloned());
         }
-        let out = parse_leaf_reach(&String::from_utf8_lossy(&o.stdout), repo, leaves);
         tracing::debug!(
-            status = %o.exit,
             repo,
             leaves = leaves.len(),
             resolved = out.len(),
             reaching = out.values().filter(|r| !r.packages.is_empty()).count(),
             via = out.values().flat_map(|r| &r.via).collect::<BTreeSet<_>>().len(),
-            bytes = o.stdout.len(),
+            loads = loads.len(),
+            bytes = graph.len(),
             ms = started.elapsed().as_millis() as u64,
             "leaf query answered"
         );
         Some(out)
+    }
+
+    /// Which targets inside the index's universe each of these leaves
+    /// reaches through targets outside it alone: leaf -> the labels, spelled
+    /// as the index spells them, of the first inside node on each such path.
+    /// A leaf that reaches nothing inside, or that Bazel could not resolve,
+    /// is left out; the whole answer is `None` when a query will not run.
+    ///
+    /// The leaves are the external labels the index holds that no package
+    /// of it owns, and the universe is `//...:*` plus `indexed`, the in-tree
+    /// repositories the index holds the packages of. Three questions at most,
+    /// all `--keep_going` (exit 3 is an answer, as it is for
+    /// [`Bazel::leaf_reaches`]):
+    ///
+    /// 1. `deps(set(leaves))` with `--output=package`: which packages the
+    ///    leaves' closure loads. No `//...:*` in it, so a server that has not
+    ///    loaded the repository does not load it for this, and the answer is
+    ///    one line per package however large the closure. Usually no package
+    ///    of the universe is among them, and that is the answer.
+    /// 2. `loadfiles` over the same closure less `P`, the packages of the
+    ///    universe among them ([`Bazel::closure_loads`]): which files of the
+    ///    main repository or an indexed one the packages outside load. A
+    ///    rule class or macro defined there decides what an external target
+    ///    depends on, so an edit to one moves the answer with nothing outside
+    ///    moving ([`RoundTrips::via`]).
+    /// 3. When `P` is not empty, `allpaths(set(leaves), deps(set(leaves))
+    ///    intersect (P))` with `--output=graph`, walked per leaf
+    ///    ([`parse_round_trips`]).
+    ///
+    /// On `bazelbuild/rules_shell` at `b1eed28` (Bazel 9.1.1, 29 leaves) the
+    /// closure is 47 packages, two of them the main repository's, and the
+    /// graph names `@bazel_tools//tools/test:collect_coverage` reaching
+    /// `//shell/runfiles:runfiles` and `//shell:toolchain_type`: the root
+    /// module's own runfiles library, which every test depends on through
+    /// the coverage collector.
+    pub fn round_trips(&self, indexed: &[String], leaves: &[String]) -> Option<RoundTrips> {
+        if leaves.is_empty() {
+            return Some(RoundTrips::default());
+        }
+        let started = std::time::Instant::now();
+        let closure = self.text_query(
+            &format!("deps({})", quoted_set(leaves)),
+            &["--output=package"],
+            "round-trip closure",
+        )?;
+        let patterns = inside_patterns(&closure, indexed);
+        // Asked even when nothing comes back in today: an edit to one of
+        // these files is how a leaf that reaches nothing starts to.
+        let via = self.closure_loads(leaves, &patterns, indexed)?;
+        if patterns.is_empty() {
+            tracing::debug!(
+                leaves = leaves.len(),
+                packages = closure.lines().count(),
+                via = via.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "no leaf's closure reaches a package of the universe"
+            );
+            return Some(RoundTrips {
+                reach: BTreeMap::new(),
+                via,
+            });
+        }
+        let graph = self.text_query(
+            &round_trip_expr(leaves, &patterns),
+            &[
+                "--output=graph",
+                "--nograph:factored",
+                "--graph:node_limit=-1",
+            ],
+            "round-trip paths",
+        )?;
+        let reach = parse_round_trips(&graph, indexed, leaves);
+        tracing::debug!(
+            leaves = leaves.len(),
+            packages = closure.lines().count(),
+            inside_packages = patterns.len(),
+            reaching = reach.len(),
+            entries = reach.values().map(BTreeSet::len).sum::<usize>(),
+            via = via.len(),
+            ms = started.elapsed().as_millis() as u64,
+            "round-trip query answered"
+        );
+        Some(RoundTrips { reach, via })
+    }
+
+    /// The files of the main repository and of the `indexed` repositories
+    /// that the packages of the leaves' closure load, less the packages
+    /// `except` names (package patterns, `//pkg:*`), as via entries
+    /// ([`closure_loads_via`]). `None` when the query will not run: the
+    /// caller then knows nothing about what its answer was derived through,
+    /// and must not keep the answer as if it did.
+    ///
+    /// The index's own packages carry their loads already, so a caller
+    /// whose closure runs through them excludes them; a caller that does
+    /// not gets their loads too, which only makes it ask again more often.
+    pub fn closure_loads(
+        &self,
+        leaves: &[String],
+        except: &BTreeSet<String>,
+        indexed: &[String],
+    ) -> Option<BTreeSet<String>> {
+        if leaves.is_empty() {
+            return Some(BTreeSet::new());
+        }
+        let loads = self.text_query(
+            &loads_expr(leaves, except),
+            &["--output=label"],
+            "closure loads",
+        )?;
+        Some(closure_loads_via(&loads, indexed))
+    }
+
+    /// Puts `expr` on `cmd`: as an argument, or through `--query_file` when
+    /// it is long, since argv limits are OS-dependent and a dirty set of
+    /// thousands of packages will exceed them. The file lives as long as the
+    /// returned guard, named after `stem`.
+    fn expression_arg(
+        &self,
+        cmd: &mut Command,
+        expr: &str,
+        stem: &str,
+    ) -> std::io::Result<Option<ScratchFile>> {
+        if expr.len() <= MAX_INLINE_QUERY {
+            cmd.arg(expr);
+            return Ok(None);
+        }
+        let path = self.scratch.join(format!(
+            "cambium-{stem}-{}-{}.txt",
+            std::process::id(),
+            now_nanos()
+        ));
+        std::fs::write(&path, expr)?;
+        cmd.arg(format!("--query_file={}", path.display()));
+        Ok(Some(ScratchFile(path)))
+    }
+
+    /// One `bazel query` whose stdout is text, with the flags that define the
+    /// graph (`extra_query_flags`, `--keep_going`) and `args`; the expression
+    /// goes through `--query_file` when it is long. `None`, with a debug
+    /// line naming `what`, when the command will not run or fails other than
+    /// with exit 3.
+    fn text_query(&self, expr: &str, args: &[&str], what: &str) -> Option<String> {
+        let mut cmd = self.command("query");
+        let _scratch = match self.expression_arg(&mut cmd, expr, "query") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error = %e, what, "the query file could not be written");
+                return None;
+            }
+        };
+        cmd.args(args)
+            .arg("--keep_going")
+            .arg("--order_output=no")
+            .args(HYGIENE)
+            .args(&self.extra_query_flags);
+        let o = match self.runner.output(&mut cmd) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(error = %e, what, "the query could not run");
+                return None;
+            }
+        };
+        if !o.exit.success && o.exit.code != Some(3) {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            tracing::debug!(status = %o.exit, what, last, "the query failed");
+            return None;
+        }
+        Some(String::from_utf8_lossy(&o.stdout).into_owned())
     }
 
     /// `bazel query '//external:*' --output=build`, which prints every
@@ -1369,19 +1728,7 @@ impl Bazel {
                 .join(" ")
         );
         let mut cmd = self.command("query");
-        let _scratch = if expr.len() > MAX_INLINE_QUERY {
-            let path = self.scratch.join(format!(
-                "cambium-reload-{}-{}.txt",
-                std::process::id(),
-                now_nanos()
-            ));
-            std::fs::write(&path, &expr)?;
-            cmd.arg(format!("--query_file={}", path.display()));
-            Some(ScratchFile(path))
-        } else {
-            cmd.arg(&expr);
-            None
-        };
+        let _scratch = self.expression_arg(&mut cmd, &expr, "reload")?;
         cmd.arg("--output=label").arg("--keep_going");
         for f in HYGIENE {
             cmd.arg(f);
@@ -2098,5 +2445,171 @@ mod consumer_tests {
         assert_eq!(apparent_of_canonical("grpc"), "grpc");
         assert_eq!(apparent_of_canonical("+xla_extension+tsl"), "tsl");
         assert_eq!(apparent_of_canonical("envoy_toolshed++llvm_ext+llvm"), "llvm");
+    }
+}
+
+#[cfg(test)]
+mod round_trip_tests {
+    use super::{
+        closure_loads_via, inside_label, inside_patterns, loads_expr, parse_round_trips,
+        round_trip_expr,
+    };
+    use std::collections::BTreeSet;
+
+    /// `loadfiles` over the closure less the universe's packages, which carry
+    /// their own loads; with none of them in it, over the whole closure.
+    #[test]
+    fn the_loads_query_leaves_out_the_universes_packages() {
+        let leaves = ["@bazel_tools//tools/test:collect_coverage".to_string()];
+        assert_eq!(
+            loads_expr(&leaves, &BTreeSet::new()),
+            "loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")))"
+        );
+        assert_eq!(
+            loads_expr(&leaves, &set(&["//shell/runfiles:*", "//shell:*"])),
+            "loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")) \
+             except (//shell/runfiles:* + //shell:*))"
+        );
+    }
+
+    /// `bazel query 'loadfiles(deps(@bazel_tools//tools/test:collect_coverage))'`
+    /// on rules_shell at `b1eed28` (Bazel 9.1.1), cut down, plus an indexed
+    /// repository's file: the root module's `.bzl` files are the ones the
+    /// collector's rule class comes from.
+    #[test]
+    fn the_closures_loads_become_via_entries() {
+        const LOADS: &str = "//shell:sh_binary.bzl\n\
+            //shell/private:sh_binary.bzl\n\
+            //shell/private:sh_executable.bzl\n\
+            @@//:defs.bzl\n\
+            @bazel_skylib//:bzl_library.bzl\n\
+            @@bazel_tools//tools/test:BUILD\n\
+            @@envoy_api+//bazel:api_build_system.bzl\n";
+        assert_eq!(
+            closure_loads_via(LOADS, &["envoy_api".to_string()]),
+            set(&[
+                "//:defs.bzl",
+                "//shell/private:sh_binary.bzl",
+                "//shell/private:sh_executable.bzl",
+                "//shell:sh_binary.bzl",
+                "@envoy_api",
+            ])
+        );
+        assert!(closure_loads_via("@rules_cc//cc:defs.bzl\n", &[]).is_empty());
+    }
+
+    fn set(ps: &[&str]) -> BTreeSet<String> {
+        ps.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// `bazel query --output=package` over the leaves' closure on
+    /// rules_shell at `b1eed28`, cut down: the main repository's packages
+    /// print with no repository at all.
+    const PACKAGES: &str = "@bazel_tools//tools/test\n@@rules_java+//toolchains\nshell\nshell/runfiles\n@@envoy_api+//envoy/type\n";
+
+    #[test]
+    fn the_closures_inside_packages_become_patterns() {
+        assert_eq!(
+            inside_patterns(PACKAGES, &[]),
+            set(&["//shell/runfiles:*", "//shell:*"])
+        );
+        // An indexed repository's packages are inside too, spelled as Bazel
+        // printed them; the root package is `//:*`.
+        assert_eq!(
+            inside_patterns(&format!("{PACKAGES}\n"), &["envoy_api".to_string()]),
+            set(&[
+                "//:*",
+                "//shell/runfiles:*",
+                "//shell:*",
+                "@@envoy_api+//envoy/type:*"
+            ])
+        );
+        assert!(inside_patterns("@bazel_tools//tools/test\n", &[]).is_empty());
+    }
+
+    #[test]
+    fn the_paths_query_names_the_leaves_once() {
+        let e = round_trip_expr(
+            &["@bazel_tools//tools/test:collect_coverage".to_string()],
+            &set(&["//shell/runfiles:*", "//shell:*"]),
+        );
+        assert_eq!(
+            e,
+            "let l = set(\"@bazel_tools//tools/test:collect_coverage\") in \
+             allpaths($l, deps($l) intersect (//shell/runfiles:* + //shell:*))"
+        );
+    }
+
+    /// Verbatim from rules_shell at `b1eed28` (Bazel 9.1.1), plus a second
+    /// leaf whose only way in runs through the first, and an external hop.
+    const GRAPH: &str = r#"digraph mygraph {
+  node [shape=box];
+  "@bazel_tools//tools/test:collect_coverage"
+  "@bazel_tools//tools/test:collect_coverage" -> "//shell/runfiles:runfiles"
+  "@bazel_tools//tools/test:collect_coverage" -> "//shell:toolchain_type"
+  "//shell:toolchain_type"
+  "//shell/runfiles:runfiles"
+  "//shell/runfiles:runfiles" -> "//shell/runfiles:runfiles_impl"
+  "//shell/runfiles:runfiles_impl"
+  "//shell/runfiles:runfiles_impl" -> "//shell/runfiles:runfiles_at_legacy_location"
+  "//shell/runfiles:runfiles_at_legacy_location"
+  "//shell/runfiles:runfiles_at_legacy_location" -> "//shell/runfiles:runfiles.bash"
+  "//shell/runfiles:runfiles.bash"
+  "@bazel_tools//tools/test:test_setup" -> "@@rules_x+//:hop"
+  [label="//conditions:default"];
+  "@@rules_x+//:hop" -> "@bazel_tools//tools/test:collect_coverage"
+  "@@rules_x+//:hop" -> "@@envoy_api+//envoy/type:pkg"
+}
+"#;
+
+    /// The walk stops at the first node inside: the runfiles library's own
+    /// deps are the index's rows, not the leaf's. A path through another
+    /// external node counts, and ends where it enters.
+    #[test]
+    fn each_leaf_gets_the_first_inside_node_of_every_path() {
+        let leaves = vec![
+            "@bazel_tools//tools/test:collect_coverage".to_string(),
+            "@bazel_tools//tools/test:test_setup".to_string(),
+            "@platforms//os:linux".to_string(),
+        ];
+        let r = parse_round_trips(GRAPH, &[], &leaves);
+        assert_eq!(
+            r["@bazel_tools//tools/test:collect_coverage"],
+            set(&["//shell/runfiles:runfiles", "//shell:toolchain_type"])
+        );
+        assert_eq!(
+            r["@bazel_tools//tools/test:test_setup"],
+            set(&["//shell/runfiles:runfiles", "//shell:toolchain_type"])
+        );
+        // Reaches nothing (never printed): absent.
+        assert_eq!(r.len(), 2, "{r:?}");
+        // An indexed repository is inside, under the name the index knows.
+        let r = parse_round_trips(GRAPH, &["envoy_api".to_string()], &leaves[1..2]);
+        assert_eq!(
+            r["@bazel_tools//tools/test:test_setup"],
+            set(&[
+                "//shell/runfiles:runfiles",
+                "//shell:toolchain_type",
+                "@envoy_api//envoy/type:pkg"
+            ])
+        );
+    }
+
+    #[test]
+    fn an_inside_label_is_spelled_as_the_index_spells_it() {
+        assert_eq!(inside_label("@@//a:b", &[]), Some("//a:b".to_string()));
+        assert_eq!(inside_label("@//a:b", &[]), Some("//a:b".to_string()));
+        assert_eq!(inside_label("//a:b", &[]), Some("//a:b".to_string()));
+        assert_eq!(inside_label("@@tsl+//t:x", &[]), None);
+        let tsl = ["tsl".to_string()];
+        assert_eq!(
+            inside_label("@@+ext+tsl//t:x", &tsl),
+            Some("@tsl//t:x".to_string())
+        );
+        assert_eq!(
+            inside_label("@tsl//t:x", &tsl),
+            Some("@tsl//t:x".to_string())
+        );
+        assert_eq!(inside_label("@@grpc+//:g", &tsl), None);
     }
 }
