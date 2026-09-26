@@ -7,7 +7,6 @@
 //! Bazel loading cost, and a like-for-like comparison with the "dump the whole
 //! graph twice" approach.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::graph::{Kind, SynthGraph, EXT_LIBS};
@@ -189,8 +188,18 @@ impl cambium_index::FileText for SynthFiles<'_> {
 }
 
 fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
+    for (path, contents) in package_files(g, pkg) {
+        write(&out.join(path), &contents)?;
+    }
+    Ok(())
+}
+
+/// Every file [`emit_workspace`] writes for one live package, as
+/// `(workspace-relative path, contents)`: its `BUILD.bazel` first, then each
+/// live target's source files. The emitter writes exactly this list, so a
+/// test can read the package as Bazel would without a disk write per file.
+pub fn package_files(g: &SynthGraph, pkg: u32) -> Vec<(String, String)> {
     let p = &g.packages[pkg as usize];
-    let dir = out.join(&p.path);
     let mut build = build_file_loads(g, pkg);
 
     if !p.exported.is_empty() {
@@ -203,33 +212,22 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
     }
 
     let suffix = p.bzl.first().map(|b| b.to_string()).unwrap_or_default();
+    let mut files = vec![(g.build_path(pkg), String::new())];
     for &tid in &p.targets {
-        if !g.targets[tid as usize].alive {
+        let t = &g.targets[tid as usize];
+        if !t.alive {
             continue;
         }
-        write_sources(g, tid, &dir)?;
+        // Each source holds its content version, so that a `ModifySource`
+        // commit produces a real diff, and a per-target glob picks them up,
+        // so that adding a file really does change the target's inputs.
+        for (&slot, version) in t.srcs.iter().zip(&t.src_versions) {
+            files.push((g.src_path(tid, slot), format!("// v{version}\n")));
+        }
         build.push_str(&target_stanza(g, tid, &suffix));
     }
-
-    write(&dir.join("BUILD.bazel"), &build)
-}
-
-/// A target's source files. Each holds its content version, so that a
-/// `ModifySource` commit produces a real diff, and a per-target glob picks
-/// them up, so that adding a file really does change the target's inputs.
-fn write_sources(g: &SynthGraph, tid: u32, dir: &Path) -> Result<()> {
-    let t = &g.targets[tid as usize];
-    for (&slot, version) in t.srcs.iter().zip(&t.src_versions) {
-        let path = dir.join(SynthGraph::src_name(tid, slot));
-        let mut f = std::fs::File::create(&path)
-            .or_else(|_| std::fs::create_dir_all(dir).and_then(|_| std::fs::File::create(&path)))
-            .map_err(|source| EmitError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        writeln!(f, "// v{version}").map_err(|source| EmitError::Io { path, source })?;
-    }
-    Ok(())
+    files[0].1 = build;
+    files
 }
 
 /// One live target's BUILD stanza. `suffix` names the generated `.bzl` whose
