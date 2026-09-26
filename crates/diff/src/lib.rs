@@ -56,8 +56,9 @@ impl Change {
     }
 }
 
-/// A commit as a reader would see it in a row: the object id, the commit
-/// date in `MM-DD HH:MM`, and the first line of the message.
+/// A commit as a reader would see it in a row: the object id, the committer
+/// date in `MM-DD HH:MM` (in the committer's recorded zone), and the first
+/// line of the message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitMeta {
     pub sha: String,
@@ -133,8 +134,10 @@ impl Repo {
     ///
     /// One `git log` rather than two calls per commit: a thirty-commit
     /// profile would otherwise pay sixty process starts to print sixty
-    /// fields. The date is the commit date in the local zone, `MM-DD HH:MM`,
-    /// which is the precision a row has space for.
+    /// fields. The date is the committer date as `MM-DD HH:MM`, the precision
+    /// a row has space for, shown in the zone the committer recorded (what
+    /// `--date=format:` does), not converted to the reader's. Two rows from
+    /// committers in different zones are therefore not directly comparable.
     pub fn first_parent_log_meta(&self, rev: &str, max: usize) -> Result<Vec<CommitMeta>> {
         let out = run(
             &self.root,
