@@ -1,14 +1,14 @@
 //! The terminal output grammar every `cambi` verb renders through.
 //!
 //! One renderer draws every command, so nothing can drift between them. The
-//! grammar is four things and no more:
+//! grammar is four things and no more, sketched here at 80 columns:
 //!
 //! ```text
 //! cambium profile  envoy  e6b1317..cc1b5cb  30 first-parent commits
 //!   worktree .............  ready                                     210 ms
 //!   cold index ...........  68,412 targets                             2.5 s
-//!     commit               time affected  index
-//!     e6b1317 09-02 09:14 tcp_proxy: idle t…  116 ms      375  ~  2625 rewritten
+//!     commit                                       time affected index
+//!     e6b1317 09-02 09:14 tcp_proxy: idle tim…   116 ms      375 ~  2625 rewritten
 //!   commits ..............  30 walked, 1 global                        9.9 s
 //! ```
 //!
@@ -36,5 +36,4 @@ mod sink;
 pub use event::{Align, Cell, Column, Event, Level, Style, Width};
 pub use mode::{ColorChoice, Kind, OutputMode};
 pub use paint::Paint;
-pub use row::{terminal_width, ROW_CAP};
 pub use sink::{boxed, Jsonl, Null, Plain, Sink, Stream};

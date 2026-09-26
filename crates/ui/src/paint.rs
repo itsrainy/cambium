@@ -12,10 +12,6 @@ impl Paint {
         Self { on }
     }
 
-    pub fn is_on(&self) -> bool {
-        self.on
-    }
-
     fn wrap(&self, code: &str, s: &str) -> String {
         if self.on {
             format!("\x1b[{code}m{s}\x1b[0m")
@@ -54,4 +50,24 @@ impl Paint {
             Style::Yellow => self.yellow(s),
         }
     }
+}
+
+/// `s` as it reads with its colour escapes taken out, for a test that
+/// checks colour moved nothing.
+#[cfg(test)]
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

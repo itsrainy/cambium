@@ -11,14 +11,14 @@ use crate::paint::Paint;
 /// A row never grows past this many columns.
 pub const ROW_CAP: usize = 96;
 /// Rows sit inside their phase.
-pub const INDENT: usize = 4;
+pub(crate) const INDENT: usize = 4;
 /// The narrowest a flexible column is ever squeezed to.
 const FLEX_MIN: usize = 24;
 /// The width assumed when there is no terminal to measure.
 const PIPE_WIDTH: usize = 80;
 
 /// Terminal width, or the 80 columns a pipe is assumed to have.
-pub fn terminal_width() -> usize {
+pub(crate) fn terminal_width() -> usize {
     crossterm::terminal::size()
         .ok()
         .map(|(w, _)| w as usize)
@@ -27,7 +27,7 @@ pub fn terminal_width() -> usize {
 }
 
 /// Pads `s` to `n` columns, or truncates it to `n` with a trailing ellipsis.
-pub fn fit(s: &str, n: usize, align: Align) -> String {
+pub(crate) fn fit(s: &str, n: usize, align: Align) -> String {
     let count = s.chars().count();
     if count > n {
         let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
@@ -98,23 +98,18 @@ pub fn render(cols: &[Column], cells: &[Cell], term: usize, p: &Paint) -> String
     out.trim_end().to_string()
 }
 
-/// The column header line, dim, laid out exactly as the rows under it.
+/// The column header line, dim, laid out exactly as the rows under it: it
+/// is a row whose cells are the titles, so it cannot drift from them.
 pub fn render_header(cols: &[Column], term: usize, p: &Paint) -> String {
-    let ws = widths(cols, term);
-    let mut out = " ".repeat(INDENT);
-    for (i, c) in cols.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&fit(&c.title, ws[i], c.align));
-    }
-    p.dim(out.trim_end())
+    let titles: Vec<Cell> = cols.iter().map(|c| Cell::text(&c.title)).collect();
+    p.dim(&render(cols, &titles, term, &Paint::new(false)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::Style;
+    use crate::paint::strip_ansi;
 
     fn cols() -> Vec<Column> {
         vec![
@@ -205,22 +200,5 @@ mod tests {
         let painted = render(&cols(), &cells, 96, &Paint::new(true));
         let stripped: String = strip_ansi(&painted);
         assert_eq!(plain, stripped);
-    }
-
-    fn strip_ansi(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
     }
 }

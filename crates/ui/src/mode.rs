@@ -4,7 +4,10 @@
 //! an [`OutputMode`] renders the same way from the first event to the last,
 //! even if the terminal is resized or the variables change under it.
 
-/// `--color`.
+/// `--color`. The type is spelled as the flag is, since it stands for the
+/// flag, just as the `no_color` and `clicolor_*` fields are spelled as the
+/// variables they mirror; everything in the crate not named after a flag or
+/// a variable says colour.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ColorChoice {
     Auto,
@@ -38,9 +41,19 @@ pub struct OutputMode {
 }
 
 impl OutputMode {
-    /// What a terminal gets when nothing is suppressing it.
+    /// The mode this invocation gets. The kind: `--quiet` first, then
+    /// `--format jsonl`, then whether stderr is a terminal that can carry a
+    /// live line (not under CI, not `TERM=dumb`). Colour is
+    /// [`OutputMode::stderr_colour`]'s answer, off for the kinds that draw
+    /// no text. The width is measured here, once, for the whole run.
     pub fn detect(quiet: bool, jsonl: bool, colour: ColorChoice) -> Self {
-        Self::decide(quiet, jsonl, colour, &Env::read())
+        Self::decide(
+            quiet,
+            jsonl,
+            colour,
+            &Env::read(),
+            crate::row::terminal_width(),
+        )
     }
 
     /// Whether text on stderr takes colour, by the rule the narration uses:
@@ -54,16 +67,11 @@ impl OutputMode {
         colour_for(colour, &Env::read())
     }
 
-    pub fn silent() -> Self {
-        Self {
-            kind: Kind::Null,
-            live: false,
-            colour: false,
-            width: 80,
-        }
-    }
-
-    fn decide(quiet: bool, jsonl: bool, colour: ColorChoice, env: &Env) -> Self {
+    /// Everything the mode depends on is an argument, so a test decides it
+    /// without the terminal it happens to run in. The width is measured by
+    /// the caller rather than read into [`Env`], because
+    /// [`OutputMode::stderr_colour`] reads `Env` too and has no use for it.
+    fn decide(quiet: bool, jsonl: bool, colour: ColorChoice, env: &Env, width: usize) -> Self {
         // `--quiet` means what the CLI has always said it means: nothing on
         // stderr when the run succeeds. `--format jsonl` means the progress
         // is for a program, so it is objects rather than lines.
@@ -81,7 +89,7 @@ impl OutputMode {
             kind,
             live: matches!(kind, Kind::Stream),
             colour,
-            width: crate::row::terminal_width(),
+            width,
         }
     }
 }
@@ -138,18 +146,24 @@ mod tests {
 
     #[test]
     fn a_terminal_is_live_and_coloured_and_a_pipe_is_neither() {
-        let m = OutputMode::decide(false, false, ColorChoice::Auto, &tty());
+        let m = OutputMode::decide(false, false, ColorChoice::Auto, &tty(), 80);
         assert_eq!(m.kind, Kind::Stream);
         assert!(m.live && m.colour);
 
-        let m = OutputMode::decide(false, false, ColorChoice::Auto, &Env::default());
+        let m = OutputMode::decide(false, false, ColorChoice::Auto, &Env::default(), 80);
         assert_eq!(m.kind, Kind::Plain);
         assert!(!m.live && !m.colour);
     }
 
     #[test]
     fn ci_and_a_dumb_terminal_keep_the_rows_and_drop_the_live_line() {
-        let m = OutputMode::decide(false, false, ColorChoice::Auto, &Env { ci: true, ..tty() });
+        let m = OutputMode::decide(
+            false,
+            false,
+            ColorChoice::Auto,
+            &Env { ci: true, ..tty() },
+            80,
+        );
         assert_eq!(m.kind, Kind::Plain);
         let m = OutputMode::decide(
             false,
@@ -159,6 +173,7 @@ mod tests {
                 dumb: true,
                 ..tty()
             },
+            80,
         );
         assert_eq!(m.kind, Kind::Plain);
         assert!(!m.colour, "a dumb terminal takes no escapes");
@@ -167,10 +182,10 @@ mod tests {
     #[test]
     fn quiet_says_nothing_and_jsonl_says_it_in_objects() {
         assert_eq!(
-            OutputMode::decide(true, false, ColorChoice::Always, &tty()).kind,
+            OutputMode::decide(true, false, ColorChoice::Always, &tty(), 80).kind,
             Kind::Null
         );
-        let m = OutputMode::decide(false, true, ColorChoice::Always, &tty());
+        let m = OutputMode::decide(false, true, ColorChoice::Always, &tty(), 80);
         assert_eq!(m.kind, Kind::Jsonl);
         assert!(!m.colour, "a JSON object is never painted");
     }
@@ -181,21 +196,21 @@ mod tests {
             no_color: true,
             ..tty()
         };
-        assert!(!OutputMode::decide(false, false, ColorChoice::Auto, &off).colour);
+        assert!(!OutputMode::decide(false, false, ColorChoice::Auto, &off, 80).colour);
         assert!(
-            OutputMode::decide(false, false, ColorChoice::Always, &off).colour,
+            OutputMode::decide(false, false, ColorChoice::Always, &off, 80).colour,
             "--color always is a caller asking for it on purpose"
         );
         let zero = Env {
             clicolor_off: true,
             ..tty()
         };
-        assert!(!OutputMode::decide(false, false, ColorChoice::Auto, &zero).colour);
+        assert!(!OutputMode::decide(false, false, ColorChoice::Auto, &zero, 80).colour);
         let forced = Env {
             clicolor_force: true,
             ..Env::default()
         };
-        let m = OutputMode::decide(false, false, ColorChoice::Auto, &forced);
+        let m = OutputMode::decide(false, false, ColorChoice::Auto, &forced, 80);
         assert!(m.colour && m.kind == Kind::Plain);
     }
 
@@ -219,6 +234,6 @@ mod tests {
         };
         assert!(colour_for(ColorChoice::Auto, &forced));
         assert!(colour_for(ColorChoice::Auto, &tty()));
-        assert!(!OutputMode::decide(true, false, ColorChoice::Auto, &tty()).colour);
+        assert!(!OutputMode::decide(true, false, ColorChoice::Auto, &tty(), 80).colour);
     }
 }

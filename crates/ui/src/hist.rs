@@ -4,9 +4,13 @@
 //! [`columns`] is a vertical column chart, eight rows tall, with each value
 //! printed directly above its own column and the labels centred under an axis
 //! line. [`bars`] is one horizontal block bar per bin with the count after
-//! it. Both stay inside [`crate::ROW_CAP`]: past that the column chart drops
-//! to every other value, then every other label, and only then narrows the
-//! bars.
+//! it, its bars as wide as the caller asks.
+//!
+//! The column chart fits itself inside [`crate::row::ROW_CAP`] as bins are
+//! added: first its bars narrow from three columns to two, then it prints
+//! every other value, then every other label, and last it narrows the bars
+//! to one. Past that last step (47 bins, when no value or label is longer
+//! than three characters) it runs wider than the cap.
 
 use crate::row::ROW_CAP;
 
@@ -17,29 +21,57 @@ const COL_INDENT: usize = 2;
 /// Partial column tops, one eighth to seven eighths.
 const EIGHTHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
-/// Column width, bar width, and how often a value and a label are printed.
-/// Labels thin out before the bars do, and the bars only shrink once
-/// thinning is not enough.
-fn layout(n: usize, w_val: usize, w_lab: usize) -> (usize, usize, usize, usize) {
-    let budget = ROW_CAP.saturating_sub(COL_INDENT);
-    let mut last = (3usize, 3usize, 1usize, 1usize);
-    for (val_every, lab_every, bar_w) in [
-        (1usize, 1usize, 3usize),
-        (1, 1, 2),
-        (2, 1, 2),
-        (2, 2, 2),
-        (2, 2, 1),
-    ] {
-        // A label printed every k columns may borrow the k columns it spans.
-        let cell = (bar_w + 1)
-            .max((w_val + 1).div_ceil(val_every))
-            .max((w_lab + 1).div_ceil(lab_every));
-        last = (cell, bar_w, val_every, lab_every);
-        if n * cell <= budget + 1 {
-            return last;
-        }
+/// How the column chart spends its width.
+#[derive(Copy, Clone)]
+struct Layout {
+    /// Columns per bin, including the one blank between neighbours.
+    cell: usize,
+    /// Columns of block in each bar.
+    bar_w: usize,
+    /// A value is printed above every `val_every`th bin.
+    val_every: usize,
+    /// A label is printed under every `lab_every`th bin.
+    lab_every: usize,
+}
+
+/// The steps the column chart narrows through as bins are added, as
+/// `(val_every, lab_every, bar_w)`. The bars narrow to two before anything is
+/// thinned, and to one only once values and labels are both thinned.
+const STEPS: [(usize, usize, usize); 5] = [(1, 1, 3), (1, 1, 2), (2, 1, 2), (2, 2, 2), (2, 2, 1)];
+
+impl Layout {
+    /// The first step whose `n` bins fit inside the cap, or the last step
+    /// when none does.
+    fn fit(n: usize, w_val: usize, w_lab: usize) -> Self {
+        let steps = STEPS.map(|(val_every, lab_every, bar_w)| Layout {
+            // A label printed every k columns may borrow the k columns it
+            // spans.
+            cell: (bar_w + 1)
+                .max((w_val + 1).div_ceil(val_every))
+                .max((w_lab + 1).div_ceil(lab_every)),
+            bar_w,
+            val_every,
+            lab_every,
+        });
+        let last = steps[steps.len() - 1];
+        steps
+            .into_iter()
+            .find(|l| l.width(n) <= ROW_CAP)
+            .unwrap_or(last)
     }
-    last
+
+    /// Columns the chart spans for `n` bins: the indent, then every cell but
+    /// the last one's blank neighbour.
+    fn width(&self, n: usize) -> usize {
+        COL_INDENT + n * self.cell - 1
+    }
+
+    /// Where bin `i`'s bar starts: centred in its cell, blank neighbour
+    /// aside. The bars, their values and their labels are all placed by it,
+    /// so a label cannot drift off its bar.
+    fn bar_x(&self, i: usize) -> usize {
+        COL_INDENT + i * self.cell + (self.cell - 1 - self.bar_w) / 2
+    }
 }
 
 /// A vertical column chart: one column per bin, the value directly above each
@@ -58,18 +90,29 @@ pub fn columns(counts: &[u64], labels: &[String]) -> Vec<String> {
         .max()
         .unwrap_or(1)
         .max(1);
-    let (cell, bar_w, val_every, lab_every) = layout(n, w_val, w_lab);
-    let content = cell - 1;
-    let bar_w = bar_w.min(content);
-    let total = COL_INDENT + n * cell - 1;
+    let layout = Layout::fit(n, w_val, w_lab);
+    let total = layout.width(n);
 
+    let mut out = plot(counts, &values, &layout, total);
+    out.push(format!(
+        "{}{}",
+        " ".repeat(COL_INDENT),
+        "─".repeat(total - COL_INDENT)
+    ));
+    out.push(label_line(labels, n, &layout, total));
+    out
+}
+
+/// The bars with their values above them, top row first, from the tallest
+/// value down to the axis.
+fn plot(counts: &[u64], values: &[String], layout: &Layout, total: usize) -> Vec<String> {
     // One row above the tallest column, so its value has somewhere to sit.
     let mut grid = vec![vec![' '; total]; COL_HEIGHT + 1];
     let max = counts.iter().copied().max().unwrap_or(1).max(1);
 
     for (i, &count) in counts.iter().enumerate() {
-        let x0 = COL_INDENT + i * cell;
-        let bar_x = x0 + (content - bar_w) / 2;
+        let x = layout.bar_x(i);
+        let bar = x..x + layout.bar_w;
         let mut eighths = (count as f64 / max as f64 * (COL_HEIGHT * 8) as f64).round() as usize;
         if count > 0 && eighths == 0 {
             eighths = 1;
@@ -77,65 +120,52 @@ pub fn columns(counts: &[u64], labels: &[String]) -> Vec<String> {
         let full = eighths / 8;
         let frac = eighths % 8;
         let top = 1 + COL_HEIGHT - full - usize::from(frac > 0);
-        for row in grid
-            .iter_mut()
-            .take(COL_HEIGHT + 1)
-            .skip(top + usize::from(frac > 0))
-        {
-            for dx in 0..bar_w {
-                row[bar_x + dx] = '█';
-            }
+        for row in grid.iter_mut().skip(top + usize::from(frac > 0)) {
+            row[bar.clone()].fill('█');
         }
         if frac > 0 {
-            for dx in 0..bar_w {
-                grid[top][bar_x + dx] = EIGHTHS[frac - 1];
-            }
+            grid[top][bar.clone()].fill(EIGHTHS[frac - 1]);
         }
-        if i % val_every == 0 {
+        if i % layout.val_every == 0 {
             let v = &values[i];
-            let end = bar_x + bar_w;
-            let start = end.saturating_sub(v.chars().count());
-            let row = top.saturating_sub(1);
-            for (k, ch) in v.chars().enumerate() {
-                if start + k < total {
-                    grid[row][start + k] = ch;
-                }
-            }
+            let start = bar.end.saturating_sub(v.chars().count());
+            stamp(&mut grid[top.saturating_sub(1)], start, v);
         }
     }
 
-    let mut out: Vec<String> = grid
-        .into_iter()
-        .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
-        .collect();
+    let mut out: Vec<String> = grid.iter().map(|row| line_of(row)).collect();
     // Drop the blank rows above the tallest value.
     while out.first().is_some_and(|l| l.is_empty()) {
         out.remove(0);
     }
+    out
+}
 
-    let mut axis = " ".repeat(COL_INDENT);
-    axis.push_str(&"─".repeat(n * cell - 1));
-    out.push(axis);
-
+/// The labels under the axis, each centred under its bar and kept inside
+/// the chart.
+fn label_line(labels: &[String], n: usize, layout: &Layout, total: usize) -> String {
     let mut line = vec![' '; total];
-    for (i, d) in labels.iter().enumerate().take(n) {
-        if i % lab_every != 0 {
-            continue;
-        }
-        let x0 = COL_INDENT + i * cell;
-        let bar_x = x0 + (content - bar_w) / 2;
+    for (i, d) in labels.iter().enumerate().take(n).step_by(layout.lab_every) {
         let w = d.chars().count();
-        let start = (bar_x + bar_w / 2)
+        let start = (layout.bar_x(i) + layout.bar_w / 2)
             .saturating_sub(w / 2)
             .min(total.saturating_sub(w));
-        for (k, ch) in d.chars().enumerate() {
-            if start + k < total {
-                line[start + k] = ch;
-            }
-        }
+        stamp(&mut line, start, d);
     }
-    out.push(line.into_iter().collect::<String>().trim_end().to_string());
-    out
+    line_of(&line)
+}
+
+/// Writes `text` into `row` from column `start`, dropping whatever would
+/// fall past the row's end.
+fn stamp(row: &mut [char], start: usize, text: &str) {
+    for (slot, ch) in row.iter_mut().skip(start).zip(text.chars()) {
+        *slot = ch;
+    }
+}
+
+/// One row of the chart as a line, without its trailing blanks.
+fn line_of(row: &[char]) -> String {
+    row.iter().collect::<String>().trim_end().to_string()
 }
 
 /// One horizontal block bar per bin, with its label before it and its count
@@ -153,13 +183,7 @@ pub fn bars(counts: &[u64], labels: &[String], width: usize) -> Vec<String> {
         .enumerate()
         .map(|(i, &count)| {
             let label = labels.get(i).cloned().unwrap_or_default();
-            format!(
-                "  {:>lw$}  {} {}",
-                label,
-                bar(count, max, width),
-                count,
-                lw = lw
-            )
+            format!("  {label:>lw$}  {} {count}", bar(count, max, width))
         })
         .collect()
 }
@@ -189,6 +213,29 @@ mod tests {
         lines.iter().map(|l| l.chars().count()).max().unwrap_or(0)
     }
 
+    fn is_block(c: char) -> bool {
+        c == '█' || EIGHTHS.contains(&c)
+    }
+
+    /// Whether anything is drawn in the column the label `label` sits under,
+    /// in any row above the axis.
+    fn drawn_above(lines: &[String], label: &str) -> bool {
+        let x = lines.last().unwrap().find(label).expect(label);
+        lines[..lines.len() - 2]
+            .iter()
+            .any(|l| l.chars().nth(x).is_some_and(is_block))
+    }
+
+    /// How many columns wide a bar is drawn: the longest run of blocks in
+    /// the bottom row, where every bin with a count has one.
+    fn bar_width(lines: &[String]) -> usize {
+        lines[lines.len() - 3]
+            .split(|c: char| !is_block(c))
+            .map(|run| run.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
     #[test]
     fn seven_bins_draw_every_value_and_every_label() {
         let counts = vec![12, 340, 1, 0, 76, 9, 250];
@@ -204,7 +251,9 @@ mod tests {
             ["0", "1", "2", "3", "4", "5", "6"]
         );
         // A bin with one item in it is still visible, and an empty one is not.
-        assert!(text.contains('▁'));
+        assert!(drawn_above(&lines, "2"), "bin 2 holds one: {lines:#?}");
+        assert!(!drawn_above(&lines, "3"), "bin 3 is empty: {lines:#?}");
+        assert_eq!(bar_width(&lines), 3, "{lines:#?}");
     }
 
     #[test]
@@ -219,10 +268,11 @@ mod tests {
             "25 bins still fit inside the cap: {drawn:?}"
         );
         assert_eq!(drawn.last(), Some(&"24"));
+        assert_eq!(bar_width(&lines), 2, "the bars narrowed: {lines:#?}");
     }
 
     #[test]
-    fn past_the_cap_the_labels_thin_out_before_the_bars_do() {
+    fn forty_bins_thin_out_the_labels_and_still_draw_the_bars() {
         let counts: Vec<u64> = (0..40).map(|i| (i * 37 % 91) as u64).collect();
         let lines = columns(&counts, &labels(40));
         assert!(width_of(&lines) <= ROW_CAP, "{lines:#?}");
