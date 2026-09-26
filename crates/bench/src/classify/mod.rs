@@ -5,7 +5,7 @@
 //! them explained by a handful of known, *expected* differences in what the
 //! two tools model. Seven classes were planned up front; the real runs turned
 //! up the rest. Thirteen of the seventeen are benign and three fail the run — plus
-//! `tool_missing`, which is a fact about the foil and gates nothing:
+//! `tool_missing`, which is a fact about the peer and gates nothing:
 //!
 //! | class | side | meaning |
 //! |---|---|---|
@@ -185,7 +185,7 @@ pub enum Class {
     /// those as tool misses and say nothing about mechanism. Only a label
     /// nothing else explains reaches here.
     ///
-    /// Not a failure. It is a fact about the foil, and gating cambium's run on
+    /// Not a failure. It is a fact about the peer, and gating cambium's run on
     /// another tool's defect would make the suite unrunnable for a reason that
     /// is not cambium's to fix. First seen on `bazel/bazel`, where Tango
     /// dropped `//docs:docs`, `//docs:srcs` and
@@ -1089,7 +1089,7 @@ mod tests {
     fn the_benign_classes_do_not_fail_a_change_set() {
         // Two kinds of class do not fail: an over-approximation by cambium
         // (every one of them named `*_extra_*`), and `tool_missing`, which is
-        // a defect of the foil rather than of cambium. Nothing else may be
+        // a defect of the peer rather than of cambium. Nothing else may be
         // waved through — a silent "other" bucket is how an unsoundness ships.
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(

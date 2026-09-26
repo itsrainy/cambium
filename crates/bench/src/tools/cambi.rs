@@ -189,7 +189,7 @@ impl Cambi {
     }
 
     /// An invocation rooted at `ws`, with this run's environment and no stdin
-    /// to prompt on — built exactly as a foil tool's is.
+    /// to prompt on — built exactly as a peer's is.
     pub fn command(&self, ws: &Path) -> Command {
         let mut cmd = crate::tools::noninteractive_command(&self.path, &self.env);
         cmd.arg("-C").arg(ws);

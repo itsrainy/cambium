@@ -40,7 +40,7 @@ pub mod target_determinator;
 
 // ------------------------------------------------------------ finding them
 
-/// Where the foil tools are, as the command line said.
+/// Where the peer tools are, as the command line said.
 ///
 /// Every field is "nothing was said", and the binary fills them from its
 /// flags — each with the environment variable of the same meaning as a
@@ -136,7 +136,7 @@ impl Install {
     /// A `key=value` per line `VERSION` file, rendered as `tag` plus the
     /// short `commit`, or just the tag when there is no commit.
     ///
-    /// Both Go foils are pinned by tag and commit and neither can be asked its
+    /// Both Go peers are pinned by tag and commit and neither can be asked its
     /// own version (upstream Tango ships no CLI at all; a `go build` of
     /// target-determinator leaves the version unstamped), so the file the
     /// fetch script wrote is the only identity the comparison can record.
@@ -161,13 +161,13 @@ impl Install {
 /// The tool names a `--tools` list asks for, before any is looked for on
 /// disk.
 ///
-/// The list is exact when given; otherwise the default is two foils — a
+/// The list is exact when given; otherwise the default is two peers — a
 /// bazel-diff and Tango — because a comparison against one tool only tells
 /// you which of the two disagrees with cambium, not which of the three is the
-/// odd one out. target-determinator is the third foil and is named
+/// odd one out. target-determinator is the third peer and is named
 /// explicitly rather than run by default: a published run is already eight
 /// hours, and its shape (one `cquery` per revision, no warm half) is the one
-/// a reader reaches for last. cambium is not a foil: it is what the foils are
+/// a reader reaches for last. cambium is not a peer: it is what the peers are
 /// compared against and runs on every change set whether or not it is named,
 /// so naming it alone is how a run measures cambium with no tool to disagree
 /// with it.
@@ -396,7 +396,7 @@ impl RunContext {
 /// CLI at all: see [`crate::checkout::bazelisk_env`].
 ///
 /// The one process builder for every tool and for `cambi`: the product under
-/// measurement is run exactly as a foil is.
+/// measurement is run exactly as a peer is.
 pub fn noninteractive_command(
     program: impl AsRef<std::ffi::OsStr>,
     env: &[(String, String)],

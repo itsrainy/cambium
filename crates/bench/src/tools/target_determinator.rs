@@ -22,7 +22,7 @@
 //!   "everything is affected" as target-determinator's *answer*, at the
 //!   precision of a global invalidation, rather than as the failure it is.
 //!   `fatal` turns it into a non-zero exit, which [`run_capture`] reports with
-//!   the tail of stderr the way every other foil's failure is reported.
+//!   the tail of stderr the way every other peer's failure is reported.
 //! - **`-nocache_results`**. The cquery result cache persists across
 //!   invocations, so with it on a change set's cost would depend on which
 //!   change sets ran before it. Its key also excludes the environment and the
