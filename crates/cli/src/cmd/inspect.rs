@@ -17,14 +17,14 @@ use serde::Serialize;
 use crate::cmd::{emit, human_bytes as human, plural, Context};
 
 /// Options every query shares.
-#[derive(ClapArgs, Clone)]
+#[derive(ClapArgs)]
 pub struct Common {
     /// Index file to query.
     pub file: PathBuf,
 }
 
 /// Options the reachability queries share.
-#[derive(ClapArgs, Clone)]
+#[derive(ClapArgs)]
 pub struct Reach {
     /// Follow edges transitively rather than one hop.
     #[arg(long)]
@@ -626,19 +626,19 @@ struct ExternalsRepo {
     /// External repositories whose rules depend on this (indexed) one, each
     /// with the packages of it they depend on: `grpc: envoy/config/core/v3,
     /// ...`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumers: Vec<String>,
     /// Per consumer, each leaf of it the index holds and the packages of this
     /// repository its transitive deps reach: `grpc @grpc//:grpc++:
     /// envoy/annotations, ...`, or `grpc (leaves not known)` for a consumer
     /// with no leaf map, whose every leaf a change seeds.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumer_leaves: Vec<String>,
     /// Per consumer with a leaf map, what the map was derived through
     /// outside this repository: `quiche: //source/common/quic/platform,
     /// @abseil-cpp, ...`. A run in which one of them moves asks Bazel for the
     /// map again rather than trust it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumer_via: Vec<String>,
 }
 
