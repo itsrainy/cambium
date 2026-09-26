@@ -33,8 +33,9 @@ cambi inspect {target, package, deps, rdeps, path, owner, consumers, targets,
 cambi config {show, explain, hash}
 ```
 
-Nine verbs; `--help` fits one screen, each verb's first help line says what
-it's for.
+Nine verbs; `cambi -h` fits one screen (27 lines, and no verb's `-h` runs
+past 28; `--help` is the long form), and each verb's first help line says
+what it's for.
 
 ### `affected`
 
@@ -168,7 +169,9 @@ The stored artifact is an index; the chain of them is a lineage. `build
 forward (bare `FROM` means `FROM..HEAD`). Both need `--out <file>`; only a
 run also `--publish`ing may omit it (indexes run gigabytes). `publish`
 uploads one, `list` shows the store's holdings, `show` prints an index's
-header/counts, `gc` applies retention. These were the `baseline` verbs,
+header/counts, `gc` applies retention (`[baseline].retention_days`, by age;
+`--keep <key>` spares one key; a directory store only, see
+[STORE.md](STORE.md#garbage-collection)). These were the `baseline` verbs,
 renamed; `baseline` survives one release as a deprecation alias.
 
 ### `inspect`
@@ -229,7 +232,7 @@ frequency:
 - **Store**: backend, location, reachable or not, index count.
 - **Warnings**: anything sending the next run global or cold: an
   unclassifiable WORKSPACE statement, an off-allowlist `.bazelrc` flag, an
-  unreadable file the fixpoint fell back on.
+  unreadable file a stage had to answer without.
 
 `status` reports; `doctor` judges, keeping `status` quiet.
 
@@ -368,9 +371,12 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   consumer succeeded.
 - Results to stdout; progress and diagnostics to stderr, and nothing at all
   on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
-  loses the live line, not the run. Colour only when stderr is a TTY, never
-  under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under `--color
-  always` or `CLICOLOR_FORCE`. `--log` lines follow the same rule.
+  loses the live line, not the run. The narration below and `--log` lines
+  are coloured only when stderr is a TTY, never under `NO_COLOR`,
+  `CLICOLOR=0` or `TERM=dumb`, always under `--color always` or
+  `CLICOLOR_FORCE`. Diagnostics read only `--color` and `NO_COLOR`: colour
+  on a TTY unless `NO_COLOR` is set, never down a pipe unless `--color
+  always`.
 - A long run narrates itself on stderr in one grammar, the same for every
   verb that has one (`profile` is the first on it): a
   header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per
@@ -387,26 +393,28 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   get the same bytes without that line, with both of each phase's lines
   printed; `--format jsonl` gets one JSON object per event on stderr
   instead; `--quiet` gets nothing.
-- `affected`'s JSON gained two things with contract version 10 and version 3
-  before it, both additive: `affected[].depth`, the hops from the change at
-  which a target was first reached, and `depth_histogram`, those depths
-  counted, one bin per depth from 0 to the deepest reached. Version 11 adds
-  the same pair in package boundaries crossed, `affected[].package_depth`
-  and `package_depth_histogram`, a target's never exceeding its `depth`.
-  Nothing else on stdout changes under `--format json`.
-- Every document carries `schema`. `affected`/`inspect` keep the existing
-  `SCHEMA_VERSION`; `status`, `explain`, `doctor` start there too, since
-  it's shared and one bump moves all.
+- Every `--format json` document carries `schema`, the contract version,
+  17 today. It is shared by every verb's document, so one bump moves all;
+  the README's JSON contract has the field tables and says what each
+  version added (`affected[].depth` and `depth_histogram` in 3 and 10,
+  their package-boundary twins `package_depth` and
+  `package_depth_histogram` in 11, and so on).
 - Exit codes are few and never change meaning:
 
   | code | meaning |
   |---:|---|
   | 0 | success, including "nothing affected" |
-  | 1 | error, or usage |
+  | 1 | error, or a usage error `cambi` diagnoses (`CAMBI-E013`) |
   | 2 | global invalidation; everything is affected |
-  | 3 | Bazel failed |
+  | 3 | Bazel failed, or no Bazel workspace was found |
   | 4 | no index available and `--no-full-build` was given |
   | 5 | the store is there and could not be read |
+
+  A command line the argument parser rejects before `cambi` runs (an
+  unknown flag or verb, a missing value) exits 2 with the parser's usage
+  text on stderr and nothing on stdout, so a script should read 2 as
+  "everything" only when stdout says `//...` (docs/CI.md's scripts run the
+  label file on 2, which fails on an empty one).
 
   0-4 keep their numbers. 5 is new: a store that is there and cannot be
   read differs from one with no index; CI retries the first, builds for the
@@ -423,13 +431,13 @@ Every warning and error has a stable code, a one-line message, an optional
 location, and a `help:` line naming what to change. Human form follows `rustc`:
 
 ```
-warning[CAMBI-W004]: .bazelrc changed and the run went global
-  --> .bazelrc:14
-   |
-14 | common --repo_env=CC=clang
-   |        ^^^^^^^^^^ --repo_env is not on the loading-irrelevant allowlist
-   = help: add it to [bazelrc].allowlist_extra if it cannot change what `bazel query` loads
+warning[CAMBI-W004]: .bazelrc changed and the run went global: .bazelrc: common --repo_env changed, not on the loading-irrelevant allowlist
+  --> .bazelrc
+  = help: add the flag to [bazelrc].allowlist_extra if it cannot change what `bazel query` loads; a flag under a --config the query does not run with is already ignored, and [bazelrc].configs names the ones it does run with
 ```
+
+The location is a file, and a line when the diagnostic knows one; no
+source excerpt is printed.
 
 Under `--format json` it's one object,
 `{"code", "level", "message", "location", "help"}`, in the `diagnostics`
@@ -444,7 +452,8 @@ Every earlier spelling keeps working one release, printing a deprecation
 diagnostic naming the new one (`CAMBI-W001: cambi baseline build is now cambi
 index build`). `--output` became `--format`, `baseline` became `index`, old
 `index` queries became `inspect`, `--explain` became `explain`, `text` became
-`human`. `bench`/`synth` were removed outright, never aliased: never part of
+`human`. `affected --write-index` is also still accepted for `--out`,
+without a diagnostic. `bench`/`synth` were removed outright, never aliased: never part of
 the contract, their only caller was the repo's own driver; both live in
 `cambium-bench` now. `cambi bench ...` is an ordinary unknown-subcommand
 error from clap.
@@ -467,14 +476,14 @@ cambium-bench subjects {list, fetch, build}
 cambium-bench walk     <subject>     # the walk: one workload, one tier
 cambium-bench run                    # the whole plan from flags
 cambium-bench replay   <subject>     # the static stages, offline
-cambium-bench pull-results           # copy a run's results off the box
+cambium-bench pull-results           # copy a run's results off the machine that ran it
 cambium-bench labels   <subject>     # the label sets a step kept
 cambium-bench watch                  # follow a run
 cambium-bench report                 # regenerate docs/RESULTS.md
 ```
 
 The verbs `history`, `changes`, `stages`, `sweep`, `regress` and `synth`
-were removed with issue #14: one workload (the walk) replaced the two, and
+were removed: one workload (the walk) replaced the two, and
 the in-memory stage micro-benchmarks were retired. `synth:<preset>` is
 still a walk target, and the launcher still offers the presets, but there
 is no `synth` verb. What the walk measures and may claim is
@@ -495,13 +504,13 @@ at, subjects}`).
 
 `cambium-bench` with no verb, on a terminal, is the launcher composing a
 run: the manifest's subjects, the synthetic presets, the peers, and a size
-(small/medium/large, large being the box run at `--tier full`), exact
+(small/medium/large, large being the full-size run at `--tier full`), exact
 command lines shown before anything runs. On confirm it spawns those lines
 (ordinary `cambium-bench walk ...`) as child processes, switching to the
 watch screen with stderr tail in the footer; `q` asks before killing a
 child. It reimplements no workload. `cambium-bench run` is the same plan
 from flags (`--subject`, `--steps`, `--smoke`, `--resume`, `--fresh`,
-`--require-sha`), what `tools/bench/run-published.sh` calls, defined once in
+`--require-sha`), what the full-size run script calls (docs/OPERATIONS.md), defined once in
 `crates/bench/src/plan.rs`. In a pipe, no verb is the usual usage error.
 
 Recorded results are never continued or discarded unasked. Over a results
@@ -511,11 +520,11 @@ asking via `r`/`f`. `walk` alone refuses a result recorded for the pin
 unless given `--resume` or `--restart`; a `--resume` that can't continue
 (another build's result, range) fails, not restarts.
 
-`cambium-bench pull-results` copies a subject's results off the box for
+`cambium-bench pull-results` copies a subject's results off the machine that ran them for
 offline replay: the index at the pin, recorded results, archived base/head
 indexes, and the diff of every recorded change set. `cambium-bench replay`
 reruns the engine's static stages over them, no Bazel, no checkout,
-milliseconds a change set, against recorded answers. Diffs are written on
-the box by `cambium-bench replay --write-paths` from the subject's git
+milliseconds a change set, against recorded answers. Diffs are written
+where the run happened, by `cambium-bench replay --write-paths` from the subject's git
 mirror, so a replay elsewhere gets every change set, repo-free.
 `tools/bench/precheck.sh` is that sequence; `docs/OPERATIONS.md` says when.

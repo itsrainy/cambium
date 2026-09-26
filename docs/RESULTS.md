@@ -15,6 +15,11 @@ Anything a run could not measure reads `n/a` rather than being omitted: a
 subject with a history and no change-set run still gets its cold-build and
 latency tables, and a result file written before a field existed says so.
 
+For a first reading, [Summary](#summary) has one row per subject and a
+legend for its columns, and the README's "How it did" says the same in two
+paragraphs. **Findings**, next, is the maintainers' account of the runs,
+with the commits and machines they ran on.
+
 ## Findings
 
 _Hand-written. `cambium-bench report` never touches this section._
@@ -139,7 +144,7 @@ visits, and 4 are the root `WORKSPACE`, whose reader is not identified; the
 fresh base at `aa90816` holds none of them. Walking the reverse rows up
 from every one of them reaches no `PACKAGE`, `GLOB` or `BZL_LOAD` node
 except those two dead packages, which have no targets. The reference build
-is being moved onto a fresh Bazel server (docs/METHODOLOGY.md), and until a
+now starts on a fresh Bazel server (docs/METHODOLOGY.md), and until a
 box run measures that, the ⚠ on envoy and xla stands as recorded.
 sourcegraph's (its graph) and apollo's (6690 rows), both from run A, ran
 against the same kind of reference build and have not been read row by row.
@@ -200,7 +205,7 @@ dependency path that leaves `//...` and comes back through `@quiche`, which
 cambium stops at. They fail on purpose, with the cause named; the run before
 had six.
 
-**What this run found, and fixed before it was published.** All five
+**What this run found, and fixed before these numbers were recorded.** All five
 subjects passed only on the fourth attempt, and each earlier attempt failed
 on something the offline replay against the pin could not see. A label
 written in `WORKSPACE` itself (sourcegraph's `npm_translate_lock(pnpm_lock
@@ -243,12 +248,12 @@ answer is *cheap*; what a global costs is precision, priced separately in
 change-set workload it fired on envoy (7 of 40) and apollo (3 of 40), so
 those two warm p50s are the numbers here that include cold rebuilds.
 
-**Laptop timings are not comparable and are not published.** Some subjects'
+**Laptop timings are not comparable and are not reported here.** Some subjects'
 external repositories cannot be fetched on macOS x86_64 (a GraalVM
 `macos-x64` distribution that does not exist, RBE configurations that shell out
 to Docker), and a failed fetch is retried by bazel-diff and Tango on every
 change set, so their absolute numbers there are inflated while cambium's mostly
-are not. The published numbers come from one machine, named in the tables
+are not. The numbers here come from one machine, named in the tables
 below.
 
 ## Summary
@@ -264,6 +269,22 @@ below.
 | apollo | d53aa3da47a0 | 7.4.1 | 25973 | 5.4 s | 274 ms | 1671 ms | 0 | 1.0000 ⚠ | 0.969 | 13409 ms | 27346 ms |
 | xla | 076fe93fad26 | 8.7.0 | 35050 | 28.9 s | 232 ms | 1188 ms | 0 | 1.0000 ⚠ | 1.000 | 24817 ms | 225536 ms |
 <!-- bench:top:end -->
+
+Reading the table: **walk p50** and **walk p90** are cambium's wall time
+per step of the walk, the whole `cambi` process, over every step that was
+not a global. **rebuilds** counts the steps that ran a mid-walk rebuild
+oracle (scheduled with `--rebuild-every N`; none were), not the engine's own
+cold rebuilds, which each subject's section gives as "Engine cold
+rebuilds". **worst recall** is the lowest share, over the steps the `rdeps`
+oracle checked, of the targets Bazel named that cambium also reported; 1.0
+means nothing was missed. A **⚠** beside it means the walk failed its
+rebuild oracle at the pin: the index carried through the walk differs from
+one cold-built there (Findings has what the rows were, and a re-measure
+with the reference build on a fresh Bazel server is pending). **tightness
+p50** is the median of Bazel's count over cambium's, 1.0 being exact and
+lower being wider. The peer columns are each peer's full run per step, on
+a stratified sample of 40 steps. Definitions are in
+[METHODOLOGY.md](METHODOLOGY.md#measurements).
 
 ## Synthetic scaling
 

@@ -14,9 +14,205 @@ $ cambi affected origin/main..HEAD --tests-only --format labels
 //lib/core:core_test
 ```
 
+It is built never to miss an affected target; [How it works](#how-it-works)
+says what that rests on, and where it does not yet hold.
+
+## Install
+
+Prebuilt binaries, once a release exists (none has been made yet):
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh
+$ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh -s -- --version v0.1.0 --prefix /usr/local
+```
+
+The script picks the build for the machine, checks the download against the
+release's `SHA256SUMS`, and installs `cambi` to `~/.local/bin` (or
+`<prefix>/bin`). The latest release is the default; `--version` pins one,
+which is what a CI job should do. The tarballs and `SHA256SUMS` are on the
+release page for a download by hand.
+
+From source, with Rust 1.98 or newer (the workspace `rust-version`) and a C
+compiler (`blake3`, `ring` and `zstd` build C code):
+
+```console
+$ cargo install --git https://github.com/itsrainy/cambium cambium-cli --locked
+$ cargo install --path crates/cli --locked    # from a clone
+$ cambi --version
+cambi 0.1.0 (0a4a001)
+```
+
+The crate is `cambium-cli`, the binary `cambi`. The crate named `cambi` on
+crates.io is an unrelated project. `--version` names the commit the binary
+was built from, or `unknown` for a source tree with neither git metadata nor
+cargo's packaged-crate metadata. The benchmark harness is a second binary,
+`cambium-bench`, from `cambium-bench-cli`; nothing in it is part of the
+contract below.
+
+No `protoc` needed: the vendored `build.proto` is compiled by `protox`, a
+pure-Rust protobuf compiler.
+
+Platforms: Linux on x86_64 and aarch64 (glibc), macOS on x86_64 and arm64.
+Windows is not supported.
+
+At run time, on `PATH`:
+
+- `bazelisk` or `bazel`, needed to run and not to build. cambi prefers
+  `bazelisk` when both are there, and `bazel.binary` in `cambium.toml`
+  names another;
+- `git`, which cambi runs for the diff and the revisions;
+- for a `command` store only, whatever its templates run (typically `aws` or
+  `gsutil`, see [docs/STORE.md](docs/STORE.md#s3-and-gcs)).
+
+## Try it
+
+`cambi` has nine verbs: `init`, `status`, `doctor`, `affected`, `explain`,
+`profile`, `index`, `inspect`, `config`. [docs/CLI.md](docs/CLI.md) is the reference for
+all of them, their flags and their output rules; this is the path through.
+
+```console
+$ cambi init --store-dir .cambium-store
+```
+
+Writes `cambium.toml` and nothing else (no index, no Bazel, no credentials),
+detecting `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
+`try-import`s and the default branch, and asking only for the store. A
+relative store path is read from the workspace root, so
+`.cambium-store/` goes in `.gitignore` beside the `cambium.local.toml` line
+`init` asks for.
+
+```console
+$ cambi doctor
+```
+
+Grades what a run needs: Bazel found and its version supported, the workspace
+mode unambiguous, the config parsed, the store answering both a fetch and a
+push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
+finding is a diagnostic with a code and a `help:` line.
+
+```console
+$ cambi profile --commits 30 --out /tmp/cambium-index.bin
+$ cambi index publish /tmp/cambium-index.bin
+```
+
+What cambium costs and saves on this repository, from its own history: one
+cold index at the oldest of the last 30 first-parent commits, then one
+incremental step per commit up to `HEAD`, in a scratch worktree (the checkout
+and the store are left alone). The report gives the graph's size, the cold
+index's time and size, what a typical commit costs and affects as a share of
+the repository's targets and tests, and how often a commit goes global and
+under which `CAMBI-W` code. Its times come from one warm Bazel server with
+the index in memory; a cold CI runner also pays the store fetch, a server
+start and external fetches. A commit that does not build is reported as
+failed and the walk goes on; if the oldest one is the problem, a smaller
+`--commits` or a `FROM..` range moves the cold index to a newer commit.
+
+`--out` keeps the index the walk ends with, and `index publish` uploads it as
+the first index of a lineage, so the profile doubles as the first cold build:
+one build, not two. Everything after is incremental. To skip the profile,
+`cambi index build --publish` is the same cold `bazel query //...:*` on its
+own. `cambi status` says where the checkout is and which index a run would
+load.
+
+```console
+$ cambi affected origin/main..HEAD --tests-only
+```
+
+On a terminal that is a count line, the labels, and two charts of how far
+from the change they sit. For CI, `--format labels` prints the labels alone,
+one per line, for `bazel test --target_pattern_file`; exit 2 means the change
+reached everything, and stdout is then `//...`:
+
+```sh
+rc=0; cambi affected origin/main --tests-only --no-full-build --format labels > targets.txt || rc=$?
+case $rc in
+  0) [ ! -s targets.txt ] || bazel test --target_pattern_file=targets.txt ;;
+  2) bazel test --target_pattern_file=targets.txt ;;  # global: the file holds //...
+  4|5) bazel test //... ;;                             # no index in reach, or no store
+  *) exit "$rc" ;;
+esac
+```
+
+An empty file is skipped, because `bazel test` with no targets fails. Exit
+4 is no index within reach under `--no-full-build`, and 5 a store that is
+there and could not be read. A mistyped flag also exits 2, with nothing on
+stdout, and the empty file then fails `bazel test` rather than passing.
+
+The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
+no range means the merge base of `[git].default_branch` with `HEAD` (or with
+`origin/<branch>` in a CI checkout that has no local branch).
+`--dry-run` prints the plan (which index would load, how the diff classifies,
+whether the run would splice, cold-rebuild or go global) and exits before any
+Bazel query. One verdict is pending that query: the toolchain check reads rule
+classes off the rows the query returns, so a plan that says `splice` or `cold
+rebuild` can still end as `//...` under `CAMBI-W023`. Every other global the
+run reaches, the plan reaches too.
+
+```console
+$ cambi explain //app:main_test origin/main..HEAD
+```
+
+Answers "why is this test running?": the shortest path from the target back to
+the change, and the direct reason at its end. With no label it tells the run's
+own story: what made it global or cold, with the `help:` line naming the fix.
+
+`cambi inspect` asks graph questions against one index file: `target`,
+`package`, `deps`, `rdeps`, `path`, `owner`, `consumers`, `targets`, `stats`,
+`externals`, `verify`. It is plumbing, and how a surprising `explain` answer
+gets checked.
+
+### In CI
+
+Two jobs: one after each merge to the default branch keeps an index at its
+tip (`cambi index update HEAD --publish`), and one per pull request runs the
+script above on `HEAD^1..HEAD`, the merge commit GitHub checks out.
+[docs/CI.md](docs/CI.md) is the whole setup: how the index moves between
+runners, two GitHub Actions workflows to copy, clone depth, what a lineage
+break looks like and how it heals, which store to use, and what a cold
+runner pays that `profile`'s numbers leave out.
+
+[docs/STORE.md](docs/STORE.md) is the store: key layout, compression at rest,
+what makes an index incompatible, why concurrent publishers are safe, and the
+exact S3 and GCS command templates.
+
+## How it did
+
+`cambium-bench` walked the first-parent history of five open-source Bazel
+repositories, bazel, envoy, sourcegraph, apollo and xla, 300 commits each
+and 74 for apollo, carrying one index forward a commit at a time the way a
+CI job would, and checked each step's answer against Bazel's own `rdeps`
+query. On every step the check ran on (288, 288, 297, 73 and 296 of them),
+cambium's answer held every target Bazel named: worst recall 1.0000 on all
+five. At the median step the answer was exact on bazel, sourcegraph and xla
+(tightness p50 1.000, Bazel's count over cambium's) and a little wider on
+envoy (0.973) and apollo (0.969). A step cost 96 ms to 3.1 s at the median
+across the five (p90 0.8 to 14.3 s), against 7.0 to 24.8 s for bazel-diff
+and 19.1 to 225.5 s for Tango, which recompute the whole graph every time
+and ran on a stratified sample of 40 steps. All of it is from one 16 vCPU
+Linux machine, with Bazel's server warm across steps and no index store,
+so a CI runner pays more ([docs/CI.md](docs/CI.md#what-a-cold-runner-pays)).
+
+The ⚠ beside envoy, sourcegraph, apollo and xla in
+[docs/RESULTS.md](docs/RESULTS.md) is a second, stricter check: the index
+carried through the whole walk is compared row by row with one built from
+scratch at the last commit, and on those four they differ. On envoy and
+xla every differing row was read, and they trace to the reference build's
+own Bazel server, which had run every earlier step, rather than to rows
+the carried index should have; envoy also has 11 rules whose hash differs
+from the reference build's, not yet diagnosed. The reference build now
+starts on a fresh Bazel server, and a re-measure with it is pending;
+sourcegraph's and apollo's rows have not been read. envoy's `rdeps` answer
+is also a lower bound on 123 of its 288 steps, where Bazel cannot resolve
+some targets and drops what depends on them, and [Known gaps](#known-gaps)
+names routes the check cannot see. docs/RESULTS.md has every number and
+[docs/METHODOLOGY.md](docs/METHODOLOGY.md) what each one can claim.
+
+## How it works
+
 It never under-approximates: missing an affected target is a bug, and the test
 suite is built around proving it does not happen. Over-approximation is
-acceptable and measured.
+acceptable and measured. The [known gaps](#known-gaps) below are where
+that does not yet hold.
 
 That guarantee rests on one invariant:
 
@@ -168,163 +364,39 @@ still exact, only not incremental):
   aspect-private attributes, which `bazel query` cannot see. That gap is the
   same on a cold build and an incremental one.
 
-## Install
+### Known gaps
 
-Prebuilt binaries, once a release exists (none has been made yet):
+Routes on which an answer can miss a target today, each tracked in a
+maintainer document:
 
-```console
-$ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh
-$ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh -s -- --version v0.1.0 --prefix /usr/local
-```
-
-The script picks the build for the machine, checks the download against the
-release's `SHA256SUMS`, and installs `cambi` to `~/.local/bin` (or
-`<prefix>/bin`). The latest release is the default; `--version` pins one,
-which is what a CI job should do. The tarballs and `SHA256SUMS` are on the
-release page for a download by hand.
-
-From source, with Rust 1.98 or newer (the workspace `rust-version`) and a C
-compiler (`blake3`, `ring` and `zstd` build C code):
-
-```console
-$ cargo install --git https://github.com/itsrainy/cambium cambium-cli --locked
-$ cargo install --path crates/cli --locked    # from a clone
-$ cambi --version
-cambi 0.1.0 (0a4a001)
-```
-
-The crate is `cambium-cli`, the binary `cambi`. The crate named `cambi` on
-crates.io is an unrelated project. `--version` names the commit the binary
-was built from, or `unknown` for a source tree with neither git metadata nor
-cargo's packaged-crate metadata. The benchmark harness is a second binary,
-`cambium-bench`, from `cambium-bench-cli`; nothing in it is part of the
-contract below.
-
-No `protoc` needed: the vendored `build.proto` is compiled by `protox`, a
-pure-Rust protobuf compiler.
-
-Platforms: Linux on x86_64 and aarch64 (glibc), macOS on x86_64 and arm64.
-Windows is not supported.
-
-At run time, on `PATH`:
-
-- `bazelisk` or `bazel`, needed to run and not to build. cambi prefers
-  `bazelisk` when both are there, and `bazel.binary` in `cambium.toml`
-  names another;
-- `git`, which cambi runs for the diff and the revisions;
-- for a `command` store only, whatever its templates run (typically `aws` or
-  `gsutil`, see [docs/STORE.md](docs/STORE.md#s3-and-gcs)).
-
-## Five minutes
-
-`cambi` has nine verbs: `init`, `status`, `doctor`, `affected`, `explain`,
-`profile`, `index`, `inspect`, `config`. [docs/CLI.md](docs/CLI.md) is the reference for
-all of them, their flags and their output rules; this is the path through.
-
-```console
-$ cambi init --store-dir /var/cache/cambium
-```
-
-Writes `cambium.toml` and nothing else (no index, no Bazel, no credentials),
-detecting `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
-`try-import`s and the default branch, and asking only for the store.
-
-```console
-$ cambi doctor
-```
-
-Grades what a run needs: Bazel found and its version supported, the workspace
-mode unambiguous, the config parsed, the store answering both a fetch and a
-push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
-finding is a diagnostic with a code and a `help:` line.
-
-```console
-$ cambi profile --commits 30 --out ./cambium-index.bin
-$ cambi index publish ./cambium-index.bin
-```
-
-What cambium costs and saves on this repository, from its own history: one
-cold index at the oldest of the last 30 first-parent commits, then one
-incremental step per commit up to `HEAD`, in a scratch worktree (the checkout
-and the store are left alone). The report gives the graph's size, the cold
-index's time and size, what a typical commit costs and affects as a share of
-the repository's targets and tests, and how often a commit goes global and
-under which `CAMBI-W` code. Its times come from one warm Bazel server with
-the index in memory; a cold CI runner also pays the store fetch, a server
-start and external fetches. A commit that does not build is reported as
-failed and the walk goes on; if the oldest one is the problem, a smaller
-`--commits` or a `FROM..` range moves the cold index to a newer commit.
-
-`--out` keeps the index the walk ends with, and `index publish` uploads it as
-the first index of a lineage, so the profile doubles as the first cold build:
-one build, not two. Everything after is incremental. To skip the profile,
-`cambi index build --publish` is the same cold `bazel query //...:*` on its
-own. `cambi status` says where the checkout is and which index a run would
-load.
-
-```console
-$ cambi affected origin/main..HEAD --tests-only
-```
-
-On a terminal that is a count line, the labels, and two charts of how far
-from the change they sit. For CI, `--format labels` prints the labels alone,
-one per line, for `bazel test --target_pattern_file`; exit 2 means the change
-reached everything, and stdout is then `//...`:
-
-```sh
-rc=0; cambi affected origin/main --tests-only --format labels > targets.txt || rc=$?
-case $rc in 0|2) [ ! -s targets.txt ] || bazel test --target_pattern_file=targets.txt ;; *) exit $rc ;; esac
-```
-
-The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
-no range means the merge base of `[git].default_branch` with `HEAD` (or with
-`origin/<branch>` in a CI checkout that has no local branch).
-`--dry-run` prints the plan (which index would load, how the diff classifies,
-whether the run would splice, cold-rebuild or go global) and exits before any
-Bazel query. One verdict is pending that query: the toolchain check reads rule
-classes off the rows the query returns, so a plan that says `splice` or `cold
-rebuild` can still end as `//...` under `CAMBI-W023`. Every other global the
-run reaches, the plan reaches too.
-
-```console
-$ cambi explain //app:main_test origin/main..HEAD
-```
-
-Answers "why is this test running?": the shortest path from the target back to
-the change, and the direct reason at its end. With no label it tells the run's
-own story: what made it global or cold, with the `help:` line naming the fix.
-
-`cambi inspect` asks graph questions against one index file: `target`,
-`package`, `deps`, `rdeps`, `path`, `owner`, `consumers`, `targets`, `stats`,
-`externals`, `verify`. It is plumbing, and how a surprising `explain` answer
-gets checked.
-
-### Keeping indexes warm
-
-A post-merge job on the main branch keeps the store populated, so pull-request
-runs almost always find their merge base directly:
-
-```console
-$ cambi index update <parent-sha>..<merge-sha> --publish
-```
-
-Otherwise a run walks back up to `max_ancestor_walk` first-parent ancestors,
-takes the nearest index, and replays it forward to the base in one update;
-failing that, it builds cold. `cambi affected --publish-base` publishes that
-computed base index for the next run on the same base, and only the base,
-because a pull-request head is not on the main line and nothing will ask for
-it again.
-
-Weekly, or whenever `cambium.toml` changes, mint a fresh lineage and drop
-accumulated tombstones:
-
-```console
-$ cambi index build --publish && cambi index gc
-```
-
-[docs/STORE.md](docs/STORE.md) is the store: key layout, compression at rest,
-what makes an index incompatible, why concurrent publishers are safe, and the
-exact S3 and GCS command templates.
+- **A round trip through an external repository cambium does not
+  expand.** The index holds `//...` and the external repositories whose
+  sources are files of this tree; any other external target is a leaf with
+  no outgoing edges, so a dependency path that leaves the main repository
+  through one and comes back is invisible to the reverse walk. On
+  `bazelbuild/rules_shell`, which is the root module, every test depends
+  on `@bazel_tools//tools/test:collect_coverage`, which depends back on
+  `//shell/runfiles`; an edit to `shell/runfiles/runfiles.bash` is reported
+  as reaching 2 tests where Bazel's `rdeps` names 23. The same shape on
+  xla (`@tsl`, whose BUILD files name `@xla//xla/...` back in the tree)
+  and on envoy (`@envoy_api`, built from the tree's `api/` directory) was
+  closed by indexing the repositories whose sources are files of the tree,
+  and envoy's route from `@grpc` into `@envoy_api` by the index's table of
+  which external repositories consume an indexed one. A repository fetched
+  from elsewhere stays a leaf. `cambi inspect verify` lists misses of this kind
+  apart, as round trips. docs/ROADMAP.md (Phase 5) and
+  docs/XLA_MAIN_REPO_MISSES.md track the class.
+- **Repository inputs Bazel's markers do not record.** A patch, a
+  `build_file` or a lock file is an input of the repository built from it,
+  not a target anything depends on, so the benchmark's `rdeps` check roots
+  a changed input through Bazel's own repository marker files. Those do not
+  record a module extension's file inputs (xla's `pip.parse` reads a
+  requirements lock no marker names) or a change to a repository's own
+  definition (xla's `LLVM_COMMIT` bump in a `.bzl`), so a step whose only
+  route is one of those scores recall 1.0 without having tested it: what
+  cambium answers there is unmeasured. docs/METHODOLOGY.md ("The
+  repository-input roots") has the details, and docs/ROADMAP.md the
+  under-reports reading such rows has found.
 
 ## The JSON contract
 
@@ -333,7 +405,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 10, "base": "...", "head": "...", ... }
+{ "schema": 17, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -347,9 +419,9 @@ affected report's shape and fails with instructions if it moves without a bump;
 | code | meaning |
 |---:|---|
 | 0 | success |
-| 1 | error |
-| 2 | global invalidation: everything is affected; stdout is `//...` |
-| 3 | Bazel failed |
+| 1 | error, or a usage error `cambi` diagnoses (`CAMBI-E013`) |
+| 2 | global invalidation: everything is affected; stdout is `//...`. A command line the argument parser itself rejects (an unknown flag or verb) also exits 2, with its usage text on stderr and nothing on stdout |
+| 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`) |
 | 4 | no index available and `--no-full-build` was given |
 | 5 | the store is there and could not be read (as against holding no index, which is 4): a CI job can retry this one. A directory store whose directory does not exist holds no index; the `aws s3 cp`/`gsutil cp` templates cannot tell an outage from a miss ([docs/STORE.md](docs/STORE.md#misses-and-outages)) |
 
@@ -376,11 +448,12 @@ what to do about it.
 | `dirty_packages` | \[string] | packages re-queried, without the leading `//` |
 | `bazelrc_flags` | \[string], optional | Starlark build settings a `.bazelrc` edit changed and the index resolved, as the rc file writes them (`@envoy//bazel:crypto`) |
 | `direct` | \[string] | labels whose own definition or inputs changed |
-| `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) |
+| `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, package_depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) and `package_depth` the same walk counted in package boundaries crossed, never more than `depth` |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `depth_histogram` | \[int], optional | how many affected targets sit at each depth, `depth_histogram[d]` for depth `d` from 0 to the deepest reached; a depth nothing reached is a zero rather than a gap. Omitted when empty, which is what a global run and an empty answer both are |
+| `package_depth_histogram` | \[int], optional | the same count by `package_depth`, omitted on the same terms |
 | `timings_ms` | object | `load`, `dirty`, `query`, `splice`, `direct`, `walk`, `total` |
-| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `sky_seeds`, `sky_unknown_seeds`, `sky_visited`, `sky_new_packages`, `bazelrc_flag_nodes` |
+| `stats` | object | `base_nodes`, `head_nodes`, `head_edges`, `dirty_packages`, `queried_targets`, `direct_targets`, `affected_targets`, `changed_files`, `ignored_files`, `rbuildfiles_called`, `bzl_closure_hits`, `bazelrc_safe_diffs`, `cold_rebuild`, `repos_dirty_by_input`, `repos_dirty_by_module`, `repos_dirty_by_bzl`, `repos_dirty_by_target`, `repos_label_only`, `external_direct_targets`, `sky_seeds`, `sky_unknown_seeds`, `sky_visited`, `sky_new_packages`, `bazelrc_flag_nodes`, `spliced_rows`, `repos_settled`, `repos_dirty_by_consumer`, `repos_dirty_by_loader` |
 | `diagnostics` | \[object], optional | the actionable warnings this run raised, each `{code, level, message, location?, help?}`; omitted when empty. See [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
 | `explanations` | \[object], optional | with the deprecated `--explain` (and within `cambi explain`): `target`, `path` (target → direct member), `direct`, `reason` |
 
@@ -408,7 +481,7 @@ not also show:
 
 ```json
 {
-  "schema": 10,
+  "schema": 17,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -420,9 +493,10 @@ not also show:
                  "has_index": false, "nearest": "def5678...", "distance": 3,
                  "max_ancestor_walk": 20, "plan": "splice",
                  "index_path": "...", "diagnostics": [] },
-  "index":     { "size_bytes": 81234567, "packages": 4120, "targets": 38211,
+  "index":     { "path": "...", "size_bytes": 81234567, "framed_bytes": 412345678,
+                 "packages": 4120, "targets": 38211,
                  "nodes": 120394, "edges": 488120, "external_repos": 212,
-                 "built_at_unix": 1789000000, "format_version": 8,
+                 "built_at_unix": 1789000000, "format_version": 13,
                  "commit": "def5678...", "lineage": "9f...", "config_hash": "f6...",
                  "bazel_version": "bazel 7.4.1", "partial": false, "diagnostics": [] },
   "lineage":   { "current": "9f...", "others": [], "conflicting": [], "diagnostics": [] },
@@ -445,7 +519,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 10,
+  "schema": 17,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -469,7 +543,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 10,
+  "schema": 17,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -504,16 +578,17 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 10,
+  "schema": 17,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
             "changed_files": 12, "dirty_packages": 4,
-            "mode": "splice", "diagnostics": [] }
+            "mode": "splice" }
 }
 ```
 
-`mode` is `splice`, `cold_rebuild`, `global` or `cold_build`. `index` is absent
+`mode` is `splice`, `cold_rebuild`, `global` or `cold_build`. `diagnostics`
+is present when the plan raised any. `index` is absent
 when nothing in the store is usable here (a cold build), `dirty_packages` when
 there is no index to classify the diff against: "unknown until queried", never
 guessed. `global_reason` is present when the plan can already
@@ -523,7 +598,7 @@ tell the answer is `//...`, which is also exit code 2.
 
 | version | change |
 |---:|---|
-| 1 | the first published contract |
+| 1 | the first contract |
 | 2 | `inspect stats` gained `bytes.label_sorted`, `bytes.label_total_share` and `bytes.label_packing` |
 | 3 | `affected` became `[{label, depth, test}]`; `stats.rbuildfiles_called`; `inspect stats` gained `in_degree.top` (the hub list) |
 | 4 | `stats.bzl_closure_hits`; `stats.rbuildfiles_called` is now always `false`, a changed `.bzl` being answered from the index instead of from Bazel. `inspect stats` gained `counts.bzl_files`, `counts.bzl_workspace_files` and `bytes.bzl_closure` |
@@ -542,23 +617,28 @@ tell the answer is `//...`, which is also exit code 2.
 | 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
-behind what `profile` prints: `index` (targets, tests, packages,
-external repositories, `bytes_on_disk`, `compression`, `load_ms`), `cold`
-(the cold build's commit and `wall_ms`), one `commits[]` entry per step
-(`changed_files`, `dirty_packages`, `affected`, `tests`, `wall_ms`, `global`,
-`global_reason`, `engine_cold_rebuild`, `date` and `index`, the last being
-what the step did to the stored index: `{"kind": "identical"}`,
-`{"kind": "spliced", "rows_rewritten": n}` or `{"kind": "rebuilt", "reason":
-...}`) and `summary` (`mean_ms`, `p50_ms`,
-`p90_ms`, `max_ms` over every step; `incremental` and `rebuild`, the same
-four plus `commits` over the steps answered incrementally and the steps a
-cold build answered; `globals`, `rebuild_every_commits`, `global_reasons`,
-`engine_cold_rebuilds`, `mean_affected`, `zero_dirty_fraction`). Version
-17 adds to it what the report prints beside those: the share of the cold
-index's targets and tests a typical (median incremental) commit affects, the
-share of commits that go global with each reason's code and help, globals
-and `limits.max_dirty_packages` re-queries timed apart, and the commits that
-failed (see the table).
+behind what `profile` prints. As of 17 it holds `repository`, `from` and
+`head` (the range walked); `index` (the final index: `commit`, `targets`,
+`tests`, `packages`, `nodes`, `edges`, `external_repos`, `bytes_on_disk`,
+`compression`, `load_ms`, `bazel_version`); `cold` (the cold build's
+`commit`, `wall_ms`, `targets` and `tests`); one `commits[]` entry per step
+(`commit`, `parent`, `date`, `subject`, `changed_files`, `dirty_packages`,
+`affected`, `tests`, `wall_ms`, `global`, `global_reason` and
+`global_cause` on a global step, `engine_cold_rebuild`, `failed` on a
+commit that did not build, and `index`, what the step did to the stored
+index: `{"kind": "identical"}`, `{"kind": "spliced", "rows_rewritten": n}`,
+`{"kind": "rebuilt", "reason": ...}` or `{"kind": "failed"}`); `summary`
+(`mean_ms`, `p50_ms`, `p90_ms`, `max_ms` over every step; `incremental` and
+`rebuild`, the same four plus `commits` over the steps answered
+incrementally and those a cold build answered, with `global_rebuild` and
+`requery` the two halves of `rebuild`; `commits`, `globals`,
+`global_share`, `rebuild_every_commits` when there was a global,
+`global_reasons`, `engine_cold_rebuilds`, `mean_affected`,
+`incremental_affected` and `incremental_tests`, `affected_share`,
+`tests_share`, `index_spliced`, `index_unchanged`, `zero_dirty_fraction`,
+`failed` and `rebuilt_after_failure`); and `from_failed` and `stopped` when
+the walk had to move its cold index or stop. The contract table's rows 9
+and 17 say which fields came when.
 
 The version is shared, so a bump for one document moves all. The affected
 report did not change shape between 1 and 2; it did at 3, and
@@ -622,17 +702,17 @@ per-step wall CI pays. cambium is one row in those tables; the oracle is
 the only ground truth, and the peers are the explanation layer, not the
 yardstick. Two tiers share the walk: `correctness` (no peers, the oracle on
 a sample) is what every engine change pays for, and `full` (the oracle on
-every step, the peers on a stratified sample) is the box run.
+every step, the peers on a stratified sample) is what
+[docs/RESULTS.md](docs/RESULTS.md) reports.
 
 `cambium-bench run` is the whole thing from flags (per subject the fetch, the
-cold build, the walk and the report), as `tools/bench/run-published.sh`
-runs it on the benchmark box; with no verb, on a terminal, it composes the same
-plan on a screen. Before that box is started,
-`cambium-bench pull-results` copies a finished run's results off it and
-`cambium-bench replay` reruns the engine's static stages over every recorded
-step offline, in milliseconds each, against the answers the run
-recorded; the diffs it reads are written on the box by `cambium-bench replay
---write-paths`.
+cold build, the walk and the report); with no verb, on a terminal, it
+composes the same plan on a screen. `cambium-bench pull-results` copies a
+finished run's results off the machine that ran it, and `cambium-bench
+replay` reruns the engine's static stages over every recorded step
+offline, in milliseconds each, against the answers the run recorded; the
+diffs it reads are written where the run happened, by `cambium-bench
+replay --write-paths`.
 
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) defines the words and says what each
 measurement can and cannot claim; [docs/RESULTS.md](docs/RESULTS.md) is the
@@ -682,7 +762,7 @@ repository, an engine over one, a package querier that also serves `.bzl`
 text, a synthetic history with an index already published) live in
 `crates/testkit` (`cambium-testkit`), a dev-dependency of every crate with
 tests and nothing else. Tests needing a real Bazel, a network fetch, or a
-corpus checkout are `#[ignore]`d, so a plain run reports them as ignored
+subject checkout are `#[ignore]`d, so a plain run reports them as ignored
 rather than as passes that ran nothing; each is opted into with `-- --ignored`
 and says what it is missing when run without it (`CAMBIUM_REQUIRE_TOOLS=1`
 turns a missing tool from a skip into a failure, which the nightly job sets).
@@ -697,8 +777,8 @@ Four oracles, in increasing order of cost:
 2. **A spliced index against a full rebuild.** After every mutation the
    incrementally updated index must describe the same graph, edge for edge, as
    one built from scratch.
-3. **Hand-written golden scenarios against real Bazel**, the cases from the
-   spec's list: modified source, globbed add and delete, rename, BUILD
+3. **Hand-written golden scenarios against real Bazel**, the cases the
+   original design listed: modified source, globbed add and delete, rename, BUILD
    attribute edit, added and deleted targets, a `.bzl` loaded by two packages,
    `exports_files` across packages, a `select` branch change, a package split,
    a global invalidator, an ignored path. Each is also checked against a full
@@ -712,21 +792,23 @@ Four oracles, in increasing order of cost:
 Oracles three and four are opt-in because they need Bazel; they are green
 against Bazel 7.4.1, at 100% precision on the emitted workspaces.
 
-## Deviations from the design spec
+## Deviations from the original design
 
-Three, each for a reason found by testing:
+The design document this was built from is not in the repository; where
+the code departs from it, it does so in three places, each for a reason
+found by testing:
 
-- **`--proto:flatten_selects=false`**, where the spec calls for `true` (7.1).
+- **`--proto:flatten_selects=false`**, where the design called for `true`.
   Flattening reports a `select` attribute as the union over its branches, so
   editing one branch to a value another branch already names leaves the rule
   hash unchanged and the target silently reported as unaffected (an
   under-approximation). `rule_input` carries the union either way, so
   disabling flattening keeps the edges identical and gives the hash its
   per-branch detail.
-- **The cold build queries `//...:*`, not `//...`** (6.9). The latter is
+- **The cold build queries `//...:*`, not `//...`**. The latter is
   shorthand for `//...:all`, which matches rules only, so a cold index would
   describe file labels differently from an incrementally updated one.
-- **No separate `files` CSR** (5.3, which permits this). Only rules hold
+- **No separate `files` CSR**, which the design permits. Only rules hold
   forward edges, so every in-edge of a file node comes from a rule: the
   reverse row *is* the consumer list, and a second copy would be redundant.
 
@@ -736,7 +818,7 @@ and synthetic revision ids both fit.
 
 One deferral that looks like a soundness question:
 `Packages::bzl_closure_hash` exists in the format but is written as zero. The
-spec uses it for one branch of the direct-set rule (a package whose `.bzl`
+design uses it for one branch of the direct-set rule (a package whose `.bzl`
 load closure changed has every rule in it direct, regardless of its own hash),
 and that branch is load-bearing: a `.bzl` edit changing a rule implementation
 without changing any BUILD attribute leaves every rule proto byte-identical,
@@ -759,6 +841,31 @@ commits. A `load` oracle over the static closure lives at
 `crates/bench/src/oracles/load.rs`; the walk's rebuild oracle at the pin
 already catches a closure that drifted, and wiring the `load` oracle into the
 per-step checks is a follow-up.
+
+## Which document
+
+For someone using `cambi`:
+
+- this README;
+- [docs/CLI.md](docs/CLI.md), every verb, flag and output rule;
+- [docs/CI.md](docs/CI.md), running it in a pipeline, with the workflows in
+  [docs/ci/](docs/ci/);
+- [docs/STORE.md](docs/STORE.md), the index store;
+- [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md), every `CAMBI-` code and what
+  to do about it;
+- [docs/OVER_REPORTING.md](docs/OVER_REPORTING.md), where answers are wider
+  than they need to be, which `CAMBI-W004` points at;
+- the summary table at the top of [docs/RESULTS.md](docs/RESULTS.md) and
+  its legend.
+
+For working on cambium, and written for its maintainers (they name
+benchmark machines, issue numbers, commits and dates freely):
+[docs/METHODOLOGY.md](docs/METHODOLOGY.md) (what the benchmark measures and
+may claim), [docs/OPERATIONS.md](docs/OPERATIONS.md) (running it at full
+size), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md),
+[docs/SKYFRAME_PROTOTYPES.md](docs/SKYFRAME_PROTOTYPES.md),
+[docs/XLA_MAIN_REPO_MISSES.md](docs/XLA_MAIN_REPO_MISSES.md), and the
+Findings section of docs/RESULTS.md.
 
 ## License
 

@@ -1,0 +1,60 @@
+# Pull request: run the tests the change affects.
+#
+# A template for your repository's .github/workflows/, described in
+# docs/CI.md. It reads the store cambium-index.yml keeps, and writes nothing:
+# a pull request, a fork's included, never publishes an index.
+
+name: affected tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CAMBI_VERSION: v0.1.0 # must match cambium-index.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # HEAD is the merge commit GitHub made; HEAD^1 is the base branch
+          # tip it merged onto, and the ancestor walk reads history behind
+          # it. For a shallower clone see docs/CI.md, "Clone depth".
+          fetch-depth: 0
+
+      - name: Install cambi
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh \
+            | sh -s -- --version "$CAMBI_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the store
+        uses: actions/cache/restore@v4
+        with:
+          path: .cambium-store
+          key: cambium-store-${{ github.event.pull_request.base.sha }}
+          # The newest store the base commit's own run saved, else the newest.
+          restore-keys: |
+            cambium-store-${{ github.event.pull_request.base.sha }}-
+            cambium-store-
+
+      - name: Affected tests
+        run: |
+          for try in 1 2 3; do
+            rc=0
+            cambi affected HEAD^1..HEAD --tests-only --no-full-build --format labels \
+              > targets.txt || rc=$?
+            [ "$rc" = 5 ] || break
+            sleep 20
+          done
+          case $rc in
+            0) if [ -s targets.txt ]; then bazel test --target_pattern_file=targets.txt
+               else echo "no affected tests"; fi ;;
+            2) bazel test --target_pattern_file=targets.txt ;; # global: the file holds //...
+            4|5) bazel test //... ;; # no index within reach, or the store stayed down
+            *) exit "$rc" ;;
+          esac
