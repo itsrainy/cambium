@@ -2013,21 +2013,21 @@ fn dirty_consumers(
             .filter(|(rr, _)| rr == name)
             .cloned()
             .collect();
-        // The packages the change touched, by their part inside the
-        // repository; `None` means every package.
-        let touched: Option<BTreeSet<String>> = if settled.contains(name) {
-            Some(
-                paths
-                    .iter()
-                    .flat_map(|p| external_labels(packages, &one, p))
-                    .filter_map(|l| {
-                        cambium_index::label::Label::parse(&l).map(|l| l.package().to_string())
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        // The labels the change touched inside the repository, and their
+        // packages by their part inside it; `None` means every package.
+        let touched_labels: Option<Vec<String>> = settled.contains(name).then(|| {
+            paths
+                .iter()
+                .flat_map(|p| external_labels(packages, &one, p))
+                .collect()
+        });
+        let touched: Option<BTreeSet<String>> = touched_labels.as_ref().map(|ls| {
+            ls.iter()
+                .filter_map(|l| {
+                    cambium_index::label::Label::parse(l).map(|l| l.package().to_string())
+                })
+                .collect()
+        });
         // Not settled, and not by `BUILD` files and sources under the
         // repository's own directory alone.
         let starlark = touched.is_none()
@@ -2096,7 +2096,8 @@ fn dirty_consumers(
             let moved: &Option<BTreeSet<String>> = widened.get_or_insert_with(|| {
                 touched
                     .as_ref()
-                    .map(|t| reverse_within(base, name, t))
+                    .zip(touched_labels.as_ref())
+                    .map(|(t, ls)| reverse_within(base, name, t, ls))
             });
             let seeded: BTreeSet<String> = leaves
                 .iter()
@@ -2303,7 +2304,7 @@ fn stale_leaf_maps(
                     %consumer,
                     through = %v,
                     "a consumer's leaf map was derived through something that moved; \
-                     read as no map, and asked for again"
+                     not trusted as it stands, and asked for again"
                 );
                 out.repos.insert(name.to_string());
                 out.suspect.entry(name.to_string()).or_default().insert(consumer);
@@ -2313,19 +2314,30 @@ fn stale_leaf_maps(
     out
 }
 
-/// The packages of the indexed repository `repo` that reach one of
-/// `touched` inside the repository, in this index's own reverse edges,
-/// `touched` included.
+/// The packages of the indexed repository `repo` whose nodes reach one of
+/// the changed files `labels` inside the repository, in this index's own
+/// reverse edges, the files' packages `touched` included.
 ///
-/// The leaf map records each leaf's transitive reach into the repository as
-/// the cold build saw it, and the index is carried through every splice
-/// since. An edge added inside the repository after that (`a` now depends on
-/// `b`, and a leaf's map names `a`) makes an edit to `b` reach the leaf, and
-/// the map cannot say so; the reverse rows can, since the repository's
-/// packages are re-queried into this index whenever its rules move. Only the
-/// repository's own nodes are walked: the walk is about the part of the path
-/// inside it.
-fn reverse_within(base: IndexRef<'_>, repo: &str, touched: &BTreeSet<String>) -> BTreeSet<String> {
+/// A leaf map Bazel answered is transitive, so a leaf that reaches a package
+/// depending on a changed file reaches the file's package too, and this adds
+/// nothing to it. It is there for a map that is not the closure the index
+/// holds (an edge inside the repository the map was derived without, or a
+/// closure a `--keep_going` load error cut short): the reverse rows are
+/// re-queried whenever the repository's rules move, so they say what the
+/// map may not. Only the repository's own nodes are walked: the walk is
+/// about the part of the path inside it.
+///
+/// The walk starts from the changed files, not from every node of their
+/// packages: on envoy an edit to `api/bazel/deps.yaml` started from every
+/// rule of `@envoy_api//bazel`, which most of the API depends on, and seeded
+/// 79 quiche leaves for a change whose oracle was 22 labels. A label the
+/// index holds no node for starts from its whole package instead.
+fn reverse_within(
+    base: IndexRef<'_>,
+    repo: &str,
+    touched: &BTreeSet<String>,
+    labels: &[String],
+) -> BTreeSet<String> {
     let canonical = (0..base.num_repos())
         .find(|&r| base.repo_name(r) == repo)
         .map_or("", |r| base.repo_canonical.get(r));
@@ -2336,15 +2348,33 @@ fn reverse_within(base: IndexRef<'_>, repo: &str, touched: &BTreeSet<String>) ->
     let mut out = touched.clone();
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     let mut stack: Vec<u32> = Vec::new();
-    for p in 0..base.num_packages() {
-        if base.package_tombstoned(p) {
-            continue;
+    // Packages a changed file has no node in, walked from whole.
+    let mut whole: BTreeSet<String> = BTreeSet::new();
+    for l in labels {
+        match base.id_of(l).filter(|&id| !base.is_tombstone(id)) {
+            Some(id) => {
+                if seen.insert(id) {
+                    stack.push(id);
+                }
+            }
+            None => {
+                if let Some(p) = cambium_index::label::Label::parse(l) {
+                    whole.insert(p.package().to_string());
+                }
+            }
         }
-        let key = base.package_name(p);
-        if inside(key) && touched.contains(cambium_index::label::key_package(key)) {
-            for &n in base.package_nodes(p) {
-                if seen.insert(n) {
-                    stack.push(n);
+    }
+    if !whole.is_empty() {
+        for p in 0..base.num_packages() {
+            if base.package_tombstoned(p) {
+                continue;
+            }
+            let key = base.package_name(p);
+            if inside(key) && whole.contains(cambium_index::label::key_package(key)) {
+                for &n in base.package_nodes(p) {
+                    if seen.insert(n) {
+                        stack.push(n);
+                    }
                 }
             }
         }

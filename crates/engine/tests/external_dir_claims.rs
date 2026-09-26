@@ -590,6 +590,13 @@ fn leaf_rows(pkg: &str) -> PackageUpdate {
                 vec!["@tsl//tsl/base:y.cc".into()],
             ),
             TargetRow::source_file("@tsl//tsl/base:y.cc"),
+            // A rule of the same package nothing else depends on.
+            TargetRow::rule(
+                "@tsl//tsl/base:other",
+                "demo_lib",
+                vec!["@tsl//tsl/base:z.cc".into()],
+            ),
+            TargetRow::source_file("@tsl//tsl/base:z.cc"),
         ],
         other => return super_rows(other),
     };
@@ -741,6 +748,29 @@ fn an_edge_inside_the_repository_carries_a_change_to_the_leaf_above_it() {
     let affected = r.affected_labels();
     assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
     assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+}
+
+/// The walk inside the repository starts from the changed file: `z.cc` is
+/// a file of `tsl/base`, but only `tsl/base:other` is built from it and
+/// nothing depends on that, so the leaf that reaches `tsl/platform` (which
+/// depends on `tsl/base:base`) is not seeded. Started from every node of
+/// `tsl/base`, it was.
+#[test]
+fn the_walk_inside_the_repository_starts_from_the_changed_file() {
+    let dir = tree2();
+    let root = dir.path();
+    let q = leaf_scanning(
+        root,
+        LEAF_UNIVERSE,
+        &[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &[])],
+    );
+    let index = engine().full_build_with("c0", &q).unwrap();
+    let r = run_leaves(&index, &q, edit("third_party/tsl/tsl/base/z.cc"));
+    assert_eq!(r.stats.repos_settled, 1);
+    assert_eq!(r.stats.consumer_leaves_seeded, 0);
+    let affected = r.affected_labels();
+    assert!(affected.contains(&"@tsl//tsl/base:other".to_string()), "{affected:?}");
+    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
 }
 
 /// A `BUILD` edit under the repository unsettles it, and what moved is then
