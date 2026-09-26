@@ -15,11 +15,18 @@ full size, which don't fit on a laptop.
 
 ## The box
 
-- `i-03c826487f1ab30ac`, c7i.4xlarge, us-east-2, 500 GB gp3, **stopped**.
-  Volume bills ~$45/month while stopped. Key `~/.ssh/cambium-corpus.pem`,
-  security group `cambium-corpus`. AWS names stay `cambium-corpus`; only
-  the words in this repository were swept. The instance carries both
-  `cambium=bench` and the old tag value in the finder's filter.
+- One c7i.4xlarge in `AWS_REGION` with a 500 GB gp3 volume, **stopped**
+  between runs; the volume bills ~$45/month while stopped. `launch.sh`
+  finds it by `TAG_FILTER`, never by instance id, and `tools/ec2/launch.sh`
+  with no subcommand prints its id, state and address when it exists. The
+  key pair is `KEY`, the ssh key file `PEM` and the security group
+  `SG_NAME`. Their values are the defaults at the top of
+  `tools/ec2/launch.sh` (and of `tools/bench/precheck.sh` for `PEM`), and an
+  operator whose key or names differ sets the variables in the environment
+  instead; nothing here repeats them. The AWS resources predate the rename
+  to "bench" and keep their old names, since a key pair and a security
+  group cannot be renamed in place, and the instance carries both tag
+  values the default `TAG_FILTER` matches.
 - The SG allows SSH from one IP, the current one. When it changes, `aws ec2
   revoke-security-group-ingress` the old CIDR and
   `authorize-security-group-ingress` the new one.
@@ -124,7 +131,7 @@ none of them. Unset means the default.
 | `CACHE` | `precheck.sh` | `bench-precheck/` | where `pull-results` puts pulled trees |
 | `LOCAL_MIRRORS` | `precheck.sh` | `$CAMBIUM_SUBJECTS_DIR` | local mirrors to pass as `--repo` |
 | `REDERIVE`, `BASELINE`, `SAVE_BASELINE` | `precheck.sh` | `0` | `--rederive` and the head check; `--baseline` / `--save-baseline` against `<cache>/<subject>/baseline.json` |
-| `PEM` | `precheck.sh`, `launch.sh` | `~/.ssh/cambium-corpus.pem` | the ssh key |
+| `PEM` | `precheck.sh`, `launch.sh` | see the script | the ssh key file |
 | `BOX_HOST` | `precheck.sh` | asked of EC2 | the box's address |
 | `BOX_REPO`, `BOX_SUBJECTS` | `precheck.sh`, `launch.sh` | `cambium`, `.cache/cambium/corpus` | checkout and mirrors on the box, relative to its home |
 | `PATHS_FROM_BOX` | `precheck.sh` | `1` | derive change-set diffs on the box |

@@ -286,9 +286,12 @@ pub fn workspace(start: &Path) -> WorkspaceProbe {
                     )
                     .at("MODULE.bazel", None)
                     .with_help(
-                        "pin the Bazel version in .bazelversion, or delete the file the \
-                         build does not use: a run that reads the other one indexes a \
-                         different graph",
+                        "pin the Bazel version in .bazelversion: a run that reads the \
+                         other file indexes a different graph. In a WORKSPACE repository \
+                         the pin is the fix that sticks, because Bazel 7 and later write \
+                         an untracked MODULE.bazel stub there the first time they run, \
+                         cambi's own queries included; a bzlmod repository can delete \
+                         WORKSPACE instead",
                     ),
                 );
                 Some(WorkspaceMode::Ambiguous)
@@ -1527,6 +1530,29 @@ mod tests {
         assert_eq!(p.diagnostics.len(), 1);
         assert_eq!(p.diagnostics[0].code, Code::W016WorkspaceModeAmbiguous);
         assert!(p.diagnostics[0].help.is_some());
+    }
+
+    /// Deleting `MODULE.bazel` from a WORKSPACE repository does not stick:
+    /// Bazel 7 and later write an untracked stub back the next time they run
+    /// there, cambi's own queries included. The help leads with the pin and
+    /// says why, and offers deletion only where it lasts.
+    #[test]
+    fn the_ambiguous_mode_help_says_the_pin_is_what_sticks() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "MODULE.bazel", "module(name = \"x\")\n");
+        write(d.path(), "WORKSPACE", "");
+        let p = workspace(d.path());
+        let help = p.diagnostics[0].help.as_deref().unwrap();
+        assert!(
+            help.starts_with("pin the Bazel version in .bazelversion"),
+            "{help}"
+        );
+        assert!(help.contains("untracked MODULE.bazel stub"), "{help}");
+        assert!(help.contains("Bazel 7 and later"), "{help}");
+        assert!(
+            !help.contains("delete the file the build does not use"),
+            "deleting the stub does not last: {help}"
+        );
     }
 
     #[test]

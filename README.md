@@ -94,7 +94,10 @@ relative store path is read from the workspace root, so `.cambium-store/`
 goes in `.gitignore` beside the `cambium.local.toml` line `init` asks for.
 A tree with only a `WORKSPACE` file and no `.bazelversion` is warned about
 (`CAMBI-W016`): bazelisk then runs the latest Bazel, which reads no
-`WORKSPACE`, so pin one that does.
+`WORKSPACE`, so pin one that does. Pinning is the fix that sticks: Bazel 7
+and later write an untracked `MODULE.bazel` stub into a WORKSPACE repository
+the first time they run there, cambi's own queries included. The stub is
+comment-only and is not read as a marker, so the tree stays a WORKSPACE one.
 
 ```console
 $ cambi doctor
@@ -108,8 +111,8 @@ work here, 1 otherwise. Every finding is a diagnostic with a code and a
 `help:` line.
 
 ```console
-$ cambi profile --commits 30 --out /tmp/cambium-index.bin
-$ cambi index publish /tmp/cambium-index.bin
+$ cambi profile --commits 30 --out ./cambium-index.bin
+$ cambi index publish ./cambium-index.bin
 ```
 
 What cambium costs and saves on this repository, from its own history: one
@@ -117,8 +120,8 @@ cold index at the oldest of the last 30 first-parent commits, then one
 incremental step per commit up to `HEAD`, in a scratch worktree (the checkout
 and the store are left alone). The report gives the graph's size, the cold
 index's time and size, what a typical commit costs and affects as a share of
-the repository's targets and tests, and how often a commit goes global and
-under which `CAMBI-W` code. Its times come from one warm Bazel server with
+the repository's targets and tests at `HEAD`, and how often a commit goes
+global and under which `CAMBI-W` code. Its times come from one warm Bazel server with
 the index in memory; a cold CI runner also pays the store fetch, a server
 start and external fetches. A commit that does not build is reported as
 failed and the walk goes on; if the oldest one is the problem, a smaller
@@ -126,10 +129,14 @@ failed and the walk goes on; if the oldest one is the problem, a smaller
 
 `--out` keeps the index the walk ends with, and `index publish` uploads it as
 the first index of a lineage, so the profile doubles as the first cold build:
-one build, not two. Everything after is incremental. To skip the profile,
-`cambi index build --publish` is the same cold `bazel query //...:*` on its
-own. `cambi status` says where the checkout is and which index a run would
-load.
+one build, not two. Everything after is incremental. The file is written in
+this checkout, the path `init` suggests, so it is this repository's index and
+no other's (a fixed path outside it, shared by every repository on the
+machine, is how one repository's index gets published into another's store);
+delete it once published, or give it a `.gitignore` line beside the other two.
+To skip the profile, `cambi index build --publish` is the same cold `bazel
+query //...:*` on its own. `cambi status` says where the checkout is and which
+index a run would load.
 
 ```console
 $ cambi affected origin/main..HEAD --tests-only
@@ -358,8 +365,14 @@ still exact, only not incremental):
   A repository dirtied only through a path that a target the repository rule
   *writes* names is spared: nothing the rule wrote, its `BUILD` files
   included, can have moved.
-- `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs (no
-  glob by default).
+- `.bazelversion`, `REPO.bazel`, `WORKSPACE.bzlmod.lock`, and any other
+  `[invalidators]` path or glob (`CAMBI-W013`; no glob by default). The
+  other default paths are read by a model of their own first and are global
+  only when it cannot answer: `MODULE.bazel`, its lock and the `WORKSPACE`
+  files by the external-repository stage (the module, lock and statement
+  diffs), `.bazelrc` by the rc screen (the first item here). With
+  `[externals] enabled = false` the `MODULE.bazel` and `WORKSPACE` entries
+  are the bare rule again. `cambi config explain` says which is which.
 - A module Bazel autoloads native rules from (`rules_python`, `rules_java`,
   `rules_shell`, `protobuf`, `rules_android`) moving in `MODULE.bazel`, its
   lock or `WORKSPACE`, under a Bazel that autoloads (`CAMBI-W024`): Bazel 8 at
@@ -442,7 +455,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 20, "base": "...", "head": "...", ... }
+{ "schema": 21, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -518,7 +531,7 @@ not also show:
 
 ```json
 {
-  "schema": 20,
+  "schema": 21,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -556,7 +569,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 20,
+  "schema": 21,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -580,7 +593,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 20,
+  "schema": 21,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -615,7 +628,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 20,
+  "schema": 21,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
@@ -655,6 +668,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 18 | `stats.consumer_leaves_seeded`: leaves of external repositories seeded because the consumer table's leaf map (index format 14) says their transitive deps reach a package of an indexed repository that moved, or does not know the leaf; a consumer seeded this way is still counted in `repos_dirty_by_consumer`, but only its reaching leaves are seeded rather than all of them |
 | 19 | `stats.closure_leaves_seeded`: leaves seeded because their transitive deps closure runs through an external repository that moved (index format 16), and for no other reason: envoy's `@grpc//:grpc++` when an input of `@c-ares` moves |
 | 20 | What `global` covers, not the shape: a run whose index is short of packages Bazel could not load, and that `baseline.publish_partial` does not name, is global (exit 2, stdout `//...`) with `CAMBI-W006` (the index is partial) or `CAMBI-W028` (this run carried the packages forward) as its cause, naming them in `global_reason`. Such a run used to answer from the partial index with `global: false`. `--allow-partial` on `affected` and `explain` answers from it as before. `doctor` and `status` values change with it: the `bazel` check fails under `CAMBI-E015` for a Bazel that cannot read the workspace's mode, and its `detail` is the version, not the binary, whenever it carries a finding; a `WORKSPACE`-only tree with no pinned Bazel grades the `workspace` check warn and puts `CAMBI-W016` in `status`'s `workspace.diagnostics`; and a comment-only `MODULE.bazel` beside a `WORKSPACE` (the stub Bazel writes) is not a marker, so such a tree's `workspace.mode` is `workspace`, not `ambiguous` |
+| 21 | `cambi profile`: `summary.affected_share` and `summary.tests_share` are shares of `index.targets` and `index.tests`, the index the walk ends with (the repository the report's `targets` line describes); they were shares of `cold.targets` and `cold.tests`, the oldest commit's, which read "200% of 1" on a window that began where the repository was small. No field is added or removed |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints. As of 17 it holds `repository`, `from` and
@@ -714,11 +728,16 @@ limits.max_dirty_packages  = 900  (/src/repo/cambium.toml)
 ```
 
 Two keys to know first: `[invalidators].paths` and `.globs` are the paths
-whose change means "everything is affected", and `limits.max_dirty_packages`
-bounds the only part of a run whose cost grows with the diff; past it the run
-asks Bazel for the whole repository once and reports `stats.cold_rebuild` with
-`cold_rebuild_reason`. The answer is exact either way: a cold rebuild is a
-slower route to the same affected set, not a surrender to `//...`.
+whose change means "everything is affected", except that most default paths
+are read by a model of their own first (`MODULE.bazel`, its lock and the
+`WORKSPACE` files by the external-repository stage, `.bazelrc` by the rc
+screen), which names what moved and is global only when it cannot; `config
+explain` says under its table which entries are which. And
+`limits.max_dirty_packages` bounds the only part of a run whose cost grows
+with the diff; past it the run asks Bazel for the whole repository once and
+reports `stats.cold_rebuild` with `cold_rebuild_reason`. The answer is exact
+either way: a cold rebuild is a slower route to the same affected set, not a
+surrender to `//...`.
 
 Every section and default is in [docs/CLI.md](docs/CLI.md#configuration)
 (`cambi config explain` prints them), and the store's syntax for each
@@ -904,8 +923,12 @@ benchmark machines, issue numbers, commits and dates freely):
 may claim), [docs/OPERATIONS.md](docs/OPERATIONS.md) (running it at full
 size), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md),
 [docs/SKYFRAME_PROTOTYPES.md](docs/SKYFRAME_PROTOTYPES.md),
-[docs/XLA_MAIN_REPO_MISSES.md](docs/XLA_MAIN_REPO_MISSES.md), and the
-Findings section of docs/RESULTS.md.
+[docs/XLA_MAIN_REPO_MISSES.md](docs/XLA_MAIN_REPO_MISSES.md), the
+Findings section of docs/RESULTS.md, and
+[docs/salvage/2026-09-18/](docs/salvage/2026-09-18/), the scratch files,
+uncommitted edits, workflow journals and review findings of a 2026-09-18
+roadmap session, copied out before its scratch directory was lost and kept
+as found (records, not instructions).
 
 ## License
 

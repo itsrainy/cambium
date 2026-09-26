@@ -185,14 +185,14 @@ above); `targets`; `full index` (where the cold index was built, its targets
 and tests, size, load time); `per commit` (mean, p50, p90 and max over the
 incremental steps, and the mean over every step with its rebuilds);
 `affected` and `tests` (the median incremental commit's count and its share
-of the cold index's targets or tests, manual targets included, with mean and
-p90); `global` (how many commits answered `//...` and their share, then one
+of the targets or tests in the index the walk ends with (the `targets` line's),
+manual targets included, with mean and p90); `global` (how many commits answered `//...` and their share, then one
 line per reason with its `CAMBI-W` code and `help:` line); `rebuilds`
 (globals and `limits.max_dirty_packages` re-queries counted and timed apart);
 `index work`; and `failed` and `stopped` when a commit failed. `--report
 prose` is the paragraphs that block replaced, kept one release, and then the
 same table. `--format json` is the document behind both, carrying every
-figure the block shows (the JSON contract, version 17, lists the fields).
+figure the block shows (the JSON contract, versions 17 and 21, lists them).
 `--out <file>` keeps the walk's final index (`REV`'s, or the last commit
 that built), `cambi index publish`-able, so a profile doubles as the first
 cold build; without it, the index goes to a deleted scratch file.

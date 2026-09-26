@@ -144,7 +144,7 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
 
 /// The `schema` every JSON document carries. Pinned here, not read from
 /// `SCHEMA_VERSION`, so a bump is a deliberate edit to this file as well.
-const SCHEMA: u64 = 20;
+const SCHEMA: u64 = 21;
 
 /// Builds a synthetic index in `dir` and returns its path.
 ///
@@ -701,6 +701,135 @@ fn init_writes_a_config_the_engine_loads_and_explain_attributes() {
         .find(|v| v["key"] == "baseline.retention_days")
         .expect("every leaf key is explained");
     assert_eq!(untouched["origin_label"], "default");
+}
+
+/// The comment lines `config explain` prints under its table, unwrapped into
+/// one string.
+fn explain_notes(stdout: &str) -> String {
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('#'))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The default `[invalidators].paths` are not all equal. Most are read by a
+/// model of their own before the rule applies (a `MODULE.bazel` comment, a
+/// `build`-only `.bazelrc` line: nothing affected), and `config explain` says
+/// which, so the list does not read as "every edit here is global".
+#[test]
+fn config_explain_says_which_invalidator_paths_a_model_reads_first() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(
+        notes.contains(
+            "invalidators.paths read first by the external-repository stage, global only \
+             when it cannot name what moved: MODULE.bazel, MODULE.bazel.lock, WORKSPACE, \
+             WORKSPACE.bazel, WORKSPACE.bzlmod"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        notes.contains(
+            "invalidators.paths read first by the rc screen, global only when it cannot \
+             clear the edit: .bazelrc"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        notes.contains(
+            "invalidators.paths whose change makes everything affected: \
+             WORKSPACE.bzlmod.lock, .bazelversion, REPO.bazel"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains('\u{2014}'), "no em-dashes: {stdout}");
+
+    // With the external-repository stage off, nothing reads MODULE.bazel
+    // first: the entry is the rule.
+    std::fs::write(
+        dir.path().join("cambium.toml"),
+        "[externals]\nenabled = false\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(!notes.contains("external-repository stage"), "{stdout}");
+    assert!(
+        notes.contains("whose change makes everything affected: MODULE.bazel, MODULE.bazel.lock"),
+        "{stdout}"
+    );
+
+    // Under `--noworkspace_rc` Bazel never reads the root rc, and its edit is
+    // an ordinary source change.
+    std::fs::write(
+        dir.path().join("cambium.toml"),
+        "[bazel]\nstartup_flags = [\"--noworkspace_rc\"]\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(
+        notes.contains(
+            "invalidators.paths Bazel does not read under these startup flags, an ordinary \
+             source change: .bazelrc"
+        ),
+        "{stdout}"
+    );
+}
+
+/// The profile's `--out` is one path everywhere a reader meets it: the one
+/// `init`'s `next:` line names, in the checkout, so it is this repository's
+/// index and no other's. A fixed `/tmp` path is shared by every repository on
+/// the machine, and publishing the wrong one uploads another repository's
+/// index.
+#[test]
+fn the_readme_and_the_ci_guide_seed_the_store_from_the_path_init_names() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let store = dir.path().join("store");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "init",
+        "--yes",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let next = stdout.trim_end().lines().last().unwrap_or_default();
+    let out = next
+        .split("--out ")
+        .nth(1)
+        .and_then(|rest| rest.split([',', ' ']).next())
+        .unwrap_or_else(|| panic!("no --out in {next}"));
+    assert_eq!(out, "./cambium-index.bin", "{next}");
+    assert!(
+        next.contains(&format!("cambi index publish {out}")),
+        "{next}"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["README.md", "docs/CI.md"] {
+        let text = std::fs::read_to_string(root.join(name)).unwrap();
+        assert!(
+            text.contains(&format!("cambi profile --commits 30 --out {out}")),
+            "{name} runs the profile with another --out than init's {out}"
+        );
+        assert!(
+            text.contains(&format!("cambi index publish {out}")),
+            "{name} publishes another file than init's {out}"
+        );
+        assert!(
+            !text.contains("/tmp/cambium-index.bin"),
+            "{name} names a path every repository on the machine shares"
+        );
+    }
 }
 
 /// `cambium.toml` is checked in, and somebody wrote the rest of it on purpose.
