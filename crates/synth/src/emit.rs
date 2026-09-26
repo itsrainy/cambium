@@ -61,7 +61,7 @@ pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
     write(&out.join("MODULE.bazel"), &module_bazel())?;
     write(&out.join(".bazelversion"), "7.4.1\n")?;
     write(&out.join("rules/BUILD.bazel"), "")?;
-    write(&out.join("rules/synth.bzl"), RULES_BZL)?;
+    write(&out.join(RULES_BZL_PATH), RULES_BZL)?;
     write(&out.join("tools/synth/BUILD.bazel"), TOOLS_BUILD)?;
     for (i, b) in g.bzl.iter().enumerate() {
         write(&out.join(&b.path), &generated_bzl(i as u32, b.version))?;
@@ -170,7 +170,7 @@ impl cambium_index::FileText for SynthFiles<'_> {
         if path == "MODULE.bazel" {
             return Some(module_bazel());
         }
-        if path == "rules/synth.bzl" {
+        if path == RULES_BZL_PATH {
             return Some(RULES_BZL.to_string());
         }
         if let Some(&b) = g.bzl_by_path.get(path) {
@@ -374,6 +374,10 @@ globs = [\"rules/**\", \"external/**\"]\n\n\
 [ignore]\n\
 globs = [\"**/*.md\"]\n";
 
+/// Where [`RULES_BZL`] lives in the workspace: loaded by every generated
+/// `.bzl`, and directly by a package that loads none of them.
+pub(crate) const RULES_BZL_PATH: &str = "rules/synth.bzl";
+
 const RULES_BZL: &str = r##""""Rules that do no real work, so `bazel build //...` runs anywhere."""
 
 def _synth_impl(ctx):
@@ -487,7 +491,7 @@ mod tests {
         emit_workspace(&g, dir.path()).unwrap();
 
         assert!(dir.path().join("MODULE.bazel").exists());
-        assert!(dir.path().join("rules/synth.bzl").exists());
+        assert!(dir.path().join(RULES_BZL_PATH).exists());
         assert!(dir
             .path()
             .join("external/synth_ext/ext/BUILD.bazel")

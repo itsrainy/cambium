@@ -8,6 +8,7 @@ use cambium_proto::blaze_query::{
     Target,
 };
 
+use crate::emit::RULES_BZL_PATH;
 use crate::graph::SynthGraph;
 
 fn string_list(name: &str, values: Vec<String>) -> Attribute {
@@ -32,12 +33,13 @@ fn string_attr(name: &str, value: String) -> Attribute {
 
 /// The `.bzl` files a package's BUILD file loads, as instantiation frames.
 ///
-/// Mirrors what `emit_package` writes: a package with generated `.bzl` loads
-/// those, and a package with none loads the shared `//rules:synth.bzl`.
+/// Mirrors the loads [`crate::emit::build_file_loads`] writes: a package
+/// with generated `.bzl` loads those, and a package with none loads the
+/// shared rules file.
 fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
     let bzl = &g.packages[pkg as usize].bzl;
     if bzl.is_empty() {
-        return vec!["rules/synth.bzl:1:1".to_string()];
+        return vec![format!("{RULES_BZL_PATH}:1:1")];
     }
     bzl.iter()
         .map(|&b| format!("{}:1:1", g.bzl[b as usize].path))
