@@ -282,7 +282,8 @@ rebuild.
   an edge to every target of the index it reaches through targets outside
   it, Bazel's answer at cold build (`deps` over every such label, then
   `allpaths` only when that closure reaches back in), and again at head in
-  a run that moves an external repository. An edit to
+  a run that moves an external repository or a main-repo `.bzl` the
+  external packages on the route load. An edit to
   `shell/runfiles/runfiles.bash` reaches all 27 rules `rdeps` names (24
   tests), where the index without those edges reached 5 (2 tests), counted
   with `--include-manual`.
@@ -381,15 +382,19 @@ Routes on which an answer can miss a target today, each tracked in a
 maintainer document:
 
 - **A round trip Bazel could not load.** The route back in from an
-  external target is Bazel's answer to one `--keep_going` query over the
+  external target is Bazel's answer to `--keep_going` queries over the
   closure of every external label the index holds (see "Where the
   invariant stops" above). A label whose closure fails to load (a
   repository that will not fetch on this machine, a package with errors)
   is recorded with the paths Bazel could load, and when the question cannot
   be asked at all every label keeps the edges it had, none at a cold build.
-  Nothing reports either beyond the `debug` log. `cambi inspect verify`
-  lists a miss of this kind apart, as a round trip. docs/ROADMAP.md (Phase
-  5) tracks the class.
+  Nothing reports either beyond the `debug` log. The same query records
+  what the route was derived through (the main-repo `.bzl` files the
+  external packages on it load, which can define the rule class that gives
+  an external target its edge back in), and a run that changes one of them
+  asks again, so a route that moves with the main repository is followed.
+  `cambi inspect verify` lists a miss of this kind apart, as a round trip.
+  docs/ROADMAP.md (Phase 5) tracks the class.
 - **Repository inputs Bazel's markers do not record.** A patch, a
   `build_file` or a lock file is an input of the repository built from it,
   not a target anything depends on, so the benchmark's `rdeps` check roots

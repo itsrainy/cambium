@@ -458,12 +458,22 @@ declared-only repository can still round trip" is now modelled: every
 external label the index holds carries a forward edge to each target of
 the universe it reaches through targets outside it, Bazel's answer at cold
 build (`crates/engine/src/round_trip.rs`), so the ordinary reverse walk
-closes the loop. The walk stops at the first inside node, which makes the
-answer a function of the repositories outside the universe alone: it is
-asked again at head in a run that moves one, for every leaf after an
-overflow, and for a leaf a splice adds; a main-repo `BUILD` edit never
-makes it stale. No column moved (format stays 14); `CONTENT_REVISION` 4 to
-5 retires the indexes written without the edges. `bazelbuild/rules_shell`
+closes the loop. The walk stops at the first inside node, so a main-repo
+`BUILD` edit never makes an answer stale. The part outside is not a
+function of the repositories outside alone: the packages there load
+`.bzl` files, and a rule class the root module defines (rules_shell's
+`sh_binary`, the class of `collect_coverage`, whose implicit
+`_runfiles_dep` is the edge back in) moves what a leaf reaches with nothing
+outside moving. A review reproduced it: an implicit attribute added to
+`sh_binary.bzl`, spliced, left an edit below it at 1 label where a cold
+build answered 25. So the answer is stored with what it was derived
+through (the main-repo files the closure's external packages load, the
+indexed repositories whose files they load, the packages of entries that
+had no node), read by the same code as the consumer table's leaf map
+(`crates/engine/src/via.rs`), which now records the loaded files too. It
+is asked again at head in a run that moves one of those or a repository
+outside, for every leaf after an overflow, and for a leaf a splice adds.
+The via set is a column, so the format went to 15. `bazelbuild/rules_shell`
 at `b1eed28`, the root module, where every test depends on
 `@bazel_tools//tools/test:collect_coverage` and so on
 `//shell/runfiles:runfiles`: an edit to `runfiles.bash` answered 5 labels
