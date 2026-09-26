@@ -265,16 +265,11 @@ impl SynthGraph {
 
     /// Rows for one package, in the form the index builder consumes.
     pub fn package_update(&self, pkg: u32) -> PackageUpdate {
-        let mut scratch = String::new();
-        self.package_update_with(pkg, &mut scratch, &|g, t, s| g.target_hash_into(t, s))
+        self.package_update_with(pkg, &mut String::new())
     }
 
-    fn package_update_with(
-        &self,
-        pkg: u32,
-        scratch: &mut String,
-        hash: &dyn Fn(&Self, u32, &mut String) -> [u8; 32],
-    ) -> PackageUpdate {
+    /// As [`SynthGraph::package_update`], reusing a scratch buffer for labels.
+    fn package_update_with(&self, pkg: u32, scratch: &mut String) -> PackageUpdate {
         let p = &self.packages[pkg as usize];
         let mut targets = Vec::with_capacity(p.targets.len() * 2);
         let mut build = blake3::Hasher::new();
@@ -290,7 +285,7 @@ impl SynthGraph {
             if !t.alive {
                 continue;
             }
-            let th = hash(self, tid, scratch);
+            let th = self.target_hash_into(tid, scratch);
             build.update(&th);
             let mut inputs: Vec<String> = Vec::with_capacity(
                 t.deps.len() + t.srcs.len() + t.foreign_srcs.len() + t.ext_deps as usize,
@@ -345,7 +340,7 @@ impl SynthGraph {
             .into_par_iter()
             .filter(|&p| self.packages[p as usize].alive)
             .map_init(String::new, |scratch, p| {
-                self.package_update_with(p, scratch, &|g, t, s| g.target_hash_into(t, s))
+                self.package_update_with(p, scratch)
             })
             .collect()
     }
