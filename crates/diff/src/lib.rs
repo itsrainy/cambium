@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(test)]
+mod testrepo;
 mod worktree;
 
 pub use worktree::Worktree;
@@ -337,6 +339,7 @@ fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testrepo::TwoCommits;
 
     #[test]
     fn parses_simple_statuses() {
@@ -382,61 +385,80 @@ mod tests {
     }
 
     #[test]
-    fn drives_a_real_repository() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let git = |args: &[&str]| {
-            let st = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                st.status.success(),
-                "git {args:?}: {:?}",
-                String::from_utf8_lossy(&st.stderr)
-            );
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@example.com"]);
-        git(&["config", "user.name", "t"]);
-        std::fs::create_dir_all(root.join("lib")).unwrap();
-        std::fs::write(root.join("lib/a.cc"), "one").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "one"]);
-        std::fs::write(root.join("lib/a.cc"), "two").unwrap();
-        std::fs::write(root.join("lib/b.cc"), "new").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "two"]);
-
-        let repo = Repo::new(root);
-        let changes = repo.diff("HEAD~1", "HEAD").unwrap();
+    fn diff_lists_each_path_that_changed() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
         assert_eq!(
-            changes,
+            repo.diff(&f.first, &f.second).unwrap(),
             vec![
                 Change::new(Status::Modified, "lib/a.cc"),
                 Change::new(Status::Added, "lib/b.cc"),
             ]
         );
-        let head = repo.rev_parse("HEAD").unwrap();
-        assert_eq!(head.len(), 40);
-        let anc = repo.first_parent_ancestors("HEAD", 5).unwrap();
-        assert_eq!(anc.len(), 1);
-        let tree = repo.tree_of("HEAD").unwrap();
-        assert_eq!(tree.len(), 40);
-        assert_ne!(tree, head);
-        assert_eq!(repo.first_parent_log("HEAD", 10).unwrap().len(), 2);
-        // Oldest first, like the log it mirrors, and carrying what a row
-        // prints about a commit.
-        let meta = repo.first_parent_log_meta("HEAD", 10).unwrap();
+    }
+
+    #[test]
+    fn rev_parse_gives_the_commit_id() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).rev_parse("HEAD").unwrap(), f.second);
+    }
+
+    #[test]
+    fn tree_of_gives_the_tree_not_the_commit() {
+        let f = TwoCommits::new();
+        let tree = Repo::new(&f.root).tree_of("HEAD").unwrap();
+        assert_eq!(tree, f.git(&["rev-parse", "HEAD^{tree}"]));
+        assert_ne!(tree, f.second);
+    }
+
+    #[test]
+    fn first_parent_log_is_oldest_first_and_includes_rev() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(
+            repo.first_parent_log("HEAD", 10).unwrap(),
+            vec![f.first.clone(), f.second.clone()]
+        );
+        assert_eq!(repo.first_parent_log("HEAD", 1).unwrap(), vec![f.second]);
+    }
+
+    #[test]
+    fn first_parent_log_meta_carries_what_a_row_prints() {
+        let f = TwoCommits::new();
+        let meta = Repo::new(&f.root)
+            .first_parent_log_meta("HEAD", 10)
+            .unwrap();
         assert_eq!(
             meta.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
             vec!["one", "two"]
         );
-        assert_eq!(meta[1].sha, head);
+        assert_eq!(meta[0].sha, f.first);
+        assert_eq!(meta[1].sha, f.second);
         assert_eq!(meta[0].date.len(), "MM-DD HH:MM".len(), "{:?}", meta[0]);
-        assert_eq!(repo.parents("HEAD").unwrap(), vec![anc[0].clone()]);
-        assert_eq!(repo.read_at("HEAD~1", "lib/a.cc").unwrap(), b"one");
-        assert!(repo.read_at("HEAD~1", "lib/b.cc").is_none());
+    }
+
+    #[test]
+    fn first_parent_ancestors_start_at_the_parent() {
+        let f = TwoCommits::new();
+        assert_eq!(
+            Repo::new(&f.root)
+                .first_parent_ancestors("HEAD", 5)
+                .unwrap(),
+            vec![f.first]
+        );
+    }
+
+    #[test]
+    fn parents_lists_the_parent_commit() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).parents("HEAD").unwrap(), vec![f.first]);
+    }
+
+    #[test]
+    fn read_at_reads_a_file_as_it_was_and_misses_an_absent_one() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(repo.read_at(&f.first, "lib/a.cc").unwrap(), b"one");
+        assert!(repo.read_at(&f.first, "lib/b.cc").is_none());
     }
 }

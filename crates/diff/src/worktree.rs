@@ -140,34 +140,21 @@ fn force_checkout(dir: &Path, rev: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Repo;
+    use crate::testrepo::TwoCommits;
 
     #[test]
     fn adds_and_removes_a_detached_worktree() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
-        let g = |args: &[&str]| {
-            Repo::new(&root).git(args).unwrap();
-        };
-        g(&["init", "-q", "-b", "main"]);
-        g(&["config", "user.email", "t@example.com"]);
-        g(&["config", "user.name", "t"]);
-        std::fs::write(root.join("a"), "one").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-qm", "one"]);
-        let first = Repo::new(&root).rev_parse("HEAD").unwrap();
-        std::fs::write(root.join("a"), "two").unwrap();
-        g(&["add", "-A"]);
-        g(&["commit", "-qm", "two"]);
-
-        let wt_path = dir.path().join("wt").join(&first);
+        let f = TwoCommits::new();
+        let wt_path = f.dir.path().join("wt").join(&f.first);
         {
-            let wt = Worktree::create(&root, &first, &wt_path).unwrap();
-            assert_eq!(std::fs::read(wt.path().join("a")).unwrap(), b"one");
-            assert_eq!(Repo::new(wt.path()).rev_parse("HEAD").unwrap(), first);
+            let wt = Worktree::create(&f.root, &f.first, &wt_path).unwrap();
+            assert_eq!(std::fs::read(wt.path().join("lib/a.cc")).unwrap(), b"one");
+            assert_eq!(
+                crate::testrepo::git(wt.path(), &["rev-parse", "HEAD"]),
+                f.first
+            );
             // The owning checkout is untouched.
-            assert_eq!(std::fs::read(root.join("a")).unwrap(), b"two");
+            assert_eq!(std::fs::read(f.root.join("lib/a.cc")).unwrap(), b"two");
         }
         assert!(!wt_path.exists(), "the worktree should be gone");
     }
