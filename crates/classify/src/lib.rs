@@ -133,8 +133,11 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ClassifyError> {
     })
 }
 
-/// The set of packages that exist, with the diff's BUILD file additions and
-/// deletions overlaid.
+/// The main repository's package layout: which package owns a path, and
+/// which nested repository a path is in.
+///
+/// Built from the base index. [`dirty_set`] overlays the diff's BUILD file
+/// additions and deletions on it, so the answers are the ones for head.
 pub struct PackageSet {
     packages: FxHashSet<String>,
     /// Directories that are Bazel repositories of their own, each with a
@@ -485,7 +488,9 @@ pub struct DirtySet {
     /// Paths whose content changed, to be resolved to source labels and
     /// marked direct through the rule layer's file rows.
     pub direct_files: BTreeSet<String>,
-    /// Paths that were ignored, for `--explain`.
+    /// How many changed paths were ignored. The engine adds the ignored
+    /// nested-repository paths and reports the total as the run's
+    /// `ignored_files` stat.
     pub ignored: usize,
     /// Changed paths inside a nested Bazel repository, by the boundary
     /// directory they sit under. Nothing here dirties a main-repo package,
