@@ -289,6 +289,48 @@ impl Diagnostic {
     }
 }
 
+/// How many packages a diagnostic's message names before it counts the rest.
+const NAMED_PACKAGES: usize = 5;
+
+/// The packages a diagnostic is about, for its message: each once, in the
+/// order given, spelled as a label's package (`//pkg`, `@repo//pkg`), the
+/// first few by name and the rest counted. `more_unnamed` says the list is
+/// itself a sample (Bazel printed more failures than were kept), so the rest
+/// cannot be counted. `None` when there is nothing to name.
+///
+/// The names belong in the message because the diagnostic is the one line a
+/// run prints about them at the default log level (see the module doc).
+pub fn name_packages<S: AsRef<str>>(packages: &[S], more_unnamed: bool) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let distinct: Vec<&str> = packages
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|p| seen.insert(*p))
+        .collect();
+    if distinct.is_empty() {
+        return None;
+    }
+    let mut out = distinct
+        .iter()
+        .take(NAMED_PACKAGES)
+        .map(|p| {
+            if p.starts_with('@') {
+                p.to_string()
+            } else {
+                format!("//{p}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rest = distinct.len().saturating_sub(NAMED_PACKAGES);
+    if more_unnamed {
+        out.push_str(" and others");
+    } else if rest > 0 {
+        out.push_str(&format!(" and {rest} more"));
+    }
+    Some(out)
+}
+
 /// The engine's diagnostic sink: a cloneable handle onto one buffer.
 ///
 /// Cloneable because the stages that emit are scattered across the crate and
@@ -349,6 +391,28 @@ pub fn extend_unique(out: &mut Vec<Diagnostic>, more: impl IntoIterator<Item = D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packages_are_named_as_labels_once_each_and_the_rest_counted() {
+        assert_eq!(name_packages::<&str>(&[], false), None);
+        assert_eq!(
+            name_packages(&["", "a/b", "a/b", "@@r+//x"], false).as_deref(),
+            Some("//, //a/b, @@r+//x")
+        );
+        let seven = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+        assert_eq!(
+            name_packages(&seven, false).as_deref(),
+            Some("//p1, //p2, //p3, //p4, //p5 and 2 more")
+        );
+        assert_eq!(
+            name_packages(&seven, true).as_deref(),
+            Some("//p1, //p2, //p3, //p4, //p5 and others")
+        );
+        assert_eq!(
+            name_packages(&["p1"], true).as_deref(),
+            Some("//p1 and others")
+        );
+    }
 
     #[test]
     fn draining_into_a_list_repeats_nothing() {

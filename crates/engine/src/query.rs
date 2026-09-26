@@ -401,10 +401,11 @@ impl PackageQuerier for BazelQuerier {
                     crate::diag::Diagnostic::warning(
                         crate::diag::Code::W028PackageLoadFailed,
                         format!(
-                            "{} dirty package(s) failed to load under --keep_going, so the \
+                            "{} dirty package(s){} failed to load under --keep_going, so the \
                              rows the index already had for them stand and this run answers \
                              from them",
-                            unloaded.len()
+                            unloaded.len(),
+                            named(&unloaded)
                         ),
                     )
                     .with_help(
@@ -589,9 +590,12 @@ impl PackageQuerier for BazelQuerier {
                     crate::diag::Code::W006PartialQuery,
                     format!(
                         "`bazel query //...` finished with errors under --keep_going \
-                         ({} package error lines), so the index is partial and every run \
+                         ({} package error lines{}), so the index is partial and every run \
                          spliced onto it is short of those packages",
-                        e.count
+                        e.count,
+                        crate::diag::name_packages(&e.packages, e.count as usize > e.packages.len())
+                            .map(|n| format!(", in {n}"))
+                            .unwrap_or_default()
                     ),
                 )
                 .with_help(
@@ -672,6 +676,15 @@ impl PackageQuerier for BazelQuerier {
 /// answer. Any *unexplained* exit 3 stays partial: zero recognised error lines
 /// means a stderr shape this does not know, and calling that complete would
 /// silently under-report for every run spliced onto the published index.
+/// ` (//a, //b)`: the packages of `updates`, named for a diagnostic's
+/// message, or nothing when there are none.
+pub(crate) fn named(updates: &[PackageUpdate]) -> String {
+    let names: Vec<&str> = updates.iter().map(|u| u.package.as_str()).collect();
+    crate::diag::name_packages(&names, false)
+        .map(|n| format!(" ({n})"))
+        .unwrap_or_default()
+}
+
 pub fn partial_of(outcome: &QueryOutcome) -> Option<cambium_bazel::LoadErrors> {
     if outcome.exit_code != Some(3) {
         return None;
@@ -1324,5 +1337,42 @@ mod tests {
             q.universe().unwrap_err(),
             EngineError::BazelQuery { code: Some(1), .. }
         ));
+    }
+
+    /// The only line at the default log level about a load failure is the
+    /// diagnostic, so it names the packages: the help asks the reader to fix
+    /// them or list them in `baseline.publish_partial`, which needs names.
+    #[test]
+    fn the_load_failure_diagnostics_name_the_packages() {
+        let two = "ERROR: error loading package 'b': no such file\n\
+                   ERROR: error loading package 'b': again\n\
+                   ERROR: error loading package 'c/d': no such file\n";
+        let q = querier(3, &[rule("//a:x")], two);
+        q.universe().unwrap();
+        let d = q.diags.drain();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, Code::W006PartialQuery);
+        assert!(
+            d[0].message
+                .contains("(3 package error lines, in //b, //c/d)"),
+            "{}",
+            d[0].message
+        );
+
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join("b")).unwrap();
+        std::fs::write(tree.path().join("b/BUILD"), "cc_library(name = \"y\")\n").unwrap();
+        let mut q = querier(3, &[rule("//a:x")], LOAD_ERROR);
+        q.files = FileSource::worktree(tree.path());
+        q.query(&["a".into(), "b".into()]).unwrap();
+        let d = q.diags.drain();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, Code::W028PackageLoadFailed);
+        assert!(
+            d[0].message
+                .starts_with("1 dirty package(s) (//b) failed to load"),
+            "{}",
+            d[0].message
+        );
     }
 }

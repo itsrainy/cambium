@@ -1130,11 +1130,12 @@ impl<'a> Run<'a> {
                     crate::diag::Diagnostic::warning(
                         crate::diag::Code::W005PackagesTombstoned,
                         format!(
-                            "{} package(s) failed to load under --keep_going and their own \
+                            "{} package(s){} failed to load under --keep_going and their own \
                              BUILD file is what this change edited, so they were tombstoned \
                              rather than answered from rows that predate the edit; their \
                              consumers are reported as affected",
-                            reapplied.len()
+                            reapplied.len(),
+                            crate::query::named(&reapplied)
                         ),
                     )
                     .with_help(

@@ -279,3 +279,46 @@ fn a_carried_package_survives_an_unrelated_step_and_heals_after_it() {
     let partial = partial_on_disk(&healed);
     assert!(!partial.partial, "{partial:?}");
 }
+
+/// A package that fails to load in the step that edits its own `BUILD` is
+/// tombstoned rather than carried, and CAMBI-W005 says which one: at the
+/// default log level it is the only line about it, and its help sends the
+/// reader to `bazel query` on that package.
+#[test]
+fn a_package_tombstoned_for_its_own_edit_is_named() {
+    let (_e, index) = base(&scanning());
+    let q = scanning().failing_to_load(&["tbl"]);
+    let e = engine();
+    e.compute_with_texts(
+        index.view(),
+        &[Change::new(Status::Modified, "tbl/BUILD")],
+        &q,
+        &AffectedRequest {
+            materialize: true,
+            ..req()
+        },
+        &texts(),
+    )
+    .unwrap();
+    let w005: Vec<_> = e
+        .diagnostics()
+        .drain()
+        .into_iter()
+        .filter(|d| d.code == Code::W005PackagesTombstoned)
+        .collect();
+    assert_eq!(w005.len(), 1, "{w005:?}");
+    assert!(
+        w005[0]
+            .message
+            .starts_with("1 package(s) (//tbl) failed to load"),
+        "{}",
+        w005[0].message
+    );
+    assert_eq!(
+        w005[0].help.as_deref(),
+        Some(
+            "fix the load error bazel reported for those packages: \
+             `bazel query` on the package shows it"
+        )
+    );
+}
