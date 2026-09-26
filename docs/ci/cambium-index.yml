@@ -1,0 +1,75 @@
+# Post-merge: keep the index store at the tip of main.
+#
+# A template for your repository's .github/workflows/, described in
+# docs/CI.md. This one keeps the store in a directory that actions/cache
+# carries between runs, and needs no credentials. Its cambium.toml:
+#
+#   [baseline]
+#   store = { kind = "dir", path = ".cambium-store" }
+#   retention_days = 3
+#
+# and .gitignore lists .cambium-store/.
+
+name: cambium index
+
+on:
+  push:
+    branches: [main]
+  # The first run: an empty store makes it a cold build of the tip.
+  workflow_dispatch:
+  # Weekly, a fresh lineage (drops the tombstones splicing accumulates).
+  schedule:
+    - cron: "17 4 * * 0"
+
+permissions:
+  contents: read
+
+# One at a time, none cancelled: a run that finds the store a merge behind
+# replays that merge, so a queued run skipped here costs nothing.
+concurrency:
+  group: cambium-index
+  cancel-in-progress: false
+
+env:
+  CAMBI_VERSION: v0.1.0 # the same version in every job (docs/CI.md, "Lineage breaks")
+
+jobs:
+  index:
+    runs-on: ubuntu-latest # bazelisk is on PATH as `bazel`
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the ancestor walk reads first-parent history
+
+      - name: Install cambi
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh \
+            | sh -s -- --version "$CAMBI_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the store
+        uses: actions/cache/restore@v4
+        with:
+          path: .cambium-store
+          key: cambium-store-${{ github.sha }}
+          restore-keys: cambium-store-
+
+      - name: Index the merge commit
+        if: github.event_name != 'schedule'
+        # <parent>..<merge>, looked up from the merge commit itself: a rerun
+        # finds its own index, and an empty store builds this commit cold.
+        run: cambi index update HEAD --publish
+
+      - name: Mint a fresh lineage
+        if: github.event_name == 'schedule'
+        run: cambi index build --publish
+
+      - name: Drop indexes older than retention_days
+        run: cambi index gc # a dir store only; S3 and GCS use a lifecycle rule
+
+      - name: Save the store
+        uses: actions/cache/save@v4
+        with:
+          path: .cambium-store
+          # Cache keys are immutable; the attempt number lets a rerun save.
+          key: cambium-store-${{ github.sha }}-${{ github.run_attempt }}
