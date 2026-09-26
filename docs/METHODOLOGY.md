@@ -301,8 +301,14 @@ needs a class, and a non-zero `unexplained` count still fails the walk.
   packages heal. `cambi` itself refuses such a publish by default
   (`CAMBI-E009`); the walk passes `--allow-partial` for its step indexes
   only. The step record keeps the index's partial state (`index.partial`:
-  the packages still in error at that head), and the summary counts the
-  steps (`partial_index_steps`) and names the packages. The cold build at
+  the packages still in error at that head) and, apart from it, the
+  packages the index carries (`index.carried`: live rows from an older
+  query, for a package the subject's `publish_partial` does not expect to
+  fail). The summary counts and names the carrying steps
+  (`carried_index_steps`, `carried_index_packages`) and, separately, the
+  steps partial for any reason (`partial_index_steps`), because a subject
+  whose cold build is partial by design (xla's
+  `tools/toolchains/win_1803/...`) is partial on every step. The cold build at
   the window's start, and any cold rebuild after a global step, keep the
   default policy: the subject's `publish_partial` decides, and a subject
   whose tree does not load there stops the walk.

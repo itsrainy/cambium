@@ -273,6 +273,16 @@ impl PartialPolicy {
         }
     }
 
+    /// Whether this policy names `package` as one whose failure to load is
+    /// expected. Only the list form names anything: the blanket `true`
+    /// accepts every failure without expecting any in particular.
+    pub fn expects(&self, package: &str) -> bool {
+        match self {
+            Self::Expected(v) => v.iter().any(|e| Self::covers(e, package)),
+            Self::Blanket(_) => false,
+        }
+    }
+
     /// Whether an index whose query failed to load `count` packages, of which
     /// stderr named `named`, may be published.
     pub fn verdict(&self, count: u32, named: &[String]) -> PartialVerdict {

@@ -379,11 +379,17 @@ impl<'a> Runner<'a> {
         let index = if run.wrote_index || !r.global {
             let f = IndexFile::open(&self.index_path)?;
             let v = f.view();
+            let partial = cambium_engine::inspect::PartialLoad::from(v);
             IndexCounts {
                 nodes: v.counts().nodes,
                 edges: v.counts().edges,
                 lineage: cambium_engine::inspect::hex(&v.lineage),
-                partial: cambium_engine::inspect::PartialLoad::from(v),
+                carried: super::model::carried_packages(
+                    v,
+                    &partial,
+                    &self.engine.config().baseline.publish_partial,
+                ),
+                partial,
             }
         } else {
             IndexCounts::default()

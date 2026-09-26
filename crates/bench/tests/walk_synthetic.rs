@@ -898,7 +898,19 @@ fn a_step_whose_index_carries_unloaded_packages_is_walked_and_published() {
     assert!(st.index.partial.partial, "{:?}", st.index);
     assert!(!st.index.partial.packages.is_empty());
     assert!(r.summary.partial_index_steps >= 1);
-    assert!(!r.summary.partial_index_packages.is_empty());
+    // The packages that failed and had rows from the step before are
+    // carried; one this step added has none to carry and is only missing.
+    assert!(!st.index.carried.is_empty(), "{:?}", st.index);
+    assert!(
+        st.index
+            .carried
+            .iter()
+            .all(|p| st.index.partial.packages.contains(p)),
+        "{:?}",
+        st.index
+    );
+    assert_eq!(r.summary.carried_index_steps, r.summary.partial_index_steps);
+    assert_eq!(r.summary.carried_index_packages, st.index.carried);
     assert!(
         f.engine.fetch_baseline(&broken).unwrap().is_some(),
         "the partial index was published to the walk's store"

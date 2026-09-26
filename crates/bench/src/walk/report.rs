@@ -147,15 +147,31 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         "Globals: {}. Engine cold rebuilds: {}.",
         s.globals, s.engine_cold_rebuilds
     );
-    if s.partial_index_steps > 0 {
+    if s.carried_index_steps > 0 {
         let _ = writeln!(
             out,
             "Steps whose index carried packages that failed to load: {} of {} ({}). They were \
              walked, scored and published to the walk's own store; the carried rows are as \
              old as the last query that loaded each package.",
-            s.partial_index_steps,
+            s.carried_index_steps,
             s.steps,
-            listed(&s.partial_index_packages, 8, |l| format!("`{l}`")),
+            listed(&s.carried_index_packages, 8, |l| format!("`{l}`")),
+        );
+    }
+    // Every step of a lineage whose cold build could not load a package is
+    // partial for it (xla's `tools/toolchains/win_1803/...`), carried or
+    // not, so this is said apart from the carried count rather than as it.
+    if !s.partial_index_packages.is_empty() || s.partial_index_steps > s.carried_index_steps {
+        let names = if s.partial_index_packages.is_empty() {
+            "none by name".to_string()
+        } else {
+            listed(&s.partial_index_packages, 8, |l| format!("`{l}`"))
+        };
+        let _ = writeln!(
+            out,
+            "Steps whose index was partial for any reason: {} of {}. Packages it named that \
+             it held no rows for (missing from the answer, not carried): {names}.",
+            s.partial_index_steps, s.steps,
         );
     }
     let _ = writeln!(out);

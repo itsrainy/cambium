@@ -153,6 +153,54 @@ pub struct IndexCounts {
     /// stopping (`walk::cambi::STEP_PUBLISH`), so this is where it shows.
     #[serde(default, skip_serializing_if = "PartialLoad::is_complete")]
     pub partial: PartialLoad,
+    /// Of the packages `partial` names, the ones this index carries
+    /// ([`carried_packages`]): it holds live rows for them, from the last
+    /// query that loaded them, and the subject does not expect them to fail.
+    /// A package the subject's `publish_partial` names (xla's
+    /// `tools/toolchains/win_1803/...`, partial on every step of every
+    /// lineage from its cold build on) is left out, as is a name with no
+    /// rows at all, which is missing from the answer rather than stale in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
+}
+
+/// The packages in `partial`'s names that `v` carries, sorted: those it
+/// holds live rows for and that `expected` does not name.
+///
+/// A partial index names three kinds of package. One the subject expects to
+/// fail on this host (its `publish_partial` list): the cold build that
+/// starts a lineage is already partial for it, with the rows `--keep_going`
+/// managed to read, and every step after is too. One that failed to load at
+/// a splice and kept the rows of the last query that loaded it: carried,
+/// and the only kind whose answer comes from stale rows. And one the index
+/// has no live rows for: missing. The walk's "carried" count is about the
+/// second alone; counting the first made every step of an xla walk read as
+/// carrying.
+pub fn carried_packages(
+    v: cambium_index::IndexRef<'_>,
+    partial: &PartialLoad,
+    expected: &cambium_engine::config::PartialPolicy,
+) -> Vec<String> {
+    if !partial.partial || partial.packages.is_empty() {
+        return Vec::new();
+    }
+    let names: BTreeSet<&str> = partial
+        .packages
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !expected.expects(p))
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = (0..v.num_packages())
+        .filter(|&p| names.contains(v.package_name(p)) && !v.package_tombstoned(p))
+        .filter(|&p| v.package_nodes(p).iter().any(|&id| !v.is_tombstone(id)))
+        .map(|p| v.package_name(p).to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// What cambium said, by size.
@@ -246,14 +294,28 @@ pub struct WalkSummary {
     /// Steps the engine answered with a whole-repository re-query. Not
     /// globals: the answer was exact.
     pub engine_cold_rebuilds: usize,
-    /// Steps whose head index was partial: packages that failed to load at
-    /// that head were carried, or were missing since a cold build. The
-    /// steps were walked and scored like any other.
+    /// Steps whose head index was partial for any reason: packages that
+    /// failed to load were carried, or were missing since a cold build that
+    /// could not load them. The steps were walked and scored like any other.
+    /// On a subject whose cold build is expected to be partial (xla's
+    /// `publish_partial`) this is every step, which is why the report leads
+    /// with `carried_index_steps` instead.
     #[serde(default)]
     pub partial_index_steps: usize,
-    /// The packages those indexes named, unioned and sorted.
+    /// The packages those indexes named that they did not carry
+    /// ([`IndexCounts::carried`] is the rest), unioned and sorted: expected
+    /// by the subject to fail, or missing from the answer rather than stale
+    /// in it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub partial_index_packages: Vec<String>,
+    /// Steps whose head index carried rows for a package that failed to
+    /// load: the answer reached through rows as old as the last query that
+    /// loaded the package.
+    #[serde(default)]
+    pub carried_index_steps: usize,
+    /// The packages carried on those steps, unioned and sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_index_packages: Vec<String>,
     /// Steps whose oracle answer was a lower bound: some `rdeps` batch
     /// exited 3 under `--keep_going`.
     #[serde(default)]
@@ -301,6 +363,8 @@ impl Default for WalkSummary {
             engine_cold_rebuilds: 0,
             partial_index_steps: 0,
             partial_index_packages: Vec::new(),
+            carried_index_steps: 0,
+            carried_index_packages: Vec::new(),
             oracle_partial_steps: 0,
             oracle_unresolved: Vec::new(),
             oracle_repository_steps: 0,
@@ -465,15 +529,28 @@ pub fn summarise(
     s.steps_with_peers = peer_sample.len().min(steps.len());
     s.globals = steps.iter().filter(|st| st.global).count();
     s.engine_cold_rebuilds = steps.iter().filter(|st| st.cambium.cold_rebuild).count();
-    let partial: Vec<&PartialLoad> = steps
+    let partial: Vec<&IndexCounts> = steps
         .iter()
-        .map(|st| &st.index.partial)
-        .filter(|p| p.partial)
+        .map(|st| &st.index)
+        .filter(|i| i.partial.partial)
         .collect();
     s.partial_index_steps = partial.len();
     s.partial_index_packages = partial
         .iter()
-        .flat_map(|p| p.packages.iter().cloned())
+        .flat_map(|i| {
+            i.partial
+                .packages
+                .iter()
+                .filter(|p| !i.carried.contains(p))
+                .cloned()
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    s.carried_index_steps = partial.iter().filter(|i| !i.carried.is_empty()).count();
+    s.carried_index_packages = partial
+        .iter()
+        .flat_map(|i| i.carried.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -828,5 +905,89 @@ mod tests {
         })
         .unwrap();
         assert_eq!(old.oracle_repository_steps, 0);
+    }
+
+    /// Box run F's xla shape on the laptop: the window's cold build is
+    /// partial for two `win_1803` packages it never had rows for, and the
+    /// step at the LLVM integrate adds the packages it carried. Only the
+    /// carried step counts as carrying, and the report says so, rather than
+    /// "every step carried" with the cold build's names first.
+    #[test]
+    fn a_step_counts_as_carrying_only_for_packages_it_holds_rows_for() {
+        let win = vec![
+            "tools/toolchains/win_1803/py38".to_string(),
+            "tools/toolchains/win_1803/py39".to_string(),
+        ];
+        let partial = |names: Vec<String>| PartialLoad {
+            partial: true,
+            packages_in_error: names.len() as u32,
+            packages: names,
+        };
+        let mut cold_only = step("h1", true, 1.0);
+        cold_only.index.partial = partial(win.clone());
+        let mut carrying = step("h2", true, 1.0);
+        carrying.index.partial = partial([win.clone(), vec!["xla/mlir_hlo".into()]].concat());
+        carrying.index.carried = vec!["xla/mlir_hlo".into()];
+        let complete = step("h3", true, 1.0);
+        let mut r = a_result(vec![cold_only, carrying, complete], None);
+        r.summarise();
+        let s = &r.summary;
+        assert_eq!(s.partial_index_steps, 2);
+        assert_eq!(s.carried_index_steps, 1);
+        assert_eq!(s.carried_index_packages, vec!["xla/mlir_hlo".to_string()]);
+        assert_eq!(s.partial_index_packages, win);
+        let text = super::super::report::render(&r);
+        assert!(
+            text.contains(
+                "Steps whose index carried packages that failed to load: 1 of 3 (`xla/mlir_hlo`)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Steps whose index was partial for any reason: 2 of 3"),
+            "{text}"
+        );
+    }
+
+    /// Carried means live rows the subject does not expect to be partial: a
+    /// name the index has no package for, or a package whose rows are all
+    /// tombstoned, is missing instead, and one `publish_partial` names is
+    /// expected. The expected package here has rows, as xla's `win_1803`
+    /// packages do in the laptop's step-12 index (the cold build read what
+    /// `--keep_going` could), so the live-row test alone does not tell it
+    /// apart.
+    #[test]
+    fn carried_packages_are_the_partial_names_with_live_rows() {
+        let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
+        let pkg = |p: &str| cambium_index::PackageUpdate {
+            package: p.into(),
+            targets: vec![cambium_index::TargetRow::rule(
+                &format!("//{p}:x"),
+                "cc_library",
+                vec![],
+            )],
+            ..Default::default()
+        };
+        let win = "tools/toolchains/win_1803/py38";
+        b.apply_packages(&[pkg("tbl"), pkg("gone"), pkg("fine"), pkg(win)]);
+        b.delete_package("gone");
+        let index = b.finish("head");
+        let partial = PartialLoad {
+            partial: true,
+            packages_in_error: 4,
+            packages: vec!["gone".into(), "never".into(), "tbl".into(), win.into()],
+        };
+        use cambium_engine::config::PartialPolicy;
+        let expected = PartialPolicy::Expected(vec!["//tools/toolchains/win_1803/...".into()]);
+        assert_eq!(
+            carried_packages(index.view(), &partial, &expected),
+            vec!["tbl".to_string()]
+        );
+        assert_eq!(
+            carried_packages(index.view(), &partial, &PartialPolicy::default()),
+            vec!["tbl".to_string(), win.to_string()],
+            "with nothing expected, the live-row test alone decides"
+        );
+        assert!(carried_packages(index.view(), &PartialLoad::default(), &expected).is_empty());
     }
 }
