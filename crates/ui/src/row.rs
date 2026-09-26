@@ -98,17 +98,11 @@ pub fn render(cols: &[Column], cells: &[Cell], term: usize, p: &Paint) -> String
     out.trim_end().to_string()
 }
 
-/// The column header line, dim, laid out exactly as the rows under it.
+/// The column header line, dim, laid out exactly as the rows under it: it
+/// is a row whose cells are the titles, so it cannot drift from them.
 pub fn render_header(cols: &[Column], term: usize, p: &Paint) -> String {
-    let ws = widths(cols, term);
-    let mut out = " ".repeat(INDENT);
-    for (i, c) in cols.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&fit(&c.title, ws[i], c.align));
-    }
-    p.dim(out.trim_end())
+    let titles: Vec<Cell> = cols.iter().map(|c| Cell::text(&c.title)).collect();
+    p.dim(&render(cols, &titles, term, &Paint::new(false)))
 }
 
 #[cfg(test)]
