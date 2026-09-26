@@ -30,7 +30,7 @@ use crate::config::StoreConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("no baseline store is configured")]
+    #[error("no index store is configured")]
     NotConfigured,
     #[error("io error on {path}: {source}")]
     Io {
@@ -609,10 +609,17 @@ impl ArtifactStore for CommandStore {
     fn list(&self) -> Result<Vec<String>> {
         let out = Self::run(&self.list_cmd, "", Path::new(""), "list")?;
         if !out.status.success() {
+            // There is no key to name, so the message names the template,
+            // and a command that failed silently still says how it exited.
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(StoreError::Backend {
                 op: "list",
-                name: String::new(),
-                detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                name: "list_cmd".into(),
+                detail: if stderr.is_empty() {
+                    format!("exit {:?}, nothing on stderr", out.status.code())
+                } else {
+                    format!("exit {:?}: {stderr}", out.status.code())
+                },
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout)

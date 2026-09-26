@@ -271,10 +271,10 @@ mod tests {
 
     #[test]
     fn a_bare_diagnostic_is_one_line() {
-        let d = Diagnostic::error(Code::E008NoStore, "no baseline store is configured");
+        let d = Diagnostic::error(Code::E008NoStore, "no index store is configured");
         assert_eq!(
             render_human(&d, false),
-            "error[CAMBI-E008]: no baseline store is configured"
+            "error[CAMBI-E008]: no index store is configured"
         );
     }
 

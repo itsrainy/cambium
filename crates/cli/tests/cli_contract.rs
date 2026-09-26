@@ -1226,3 +1226,55 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
         "an error is not also a miss:\n{stderr}"
     );
 }
+
+/// `index gc` and `index list` report a store problem under the code every
+/// other verb uses for it: `CAMBI-E008` when no store is configured,
+/// `CAMBI-E012` when the backend has no such operation, each with its
+/// `help:` line. Never the generic `CAMBI-E001`.
+#[test]
+fn index_gc_and_list_report_store_problems_under_their_own_codes() {
+    let ws = bare_workspace();
+    let w = ws.path().to_str().unwrap();
+    for verb in ["gc", "list"] {
+        let (code, stdout, stderr) = run(&["-C", w, "index", verb]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stdout.is_empty(), "{stdout:?}");
+        assert!(
+            stderr.contains("error[CAMBI-E008]: no index store is configured"),
+            "`index {verb}` with no store:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("= help: set [baseline].store in cambium.toml"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("CAMBI-E001"), "{stderr}");
+        assert!(!stderr.contains("baseline store"), "{stderr}");
+    }
+
+    // A command store with no `list_cmd` can neither enumerate nor collect.
+    std::fs::write(
+        ws.path().join("cambium.toml"),
+        "[baseline]\nstore = { kind = \"command\", fetch_cmd = [\"false\"], push_cmd = [\"false\"] }\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = run(&["-C", w, "index", "gc"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    assert!(stderr.contains("lifecycle rule"), "{stderr}");
+    let (code, _, stderr) = run(&["-C", w, "index", "list"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    assert!(stderr.contains("`list_cmd`"), "{stderr}");
+
+    // Plain HTTP cannot list either; nothing is contacted to find that out.
+    std::fs::write(
+        ws.path().join("cambium.toml"),
+        "[baseline]\nstore = { kind = \"http\", url = \"http://127.0.0.1:9/cambium\" }\n",
+    )
+    .unwrap();
+    for verb in ["gc", "list"] {
+        let (code, _, stderr) = run(&["-C", w, "index", verb]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    }
+}

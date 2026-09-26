@@ -6,7 +6,7 @@
 //! spelling of these verbs.
 
 use anyhow::{Context as _, Result};
-use cambium_engine::{AffectedRequest, OnGlobal, PublishPolicy, PublishSource};
+use cambium_engine::{AffectedRequest, EngineError, OnGlobal, PublishPolicy, PublishSource};
 use clap::Subcommand;
 
 use crate::cmd::{hex, Context};
@@ -163,11 +163,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
         Args::Gc { keep } => {
             let engine = ctx.engine()?;
-            let store = engine.store().context("no baseline store is configured")?;
-            let removed = store.gc(
-                engine.config().baseline.retention_days,
-                keep.as_deref().unwrap_or(""),
-            )?;
+            let removed = configured_store(&engine)?
+                .gc(
+                    engine.config().baseline.retention_days,
+                    keep.as_deref().unwrap_or(""),
+                )
+                .map_err(EngineError::from)?;
             println!("removed {removed} index files");
             Ok(crate::EXIT_OK)
         }
@@ -184,13 +185,27 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         }
         Args::List => {
             let engine = ctx.engine()?;
-            let store = engine.store().context("no baseline store is configured")?;
-            for n in store.list()? {
+            for n in configured_store(&engine)?
+                .list()
+                .map_err(EngineError::from)?
+            {
                 println!("{n}");
             }
             Ok(crate::EXIT_OK)
         }
     }
+}
+
+/// The store `[baseline].store` names, or `CAMBI-E008` saying there is none.
+///
+/// A store failure goes through [`EngineError`] too (`.map_err` at each
+/// call), so it keeps its own code: `CAMBI-E012` for an operation the backend
+/// has no implementation of, `CAMBI-E010`/`E011` and exit 5 for a store that
+/// is there and failed, never the generic `CAMBI-E001`.
+fn configured_store(
+    engine: &cambium_engine::Engine,
+) -> Result<&dyn cambium_engine::store::ArtifactStore> {
+    Ok(engine.store().ok_or(EngineError::NoStore)?)
 }
 
 /// Writes the index to `out`, and publishes it when `publish` says how.
