@@ -1,9 +1,22 @@
+//! The verbs, one module each, and what they share.
+//!
+//! `main` turns the command line into a [`Context`] and hands it to one
+//! verb's `run`. What a new verb uses rather than writes again lives here:
+//! [`emit`] and [`emit_json`] print a document the way `--format` asked,
+//! [`tagged_event`] is the `jsonl` framing, [`two_dot`] reads a range, and
+//! [`short`], [`plural`], [`duration`] and [`human_bytes`] are the units a
+//! revision, a count, an age and a size are said in. `narrate` holds the
+//! pieces of the stderr narration more than one verb draws. `cambi config`
+//! has no module of its own: each of its three subcommands is one document,
+//! printed here.
+
 pub mod affected;
 pub mod doctor;
 pub mod explain;
 pub mod index;
 pub mod init;
 pub mod inspect;
+mod narrate;
 pub mod plan;
 pub mod profile;
 pub mod status;
@@ -21,9 +34,8 @@ pub struct Context {
     /// attribute each value to. The highest layer of the configuration
     /// stack, and the only way a flag reaches the engine or a probe.
     pub overrides: Overrides,
-    /// The global `--format`.
-    pub format: crate::Format,
-    /// Where diagnostics go, and in what shape.
+    /// Where diagnostics go, and in what shape. It holds the global
+    /// `--format`, which [`Context::format`] reads for every verb.
     pub render: crate::diag::Renderer,
     /// How a long run narrates itself on stderr: decided once, at startup,
     /// from `--quiet`, `--format`, `--color` and the terminal.
@@ -31,6 +43,11 @@ pub struct Context {
 }
 
 impl Context {
+    /// The global `--format`.
+    pub fn format(&self) -> crate::Format {
+        self.render.format
+    }
+
     pub fn engine(&self) -> Result<Engine> {
         Ok(Engine::open_with(
             &self.root,
@@ -99,7 +116,7 @@ pub fn config(ctx: &Context, args: ConfigArgs) -> Result<u8> {
                 "schema": cambium_engine::report::SCHEMA_VERSION,
                 "config_hash": hash,
             });
-            emit(&doc, ctx.format.data("cambi config hash")?, |_| {
+            emit(&doc, ctx.format().data("cambi config hash")?, |_| {
                 println!("{hash}")
             })?;
             Ok(crate::EXIT_OK)
@@ -117,7 +134,7 @@ pub fn config_show(ctx: &Context) -> Result<u8> {
         "config_hash": hex(&cfg.hash()),
         "toml": cfg.to_toml(),
     });
-    emit(&doc, ctx.format.data("cambi config show")?, |_| {
+    emit(&doc, ctx.format().data("cambi config show")?, |_| {
         print!("{}", cfg.to_toml());
         println!("\n# config_hash = {}", hex(&cfg.hash()));
     })?;
@@ -143,7 +160,7 @@ pub fn config_explain(ctx: &Context) -> Result<u8> {
         "local_file": layered.local_exists().then(|| layered.local_path.clone()),
         "values": values,
     });
-    emit(&doc, ctx.format.data("cambi config explain")?, |_| {
+    emit(&doc, ctx.format().data("cambi config explain")?, |_| {
         let width = values.iter().map(|v| v.key.len()).max().unwrap_or(0);
         for v in &values {
             println!(
@@ -181,7 +198,7 @@ pub fn emit<T: serde::Serialize>(
 /// of the document (`affected`, whose human output is the label list).
 pub fn emit_json<T: serde::Serialize>(value: &T, fmt: crate::DataFormat) -> Result<()> {
     match fmt {
-        crate::DataFormat::Jsonl => println!("{}", result_event(value)?),
+        crate::DataFormat::Jsonl => println!("{}", tagged_event("result", value)?),
         crate::DataFormat::Json | crate::DataFormat::Text => {
             println!("{}", serde_json::to_string_pretty(value)?)
         }
@@ -189,15 +206,17 @@ pub fn emit_json<T: serde::Serialize>(value: &T, fmt: crate::DataFormat) -> Resu
     Ok(())
 }
 
-/// One `jsonl` result line: the document, with `"event": "result"` in front of
-/// its own fields.
-pub fn result_event<T: serde::Serialize>(value: &T) -> Result<String> {
-    let mut doc = serde_json::json!({"event": "result"});
+/// One `jsonl` line: `"event": kind` in front of the value's own fields, or
+/// in front of the value itself, under `kind`, when it is not an object. The
+/// framing a watcher parses, for the `result` at the end of a run and the
+/// `diagnostic`s streamed ahead of it alike.
+pub fn tagged_event<T: serde::Serialize>(kind: &str, value: &T) -> Result<String> {
+    let mut doc = serde_json::json!({ "event": kind });
     let map = doc.as_object_mut().expect("an object");
     match serde_json::to_value(value)? {
         serde_json::Value::Object(fields) => map.extend(fields),
         other => {
-            map.insert("result".into(), other);
+            map.insert(kind.into(), other);
         }
     }
     Ok(serde_json::to_string(&doc)?)
@@ -208,3 +227,114 @@ pub use cambium_engine::hex;
 /// Units every verb says a number in. They live in `cambium_ui` so the live
 /// rows and the report on stdout cannot disagree about what `4.2 s` is.
 pub use cambium_ui::report::human_bytes;
+
+/// `one` after a count of one and `many` after any other, zero included:
+/// `plural(n, "repository", "repositories")`.
+pub fn plural<'a, N: PartialEq + From<u8>>(n: N, one: &'a str, many: &'a str) -> &'a str {
+    if n == N::from(1) {
+        one
+    } else {
+        many
+    }
+}
+
+/// The `s` a regular noun takes after a count:
+/// `format!("{n} file{}", plural_s(n))`.
+pub fn plural_s<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    plural(n, "", "s")
+}
+
+/// The two halves of a two-dot range, read as `git diff` reads them: an
+/// empty side is HEAD, so `main..` is `main..HEAD` and `..feature` is
+/// `HEAD..feature`. `None` when there is no `..` at all, which each verb
+/// reads its own way (a base for `affected`, the walk's end for `profile`).
+/// A three-dot range is each verb's usage error, checked before this.
+pub fn two_dot(range: &str) -> Option<(String, String)> {
+    let (from, to) = range.split_once("..")?;
+    let side = |s: &str| if s.is_empty() { "HEAD" } else { s }.to_string();
+    Some((side(from), side(to)))
+}
+
+/// A span of seconds in the words someone would say it in: `3 days`,
+/// `1 hour`. `status` and `--dry-run` say how old an index is this way;
+/// [`human_age`] is the narration's shorter form.
+pub fn duration(secs: u64) -> String {
+    let (n, unit) = match secs {
+        0..=119 => (secs, "second"),
+        120..=3599 => (secs / 60, "minute"),
+        3600..=86_399 => (secs / 3600, "hour"),
+        _ => (secs / 86_400, "day"),
+    };
+    format!("{n} {unit}{}", plural_s(n))
+}
+
+/// An age in the coarsest unit that still says something, short enough for
+/// a narration line: `40 min`, `4 h`, `2 d`. An index is minutes to weeks
+/// old and nobody reads the seconds. [`duration`] is the spelled-out form.
+pub fn human_age(secs: u64) -> String {
+    match secs {
+        0..=119 => format!("{secs} s"),
+        120..=7_199 => format!("{} min", secs / 60),
+        7_200..=172_799 => format!("{} h", secs / 3_600),
+        _ => format!("{} d", secs / 86_400),
+    }
+}
+
+/// A revision as the narration and the long reports name it: a sha cut to
+/// ten digits, a ref name (`origin/main`) whole.
+pub fn short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 10)
+}
+
+/// A revision as the one-screen answers name it (`explain`, `--dry-run`): a
+/// sha cut to the seven digits git abbreviates one to, a ref name whole.
+pub fn git_short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 7)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_is_singular_and_every_other_count_is_plural() {
+        assert_eq!(plural(1usize, "repository", "repositories"), "repository");
+        assert_eq!(plural(0u32, "repository", "repositories"), "repositories");
+        assert_eq!(format!("{} file{}", 2u64, plural_s(2u64)), "2 files");
+        assert_eq!(format!("{} file{}", 1u64, plural_s(1u64)), "1 file");
+    }
+
+    #[test]
+    fn an_empty_side_of_a_range_is_head() {
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(two_dot("a..b"), pair("a", "b"));
+        assert_eq!(two_dot("a.."), pair("a", "HEAD"));
+        assert_eq!(two_dot("..b"), pair("HEAD", "b"));
+        assert_eq!(
+            two_dot("origin/main~2..HEAD"),
+            pair("origin/main~2", "HEAD")
+        );
+        assert_eq!(two_dot("main"), None);
+    }
+
+    #[test]
+    fn an_age_is_singular_when_it_is_one() {
+        assert_eq!(duration(3600), "1 hour");
+        assert_eq!(duration(7200 * 2), "4 hours");
+        assert_eq!(duration(86_400 * 3), "3 days");
+    }
+
+    /// A watcher reads the kind off `event` and the rest off the same
+    /// object, so a document's fields sit beside the tag rather than under it.
+    #[test]
+    fn an_event_line_is_its_kind_beside_the_value_s_own_fields() {
+        let read = |line: String| serde_json::from_str::<serde_json::Value>(&line).unwrap();
+        let v = read(tagged_event("result", &serde_json::json!({ "schema": 18 })).unwrap());
+        assert_eq!(v, serde_json::json!({ "event": "result", "schema": 18 }));
+        let v = read(tagged_event("result", &"a bare value").unwrap());
+        assert_eq!(
+            v,
+            serde_json::json!({ "event": "result", "result": "a bare value" })
+        );
+    }
+}

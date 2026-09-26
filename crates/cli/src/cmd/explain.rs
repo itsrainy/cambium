@@ -1,8 +1,8 @@
 //! `cambi explain [LABEL] [BASE..HEAD]`: why is this target affected, or why
 //! did the run go the size it did.
 //!
-//! It is the same computation `affected` runs — the same range, the same
-//! flags, the same `AffectedRequest`, built by `affected::request` — with the
+//! It is the same computation `affected` runs (the same range, the same
+//! flags, the same `AffectedRequest`, built by `affected::request`) with the
 //! explanations turned on. It is a verb rather than a flag because its output
 //! has its own shape and its own audience: someone who already has an answer
 //! and wants to know where it came from.
@@ -18,7 +18,7 @@ use cambium_engine::{AffectedReport, Diagnostic, Explanation};
 use clap::Args as ClapArgs;
 
 use crate::cmd::affected::Shape;
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, git_short, plural_s, Context};
 
 #[derive(ClapArgs)]
 // Both this and `affected::Args` are `Args`, and clap names an argument group
@@ -46,7 +46,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     // Before the workspace is opened, like every other usage error: asking
     // `explain` for `--format query` is wrong wherever it is run, and
     // answering it with "no workspace here" would hide that.
-    let fmt = ctx.format.data("cambi explain")?;
+    let fmt = ctx.format().data("cambi explain")?;
 
     let engine = ctx.engine()?;
     // `--dry-run` is one of the flags `explain` shares with `affected`, and it
@@ -71,7 +71,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         Some(label) => about_label(&outcome, label)?,
     };
 
-    let doc = document(report, args.label.as_deref(), &about);
+    let doc = document(report, args.label.as_deref(), &about)?;
     emit(&doc, fmt, |_| {
         print!(
             "{}",
@@ -79,7 +79,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         )
     })?;
     // An unaffected label is an answer, not an error, and a global run is
-    // still the answer to the question asked — `affected` is the verb whose
+    // still the answer to the question asked: `affected` is the verb whose
     // exit code carries the verdict.
     Ok(crate::EXIT_OK)
 }
@@ -120,12 +120,12 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
     let cambium_engine::LabelPresence { at_head, at_base } = outcome.label_presence(label);
     match (at_head, at_base) {
         (Some(false), Some(true)) => Ok(About::NotAffected {
-            note: format!("it no longer exists at {}", short(&report.head)),
+            note: format!("it no longer exists at {}", git_short(&report.head)),
         }),
         (Some(false), Some(false)) => Err(crate::diag::UsageError::raised(format!(
             "{label} is in neither index: it exists at neither {} nor {}",
-            short(&report.base),
-            short(&report.head)
+            git_short(&report.base),
+            git_short(&report.head)
         ))),
         // Either the head index was not materialised or the base could not be
         // read back; the answer about the change still holds.
@@ -134,9 +134,9 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
                 "no changed input reached it: {} changed file{} dirtied {} package{}, and \
                  nothing in their reverse closure names it",
                 report.stats.changed_files,
-                plural(report.stats.changed_files),
+                plural_s(report.stats.changed_files),
                 report.stats.dirty_packages,
-                plural(report.stats.dirty_packages),
+                plural_s(report.stats.dirty_packages),
             ),
         }),
     }
@@ -144,19 +144,6 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
 
 fn is_label(s: &str) -> bool {
     s.starts_with("//") || s.starts_with('@') || s.starts_with(':')
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
-
-/// A sha cut to seven digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 7)
 }
 
 // --------------------------------------------------------------------- human
@@ -201,8 +188,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
     if report.stats.cold_rebuild {
         return format!(
             "{}..{} re-indexed the whole repository at head; the answer is still exact\n{}",
-            short(&report.base),
-            short(&report.head),
+            git_short(&report.base),
+            git_short(&report.head),
             cause(
                 report.cold_rebuild_cause(),
                 report.cold_rebuild_reason.as_deref(),
@@ -217,8 +204,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
          direct targets     {}\n  \
          affected targets   {}\n  \
          {}\n",
-        short(&report.base),
-        short(&report.head),
+        git_short(&report.base),
+        git_short(&report.head),
         report.stats.changed_files,
         report.stats.dirty_packages,
         report.stats.direct_targets,
@@ -228,8 +215,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
 }
 
 /// The diagnostic the engine already emitted for this cause, rendered with its
-/// help line. Its message carries the reason verbatim — the engine's own
-/// tests hold that — so the reason is printed on its own only when there is
+/// help line. Its message carries the reason verbatim (the engine's own
+/// tests hold that), so the reason is printed on its own only when there is
 /// no diagnostic: a run replayed from a document, or a cause older than the
 /// codes.
 fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> String {
@@ -245,7 +232,7 @@ fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> Strin
 fn spliced_onto(report: &AffectedReport) -> String {
     format!(
         "spliced onto       {} ({} nodes at base)",
-        short(&report.base),
+        git_short(&report.base),
         report.stats.base_nodes
     )
 }
@@ -253,7 +240,11 @@ fn spliced_onto(report: &AffectedReport) -> String {
 // ---------------------------------------------------------------------- json
 
 /// The one `explain` document, in both scopes (README, "The JSON contract").
-fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serde_json::Value {
+fn document(
+    report: &AffectedReport,
+    label: Option<&str>,
+    about: &About,
+) -> Result<serde_json::Value> {
     let mut doc = serde_json::json!({
         "schema": cambium_engine::report::SCHEMA_VERSION,
         "base": report.base,
@@ -282,10 +273,7 @@ fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serd
             About::Affected(e) => {
                 map.insert("affected".into(), true.into());
                 map.insert("path".into(), serde_json::json!(e.path));
-                map.insert(
-                    "reason".into(),
-                    serde_json::to_value(&e.reason).unwrap_or(serde_json::Value::Null),
-                );
+                map.insert("reason".into(), serde_json::to_value(&e.reason)?);
             }
             About::GloballyAffected => {
                 map.insert("affected".into(), true.into());
@@ -297,7 +285,7 @@ fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serd
             About::Run => {}
         }
     }
-    doc
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -353,7 +341,7 @@ mod tests {
     }
 
     /// A global run is not a per-target answer, so the label's line says that
-    /// and the run's own story follows — with the diagnostic the engine
+    /// and the run's own story follows, with the diagnostic the engine
     /// already raised for the cause, its code, and its help line.
     #[test]
     fn a_global_run_names_the_causes_diagnostic_and_its_help_line() {
@@ -438,7 +426,7 @@ mod tests {
     /// label's only when a label was asked about.
     #[test]
     fn the_json_document_carries_the_label_fields_only_with_a_label() {
-        let run = document(&report(), None, &About::Run);
+        let run = document(&report(), None, &About::Run).unwrap();
         assert_eq!(run["schema"], cambium_engine::report::SCHEMA_VERSION);
         assert_eq!(run["summary"]["affected_targets"], 9);
         assert!(run.get("label").is_none() && run.get("affected").is_none());
@@ -451,7 +439,7 @@ mod tests {
                 path: "lib/base.cc".into(),
             },
         }));
-        let one = document(&report(), Some("//foo:bar"), &about);
+        let one = document(&report(), Some("//foo:bar"), &about).unwrap();
         assert_eq!(one["label"], "//foo:bar");
         assert_eq!(one["affected"], true);
         assert_eq!(one["path"][1], "//lib:base");
@@ -464,7 +452,8 @@ mod tests {
             &About::NotAffected {
                 note: "no changed input reached it".into(),
             },
-        );
+        )
+        .unwrap();
         assert_eq!(none["affected"], false);
         assert_eq!(none["why_not"], "no changed input reached it");
     }

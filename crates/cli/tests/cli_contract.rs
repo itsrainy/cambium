@@ -2,12 +2,13 @@
 //!
 //! A service is going to shell out to this binary rather than link against the
 //! crates, so its name, the subcommands it answers to, and the exit codes it
-//! returns are as much a published interface as the JSON it prints — and
+//! returns are as much a published interface as the JSON it prints, and
 //! nothing else in the tree would notice if one of them changed.
 //!
 //! `crates/engine/tests/json_contract.rs` pins the document shapes and the
 //! error-to-exit-code mapping; this pins the surface a caller types.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 use cambium_testkit::published_fixture;
@@ -20,12 +21,12 @@ use cambium_testkit::published_fixture;
 /// so a rename fails this file at compile time rather than at a customer.
 const CAMBI: &str = env!("CARGO_BIN_EXE_cambi");
 
-fn run(args: &[&str]) -> (i32, String, String) {
+fn run(args: &[impl AsRef<OsStr>]) -> (i32, String, String) {
     run_with_env(args, &[])
 }
 
 /// As [`run`], with environment variables set for the child alone.
-fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+fn run_with_env(args: &[impl AsRef<OsStr>], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(CAMBI);
     cmd.args(args);
     for (k, v) in env {
@@ -141,12 +142,16 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
     }
 }
 
+/// The `schema` every JSON document carries. Pinned here, not read from
+/// `SCHEMA_VERSION`, so a bump is a deliberate edit to this file as well.
+const SCHEMA: u64 = 18;
+
 /// Builds a synthetic index in `dir` and returns its path.
 ///
 /// The generator never goes near Bazel or git, so everything below runs in a
-/// bare sandbox. It is built in process because the verb that used to do it
-/// (`cambium-bench synth build-index`) is `cambium-bench synth build-index` now, and a
-/// `cambi` test must not need another binary to have been built.
+/// bare sandbox. It is built in process because the verb that builds one
+/// moved out of `cambi` into `cambium-bench synth build-index`, and a `cambi`
+/// test must not need another binary to have been built.
 fn synth_index(dir: &std::path::Path) -> std::path::PathBuf {
     let out = dir.join("synth.cmbx");
     let spec = cambium_synth::GraphSpec::preset("tiny").expect("the tiny preset");
@@ -157,10 +162,10 @@ fn synth_index(dir: &std::path::Path) -> std::path::PathBuf {
 
 #[test]
 fn the_exit_codes_are_the_ones_the_readme_documents() {
-    // 0 for an answer, 1 for a failure the caller caused. The Bazel- and
-    // baseline-specific codes (3, 4) need a workspace, so they are pinned
-    // against `EngineError` in the unit tests instead; these two are the ones
-    // every caller branches on, and they must hold with nothing installed.
+    // 0 for an answer, 1 for a failure the caller caused: the two every
+    // caller branches on, which must hold with nothing installed, so this
+    // runs against a synthetic index and no workspace. The codes that need
+    // one (3, 4 and 5) are pinned end to end by the fixture tests below.
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
 
@@ -171,7 +176,12 @@ fn the_exit_codes_are_the_ones_the_readme_documents() {
     let (code, stdout, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
     assert_eq!(code, 1, "an unreadable index is a plain error");
     assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
-    assert!(!stderr.is_empty(), "the error should say what went wrong");
+    // An error is a diagnostic like any other: a code a script can match,
+    // not a prose line that changes with the wording.
+    assert!(
+        stderr.contains("error[CAMBI-E"),
+        "an unreadable index should be a coded diagnostic:\n{stderr}"
+    );
 
     let (code, _, _) = run(&[
         "inspect",
@@ -206,7 +216,6 @@ fn hub_labels(index: &std::path::Path) -> Vec<String> {
 fn json_documents_carry_the_current_schema_version() {
     // The version is shared by every document, so one reader that pins it is
     // enough to catch a bump made for one document and forgotten in another.
-    const SCHEMA: u64 = 18;
     let dir = tempfile::tempdir().expect("tempdir");
     let index = synth_index(dir.path());
     let hub = hub_labels(&index).first().expect("a hub").clone();
@@ -358,20 +367,6 @@ fn the_null_format_answers_with_the_exit_code_alone() {
     assert!(stdout.is_empty(), "{stdout:?}");
 }
 
-/// An error is a diagnostic like any other: a code a script can match, not a
-/// prose line that changes with the wording.
-#[test]
-fn an_error_carries_a_code_on_stderr() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let missing = dir.path().join("nope.cmbx");
-    let (code, _, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(
-        stderr.contains("error[CAMBI-E"),
-        "an unreadable index should be a coded diagnostic:\n{stderr}"
-    );
-}
-
 #[test]
 fn no_color_means_no_escape_codes() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -440,7 +435,7 @@ fn the_old_spellings_still_work_and_name_the_new_one() {
     assert_eq!(old, new);
 
     // `baseline` is `index`. `list` needs no workspace-side work beyond the
-    // store, and a missing store is an error — the deprecation still fires,
+    // store, and a missing store is an error; the deprecation still fires,
     // which is the point.
     let (_, _, stderr) = run(&["baseline", "list"]);
     assert!(
@@ -474,7 +469,7 @@ fn quiet_suppresses_the_deprecation_warning() {
 }
 
 /// The range is positional; `--base` / `--head` stay as aliases of its halves.
-/// Both at once is a contradiction, and it is the command line's own error —
+/// Both at once is a contradiction, and it is the command line's own error,
 /// reported with a code, wherever it is typed, workspace or not.
 #[test]
 fn affected_rejects_a_range_and_the_old_flags_together() {
@@ -490,7 +485,7 @@ fn affected_rejects_a_range_and_the_old_flags_together() {
 }
 
 /// Typing `cambi` and nothing else is the first thing a new user does, and the
-/// question it asks is "where am I" — so it prints `status`, not a usage screen.
+/// question it asks is "where am I", so it prints `status`, not a usage screen.
 /// Outside a workspace too: "there is no workspace here" is the answer, and it
 /// is not an error.
 #[test]
@@ -533,7 +528,7 @@ fn status_json_carries_the_schema_and_a_field_per_probe() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("status prints one document");
-    assert_eq!(v["schema"].as_u64(), Some(18));
+    assert_eq!(v["schema"].as_u64(), Some(SCHEMA));
     for field in ["workspace", "config", "store", "diagnostics"] {
         assert!(v.get(field).is_some(), "{field} is missing:\n{stdout}");
     }
@@ -577,7 +572,7 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
         "no workspace means a run cannot work here: {stderr}"
     );
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor prints one document");
-    assert_eq!(v["schema"].as_u64(), Some(18));
+    assert_eq!(v["schema"].as_u64(), Some(SCHEMA));
     let checks = v["checks"].as_array().expect("a checks array");
     assert!(!checks.is_empty());
     for c in checks {
@@ -606,7 +601,7 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
 }
 
 /// A store nobody configured is how a developer with no store works, and
-/// `doctor` must not grade it as broken — it is the difference between "you
+/// `doctor` must not grade it as broken: it is the difference between "you
 /// have not set this up" and "this is set up wrong".
 #[test]
 fn doctor_grades_an_unconfigured_store_ok() {
@@ -639,7 +634,7 @@ fn bare_workspace() -> tempfile::TempDir {
 }
 
 /// What `init` writes has to be what the engine reads, and `config explain` has
-/// to be able to say where every value came from — otherwise the file it wrote
+/// to be able to say where every value came from; otherwise the file it wrote
 /// is a file nothing can account for.
 #[test]
 fn init_writes_a_config_the_engine_loads_and_explain_attributes() {
@@ -922,13 +917,40 @@ fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let doc: serde_json::Value = serde_json::from_str(&stdout).expect("one document");
-    assert_eq!(doc["schema"], 18);
+    assert_eq!(doc["schema"], SCHEMA);
     assert_eq!(doc["plan"]["mode"], "splice");
     assert_eq!(doc["plan"]["index"]["revision"], f.commits[1]);
     assert!(
         doc["plan"]["dirty_packages"].is_u64(),
         "the diff was classified without Bazel:\n{stdout}"
     );
+}
+
+/// A range with an empty side reads as `git diff` reads it: the empty side
+/// is HEAD, whichever side it is.
+#[test]
+fn an_empty_side_of_a_range_is_head() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let (base, head) = (&f.commits[1], &f.commits[f.commits.len() - 1]);
+    let plan = |range: &str| {
+        let (code, stdout, stderr) = run(&[
+            "-C",
+            ws,
+            "--cache-dir",
+            f.cache.to_str().unwrap(),
+            "affected",
+            "--dry-run",
+            range,
+        ]);
+        assert_eq!(code, 0, "{range}: {stderr}{stdout}");
+        stdout.lines().next().unwrap_or_default().to_string()
+    };
+    let expected = format!("plan for {}..{}", &base[..7], &head[..7]);
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", head]);
+    assert_eq!(plan(&format!("{base}..")), expected);
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    assert_eq!(plan(&format!("..{head}")), expected);
 }
 
 /// `--format labels` is the CI format: one label per line and nothing else,
@@ -998,16 +1020,31 @@ fn asking_a_data_query_for_labels_is_a_usage_error() {
     );
 }
 
+/// `git clone <flags>` of the fixture into `<dir>/clone`, with the
+/// fixture's `cambium.toml` copied in: the fixture writes it after its
+/// history, so a clone has none of its own. Returns the clone's path.
+fn clone_fixture(
+    f: &cambium_testkit::PublishedFixture,
+    dir: &std::path::Path,
+    flags: &[&str],
+) -> std::path::PathBuf {
+    let clone = dir.join("clone");
+    let url = format!("file://{}", f.ws.display());
+    let mut args = vec!["clone", "-q"];
+    args.extend_from_slice(flags);
+    args.extend([url.as_str(), clone.to_str().unwrap()]);
+    cambium_testkit::git(dir, &args);
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    clone
+}
+
 /// A clone the way `actions/checkout` leaves one: a detached HEAD, no local
 /// `main`, and `origin/main` present or not.
 fn ci_clone(f: &cambium_testkit::PublishedFixture) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    let clone = dir.path().join("clone");
-    let url = format!("file://{}", f.ws.display());
-    cambium_testkit::git(dir.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
+    let clone = clone_fixture(f, dir.path(), &[]);
     cambium_testkit::git(&clone, &["checkout", "-q", "--detach"]);
     cambium_testkit::git(&clone, &["branch", "-q", "-D", "main"]);
-    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
     dir
 }
 
@@ -1136,6 +1173,14 @@ fn point_store_at(ws: &std::path::Path, path: &str) {
     std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
 }
 
+/// Changes one hashed key of the fixture's `cambium.toml`, so every index it
+/// published was built with a configuration the workspace no longer has.
+fn move_the_configuration(ws: &std::path::Path) {
+    let mut cfg = cambium_engine::Config::load(ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+}
+
 /// A relative directory store in the checked-in `cambium.toml` is read from
 /// the workspace root, so `-C` from anywhere else reaches the same store.
 #[test]
@@ -1182,7 +1227,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
 
     point_store_at(&f.ws, "never-published");
     let a = args(ws);
-    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, _, stderr) = run(&a);
     assert_eq!(code, 4, "{stderr}");
     assert_eq!(
         stderr.matches("CAMBI-W007").count(),
@@ -1199,7 +1244,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
     // would be on success; the error stays on stderr.
     let mut j = a.clone();
     j.splice(2..2, ["--format".to_string(), "jsonl".to_string()]);
-    let (code, stdout, stderr) = run(&j.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, stdout, stderr) = run(&j);
     assert_eq!(code, 4, "{stderr}");
     let events: Vec<serde_json::Value> = stdout
         .lines()
@@ -1218,7 +1263,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
 
     // A file where the directory should be: `/dev/null/nope`'s shape.
     point_store_at(&f.ws, "cambium.toml/nope");
-    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, _, stderr) = run(&a);
     assert_eq!(code, 5, "{stderr}");
     assert!(stderr.contains("CAMBI-E011"), "{stderr}");
     assert!(
@@ -1288,9 +1333,7 @@ fn gc_removes_a_lineage_the_configuration_moved_away_from() {
     let f = published_fixture(1);
     let ws = f.ws.to_str().unwrap();
     let cache = f.cache.to_str().unwrap();
-    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
-    cfg.externals.index_max_packages += 1;
-    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    move_the_configuration(&f.ws);
 
     let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "status"]);
     assert_eq!(code, 0, "{stderr}");
@@ -1461,9 +1504,7 @@ fn no_index_under_no_full_build_narrates_no_cold_build() {
 #[test]
 fn a_refused_index_is_one_w003() {
     let f = published_fixture(1);
-    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
-    cfg.externals.index_max_packages += 1;
-    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    move_the_configuration(&f.ws);
     let base = &f.commits[1];
     let (code, _, stderr) = run(&[
         "-C",
@@ -1494,22 +1535,7 @@ fn a_depth_one_clone_names_the_fetch_or_the_deepen() {
     let f = published_fixture(1);
     cambium_testkit::git(&f.ws, &["branch", "-q", "pr", &f.commits[3]]);
     let dir = tempfile::tempdir().expect("tempdir");
-    let clone = dir.path().join("clone");
-    let url = format!("file://{}", f.ws.display());
-    cambium_testkit::git(
-        dir.path(),
-        &[
-            "clone",
-            "-q",
-            "--depth",
-            "1",
-            "--branch",
-            "pr",
-            &url,
-            clone.to_str().unwrap(),
-        ],
-    );
-    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    let clone = clone_fixture(&f, dir.path(), &["--depth", "1", "--branch", "pr"]);
     let c = clone.to_str().unwrap();
 
     let (code, stdout, stderr) = run(&["-C", c, "affected", "main", "--dry-run"]);

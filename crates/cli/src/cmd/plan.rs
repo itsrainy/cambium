@@ -6,7 +6,7 @@
 use anyhow::Result;
 use cambium_engine::plan::{PlanMode, RunPlan};
 
-use crate::cmd::{emit, Context};
+use crate::cmd::{duration, emit, git_short, plural_s, Context};
 
 pub fn run(
     ctx: &Context,
@@ -21,7 +21,7 @@ pub fn run(
         "schema": cambium_engine::report::SCHEMA_VERSION,
         "plan": plan,
     });
-    emit(&doc, ctx.format.data("cambi affected --dry-run")?, |_| {
+    emit(&doc, ctx.format().data("cambi affected --dry-run")?, |_| {
         print_human(&plan)
     })?;
     // The same code the run itself would exit with when it already knows the
@@ -36,8 +36,8 @@ pub fn run(
 fn print_human(plan: &RunPlan) {
     println!(
         "plan for {}..{}",
-        cambium_ui::report::rev(&plan.base, 7),
-        cambium_ui::report::rev(&plan.head, 7)
+        git_short(&plan.base),
+        git_short(&plan.head)
     );
     match &plan.index {
         None => println!("  index  none: cold build"),
@@ -46,21 +46,21 @@ fn print_human(plan: &RunPlan) {
             cambium_engine::probe::short(&i.revision),
             &i.lineage[..6.min(i.lineage.len())],
             match i.age_seconds {
-                Some(age) => format!("{} old", crate::cmd::status::duration(age)),
+                Some(age) => format!("{} old", duration(age)),
                 None => "built at an unrecorded time".into(),
             },
             match i.distance {
                 Some(0) | None => String::new(),
-                Some(n) => format!(", {n} commit{} back", if n == 1 { "" } else { "s" }),
+                Some(n) => format!(", {n} commit{} back", plural_s(n)),
             }
         ),
     }
     println!(
         "  diff   {} changed file{}, {}",
         plan.changed_files,
-        if plan.changed_files == 1 { "" } else { "s" },
+        plural_s(plan.changed_files),
         match plan.dirty_packages {
-            Some(n) => format!("{n} dirty package{}", if n == 1 { "" } else { "s" }),
+            Some(n) => format!("{n} dirty package{}", plural_s(n)),
             None => "dirty packages unknown until queried".into(),
         }
     );

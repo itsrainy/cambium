@@ -1,4 +1,4 @@
-//! `cambi inspect` — graph questions against one index file.
+//! `cambi inspect`: graph questions against one index file.
 //!
 //! Plumbing: this is how an answer `explain` gave is checked against the graph
 //! it came from. Every subcommand reads one index file and answers one
@@ -14,17 +14,17 @@ use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
-use crate::cmd::{emit, human_bytes as human, Context};
+use crate::cmd::{emit, hex, human_bytes, plural, Context};
 
 /// Options every query shares.
-#[derive(ClapArgs, Clone)]
+#[derive(ClapArgs)]
 pub struct Common {
     /// Index file to query.
     pub file: PathBuf,
 }
 
 /// Options the reachability queries share.
-#[derive(ClapArgs, Clone)]
+#[derive(ClapArgs)]
 pub struct Reach {
     /// Follow edges transitively rather than one hop.
     #[arg(long)]
@@ -216,7 +216,7 @@ fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     let limit = args.limit;
     emit(
         &result,
-        ctx.format.data("cambi inspect verify")?,
+        ctx.format().data("cambi inspect verify")?,
         |r: &inspect::VerifyResult| print_verify(r, limit),
     )?;
     Ok(if result.is_sound() {
@@ -307,24 +307,16 @@ fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
     }
 }
 
-fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
-    if n == 1 {
-        one
-    } else {
-        many
-    }
-}
-
 /// One question against the index.
 ///
 /// The query runs under every format, `null` included: the exit code is an
-/// answer — `path` says whether there is a path, and an unknown label is
-/// still an error — and `emit` is what decides whether anything is printed.
+/// answer (`path` says whether there is a path, and an unknown label is
+/// still an error), and `emit` is what decides whether anything is printed.
 fn run_query(ctx: &Context, args: Query) -> Result<u8> {
     // `--format query` has no meaning for a byte count or a path, and a silent
     // fallback to text would be worse than saying so. Checked before the file
     // is opened: a usage error is the caller's, whatever the file's state.
-    let fmt = ctx.format.data("cambi inspect")?;
+    let fmt = ctx.format().data("cambi inspect")?;
     let f = IndexFile::open(&args.common().file)?;
     let q = IndexQuery::new(f.view());
 
@@ -492,7 +484,7 @@ fn print_stats(s: &inspect::IndexStats) {
     }
     println!();
     let b = &s.bytes;
-    println!("bytes:           {} total", human(b.file_total));
+    println!("bytes:           {} total", human_bytes(b.file_total));
     let rows: [(&str, i64); 13] = [
         ("label table", b.label_table as i64),
         ("label sort index", b.label_sorted as i64),
@@ -511,26 +503,26 @@ fn print_stats(s: &inspect::IndexStats) {
     for (name, v) in rows {
         println!(
             "  {name:<18} {:>10}  {:>5.1}%",
-            human(v.max(0) as u64),
+            human_bytes(v.max(0) as u64),
             share(v, b.file_total)
         );
     }
     println!(
         "  {:<18} {:>10}  {:>5.1}%",
         "framing/padding",
-        human(b.framing.max(0) as u64),
+        human_bytes(b.framing.max(0) as u64),
         share(b.framing, b.file_total)
     );
     println!();
     let lp = &b.label_packing;
     println!(
         "labels:          {:>10}  {:>5.1}% of the file (table + sort index)",
-        human(b.label_table + b.label_sorted),
+        human_bytes(b.label_table + b.label_sorted),
         b.label_total_share * 100.0
     );
     println!(
         "  packed         {:>10}  {:>5.1}% would remain, storing (package, name)",
-        human(lp.packed_label_table + b.label_sorted),
+        human_bytes(lp.packed_label_table + b.label_sorted),
         share(
             (lp.packed_label_table + b.label_sorted) as i64,
             b.file_total
@@ -538,7 +530,7 @@ fn print_stats(s: &inspect::IndexStats) {
     );
     println!(
         "  saving         {:>10}  {:>5.1}% of the file, {} labels not packable",
-        human(lp.prefix_bytes),
+        human_bytes(lp.prefix_bytes),
         lp.file_saving_share * 100.0,
         lp.unpackable_nodes
     );
@@ -557,7 +549,7 @@ fn share(part: i64, total: u64) -> f64 {
 /// It lives here because it is the same read of the same file the queries
 /// make, and it was `index inspect` with no selector before the rename.
 pub fn show(ctx: &Context, file: &std::path::Path) -> Result<u8> {
-    let fmt = ctx.format.data("cambi index show")?;
+    let fmt = ctx.format().data("cambi index show")?;
     let f = IndexFile::open(file)?;
     let q = IndexQuery::new(f.view());
     // The JSON forms are the stats document; the text form is the header a
@@ -567,18 +559,18 @@ pub fn show(ctx: &Context, file: &std::path::Path) -> Result<u8> {
         println!("file:            {}", f.path().display());
         println!("format version:  {}", v.format_version);
         println!("commit:          {}", v.commit);
-        println!("lineage:         {}", inspect::hex(&v.lineage));
+        println!("lineage:         {}", hex(&v.lineage));
         println!("bazel:           {}", v.bazel_version);
-        println!("config hash:     {}", inspect::hex(&v.config_hash));
+        println!("config hash:     {}", hex(&v.config_hash));
         println!("created:         {}", v.created_unix);
         if let Some(w) = inspect::PartialLoad::from(v).warning() {
             println!("WARNING:         {w}");
         }
-        println!("size on disk:    {}", human(f.file_size() as u64));
+        println!("size on disk:    {}", human_bytes(f.file_size() as u64));
         if f.is_compressed() {
             println!(
                 "                 zstd, {} decompressed",
-                human(f.framed_size() as u64)
+                human_bytes(f.framed_size() as u64)
             );
         }
         println!("nodes:           {}", v.num_nodes());
@@ -634,19 +626,19 @@ struct ExternalsRepo {
     /// External repositories whose rules depend on this (indexed) one, each
     /// with the packages of it they depend on: `grpc: envoy/config/core/v3,
     /// ...`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumers: Vec<String>,
     /// Per consumer, each leaf of it the index holds and the packages of this
     /// repository its transitive deps reach: `grpc @grpc//:grpc++:
     /// envoy/annotations, ...`, or `grpc (leaves not known)` for a consumer
     /// with no leaf map, whose every leaf a change seeds.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumer_leaves: Vec<String>,
     /// Per consumer with a leaf map, what the map was derived through
     /// outside this repository: `quiche: //source/common/quic/platform,
     /// @abseil-cpp, ...`. A run in which one of them moves asks Bazel for the
     /// map again rather than trust it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     consumer_via: Vec<String>,
 }
 
@@ -675,69 +667,7 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
     }
     let repos = (0..v.num_repos())
         .filter(|&r| only.is_none_or(|o| o == v.repo_name(r)))
-        .map(|r| {
-            let o = v.repo_origin(r);
-            ExternalsRepo {
-            name: v.repo_name(r).to_string(),
-            canonical: v.repo_canonical_name(r).to_string(),
-            origin: o.kind.as_str().to_string(),
-            origin_dir: o.dir,
-            evidence: o.evidence,
-            confirmed: o.confirmed,
-            indexed: o.indexed,
-            path_maps: v
-                .repo_path_maps(r)
-                .iter()
-                .map(|m| {
-                    format!(
-                        "{} -> {}{}",
-                        m.from,
-                        m.to,
-                        if m.exhaustive { " (exhaustive)" } else { "" }
-                    )
-                })
-                .collect(),
-            consumers: v
-                .repo_consumers(r)
-                .iter()
-                .map(|(c, used)| {
-                    format!(
-                        "{c}: {}",
-                        used.packages.iter().cloned().collect::<Vec<_>>().join(", ")
-                    )
-                })
-                .collect(),
-            consumer_leaves: v
-                .repo_consumers(r)
-                .iter()
-                .flat_map(|(c, used)| match &used.leaves {
-                    None => vec![format!("{c} (leaves not known)")],
-                    Some(leaves) if leaves.is_empty() => vec![format!("{c} (no leaf in this index)")],
-                    Some(leaves) => leaves
-                        .iter()
-                        .map(|(leaf, pkgs)| {
-                            format!(
-                                "{c} {leaf}: {}",
-                                if pkgs.is_empty() {
-                                    "-".to_string()
-                                } else {
-                                    pkgs.iter().cloned().collect::<Vec<_>>().join(", ")
-                                }
-                            )
-                        })
-                        .collect(),
-                })
-                .collect(),
-            consumer_via: v
-                .repo_consumers(r)
-                .iter()
-                .filter(|(_, used)| used.leaves.is_some())
-                .map(|(c, used)| {
-                    format!("{c}: {}", used.via.iter().cloned().collect::<Vec<_>>().join(", "))
-                })
-                .collect(),
-            inputs: inputs.remove(&r).unwrap_or_default(),
-        }})
+        .map(|r| externals_repo(v, r, inputs.remove(&r).unwrap_or_default()))
         .collect();
     let workspace_bzl = (0..v.num_bzl())
         .filter(|&id| v.bzl_in_workspace(id))
@@ -761,6 +691,76 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
         workspace_bzl,
         ext_labels,
     }
+}
+
+/// One repository's row of the externals tables, with the input patterns
+/// that name it (`inputs`, gathered once for every repository by the caller).
+fn externals_repo(
+    v: cambium_index::IndexRef<'_>,
+    r: u32,
+    inputs: Vec<(String, bool)>,
+) -> ExternalsRepo {
+    let origin = v.repo_origin(r);
+    let consumers = v.repo_consumers(r);
+    ExternalsRepo {
+        name: v.repo_name(r).to_string(),
+        canonical: v.repo_canonical_name(r).to_string(),
+        origin: origin.kind.as_str().to_string(),
+        origin_dir: origin.dir,
+        evidence: origin.evidence,
+        confirmed: origin.confirmed,
+        indexed: origin.indexed,
+        path_maps: v
+            .repo_path_maps(r)
+            .iter()
+            .map(|m| {
+                format!(
+                    "{} -> {}{}",
+                    m.from,
+                    m.to,
+                    if m.exhaustive { " (exhaustive)" } else { "" }
+                )
+            })
+            .collect(),
+        consumers: consumers
+            .iter()
+            .map(|(c, used)| format!("{c}: {}", comma_list(&used.packages)))
+            .collect(),
+        consumer_leaves: consumers
+            .iter()
+            .flat_map(|(c, used)| match &used.leaves {
+                None => vec![format!("{c} (leaves not known)")],
+                Some(leaves) if leaves.is_empty() => {
+                    vec![format!("{c} (no leaf in this index)")]
+                }
+                Some(leaves) => leaves
+                    .iter()
+                    .map(|(leaf, pkgs)| {
+                        if pkgs.is_empty() {
+                            format!("{c} {leaf}: -")
+                        } else {
+                            format!("{c} {leaf}: {}", comma_list(pkgs))
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+        consumer_via: consumers
+            .iter()
+            .filter(|(_, used)| used.leaves.is_some())
+            .map(|(c, used)| format!("{c}: {}", comma_list(&used.via)))
+            .collect(),
+        inputs,
+    }
+}
+
+/// `a, b, c`.
+fn comma_list<'a>(items: impl IntoIterator<Item = &'a String>) -> String {
+    items
+        .into_iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_externals(d: &ExternalsDump) {
@@ -811,5 +811,89 @@ fn print_externals(d: &ExternalsDump) {
     }
     for l in &d.ext_labels {
         println!("ext {l}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use cambium_index::externals::Consumer;
+    use cambium_index::{BzlClosure, IndexBuilder};
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// One consumer of each shape the table holds: a leaf map (one leaf
+    /// reaching the root package, one reaching nothing), no map at all, and
+    /// a map naming no leaf. Each prints the line that tells it apart.
+    #[test]
+    fn externals_names_each_consumer_its_leaves_and_what_its_map_came_through() {
+        let grpc = Consumer {
+            packages: set(&["envoy/admin/v3", "envoy/type/metadata/v3"]),
+            leaves: Some(BTreeMap::from([
+                ("@grpc//:grpc++".to_string(), set(&["envoy/admin/v3", ""])),
+                ("@grpc//health:health_cc_proto".to_string(), set(&[])),
+            ])),
+            via: set(&["//", "//source/common/quic/platform", "@grpc"]),
+        };
+        let mut closure = BzlClosure::default();
+        closure.inputs.repos = set(&["envoy_api", "tsl"]);
+        closure.inputs.consumers.insert(
+            "envoy_api".into(),
+            BTreeMap::from([
+                ("grpc".to_string(), grpc),
+                (
+                    "quiche".to_string(),
+                    Consumer::of_packages(set(&["envoy/admin/v3"])),
+                ),
+            ]),
+        );
+        closure.inputs.consumers.insert(
+            "tsl".into(),
+            BTreeMap::from([(
+                "xla".to_string(),
+                Consumer {
+                    packages: set(&["tsl/platform"]),
+                    leaves: Some(BTreeMap::new()),
+                    via: BTreeSet::new(),
+                },
+            )]),
+        );
+        let mut b = IndexBuilder::new(cambium_index::builder::new_lineage());
+        b.set_bzl_closure(closure);
+        let index = b.finish("deadbeef");
+
+        let dump = super::externals(index.view(), None);
+        let repo = |name: &str| {
+            dump.repos
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        let api = repo("envoy_api");
+        assert_eq!(
+            api.consumers,
+            [
+                "grpc: envoy/admin/v3, envoy/type/metadata/v3",
+                "quiche: envoy/admin/v3"
+            ]
+        );
+        assert_eq!(
+            api.consumer_leaves,
+            [
+                "grpc @grpc//:grpc++: , envoy/admin/v3",
+                "grpc @grpc//health:health_cc_proto: -",
+                "quiche (leaves not known)",
+            ]
+        );
+        assert_eq!(
+            api.consumer_via,
+            ["grpc: //, //source/common/quic/platform, @grpc"]
+        );
+        let tsl = repo("tsl");
+        assert_eq!(tsl.consumer_leaves, ["xla (no leaf in this index)"]);
+        assert_eq!(tsl.consumer_via, ["xla: "]);
     }
 }

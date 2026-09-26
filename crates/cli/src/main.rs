@@ -1,4 +1,4 @@
-//! `cambi` — incremental changed-target computation for Bazel monorepos.
+//! `cambi`: incremental changed-target computation for Bazel monorepos.
 //!
 //! Nine verbs, and nothing else is in this binary: `init`, `status`,
 //! `doctor`, `affected`, `explain`, `profile`, `index`, `inspect`, `config`.
@@ -16,19 +16,16 @@ mod cmd;
 mod compat;
 mod diag;
 
-/// Exit codes (spec 10).
+/// The exit codes the verbs return themselves. The rest (3, 4 and 5) are
+/// an error's, from [`cambium_engine::EngineError::exit_code`], and the tests
+/// below pin all six.
 ///
-/// Part of the versioned contract described in the README alongside the JSON
-/// field names: callers branch on these, so a value never changes meaning
-/// without a `SCHEMA_VERSION` bump.
+/// Part of the versioned contract in the README's "Exit codes" table,
+/// alongside the JSON field names: callers branch on these, so a value never
+/// changes meaning without a `SCHEMA_VERSION` bump.
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_ERROR: u8 = 1;
 pub const EXIT_GLOBAL: u8 = 2;
-pub const EXIT_BAZEL: u8 = 3;
-pub const EXIT_NO_BASELINE: u8 = 4;
-/// The store could not be reached — as against holding no index for this
-/// commit, which is [`EXIT_NO_BASELINE`]. A CI job can retry this one.
-pub const EXIT_STORE: u8 = 5;
 
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -261,7 +258,6 @@ fn main() -> ExitCode {
         root,
         config: cli.config.clone(),
         overrides,
-        format: cli.format,
         render,
         ui,
     };
@@ -385,7 +381,7 @@ fn init_logging(level: &str, colour: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
     // `cli.log` already carries $CAMBIUM_LOG's value via clap's `env =
     // "CAMBIUM_LOG"` (an explicit `--log` still wins over it there), so this
-    // must not consult the environment a second time — doing so let a stale
+    // must not consult the environment a second time: doing so let a stale
     // $CAMBIUM_LOG silently override an explicit `--log`.
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = fmt()
@@ -400,6 +396,14 @@ fn init_logging(level: &str, colour: bool) {
 mod tests {
     use super::*;
 
+    /// The codes an [`cambium_engine::EngineError`] maps onto, which nothing
+    /// in this binary returns by name.
+    const EXIT_BAZEL: u8 = 3;
+    const EXIT_NO_INDEX: u8 = 4;
+    /// The store could not be reached, as against holding no index for this
+    /// commit, which is [`EXIT_NO_INDEX`]. A CI job can retry this one.
+    const EXIT_STORE: u8 = 5;
+
     #[test]
     fn exit_codes_are_pinned() {
         // Changing any of these is a contract break: bump SCHEMA_VERSION and
@@ -408,7 +412,7 @@ mod tests {
         assert_eq!(EXIT_ERROR, 1);
         assert_eq!(EXIT_GLOBAL, 2);
         assert_eq!(EXIT_BAZEL, 3);
-        assert_eq!(EXIT_NO_BASELINE, 4);
+        assert_eq!(EXIT_NO_INDEX, 4);
         assert_eq!(EXIT_STORE, 5);
     }
 
@@ -417,7 +421,7 @@ mod tests {
         let map = |e: cambium_engine::EngineError| e.exit_code() as u8;
         assert_eq!(
             map(cambium_engine::EngineError::BaselineUnavailable { base: "x".into() }),
-            EXIT_NO_BASELINE
+            EXIT_NO_INDEX
         );
         assert_eq!(
             map(cambium_engine::EngineError::Store(

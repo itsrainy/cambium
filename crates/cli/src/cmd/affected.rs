@@ -13,10 +13,11 @@ use anyhow::Result;
 use cambium_engine::progress::Progress;
 use cambium_engine::{AffectedRequest, Code, Diagnostic};
 use cambium_ui::report::{group, human_ms};
-use cambium_ui::{hist, Align, Cell, Column, Event, Level, Paint, Sink, Style};
+use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
-use crate::cmd::{emit_json, Context};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
+use crate::cmd::{emit_json, human_age, plural, plural_s, short, two_dot, Context};
 use crate::Format;
 
 /// How the targets-by-depth distribution is drawn under the answer.
@@ -87,11 +88,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     // rather than that there is no workspace.
     check_usage(&args)?;
     let engine = ctx.engine()?;
-    let resolved = request(&engine, &args, Shape::affected(&args))?;
     if args.dry_run {
+        let resolved = request(&engine, &args, Shape::PLAN)?;
         say_note(ctx, &resolved);
         return crate::cmd::plan::run(ctx, &engine, &resolved.req);
     }
+    let resolved = request(&engine, &args, Shape::affected(&args))?;
     let outcome = narrate(ctx, &engine, &resolved, "affected")?;
     let report = &outcome.report;
     ctx.render.report(&report.diagnostics)?;
@@ -100,10 +102,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         cambium_index::format::write_index(path, index)?;
     }
 
-    match ctx.format {
+    match ctx.format() {
         Format::Null => {}
         Format::Json | Format::Jsonl => {
-            let fmt = ctx.format.data("cambi affected")?.expect("json or jsonl");
+            let fmt = ctx.format().data("cambi affected")?.expect("json or jsonl");
             if args.tests_only && !report.global {
                 // `--tests-only` restricts `affected` to test targets; every
                 // other field (including `direct`, which can name non-test
@@ -203,11 +205,7 @@ pub struct Range {
 pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<Range> {
     let repo = engine.repo();
     let (base, head) = if let Some(range) = &args.range {
-        match range.split_once("..") {
-            Some((base, "")) => (base.to_string(), "HEAD".to_string()),
-            Some((base, head)) => (base.to_string(), head.to_string()),
-            None => (range.clone(), "HEAD".to_string()),
-        }
+        two_dot(range).unwrap_or_else(|| (range.clone(), "HEAD".to_string()))
     } else {
         let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
         match &args.base {
@@ -437,7 +435,7 @@ fn git_detail(e: &cambium_diff::GitError) -> Option<String> {
 
 /// What a run is for, beyond what its flags say: whether it explains itself,
 /// and whether it builds a head index. Only a run that someone will read a
-/// graph out of materialises one — it is the most expensive step there is —
+/// graph out of materialises one (it is the most expensive step there is),
 /// and only a run that will print explanations computes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -475,8 +473,8 @@ impl Shape {
 /// The request both `affected` and `explain` run.
 ///
 /// One construction for the two verbs: `explain` is the same computation with
-/// the explanations on, so anything that changes what a run means — a new
-/// flag, a different default — has to change it for both or for neither.
+/// the explanations on, so anything that changes what a run means (a new
+/// flag, a different default) has to change it for both or for neither.
 pub fn request(engine: &cambium_engine::Engine, args: &Args, shape: Shape) -> Result<Resolved> {
     let Range { base, head, note } = resolve_range(engine, args)?;
     let req = AffectedRequest {
@@ -523,25 +521,20 @@ pub fn narrate(
 ) -> Result<cambium_engine::RunOutcome> {
     let req = &resolved.req;
     let mut sink = cambium_ui::boxed(ctx.ui);
-    let repo = engine
-        .workspace()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
     sink.emit(Event::Header {
         verb: verb.to_string(),
-        repo,
+        repo: repo_name(engine),
         range: format!("{}..{}", short(&req.base), short(&req.head)),
         note: commits_in_range(engine, req),
     });
     if let Some(note) = &resolved.note {
         sink.emit(Event::Log(Level::Info, note.clone()));
     }
-    let mut render = Narrator {
+    let mut narrator = Narrator {
         sink: sink.as_mut(),
         rows_open: false,
     };
-    let out = engine.affected_narrated(req, &mut |p| render.on(p));
+    let out = engine.affected_narrated(req, &mut |p| narrator.on(p));
     sink.emit(Event::Done);
     // A run that fails still said things on the way (a store read as empty,
     // an index refused for its configuration), and they are what explain the
@@ -550,7 +543,7 @@ pub fn narrate(
     // under `json` there is no document to hold them, so stderr it is.
     if out.is_err() {
         let said = engine.diagnostics().drain();
-        match ctx.render.format {
+        match ctx.format() {
             Format::Jsonl => ctx.render.report(&said)?,
             _ => said.iter().for_each(|d| ctx.render.warn(d)),
         }
@@ -566,21 +559,9 @@ fn commits_in_range(engine: &cambium_engine::Engine, req: &AffectedRequest) -> S
         return String::new();
     };
     match out.trim().parse::<u64>() {
-        Ok(n) => format!("{} commit{}", group(n), if n == 1 { "" } else { "s" }),
+        Ok(n) => format!("{} commit{}", group(n), plural_s(n)),
         Err(_) => String::new(),
     }
-}
-
-/// The columns of the splice row, the same five a profile row uses so the two
-/// verbs lay a commit out alike.
-fn splice_columns() -> Vec<Column> {
-    vec![
-        Column::flex("range"),
-        Column::fixed("time", 9, Align::Right),
-        Column::fixed("affected", 8, Align::Right),
-        Column::fixed("tests", 6, Align::Right),
-        Column::fixed("index", 17, Align::Left),
-    ]
 }
 
 /// Turns the run's progress into the grammar the sink draws.
@@ -594,24 +575,20 @@ impl Narrator<'_> {
     fn on(&mut self, p: Progress) {
         match p {
             Progress::IndexLookup { base } => {
+                let looking = format!("looking for {}", short(&base));
                 self.sink.emit(Event::PhaseStart {
                     name: "index".into(),
-                    detail: Some(format!("looking for {}", short(&base))),
+                    detail: Some(looking.clone()),
                 });
-                self.sink
-                    .emit(Event::Current(format!("looking for {}", short(&base))));
+                self.sink.emit(Event::Current(looking));
             }
             Progress::SearchStart { base, ancestors } => {
                 // The live line is about to count these off; a pipe gets the
                 // one line that says the search happened at all.
-                self.sink.emit(Event::Milestone(format!(
-                    "none at {}, searching {ancestors} ancestors",
-                    short(&base)
-                )));
-                self.sink.emit(Event::Current(format!(
-                    "none at {}, searching {ancestors} ancestors",
-                    short(&base)
-                )));
+                let searching =
+                    format!("none at {}, searching {ancestors} ancestors", short(&base));
+                self.sink.emit(Event::Milestone(searching.clone()));
+                self.sink.emit(Event::Current(searching));
             }
             Progress::AncestorChecked { checked, of, .. } => {
                 // Live only: `Current` is dropped by every sink without a
@@ -629,7 +606,7 @@ impl Narrator<'_> {
             } => {
                 let mut about = vec![format!("lineage {}", short(&lineage))];
                 if behind > 0 {
-                    about.insert(0, format!("{} behind", plural_hops(behind)));
+                    about.insert(0, format!("{behind} commit{} behind", plural_s(behind)));
                 }
                 if let Some(age) = age_secs {
                     about.push(format!("{} old", human_age(age)));
@@ -651,14 +628,7 @@ impl Narrator<'_> {
                 result: format!("none within {searched} ancestors"),
                 elapsed_ms,
             }),
-            Progress::ColdBuild { commit } => {
-                self.sink.emit(Event::PhaseStart {
-                    name: "cold index".into(),
-                    detail: Some(format!("bazel query //... at {}", short(&commit))),
-                });
-                self.sink
-                    .emit(Event::Current(format!("indexing {}", short(&commit))));
-            }
+            Progress::ColdBuild { commit } => start_indexing(self.sink, "cold index", &commit),
             Progress::ColdBuilt {
                 targets,
                 elapsed_ms,
@@ -672,7 +642,7 @@ impl Narrator<'_> {
                     name: "splice".into(),
                     detail: Some(format!(
                         "{commits} commit{}  {}..{}",
-                        if commits == 1 { "" } else { "s" },
+                        plural_s(commits),
                         short(&from),
                         short(&to)
                     )),
@@ -686,7 +656,7 @@ impl Narrator<'_> {
             Progress::SpliceStep { step } => {
                 if !self.rows_open {
                     self.rows_open = true;
-                    self.sink.emit(Event::RowHeader(splice_columns()));
+                    self.sink.emit(Event::RowHeader(commit_columns("range")));
                 }
                 self.sink.emit(Event::Row(vec![
                     Cell::Commit {
@@ -695,9 +665,9 @@ impl Narrator<'_> {
                         subject: format!(
                             "{} file{}, {} package{}",
                             step.changed_files,
-                            if step.changed_files == 1 { "" } else { "s" },
+                            plural_s(step.changed_files),
                             step.dirty_packages,
-                            if step.dirty_packages == 1 { "" } else { "s" },
+                            plural_s(step.dirty_packages),
                         ),
                     },
                     Cell::text(human_ms(step.wall_ms)),
@@ -715,7 +685,7 @@ impl Narrator<'_> {
                 result: format!(
                     "{} row{} rewritten, index now at {}",
                     group(rows_rewritten as u64),
-                    if rows_rewritten == 1 { "" } else { "s" },
+                    plural_s(rows_rewritten),
                     short(&at)
                 ),
                 elapsed_ms,
@@ -743,9 +713,9 @@ impl Narrator<'_> {
                 result: format!(
                     "{} changed file{}, {} package{} \u{2192} {} affected ({} tests)",
                     changed_files,
-                    if changed_files == 1 { "" } else { "s" },
+                    plural_s(changed_files),
                     packages,
-                    if packages == 1 { "" } else { "s" },
+                    plural_s(packages),
                     group(affected as u64),
                     group(tests as u64),
                 ),
@@ -764,34 +734,6 @@ impl Narrator<'_> {
             }
         }
     }
-}
-
-/// What the splice did to the index, in the same cell `cambi profile` prints.
-fn index_cell(work: &cambium_engine::profile::IndexWork) -> Cell {
-    use cambium_engine::profile::IndexWork;
-    match work {
-        IndexWork::Identical => Cell::styled("= unchanged", Style::Dim),
-        IndexWork::Spliced { rows_rewritten } => {
-            Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
-        }
-        IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
-        IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
-    }
-}
-
-/// An age in the coarsest unit that still says something: `40 min`, `4 h`,
-/// `2 d`. An index is minutes to weeks old and nobody reads the seconds.
-fn human_age(secs: u64) -> String {
-    match secs {
-        0..=119 => format!("{secs} s"),
-        120..=7_199 => format!("{} min", secs / 60),
-        7_200..=172_799 => format!("{} h", secs / 3_600),
-        _ => format!("{} d", secs / 86_400),
-    }
-}
-
-fn plural_hops(n: u32) -> String {
-    format!("{n} commit{}", if n == 1 { "" } else { "s" })
 }
 
 /// The answer as `--format labels` prints it, one per line: what `bazel test
@@ -827,7 +769,7 @@ fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_
         paint.bold(&format!(
             "{} affected target{}",
             group(items.len() as u64),
-            if items.len() == 1 { "" } else { "s" }
+            plural_s(items.len())
         )),
         group(report.tests.len() as u64),
         depth,
@@ -926,13 +868,9 @@ pub fn path_line(path: &[String]) -> String {
         "{}  ({} {}, {} package {})",
         path.join(" <- "),
         hops,
-        if hops == 1 { "hop" } else { "hops" },
+        plural(hops, "hop", "hops"),
         boundaries,
-        if boundaries == 1 {
-            "boundary"
-        } else {
-            "boundaries"
-        }
+        plural(boundaries, "boundary", "boundaries"),
     )
 }
 
@@ -943,20 +881,12 @@ fn package_of(label: &str) -> &str {
     }
 }
 
-/// A sha cut to ten digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 10)
-}
-
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {
     let Some(explanations) = &report.explanations else {
         return;
     };
-    let wanted: std::collections::HashSet<&str> = if tests_only {
-        report.tests.iter().map(|s| s.as_str()).collect()
-    } else {
-        report.affected.iter().map(|t| t.label.as_str()).collect()
-    };
+    // Only the labels the answer above listed get a why.
+    let wanted: std::collections::HashSet<&str> = labels(report, tests_only).into_iter().collect();
     eprintln!("\n--- why ---");
     for e in explanations {
         if !wanted.contains(e.target.as_str()) {
@@ -975,7 +905,7 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
 mod tests {
     use cambium_engine::profile::{CommitStep, IndexWork};
     use cambium_engine::report::{AffectedReport, AffectedTarget};
-    use cambium_ui::{ColorChoice, Kind, OutputMode};
+    use cambium_ui::{Kind, OutputMode};
     use clap::Parser;
 
     use super::Clue;
@@ -995,7 +925,6 @@ mod tests {
     }
 
     fn plain_mode() -> OutputMode {
-        let _ = ColorChoice::Never;
         OutputMode {
             kind: Kind::Plain,
             live: false,

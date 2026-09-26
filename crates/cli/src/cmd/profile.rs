@@ -12,15 +12,16 @@
 use std::io::IsTerminal as _;
 
 use anyhow::{Context as _, Result};
-use cambium_engine::profile::{self, CommitStep, IndexWork, Progress, WorktreeRevisions};
+use cambium_engine::profile::{self, CommitStep, Progress, WorktreeRevisions};
 use cambium_engine::report::Stopwatch;
 use cambium_engine::Diagnostic;
 use cambium_engine::Profile;
-use cambium_ui::report::{group, human_bytes, human_ms, kv, Pair};
-use cambium_ui::{row, Align, Cell, Column, Event, Paint, Sink, Style};
+use cambium_ui::report::{group, human_ms, kv, Pair};
+use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
-use crate::cmd::{emit, Context};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
+use crate::cmd::{emit, human_bytes, plural, plural_s, short, two_dot, Context};
 
 /// What lands on stdout above the table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -51,31 +52,6 @@ pub struct Args {
     /// How the report above the table reads.
     #[arg(long, value_enum, default_value_t = Report::Kv)]
     report: Report,
-}
-
-/// The columns of a commit row, live and in the final table alike, so the two
-/// cannot drift.
-fn columns() -> Vec<Column> {
-    vec![
-        Column::flex("commit"),
-        Column::fixed("time", 9, Align::Right),
-        Column::fixed("affected", 8, Align::Right),
-        Column::fixed("tests", 6, Align::Right),
-        Column::fixed("index", 17, Align::Left),
-    ]
-}
-
-/// The `index` cell: what the run did to the stored index for this commit.
-/// Dim when nothing happened, so it adds no noise.
-fn index_cell(work: &IndexWork) -> Cell {
-    match work {
-        IndexWork::Identical => Cell::styled("= unchanged", Style::Dim),
-        IndexWork::Spliced { rows_rewritten } => {
-            Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
-        }
-        IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
-        IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
-    }
 }
 
 /// A row's cells. A global step answered `//...`, so it reads `all` rather
@@ -119,7 +95,7 @@ fn header_note(commits: usize) -> String {
     } else {
         format!(
             "{commits} first-parent commit{}; the oldest is indexed cold first",
-            plural(commits)
+            plural_s(commits)
         )
     }
 }
@@ -139,7 +115,7 @@ fn resolve_walk(
              ends"
         )));
     }
-    let Some((from, to)) = rev.split_once("..") else {
+    let Some((from, to)) = two_dot(rev) else {
         let head = engine
             .repo()
             .rev_parse(rev)
@@ -151,14 +127,13 @@ fn resolve_walk(
             "`cambi profile {rev}` already says how far back to walk; drop --commits"
         )));
     }
-    let to = if to.is_empty() { "HEAD" } else { to };
     let from_sha = engine
         .repo()
-        .rev_parse(from)
+        .rev_parse(&from)
         .with_context(|| format!("{from} is not a revision in this repository"))?;
     let head = engine
         .repo()
-        .rev_parse(to)
+        .rev_parse(&to)
         .with_context(|| format!("{to} is not a revision in this repository"))?;
     let count: usize = engine
         .repo()
@@ -197,38 +172,35 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     };
 
     let mut sink = cambium_ui::boxed(ctx.ui);
-    let repo_name = engine
-        .workspace()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
     // The range the header names is one git call, before any Bazel runs, so
     // the first line is on screen while the cold build starts.
     let log = engine.repo().first_parent_log(&head, commits + 1)?;
     let from = log.first().cloned().unwrap_or_else(|| head.clone());
     sink.emit(Event::Header {
         verb: "profile".into(),
-        repo: repo_name,
+        repo: repo_name(&engine),
         range: format!("{}..{}", short(&from), short(&head)),
         note: header_note(log.len().saturating_sub(1)),
     });
 
     // The worktree outlives one `profile` call, so the CLI creates it and
     // reports it in the same vocabulary the walk uses for its own phases.
-    let mut render = Renderer {
+    let mut narrator = Narrator {
         sink: sink.as_mut(),
-        opened: false,
+        rows_open: false,
     };
-    render.on(Progress::Worktree {
+    narrator.on(Progress::Worktree {
         commit: head.clone(),
     });
     let sw = Stopwatch::start();
     let revs = WorktreeRevisions::create(&engine, &head)?;
-    render.on(Progress::WorktreeReady {
+    narrator.on(Progress::WorktreeReady {
         elapsed_ms: sw.elapsed_ms(),
     });
 
-    let doc = profile::profile(&engine, &revs, &head, commits, &out, &mut |p| render.on(p));
+    let doc = profile::profile(&engine, &revs, &head, commits, &out, &mut |p| {
+        narrator.on(p)
+    });
     sink.emit(Event::Done);
     drop(revs);
     let doc = doc?;
@@ -242,7 +214,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             ctx.render.warn(d);
         }
     }
-    emit(&doc, ctx.format.data("cambi profile")?, |p| {
+    emit(&doc, ctx.format().data("cambi profile")?, |p| {
         print_human(
             p,
             args.report,
@@ -259,13 +231,13 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 }
 
 /// Turns the walk's progress into the grammar the sink draws.
-struct Renderer<'a> {
+struct Narrator<'a> {
     sink: &'a mut dyn Sink,
-    /// The `commits` phase has printed its header.
-    opened: bool,
+    /// The `commits` phase has printed its header and its row header.
+    rows_open: bool,
 }
 
-impl Renderer<'_> {
+impl Narrator<'_> {
     fn on(&mut self, p: Progress) {
         match p {
             Progress::Range { .. } => {}
@@ -278,24 +250,13 @@ impl Renderer<'_> {
                 result: "ready".into(),
                 elapsed_ms,
             }),
-            Progress::ColdBuild { commit } => {
-                self.sink.emit(Event::PhaseStart {
-                    name: "cold index".into(),
-                    detail: Some(format!("bazel query //... at {}", short(&commit))),
-                });
-                self.sink
-                    .emit(Event::Current(format!("indexing {}", short(&commit))));
-            }
+            Progress::ColdBuild { commit } => start_indexing(self.sink, "cold index", &commit),
             Progress::ColdBuilt {
                 targets,
                 elapsed_ms,
             } => self.sink.emit(Event::PhaseEnd {
                 name: "cold index".into(),
-                result: format!(
-                    "{} target{}",
-                    group(targets as u64),
-                    plural(targets as usize)
-                ),
+                result: format!("{} target{}", group(targets as u64), plural_s(targets)),
                 elapsed_ms,
             }),
             Progress::ColdFailed {
@@ -318,13 +279,13 @@ impl Renderer<'_> {
                 ));
             }
             Progress::Step { index, of, commit } => {
-                if !self.opened {
-                    self.opened = true;
+                if !self.rows_open {
+                    self.rows_open = true;
                     self.sink.emit(Event::PhaseStart {
                         name: "commits".into(),
-                        detail: Some(format!("{of} step{}", plural(of))),
+                        detail: Some(format!("{of} step{}", plural_s(of))),
                     });
-                    self.sink.emit(Event::RowHeader(columns()));
+                    self.sink.emit(Event::RowHeader(commit_columns("commit")));
                 }
                 self.sink
                     .emit(Event::Current(format!("[{index}/{of}] {}", short(&commit))));
@@ -382,7 +343,7 @@ impl Renderer<'_> {
                 globals,
                 elapsed_ms,
             } => {
-                if self.opened {
+                if self.rows_open {
                     self.sink.emit(Event::PhaseEnd {
                         name: "commits".into(),
                         result: if globals == 0 {
@@ -396,11 +357,6 @@ impl Renderer<'_> {
             }
         }
     }
-}
-
-/// A sha cut to ten digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 10)
 }
 
 fn print_human(
@@ -428,11 +384,19 @@ fn print_human(
         return;
     }
     println!();
-    println!("{}", row::render_header(&columns(), width, &paint));
+    println!(
+        "{}",
+        row::render_header(&commit_columns("commit"), width, &paint)
+    );
     for c in &p.commits {
         println!(
             "{}",
-            row::render(&columns(), &row_cells(c, &c.subject), width, &paint)
+            row::render(
+                &commit_columns("commit"),
+                &row_cells(c, &c.subject),
+                width,
+                &paint
+            )
         );
     }
     if let Some(kept) = kept {
@@ -483,7 +447,7 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
                 "at {}, last {} first-parent commit{}",
                 short(&p.head),
                 s.commits,
-                plural(s.commits)
+                plural_s(s.commits)
             ),
         ),
         Pair::new("measured", "", MEASURED),
@@ -491,12 +455,12 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
             "targets",
             group(i.targets as u64),
             format!(
-                "{} tests, {} package{}, {} external repositor{}",
+                "{} tests, {} package{}, {} external {}",
                 group(i.tests as u64),
                 group(i.packages as u64),
-                plural(i.packages as usize),
+                plural_s(i.packages),
                 group(i.external_repos as u64),
-                if i.external_repos == 1 { "y" } else { "ies" },
+                plural(i.external_repos, "repository", "repositories"),
             ),
         ),
         Pair::new(
@@ -669,18 +633,18 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
         workspace.display(),
         short(&p.head),
         s.commits,
-        plural(s.commits),
+        plural_s(s.commits),
         short(&p.from),
     );
     println!();
     println!(
         "This build graph has {} targets ({} tests) in {} packages, with {} external \
-         repositor{}.",
+         {}.",
         group(i.targets as u64),
         group(i.tests as u64),
         group(i.packages as u64),
         group(i.external_repos as u64),
-        if i.external_repos == 1 { "y" } else { "ies" },
+        plural(i.external_repos, "repository", "repositories"),
     );
     println!(
         "A full cambium index takes {} to build and {} on disk ({}); loading it takes {}.",
@@ -699,7 +663,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "Based on the last {} commit{}, none was answered incrementally, so there is no \
              incremental time to report.",
             s.commits,
-            plural(s.commits),
+            plural_s(s.commits),
         );
     } else {
         println!(
@@ -708,13 +672,13 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
              incrementally). A typical commit (the median) affects {} of {} targets ({}, \
              manual included) and {} of {} tests ({}).",
             s.commits,
-            plural(s.commits),
+            plural_s(s.commits),
             human_ms(inc.mean_ms),
             human_ms(inc.p50_ms),
             human_ms(inc.p90_ms),
             human_ms(inc.max_ms),
             inc.commits,
-            plural(inc.commits),
+            plural_s(inc.commits),
             group(s.incremental_affected.p50),
             group(p.cold.targets as u64),
             percent(s.affected_share),
@@ -728,7 +692,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
         None => println!(
             "The entire graph never had to be rebuilt in those {} commit{}.",
             s.commits,
-            plural(s.commits)
+            plural_s(s.commits)
         ),
         Some(every) => {
             let reasons: Vec<String> = s
@@ -743,7 +707,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
                 "The entire graph had to be rebuilt {} time{} ({} of commits), once every {:.1} \
                  commits on average, at {} per rebuild ({}).",
                 s.globals,
-                plural(s.globals),
+                plural_s(s.globals),
                 percent(s.global_share),
                 every,
                 human_ms(s.global_rebuild.mean_ms),
@@ -756,7 +720,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "{} commit{} exceeded limits.max_dirty_packages and were answered by re-querying \
              the whole repository: exact, at {} each.",
             s.engine_cold_rebuilds,
-            plural(s.engine_cold_rebuilds),
+            plural_s(s.engine_cold_rebuilds),
             human_ms(s.requery.mean_ms),
         );
     }
@@ -765,23 +729,16 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "{} commit{} failed to build and {} left out of every figure; the commit after \
              each was indexed cold.",
             s.failed,
-            plural(s.failed),
-            if s.failed == 1 { "is" } else { "are" },
+            plural_s(s.failed),
+            plural(s.failed, "is", "are"),
         );
-    }
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cambium_engine::profile::IndexWork;
 
     fn step(index: IndexWork) -> CommitStep {
         CommitStep {
@@ -915,7 +872,7 @@ mod tests {
         let doc = profile_doc();
         let render = |c: &CommitStep| {
             row::render(
-                &columns(),
+                &commit_columns("commit"),
                 &row_cells(c, &c.subject),
                 96,
                 &Paint::new(false),
@@ -981,7 +938,7 @@ mod tests {
             }),
             "tcp_proxy: idle timeout",
         );
-        let line = row::render(&columns(), &cells, 96, &Paint::new(false));
+        let line = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(false));
         assert!(
             line.starts_with("    e6b1317 09-02 09:14 tcp_proxy: idle timeout"),
             "{line}"
@@ -995,9 +952,9 @@ mod tests {
     #[test]
     fn a_commit_that_changed_nothing_the_graph_models_says_so_quietly() {
         let cells = row_cells(&step(IndexWork::Identical), "docs: a typo");
-        let line = row::render(&columns(), &cells, 96, &Paint::new(false));
+        let line = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(false));
         assert!(line.ends_with("= unchanged"), "{line}");
-        let painted = row::render(&columns(), &cells, 96, &Paint::new(true));
+        let painted = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(true));
         assert!(painted.contains("\x1b[2m= unchanged\x1b[0m"), "{painted}");
     }
 }
