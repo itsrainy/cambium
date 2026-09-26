@@ -8,7 +8,6 @@ repository.workspace = true
 description = "the terminal output grammar every cambi verb renders through"
 
 [dependencies]
-serde.workspace = true
 serde_json.workspace = true
 # Terminal width only. No ratatui here: the grammar is lines, not a screen.
 crossterm.workspace = true
