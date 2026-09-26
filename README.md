@@ -94,8 +94,8 @@ push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
 finding is a diagnostic with a code and a `help:` line.
 
 ```console
-$ cambi profile --commits 30 --out /tmp/cambium-index.bin
-$ cambi index publish /tmp/cambium-index.bin
+$ cambi profile --commits 30 --out ./cambium-index.bin
+$ cambi index publish ./cambium-index.bin
 ```
 
 What cambium costs and saves on this repository, from its own history: one
@@ -112,10 +112,14 @@ failed and the walk goes on; if the oldest one is the problem, a smaller
 
 `--out` keeps the index the walk ends with, and `index publish` uploads it as
 the first index of a lineage, so the profile doubles as the first cold build:
-one build, not two. Everything after is incremental. To skip the profile,
-`cambi index build --publish` is the same cold `bazel query //...:*` on its
-own. `cambi status` says where the checkout is and which index a run would
-load.
+one build, not two. Everything after is incremental. The file is written in
+this checkout, the path `init` suggests, so it is this repository's index and
+no other's (a fixed path outside it, shared by every repository on the
+machine, is how one repository's index gets published into another's store);
+delete it once published, or give it a `.gitignore` line beside the other two.
+To skip the profile, `cambi index build --publish` is the same cold `bazel
+query //...:*` on its own. `cambi status` says where the checkout is and which
+index a run would load.
 
 ```console
 $ cambi affected origin/main..HEAD --tests-only

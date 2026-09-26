@@ -93,14 +93,15 @@ build; nothing else is needed. From a machine that can write the store,
 two other ways seed it:
 
 ```console
-$ cambi profile --commits 30 --out /tmp/cambium-index.bin  # also measures the last 30 commits
-$ cambi index publish /tmp/cambium-index.bin
-$ cambi index build --publish                              # the cold build alone
+$ cambi profile --commits 30 --out ./cambium-index.bin  # also measures the last 30 commits
+$ cambi index publish ./cambium-index.bin
+$ cambi index build --publish                           # the cold build alone
 ```
 
-A profile ends at `HEAD`, so run it on the default branch's tip. With the
-`actions/cache` store the store lives in the cache, which only a workflow
-can write, so its first run is the way.
+A profile ends at `HEAD`, so run it on the default branch's tip. The index
+file lands in this checkout, so it is this repository's and no other's; delete
+it once published. With the `actions/cache` store the store lives in the
+cache, which only a workflow can write, so its first run is the way.
 
 **Weekly, a fresh lineage.** Splicing leaves tombstones for deleted
 targets in the lineage; `cambi index build --publish` starts a clean one.

@@ -772,6 +772,54 @@ fn config_explain_says_which_invalidator_paths_a_model_reads_first() {
     );
 }
 
+/// The profile's `--out` is one path everywhere a reader meets it: the one
+/// `init`'s `next:` line names, in the checkout, so it is this repository's
+/// index and no other's. A fixed `/tmp` path is shared by every repository on
+/// the machine, and publishing the wrong one uploads another repository's
+/// index.
+#[test]
+fn the_readme_and_the_ci_guide_seed_the_store_from_the_path_init_names() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let store = dir.path().join("store");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "init",
+        "--yes",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let next = stdout.trim_end().lines().last().unwrap_or_default();
+    let out = next
+        .split("--out ")
+        .nth(1)
+        .and_then(|rest| rest.split([',', ' ']).next())
+        .unwrap_or_else(|| panic!("no --out in {next}"));
+    assert_eq!(out, "./cambium-index.bin", "{next}");
+    assert!(
+        next.contains(&format!("cambi index publish {out}")),
+        "{next}"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["README.md", "docs/CI.md"] {
+        let text = std::fs::read_to_string(root.join(name)).unwrap();
+        assert!(
+            text.contains(&format!("cambi profile --commits 30 --out {out}")),
+            "{name} runs the profile with another --out than init's {out}"
+        );
+        assert!(
+            text.contains(&format!("cambi index publish {out}")),
+            "{name} publishes another file than init's {out}"
+        );
+        assert!(
+            !text.contains("/tmp/cambium-index.bin"),
+            "{name} names a path every repository on the machine shares"
+        );
+    }
+}
+
 /// `cambium.toml` is checked in, and somebody wrote the rest of it on purpose.
 #[test]
 fn init_on_an_existing_file_preserves_what_it_was_not_asked_about() {
