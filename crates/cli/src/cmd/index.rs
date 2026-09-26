@@ -16,7 +16,7 @@ use cambium_ui::{Event, Level, Sink};
 use clap::Subcommand;
 
 use crate::cmd::narrate::{repo_name, start_indexing};
-use crate::cmd::{hex, human_bytes, plural_s, short, Context};
+use crate::cmd::{hex, human_bytes, plural_s, short, two_dot, Context};
 
 #[derive(Subcommand)]
 pub enum Args {
@@ -489,10 +489,7 @@ fn update_range(
                  means <rev>..HEAD"
             )));
         }
-        return Ok(match range.split_once("..") {
-            Some((a, b)) => (a.to_string(), b.to_string()),
-            None => (range, "HEAD".to_string()),
-        });
+        return Ok(two_dot(&range).unwrap_or((range, "HEAD".to_string())));
     }
     match from {
         Some(from) => Ok((from, to.unwrap_or_else(|| "HEAD".to_string()))),
@@ -522,6 +519,16 @@ mod range_tests {
             ("a".into(), "HEAD".into())
         );
         assert!(update_range(None, None, None).is_err());
+        // An empty side is HEAD, as git reads it and as affected and profile
+        // read it.
+        assert_eq!(
+            update_range(Some("a..".into()), None, None).unwrap(),
+            ("a".into(), "HEAD".into())
+        );
+        assert_eq!(
+            update_range(Some("..b".into()), None, None).unwrap(),
+            ("HEAD".into(), "b".into())
+        );
         assert!(update_range(Some("a...b".into()), None, None).is_err());
     }
 }

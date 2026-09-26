@@ -926,6 +926,33 @@ fn a_dry_run_names_the_index_it_would_load_and_what_it_would_do() {
     );
 }
 
+/// A range with an empty side reads as `git diff` reads it: the empty side
+/// is HEAD, whichever side it is.
+#[test]
+fn an_empty_side_of_a_range_is_head() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let (base, head) = (&f.commits[1], &f.commits[f.commits.len() - 1]);
+    let plan = |range: &str| {
+        let (code, stdout, stderr) = run(&[
+            "-C",
+            ws,
+            "--cache-dir",
+            f.cache.to_str().unwrap(),
+            "affected",
+            "--dry-run",
+            range,
+        ]);
+        assert_eq!(code, 0, "{range}: {stderr}{stdout}");
+        stdout.lines().next().unwrap_or_default().to_string()
+    };
+    let expected = format!("plan for {}..{}", &base[..7], &head[..7]);
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", head]);
+    assert_eq!(plan(&format!("{base}..")), expected);
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    assert_eq!(plan(&format!("..{head}")), expected);
+}
+
 /// `--format labels` is the CI format: one label per line and nothing else,
 /// so `bazel test --target_pattern_file` reads stdout as it is. An empty
 /// answer is an empty stdout, not a header, and a global one is `//...` with

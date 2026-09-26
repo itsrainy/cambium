@@ -244,6 +244,17 @@ pub fn plural_s<N: PartialEq + From<u8>>(n: N) -> &'static str {
     plural(n, "", "s")
 }
 
+/// The two halves of a two-dot range, read as `git diff` reads them: an
+/// empty side is HEAD, so `main..` is `main..HEAD` and `..feature` is
+/// `HEAD..feature`. `None` when there is no `..` at all, which each verb
+/// reads its own way (a base for `affected`, the walk's end for `profile`).
+/// A three-dot range is each verb's usage error, checked before this.
+pub fn two_dot(range: &str) -> Option<(String, String)> {
+    let (from, to) = range.split_once("..")?;
+    let side = |s: &str| if s.is_empty() { "HEAD" } else { s }.to_string();
+    Some((side(from), side(to)))
+}
+
 /// A span of seconds in the words someone would say it in: `3 days`,
 /// `1 hour`. `status` and `--dry-run` say how old an index is this way;
 /// [`human_age`] is the narration's shorter form.
@@ -291,6 +302,19 @@ mod tests {
         assert_eq!(plural(0u32, "repository", "repositories"), "repositories");
         assert_eq!(format!("{} file{}", 2u64, plural_s(2u64)), "2 files");
         assert_eq!(format!("{} file{}", 1u64, plural_s(1u64)), "1 file");
+    }
+
+    #[test]
+    fn an_empty_side_of_a_range_is_head() {
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(two_dot("a..b"), pair("a", "b"));
+        assert_eq!(two_dot("a.."), pair("a", "HEAD"));
+        assert_eq!(two_dot("..b"), pair("HEAD", "b"));
+        assert_eq!(
+            two_dot("origin/main~2..HEAD"),
+            pair("origin/main~2", "HEAD")
+        );
+        assert_eq!(two_dot("main"), None);
     }
 
     #[test]

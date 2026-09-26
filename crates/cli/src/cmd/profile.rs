@@ -21,7 +21,7 @@ use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit, human_bytes, plural, plural_s, short, Context};
+use crate::cmd::{emit, human_bytes, plural, plural_s, short, two_dot, Context};
 
 /// What lands on stdout above the table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -115,7 +115,7 @@ fn resolve_walk(
              ends"
         )));
     }
-    let Some((from, to)) = rev.split_once("..") else {
+    let Some((from, to)) = two_dot(rev) else {
         let head = engine
             .repo()
             .rev_parse(rev)
@@ -127,14 +127,13 @@ fn resolve_walk(
             "`cambi profile {rev}` already says how far back to walk; drop --commits"
         )));
     }
-    let to = if to.is_empty() { "HEAD" } else { to };
     let from_sha = engine
         .repo()
-        .rev_parse(from)
+        .rev_parse(&from)
         .with_context(|| format!("{from} is not a revision in this repository"))?;
     let head = engine
         .repo()
-        .rev_parse(to)
+        .rev_parse(&to)
         .with_context(|| format!("{to} is not a revision in this repository"))?;
     let count: usize = engine
         .repo()

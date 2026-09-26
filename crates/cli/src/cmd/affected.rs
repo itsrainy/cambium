@@ -17,7 +17,7 @@ use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit_json, human_age, plural, plural_s, short, Context};
+use crate::cmd::{emit_json, human_age, plural, plural_s, short, two_dot, Context};
 use crate::Format;
 
 /// How the targets-by-depth distribution is drawn under the answer.
@@ -205,11 +205,7 @@ pub struct Range {
 pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<Range> {
     let repo = engine.repo();
     let (base, head) = if let Some(range) = &args.range {
-        match range.split_once("..") {
-            Some((base, "")) => (base.to_string(), "HEAD".to_string()),
-            Some((base, head)) => (base.to_string(), head.to_string()),
-            None => (range.clone(), "HEAD".to_string()),
-        }
+        two_dot(range).unwrap_or_else(|| (range.clone(), "HEAD".to_string()))
     } else {
         let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
         match &args.base {
