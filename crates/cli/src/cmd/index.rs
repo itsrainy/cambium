@@ -170,6 +170,7 @@ fn build(
 ) -> Result<u8> {
     check_destination(out, publish)?;
     let engine = ctx.engine()?;
+    check_store(&engine, publish)?;
     let sha = engine
         .repo()
         .rev_parse(rev)
@@ -208,6 +209,7 @@ fn update(
 ) -> Result<u8> {
     check_destination(out, publish)?;
     let engine = ctx.engine()?;
+    check_store(&engine, publish)?;
     let to_sha = engine
         .repo()
         .rev_parse(to)
@@ -366,6 +368,17 @@ fn check_destination(out: Option<&std::path::Path>, publish: Option<PublishPolic
             "the index would go nowhere",
             "pass --out <file> to say where the index goes, or --publish to upload it",
         ));
+    }
+    Ok(())
+}
+
+/// `--publish` with no store configured is `CAMBI-E008` before the header,
+/// as `index publish` does: the build would run to the end and then have
+/// nowhere to put the index, and a cold build of a large repository is the
+/// most expensive way to learn that.
+fn check_store(engine: &cambium_engine::Engine, publish: Option<PublishPolicy>) -> Result<()> {
+    if publish.is_some() {
+        configured_store(engine)?;
     }
     Ok(())
 }

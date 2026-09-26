@@ -948,6 +948,7 @@ impl Engine {
         if req.no_full_build {
             return Err(EngineError::BaselineUnavailable {
                 base: base.to_string(),
+                store_configured: self.store.is_some(),
             });
         }
         on(Progress::ColdBuild {

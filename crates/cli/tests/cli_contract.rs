@@ -1658,6 +1658,11 @@ fn no_index_under_no_full_build_narrates_no_cold_build() {
         stderr.contains("error[CAMBI-E006]: no index is available for"),
         "{stderr}"
     );
+    // A store is configured, so publishing one is the fix.
+    assert!(
+        stderr.contains("= help: run `cambi index build --publish`, or drop --no-full-build"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("baseline index"), "{stderr}");
 }
 
@@ -1771,4 +1776,95 @@ fn publish_base_on_a_global_run_publishes_the_base_and_nothing_else() {
         2,
         "the fixture's index and the computed base: {stdout}"
     );
+}
+
+/// A git workspace with no `cambium.toml` (so no store) and a Bazel that
+/// records each start in `bazel-ran` and fails: a verb that reaches Bazel
+/// leaves the marker behind. Returns the directory, the stub's path and the
+/// marker's.
+fn storeless_workspace() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = dir.path().join("ws");
+    cambium_testkit::init_repo(&ws);
+    cambium_testkit::write(&ws, "MODULE.bazel", "module(name = \"x\")\n");
+    cambium_testkit::write(&ws, "BUILD.bazel", "");
+    cambium_testkit::commit_all(&ws, "one");
+    cambium_testkit::write(&ws, "a/BUILD.bazel", "");
+    cambium_testkit::commit_all(&ws, "two");
+    let marker = dir.path().join("bazel-ran");
+    let stub = dir.path().join("bazel");
+    cambium_testkit::executable_script(
+        &stub,
+        &format!("echo \"$@\" >> '{}'\nexit 1", marker.display()),
+    );
+    (dir, stub, marker)
+}
+
+/// With no store configured, `index build --publish` and `index update
+/// --publish` could only end in `CAMBI-E008` after paying for the build, so
+/// they say so first and never start Bazel.
+#[test]
+fn publishing_with_no_store_fails_before_anything_is_built() {
+    let (dir, stub, marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let w = ws.to_str().unwrap();
+    let cache = dir.path().join("cache");
+    for verb in [
+        &["index", "build", "--publish"][..],
+        &["index", "update", "HEAD~1", "--publish"],
+    ] {
+        let mut argv = vec![
+            "-C",
+            w,
+            "--bazel-binary",
+            stub.to_str().unwrap(),
+            "--cache-dir",
+            cache.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(verb);
+        let (code, stdout, stderr) = run(&argv);
+        assert_eq!(code, 1, "{}:\n{stderr}", verb.join(" "));
+        assert!(stdout.is_empty(), "{stdout:?}");
+        assert!(
+            stderr.contains("error[CAMBI-E008]: no index store is configured"),
+            "{}:\n{stderr}",
+            verb.join(" ")
+        );
+        assert!(
+            !marker.exists(),
+            "`{}` started Bazel before finding there is no store: {:?}",
+            verb.join(" "),
+            std::fs::read_to_string(&marker)
+        );
+    }
+}
+
+/// `CAMBI-E006`'s help names the fix that works here: with no store, a
+/// published index has nowhere to go, so the help does not send the reader
+/// to `cambi index build --publish` alone.
+#[test]
+fn no_index_with_no_store_says_to_configure_one() {
+    let (dir, stub, _marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let cache = dir.path().join("cache");
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws.to_str().unwrap(),
+        "--bazel-binary",
+        stub.to_str().unwrap(),
+        "--cache-dir",
+        cache.to_str().unwrap(),
+        "affected",
+        "HEAD~1..HEAD",
+        "--no-full-build",
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E006]"), "{stderr}");
+    let help = stderr
+        .lines()
+        .find(|l| l.contains("= help:"))
+        .unwrap_or_else(|| panic!("a help line:\n{stderr}"));
+    assert!(help.contains("no store is configured"), "{help}");
+    assert!(help.contains("[baseline].store"), "{help}");
+    assert!(help.contains("drop --no-full-build"), "{help}");
 }

@@ -39,7 +39,13 @@ pub enum EngineError {
         "no index is available for {base}, in the store or within the ancestor walk, and \
          --no-full-build was given"
     )]
-    BaselineUnavailable { base: String },
+    BaselineUnavailable {
+        base: String,
+        /// Whether `[baseline].store` names a store. Without one, nothing a
+        /// run publishes can be found by a later one, so the help names a
+        /// different fix.
+        store_configured: bool,
+    },
     #[error(
         "{path} was built with a different cambium.toml; splicing onto it could \
          disagree with a full build. Run `cambi index build` to mint a new lineage."
@@ -152,9 +158,26 @@ impl EngineError {
                 Some("run from inside the Bazel workspace or pass -C, and check --bazel-binary"),
             ),
             EngineError::BazelQuery { .. } => (Code::E005BazelQuery, None),
-            EngineError::BaselineUnavailable { .. } => (
+            EngineError::BaselineUnavailable {
+                store_configured: true,
+                ..
+            } => (
                 Code::E006BaselineUnavailable,
                 Some("run `cambi index build --publish`, or drop --no-full-build"),
+            ),
+            // `index build --publish` would pay for a cold build and then
+            // fail with E008: with no store there is nowhere to put the
+            // index a later run would look for.
+            EngineError::BaselineUnavailable {
+                store_configured: false,
+                ..
+            } => (
+                Code::E006BaselineUnavailable,
+                Some(
+                    "no store is configured, so no run can find a published index: drop \
+                     --no-full-build to build the base cold, or set [baseline].store in \
+                     cambium.toml and publish one with `cambi index build --publish`",
+                ),
             ),
             EngineError::ConfigHashMismatch { .. } => (
                 Code::E007ConfigHashMismatch,

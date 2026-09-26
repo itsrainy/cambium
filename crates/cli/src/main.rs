@@ -420,7 +420,10 @@ mod tests {
     fn engine_errors_map_onto_the_documented_codes() {
         let map = |e: cambium_engine::EngineError| e.exit_code() as u8;
         assert_eq!(
-            map(cambium_engine::EngineError::BaselineUnavailable { base: "x".into() }),
+            map(cambium_engine::EngineError::BaselineUnavailable {
+                base: "x".into(),
+                store_configured: true,
+            }),
             EXIT_NO_INDEX
         );
         assert_eq!(
