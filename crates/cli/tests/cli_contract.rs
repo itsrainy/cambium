@@ -1001,16 +1001,31 @@ fn asking_a_data_query_for_labels_is_a_usage_error() {
     );
 }
 
+/// `git clone <flags>` of the fixture into `<dir>/clone`, with the
+/// fixture's `cambium.toml` copied in: the fixture writes it after its
+/// history, so a clone has none of its own. Returns the clone's path.
+fn clone_fixture(
+    f: &cambium_testkit::PublishedFixture,
+    dir: &std::path::Path,
+    flags: &[&str],
+) -> std::path::PathBuf {
+    let clone = dir.join("clone");
+    let url = format!("file://{}", f.ws.display());
+    let mut args = vec!["clone", "-q"];
+    args.extend_from_slice(flags);
+    args.extend([url.as_str(), clone.to_str().unwrap()]);
+    cambium_testkit::git(dir, &args);
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    clone
+}
+
 /// A clone the way `actions/checkout` leaves one: a detached HEAD, no local
 /// `main`, and `origin/main` present or not.
 fn ci_clone(f: &cambium_testkit::PublishedFixture) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    let clone = dir.path().join("clone");
-    let url = format!("file://{}", f.ws.display());
-    cambium_testkit::git(dir.path(), &["clone", "-q", &url, clone.to_str().unwrap()]);
+    let clone = clone_fixture(f, dir.path(), &[]);
     cambium_testkit::git(&clone, &["checkout", "-q", "--detach"]);
     cambium_testkit::git(&clone, &["branch", "-q", "-D", "main"]);
-    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
     dir
 }
 
@@ -1501,22 +1516,7 @@ fn a_depth_one_clone_names_the_fetch_or_the_deepen() {
     let f = published_fixture(1);
     cambium_testkit::git(&f.ws, &["branch", "-q", "pr", &f.commits[3]]);
     let dir = tempfile::tempdir().expect("tempdir");
-    let clone = dir.path().join("clone");
-    let url = format!("file://{}", f.ws.display());
-    cambium_testkit::git(
-        dir.path(),
-        &[
-            "clone",
-            "-q",
-            "--depth",
-            "1",
-            "--branch",
-            "pr",
-            &url,
-            clone.to_str().unwrap(),
-        ],
-    );
-    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    let clone = clone_fixture(&f, dir.path(), &["--depth", "1", "--branch", "pr"]);
     let c = clone.to_str().unwrap();
 
     let (code, stdout, stderr) = run(&["-C", c, "affected", "main", "--dry-run"]);
