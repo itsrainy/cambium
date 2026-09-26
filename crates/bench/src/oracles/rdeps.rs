@@ -727,7 +727,7 @@ pub(crate) fn package_of_label(label: &str) -> Option<&str> {
 /// rule in it and correctly reports none of them, so reading packages off the
 /// affected labels alone would fail every wholly-deleted package. That was the
 /// whole of sourcegraph's and apollo's change-set failures on the 2026-09-08
-/// published run.
+/// box run.
 ///
 /// The package spelling is an escape hatch for a rule that cannot be named at
 /// head, so it is only offered to a consumer that is *gone* at head (absent
@@ -1592,7 +1592,7 @@ mod tests {
         // package and `dirty_packages` is the only place its name survives.
         // Before the dirty set was consulted this case could not be satisfied
         // at all, and it failed every such change set on the 2026-09-08
-        // published run: `//internal/search/smartsearch` on sourcegraph,
+        // box run: `//internal/search/smartsearch` on sourcegraph,
         // `//modules/drivers/lidar/vanjeelidar` on apollo.
         assert!(run(&none, &set(&["lib"])).ok());
         // A different package does not satisfy it.

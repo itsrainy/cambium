@@ -146,7 +146,7 @@ impl BenchBox {
     /// result files differ from the cached ones, compared by sha256 over ssh,
     /// so a precheck never replays a run the box has since replaced. With no
     /// running box the cache is used as it is. Read-only on the box, and small: the largest
-    /// index in the last published run was envoy's at 7.3 MB, the bases at
+    /// index in the last full run was envoy's at 7.3 MB, the bases at
     /// most a few hundred megabytes a subject.
     pub fn pull(&self, subject: &str, cache: &Path, paths: bool) -> Result<Pulled> {
         let dir = cache.join(subject);

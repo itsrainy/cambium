@@ -191,7 +191,7 @@ pub trait RowSource {
 /// The test harness's driver, and the one place in the benchmark where the
 /// engine answers the product's question directly. It exists so the walk loop
 /// can be tested over a synthetic git history on a machine with no Bazel; it
-/// is never what a published number was measured with.
+/// is never what a recorded number was measured with.
 pub struct EngineDriver<'a> {
     pub engine: &'a Engine,
     pub rows: &'a dyn RowSource,

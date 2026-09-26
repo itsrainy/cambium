@@ -21,7 +21,7 @@ pub struct Manifest {
 pub struct RepoEntry {
     pub id: String,
     pub url: String,
-    /// Baseline commit. Bumped deliberately, in a PR that regenerates the
+    /// The commit the subject is pinned at. Bumped deliberately, in a PR that regenerates the
     /// repo's `docs/RESULTS.md` section.
     pub pin: String,
     /// The history window: how many first-parent commits before `pin` a

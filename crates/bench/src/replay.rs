@@ -3,7 +3,7 @@
 //!
 //! # Why
 //!
-//! A published run leaves behind, per subject, the index at the pin
+//! A finished walk leaves behind, per subject, the index at the pin
 //! (`bench-results/<subject>/index-<pin>.bin`) and what cambium answered on
 //! every recorded change set and history commit. Between the diff and the
 //! `bazel query` the engine does a substantial amount of work that needs
@@ -12,7 +12,7 @@
 //! `limits.max_dirty_packages` and the run therefore falls back to a cold
 //! rebuild. Every regression the last two runs found lived in exactly that
 //! stretch. Replaying it against a stored index costs milliseconds, so an
-//! engine change can be checked against the real corpus before the box is
+//! engine change can be checked against the real subjects before the box is
 //! started rather than seven hours after.
 //!
 //! # What a replay cannot know

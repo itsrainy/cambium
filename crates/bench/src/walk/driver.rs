@@ -105,7 +105,7 @@ pub struct WalkOptions {
     /// This is a `--only` walk: a handful of named steps rather than the
     /// first-parent range, each one cold-built at its own parent. Its record
     /// goes beside the full walk's under its own name, so a gate run never
-    /// overwrites a published one.
+    /// overwrites the full walk's record.
     pub only: bool,
 }
 

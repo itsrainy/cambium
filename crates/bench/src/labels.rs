@@ -2,7 +2,7 @@
 //!
 //! `walk-<pin>.json` records per-step *counts* and a capped handful of
 //! example labels, and that cap is a schema commitment: the file is read by
-//! the report and by published tooling, so it cannot grow to hold thousands
+//! the report and by tooling outside this crate, so it cannot grow to hold thousands
 //! of labels. But the counts are also where an investigation starts and
 //! stops: a change set where the tools named 990 targets cambium lacked was
 //! only ever visible through twenty of them, and a regression that put 165

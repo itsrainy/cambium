@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(Class::ToolMissing.to_string(), "tool_missing");
     }
 
-    /// docs/METHODOLOGY.md's taxonomy table is the published contract, and a
+    /// docs/METHODOLOGY.md's taxonomy table is the documented contract, and a
     /// class that exists only in one of the two is the failure mode: a run
     /// reports a name no reader can look up, or the docs promise a class the
     /// binary cannot produce.

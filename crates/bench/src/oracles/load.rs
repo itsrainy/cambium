@@ -23,7 +23,7 @@
 //! `api/bazel/repositories.bzl`) makes `rbuildfiles` name **every package in
 //! the repository**, whether or not anything loads the file.
 //!
-//! The second published run is the evidence. On all five envoy change sets
+//! The second full run on the box is the evidence. On all five envoy change sets
 //! that touched such a file, Bazel named 1211 packages and the packages
 //! cambium had not dirtied were exactly the complement of its dirty set:
 //! 1099 + 112, 1102 + 109, 1104 + 110, 1101 + 111, 1099 + 112, all summing to

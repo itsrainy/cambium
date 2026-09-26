@@ -165,7 +165,7 @@ impl Install {
 /// bazel-diff and Tango) because a comparison against one tool only tells
 /// you which of the two disagrees with cambium, not which of the three is the
 /// odd one out. target-determinator is the third peer and is named
-/// explicitly rather than run by default: a published run is already eight
+/// explicitly rather than run by default: a full run is already eight
 /// hours, and its shape (one `cquery` per revision, no warm half) is the one
 /// a reader reaches for last. cambium is not a peer: it is what the peers are
 /// compared against and runs on every change set whether or not it is named,

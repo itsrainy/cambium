@@ -13,7 +13,7 @@
 //! - **What is measured is what a user waits for.** A wall time here includes
 //!   process start, the config load, and serialising the answer to JSON. The
 //!   engine's own `timings_ms.total` travels beside it, from the document, so
-//!   a published table can show both and the difference between them is
+//!   a results table can show both and the difference between them is
 //!   visible rather than assumed.
 //! - **A change to the surface shows up here.** If a flag is renamed or an
 //!   exit code changes meaning, the benchmark fails the way a user's script

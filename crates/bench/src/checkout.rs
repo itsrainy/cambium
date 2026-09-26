@@ -5,7 +5,7 @@
 //! ```text
 //! <id>.git/              bare mirror, fetched once and updated on demand
 //! <id>/                  worktree, checked out at whatever commit a step needs
-//! store/<id>/            the benchmark lineage's baseline store (dir backend)
+//! store/<id>/            the benchmark lineage's index store (dir backend)
 //! output/<id>[-<ver>]/   per-repo (and per Bazel version) --output_base
 //! repository_cache/      shared --repository_cache: external fetches once per machine
 //! disk_cache/            shared --disk_cache
@@ -324,7 +324,7 @@ pub const BAZEL_RELEASES_URL: &str = "https://github.com/bazelbuild/bazel/releas
 /// with `BAZELISK_BASE_URL` at the aspect-cli releases, so `bazelisk` there
 /// *is* the Aspect CLI, a wrapper that adds its own behaviour in front of the
 /// Bazel named by `.bazelversion`. One of those behaviours failed every
-/// bazel-diff change set on the first published run: bazel-diff hands the
+/// bazel-diff change set on the first full run: bazel-diff hands the
 /// query expression over as `--query_file`, and `aspect query` with no
 /// positional expression does not pass the flag through but opens its
 /// interactive preset picker ("Select a preset query: why / deps / …"),

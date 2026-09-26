@@ -21,7 +21,7 @@ use crate::util::revs_match;
 
 /// How big a run is: small is the fifteen-minute check before a real run,
 /// medium the laptop-sized slice `--quick` is sugar for, and large the
-/// configuration `docs/RESULTS.md` is published from.
+/// configuration `docs/RESULTS.md` is generated from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Size {
     Small,
@@ -426,7 +426,7 @@ fn clock() -> String {
     now.get(11..19).unwrap_or(&now).to_string()
 }
 
-/// The preflight a published run refuses without: both binaries built from
+/// The preflight a full run refuses without: both binaries built from
 /// the tree at `sha`.
 ///
 /// Twice a run went on for hours with a binary that was not what the log said
@@ -471,11 +471,11 @@ mod tests {
         p.steps().iter().map(|s| s.command_line()).collect()
     }
 
-    /// The published size is the run that produced the published numbers:
+    /// The large size is the run that produced the numbers in RESULTS.md:
     /// these command lines are the contract `run-published.sh` used to spell
     /// out by hand.
     #[test]
-    fn the_published_size_is_the_published_run() {
+    fn the_large_size_is_the_full_run() {
         assert_eq!(
             lines(&plan(Size::Large)),
             [

@@ -40,7 +40,7 @@
 //!
 //! Beside them sits [`replay`], which is not a workload: it drives the
 //! engine's static stages from a stored index and a list of changed paths, so
-//! that an engine change can be checked against a published run's own answers
+//! that an engine change can be checked against a recorded walk's own answers
 //! offline, in milliseconds, before the benchmark machine is started.
 
 pub mod checkout;
