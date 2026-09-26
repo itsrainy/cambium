@@ -261,11 +261,6 @@ impl Reporter {
             p.tool = None;
         });
     }
-
-    /// The document as it stands, for a test or a caller that wants to log it.
-    pub fn snapshot(&self) -> Progress {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
 }
 
 #[cfg(test)]

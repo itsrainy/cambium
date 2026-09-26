@@ -85,24 +85,11 @@ pub mod watch;
 /// place and this cambium refuses to read them.
 pub const RESULT_SCHEMA: u32 = 7;
 
-/// How many first-parent commits a history workload covers when nobody says.
-///
-/// `None` here means "the subject's own window", which is what the manifest's
-/// `history_window` is for; the CLI's `--commits N` overrides it.
-pub const DEFAULT_CHANGE_SETS: usize = 40;
-
-/// The sizes `--quick` sets: a bounded, deterministic slice that finishes on a
-/// laptop. It is sugar for three flags, not a mode — the results land in the
-/// same tree as any other run, and the sizes that produced them are inside the
+/// The window `--quick` sets: a bounded, deterministic slice that finishes on
+/// a laptop. It is sugar for a flag, not a mode: the results land in the
+/// same tree as any other run, and the size that produced them is inside the
 /// result file.
 pub const QUICK_COMMITS: usize = 50;
-pub const QUICK_CHANGE_SETS: usize = 50;
-pub const QUICK_TANGO_CHANGE_SETS: usize = 10;
-
-/// `bench-results/<subject>/<workload>/`.
-pub fn workload_dir(root: &std::path::Path, subject: &str, workload: &str) -> std::path::PathBuf {
-    root.join(subject).join(workload)
-}
 
 /// `bench-results/<subject>/` — the per-subject directory that holds
 /// `state.json` and the cold indexes every workload shares.

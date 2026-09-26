@@ -282,33 +282,6 @@ impl SubjectRun<'_> {
         self.result_path(&self.results, &format!("index-{sha}"), "bin")
     }
 
-    /// The recorded change sets: `changes/change-sets-<pin>.json`.
-    pub fn change_sets_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("changes"),
-            &format!("change-sets-{}", self.entry.pin),
-            "json",
-        )
-    }
-
-    /// The change-set result: `changes/changes-<pin>.json`.
-    pub fn changes_result_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("changes"),
-            &format!("changes-{}", self.entry.pin),
-            "json",
-        )
-    }
-
-    /// The history result: `history/history-<pin>.json`.
-    pub fn history_result_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("history"),
-            &format!("history-{}", self.entry.pin),
-            "json",
-        )
-    }
-
     /// The walk result: `walk/walk-<pin>.json`.
     pub fn walk_result_path(&self) -> PathBuf {
         self.result_path(
@@ -457,17 +430,11 @@ mod tests {
         );
         assert_eq!(run.results, s.results_root.join("bazel"));
         assert!(run
-            .changes_result_path()
-            .ends_with(format!("bazel/changes/changes-{pin}-7.4.1.json")));
-        assert!(run
-            .history_result_path()
-            .ends_with(format!("bazel/history/history-{pin}-7.4.1.json")));
+            .walk_result_path()
+            .ends_with(format!("bazel/walk/walk-{pin}-7.4.1.json")));
         assert!(run
             .paths_cache_path()
             .ends_with(format!("bazel/paths-{pin}-7.4.1.json")));
-        assert!(run
-            .change_sets_path()
-            .ends_with(format!("bazel/changes/change-sets-{pin}-7.4.1.json")));
         assert!(run.index_path("abc").ends_with("bazel/index-abc-7.4.1.bin"));
         assert!(!run.results.exists(), "an offline subject creates nothing");
         assert!(s.subject("nope").is_err());

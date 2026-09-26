@@ -38,14 +38,3 @@ pub struct Environment {
     #[serde(default)]
     pub output_bases: BTreeMap<String, String>,
 }
-
-impl Environment {
-    /// Whether two environments are close enough that their walls may be read
-    /// against each other: the same machine and the same Bazel. A different
-    /// cambium or harness sha is the whole point of a comparison, so those do
-    /// not gate it.
-    pub fn comparable_to(&self, other: &Environment) -> bool {
-        self.machine.fingerprint() == other.machine.fingerprint()
-            && self.bazel_version_used == other.bazel_version_used
-    }
-}

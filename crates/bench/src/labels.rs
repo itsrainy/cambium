@@ -35,7 +35,7 @@ use anyhow::{Context as _, Result};
 use crate::classify::{Class, Side};
 
 /// The directory under `changes/` that holds every change set's sets.
-pub const DIR: &str = "labels";
+const DIR: &str = "labels";
 
 /// The file names that are not a tool's.
 pub const CAMBIUM: &str = "cambium";

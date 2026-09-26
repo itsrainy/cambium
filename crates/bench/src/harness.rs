@@ -90,22 +90,6 @@ fn total_ram_gb() -> f64 {
     0.0
 }
 
-/// Peak resident set size of this process, in MiB. Linux only; 0 elsewhere.
-pub fn peak_rss_mb() -> f64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-            for line in s.lines() {
-                if let Some(v) = line.strip_prefix("VmHWM:") {
-                    let kb: f64 = v.trim().trim_end_matches(" kB").parse().unwrap_or(0.0);
-                    return kb / 1024.0;
-                }
-            }
-        }
-    }
-    0.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

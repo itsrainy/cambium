@@ -263,15 +263,6 @@ pub fn steps(
     Ok((commits, steps))
 }
 
-/// How many steps carry each tag.
-pub fn present_by_tag(steps: &[Step]) -> BTreeMap<Tag, usize> {
-    let mut out = BTreeMap::new();
-    for t in Tag::ALL {
-        out.insert(t, steps.iter().filter(|s| s.has(t)).count());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

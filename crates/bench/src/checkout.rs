@@ -235,7 +235,6 @@ impl SubjectsDir {
 pub struct Checkout {
     pub id: String,
     pub dir: PathBuf,
-    pub mirror: PathBuf,
     pub repo: Repo,
     subjects: SubjectsDir,
 }
@@ -256,7 +255,6 @@ impl Checkout {
         Ok(Self {
             id: entry.id.clone(),
             dir: dir.clone(),
-            mirror: subjects.mirror(entry),
             repo: Repo::new(dir),
             subjects: subjects.clone(),
         })
@@ -467,7 +465,6 @@ mod tests {
         Checkout {
             id: "r".into(),
             dir: PathBuf::from("/tmp/wt"),
-            mirror: PathBuf::from("/tmp/mirror"),
             repo: Repo::new("/tmp/wt"),
             subjects: SubjectsDir::new(PathBuf::from("/tmp/subjects")),
         }
