@@ -330,7 +330,78 @@ pub struct RepoInputs {
     /// grpc's xDS client consuming 101 of the API's proto rules. Without it a
     /// change under `api/` reached `@grpc//:grpc`'s consumers by nothing:
     /// the leaf has no outgoing edges and the return path was invisible.
-    pub consumers: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    ///
+    /// Each consumer also carries, where Bazel could say, which of its
+    /// leaves reach which of the repository's packages ([`Consumer`]), so
+    /// that a change seeds only the leaves whose closure it can have moved.
+    pub consumers: BTreeMap<String, BTreeMap<String, Consumer>>,
+}
+
+/// One external repository's use of an indexed repository: what the cold
+/// build asked Bazel about the consumer `C` of the repository `R`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Consumer {
+    /// The packages of `R` that `C`'s rules depend on, transitively
+    /// (`deps(set(bridge)) intersect @R//...:*`, the bridge being every rule
+    /// on a path from `//...` into `R` less the two ends). Pooled across
+    /// every consumer of `R`, since the query that finds them is one query.
+    pub packages: BTreeSet<String>,
+    /// Leaf label of `C`, as the index spells it -> the packages of `R` its
+    /// transitive deps reach, in Bazel's own answer (`deps(set(leaves))`,
+    /// walked from each leaf on its own). A leaf that reaches nothing of `R`
+    /// is here with an empty set.
+    ///
+    /// The index holds no graph for `C`: `//app:test` depends on
+    /// `@grpc//:grpc++`, which is a node with no outgoing edges, and the
+    /// rules inside `@grpc` that consume `@envoy_api` are not nodes at all.
+    /// So the unit a change can seed is the leaf, and the question is which
+    /// leaves a moved package of `R` is under. On envoy at its pin one of
+    /// grpc's five leaves reaches the API's protos; seeding all five put
+    /// 2398 labels behind `health_cc_proto` into an answer whose oracle
+    /// was 649.
+    ///
+    /// `None` is "not known": an index written before format 14, a query
+    /// that failed, a querier with no Bazel behind it. The run then seeds
+    /// every leaf of `C` when the pooled [`Consumer::packages`] meet what
+    /// moved, which is the answer before the map existed. A leaf of `C` the
+    /// index holds and the map does not name (the label was spelled after
+    /// the map was derived, or Bazel could not resolve it) gets that same
+    /// answer.
+    pub leaves: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// What the leaf map was derived through, outside `R`: every main-repo
+    /// package (`//pkg`, the root package `//`) and every other repository
+    /// (`@name`, as Bazel spelled it) among the rules of the leaves'
+    /// transitive deps. Meaningful only with [`Consumer::leaves`].
+    ///
+    /// The map is a closure, and a closure moves when a rule on it does. The
+    /// quiche leaves reach `@envoy_api` only through
+    /// `@envoy//source/common/quic/platform:*`, main-repo rules the index
+    /// holds and a `BUILD` edit can point at any package of `R` without the
+    /// map hearing of it. So a run in which one of these packages or
+    /// repositories moved holds the map against Bazel's answer at head
+    /// (or reads it as no map, when there is none), and the splice asks for
+    /// the map again.
+    pub via: BTreeSet<String>,
+}
+
+impl Consumer {
+    /// A consumer known only by the packages it depends on.
+    pub fn of_packages(packages: BTreeSet<String>) -> Self {
+        Self {
+            packages,
+            leaves: None,
+            via: BTreeSet::new(),
+        }
+    }
+}
+
+/// Bazel's answer for one leaf of a consumer ([`Consumer::leaves`]): the
+/// packages of the indexed repository its transitive deps reach, and what
+/// outside that repository they pass through ([`Consumer::via`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeafReach {
+    pub packages: BTreeSet<String>,
+    pub via: BTreeSet<String>,
 }
 
 /// A `Dir` claim that has not been checked against Bazel yet.

@@ -11,6 +11,7 @@ pub mod baseline;
 pub mod bazelrc;
 mod bzl;
 pub mod config;
+mod consumers;
 pub mod diag;
 mod direct;
 pub mod engine;

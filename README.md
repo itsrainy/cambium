@@ -405,7 +405,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 17, "base": "...", "head": "...", ... }
+{ "schema": 18, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -481,7 +481,7 @@ not also show:
 
 ```json
 {
-  "schema": 17,
+  "schema": 18,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -519,7 +519,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 17,
+  "schema": 18,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -543,7 +543,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 17,
+  "schema": 18,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -578,7 +578,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 17,
+  "schema": 18,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
@@ -615,6 +615,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 15 | `stats.repos_dirty_by_loader`: external repositories dirtied because a workspace-closure `.bzl` (or `MODULE.bazel`) that defines them loads from a repository whose `.bzl` files may have moved |
 | 16 | `inspect verify` compares main-repository rule targets on both sides, which is all `affected` reports: `theirs_total` no longer counts the source and generated files or external targets Bazel's `rdeps` names, which are counted in the new `ignored_files` and `ignored_external` instead. `precision_pct` is now `agreed_total / ours_total`, the share of what the index reported that Bazel also reports (it was `theirs_total / ours_total`, which could pass 100%). `failures[].missing` is sorted and gained `round_trip` and `via`: the misses Bazel connects to the sample only through an external repository, and the external targets on those paths. `escalations` (`{label, rule_class, code, missing}`) lists the toolchain-class samples that depend in the index on nothing but toolchain-class rules: any change that reaches one moves a toolchain-class row, which a run answers with `//...` under `CAMBI-W023`, so their misses no longer count as unsound. A toolchain-class sample that depends on anything else is a failure like any other |
 | 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
+| 18 | `stats.consumer_leaves_seeded`: leaves of external repositories seeded because the consumer table's leaf map (index format 14) says their transitive deps reach a package of an indexed repository that moved, or does not know the leaf; a consumer seeded this way is still counted in `repos_dirty_by_consumer`, but only its reaching leaves are seeded rather than all of them |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints. As of 17 it holds `repository`, `from` and

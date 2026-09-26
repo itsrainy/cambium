@@ -240,6 +240,17 @@ impl PackageQuerier for RevisionQuerier {
         self.querier.consumer_repos(indexed)
     }
 
+    /// Delegated, or every consumer's leaf map reads "not known" and every
+    /// leaf is seeded, which is the fault class `consumer_repos` had: a
+    /// silent default answering for the querier underneath.
+    fn consumer_leaf_packages(
+        &self,
+        repo: &str,
+        leaves: &[String],
+    ) -> Option<std::collections::BTreeMap<String, cambium_index::externals::LeafReach>> {
+        self.querier.consumer_leaf_packages(repo, leaves)
+    }
+
     fn can_dump_loading_layer(&self) -> bool {
         self.querier.can_dump_loading_layer()
     }
@@ -357,6 +368,33 @@ mod tests {
             },
             ws,
         )
+    }
+
+    /// Every consumer-table question reaches the Bazel underneath. The
+    /// trait's defaults answer an empty table and no leaf map, and a wrapper
+    /// that leaves either to the default stores exactly that while the querier
+    /// it wraps could have answered: `consumer_repos` did once (9858de7), and
+    /// every cold build the CLI and the bench made had no table.
+    #[test]
+    fn the_consumer_questions_are_delegated() {
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let q = querier_with(&recorder, None);
+        let _ = q.consumer_repos(&["envoy_api".to_string()]);
+        let leaves = q.consumer_leaf_packages("envoy_api", &["@grpc//:grpc++".to_string()]);
+        // An empty graph is an answer, and it knows no leaf; the default
+        // would have been no answer at all.
+        assert_eq!(leaves, Some(std::collections::BTreeMap::new()));
+        let asked = recorder.0.lock().unwrap().clone();
+        assert!(
+            asked.iter().any(|a| a.contains("query") && a.contains("rdeps(//...")),
+            "{asked:?}"
+        );
+        assert!(
+            asked
+                .iter()
+                .any(|a| a.contains("let d = deps(set(\"@grpc//:grpc++\")) in")),
+            "{asked:?}"
+        );
     }
 
     /// A worktree's server is stopped when its querier goes, against the

@@ -11,6 +11,8 @@
 //! under `CAMBI-W023`, and the plan says so of itself.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use crate::externals::LeafSeeds;
 use std::path::Path;
 
 use cambium_classify::{DirtySet, Matchers, PackageSet};
@@ -241,6 +243,13 @@ pub struct DirtyStage {
     /// path that moved them is a modified source file of a package this
     /// index holds (`settled_repos`).
     pub settled: BTreeSet<String>,
+    /// The indexed repositories whose consumers' leaf maps may no longer
+    /// be Bazel's answer at head ([`stale_leaf_maps`]), for the splice to
+    /// ask again.
+    pub stale_leaf_maps: BTreeSet<String>,
+    /// The leaf questions this run asked at head for a consumer whose map
+    /// was suspect ([`ask_at_head`]), for the splice to reuse.
+    pub leaf_answers: crate::consumers::Asked,
     /// Set when the answer is `//...`; the other fields are then irrelevant.
     pub global: Option<GlobalReason>,
 }
@@ -729,12 +738,37 @@ impl<'a> Run<'a> {
         let mut external_nodes: Vec<(u32, String)> = Vec::new();
         let mut packages_by_repo: BTreeMap<String, usize> = BTreeMap::new();
         let mut settled = BTreeSet::new();
+        let mut stale = StaleMaps::default();
+        if !dirty.global {
+            if !ext.repos.is_empty() {
+                settled = settled_repos(self.base, ext, changes, &packages);
+            }
+            // Before `dirty_consumers` adds the consumers it dirties: a
+            // consumer dirty because what it consumes moved has not had its
+            // own rules move.
+            stale = stale_leaf_maps(self.base, &ext.repos, &settled, &dirty.dirty);
+        }
+        let leaf_answers = ask_at_head(self.base, self.querier, &stale, &ext.repos);
         if !dirty.global && !ext.repos.is_empty() {
-            settled = settled_repos(self.base, ext, changes, &packages);
             self.stats.repos_settled = settled.len();
-            self.stats.repos_dirty_by_consumer =
-                dirty_consumers(self.base, ext, &settled, &packages);
-            let r = crate::externals::reach(self.base, &ext.repos, &ext.load_repos, &settled);
+            let mut seeds = LeafSeeds::default();
+            self.stats.repos_dirty_by_consumer = dirty_consumers(
+                self.base,
+                ext,
+                &settled,
+                &packages,
+                &stale.suspect,
+                &leaf_answers,
+                &mut seeds,
+            );
+            let r = crate::externals::reach(
+                self.base,
+                &ext.repos,
+                &ext.load_repos,
+                &settled,
+                &seeds,
+            );
+            self.stats.consumer_leaves_seeded = r.consumer_leaves;
             tracing::debug!(
                 repos = ?ext.repos,
                 load_repos = ?ext.load_repos,
@@ -761,6 +795,8 @@ impl<'a> Run<'a> {
             external_nodes,
             packages_by_repo,
             settled,
+            stale_leaf_maps: stale.repos,
+            leaf_answers,
             global,
         })
     }
@@ -1122,6 +1158,10 @@ impl<'a> Run<'a> {
             b.traversed = self.base.boundary_is_traversed(&b.dir);
         }
         builder.set_repo_boundaries(boundaries.clone());
+        // The consumer table Bazel answered on an overflow's re-query, and the
+        // carried one's entries whose leaf maps went stale, to be given their
+        // leaf maps once the splice has put the head's labels in.
+        let mut rederived: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
         // Only the materialised path: an overlay is never published, and the
         // run that produced it read the closure it needed out of the base.
         if self.req.materialize {
@@ -1267,16 +1307,46 @@ impl<'a> Run<'a> {
             // overflow, and a cold build at the same commit had it.
             // A repository Bazel cannot answer for keeps the carried entry:
             // a stale consumer over-reports, an absent one under-reports.
+            //
+            // The fresh answer is asked here and applied after the splice
+            // below: its leaf map is keyed by the labels the index holds, and
+            // after a rename those are the head's, which only exist once the
+            // re-queried packages are in the builder. The closure rescan
+            // carries the base's table meanwhile.
             let indexed = base.indexed_repos();
-            let mut consumers = consumers_of(base);
+            let consumers = consumers_of(base);
             if queried.cold_reason.is_some() {
-                for (r, cs) in self.querier.consumer_repos(&indexed) {
+                rederived = self.querier.consumer_repos(&indexed);
+                for (r, cs) in &rederived {
                     tracing::debug!(
                         repo = %r,
                         consumers = ?cs.keys().collect::<Vec<_>>(),
                         "the consumer table was re-derived on the re-queried server"
                     );
-                    consumers.insert(r, cs);
+                }
+            }
+            // A leaf map something on its closure moved under
+            // (`stale_leaf_maps`) is asked for again, over the carried
+            // table's consumers and packages: the consumers and what they
+            // pool are the overflow's to re-derive, the map is this one's.
+            // Carried unasked, the map would stand as the answer for every
+            // later run, and a quiche leaf given a path into `@envoy_api` by
+            // a `BUILD` edit here would miss the edit there that follows.
+            for r in &stage.stale_leaf_maps {
+                if rederived.contains_key(r) {
+                    continue;
+                }
+                if let Some(cs) = consumers.get(r) {
+                    tracing::debug!(
+                        repo = %r,
+                        consumers = ?cs.keys().collect::<Vec<_>>(),
+                        "the consumer leaf map is asked for again: something it was derived \
+                         through moved"
+                    );
+                    rederived.insert(
+                        r.clone(),
+                        cs.iter().map(|(c, u)| (c.clone(), u.packages.clone())).collect(),
+                    );
                 }
             }
             if let Some(c) = bzl::rescan_closure(
@@ -1304,6 +1374,26 @@ impl<'a> Run<'a> {
             deleted_by_package.push((p.clone(), ids));
         }
         let splice = builder.apply_packages(&queried.rows.updates);
+        // The re-derived consumer table goes in over the carried one, with
+        // each consumer's leaves asked for under the spelling the head's
+        // labels have: envoy's rename to `grpc` is the case, where every
+        // leaf the base held was `@com_github_grpc_grpc//...`. The same for
+        // a stale leaf map, whose leaves a commit can have added to.
+        if !rederived.is_empty() {
+            if let Some(mut c) = builder.take_bzl_closure() {
+                let fresh = crate::consumers::with_leaves(
+                    self.querier,
+                    std::mem::take(&mut rederived),
+                    &crate::consumers::external_labels(&builder),
+                    &c.inputs.canonical,
+                    &stage.leaf_answers,
+                );
+                for (r, cs) in fresh {
+                    c.inputs.consumers.insert(r, cs);
+                }
+                builder.set_bzl_closure(c);
+            }
+        }
 
         // Resolve changed source files to node ids while the builder still has
         // its interner: rebuilding a label map over a finished index costs
@@ -1845,8 +1935,10 @@ fn indexed_repo_dirs(base: IndexRef<'_>) -> Vec<(String, String)> {
 }
 
 /// The external-consumer table of an index, as `RepoInputs::consumers`
-/// holds it, for the splice to carry forward.
-fn consumers_of(base: IndexRef<'_>) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
+/// holds it, leaf maps and all, for the splice to carry forward.
+fn consumers_of(
+    base: IndexRef<'_>,
+) -> BTreeMap<String, BTreeMap<String, cambium_index::externals::Consumer>> {
     (0..base.num_repos())
         .filter_map(|r| {
             let cs = base.repo_consumers(r);
@@ -1855,8 +1947,9 @@ fn consumers_of(base: IndexRef<'_>) -> BTreeMap<String, BTreeMap<String, BTreeSe
         .collect()
 }
 
-/// Dirties the external repositories that consume a dirty indexed one, and
-/// says how many it dirtied.
+/// Dirties the external repositories that consume a dirty indexed one, or
+/// the leaves of them the change can have moved, and says how many
+/// consumers it reached.
 ///
 /// The return path. `//app:test` links `@grpc//:grpc`; grpc's xDS client is
 /// built from `@envoy_api` protos; a `.proto` under `api/` therefore moves
@@ -1864,10 +1957,7 @@ fn consumers_of(base: IndexRef<'_>) -> BTreeMap<String, BTreeMap<String, BTreeSe
 /// and the second not at all, so the reverse walk from the proto ends at
 /// `@envoy_api`. The table the cold build asked Bazel for
 /// (`RepoInputs::consumers`) names `grpc` as a consumer of `envoy_api` and
-/// the API packages it consumes; here each consumer is marked dirty when a
-/// package it consumes moved, and `externals::reach` rule (1) then seeds
-/// its leaves, which is the same answer the walk gives any dirty
-/// repository nothing indexes. Box run C measured 510 labels missing on
+/// the API packages it consumes. Box run C measured 510 labels missing on
 /// one such step with recall 0.21; Bazel's own `rdeps` for the proto is
 /// exactly the consumers of `@grpc//:grpc`.
 ///
@@ -1876,14 +1966,38 @@ fn consumers_of(base: IndexRef<'_>) -> BTreeMap<String, BTreeMap<String, BTreeSe
 /// by the same join the splice uses; for one that is not settled (a `BUILD`
 /// or `.bzl` moved, or a `MODULE.bazel` edit named it), every package, since
 /// what its rules will look like is not known until they are re-queried.
+///
+/// What a consumer that moved gets depends on its leaf map
+/// (`Consumer::leaves`):
+///
+/// - no map, or one [`stale_leaf_maps`] found suspect this run that Bazel
+///   would not answer for at head ([`ask_at_head`]): the consumer is marked
+///   dirty when the packages it consumes, pooled, meet what moved, and
+///   `externals::reach` rule (1) seeds every leaf of it, the answer any
+///   dirty repository nothing indexes gets;
+/// - a map (for a suspect one, each leaf reaching what it reaches in the map
+///   or at head): only the leaves whose recorded packages meet what moved go to
+///   rule (1) as [`LeafSeeds`], with the leaves the map does not name
+///   getting the pooled answer above. The consumer itself stays clean. For a
+///   settled repository what moved is widened first by the repository's own
+///   reverse edges in this index ([`reverse_within`]). For one that is not
+///   settled, every leaf that reaches anything of it is seeded, and every
+///   leaf at all when a path that unsettled it is Starlark or outside its
+///   directory: a `.bzl` of the repository that the consumer's `BUILD` files
+///   load can change the consumer's rules, including one that reached
+///   nothing of the repository before.
 fn dirty_consumers(
     base: IndexRef<'_>,
     ext: &mut Externals,
     settled: &BTreeSet<String>,
     packages: &PackageSet,
+    suspect: &BTreeMap<String, BTreeSet<String>>,
+    at_head: &crate::consumers::Asked,
+    seeds: &mut LeafSeeds,
 ) -> usize {
     let indexed_dirs = indexed_repo_dirs(base);
     let mut added = 0;
+    let mut narrowed: BTreeSet<String> = BTreeSet::new();
     for r in 0..base.num_repos() {
         let name = base.repo_name(r);
         if !ext.repos.contains(name) {
@@ -1894,53 +2008,391 @@ fn dirty_consumers(
             continue;
         }
         let paths: Vec<String> = ext.dirtied_by.get(name).cloned().unwrap_or_default();
-        // The packages the change touched, by their part inside the
-        // repository; `None` means every package.
-        let touched: Option<BTreeSet<String>> = if settled.contains(name) {
-            let one: Vec<(String, String)> = indexed_dirs
+        let one: Vec<(String, String)> = indexed_dirs
+            .iter()
+            .filter(|(rr, _)| rr == name)
+            .cloned()
+            .collect();
+        // The labels the change touched inside the repository, and their
+        // packages by their part inside it; `None` means every package.
+        let touched_labels: Option<Vec<String>> = settled.contains(name).then(|| {
+            paths
                 .iter()
-                .filter(|(rr, _)| rr == name)
-                .cloned()
-                .collect();
-            Some(
-                paths
-                    .iter()
-                    .flat_map(|p| external_labels(packages, &one, p))
-                    .filter_map(|l| {
-                        cambium_index::label::Label::parse(&l).map(|l| l.package().to_string())
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
-        for (consumer, consumed) in consumers {
-            let moved = match &touched {
-                Some(t) => t.iter().any(|p| consumed.contains(p)),
+                .flat_map(|p| external_labels(packages, &one, p))
+                .collect()
+        });
+        let touched: Option<BTreeSet<String>> = touched_labels.as_ref().map(|ls| {
+            ls.iter()
+                .filter_map(|l| {
+                    cambium_index::label::Label::parse(l).map(|l| l.package().to_string())
+                })
+                .collect()
+        });
+        // Not settled, and not by `BUILD` files and sources under the
+        // repository's own directory alone.
+        let starlark = touched.is_none()
+            && (paths.is_empty()
+                || paths.iter().any(|p| {
+                    cambium_classify::is_bzl_file(p)
+                        || !one.iter().any(|(_, dir)| p.starts_with(dir.as_str()))
+                }));
+        let no_suspects = BTreeSet::new();
+        let suspects = suspect.get(name).unwrap_or(&no_suspects);
+        // Widened once per repository, and only if some consumer of it has a
+        // map to hold it against.
+        let mut widened: Option<Option<BTreeSet<String>>> = None;
+        for (consumer, used) in consumers {
+            let pooled = match &touched {
+                Some(t) => t.iter().any(|p| used.packages.contains(p)),
                 None => true,
             };
-            if !moved {
-                tracing::debug!(
-                    repo = %name,
-                    %consumer,
-                    "a consumer of a settled repository depends on none of the packages that moved"
-                );
+            // A suspect map is read against Bazel's answer at head, each
+            // leaf reaching what it reached at either end: a package it
+            // reaches only at head is one the change can have moved it
+            // through, and one it reached only at base is one whose move it
+            // can have been cut from. With no answer at head, no map.
+            let merged: Option<BTreeMap<String, BTreeSet<String>>> = if suspects.contains(&consumer) {
+                match (&used.leaves, at_head.get(name).and_then(|(_, a)| a.as_ref())) {
+                    (Some(base_map), Some(head)) => {
+                        let canonical = (0..base.num_repos())
+                            .find(|&r| base.repo_name(r) == consumer)
+                            .map_or("", |r| base.repo_canonical.get(r));
+                        let mut m = base_map.clone();
+                        for (leaf, reach) in head {
+                            if crate::consumers::is_leaf_of(leaf, &consumer, canonical) {
+                                m.entry(leaf.clone()).or_default().extend(reach.packages.iter().cloned());
+                            }
+                        }
+                        Some(m)
+                    }
+                    _ => None,
+                }
+            } else {
+                used.leaves.clone()
+            };
+            let Some(leaves) = merged.as_ref() else {
+                if !pooled {
+                    tracing::debug!(
+                        repo = %name,
+                        %consumer,
+                        "a consumer of a settled repository depends on none of the packages that moved"
+                    );
+                    continue;
+                }
+                if ext.repos.insert(consumer.clone()) {
+                    added += 1;
+                    tracing::debug!(
+                        repo = %name,
+                        %consumer,
+                        suspect = suspects.contains(&consumer),
+                        "an external repository that consumes a moved indexed repository is dirty"
+                    );
+                }
+                for p in &paths {
+                    ext.name(p, std::iter::once(&consumer));
+                }
                 continue;
+            };
+            let moved: &Option<BTreeSet<String>> = widened.get_or_insert_with(|| {
+                touched
+                    .as_ref()
+                    .zip(touched_labels.as_ref())
+                    .map(|(t, ls)| reverse_within(base, name, t, ls))
+            });
+            let seeded: BTreeSet<String> = leaves
+                .iter()
+                .filter(|(_, reach)| match moved {
+                    Some(m) => reach.iter().any(|p| m.contains(p)),
+                    None => starlark || !reach.is_empty(),
+                })
+                .map(|(l, _)| l.clone())
+                .collect();
+            // A leaf the map does not know gets the pooled answer, and only
+            // counts if there is one.
+            let unknown = pooled && has_unknown_leaf(base, &consumer, leaves);
+            tracing::debug!(
+                repo = %name,
+                %consumer,
+                known = leaves.len(),
+                seeded = seeded.len(),
+                unknown,
+                starlark,
+                first = ?seeded.iter().take(5).collect::<Vec<_>>(),
+                "a consumer of a moved indexed repository is seeded by its leaf map"
+            );
+            if !seeded.is_empty() || unknown {
+                if !ext.repos.contains(&consumer) && narrowed.insert(consumer.clone()) {
+                    added += 1;
+                }
+                for p in &paths {
+                    ext.name(p, std::iter::once(&consumer));
+                }
             }
-            if ext.repos.insert(consumer.clone()) {
-                added += 1;
-                tracing::debug!(
-                    repo = %name,
-                    %consumer,
-                    "an external repository that consumes a moved indexed repository is dirty"
-                );
-            }
-            for p in &paths {
-                ext.name(p, std::iter::once(&consumer));
-            }
+            seeds
+                .by_consumer
+                .entry(consumer)
+                .or_default()
+                .push(crate::externals::MapSeeds {
+                    known: leaves.keys().cloned().collect(),
+                    seeded,
+                    unknown,
+                });
         }
     }
     added
+}
+
+/// Asks Bazel at head for the leaf maps of the indexed repositories that
+/// moved in this run and have a consumer whose map [`stale_leaf_maps`] found
+/// suspect: one question per repository, over every leaf of its consumers
+/// the base holds.
+///
+/// Without it the suspect consumer is answered from its pooled packages,
+/// every leaf seeded: sound, and on envoy the quiche consumer's 125 leaves
+/// behind any `api/` edit that comes with a `BUILD` edit on the main-repo
+/// closure quiche reaches the API through. The querier answers at head (it
+/// is the one the dirty packages are re-queried with), and the splice reuses
+/// the answer for its own re-derivation when the leaves are the same.
+fn ask_at_head(
+    base: IndexRef<'_>,
+    q: &dyn PackageQuerier,
+    stale: &StaleMaps,
+    moved: &BTreeSet<String>,
+) -> crate::consumers::Asked {
+    let mut out = crate::consumers::Asked::new();
+    for r in 0..base.num_repos() {
+        let name = base.repo_name(r);
+        if !moved.contains(name) || !stale.suspect.contains_key(name) {
+            continue;
+        }
+        let consumers: Vec<(String, &str)> = base
+            .repo_consumers(r)
+            .into_iter()
+            .map(|(c, _)| {
+                let canonical = (0..base.num_repos())
+                    .find(|&i| base.repo_name(i) == c)
+                    .map_or("", |i| base.repo_canonical.get(i));
+                (c, canonical)
+            })
+            .collect();
+        let start = base
+            .label_sorted
+            .partition_point(|&id| base.label(id) < "@");
+        let leaves: Vec<String> = base.label_sorted[start..]
+            .iter()
+            .filter(|&&id| !base.is_tombstone(id))
+            .map(|&id| base.label(id))
+            .take_while(|l| l.starts_with('@'))
+            .filter(|l| {
+                consumers
+                    .iter()
+                    .any(|(c, canonical)| crate::consumers::is_leaf_of(l, c, canonical))
+            })
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let started = std::time::Instant::now();
+        let answer = q.consumer_leaf_packages(name, &leaves);
+        tracing::debug!(
+            repo = %name,
+            leaves = leaves.len(),
+            answered = answer.as_ref().map(BTreeMap::len),
+            ms = started.elapsed().as_millis() as u64,
+            "a suspect consumer leaf map was asked for at head"
+        );
+        out.insert(name.to_string(), (leaves, answer));
+    }
+    out
+}
+
+/// Whether the index holds a label of `consumer` that its leaf map does not
+/// name: one spelled after the map was derived, or one Bazel could not
+/// resolve when it was.
+fn has_unknown_leaf(
+    base: IndexRef<'_>,
+    consumer: &str,
+    known: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let canonical = (0..base.num_repos())
+        .find(|&r| base.repo_name(r) == consumer)
+        .map_or("", |r| base.repo_canonical.get(r));
+    let start = base
+        .label_sorted
+        .partition_point(|&id| base.label(id) < "@");
+    base.label_sorted[start..]
+        .iter()
+        .filter(|&&id| !base.is_tombstone(id))
+        .map(|&id| base.label(id))
+        .take_while(|l| l.starts_with('@'))
+        .any(|l| crate::consumers::is_leaf_of(l, consumer, canonical) && !known.contains_key(l))
+}
+
+/// The leaf maps a run cannot trust, found before any consumer is dirtied.
+#[derive(Default, Debug)]
+struct StaleMaps {
+    /// Indexed repositories whose consumers' maps the splice asks for again.
+    repos: BTreeSet<String>,
+    /// Indexed repository -> the consumers whose map this run reads as no
+    /// map at all.
+    suspect: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Which consumers' leaf maps may no longer be Bazel's answer at head.
+///
+/// A map is the closure of each leaf as Bazel answered it when it was
+/// asked, and it stays right only while nothing on that closure moves. Two
+/// things can move it without an overflow, which is the one place the whole
+/// table is asked for again:
+///
+/// - something the map was derived through (`Consumer::via`): a main-repo
+///   package in `main_dirty` (a `BUILD` edit, or a `.bzl` it loads), or
+///   another repository in `moved`, the consumer's own definition included.
+///   envoy's quiche leaves reach `@envoy_api` only through
+///   `@envoy//source/common/quic/platform:*`; a `BUILD` edit on that closure
+///   can give a leaf a path into any package of the API, and a later edit
+///   there would then miss the leaf's consumers. The consumer is suspect:
+///   the edit that moved the closure can come in the same run as one to
+///   what it now reaches, so when the indexed repository moved too this run
+///   asks Bazel at head ([`ask_at_head`]) rather than trust the map;
+/// - the indexed repository itself, when it moved and is not settled: its
+///   own rules changed, so a path through them may have, including one that
+///   leaves it for the main repository and comes back. This run's seeds
+///   stand on the old map ([`dirty_consumers`] says why that is enough for
+///   the change that unsettled it), but the next run's would not.
+///
+/// Either way the repository is named for the splice to ask again.
+fn stale_leaf_maps(
+    base: IndexRef<'_>,
+    moved: &BTreeSet<String>,
+    settled: &BTreeSet<String>,
+    main_dirty: &BTreeSet<String>,
+) -> StaleMaps {
+    let mut out = StaleMaps::default();
+    let canonical: BTreeMap<&str, &str> = (0..base.num_repos())
+        .map(|r| (base.repo_name(r), base.repo_canonical.get(r)))
+        .collect();
+    for r in 0..base.num_repos() {
+        let name = base.repo_name(r);
+        let consumers = base.repo_consumers(r);
+        if consumers.iter().all(|(_, c)| c.leaves.is_none()) {
+            continue;
+        }
+        if moved.contains(name) && !settled.contains(name) {
+            out.repos.insert(name.to_string());
+        }
+        for (consumer, used) in consumers {
+            if used.leaves.is_none() {
+                continue;
+            }
+            let hit = used.via.iter().find(|v| match v.strip_prefix("//") {
+                Some(pkg) => main_dirty.contains(pkg),
+                None => v.strip_prefix('@').is_some_and(|token| {
+                    moved.iter().any(|m| {
+                        m != name
+                            && crate::externals::repo_token_matches(
+                                token,
+                                m,
+                                canonical.get(m.as_str()).copied().unwrap_or(""),
+                            )
+                    })
+                }),
+            });
+            if let Some(v) = hit {
+                tracing::debug!(
+                    repo = %name,
+                    %consumer,
+                    through = %v,
+                    "a consumer's leaf map was derived through something that moved; \
+                     not trusted as it stands, and asked for again"
+                );
+                out.repos.insert(name.to_string());
+                out.suspect.entry(name.to_string()).or_default().insert(consumer);
+            }
+        }
+    }
+    out
+}
+
+/// The packages of the indexed repository `repo` whose nodes reach one of
+/// the changed files `labels` inside the repository, in this index's own
+/// reverse edges, the files' packages `touched` included.
+///
+/// A leaf map Bazel answered is transitive, so a leaf that reaches a package
+/// depending on a changed file reaches the file's package too, and this adds
+/// nothing to it. It is there for a map that is not the closure the index
+/// holds (an edge inside the repository the map was derived without, or a
+/// closure a `--keep_going` load error cut short): the reverse rows are
+/// re-queried whenever the repository's rules move, so they say what the
+/// map may not. Only the repository's own nodes are walked: the walk is
+/// about the part of the path inside it.
+///
+/// The walk starts from the changed files, not from every node of their
+/// packages: on envoy an edit to `api/bazel/deps.yaml` started from every
+/// rule of `@envoy_api//bazel`, which most of the API depends on, and seeded
+/// 79 quiche leaves for a change whose oracle was 22 labels. A label the
+/// index holds no node for starts from its whole package instead.
+fn reverse_within(
+    base: IndexRef<'_>,
+    repo: &str,
+    touched: &BTreeSet<String>,
+    labels: &[String],
+) -> BTreeSet<String> {
+    let canonical = (0..base.num_repos())
+        .find(|&r| base.repo_name(r) == repo)
+        .map_or("", |r| base.repo_canonical.get(r));
+    let inside = |key: &str| {
+        cambium_index::label::key_repo(key)
+            .is_some_and(|t| crate::externals::repo_token_matches(t, repo, canonical))
+    };
+    let mut out = touched.clone();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut stack: Vec<u32> = Vec::new();
+    // Packages a changed file has no node in, walked from whole.
+    let mut whole: BTreeSet<String> = BTreeSet::new();
+    for l in labels {
+        match base.id_of(l).filter(|&id| !base.is_tombstone(id)) {
+            Some(id) => {
+                if seen.insert(id) {
+                    stack.push(id);
+                }
+            }
+            None => {
+                if let Some(p) = cambium_index::label::Label::parse(l) {
+                    whole.insert(p.package().to_string());
+                }
+            }
+        }
+    }
+    if !whole.is_empty() {
+        for p in 0..base.num_packages() {
+            if base.package_tombstoned(p) {
+                continue;
+            }
+            let key = base.package_name(p);
+            if inside(key) && whole.contains(cambium_index::label::key_package(key)) {
+                for &n in base.package_nodes(p) {
+                    if seen.insert(n) {
+                        stack.push(n);
+                    }
+                }
+            }
+        }
+    }
+    while let Some(n) = stack.pop() {
+        for &m in base.reverse.row(n) {
+            if seen.contains(&m) || base.is_tombstone(m) {
+                continue;
+            }
+            let Some(key) = base.package_of(m).filter(|k| inside(k)) else {
+                continue;
+            };
+            seen.insert(m);
+            out.insert(cambium_index::label::key_package(key).to_string());
+            stack.push(m);
+        }
+    }
+    out
 }
 
 /// The labels a changed path has inside the in-tree repositories whose
@@ -2089,4 +2541,90 @@ fn confirmed_repos(base: IndexRef<'_>) -> std::collections::BTreeSet<(String, St
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::stale_leaf_maps;
+    use cambium_index::externals::Consumer;
+    use cambium_index::{new_lineage, BzlClosure, IndexBuilder, IndexData};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn set(xs: &[&str]) -> BTreeSet<String> {
+        xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// `envoy_api` consumed by `grpc`, whose map was derived through
+    /// `@grpc` itself and `@abseil-cpp`, and by `quiche`, whose map was
+    /// derived through a main-repo package and `@quiche`; and `tsl`,
+    /// consumed by `xla` with no map at all.
+    fn index() -> IndexData {
+        let mut c = BzlClosure::default();
+        c.inputs.repos = set(&["envoy_api", "tsl"]);
+        let leaf = |l: &str| -> Option<BTreeMap<String, BTreeSet<String>>> {
+            Some([(l.to_string(), set(&["envoy/type/v3"]))].into_iter().collect())
+        };
+        let grpc = Consumer {
+            packages: set(&["envoy/type/v3"]),
+            leaves: leaf("@grpc//:grpc++"),
+            via: set(&["@grpc", "@abseil-cpp"]),
+        };
+        let quiche = Consumer {
+            packages: set(&["envoy/type/v3"]),
+            leaves: leaf("@quiche//:quic_core"),
+            via: set(&["//source/common/quic/platform", "//", "@quiche"]),
+        };
+        c.inputs.consumers.insert(
+            "envoy_api".into(),
+            [("grpc".to_string(), grpc), ("quiche".to_string(), quiche)].into_iter().collect(),
+        );
+        c.inputs.consumers.insert(
+            "tsl".into(),
+            [("xla".to_string(), Consumer::of_packages(set(&["tsl/platform"])))]
+                .into_iter()
+                .collect(),
+        );
+        let mut b = IndexBuilder::new(new_lineage());
+        b.set_bzl_closure(c);
+        b.finish("c0")
+    }
+
+    #[test]
+    fn a_main_repo_package_a_map_was_derived_through_makes_it_suspect() {
+        let d = index();
+        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&["source/common/quic/platform"]));
+        assert_eq!(s.repos, set(&["envoy_api"]));
+        assert_eq!(s.suspect["envoy_api"], set(&["quiche"]));
+        // The root package is spelled `//`, and is the empty package.
+        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&[""]));
+        assert_eq!(s.suspect["envoy_api"], set(&["quiche"]));
+        // A package no map was derived through moves none.
+        let s = stale_leaf_maps(d.view(), &set(&[]), &set(&[]), &set(&["source/server"]));
+        assert!(s.repos.is_empty() && s.suspect.is_empty(), "{s:?}");
+    }
+
+    /// The consumer's own definition moving (a version bump of `@grpc`) is
+    /// a repository it was derived through, in either spelling Bazel printed.
+    #[test]
+    fn a_repository_a_map_was_derived_through_moving_makes_it_suspect() {
+        let d = index();
+        let s = stale_leaf_maps(d.view(), &set(&["grpc"]), &set(&[]), &set(&[]));
+        assert_eq!(s.suspect["envoy_api"], set(&["grpc"]));
+        let s = stale_leaf_maps(d.view(), &set(&["abseil-cpp"]), &set(&[]), &set(&[]));
+        assert_eq!(s.suspect["envoy_api"], set(&["grpc"]));
+    }
+
+    /// The indexed repository moving and not settled names it for the splice
+    /// without making any consumer suspect; settled, it names nothing. A
+    /// repository whose consumers have no map is never named: there is
+    /// nothing to ask again.
+    #[test]
+    fn an_unsettled_indexed_repository_is_asked_for_again() {
+        let d = index();
+        let s = stale_leaf_maps(d.view(), &set(&["envoy_api", "tsl"]), &set(&[]), &set(&[]));
+        assert_eq!(s.repos, set(&["envoy_api"]));
+        assert!(s.suspect.is_empty(), "{s:?}");
+        let s = stale_leaf_maps(d.view(), &set(&["envoy_api"]), &set(&["envoy_api"]), &set(&[]));
+        assert!(s.repos.is_empty(), "{s:?}");
+    }
 }
