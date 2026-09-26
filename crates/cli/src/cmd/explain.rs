@@ -71,7 +71,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         Some(label) => about_label(&outcome, label)?,
     };
 
-    let doc = document(report, args.label.as_deref(), &about);
+    let doc = document(report, args.label.as_deref(), &about)?;
     emit(&doc, fmt, |_| {
         print!(
             "{}",
@@ -240,7 +240,11 @@ fn spliced_onto(report: &AffectedReport) -> String {
 // ---------------------------------------------------------------------- json
 
 /// The one `explain` document, in both scopes (README, "The JSON contract").
-fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serde_json::Value {
+fn document(
+    report: &AffectedReport,
+    label: Option<&str>,
+    about: &About,
+) -> Result<serde_json::Value> {
     let mut doc = serde_json::json!({
         "schema": cambium_engine::report::SCHEMA_VERSION,
         "base": report.base,
@@ -269,10 +273,7 @@ fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serd
             About::Affected(e) => {
                 map.insert("affected".into(), true.into());
                 map.insert("path".into(), serde_json::json!(e.path));
-                map.insert(
-                    "reason".into(),
-                    serde_json::to_value(&e.reason).unwrap_or(serde_json::Value::Null),
-                );
+                map.insert("reason".into(), serde_json::to_value(&e.reason)?);
             }
             About::GloballyAffected => {
                 map.insert("affected".into(), true.into());
@@ -284,7 +285,7 @@ fn document(report: &AffectedReport, label: Option<&str>, about: &About) -> serd
             About::Run => {}
         }
     }
-    doc
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -425,7 +426,7 @@ mod tests {
     /// label's only when a label was asked about.
     #[test]
     fn the_json_document_carries_the_label_fields_only_with_a_label() {
-        let run = document(&report(), None, &About::Run);
+        let run = document(&report(), None, &About::Run).unwrap();
         assert_eq!(run["schema"], cambium_engine::report::SCHEMA_VERSION);
         assert_eq!(run["summary"]["affected_targets"], 9);
         assert!(run.get("label").is_none() && run.get("affected").is_none());
@@ -438,7 +439,7 @@ mod tests {
                 path: "lib/base.cc".into(),
             },
         }));
-        let one = document(&report(), Some("//foo:bar"), &about);
+        let one = document(&report(), Some("//foo:bar"), &about).unwrap();
         assert_eq!(one["label"], "//foo:bar");
         assert_eq!(one["affected"], true);
         assert_eq!(one["path"][1], "//lib:base");
@@ -451,7 +452,8 @@ mod tests {
             &About::NotAffected {
                 note: "no changed input reached it".into(),
             },
-        );
+        )
+        .unwrap();
         assert_eq!(none["affected"], false);
         assert_eq!(none["why_not"], "no changed input reached it");
     }
