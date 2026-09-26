@@ -1295,27 +1295,103 @@ mod tests {
     #[test]
     fn the_boundary_set_comes_off_the_index() {
         let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
-        b.set_repo_boundaries(vec![cambium_index::Boundary {
-            dir: "third_party/xla".into(),
-            bazelignored: false,
-            traversed: false,
-        }]);
-        b.apply_packages(&[cambium_index::PackageUpdate {
-            package: "lib".into(),
+        b.set_repo_boundaries(vec![
+            cambium_index::Boundary {
+                dir: "third_party/xla".into(),
+                bazelignored: false,
+                traversed: false,
+            },
+            cambium_index::Boundary {
+                dir: "third_party/tsl".into(),
+                bazelignored: false,
+                traversed: true,
+            },
+        ]);
+        let package = |name: &str| cambium_index::PackageUpdate {
+            package: name.into(),
             build_hash: [1; 32],
             bzl_hash: [0; 32],
             targets: vec![cambium_index::TargetRow::rule(
-                "//lib:a",
+                format!("//{name}:a"),
                 "cc_library",
                 vec![],
             )],
-        }]);
+        };
+        b.apply_packages(&[package("lib"), package("third_party/tsl/tsl")]);
         let d = b.finish("head");
         let p = PackageSet::from_index(d.view());
         assert!(p.contains("lib"));
         assert_eq!(
             p.boundary_of("third_party/xla/a.cc"),
             Some("third_party/xla")
+        );
+        assert_eq!(
+            p.unwalked_boundary_of("third_party/xla/a.cc"),
+            Some("third_party/xla")
+        );
+        // The traversed flag comes off the index too: the boundary is still
+        // one, and the main repository still owns the packages under it.
+        let tsl = "third_party/tsl/tsl/a.cc";
+        assert_eq!(p.boundary_of(tsl), Some("third_party/tsl"));
+        assert_eq!(p.unwalked_boundary_of(tsl), None);
+        assert_eq!(p.owner_of(tsl), Some("third_party/tsl/tsl"));
+    }
+
+    #[test]
+    fn a_bad_glob_names_the_pattern_it_came_from() {
+        for rules in [
+            Rules {
+                invalidator_globs: vec!["tools/**".into(), "a[".into()],
+                ..Default::default()
+            },
+            Rules {
+                ignore_globs: vec!["docs/**".into(), "a[".into()],
+                ..Default::default()
+            },
+        ] {
+            let Err(ClassifyError::BadGlob { pattern, .. }) = Matchers::compile(&rules) else {
+                panic!("`a[` compiled: {rules:?}");
+            };
+            assert_eq!(pattern, "a[");
+        }
+    }
+
+    /// An exemption is the caller's claim to have handled a file, so it holds
+    /// against a configured glob as it does against an exact path.
+    #[test]
+    fn an_exemption_beats_a_glob_invalidator() {
+        let mut m = matchers();
+        assert!(m.is_invalidator("tools/toolchains/cc.bzl"));
+        m.exempt(["tools/toolchains/cc.bzl".to_string()]);
+        assert!(!m.is_invalidator("tools/toolchains/cc.bzl"));
+        assert!(m.is_invalidator("tools/toolchains/other.bzl"));
+    }
+
+    /// Under a traversed boundary a BUILD file is this repository's, so it
+    /// moves the package layout like any other, and the repository half of
+    /// the answer is owed for it as well.
+    #[test]
+    fn a_build_file_under_a_traversed_boundary_moves_the_layout() {
+        let (d, p) = run_with(
+            traversed(),
+            &no_rules(),
+            &NoConsumers,
+            &[
+                Change::new(Status::Added, "third_party/tsl/tsl/newpkg/BUILD"),
+                Change::new(Status::Deleted, "third_party/tsl/tsl/platform/BUILD"),
+            ],
+        );
+        assert!(p.contains("third_party/tsl/tsl/newpkg"));
+        assert!(!p.contains("third_party/tsl/tsl/platform"));
+        assert_eq!(
+            d.deleted_packages.iter().collect::<Vec<_>>(),
+            vec!["third_party/tsl/tsl/platform"]
+        );
+        assert_eq!(
+            d.nested.get("third_party/tsl").map(Vec::len),
+            Some(2),
+            "{:?}",
+            d.nested
         );
     }
 }
