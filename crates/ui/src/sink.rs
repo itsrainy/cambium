@@ -20,9 +20,6 @@ const TIME_END: usize = 74;
 /// Where a run says what it is doing.
 pub trait Sink {
     fn emit(&mut self, event: Event);
-    /// Redraws the live line without a new event, for a phase that is slow
-    /// and silent. A sink without a live line does nothing.
-    fn tick(&mut self) {}
 }
 
 /// The sink `mode` asks for, writing to stderr.
@@ -316,11 +313,6 @@ impl<W: Write + Send + 'static> Sink for Stream<W> {
         }
         if done {
             self.finish();
-        }
-    }
-    fn tick(&mut self) {
-        if let Ok(mut text) = self.text.lock() {
-            text.tick_line();
         }
     }
 }
