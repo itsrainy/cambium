@@ -855,11 +855,13 @@ impl<'a> Run<'a> {
             return;
         }
         for c in changes {
+            // A `BUILD` file inside a nested repository defines a package of
+            // *that* repository, which this one can never query. One under a
+            // boundary `//...` walked into anyway is this repository's, and
+            // the classifier has already put its package in the layout; the
+            // question is the classifier's, asked the same way.
             if c.status == cambium_diff::Status::Deleted
-                || !cambium_classify::is_build_file(&c.path)
-                // A `BUILD` file inside a nested repository defines a package
-                // of *that* repository, which this one can never query.
-                || packages.boundary_of(&c.path).is_some()
+                || !packages.is_main_repo_build_file(&c.path)
             {
                 continue;
             }

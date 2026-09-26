@@ -499,3 +499,69 @@ fn a_change_under_a_traversed_boundary_moves_the_repository_it_also_is() {
         r.affected_labels()
     );
 }
+
+/// A package the change creates under a traversed boundary.
+///
+/// The directory is main-repo territory, so a `BUILD` file there defines a
+/// main-repo package, and the classifier already puts it in the layout. The
+/// layer built at base has no `PACKAGE` node for it, so the only thing that
+/// can name it is the path, and the engine has to read the path with the
+/// same notion of "nested" the classifier uses: a traversed boundary is not
+/// one.
+const TSL_NEW_PKG: &str = "third_party/tsl/tsl/newpkg";
+
+fn tsl_head_rows(pkg: &str) -> PackageUpdate {
+    match pkg {
+        TSL_NEW_PKG => PackageUpdate {
+            package: pkg.to_string(),
+            targets: vec![TargetRow::rule(
+                "//third_party/tsl/tsl/newpkg:fresh",
+                "cc_library",
+                vec!["//third_party/tsl/tsl/platform:dso_loader".into()],
+            )],
+            ..Default::default()
+        },
+        other => tsl_rows(other),
+    }
+}
+
+#[test]
+fn a_package_created_under_a_traversed_boundary_is_queried() {
+    let dir = tsl_tree();
+    let index = tsl_index(dir.path(), false);
+    let mut m = BTreeMap::new();
+    m.insert("WORKSPACE".to_string(), String::new());
+    m.insert("app/BUILD".to_string(), String::new());
+    m.insert("lib/BUILD".to_string(), String::new());
+    m.insert(format!("{TSL_PKG}/BUILD"), String::new());
+    m.insert(format!("{TSL_NEW_PKG}/BUILD"), String::new());
+    let head = Scanning::new(&["app", "lib", TSL_PKG, TSL_NEW_PKG], tsl_head_rows)
+        .with_files(Files(m))
+        .with_workspace(dir.path());
+    let changes = vec![Change::new(
+        Status::Added,
+        "third_party/tsl/tsl/newpkg/BUILD",
+    )];
+    let r = engine()
+        .compute_with_texts(
+            index.view(),
+            &changes,
+            &head,
+            &req(),
+            &FixedText(BTreeMap::new()),
+        )
+        .unwrap()
+        .report;
+    assert!(!r.global, "{:?}", r.global_reason);
+    assert!(
+        r.dirty_packages.contains(&TSL_NEW_PKG.to_string()),
+        "the path names the package the layer cannot: {:?}",
+        r.dirty_packages
+    );
+    assert!(
+        r.affected_labels()
+            .contains(&"//third_party/tsl/tsl/newpkg:fresh".to_string()),
+        "and its targets are in the answer: {:?}",
+        r.affected_labels()
+    );
+}
