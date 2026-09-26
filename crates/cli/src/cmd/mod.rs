@@ -4,6 +4,7 @@ pub mod explain;
 pub mod index;
 pub mod init;
 pub mod inspect;
+mod narrate;
 pub mod plan;
 pub mod profile;
 pub mod status;

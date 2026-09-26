@@ -13,9 +13,10 @@ use anyhow::Result;
 use cambium_engine::progress::Progress;
 use cambium_engine::{AffectedRequest, Code, Diagnostic};
 use cambium_ui::report::{group, human_ms};
-use cambium_ui::{hist, Align, Cell, Column, Event, Level, Paint, Sink, Style};
+use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
+use crate::cmd::narrate::{commit_columns, index_cell};
 use crate::cmd::{emit_json, Context};
 use crate::Format;
 
@@ -571,18 +572,6 @@ fn commits_in_range(engine: &cambium_engine::Engine, req: &AffectedRequest) -> S
     }
 }
 
-/// The columns of the splice row, the same five a profile row uses so the two
-/// verbs lay a commit out alike.
-fn splice_columns() -> Vec<Column> {
-    vec![
-        Column::flex("range"),
-        Column::fixed("time", 9, Align::Right),
-        Column::fixed("affected", 8, Align::Right),
-        Column::fixed("tests", 6, Align::Right),
-        Column::fixed("index", 17, Align::Left),
-    ]
-}
-
 /// Turns the run's progress into the grammar the sink draws.
 struct Narrator<'a> {
     sink: &'a mut dyn Sink,
@@ -686,7 +675,7 @@ impl Narrator<'_> {
             Progress::SpliceStep { step } => {
                 if !self.rows_open {
                     self.rows_open = true;
-                    self.sink.emit(Event::RowHeader(splice_columns()));
+                    self.sink.emit(Event::RowHeader(commit_columns("range")));
                 }
                 self.sink.emit(Event::Row(vec![
                     Cell::Commit {
@@ -763,19 +752,6 @@ impl Narrator<'_> {
                 });
             }
         }
-    }
-}
-
-/// What the splice did to the index, in the same cell `cambi profile` prints.
-fn index_cell(work: &cambium_engine::profile::IndexWork) -> Cell {
-    use cambium_engine::profile::IndexWork;
-    match work {
-        IndexWork::Identical => Cell::styled("= unchanged", Style::Dim),
-        IndexWork::Spliced { rows_rewritten } => {
-            Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
-        }
-        IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
-        IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
     }
 }
 

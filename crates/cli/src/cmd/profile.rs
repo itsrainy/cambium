@@ -12,14 +12,15 @@
 use std::io::IsTerminal as _;
 
 use anyhow::{Context as _, Result};
-use cambium_engine::profile::{self, CommitStep, IndexWork, Progress, WorktreeRevisions};
+use cambium_engine::profile::{self, CommitStep, Progress, WorktreeRevisions};
 use cambium_engine::report::Stopwatch;
 use cambium_engine::Diagnostic;
 use cambium_engine::Profile;
 use cambium_ui::report::{group, human_bytes, human_ms, kv, Pair};
-use cambium_ui::{row, Align, Cell, Column, Event, Paint, Sink, Style};
+use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
+use crate::cmd::narrate::{commit_columns, index_cell};
 use crate::cmd::{emit, Context};
 
 /// What lands on stdout above the table.
@@ -51,31 +52,6 @@ pub struct Args {
     /// How the report above the table reads.
     #[arg(long, value_enum, default_value_t = Report::Kv)]
     report: Report,
-}
-
-/// The columns of a commit row, live and in the final table alike, so the two
-/// cannot drift.
-fn columns() -> Vec<Column> {
-    vec![
-        Column::flex("commit"),
-        Column::fixed("time", 9, Align::Right),
-        Column::fixed("affected", 8, Align::Right),
-        Column::fixed("tests", 6, Align::Right),
-        Column::fixed("index", 17, Align::Left),
-    ]
-}
-
-/// The `index` cell: what the run did to the stored index for this commit.
-/// Dim when nothing happened, so it adds no noise.
-fn index_cell(work: &IndexWork) -> Cell {
-    match work {
-        IndexWork::Identical => Cell::styled("= unchanged", Style::Dim),
-        IndexWork::Spliced { rows_rewritten } => {
-            Cell::styled(format!("~ {rows_rewritten:>5} rewritten"), Style::Cyan)
-        }
-        IndexWork::Rebuilt { .. } => Cell::styled("\u{21bb} rebuilt", Style::Cyan),
-        IndexWork::Failed => Cell::styled("x failed", Style::Yellow),
-    }
 }
 
 /// A row's cells. A global step answered `//...`, so it reads `all` rather
@@ -324,7 +300,7 @@ impl Renderer<'_> {
                         name: "commits".into(),
                         detail: Some(format!("{of} step{}", plural(of))),
                     });
-                    self.sink.emit(Event::RowHeader(columns()));
+                    self.sink.emit(Event::RowHeader(commit_columns("commit")));
                 }
                 self.sink
                     .emit(Event::Current(format!("[{index}/{of}] {}", short(&commit))));
@@ -428,11 +404,19 @@ fn print_human(
         return;
     }
     println!();
-    println!("{}", row::render_header(&columns(), width, &paint));
+    println!(
+        "{}",
+        row::render_header(&commit_columns("commit"), width, &paint)
+    );
     for c in &p.commits {
         println!(
             "{}",
-            row::render(&columns(), &row_cells(c, &c.subject), width, &paint)
+            row::render(
+                &commit_columns("commit"),
+                &row_cells(c, &c.subject),
+                width,
+                &paint
+            )
         );
     }
     if let Some(kept) = kept {
@@ -782,6 +766,7 @@ fn plural(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cambium_engine::profile::IndexWork;
 
     fn step(index: IndexWork) -> CommitStep {
         CommitStep {
@@ -915,7 +900,7 @@ mod tests {
         let doc = profile_doc();
         let render = |c: &CommitStep| {
             row::render(
-                &columns(),
+                &commit_columns("commit"),
                 &row_cells(c, &c.subject),
                 96,
                 &Paint::new(false),
@@ -981,7 +966,7 @@ mod tests {
             }),
             "tcp_proxy: idle timeout",
         );
-        let line = row::render(&columns(), &cells, 96, &Paint::new(false));
+        let line = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(false));
         assert!(
             line.starts_with("    e6b1317 09-02 09:14 tcp_proxy: idle timeout"),
             "{line}"
@@ -995,9 +980,9 @@ mod tests {
     #[test]
     fn a_commit_that_changed_nothing_the_graph_models_says_so_quietly() {
         let cells = row_cells(&step(IndexWork::Identical), "docs: a typo");
-        let line = row::render(&columns(), &cells, 96, &Paint::new(false));
+        let line = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(false));
         assert!(line.ends_with("= unchanged"), "{line}");
-        let painted = row::render(&columns(), &cells, 96, &Paint::new(true));
+        let painted = row::render(&commit_columns("commit"), &cells, 96, &Paint::new(true));
         assert!(painted.contains("\x1b[2m= unchanged\x1b[0m"), "{painted}");
     }
 }
