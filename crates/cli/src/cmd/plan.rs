@@ -6,7 +6,7 @@
 use anyhow::Result;
 use cambium_engine::plan::{PlanMode, RunPlan};
 
-use crate::cmd::{emit, git_short, plural_s, Context};
+use crate::cmd::{duration, emit, git_short, plural_s, Context};
 
 pub fn run(
     ctx: &Context,
@@ -46,7 +46,7 @@ fn print_human(plan: &RunPlan) {
             cambium_engine::probe::short(&i.revision),
             &i.lineage[..6.min(i.lineage.len())],
             match i.age_seconds {
-                Some(age) => format!("{} old", crate::cmd::status::duration(age)),
+                Some(age) => format!("{} old", duration(age)),
                 None => "built at an unrecorded time".into(),
             },
             match i.distance {

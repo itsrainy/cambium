@@ -17,7 +17,7 @@ use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit_json, plural, plural_s, short, Context};
+use crate::cmd::{emit_json, human_age, plural, plural_s, short, Context};
 use crate::Format;
 
 /// How the targets-by-depth distribution is drawn under the answer.
@@ -736,17 +736,6 @@ impl Narrator<'_> {
                 });
             }
         }
-    }
-}
-
-/// An age in the coarsest unit that still says something: `40 min`, `4 h`,
-/// `2 d`. An index is minutes to weeks old and nobody reads the seconds.
-fn human_age(secs: u64) -> String {
-    match secs {
-        0..=119 => format!("{secs} s"),
-        120..=7_199 => format!("{} min", secs / 60),
-        7_200..=172_799 => format!("{} h", secs / 3_600),
-        _ => format!("{} d", secs / 86_400),
     }
 }
 

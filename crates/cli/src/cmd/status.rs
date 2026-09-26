@@ -10,7 +10,7 @@
 use anyhow::Result;
 use cambium_engine::probe;
 
-use crate::cmd::{emit, human_bytes, plural_s, Context};
+use crate::cmd::{duration, emit, human_bytes, plural_s, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
@@ -226,18 +226,6 @@ fn unix_time(unix: u64) -> String {
         return "at an unrecorded time".into();
     }
     format!("{} ago", duration(now.saturating_sub(unix)))
-}
-
-/// A span of seconds in the unit someone would say it in: `3 days`, `1 hour`.
-/// `--dry-run` says how old the index it would load is with the same words.
-pub fn duration(secs: u64) -> String {
-    let (n, unit) = match secs {
-        0..=119 => (secs, "second"),
-        120..=3599 => (secs / 60, "minute"),
-        3600..=86_399 => (secs / 3600, "hour"),
-        _ => (secs / 86_400, "day"),
-    };
-    format!("{n} {unit}{}", plural_s(n))
 }
 
 #[cfg(test)]
