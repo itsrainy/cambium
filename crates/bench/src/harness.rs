@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Enough about the machine to know whether two runs are comparable.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Machine {
     pub cpu: String,
     pub cores: usize,

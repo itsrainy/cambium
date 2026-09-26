@@ -312,7 +312,7 @@ mod tests {
                 tool_sha: "def".into(),
                 engine_id: "0123456789abcdef".into(),
                 config_hash: "hash".into(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 5000,

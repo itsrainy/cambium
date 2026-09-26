@@ -594,12 +594,7 @@ mod tests {
             peer_sample: Sample::default(),
             environment: Environment {
                 machine: crate::harness::Machine::detect(),
-                bazel_version_used: String::new(),
-                cambi_version: String::new(),
-                tool_sha: String::new(),
-                engine_id: String::new(),
-                config_hash: String::new(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 0,

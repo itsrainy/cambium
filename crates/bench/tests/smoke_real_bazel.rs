@@ -319,9 +319,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
             bazel_version_used: version.clone().unwrap_or_default(),
             cambi_version: cambi.version().to_string(),
             tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,
@@ -527,9 +525,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
             bazel_version_used: version.clone().unwrap_or_default(),
             cambi_version: cambi.version().to_string(),
             tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,

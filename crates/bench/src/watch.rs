@@ -666,9 +666,7 @@ mod tests {
                 bazel_version_used: "bazel 7.4.1".into(),
                 cambi_version: "cambi".into(),
                 tool_sha: "abc".into(),
-                engine_id: String::new(),
-                config_hash: String::new(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 60_000,

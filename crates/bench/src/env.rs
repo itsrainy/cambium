@@ -28,7 +28,7 @@ pub fn bazel_version_used(bazel: &cambium_bazel::Bazel) -> String {
 }
 
 /// What a walk was run in. Stamped into [`super::walk::model::WalkResult`].
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Environment {
     /// CPU, cores, RAM, OS+arch — enough to refuse a cross-machine
     /// comparison.

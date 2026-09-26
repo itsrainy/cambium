@@ -254,12 +254,7 @@ fn opts(f: &Fixture) -> WalkOptions {
         peer_sample: walk::Sample::default(),
         environment: cambium_bench::env::Environment {
             machine: cambium_bench::harness::Machine::detect(),
-            bazel_version_used: String::new(),
-            cambi_version: String::new(),
-            tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,

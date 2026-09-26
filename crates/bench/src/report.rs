@@ -416,7 +416,7 @@ mod tests {
                 tool_sha: "sha".into(),
                 engine_id: "eng".into(),
                 config_hash: "h".into(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 12000,
