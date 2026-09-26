@@ -934,12 +934,12 @@ pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[S
 /// query *words*, and the lexer ends a word at a `+`, so one unquoted
 /// `//bazel:libc++` makes the whole batch a syntax error rather than one
 /// missing label.
-pub fn label_set(labels: &[String]) -> String {
+pub fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
     format!(
         "set({})",
         labels
             .iter()
-            .map(|l| query_word(l))
+            .map(|l| query_word(l.as_ref()))
             .collect::<Vec<_>>()
             .join(" ")
     )

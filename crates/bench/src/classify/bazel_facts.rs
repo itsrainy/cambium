@@ -9,6 +9,10 @@ use cambium_index::{IndexRef, WalkOptions};
 use cambium_proto::blaze_query::{attribute::Discriminator, Rule};
 
 use super::Facts;
+use crate::oracles::rdeps::{is_external, label_set};
+
+/// A memo of rule protos by label; `None` for a label Bazel did not return.
+type RuleCache = RefCell<HashMap<String, Option<Rule>>>;
 
 /// A [`Facts`] implementation backed by Bazel and the head index.
 ///
@@ -56,13 +60,13 @@ pub struct BazelFacts<'a> {
     /// that reached it (`--explain`). Lets the `select` test look along the
     /// whole path instead of one hop.
     paths: HashMap<String, Vec<String>>,
-    cache: RefCell<HashMap<String, Option<Rule>>>,
-    base_cache: RefCell<HashMap<String, Option<Rule>>>,
+    cache: RuleCache,
+    base_cache: RuleCache,
     /// Rule protos fetched for [`Facts::has_external_input`]'s closure sweep,
     /// kept apart from `cache` because that one is populated by `prefetch`
     /// from the symmetric difference and this one from whole dependency
     /// closures.
-    implicit_cache: RefCell<HashMap<String, Option<Rule>>>,
+    implicit_cache: RuleCache,
     /// One forward walk per label, memoised: `bazeldiff_extra_external_content`
     /// asks two questions of the same traversal.
     dep_cache: RefCell<HashMap<String, DepFacts>>,
@@ -166,12 +170,7 @@ impl<'a> BazelFacts<'a> {
         self
     }
 
-    fn rule(
-        &self,
-        bazel: &Bazel,
-        cache: &RefCell<HashMap<String, Option<Rule>>>,
-        label: &str,
-    ) -> Option<Rule> {
+    fn rule(&self, bazel: &Bazel, cache: &RuleCache, label: &str) -> Option<Rule> {
         if let Some(hit) = cache.borrow().get(label) {
             return hit.clone();
         }
@@ -218,7 +217,7 @@ impl<'a> BazelFacts<'a> {
                 continue;
             }
             let l = self.index.label(v);
-            if l.starts_with('@') || l.starts_with("//external:") {
+            if is_external(l) {
                 out.has_external = true;
             } else if self.affected.contains(l) {
                 out.touches_affected = true;
@@ -253,7 +252,7 @@ impl<'a> BazelFacts<'a> {
                 // filegroup's closure would be a Bazel query each for nothing.
                 .filter(|&v| self.index.is_rule(v))
                 .map(|v| self.index.label(v).to_string())
-                .filter(|l| !self.is_external(l))
+                .filter(|l| !is_external(l))
                 .collect();
             closure.sort();
             closure.dedup();
@@ -289,7 +288,7 @@ impl<'a> BazelFacts<'a> {
                 }
             }
         }
-        closure.retain(|l| !self.is_external(l));
+        closure.retain(|l| !is_external(l));
         closure.sort();
         closure.dedup();
         self.any_rule_input(&closure, |input| under(input))
@@ -302,31 +301,7 @@ impl<'a> BazelFacts<'a> {
     /// hundred of them.
     fn any_rule_input(&self, labels: &[String], pred: impl Fn(&str) -> bool) -> bool {
         for chunk in labels.chunks(PREFETCH_CHUNK) {
-            let todo: Vec<&String> = {
-                let c = self.implicit_cache.borrow();
-                chunk
-                    .iter()
-                    .filter(|l| !c.contains_key(l.as_str()))
-                    .collect()
-            };
-            if !todo.is_empty() {
-                let expr = format!(
-                    "set({})",
-                    todo.iter()
-                        .map(|l| query_word(l))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                if let Some(rules) = crate::tools::bazel_query::rules(self.head, &expr) {
-                    let mut c = self.implicit_cache.borrow_mut();
-                    for r in rules {
-                        c.insert(r.name.clone(), Some(r));
-                    }
-                    for l in todo {
-                        c.entry(l.clone()).or_insert(None);
-                    }
-                }
-            }
+            fill_cache(self.head, &self.implicit_cache, chunk);
             let c = self.implicit_cache.borrow();
             if chunk
                 .iter()
@@ -342,9 +317,7 @@ impl<'a> BazelFacts<'a> {
 
     /// Does any rule in `labels` name an external label among its inputs?
     fn any_implicit_external(&self, labels: &[String]) -> bool {
-        self.any_rule_input(labels, |i| {
-            i.starts_with('@') || i.starts_with("//external:")
-        })
+        self.any_rule_input(labels, is_external)
     }
 
     /// Fetches the rule protos for `labels` in bulk, at both revisions.
@@ -360,10 +333,7 @@ impl<'a> BazelFacts<'a> {
     /// Best-effort: a batch that fails leaves its labels uncached, and they
     /// fall back to the per-label path.
     pub fn prefetch(&self, labels: impl IntoIterator<Item = String>) {
-        let wanted: Vec<String> = labels
-            .into_iter()
-            .filter(|l| !self.is_external(l))
-            .collect();
+        let wanted: Vec<String> = labels.into_iter().filter(|l| !is_external(l)).collect();
         if wanted.is_empty() {
             return;
         }
@@ -379,35 +349,36 @@ impl<'a> BazelFacts<'a> {
 /// decoded proto stay manageable.
 pub const PREFETCH_CHUNK: usize = 500;
 
-fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, labels: &[String]) {
+fn prefetch_into(bazel: &Bazel, cache: &RuleCache, labels: &[String]) {
     for chunk in labels.chunks(PREFETCH_CHUNK) {
-        let todo: Vec<&String> = {
-            let c = cache.borrow();
-            chunk
-                .iter()
-                .filter(|l| !c.contains_key(l.as_str()))
-                .collect()
-        };
-        if todo.is_empty() {
-            continue;
-        }
-        let expr = format!(
-            "set({})",
-            todo.iter()
-                .map(|l| query_word(l))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let Some(rules) = crate::tools::bazel_query::rules(bazel, &expr) else {
-            continue;
-        };
-        let mut c = cache.borrow_mut();
-        for r in rules {
-            c.insert(r.name.clone(), Some(r));
-        }
-        for l in todo {
-            c.entry(l.clone()).or_insert(None);
-        }
+        fill_cache(bazel, cache, chunk);
+    }
+}
+
+/// Asks Bazel, in one `set(...)` query, for every label in `chunk` the cache
+/// has not seen, and caches the answer: the rules it returned, and `None` for
+/// the rest. A query that fails caches nothing, so those labels are asked
+/// again the next time (or one at a time, by [`BazelFacts::rule`]).
+fn fill_cache(bazel: &Bazel, cache: &RuleCache, chunk: &[String]) {
+    let todo: Vec<&String> = {
+        let c = cache.borrow();
+        chunk
+            .iter()
+            .filter(|l| !c.contains_key(l.as_str()))
+            .collect()
+    };
+    if todo.is_empty() {
+        return;
+    }
+    let Some(rules) = crate::tools::bazel_query::rules(bazel, &label_set(&todo)) else {
+        return;
+    };
+    let mut c = cache.borrow_mut();
+    for r in rules {
+        c.insert(r.name.clone(), Some(r));
+    }
+    for l in todo {
+        c.entry(l.clone()).or_insert(None);
     }
 }
 
@@ -415,9 +386,7 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
 /// inputs. Split out from the walk so the predicate can be tested on a
 /// hand-built proto without a Bazel.
 pub fn names_external_input(rule: &Rule) -> bool {
-    rule.rule_input
-        .iter()
-        .any(|l| l.starts_with('@') || l.starts_with("//external:"))
+    rule.rule_input.iter().any(|l| is_external(l))
 }
 
 /// One rule's proto at a revision, or `None` when Bazel cannot produce it.
@@ -569,7 +538,7 @@ pub fn label_to_path(label: &str) -> Option<String> {
 
 impl Facts for BazelFacts<'_> {
     fn is_external(&self, label: &str) -> bool {
-        label.starts_with('@') || label.starts_with("//external:")
+        is_external(label)
     }
 
     fn reachable_via_select(&self, label: &str) -> bool {
