@@ -800,6 +800,14 @@ fn schema_seven_refuses_a_schema_six_walk_file() {
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     doc["schema"] = serde_json::json!(6);
     std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    // The walk record is read through the crate's one schema gate, which
+    // names both versions.
     let err = walk::WalkResult::read(&path).unwrap_err().to_string();
-    assert!(err.contains("schema") || err.contains("version"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "is schema 6 and this cambium reads {}",
+            cambium_bench::RESULT_SCHEMA
+        )),
+        "{err}"
+    );
 }
