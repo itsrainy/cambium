@@ -165,10 +165,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 head: to_sha,
                 include_manual: false,
                 explain: false,
-                // `baseline update` publishes its output, so it needs one.
+                // The head index is what `index update` is for, so it needs one.
                 materialize: true,
                 no_full_build: false,
-                // `baseline update` publishes its own output below; there is
+                // `index update` publishes its own output below; there is
                 // nothing for the base-side publish to add.
                 publish_base: false,
                 allow_partial,
