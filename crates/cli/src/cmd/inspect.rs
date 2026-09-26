@@ -675,69 +675,7 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
     }
     let repos = (0..v.num_repos())
         .filter(|&r| only.is_none_or(|o| o == v.repo_name(r)))
-        .map(|r| {
-            let o = v.repo_origin(r);
-            ExternalsRepo {
-            name: v.repo_name(r).to_string(),
-            canonical: v.repo_canonical_name(r).to_string(),
-            origin: o.kind.as_str().to_string(),
-            origin_dir: o.dir,
-            evidence: o.evidence,
-            confirmed: o.confirmed,
-            indexed: o.indexed,
-            path_maps: v
-                .repo_path_maps(r)
-                .iter()
-                .map(|m| {
-                    format!(
-                        "{} -> {}{}",
-                        m.from,
-                        m.to,
-                        if m.exhaustive { " (exhaustive)" } else { "" }
-                    )
-                })
-                .collect(),
-            consumers: v
-                .repo_consumers(r)
-                .iter()
-                .map(|(c, used)| {
-                    format!(
-                        "{c}: {}",
-                        used.packages.iter().cloned().collect::<Vec<_>>().join(", ")
-                    )
-                })
-                .collect(),
-            consumer_leaves: v
-                .repo_consumers(r)
-                .iter()
-                .flat_map(|(c, used)| match &used.leaves {
-                    None => vec![format!("{c} (leaves not known)")],
-                    Some(leaves) if leaves.is_empty() => vec![format!("{c} (no leaf in this index)")],
-                    Some(leaves) => leaves
-                        .iter()
-                        .map(|(leaf, pkgs)| {
-                            format!(
-                                "{c} {leaf}: {}",
-                                if pkgs.is_empty() {
-                                    "-".to_string()
-                                } else {
-                                    pkgs.iter().cloned().collect::<Vec<_>>().join(", ")
-                                }
-                            )
-                        })
-                        .collect(),
-                })
-                .collect(),
-            consumer_via: v
-                .repo_consumers(r)
-                .iter()
-                .filter(|(_, used)| used.leaves.is_some())
-                .map(|(c, used)| {
-                    format!("{c}: {}", used.via.iter().cloned().collect::<Vec<_>>().join(", "))
-                })
-                .collect(),
-            inputs: inputs.remove(&r).unwrap_or_default(),
-        }})
+        .map(|r| externals_repo(v, r, inputs.remove(&r).unwrap_or_default()))
         .collect();
     let workspace_bzl = (0..v.num_bzl())
         .filter(|&id| v.bzl_in_workspace(id))
@@ -761,6 +699,76 @@ fn externals(v: cambium_index::IndexRef<'_>, only: Option<&str>) -> ExternalsDum
         workspace_bzl,
         ext_labels,
     }
+}
+
+/// One repository's row of the externals tables, with the input patterns
+/// that name it (`inputs`, gathered once for every repository by the caller).
+fn externals_repo(
+    v: cambium_index::IndexRef<'_>,
+    r: u32,
+    inputs: Vec<(String, bool)>,
+) -> ExternalsRepo {
+    let origin = v.repo_origin(r);
+    let consumers = v.repo_consumers(r);
+    ExternalsRepo {
+        name: v.repo_name(r).to_string(),
+        canonical: v.repo_canonical_name(r).to_string(),
+        origin: origin.kind.as_str().to_string(),
+        origin_dir: origin.dir,
+        evidence: origin.evidence,
+        confirmed: origin.confirmed,
+        indexed: origin.indexed,
+        path_maps: v
+            .repo_path_maps(r)
+            .iter()
+            .map(|m| {
+                format!(
+                    "{} -> {}{}",
+                    m.from,
+                    m.to,
+                    if m.exhaustive { " (exhaustive)" } else { "" }
+                )
+            })
+            .collect(),
+        consumers: consumers
+            .iter()
+            .map(|(c, used)| format!("{c}: {}", comma_list(&used.packages)))
+            .collect(),
+        consumer_leaves: consumers
+            .iter()
+            .flat_map(|(c, used)| match &used.leaves {
+                None => vec![format!("{c} (leaves not known)")],
+                Some(leaves) if leaves.is_empty() => {
+                    vec![format!("{c} (no leaf in this index)")]
+                }
+                Some(leaves) => leaves
+                    .iter()
+                    .map(|(leaf, pkgs)| {
+                        if pkgs.is_empty() {
+                            format!("{c} {leaf}: -")
+                        } else {
+                            format!("{c} {leaf}: {}", comma_list(pkgs))
+                        }
+                    })
+                    .collect(),
+            })
+            .collect(),
+        consumer_via: consumers
+            .iter()
+            .filter(|(_, used)| used.leaves.is_some())
+            .map(|(c, used)| format!("{c}: {}", comma_list(&used.via)))
+            .collect(),
+        inputs,
+    }
+}
+
+/// `a, b, c`.
+fn comma_list<'a>(items: impl IntoIterator<Item = &'a String>) -> String {
+    items
+        .into_iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_externals(d: &ExternalsDump) {
@@ -811,5 +819,89 @@ fn print_externals(d: &ExternalsDump) {
     }
     for l in &d.ext_labels {
         println!("ext {l}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use cambium_index::externals::Consumer;
+    use cambium_index::{BzlClosure, IndexBuilder};
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// One consumer of each shape the table holds: a leaf map (one leaf
+    /// reaching the root package, one reaching nothing), no map at all, and
+    /// a map naming no leaf. Each prints the line that tells it apart.
+    #[test]
+    fn externals_names_each_consumer_its_leaves_and_what_its_map_came_through() {
+        let grpc = Consumer {
+            packages: set(&["envoy/admin/v3", "envoy/type/metadata/v3"]),
+            leaves: Some(BTreeMap::from([
+                ("@grpc//:grpc++".to_string(), set(&["envoy/admin/v3", ""])),
+                ("@grpc//health:health_cc_proto".to_string(), set(&[])),
+            ])),
+            via: set(&["//", "//source/common/quic/platform", "@grpc"]),
+        };
+        let mut closure = BzlClosure::default();
+        closure.inputs.repos = set(&["envoy_api", "tsl"]);
+        closure.inputs.consumers.insert(
+            "envoy_api".into(),
+            BTreeMap::from([
+                ("grpc".to_string(), grpc),
+                (
+                    "quiche".to_string(),
+                    Consumer::of_packages(set(&["envoy/admin/v3"])),
+                ),
+            ]),
+        );
+        closure.inputs.consumers.insert(
+            "tsl".into(),
+            BTreeMap::from([(
+                "xla".to_string(),
+                Consumer {
+                    packages: set(&["tsl/platform"]),
+                    leaves: Some(BTreeMap::new()),
+                    via: BTreeSet::new(),
+                },
+            )]),
+        );
+        let mut b = IndexBuilder::new(cambium_index::builder::new_lineage());
+        b.set_bzl_closure(closure);
+        let index = b.finish("deadbeef");
+
+        let dump = super::externals(index.view(), None);
+        let repo = |name: &str| {
+            dump.repos
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        let api = repo("envoy_api");
+        assert_eq!(
+            api.consumers,
+            [
+                "grpc: envoy/admin/v3, envoy/type/metadata/v3",
+                "quiche: envoy/admin/v3"
+            ]
+        );
+        assert_eq!(
+            api.consumer_leaves,
+            [
+                "grpc @grpc//:grpc++: , envoy/admin/v3",
+                "grpc @grpc//health:health_cc_proto: -",
+                "quiche (leaves not known)",
+            ]
+        );
+        assert_eq!(
+            api.consumer_via,
+            ["grpc: //, //source/common/quic/platform, @grpc"]
+        );
+        let tsl = repo("tsl");
+        assert_eq!(tsl.consumer_leaves, ["xla (no leaf in this index)"]);
+        assert_eq!(tsl.consumer_via, ["xla: "]);
     }
 }
