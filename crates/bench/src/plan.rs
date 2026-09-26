@@ -17,6 +17,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
+use crate::util::revs_match;
+
 /// How big a run is: small is the fifteen-minute check before a real run,
 /// medium the laptop-sized slice `--quick` is sugar for, and large the
 /// configuration `docs/RESULTS.md` is published from.
@@ -434,13 +436,13 @@ pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {
     anyhow::ensure!(!expected.is_empty(), "--require-sha needs a sha");
     let bin = version_sha(cambi_version).unwrap_or_default();
     anyhow::ensure!(
-        same_sha(&bin, expected),
+        revs_match(&bin, expected),
         "REFUSING: cambi is built from '{}' but the tree is at '{expected}'; rebuild first",
         if bin.is_empty() { "?" } else { &bin }
     );
     let own = crate::util::tool_sha();
     anyhow::ensure!(
-        same_sha(own, expected),
+        revs_match(own, expected),
         "REFUSING: cambium-bench is built from '{own}' but the tree is at '{expected}'; rebuild first"
     );
     Ok(())
@@ -450,11 +452,6 @@ pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {
 pub fn version_sha(version: &str) -> Option<String> {
     let inner = version.rsplit_once('(')?.1.split_once(')')?.0.trim();
     (!inner.is_empty() && inner.chars().all(|c| c.is_ascii_hexdigit())).then(|| inner.to_string())
-}
-
-/// Two shas name the same commit when one is a prefix of the other.
-fn same_sha(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 #[cfg(test)]

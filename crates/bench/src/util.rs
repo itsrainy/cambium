@@ -196,6 +196,15 @@ struct SchemaProbe {
     schema: u32,
 }
 
+/// Two revisions name the same commit when one is a prefix of the other.
+///
+/// Result files, the paths cache and a binary's `--version` all carry full
+/// shas, but a person passing `--change-set` types a short one. An empty
+/// revision matches nothing, since it is a prefix of everything.
+pub fn revs_match(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
 /// Writes `value` to `path` as pretty JSON, atomically: a temp file beside it
 /// and a rename, so a reader polling the file (`watch`, a resumed run) never
 /// sees half a document. The parent directory is created if need be.
@@ -234,6 +243,17 @@ pub fn read_result<T: DeserializeOwned>(path: &Path) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_revision_matches_the_full_one_either_way_round() {
+        let full = "0123456789abcdef";
+        assert!(revs_match("0123", full));
+        assert!(revs_match(full, "0123"));
+        assert!(revs_match(full, full));
+        assert!(!revs_match(full, "0124"));
+        assert!(!revs_match("", full), "an empty revision names no commit");
+        assert!(!revs_match(full, ""));
+    }
 
     #[test]
     fn a_percentile_is_the_nearest_rank_and_an_empty_sample_is_zero() {

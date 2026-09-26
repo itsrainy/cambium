@@ -70,6 +70,8 @@ use cambium_index::label::{Label, Repo};
 use cambium_index::{walk, IndexRef};
 use serde::{Deserialize, Serialize};
 
+use crate::util::revs_match;
+
 /// The schema of the JSON this module reads and writes.
 pub const REPLAY_SCHEMA: u32 = 1;
 
@@ -124,14 +126,6 @@ impl PathsCache {
             .find(|e| revs_match(&e.base, base) && revs_match(&e.head, head))
             .map(|e| parse_name_status(&e.changes))
     }
-}
-
-/// Two revisions name the same commit when one is a prefix of the other.
-///
-/// The results file and the paths cache are both written from full shas, but a
-/// person passing `--change-set` types a short one.
-pub fn revs_match(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 /// The recorded answer for `base..head`, by either revision spelling.

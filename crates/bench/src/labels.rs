@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::classify::{Class, Side};
+use crate::util::revs_match;
 
 /// The directory under `changes/` that holds every change set's sets.
 const DIR: &str = "labels";
@@ -206,7 +207,7 @@ pub fn resolve(changes_dir: &Path, spec: &str) -> Result<PathBuf> {
         else {
             continue;
         };
-        if pre(b, base) && pre(h, head) {
+        if revs_match(b, base) && revs_match(h, head) {
             hits.push(path);
         }
     }
@@ -222,10 +223,6 @@ pub fn resolve(changes_dir: &Path, spec: &str) -> Result<PathBuf> {
             hits.len()
         ),
     }
-}
-
-fn pre(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 /// Which rows a `bench labels` invocation asked for.
