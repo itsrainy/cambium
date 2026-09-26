@@ -246,8 +246,10 @@ impl SynthGraph {
         *h.finalize().as_bytes()
     }
 
-    /// Hash of the package's `.bzl` load closure: every file it loads, with
-    /// the version `EditBzl` bumps.
+    /// Hash of the package's `.bzl` load closure: every generated `.bzl` it
+    /// loads, with the version `EditBzl` bumps. The shared rules file never
+    /// changes, so it is left out, and a package that loads only that file
+    /// hashes an empty list.
     pub fn bzl_closure_hash(&self, pkg: u32) -> [u8; 32] {
         let p = &self.packages[pkg as usize];
         let mut entries: Vec<(&str, u32)> = p
