@@ -17,9 +17,9 @@
 //!   complete?). No workload runs `load` at present.
 //! - **Workload**: what the tools are run on. There is one, the [`walk`]: it
 //!   cold-builds an index at the start of a subject's first-parent window and
-//!   carries it forward one commit at a time to the pin, asking cambium and
-//!   the peers the question a CI job asks at each step and scoring every
-//!   answer against the `rdeps` oracle. [`skyframe`] measures the Skyframe
+//!   carries it forward one commit at a time to the pin, asking cambium the
+//!   question a CI job asks at each step, and the peers and the `rdeps`
+//!   oracle on the steps the tier samples. [`skyframe`] measures the Skyframe
 //!   prototypes on the walk's own steps. [`classify`] names the kinds of
 //!   disagreement, [`report`] renders `docs/RESULTS.md`, and [`state`] is
 //!   what makes a killed run resumable.
