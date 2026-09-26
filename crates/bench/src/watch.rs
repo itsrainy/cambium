@@ -309,8 +309,8 @@ fn render_diagnostic(d: &cambium_engine::diag::Diagnostic) -> String {
     }
 }
 
-/// The newest readable `walk-*.json` under `<subject>/walk/`, preferring the
-/// one for `pin`.
+/// The walk record a row of `pin` reads from `<subject>/walk/`, if it is
+/// readable.
 fn read_walk(subject_dir: &Path, pin: &str) -> Option<WalkResult> {
     let dir = subject_dir.join("walk");
     let path = newest(&dir, "walk-", pin)?;
@@ -323,28 +323,38 @@ fn read_walk(subject_dir: &Path, pin: &str) -> Option<WalkResult> {
     }
 }
 
-/// The file in `dir` named `<prefix><pin>...json` if there is one, else the
-/// most recently modified `<prefix>*.json`.
+/// The most recently modified of the files in `dir` named `<prefix><pin>.json`
+/// or `<prefix><pin>-*.json`, or of every `<prefix>*.json` when `pin` is empty
+/// (a subject with neither a progress nor a state file to name one).
 ///
-/// A subject carries one result file per Bazel version and keeps the files of
-/// earlier pins, and a watcher that picked the wrong one would show a finished
-/// run while another is walking.
+/// A subject carries one record per Bazel version, a `--only` gate's beside
+/// the full walk's, and the records of earlier pins. The watcher shows the
+/// run a progress file describes, and it names only the pin: of that pin's
+/// records the one written last is the run in progress or the last to
+/// finish, and an earlier pin's record is never this run's. Ties on the
+/// modification time go to the later name, so a directory's listing order
+/// never decides.
 fn newest(dir: &Path, prefix: &str, pin: &str) -> Option<PathBuf> {
+    let exact = format!("{prefix}{pin}.json");
+    let versioned = format!("{prefix}{pin}-");
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let path = e.path();
-        let name = path.file_name()?.to_str()?.to_string();
-        if !name.starts_with(prefix) || !name.ends_with(".json") {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
-        }
-        if !pin.is_empty() && name.starts_with(&format!("{prefix}{pin}")) {
-            return Some(path);
+        };
+        let wanted = match pin.is_empty() {
+            true => name.starts_with(prefix) && name.ends_with(".json"),
+            false => name == exact || (name.starts_with(&versioned) && name.ends_with(".json")),
+        };
+        if !wanted {
+            continue;
         }
         let t = e
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+        if best.as_ref().is_none_or(|(bt, bp)| (t, &path) > (*bt, bp)) {
             best = Some((t, path));
         }
     }
@@ -881,5 +891,58 @@ mod tests {
         assert_eq!(s.subjects[0].step, "walk");
         assert!(s.subjects[0].min_recall.is_none());
         assert!(render(&s).iter().any(|l| l.contains("walk 3/10")));
+    }
+
+    fn touch(path: &Path, secs: u64) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// A pin with a full walk (50 steps) and a `--only` gate (2 steps) beside
+    /// it: the row shows whichever was written last, since that is the run a
+    /// progress file of that pin describes, whatever order the directory lists
+    /// them in.
+    #[test]
+    fn a_pins_row_reads_its_most_recently_written_record() {
+        let mut got = Vec::new();
+        for gate_last in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let subject = dir.path().join("envoy");
+            walk_file(&subject, "pin1", 2, 0, 2);
+            let gate = subject.join("walk/walk-pin1-only.json");
+            std::fs::rename(subject.join("walk/walk-pin1.json"), &gate).unwrap();
+            walk_file(&subject, "pin1", 50, 0, 50);
+            let full = subject.join("walk/walk-pin1.json");
+            let (older, newer) = if gate_last {
+                (&full, &gate)
+            } else {
+                (&gate, &full)
+            };
+            touch(older, 1_000);
+            touch(newer, 2_000);
+            progress("envoy", "pin1", "walk", Step::Done, 0, 0)
+                .write(&subject)
+                .unwrap();
+            got.push(snapshot(dir.path(), &[]).subjects[0].recorded);
+        }
+        assert_eq!(got, [Some(50), Some(2)], "full walk last, then gate last");
+    }
+
+    /// A pin that has no record yet shows no numbers, not the previous pin's:
+    /// a watcher that did would show a finished run while the new one builds.
+    #[test]
+    fn a_new_pin_does_not_borrow_the_old_pins_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let subject = dir.path().join("envoy");
+        walk_file(&subject, "pin0", 50, 0, 50);
+        progress("envoy", "pin1", "walk", Step::Build, 0, 0)
+            .write(&subject)
+            .unwrap();
+        let row = &snapshot(dir.path(), &[]).subjects[0];
+        assert_eq!((row.pin.as_str(), row.recorded), ("pin1", None));
     }
 }
