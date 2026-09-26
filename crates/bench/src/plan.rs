@@ -120,7 +120,7 @@ pub struct Plan {
     pub subjects: Vec<String>,
     /// Tool names as `--tools` takes them. The walk step passes them on as
     /// `--peers` with cambium left out (`Plan::peer_flag`): cambium is the
-    /// walk's driver and runs whatever this list says.
+    /// walk's driver and runs whether or not the list names it.
     pub tools: Vec<String>,
     /// Which steps to take, per subject. The order is [`StepKind::ALL`]'s
     /// whatever order they are named in.
