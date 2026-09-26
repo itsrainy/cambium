@@ -656,8 +656,9 @@ fn parse_round_trips(
 /// `llvm/lit_test.bzl`).
 ///
 /// A whole-package pattern whose reason says that very package is missing
-/// (`no such package 'gone': BUILD file not found`) is a deletion, not a
-/// load failure, and names nothing. Any other pattern (a single target, a
+/// (`no such package 'gone': BUILD file not found`, or for an external one
+/// `no such package '@@tsl//tsl/gone'` against the pattern's `@tsl`) is a
+/// deletion, not a load failure, and names nothing. Any other pattern (a single target, a
 /// `...` walk) names no one package, and the line is read by its reason
 /// alone, as if the `Skipping '<pattern>': ` prefix were not there.
 ///
@@ -681,7 +682,7 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
                 let own = why
                     .strip_prefix("no such package '")
                     .and_then(|w| w.split_once('\''))
-                    .is_some_and(|(named, _)| named == pkg);
+                    .is_some_and(|(named, _)| same_package(named, pkg));
                 return (!own).then(|| pkg.to_string());
             }
             None => rest = why,
@@ -707,6 +708,33 @@ pub fn parse_load_error_line(line: &str) -> Option<String> {
         return Some(r.split(':').next().unwrap_or(r).trim().to_string());
     }
     None
+}
+
+/// Whether Bazel's spelling of a package in a reason (`named`) is the
+/// package key a pattern stands for (`pkg`).
+///
+/// The same text for a main-repository package. For an external one Bazel
+/// prints the canonical repository (`@@tsl//tsl/gone`, or under bzlmod
+/// `@@tsl+//...` or `@@+ext+tsl//...`) where the pattern, and so the key, has
+/// the apparent name (`@tsl//tsl/gone`): the package paths must be equal and
+/// the canonical name must end in the apparent one, after the `+` or `~`
+/// Bazel splices extension and version segments in with.
+fn same_package(named: &str, pkg: &str) -> bool {
+    if named == pkg {
+        return true;
+    }
+    let (Some((named_repo, named_path)), Some((repo, path))) =
+        (named.split_once("//"), pkg.split_once("//"))
+    else {
+        return false;
+    };
+    if named_path != path {
+        return false;
+    }
+    let repo = repo.trim_start_matches('@');
+    let canonical = named_repo.trim_start_matches('@');
+    !repo.is_empty()
+        && (canonical == repo || canonical.rsplit(['+', '~']).find(|s| !s.is_empty()) == Some(repo))
 }
 
 /// The package key a skipped `<package>:*` pattern stands for, the inverse
@@ -2375,6 +2403,45 @@ mod tests {
                  as a package."
             ),
             None
+        );
+    }
+
+    /// An external package that is gone is skipped with Bazel's canonical
+    /// spelling in the reason and the apparent one in the pattern; it is a
+    /// deletion all the same. One that failed to load, or a different
+    /// package or repository in the reason, is still a load error.
+    #[test]
+    fn a_skipped_external_package_that_is_gone_is_not_a_load_error() {
+        for canonical in ["@@tsl", "@@tsl+", "@@+_repo_rules+tsl", "@@_main~ext~tsl"] {
+            let line = format!(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '{canonical}//tsl/gone': \
+                 BUILD file not found in any of the following directories."
+            );
+            assert_eq!(parse_load_error_line(&line), None, "{canonical}");
+        }
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '@@+ext+other_tsl//': \
+                 patch does not apply"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/gone")
+        );
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/x:*': no such package '@@tsl//tsl/gone': \
+                 BUILD file not found"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/x")
+        );
+        assert_eq!(
+            parse_load_error_line(
+                "ERROR: Skipping '@tsl//tsl/gone:*': no such package '@@notsl//tsl/gone': \
+                 BUILD file not found"
+            )
+            .as_deref(),
+            Some("@tsl//tsl/gone")
         );
     }
 
