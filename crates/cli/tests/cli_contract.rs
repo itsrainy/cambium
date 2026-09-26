@@ -176,7 +176,12 @@ fn the_exit_codes_are_the_ones_the_readme_documents() {
     let (code, stdout, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
     assert_eq!(code, 1, "an unreadable index is a plain error");
     assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
-    assert!(!stderr.is_empty(), "the error should say what went wrong");
+    // An error is a diagnostic like any other: a code a script can match,
+    // not a prose line that changes with the wording.
+    assert!(
+        stderr.contains("error[CAMBI-E"),
+        "an unreadable index should be a coded diagnostic:\n{stderr}"
+    );
 
     let (code, _, _) = run(&[
         "inspect",
@@ -360,20 +365,6 @@ fn the_null_format_answers_with_the_exit_code_alone() {
     ]);
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "{stdout:?}");
-}
-
-/// An error is a diagnostic like any other: a code a script can match, not a
-/// prose line that changes with the wording.
-#[test]
-fn an_error_carries_a_code_on_stderr() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let missing = dir.path().join("nope.cmbx");
-    let (code, _, stderr) = run(&["inspect", "stats", missing.to_str().unwrap()]);
-    assert_eq!(code, 1);
-    assert!(
-        stderr.contains("error[CAMBI-E"),
-        "an unreadable index should be a coded diagnostic:\n{stderr}"
-    );
 }
 
 #[test]
