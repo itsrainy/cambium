@@ -41,7 +41,7 @@
 //! also records it in [`DirtySet::nested`].
 
 use std::borrow::Borrow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cambium_diff::{Change, Status};
 use cambium_index::{label, IndexRef};
@@ -442,10 +442,9 @@ pub struct IndexConsumers<'a>(pub IndexRef<'a>);
 impl Consumers for IndexConsumers<'_> {
     fn is_consumed(&self, pkg: &str, path: &str) -> bool {
         let label = label::source_label(pkg, path);
-        match self.0.id_of(&label) {
-            Some(id) => !self.0.file_consumers(id).is_empty(),
-            None => false,
-        }
+        self.0
+            .id_of(&label)
+            .is_some_and(|id| !self.0.file_consumers(id).is_empty())
     }
 }
 
@@ -484,7 +483,7 @@ pub struct DirtySet {
     /// directory they sit under. Nothing here dirties a main-repo package,
     /// because there is none; the engine routes each directory to the
     /// external repository it is, or gives up and says so.
-    pub nested: std::collections::BTreeMap<String, Vec<String>>,
+    pub nested: BTreeMap<String, Vec<String>>,
 }
 
 impl DirtySet {
