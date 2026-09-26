@@ -76,7 +76,9 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Hist::Columns)]
     pub hist: Hist,
     /// Write the head index produced by this run to this file. (The report
-    /// itself goes to stdout; `--write-index` is the old spelling.)
+    /// itself goes to stdout; `--write-index` is the old spelling.) A run that
+    /// goes global builds no head index: it removes any older file at this
+    /// path, says so, and still exits 2; `cambi index update` builds one cold.
     #[arg(long = "out", alias = "write-index", value_name = "FILE")]
     pub out: Option<std::path::PathBuf>,
 }
@@ -94,10 +96,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         return crate::cmd::plan::run(ctx, &engine, &resolved.req);
     }
     let resolved = request(&engine, &args, Shape::affected(&args))?;
-    let outcome = narrate(ctx, &engine, &resolved, "affected")?;
+    let outcome = narrate(ctx, &engine, &resolved, "affected", args.out.as_deref())?;
     let report = &outcome.report;
     ctx.render.report(&report.diagnostics)?;
 
+    // A run with no head index (a global one) has already cleared the path
+    // and said so, in the narration.
     if let (Some(path), Some(index)) = (&args.out, &outcome.index) {
         cambium_index::format::write_index(path, index)?;
     }
@@ -513,11 +517,16 @@ pub fn say_note(ctx: &Context, resolved: &Resolved) {
 /// `explain` calls this too: it is the same computation, so it is the same
 /// three phases, and the two verbs cannot drift apart about what a run is
 /// doing while it does it.
+///
+/// `out` is `affected --out`: on a run that built no head index it is
+/// cleared here, so the narration can say so before it ends (see
+/// [`no_head_index`]). `explain` writes no file and passes `None`.
 pub fn narrate(
     ctx: &Context,
     engine: &cambium_engine::Engine,
     resolved: &Resolved,
     verb: &str,
+    out: Option<&std::path::Path>,
 ) -> Result<cambium_engine::RunOutcome> {
     let req = &resolved.req;
     let mut sink = cambium_ui::boxed(ctx.ui);
@@ -534,21 +543,67 @@ pub fn narrate(
         sink: sink.as_mut(),
         rows_open: false,
     };
-    let out = engine.affected_narrated(req, &mut |p| narrator.on(p));
+    let run = engine.affected_narrated(req, &mut |p| narrator.on(p));
+    let cleared = match (&run, out) {
+        (Ok(o), Some(path)) if o.index.is_none() => no_head_index(sink.as_mut(), path, req),
+        _ => Ok(()),
+    };
     sink.emit(Event::Done);
     // A run that fails still said things on the way (a store read as empty,
     // an index refused for its configuration), and they are what explain the
     // error; with no report to carry them they are said here, before it.
     // Under `jsonl` they are `diagnostic` events on stdout, as on success;
     // under `json` there is no document to hold them, so stderr it is.
-    if out.is_err() {
+    if run.is_err() {
         let said = engine.diagnostics().drain();
         match ctx.format() {
             Format::Jsonl => ctx.render.report(&said)?,
             _ => said.iter().for_each(|d| ctx.render.warn(d)),
         }
     }
-    Ok(out?)
+    let run = run?;
+    cleared?;
+    Ok(run)
+}
+
+/// `--out` on a run that built no head index. A global run drops it (see
+/// `RunOutcome::index`), and `affected` does not pay for a cold build at head
+/// in its place: that is `cambi index update`, which the narration names.
+///
+/// The path is the file a later `cambi index publish` uploads, so an older
+/// file there (an earlier run's head) is removed rather than left to be taken
+/// for this run's: publishing it would put an index for the wrong commit in
+/// the store. The exit code stays the run's own, 2.
+fn no_head_index(sink: &mut dyn Sink, path: &std::path::Path, req: &AffectedRequest) -> Result<()> {
+    let removed = match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "the run went global and wrote no index, but the older file at {} could not \
+                 be removed",
+                path.display()
+            )))
+        }
+    };
+    let mut said = format!(
+        "no index written to {}: the run went global, and a global run builds no head index",
+        path.display()
+    );
+    if removed {
+        said.push_str("; removed the older file there");
+    }
+    sink.emit(Event::Log(Level::Warning, said));
+    sink.emit(Event::Log(
+        Level::Info,
+        format!(
+            "`cambi index update {}..{} --out {}` builds one cold",
+            req.base,
+            req.head,
+            path.display()
+        ),
+    ));
+    Ok(())
 }
 
 /// `N commits`, or nothing to say when git will not count them (a synthetic

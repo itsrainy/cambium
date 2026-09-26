@@ -998,6 +998,91 @@ fn labels_is_the_answer_one_per_line_and_nothing_else() {
     assert_eq!(stdout, "//...\n", "a global answer is the one pattern");
 }
 
+/// `--out` names the file a later `cambi index publish` uploads, so on a run
+/// that went global (which builds no head index) it must not leave an older
+/// file there to be mistaken for this run's head: the file is removed, the
+/// narration says no index was written and why, and the exit code is still
+/// 2. Before this, the older file stayed and nothing was said, and the next
+/// publish uploaded an index for the wrong commit.
+#[test]
+fn a_global_run_leaves_no_stale_out_file() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let base = &f.commits[1];
+    let out = f.cache.join("head.cmbx");
+    let out_s = out.to_str().unwrap();
+
+    // An earlier run's head index: nothing changed, so the index at the base
+    // is this run's head, and `--out` writes it.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        &format!("{base}..{base}"),
+        "--out",
+        out_s,
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let earlier = cambium_index::IndexFile::open(&out).expect("the earlier run wrote an index");
+    assert_eq!(earlier.view().commit, *base);
+    drop(earlier);
+
+    // A commit on the base that adds a .bazelrc: the whole graph, no index.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    std::fs::write(f.ws.join(".bazelrc"), "build --jobs=4\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", ".bazelrc"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "add a bazelrc"]);
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        &format!("{base}..HEAD"),
+        "--out",
+        out_s,
+    ]);
+    assert_eq!(code, 2, "global is still exit 2: {stderr}");
+    assert_eq!(stdout, "//...\n", "{stderr}");
+    assert!(
+        !out.exists(),
+        "a global run must not leave the earlier run's index at --out: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("no index written to {out_s}")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("removed the older file there"), "{stderr}");
+    assert!(stderr.contains("cambi index update"), "{stderr}");
+
+    // So the publish that follows in a pipeline fails rather than uploading
+    // an index for the wrong commit.
+    let (code, _, stderr) = run(&["-C", ws, "index", "publish", out_s]);
+    assert_ne!(code, 0, "{stderr}");
+
+    // With no file there to begin with, the run still says it wrote none.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        &format!("{base}..HEAD"),
+        "--out",
+        out_s,
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(!out.exists(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("no index written to {out_s}")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("removed the older file"), "{stderr}");
+}
+
 /// `labels` has no meaning off `affected`, like `query`: a usage error with a
 /// code and a help line, not a silent fallback to another shape.
 #[test]
@@ -1555,4 +1640,58 @@ fn a_depth_one_clone_names_the_fetch_or_the_deepen() {
         assert!(!stderr.contains("check the spelling"), "{rev}:\n{stderr}");
         assert!(!stderr.contains("pr~1:refs"), "{rev}:\n{stderr}");
     }
+}
+
+/// `--publish-base` on a run that goes global publishes the base index it
+/// computed under the base revision and nothing under the head: the base
+/// index is resolved and published before the head side is looked at, and it
+/// describes the base whatever the range then does. Pinned here because
+/// `--out` on the same run once left the wrong commit's index behind.
+#[test]
+fn publish_base_on_a_global_run_publishes_the_base_and_nothing_else() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    // A base the store has no index for, one commit past the published one,
+    // touching a file no package owns: the replay to it queries nothing.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", &f.commits[1]]);
+    std::fs::create_dir_all(f.ws.join("notes")).unwrap();
+    std::fs::write(f.ws.join("notes/README.md"), "notes\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", "notes"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "notes"]);
+    let base = cambium_testkit::git(&f.ws, &["rev-parse", "HEAD"]);
+    let base = base.trim();
+    // The head adds a .bazelrc: global.
+    std::fs::write(f.ws.join(".bazelrc"), "build --jobs=4\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", ".bazelrc"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "add a bazelrc"]);
+    let head = cambium_testkit::git(&f.ws, &["rev-parse", "HEAD"]);
+
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "affected",
+        &format!("{base}..HEAD"),
+        "--publish-base",
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+
+    let (code, stdout, stderr) = run(&["-C", ws, "index", "list"]);
+    assert_eq!(code, 0, "{stderr}");
+    let pointer = |sha: &str| format!("commits/{}/{sha}", f.lineage);
+    assert!(
+        stdout.contains(&pointer(base)),
+        "the base is published: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&pointer(&head)),
+        "the head is not: {stdout}"
+    );
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with("indexes/")).count(),
+        2,
+        "the fixture's index and the computed base: {stdout}"
+    );
 }

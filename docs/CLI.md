@@ -91,6 +91,18 @@ Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
 `--no-full-build`, `--publish-base`, `--out`. `--explain` is kept one
 release; the verb below replaces it.
 
+`--out FILE` writes the head index the run built. A global run builds none
+(the answer is `//...` and nothing is spliced to keep), and `affected` does
+not pay for a cold build at head in its place, so on a global run `--out`
+removes any older file at that path rather than leave it to be taken for this
+run's head (a `cambi index publish FILE` after it would otherwise upload an
+index for the wrong commit). The narration says `no index written to FILE`
+and why, names the `cambi index update BASE..HEAD --out FILE` that builds one
+cold, and the exit code is still 2. `--publish-base` is unaffected by a global
+run: the base index it publishes describes the base, and is published under
+the base revision before the head side is looked at; the head index is never
+published from `affected`.
+
 ### `explain`
 
 With a label: the shortest path back to the change, its length in hops and in
