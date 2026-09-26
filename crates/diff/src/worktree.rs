@@ -26,10 +26,10 @@ pub struct Worktree {
 }
 
 impl Worktree {
-    /// Adds a worktree of `owner` at `sha`, in `path`.
+    /// Adds a worktree of `owner` at `rev`, in `path`.
     ///
     /// If `path` already holds a worktree it is reused: it is forced back onto
-    /// `sha` and left in place when this handle drops. Reuse matters when
+    /// `rev` and left in place when this handle drops. Reuse matters when
     /// consecutive runs share a revision, and re-adding a worktree per run
     /// would dominate.
     ///
@@ -37,13 +37,13 @@ impl Worktree {
     /// local modifications, and on a case-insensitive filesystem a worktree
     /// acquires them without anyone editing anything (two paths that differ
     /// only in case collide, and git leaves one of them reported as deleted).
-    pub fn create(owner: &Path, sha: &str, path: &Path) -> Result<Self> {
+    pub fn create(owner: &Path, rev: &str, path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(GitError::Spawn)?;
         }
         if path.join(".git").exists() {
             run(owner, &["worktree", "prune"]).ok();
-            run(path, &["checkout", "--quiet", "--force", "--detach", sha])?;
+            run(path, &["checkout", "--quiet", "--force", "--detach", rev])?;
             return Ok(Self {
                 path: path.to_path_buf(),
                 owner: owner.to_path_buf(),
@@ -63,7 +63,7 @@ impl Worktree {
                 "--quiet",
                 "--detach",
                 &path.display().to_string(),
-                sha,
+                rev,
             ],
         )?;
         Ok(Self {
@@ -99,10 +99,10 @@ impl Worktree {
     }
 
     /// Moves this worktree to another revision.
-    pub fn checkout(&self, sha: &str) -> Result<()> {
+    pub fn checkout(&self, rev: &str) -> Result<()> {
         run(
             &self.path,
-            &["checkout", "--quiet", "--force", "--detach", sha],
+            &["checkout", "--quiet", "--force", "--detach", rev],
         )?;
         Ok(())
     }
