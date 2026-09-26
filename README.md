@@ -19,18 +19,28 @@ says what that rests on, and where it does not yet hold.
 
 ## Install
 
-Prebuilt binaries, once a release exists (none has been made yet):
+Prebuilt binaries:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh
 $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh -s -- --version v0.1.0 --prefix /usr/local
 ```
 
+No release exists yet, so today these commands fail; build from a clone
+(below) instead. When `curl` fails, `curl ... | sh` still exits 0, because
+`sh` runs the empty script it was given: in a bash script or CI step, run
+`set -o pipefail` first so a failed download fails the step, as the
+templates in [docs/ci/](docs/ci/) do. Older POSIX shells (dash before
+0.5.12) reject `pipefail`; there, download the script to a file with
+`curl -fsSL -o install.sh ...` and run `sh install.sh` only if that
+succeeded.
+
 The script picks the build for the machine, checks the download against the
 release's `SHA256SUMS`, and installs `cambi` to `~/.local/bin` (or
-`<prefix>/bin`). The latest release is the default; `--version` pins one,
-which is what a CI job should do. The tarballs and `SHA256SUMS` are on the
-release page for a download by hand.
+`<prefix>/bin`); it exits non-zero when there is no tarball to download.
+The latest release is the default; `--version` pins one, which is what a
+CI job should do. The tarballs and `SHA256SUMS` are on the release page for
+a download by hand.
 
 From source, with Rust 1.98 or newer (the workspace `rust-version`) and a C
 compiler (`blake3`, `ring` and `zstd` build C code):
@@ -41,6 +51,9 @@ $ cargo install --path crates/cli --locked    # from a clone
 $ cambi --version
 cambi 0.1.0 (0a4a001)
 ```
+
+`cargo install --git` works only once the repository is public; until then
+it cannot fetch it, and the from-a-clone line is the route that works.
 
 The crate is `cambium-cli`, the binary `cambi`. The crate named `cambi` on
 crates.io is an unrelated project. `--version` names the commit the binary
@@ -472,7 +485,7 @@ what to do about it.
 | `dirty_packages` | \[string] | packages re-queried, without the leading `//` |
 | `bazelrc_flags` | \[string], optional | Starlark build settings a `.bazelrc` edit changed and the index resolved, as the rc file writes them (`@envoy//bazel:crypto`) |
 | `direct` | \[string] | labels whose own definition or inputs changed |
-| `affected` | \[object] | `direct` plus its reverse closure, sorted by `label`; each entry is `{label, depth, package_depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) and `package_depth` the same walk counted in package boundaries crossed, never more than `depth` |
+| `affected` | \[object] | `direct` plus its reverse closure, rule targets only, less the targets a tag in `output.exclude_tags` marks (`manual`, by default) unless `--include-manual` was passed, sorted by `label`: a `manual` target can be in `direct` and not here, so `stats.direct_targets` can exceed `stats.affected_targets`; each entry is `{label, depth, package_depth, test}`, where `depth` is the number of reverse-dependency hops from the change (0 for the direct set; a hop through a deleted dependency counts) and `package_depth` the same walk counted in package boundaries crossed, never more than `depth` |
 | `tests` | \[string] | the subset of `affected` that is a test |
 | `depth_histogram` | \[int], optional | how many affected targets sit at each depth, `depth_histogram[d]` for depth `d` from 0 to the deepest reached; a depth nothing reached is a zero rather than a gap. Omitted when empty, which is what a global run and an empty answer both are |
 | `package_depth_histogram` | \[int], optional | the same count by `package_depth`, omitted on the same terms |

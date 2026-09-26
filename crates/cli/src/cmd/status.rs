@@ -10,7 +10,7 @@
 use anyhow::Result;
 use cambium_engine::probe;
 
-use crate::cmd::{duration, emit, human_bytes, plural_s, Context};
+use crate::cmd::{duration, emit, human_bytes, plural, plural_s, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
@@ -152,13 +152,9 @@ fn print_index(p: &probe::Probes) {
             println!("  targets    {} rules of {} nodes", i.targets, i.nodes);
             println!("  externals  {} repositories", i.external_repos);
             println!(
-                "  built      {} by bazel {}",
+                "  built      {} by {}",
                 age_since(i.built_at_unix),
-                if i.bazel_version.is_empty() {
-                    "(unrecorded)"
-                } else {
-                    &i.bazel_version
-                }
+                built_by(&i.bazel_version)
             );
             println!("  format     version {}", i.format_version);
         }
@@ -194,6 +190,28 @@ fn print_lineage(p: &probe::Probes) {
     }
 }
 
+/// The Bazel an index was built by, as `bazel --version` printed it
+/// (`bazel 7.4.1`), or the bare version an older index recorded.
+fn built_by(version: &str) -> String {
+    match version.trim() {
+        "" => "bazel (unrecorded)".to_string(),
+        v if v.starts_with("bazel ") => v.to_string(),
+        v => format!("bazel {v}"),
+    }
+}
+
+/// Where the store is, without the `dir:` a store's description leads with:
+/// the line already starts with the kind.
+fn store_location<'a>(kind: &str, location: Option<&'a str>) -> &'a str {
+    match location {
+        None => "-",
+        Some(l) => l
+            .strip_prefix(kind)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .unwrap_or(l),
+    }
+}
+
 /// The configured store and whether it answered.
 fn print_store(p: &probe::Probes) {
     println!("Store");
@@ -204,7 +222,7 @@ fn print_store(p: &probe::Probes) {
         println!(
             "  {}  {}",
             p.store.kind,
-            p.store.location.as_deref().unwrap_or("-")
+            store_location(&p.store.kind, p.store.location.as_deref())
         );
         match (p.store.reachable, p.store.indexes) {
             // One line for an unreachable store, and everything above it still
@@ -214,7 +232,7 @@ fn print_store(p: &probe::Probes) {
                 "  unreachable: {}",
                 p.store.error.as_deref().unwrap_or("no detail")
             ),
-            (Some(true), Some(n)) => println!("  reachable, {n} indexes"),
+            (Some(true), Some(n)) => println!("  reachable, {n} index{}", plural(n, "", "es")),
             (Some(true), None) => println!("  reachable (this backend cannot be listed)"),
             (None, _) => {}
         }
@@ -261,5 +279,28 @@ mod tests {
     #[test]
     fn an_unrecorded_build_time_does_not_print_as_the_epoch() {
         assert_eq!(age_since(0), "at an unrecorded time");
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    use super::{built_by, store_location};
+
+    #[test]
+    fn the_bazel_version_is_said_once() {
+        assert_eq!(built_by("bazel 9.1.1"), "bazel 9.1.1");
+        assert_eq!(built_by("7.4.1"), "bazel 7.4.1");
+        assert_eq!(built_by(""), "bazel (unrecorded)");
+    }
+
+    #[test]
+    fn the_store_kind_is_said_once() {
+        assert_eq!(store_location("dir", Some("dir:/srv/store")), "/srv/store");
+        assert_eq!(
+            store_location("http", Some("http:https://example.com/c")),
+            "https://example.com/c"
+        );
+        assert_eq!(store_location("command", Some("aws s3 cp")), "aws s3 cp");
+        assert_eq!(store_location("dir", None), "-");
     }
 }

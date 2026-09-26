@@ -15,7 +15,7 @@
 use anyhow::Result;
 use cambium_engine::probe::{self, Check, Grade};
 
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, plural, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let mut opts = ctx.probe_options();
@@ -65,6 +65,9 @@ fn print_human(checks: &[Check]) {
     if failed == 0 {
         println!("a run can work here");
     } else {
-        println!("{failed} check(s) must be fixed before a run can work here");
+        println!(
+            "{failed} {} must be fixed before a run can work here",
+            plural(failed, "check", "checks")
+        );
     }
 }

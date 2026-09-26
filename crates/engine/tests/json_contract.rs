@@ -160,6 +160,8 @@ fn fixture() -> AffectedReport {
             dirty_packages: 4,
             queried_targets: 5,
             direct_targets: 6,
+            // Not serialised: the document must not change for it.
+            direct_excluded_by_tag: 99,
             affected_targets: 7,
             changed_files: 8,
             ignored_files: 9,
@@ -314,7 +316,11 @@ fn optional_fields_are_omitted_rather_than_null() {
 fn exit_codes_are_pinned() {
     use std::path::PathBuf;
     assert_eq!(
-        EngineError::BaselineUnavailable { base: "x".into() }.exit_code(),
+        EngineError::BaselineUnavailable {
+            base: "x".into(),
+            store_configured: true,
+        }
+        .exit_code(),
         4,
         "4 means: no baseline and --no-full-build was given"
     );

@@ -36,10 +36,20 @@ pub enum EngineError {
         source: std::io::Error,
     },
     #[error(
-        "no index is available for {base}, in the store or within the ancestor walk, and \
-         --no-full-build was given"
+        "no index is available for {base}{}, and --no-full-build was given",
+        if *.store_configured {
+            ", in the store or within the ancestor walk"
+        } else {
+            " within the ancestor walk, no store is configured"
+        }
     )]
-    BaselineUnavailable { base: String },
+    BaselineUnavailable {
+        base: String,
+        /// Whether `[baseline].store` names a store. Without one, nothing a
+        /// run publishes can be found by a later one, so the help names a
+        /// different fix.
+        store_configured: bool,
+    },
     #[error(
         "{path} was built with a different cambium.toml; splicing onto it could \
          disagree with a full build. Run `cambi index build` to mint a new lineage."
@@ -177,9 +187,26 @@ impl EngineError {
                 Some("run from inside the Bazel workspace or pass -C, and check --bazel-binary"),
             ),
             EngineError::BazelQuery { .. } => (Code::E005BazelQuery, None),
-            EngineError::BaselineUnavailable { .. } => (
+            EngineError::BaselineUnavailable {
+                store_configured: true,
+                ..
+            } => (
                 Code::E006BaselineUnavailable,
                 Some("run `cambi index build --publish`, or drop --no-full-build"),
+            ),
+            // `index build --publish` would pay for a cold build and then
+            // fail with E008: with no store there is nowhere to put the
+            // index a later run would look for.
+            EngineError::BaselineUnavailable {
+                store_configured: false,
+                ..
+            } => (
+                Code::E006BaselineUnavailable,
+                Some(
+                    "no store is configured, so no run can find a published index: drop \
+                     --no-full-build to build the base cold, or set [baseline].store in \
+                     cambium.toml and publish one with `cambi index build --publish`",
+                ),
             ),
             EngineError::ConfigHashMismatch { .. } => (
                 Code::E007ConfigHashMismatch,
@@ -232,13 +259,24 @@ impl EngineError {
             EngineError::Store(StoreError::Unsupported(op)) => {
                 (Code::E012StoreUnsupported, Some(unsupported_help(op)))
             }
-            EngineError::Query(_) => (
+            EngineError::Query(crate::inspect::QueryError::UnknownPackage(_)) => (
                 Code::E017IndexQuery,
                 Some(
-                    "check the spelling against the index: `cambi inspect targets <package>` \
-                     lists what a package holds",
+                    "a package is written `//pkg` or `pkg` (the root package is `//`), and one \
+                     in an external repository `@repo//pkg` with the canonical repository name \
+                     Bazel prints (`@@repo+//pkg` also works); `cambi inspect owner <file> \
+                     <path>` names the package that owns a path",
                 ),
             ),
+            EngineError::Query(crate::inspect::QueryError::UnknownLabel(_)) => (
+                Code::E017IndexQuery,
+                Some(
+                    "check the spelling against the index: `cambi inspect targets <file> \
+                     <package>` lists what a package holds, the package written `//pkg` or \
+                     `@repo//pkg`",
+                ),
+            ),
+            EngineError::Query(_) => (Code::E017IndexQuery, None),
             EngineError::RangeInvalidated { .. } => (
                 Code::E018RangeInvalidated,
                 Some("drop --no-rebuild-on-global to mint a fresh lineage instead"),

@@ -23,7 +23,7 @@ use crate::report::SCHEMA_VERSION;
 pub enum QueryError {
     #[error("{0} is not in this index")]
     UnknownLabel(String),
-    #[error("no package named {0} in this index")]
+    #[error("no package named '{0}' in this index")]
     UnknownPackage(String),
     #[error("{0} is not a node kind; try rule, source_file, generated_file, package_group, or tombstone")]
     UnknownKind(String),
@@ -33,6 +33,26 @@ pub enum QueryError {
     ZeroSample,
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// The index's key for a package as a person writes it: `//pkg`, `@//pkg`
+/// and `@@//pkg` are the main repository's `pkg` (the root package is `//`,
+/// key `""`). An external package is keyed `@repo//pkg` with the canonical
+/// repository name ([`label::external_package_key`]), so Bazel's own
+/// `@@repo//pkg` loses one `@`. Anything else, a bare `pkg` or an external
+/// `@repo//pkg`, is already the key. An apparent repository name is not
+/// mapped: the index does not keep the mapping.
+pub fn package_key_of(package: &str) -> &str {
+    if let Some(p) = ["@@//", "@//", "//"]
+        .iter()
+        .find_map(|p| package.strip_prefix(p))
+    {
+        return p;
+    }
+    match package.strip_prefix('@') {
+        Some(rest) if rest.starts_with('@') && rest.contains("//") => rest,
+        _ => package,
+    }
 }
 
 /// Every query fails as an [`EngineError`](crate::error::EngineError), so a
@@ -564,9 +584,14 @@ impl<'a> IndexQuery<'a> {
     }
 
     /// Everything a package owns, optionally of one kind.
+    ///
+    /// `package` is spelled as a label's package is: `//pkg`, `@//pkg` or
+    /// `@@//pkg` for the main repository, `@repo//pkg` for an external one,
+    /// and the bare `pkg` the index keys a main-repository package by.
     pub fn targets(&self, package: &str, kind: Option<NodeKind>) -> Result<PackageTargets> {
+        let key = package_key_of(package);
         let pkg = (0..self.view.num_packages())
-            .find(|&i| self.view.package_name(i) == package)
+            .find(|&i| self.view.package_name(i) == key)
             .ok_or_else(|| QueryError::UnknownPackage(package.to_string()))
             .map_err(crate::error::EngineError::from)?;
         let mut targets: Vec<PackageTarget> = self
@@ -584,7 +609,7 @@ impl<'a> IndexQuery<'a> {
         Ok(PackageTargets {
             schema: SCHEMA_VERSION,
             query: "targets".into(),
-            package: package.to_string(),
+            package: key.to_string(),
             count: targets.len(),
             targets,
         })
@@ -1335,5 +1360,37 @@ mod verify_tests {
         let (rt, via) = split_round_trips(&missing, "//lib:x", &edges);
         assert_eq!(rt, vec!["//tests:b"]);
         assert_eq!(via, vec!["@bazel_tools//tools/test:collect_coverage"]);
+    }
+}
+
+#[cfg(test)]
+mod package_spelling_tests {
+    use super::package_key_of;
+
+    #[test]
+    fn a_package_is_keyed_the_same_however_the_main_repository_is_spelled() {
+        for spelled in [
+            "shell/runfiles",
+            "//shell/runfiles",
+            "@//shell/runfiles",
+            "@@//shell/runfiles",
+        ] {
+            assert_eq!(package_key_of(spelled), "shell/runfiles", "{spelled}");
+        }
+        assert_eq!(package_key_of("//"), "", "the root package");
+        assert_eq!(package_key_of("@tsl//tsl/platform"), "@tsl//tsl/platform");
+        assert_eq!(
+            package_key_of("@@rules_cc+//cc/private"),
+            "@rules_cc+//cc/private",
+            "an external key has one @, and Bazel prints the canonical name with two"
+        );
+    }
+
+    #[test]
+    fn an_unknown_package_is_quoted_so_an_empty_one_still_reads() {
+        assert_eq!(
+            super::QueryError::UnknownPackage(String::new()).to_string(),
+            "no package named '' in this index"
+        );
     }
 }

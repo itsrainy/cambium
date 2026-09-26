@@ -306,7 +306,7 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
     })?;
     if existing.trim().is_empty() {
         doc.decor_mut()
-            .set_prefix("# cambium.toml — checked in, and hashed into every index it produces.\n# Machine-local overrides go in cambium.local.toml.\n\n");
+            .set_prefix("# cambium.toml: checked in, and hashed into every index it produces.\n# Machine-local overrides go in cambium.local.toml.\n\n");
     }
 
     match store {

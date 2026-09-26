@@ -144,3 +144,51 @@ fn a_global_run_leaves_behind_the_diagnostic_that_explains_it() {
         "the cause carries the fix `explain` prints: {cause:?}"
     );
 }
+
+/// A direct target that `output.exclude_tags` drops (a `manual` one, by
+/// default) is counted, so `explain` can say why `direct` holds more targets
+/// than `affected` does; with `--include-manual` nothing is dropped.
+#[test]
+fn direct_targets_dropped_by_tag_are_counted() {
+    let e = engine();
+    let before = generate(&GraphSpec::preset("small").unwrap());
+    let base = e
+        .full_build_with("c0", &SynthQuerier::new(&before))
+        .unwrap();
+    let t = (0..before.targets.len() as u32)
+        .find(|&i| {
+            let t = &before.targets[i as usize];
+            t.is_manual() && !t.srcs.is_empty()
+        })
+        .expect("a manual target with a source");
+    let slot = before.targets[t as usize].srcs[0];
+    let mut after = before.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+
+    let run = |include_manual: bool| {
+        e.compute(
+            base.view(),
+            &changes,
+            &SynthQuerier::new(&after),
+            &AffectedRequest {
+                include_manual,
+                ..request()
+            },
+        )
+        .unwrap()
+        .report
+    };
+    let without = run(false);
+    let affected: std::collections::BTreeSet<&str> =
+        without.affected.iter().map(|a| a.label.as_str()).collect();
+    let dropped = without
+        .direct
+        .iter()
+        .filter(|d| !affected.contains(d.as_str()))
+        .count();
+    assert!(dropped >= 1, "the manual target is direct and not affected");
+    assert_eq!(without.stats.direct_excluded_by_tag, dropped);
+
+    let with = run(true);
+    assert_eq!(with.stats.direct_excluded_by_tag, 0);
+}

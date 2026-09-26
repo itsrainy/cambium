@@ -985,6 +985,7 @@ impl Engine {
         if req.no_full_build {
             return Err(EngineError::BaselineUnavailable {
                 base: base.to_string(),
+                store_configured: self.store.is_some(),
             });
         }
         on(Progress::ColdBuild {
@@ -1114,7 +1115,8 @@ impl Engine {
                     // because the store was unwritable; the next run will
                     // simply have to compute the base again.
                     Err(e) => {
-                        tracing::warn!(%base, error = %e, "could not publish the base index");
+                        // At info: CAMBI-W011 below is the default-level line.
+                        tracing::info!(%base, error = %e, "could not publish the base index");
                         self.diagnostics.emit(
                             crate::diag::Diagnostic::warning(
                                 crate::diag::Code::W011PublishFailed,

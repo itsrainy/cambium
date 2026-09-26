@@ -774,8 +774,10 @@ impl Config {
                 // Said once while the file is read, before there is an
                 // engine to report into; the diagnostics themselves are
                 // re-derived from the config once a sink exists.
+                //
+                // At info: the diagnostics are the default-level lines.
                 for d in cfg.removed_key_diagnostics() {
-                    tracing::warn!(config = %path.display(), "{}", d.message);
+                    tracing::info!(config = %path.display(), "{}", d.message);
                 }
                 Ok(cfg)
             }

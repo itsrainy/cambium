@@ -78,7 +78,7 @@ impl fmt::Display for FlagCause {
             FlagCause::Unparsed => f.write_str("is not a label cambium parses"),
             FlagCause::ReadByBzl { path } => write!(
                 f,
-                "and `{path}` in the load closure names it — a transition or other Starlark \
+                "and `{path}` in the load closure names it; a transition or other Starlark \
                  read of the setting is not an edge in the graph"
             ),
             FlagCause::External { repo } => write!(
@@ -712,7 +712,7 @@ mod tests {
                     },
                 },
                 "build --@envoy//bazel:crypto changed and `bazel/defs.bzl` in the load closure \
-                 names it — a transition or other Starlark read of the setting is not an edge \
+                 names it; a transition or other Starlark read of the setting is not an edge \
                  in the graph",
             ),
             (

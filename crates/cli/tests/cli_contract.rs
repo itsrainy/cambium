@@ -598,6 +598,18 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
             .any(|c| c["name"] == "workspace" && c["level"] == "fail"),
         "the missing workspace should be the failure:\n{stdout}"
     );
+
+    // The human verdict counts its failures in words, not `check(s)`.
+    let failed = checks.iter().filter(|c| c["level"] == "fail").count();
+    let (code, stdout, _) = run(&["-C", outside, "doctor"]);
+    assert_eq!(code, 1);
+    let noun = if failed == 1 { "check" } else { "checks" };
+    assert!(
+        stdout.contains(&format!(
+            "{failed} {noun} must be fixed before a run can work here"
+        )),
+        "{stdout}"
+    );
 }
 
 /// A store nobody configured is how a developer with no store works, and
@@ -844,7 +856,14 @@ fn status_names_the_nearest_index_and_how_far_back_it_is() {
         stdout.lines().any(|l| l.trim() == expected),
         "the Position line should read\n  {expected}\nand status printed\n{stdout}"
     );
-    assert!(stdout.contains("reachable, 1 indexes"), "{stdout}");
+    assert!(stdout.contains("reachable, 1 index\n"), "{stdout}");
+    // The kind is said once: `dir  /path/to/store`, not `dir  dir:/path`.
+    assert!(
+        stdout.lines().any(|l| l.starts_with("  dir  /")),
+        "the store line names its kind once:\n{stdout}"
+    );
+    assert!(!stdout.contains("dir:"), "{stdout}");
+    assert!(!stdout.contains("bazel bazel"), "{stdout}");
     assert!(
         stdout.contains("packages") && stdout.contains("format     version"),
         "the Index section should describe the index a run would load:\n{stdout}"
@@ -1330,7 +1349,7 @@ fn a_relative_directory_store_is_read_from_the_workspace_root() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(
-        stdout.contains("reachable, 1 indexes"),
+        stdout.contains("reachable, 1 index\n"),
         "the store should be found from another working directory:\n{stdout}"
     );
 }
@@ -1658,25 +1677,50 @@ fn no_index_under_no_full_build_narrates_no_cold_build() {
         stderr.contains("error[CAMBI-E006]: no index is available for"),
         "{stderr}"
     );
+    // A store is configured, so publishing one is the fix.
+    assert!(
+        stderr.contains("= help: run `cambi index build --publish`, or drop --no-full-build"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("baseline index"), "{stderr}");
 }
 
-/// One refused index is one `CAMBI-W003`, and one log line, though the
-/// lookup reaches it by its tree and again through its `commits/` pointer.
+/// One refused index is one `CAMBI-W003`, though the lookup reaches it by
+/// its tree and again through its `commits/` pointer. At the default log
+/// level that is the only line saying so: the log line beside it is at
+/// `info`, where `--log info` still shows it once.
 #[test]
 fn a_refused_index_is_one_w003() {
     let f = published_fixture(1);
     move_the_configuration(&f.ws);
     let base = &f.commits[1];
-    let (code, _, stderr) = run(&[
-        "-C",
-        f.ws.to_str().unwrap(),
-        "--cache-dir",
-        f.cache.to_str().unwrap(),
-        "affected",
-        "--no-full-build",
-        &format!("{base}..{base}"),
-    ]);
+    let range = format!("{base}..{base}");
+    let args = |log: Option<&'static str>| {
+        let mut a = vec![
+            "-C".to_string(),
+            f.ws.to_str().unwrap().to_string(),
+            "--cache-dir".to_string(),
+            f.cache.to_str().unwrap().to_string(),
+        ];
+        if let Some(l) = log {
+            a.extend(["--log".to_string(), l.to_string()]);
+        }
+        a.extend(["affected", "--no-full-build", &range].map(str::to_string));
+        a
+    };
+    let (code, _, stderr) = run(&args(None));
+    assert_eq!(code, 4, "{stderr}");
+    assert_eq!(stderr.matches("warning[CAMBI-W003]").count(), 1, "{stderr}");
+    assert!(
+        !stderr.lines().any(|l| l.contains(" WARN ")),
+        "a diagnostic is not also a WARN log line:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("skipping an index built with a different cambium.toml"),
+        "{stderr}"
+    );
+
+    let (code, _, stderr) = run(&args(Some("info")));
     assert_eq!(code, 4, "{stderr}");
     assert_eq!(stderr.matches("warning[CAMBI-W003]").count(), 1, "{stderr}");
     assert_eq!(
@@ -2183,4 +2227,263 @@ fn an_answer_from_a_partial_index_is_everything() {
     let (code, _, stderr) = affected(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(!stderr.contains("everything is affected"), "{stderr}");
+}
+
+/// A git workspace with no `cambium.toml` (so no store) and a Bazel that
+/// records each start in `bazel-ran` and fails: a verb that reaches Bazel
+/// leaves the marker behind. Returns the directory, the stub's path and the
+/// marker's.
+fn storeless_workspace() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = dir.path().join("ws");
+    cambium_testkit::init_repo(&ws);
+    cambium_testkit::write(&ws, "MODULE.bazel", "module(name = \"x\")\n");
+    cambium_testkit::write(&ws, "BUILD.bazel", "");
+    cambium_testkit::commit_all(&ws, "one");
+    cambium_testkit::write(&ws, "a/BUILD.bazel", "");
+    cambium_testkit::commit_all(&ws, "two");
+    let marker = dir.path().join("bazel-ran");
+    let stub = dir.path().join("bazel");
+    cambium_testkit::executable_script(
+        &stub,
+        &format!("echo \"$@\" >> '{}'\nexit 1", marker.display()),
+    );
+    (dir, stub, marker)
+}
+
+/// With no store configured, `index build --publish` and `index update
+/// --publish` could only end in `CAMBI-E008` after paying for the build, so
+/// they say so first and never start Bazel.
+#[test]
+fn publishing_with_no_store_fails_before_anything_is_built() {
+    let (dir, stub, marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let w = ws.to_str().unwrap();
+    let cache = dir.path().join("cache");
+    for verb in [
+        &["index", "build", "--publish"][..],
+        &["index", "update", "HEAD~1", "--publish"],
+    ] {
+        let mut argv = vec![
+            "-C",
+            w,
+            "--bazel-binary",
+            stub.to_str().unwrap(),
+            "--cache-dir",
+            cache.to_str().unwrap(),
+        ];
+        argv.extend_from_slice(verb);
+        let (code, stdout, stderr) = run(&argv);
+        assert_eq!(code, 1, "{}:\n{stderr}", verb.join(" "));
+        assert!(stdout.is_empty(), "{stdout:?}");
+        assert!(
+            stderr.contains("error[CAMBI-E008]: no index store is configured"),
+            "{}:\n{stderr}",
+            verb.join(" ")
+        );
+        assert!(
+            !marker.exists(),
+            "`{}` started Bazel before finding there is no store: {:?}",
+            verb.join(" "),
+            std::fs::read_to_string(&marker)
+        );
+    }
+}
+
+/// A store that is configured but cannot be reached fails `--publish` the
+/// same way, before Bazel starts: a directory store under a regular file is
+/// `CAMBI-E011`, where it used to be found only after the build.
+#[test]
+fn publishing_to_an_unreachable_store_fails_before_anything_is_built() {
+    let (dir, stub, marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, "").unwrap();
+    point_store_at(&ws, blocker.join("store").to_str().unwrap());
+    let w = ws.to_str().unwrap();
+    let cache = dir.path().join("cache");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        w,
+        "--bazel-binary",
+        stub.to_str().unwrap(),
+        "--cache-dir",
+        cache.to_str().unwrap(),
+        "index",
+        "build",
+        "--publish",
+    ]);
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E011]"), "{stderr}");
+    assert_eq!(code, 5, "{stderr}");
+    assert!(
+        !marker.exists(),
+        "`index build --publish` started Bazel before finding the store unreachable: {:?}",
+        std::fs::read_to_string(&marker)
+    );
+}
+
+/// `CAMBI-E006`'s help names the fix that works here: with no store, a
+/// published index has nowhere to go, so the help does not send the reader
+/// to `cambi index build --publish` alone.
+#[test]
+fn no_index_with_no_store_says_to_configure_one() {
+    let (dir, stub, _marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let cache = dir.path().join("cache");
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws.to_str().unwrap(),
+        "--bazel-binary",
+        stub.to_str().unwrap(),
+        "--cache-dir",
+        cache.to_str().unwrap(),
+        "affected",
+        "HEAD~1..HEAD",
+        "--no-full-build",
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    let message = stderr
+        .lines()
+        .find(|l| l.contains("error[CAMBI-E006]"))
+        .unwrap_or_else(|| panic!("an E006 line:\n{stderr}"));
+    assert!(
+        !message.contains("in the store"),
+        "no store was looked in: {message}"
+    );
+    let help = stderr
+        .lines()
+        .find(|l| l.contains("= help:"))
+        .unwrap_or_else(|| panic!("a help line:\n{stderr}"));
+    assert!(help.contains("no store is configured"), "{help}");
+    assert!(help.contains("[baseline].store"), "{help}");
+    assert!(help.contains("drop --no-full-build"), "{help}");
+}
+
+/// `inspect targets` and `inspect package` take a package the way every
+/// other place writes one, `//pkg`, as well as the bare path the index keys
+/// it by; an unknown one's help says how a package is spelled, rather than
+/// naming the command that just failed.
+#[test]
+fn inspect_takes_a_package_with_or_without_its_slashes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let file = index.to_str().unwrap();
+    let hub = hub_labels(&index).first().expect("a hub").clone();
+    let bare = hub
+        .trim_start_matches("//")
+        .split_once(':')
+        .expect("a hub label names a package")
+        .0
+        .to_string();
+    let slashed = format!("//{bare}");
+    let targets = |verb: &str, package: &str| {
+        let (code, stdout, stderr) = run(&["inspect", verb, file, package, "--format", "json"]);
+        assert_eq!(code, 0, "`inspect {verb} {package}`:\n{stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        v["targets"].clone()
+    };
+    for verb in ["targets", "package"] {
+        let want = targets(verb, &bare);
+        assert!(want.as_array().is_some_and(|a| !a.is_empty()), "{want}");
+        assert_eq!(targets(verb, &slashed), want, "`inspect {verb} {slashed}`");
+        assert_eq!(
+            targets(verb, &format!("@{slashed}")),
+            want,
+            "`@//pkg` is the main repository spelled out"
+        );
+    }
+
+    let (code, _, stderr) = run(&["inspect", "targets", file, "//no/such/package"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E017]"), "{stderr}");
+    let help = stderr
+        .lines()
+        .find(|l| l.contains("= help:"))
+        .unwrap_or_else(|| panic!("a help line:\n{stderr}"));
+    assert!(
+        help.contains("`//pkg`"),
+        "the help gives the spelling: {help}"
+    );
+    assert!(help.contains("@repo//pkg"), "{help}");
+    assert!(
+        !help.contains("`cambi inspect targets <package>`"),
+        "the help should not name the command that just failed: {help}"
+    );
+
+    for verb in ["targets", "package"] {
+        let (code, stdout, _) = run(&["inspect", verb, "--help"]);
+        assert_eq!(code, 0);
+        // `--help` puts an argument's help on the line after its name, and
+        // `-h` beside it; either way it is the text right after `<PACKAGE>`.
+        let lines: Vec<&str> = stdout.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("<PACKAGE>"))
+            .unwrap_or_else(|| panic!("a <PACKAGE> line:\n{stdout}"));
+        let help = format!(
+            "{} {}",
+            lines[at].trim_start().trim_start_matches("<PACKAGE>"),
+            lines.get(at + 1).copied().unwrap_or_default()
+        );
+        assert!(
+            help.contains("`//pkg`"),
+            "`inspect {verb} --help` leaves <PACKAGE> blank:\n{stdout}"
+        );
+    }
+}
+
+/// No em-dash in anything the binary writes for a person to read: every
+/// verb's `--help` and every subcommand's, and the `cambium.toml` that
+/// `init` writes.
+#[test]
+fn help_and_the_generated_config_carry_no_em_dash() {
+    let mut argvs: Vec<Vec<&str>> = vec![vec!["--help"]];
+    for verb in [
+        "init", "status", "doctor", "affected", "explain", "profile", "index", "inspect", "config",
+    ] {
+        argvs.push(vec![verb, "--help"]);
+    }
+    for sub in ["build", "update", "publish", "list", "show", "gc"] {
+        argvs.push(vec!["index", sub, "--help"]);
+    }
+    for sub in [
+        "target",
+        "package",
+        "rdeps",
+        "deps",
+        "path",
+        "consumers",
+        "owner",
+        "targets",
+        "stats",
+        "externals",
+        "verify",
+    ] {
+        argvs.push(vec!["inspect", sub, "--help"]);
+    }
+    for sub in ["show", "explain", "hash"] {
+        argvs.push(vec!["config", sub, "--help"]);
+    }
+    for argv in &argvs {
+        let (code, stdout, stderr) = run(argv);
+        assert_eq!(code, 0, "`cambi {}`:\n{stderr}", argv.join(" "));
+        assert!(
+            !stdout.contains('\u{2014}'),
+            "`cambi {}` prints an em-dash:\n{stdout}",
+            argv.join(" ")
+        );
+    }
+
+    let dir = bare_workspace();
+    let (code, _, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "init",
+        "--yes",
+        "--store-none",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let written = std::fs::read_to_string(dir.path().join("cambium.toml")).unwrap();
+    assert!(!written.contains('\u{2014}'), "{written}");
 }

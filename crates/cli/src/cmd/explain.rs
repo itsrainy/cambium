@@ -198,10 +198,10 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
         );
     }
     format!(
-        "{}..{} was answered by splicing\n  \
+        "{}..{} was answered incrementally\n  \
          changed files      {}\n  \
          dirty packages     {}\n  \
-         direct targets     {}\n  \
+         direct targets     {}{}\n  \
          affected targets   {}\n  \
          {}\n",
         git_short(&report.base),
@@ -209,8 +209,9 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
         report.stats.changed_files,
         report.stats.dirty_packages,
         report.stats.direct_targets,
+        excluded_by_tag(report.stats.direct_excluded_by_tag),
         report.stats.affected_targets,
-        spliced_onto(report),
+        base_index(report),
     )
 }
 
@@ -227,11 +228,21 @@ fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> Strin
     }
 }
 
-/// The base this run spliced onto, in the terms the report carries: the
+/// Why `direct` can hold more targets than `affected`: the ones a tag in
+/// `output.exclude_tags` dropped, said beside the count they are part of.
+fn excluded_by_tag(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(", {n} of them dropped by output.exclude_tags")
+    }
+}
+
+/// The index this run answered from, in the terms the report carries: the
 /// revision it was built for and how big the graph it brought was.
-fn spliced_onto(report: &AffectedReport) -> String {
+fn base_index(report: &AffectedReport) -> String {
     format!(
-        "spliced onto       {} ({} nodes at base)",
+        "base index         {} ({} nodes)",
         git_short(&report.base),
         report.stats.base_nodes
     )
@@ -401,18 +412,37 @@ mod tests {
     }
 
     /// Neither global nor cold: the four numbers and the base, so someone can
-    /// see why the answer was the size it was.
+    /// see why the answer was the size it was. Not "by splicing": the
+    /// narration calls the replay of a stored index forward to the base a
+    /// splice, and says `skipped` when the index was already at the base.
     #[test]
     fn an_ordinary_run_accounts_for_its_own_size() {
         let out = render(&report(), None, &About::Run, false);
         assert_eq!(
             out,
-            "e5ac543..ca7fa29 was answered by splicing\n  \
+            "e5ac543..ca7fa29 was answered incrementally\n  \
              changed files      3\n  \
              dirty packages     2\n  \
              direct targets     4\n  \
              affected targets   9\n  \
-             spliced onto       e5ac543 (120 nodes at base)\n"
+             base index         e5ac543 (120 nodes)\n"
+        );
+        assert!(!out.contains("splic"), "{out}");
+    }
+
+    /// `affected` is `direct` plus its reverse closure less what
+    /// `output.exclude_tags` drops, so a run where direct targets were
+    /// dropped says how many, beside the number they are missing from.
+    #[test]
+    fn direct_targets_dropped_by_tag_are_said() {
+        let mut r = report();
+        r.stats.direct_targets = 172;
+        r.stats.affected_targets = 167;
+        r.stats.direct_excluded_by_tag = 8;
+        let out = render(&r, None, &About::Run, false);
+        assert!(
+            out.contains("  direct targets     172, 8 of them dropped by output.exclude_tags\n"),
+            "{out}"
         );
     }
 

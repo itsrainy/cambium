@@ -265,6 +265,13 @@ pub struct Stats {
     pub dirty_packages: usize,
     pub queried_targets: usize,
     pub direct_targets: usize,
+    /// Of `direct_targets`, the rules `affected` leaves out because a tag in
+    /// `output.exclude_tags` marks them (`manual`, by default) and the run
+    /// did not pass `--include-manual`: why `direct_targets` can exceed
+    /// `affected_targets`. Said by `cambi explain`; not part of the JSON
+    /// document, whose contract this would change.
+    #[serde(skip)]
+    pub direct_excluded_by_tag: usize,
     pub affected_targets: usize,
     pub changed_files: usize,
     pub ignored_files: usize,
