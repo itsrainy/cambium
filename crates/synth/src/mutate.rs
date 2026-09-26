@@ -366,7 +366,12 @@ fn generate<R: Rng>(
             Mutation::EditRuleAttr { target }
         }
         MutKind::AddDep => {
-            let t = pick_target(g, spec, rng)?;
+            // An alias names exactly one target, its `actual`, and the
+            // emitter writes only that one: a second dep would be an edge the
+            // reference follows and Bazel never sees.
+            let t = (0..8)
+                .filter_map(|_| pick_target(g, spec, rng))
+                .find(|&t| g.targets[t as usize].kind != Kind::Alias)?;
             let layer = g.targets[t as usize].layer;
             if layer == 0 {
                 return None;
@@ -791,6 +796,43 @@ mod tests {
                 assert!(g.targets[d as usize].layer < t.layer);
             }
         }
+    }
+
+    /// A history long enough to offer every alias to `AddDep`, as the graph
+    /// looks after it.
+    fn after_a_long_build_edit_history() -> SynthGraph {
+        let spec = ChangeSpec {
+            weights: MutationWeights {
+                add_dep: 100,
+                ..MutationWeights::default()
+            },
+            ..ChangeSpec::default()
+        };
+        let mut g = graph();
+        for rev in 0..60 {
+            commit(&mut g, &spec, rev);
+        }
+        g
+    }
+
+    /// An alias names one target however many deps are added around it.
+    #[test]
+    fn an_alias_never_gains_a_second_target() {
+        let g = after_a_long_build_edit_history();
+        let wrong: Vec<String> = (0..g.targets.len() as u32)
+            .filter(|&t| {
+                let t = &g.targets[t as usize];
+                t.alive
+                    && t.kind == Kind::Alias
+                    && t.deps
+                        .iter()
+                        .filter(|&&d| g.targets[d as usize].alive)
+                        .count()
+                        > 1
+            })
+            .map(|t| g.target_label(t))
+            .collect();
+        assert!(wrong.is_empty(), "aliases naming two targets: {wrong:?}");
     }
 
     #[test]

@@ -646,8 +646,8 @@ fn gen_deps(
         }
         let pkg_layers = &pkg_layer_members[t.package as usize];
 
-        // An alias takes one drawn dep (`attach_hub` may still add a hub).
-        // Its count is sampled anyway, so later draws stay where they were.
+        // An alias takes one drawn dep, its `actual`. Its count is sampled
+        // anyway, so later draws stay where they were.
         let want = spec.deps_per_target.sample(rng) as usize;
         let want = if kind == Kind::Alias { 1 } else { want };
         let mut deps: Vec<u32> = Vec::with_capacity(want + 2);
@@ -666,6 +666,15 @@ fn gen_deps(
         }
         attach_hub(spec, rng, targets, &hubs, id, &mut deps);
         reservoir.note_edges(rng, &deps);
+        if kind == Kind::Alias {
+            // An `alias` names exactly one target, and the emitter writes
+            // only that one, so a hub drawn for it is dropped here. The hub
+            // draw and its reservoir entry are kept: every other target then
+            // draws exactly what it did before aliases lost their hubs, at the
+            // cost of a hub's attachment weight counting an edge it does not
+            // have.
+            deps.truncate(1);
+        }
 
         let n_select = if spec.select_ratio > 0.0 && !deps.is_empty() {
             let n = (deps.len() as f64 * spec.select_ratio).round() as u16;
@@ -757,8 +766,9 @@ fn attach_hub(
 }
 
 /// The preferential attachment reservoir: ids appear once per in-edge
-/// received, up to a cap, after which reservoir replacement keeps the hub
-/// skew without unbounded memory.
+/// received, and once per hub drawn for an alias (see [`gen_deps`]), up to a
+/// cap, after which reservoir replacement keeps the hub skew without
+/// unbounded memory.
 #[derive(Default)]
 struct Reservoir {
     ids: Vec<u32>,
@@ -894,7 +904,7 @@ mod tests {
         }
         let before = h.finalize().to_hex().to_string();
         assert_eq!(
-            before, "4bed7f55d5e486941136674f64cdd6c81955515dd95465a7638867c4eea0d42b",
+            before, "b9e086f5023563ebf74a80656f253497137013c45a531a88995ff28673b414b3",
             "the generated graph moved"
         );
         let spec = crate::ChangeSpec::default();
@@ -909,6 +919,26 @@ mod tests {
             "14bcc52f9b03050bb78ede0d672f64291ef4eaa6f86b69011b9b44326c241755",
             "the generated history moved"
         );
+    }
+
+    /// An `alias` names one target, and the emitter writes one `actual`: a
+    /// second dep in the graph would be an edge the reference follows and
+    /// Bazel never sees.
+    #[test]
+    fn every_alias_names_exactly_one_target() {
+        for name in ["small", "medium"] {
+            let g = generate(&GraphSpec::preset(name).unwrap());
+            let aliases: Vec<&SynthTarget> =
+                g.targets.iter().filter(|t| t.kind == Kind::Alias).collect();
+            assert!(!aliases.is_empty(), "{name} draws no alias");
+            let wrong = aliases.iter().filter(|t| t.deps.len() != 1).count();
+            assert_eq!(
+                wrong,
+                0,
+                "{name}: {wrong} of {} aliases do not name exactly one target",
+                aliases.len()
+            );
+        }
     }
 
     #[test]
