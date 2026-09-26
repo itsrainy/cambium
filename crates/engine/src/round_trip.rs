@@ -384,6 +384,28 @@ pub(crate) fn closure_seeds(
     out
 }
 
+/// Says so when a repository outside the index moved and the run has no
+/// answer at head (Bazel would not answer the round-trip question): the
+/// leaves whose closure runs through it are then seeded from the index's
+/// table alone, which misses a leaf whose closure gained the repository in
+/// this commit, and every leaf when the index holds no table (it was built
+/// without an answer). A warning, not a diagnostic: the run's answer is
+/// still the one it gives, and the log says which part of it rests on the
+/// base alone.
+pub(crate) fn warn_unasked(base: IndexRef<'_>, ext: &Externals) {
+    let indexed = base.indexed_repos();
+    let moved = moved_outside(ext, &indexed);
+    if moved.is_empty() || base_leaves(base).is_empty() {
+        return;
+    }
+    tracing::warn!(
+        ?moved,
+        table = base.leaf_closure().count(),
+        "a repository outside the index moved and Bazel gave no round-trip answer at head; \
+         leaves whose closure runs through it are seeded from the index's table alone"
+    );
+}
+
 /// Asks Bazel at head for every leaf's edges when something they were
 /// derived through moved: a repository outside the universe, or an entry of
 /// the base's via set ([`IndexRef::round_trip_via`], read by `through`).

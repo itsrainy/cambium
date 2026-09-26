@@ -781,6 +781,9 @@ impl<'a> Run<'a> {
             // and so did every leaf whose closure runs through it.
             let closure =
                 crate::round_trip::closure_seeds(self.base, &ext.repos, round_trip.as_ref());
+            if round_trip.is_none() {
+                crate::round_trip::warn_unasked(self.base, ext);
+            }
             let r = crate::externals::reach(
                 self.base,
                 &ext.repos,
