@@ -381,7 +381,7 @@ pub enum Classification {
     Source(String),
     /// A file owned by the named package that also matches an ignore glob.
     /// Whether it really is out of the graph is a question for the index:
-    /// see [`Consumed`].
+    /// see [`Consumers`].
     IgnoredSource(String),
     /// Not part of the build graph: no package owns it.
     Ignored,
@@ -430,27 +430,16 @@ pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classificati
 /// an under-approximation, the one class of bug this design does not
 /// tolerate. So [`dirty_set`] asks the index instead and lets the glob decide
 /// only the cases the graph does not contradict.
-pub trait Consumed {
+pub trait Consumers {
     /// Some rule consumes `path` (owned by `pkg`) as a source input.
     fn is_consumed(&self, pkg: &str, path: &str) -> bool;
 }
 
-/// A [`Consumed`] that never contradicts an ignore glob. For callers with no
-/// index in hand; it restores the old path-only behaviour, so it is *not* the
-/// right answer for a real run.
-pub struct NoConsumers;
-
-impl Consumed for NoConsumers {
-    fn is_consumed(&self, _pkg: &str, _path: &str) -> bool {
-        false
-    }
-}
-
-/// The [`Consumed`] a real run uses: the base index's reverse row for the
+/// The [`Consumers`] a real run uses: the base index's reverse row for the
 /// path's source label.
 pub struct IndexConsumers<'a>(pub IndexRef<'a>);
 
-impl Consumed for IndexConsumers<'_> {
+impl Consumers for IndexConsumers<'_> {
     fn is_consumed(&self, pkg: &str, path: &str) -> bool {
         let label = label::source_label(pkg, path);
         match self.0.id_of(&label) {
@@ -527,13 +516,13 @@ pub fn dirty_set(
     changes: &[impl Borrow<Change>],
     packages: &mut PackageSet,
     m: &Matchers,
-    consumed: &dyn Consumed,
+    consumers: &dyn Consumers,
 ) -> DirtySet {
     let mut out = DirtySet::default();
     if let Some(path) = apply_build_changes(changes, packages, m, &mut out) {
         return DirtySet::invalidated_by(path);
     }
-    classify_changes(changes, packages, m, consumed, &mut out);
+    classify_changes(changes, packages, m, consumers, &mut out);
     route_traversed(changes, packages, &mut out);
     out
 }
@@ -604,7 +593,7 @@ fn classify_changes(
     changes: &[impl Borrow<Change>],
     packages: &PackageSet,
     m: &Matchers,
-    consumed: &dyn Consumed,
+    consumers: &dyn Consumers,
     out: &mut DirtySet,
 ) {
     for c in changes {
@@ -652,7 +641,7 @@ fn classify_changes(
             // input of `//:changelog-file`.
             Classification::IgnoredSource(pkg) => {
                 if is_content_edit(c.status) {
-                    if consumed.is_consumed(&pkg, &c.path) {
+                    if consumers.is_consumed(&pkg, &c.path) {
                         out.direct_files.insert(c.path.clone());
                     } else {
                         out.ignored += 1;
@@ -810,10 +799,20 @@ mod tests {
         );
     }
 
-    /// A [`Consumed`] over a hand-written list of consumed paths.
+    /// A [`Consumers`] that never contradicts an ignore glob: the path-only
+    /// reading, which is not the right answer for a real run.
+    struct NoConsumers;
+
+    impl Consumers for NoConsumers {
+        fn is_consumed(&self, _pkg: &str, _path: &str) -> bool {
+            false
+        }
+    }
+
+    /// A [`Consumers`] over a hand-written list of consumed paths.
     struct Consumes(&'static [&'static str]);
 
-    impl Consumed for Consumes {
+    impl Consumers for Consumes {
         fn is_consumed(&self, _pkg: &str, path: &str) -> bool {
             self.0.contains(&path)
         }
