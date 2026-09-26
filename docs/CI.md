@@ -58,7 +58,7 @@ machine, fetches it.
 - **The cache key**, when the store is a directory carried by
   `actions/cache`, is a different thing from the store key: the cache
   entry holds the whole store directory, saved by the post-merge job under
-  `cambium-store-<sha>-<attempt>` and restored by the prefix
+  `cambium-store-<sha>-<run id>-<attempt>` and restored by the prefix
   `cambium-store-`, which takes the newest entry. The ancestor walk inside
   the store does the rest.
 - **`--publish-base`** makes `affected` publish the base index it had to
@@ -93,9 +93,9 @@ build; nothing else is needed. From a machine that can write the store,
 two other ways seed it:
 
 ```console
-$ cambi profile --commits 30 --out ./cambium-index.bin   # also measures the last 30 commits
-$ cambi index publish ./cambium-index.bin
-$ cambi index build --publish                            # the cold build alone
+$ cambi profile --commits 30 --out /tmp/cambium-index.bin  # also measures the last 30 commits
+$ cambi index publish /tmp/cambium-index.bin
+$ cambi index build --publish                              # the cold build alone
 ```
 
 A profile ends at `HEAD`, so run it on the default branch's tip. With the
@@ -103,8 +103,16 @@ A profile ends at `HEAD`, so run it on the default branch's tip. With the
 can write, so its first run is the way.
 
 **Weekly, a fresh lineage.** Splicing leaves tombstones for deleted
-targets in the lineage; a scheduled `cambi index build --publish` starts a
-clean one. The next runs find it by tree like any other index.
+targets in the lineage; `cambi index build --publish` starts a clean one.
+It retires the old lineage only if the store then holds nothing else: when
+two compatible lineages both hold a tree, the next run continues whichever
+key sorts first in the store's listing, and lineage ids are hashes, so
+that is either one. The workflow's scheduled run therefore starts from an
+empty store instead of restoring one, and saves an entry holding only the
+fresh lineage, which later runs restore because it is the newest. On an S3
+or GCS store, delete the old `indexes/<lineage>/` and
+`commits/<lineage>/` prefixes after the fresh build has published, or
+leave the lineages to the lifecycle rule and the choice to the listing.
 
 **Retention.** On a directory store, `cambi index gc` deletes every index
 file and pointer older than `[baseline].retention_days`, by modification
@@ -200,9 +208,12 @@ has no local branch; in a shallow clone that merge base may be missing
 A break is every stored index becoming unusable for a run at once. Three
 things cause one:
 
-- **A `cambium.toml` edit to anything but `[baseline]`, `[git]` and
-  `[limits]`.** Those three say where and how an index is found; the rest
-  says what is in it, and is hashed.
+- **A `cambium.toml` edit to anything but `[baseline]`, `[git]`,
+  `[limits]`, `bazel.binary` and most of `bazel.startup_flags`.** Those say
+  where and how an index is found, or which Bazel binary and server answer;
+  the rest says what is in it, and is hashed. Of the startup flags, only
+  the ones that decide which rc files are read (`--bazelrc=`,
+  `--noworkspace_rc`, `--workspace_rc`) are hashed.
 - **A `cambi` upgrade that changes the rule hash or the index content
   revision** (same effect, `CAMBI-W003`), or **the file format**, which
   makes every stored file unreadable to the new binary: the run skips
@@ -213,8 +224,8 @@ things cause one:
   outcome with nothing refused: a first run, or a default branch that ran
   more than `max_ancestor_walk` merges without a post-merge job.
 
-What the pull-request job sees: a `CAMBI-W003` warning per stored index it
-skipped, then, under `--no-full-build`, `CAMBI-E006` and exit 4, and the
+What the pull-request job sees: `CAMBI-W003` lines naming each stored
+index it skipped (each one more than once today), then, under `--no-full-build`, `CAMBI-E006` and exit 4, and the
 job tests `//...`. Without the flag the run builds the base cold instead.
 `cambi status` on the same checkout also shows `CAMBI-W019`, naming the
 store's lineage that this configuration cannot use. A pull request that
@@ -270,10 +281,13 @@ rather than reading it as a miss. The workflows change in three places:
   `aws-actions/configure-aws-credentials@v4` step assuming a role that may
   `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` on the prefix;
 - the pull-request job assumes a read-only role, `s3:GetObject` and
-  `s3:ListBucket`. The list permission is not optional: without it the
-  listing fails, the run fetches the lineage-less keys blind, a publisher
-  that can list writes those only under `lineage_less_copies` (below), and
-  every run is a miss.
+  `s3:ListBucket`. Without the list permission the listing fails and the
+  run asks for the lineage-less keys blind. A publisher that can list
+  writes those only under `lineage_less_copies` (below), so they are not
+  there, and S3 answers `403` for a missing key to a caller that may not
+  list. The plain templates read that as a miss, exit 4 on every run; the
+  wrapper reads it as an outage, `CAMBI-E010` and exit 5 on every run, so
+  the job retries before it tests `//...`.
 
 Retention is a bucket lifecycle rule on the prefix; `cambi index gc` has
 no S3 or GCS implementation. The S3 and GCS commands on this page and in

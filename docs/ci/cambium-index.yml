@@ -17,15 +17,19 @@ on:
     branches: [main]
   # The first run: an empty store makes it a cold build of the tip.
   workflow_dispatch:
-  # Weekly, a fresh lineage (drops the tombstones splicing accumulates).
+  # Weekly, a fresh lineage (drops the tombstones splicing accumulates):
+  # it starts from an empty store, so the entry it saves holds only the new
+  # lineage, and later runs restore that entry because it is the newest.
   schedule:
     - cron: "17 4 * * 0"
 
 permissions:
   contents: read
 
-# One at a time, none cancelled: a run that finds the store a merge behind
-# replays that merge, so a queued run skipped here costs nothing.
+# One run at a time. GitHub keeps at most one run pending per group and
+# cancels it when a newer one queues, whatever cancel-in-progress says; that
+# costs nothing, because the next run finds the store a merge behind and
+# replays that merge.
 concurrency:
   group: cambium-index
   cancel-in-progress: false
@@ -48,6 +52,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Restore the store
+        if: github.event_name != 'schedule'
         uses: actions/cache/restore@v4
         with:
           path: .cambium-store
@@ -71,5 +76,8 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .cambium-store
-          # Cache keys are immutable; the attempt number lets a rerun save.
-          key: cambium-store-${{ github.sha }}-${{ github.run_attempt }}
+          # Cache keys are immutable. The run id keeps a scheduled or manual
+          # run at a tip that has not moved from colliding with that tip's
+          # push run (a collision only warns, and the store is not saved);
+          # the attempt number lets a rerun save.
+          key: cambium-store-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
