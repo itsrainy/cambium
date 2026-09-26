@@ -1,5 +1,5 @@
-//! Git plumbing: what changed between two revisions, and how to find an
-//! ancestor with a published baseline.
+//! Git plumbing: what changed between two revisions, and which ancestors
+//! to try when looking for one that has an index.
 //!
 //! We shell out to `git` rather than linking a library: the operations are few,
 //! the output formats are stable, and it keeps cambium honest about running in
@@ -8,27 +8,40 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub mod worktree;
+#[cfg(test)]
+mod testrepo;
+mod worktree;
 
 pub use worktree::Worktree;
 
+/// Why a git operation gave no answer.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
+    /// git could not be started (not installed, not on `PATH`, or the
+    /// directory to run it in is gone). [`Worktree::create`] also reports
+    /// the filesystem errors it meets preparing the directory this way.
     #[error("failed to run git: {0}")]
     Spawn(#[source] std::io::Error),
+    /// git ran and refused. `stderr` is git's own account, kept whole so a
+    /// caller can show the reader the line that explains it (a revision
+    /// this clone does not have, a shallow history that stops short).
     #[error("git {args} failed with {status}: {stderr}")]
     Failed {
         args: String,
         status: String,
         stderr: String,
     },
+    /// git answered in bytes that are not UTF-8. Every answer is read as
+    /// text, paths included, so a non-UTF-8 file name in a diff lands here.
     #[error("git output was not valid UTF-8")]
     NotUtf8,
+    /// A `--name-status` record cut short: a status with fewer paths after
+    /// it than its letter promises.
     #[error("unrecognised diff status {0:?}")]
     BadStatus(String),
 }
 
-type Result<T> = std::result::Result<T, GitError>;
+pub(crate) type Result<T> = std::result::Result<T, GitError>;
 
 /// What happened to one path between two revisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,11 +49,16 @@ pub enum Status {
     Added,
     Modified,
     Deleted,
-    /// Mode or type change (symlink <-> file). Treated as a modification of the
-    /// content, which is the conservative reading.
+    /// The path changed type (file to symlink, or the reverse). Treated as a
+    /// modification of the content, which is the conservative reading. A
+    /// change of mode alone (the executable bit) is `Modified`, as git
+    /// reports it.
     TypeChanged,
 }
 
+/// One path and what happened to it between two revisions: the unit the
+/// classifier and the engine reason about. A rename arrives as two of
+/// these, so nothing downstream has to know renames exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub status: Status,
@@ -56,8 +74,9 @@ impl Change {
     }
 }
 
-/// A commit as a reader would see it in a row: the object id, the commit
-/// date in `MM-DD HH:MM`, and the first line of the message.
+/// A commit as a reader would see it in a row: the object id, the committer
+/// date in `MM-DD HH:MM` (in the committer's recorded zone), and the first
+/// line of the message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitMeta {
     pub sha: String,
@@ -72,14 +91,16 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// A repository rooted at `root`. Nothing is checked here: the first
+    /// command run in it is what finds out whether it is one.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
     /// Finds the repository root containing `start`.
     pub fn discover(start: &Path) -> Result<Self> {
-        let out = run(start, &["rev-parse", "--show-toplevel"])?;
-        Ok(Self::new(PathBuf::from(out.trim())))
+        let top = run_line(start, &["rev-parse", "--show-toplevel"])?;
+        Ok(Self::new(PathBuf::from(top)))
     }
 
     pub fn root(&self) -> &Path {
@@ -88,44 +109,34 @@ impl Repo {
 
     /// Resolves a revision to a full object id.
     pub fn rev_parse(&self, rev: &str) -> Result<String> {
-        Ok(run(
-            &self.root,
-            &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
-        )?
-        .trim()
-        .to_string())
+        self.peel(rev, "commit")
     }
 
     /// The tree object a revision points at.
     ///
     /// Two commits with identical content have identical trees whatever their
-    /// shas, which is what lets the baseline store key indexes by tree: a
+    /// shas, which is what lets the index store key indexes by tree: a
     /// rebased or squash-merged commit finds the index built for its
     /// pre-rebase twin.
     pub fn tree_of(&self, rev: &str) -> Result<String> {
-        Ok(run(
+        self.peel(rev, "tree")
+    }
+
+    /// The id of the `kind` object `rev` peels to (`rev^{kind}`), which
+    /// fails rather than guessing when `rev` names nothing of that kind.
+    fn peel(&self, rev: &str, kind: &str) -> Result<String> {
+        run_line(
             &self.root,
-            &["rev-parse", "--verify", &format!("{rev}^{{tree}}")],
-        )?
-        .trim()
-        .to_string())
+            &["rev-parse", "--verify", &format!("{rev}^{{{kind}}}")],
+        )
     }
 
     /// First-parent history of `rev`, oldest first, at most `max` commits
     /// (including `rev`).
     pub fn first_parent_log(&self, rev: &str, max: usize) -> Result<Vec<String>> {
-        let out = run(
-            &self.root,
-            &[
-                "rev-list",
-                "--first-parent",
-                &format!("--max-count={max}"),
-                rev,
-            ],
-        )?;
-        let mut v: Vec<String> = out.lines().map(|s| s.to_string()).collect();
-        v.reverse();
-        Ok(v)
+        let mut log = self.first_parent_walk(rev, max)?;
+        log.reverse();
+        Ok(log)
     }
 
     /// The same history with the date and subject of each commit, for a
@@ -133,15 +144,20 @@ impl Repo {
     ///
     /// One `git log` rather than two calls per commit: a thirty-commit
     /// profile would otherwise pay sixty process starts to print sixty
-    /// fields. The date is the commit date in the local zone, `MM-DD HH:MM`,
-    /// which is the precision a row has space for.
+    /// fields. The date is the committer date as `MM-DD HH:MM`, the precision
+    /// a row has space for, shown in the zone the committer recorded (what
+    /// `--date=format:` does), not converted to the reader's. Two rows from
+    /// committers in different zones are therefore not directly comparable.
     pub fn first_parent_log_meta(&self, rev: &str, max: usize) -> Result<Vec<CommitMeta>> {
         let out = run(
             &self.root,
             &[
                 "log",
+                // log.showSignature in a user's config would otherwise put
+                // gpg's verdict on stdout among the formatted lines.
+                "--no-show-signature",
                 "--first-parent",
-                &format!("--max-count={max}"),
+                &max_count(max),
                 "--date=format:%m-%d %H:%M",
                 "--format=%H%x1f%cd%x1f%s",
                 rev,
@@ -173,20 +189,16 @@ impl Repo {
             .collect())
     }
 
-    /// The commit's subject line (the first line of its message), for
-    /// PR-reference detection in the change-set workload.
-    pub fn subject(&self, rev: &str) -> Result<String> {
-        Ok(run(&self.root, &["log", "-1", "--format=%s", rev])?
-            .trim()
-            .to_string())
-    }
-
     /// True when the working tree has uncommitted changes to tracked files.
     ///
     /// A dirty tree is not an error: `cambi affected` on a developer's
-    /// checkout is meant to see the edits. It only means the tree is not
-    /// exactly `HEAD`, which the engine takes into account when it decides
-    /// whether a revision can be read from the tree it already has.
+    /// checkout is meant to see the edits. The answer is reported, not acted
+    /// on: `cambi status` tells the reader a run will index the edits as they
+    /// are. The engine's choice of checkout compares trees and ignores dirt on
+    /// purpose (see `Engine::needs_revision_workspace`).
+    ///
+    /// A `git status` that fails reads as clean, not as an error, because the
+    /// flag only annotates a report and a probe should not fail over it.
     pub fn is_dirty(&self) -> bool {
         match run(
             &self.root,
@@ -207,76 +219,66 @@ impl Repo {
         run(&self.root, args)
     }
 
-    /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself
-    /// (spec 6.5: walk back looking for a published baseline).
+    /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself:
+    /// the order to try them in when looking for the nearest one with an
+    /// index.
     pub fn first_parent_ancestors(&self, rev: &str, max: usize) -> Result<Vec<String>> {
         if max == 0 {
             return Ok(Vec::new());
         }
-        let out = run(
-            &self.root,
-            &[
-                "rev-list",
-                "--first-parent",
-                &format!("--max-count={}", max + 1),
-                rev,
-            ],
-        )?;
-        Ok(out.lines().skip(1).map(|s| s.to_string()).collect())
+        let walk = self.first_parent_walk(rev, max.saturating_add(1))?;
+        Ok(walk.into_iter().skip(1).collect())
     }
 
+    /// `rev` and its first-parent ancestors, nearest first, at most `count`
+    /// commits: the one walk behind both the oldest-first log and the
+    /// ancestor search.
+    fn first_parent_walk(&self, rev: &str, count: usize) -> Result<Vec<String>> {
+        let out = run(
+            &self.root,
+            &["rev-list", "--first-parent", &max_count(count), rev],
+        )?;
+        Ok(out.lines().map(str::to_string).collect())
+    }
+
+    /// The best common ancestor of `a` and `b`: what "the changes on this
+    /// branch" are measured from when no base is given. Fails when there is
+    /// none in this clone, which on CI usually means the history is shallow.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
-        Ok(run(&self.root, &["merge-base", a, b])?.trim().to_string())
+        run_line(&self.root, &["merge-base", a, b])
     }
 
     /// `git diff --name-status -M -z base head`, with renames and copies
-    /// expanded into a delete plus an add (spec 6.2).
+    /// expanded into plain adds and deletes.
     pub fn diff(&self, base: &str, head: &str) -> Result<Vec<Change>> {
         let out = run(
             &self.root,
-            &[
-                "diff",
-                "--name-status",
-                "-M",
-                "-z",
-                "--no-renames-empty",
-                base,
-                head,
-            ],
-        );
-        // --no-renames-empty is not a real flag on older gits; retry without it.
-        let out = match out {
-            Ok(o) => o,
-            Err(_) => run(
-                &self.root,
-                &["diff", "--name-status", "-M", "-z", base, head],
-            )?,
-        };
+            &["diff", "--name-status", "-M", "-z", base, head],
+        )?;
         parse_name_status_z(&out)
     }
 
-    /// Files changed by a single commit relative to its first parent.
-    pub fn diff_commit(&self, commit: &str) -> Result<Vec<Change>> {
-        self.diff(&format!("{commit}^"), commit)
-    }
-
-    /// Reads a blob at a revision. `None` if the path does not exist there.
+    /// Reads a blob at a revision. `None` if the path does not exist there,
+    /// or is a directory there.
+    ///
+    /// `cat-file blob` rather than `show`: `show` answers a directory with a
+    /// listing of it, which a caller reading a BUILD or rc file would take
+    /// for the file's text. Any git failure reads as `None`, so a revision
+    /// git cannot resolve looks the same as an absent path; callers that
+    /// must tell the two apart resolve the revision first.
     pub fn read_at(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
-        let out = Command::new("git")
-            .current_dir(&self.root)
-            .args(["show", &format!("{rev}:{path}")])
-            .output()
-            .ok()?;
-        out.status.success().then_some(out.stdout)
+        run_bytes(&self.root, &["cat-file", "blob", &format!("{rev}:{path}")]).ok()
     }
 }
 
 /// Parses the NUL-separated form of `--name-status`.
 ///
-/// Rename and copy records carry two paths (`R100\0old\0new`); both become a
-/// delete of the old path and an add of the new one, which is what makes the
-/// dirty-set rules in spec 6.2 uniform.
-pub fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
+/// Rename and copy records carry two paths (`R100\0old\0new`). A rename
+/// becomes a delete of the old path and an add of the new one; a copy
+/// leaves its source in place, so it becomes only the add. Either way the
+/// dirty-set rules see one shape for every change: a path that appeared,
+/// changed or went away.
+fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut changes = Vec::new();
     while let Some(status) = fields.next() {
@@ -308,7 +310,29 @@ pub fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
-fn run(dir: &Path, args: &[&str]) -> Result<String> {
+/// `--max-count=n` as git will take it.
+///
+/// git reads the count as an `int` and refuses anything larger, so a larger
+/// `n` is sent as the largest it accepts, which no history reaches: a limit
+/// that high means all of it.
+fn max_count(n: usize) -> String {
+    format!("--max-count={}", n.min(i32::MAX as usize))
+}
+
+/// Runs a git command whose answer is one line, and returns that line.
+fn run_line(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(run(dir, args)?.trim().to_string())
+}
+
+/// Runs git in `dir` and returns its stdout as text.
+pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    String::from_utf8(run_bytes(dir, args)?).map_err(|_| GitError::NotUtf8)
+}
+
+/// Runs git in `dir` and returns its stdout as it came: the one place this
+/// crate starts git, and the form for output that is file content rather
+/// than text git wrote.
+fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -321,12 +345,13 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    String::from_utf8(out.stdout).map_err(|_| GitError::NotUtf8)
+    Ok(out.stdout)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testrepo::TwoCommits;
 
     #[test]
     fn parses_simple_statuses() {
@@ -372,61 +397,194 @@ mod tests {
     }
 
     #[test]
-    fn drives_a_real_repository() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let git = |args: &[&str]| {
-            let st = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
-                .unwrap();
+    fn a_record_cut_short_is_an_error() {
+        for out in ["M\0", "R100\0a\0", "C75\0"] {
             assert!(
-                st.status.success(),
-                "git {args:?}: {:?}",
-                String::from_utf8_lossy(&st.stderr)
+                matches!(parse_name_status_z(out), Err(GitError::BadStatus(_))),
+                "{out:?}"
             );
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@example.com"]);
-        git(&["config", "user.name", "t"]);
-        std::fs::create_dir_all(root.join("lib")).unwrap();
-        std::fs::write(root.join("lib/a.cc"), "one").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "one"]);
-        std::fs::write(root.join("lib/a.cc"), "two").unwrap();
-        std::fs::write(root.join("lib/b.cc"), "new").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "two"]);
+        }
+    }
 
-        let repo = Repo::new(root);
-        let changes = repo.diff("HEAD~1", "HEAD").unwrap();
+    #[test]
+    fn unmerged_and_unknown_records_read_as_modifications() {
         assert_eq!(
-            changes,
+            parse_name_status_z("U\0a.cc\0X\0b.cc\0").unwrap(),
+            vec![
+                Change::new(Status::Modified, "a.cc"),
+                Change::new(Status::Modified, "b.cc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_lists_each_path_that_changed() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(
+            repo.diff(&f.first, &f.second).unwrap(),
             vec![
                 Change::new(Status::Modified, "lib/a.cc"),
                 Change::new(Status::Added, "lib/b.cc"),
             ]
         );
-        let head = repo.rev_parse("HEAD").unwrap();
-        assert_eq!(head.len(), 40);
-        let anc = repo.first_parent_ancestors("HEAD", 5).unwrap();
-        assert_eq!(anc.len(), 1);
-        let tree = repo.tree_of("HEAD").unwrap();
-        assert_eq!(tree.len(), 40);
-        assert_ne!(tree, head);
-        assert_eq!(repo.first_parent_log("HEAD", 10).unwrap().len(), 2);
-        // Oldest first, like the log it mirrors, and carrying what a row
-        // prints about a commit.
-        let meta = repo.first_parent_log_meta("HEAD", 10).unwrap();
+    }
+
+    #[test]
+    fn diff_reads_a_rename_as_a_delete_and_an_add() {
+        let f = TwoCommits::new();
+        f.git(&["mv", "lib/b.cc", "lib/c.cc"]);
+        f.git(&["commit", "-qm", "rename"]);
+        assert_eq!(
+            Repo::new(&f.root).diff(&f.second, "HEAD").unwrap(),
+            vec![
+                Change::new(Status::Deleted, "lib/b.cc"),
+                Change::new(Status::Added, "lib/c.cc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rev_parse_gives_the_commit_id() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).rev_parse("HEAD").unwrap(), f.second);
+    }
+
+    #[test]
+    fn tree_of_gives_the_tree_not_the_commit() {
+        let f = TwoCommits::new();
+        let tree = Repo::new(&f.root).tree_of("HEAD").unwrap();
+        assert_eq!(tree, f.git(&["rev-parse", "HEAD^{tree}"]));
+        assert_ne!(tree, f.second);
+    }
+
+    #[test]
+    fn first_parent_log_is_oldest_first_and_includes_rev() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(
+            repo.first_parent_log("HEAD", 10).unwrap(),
+            vec![f.first.clone(), f.second.clone()]
+        );
+        assert_eq!(repo.first_parent_log("HEAD", 1).unwrap(), vec![f.second]);
+    }
+
+    #[test]
+    fn first_parent_log_meta_carries_what_a_row_prints() {
+        let f = TwoCommits::new();
+        let meta = Repo::new(&f.root)
+            .first_parent_log_meta("HEAD", 10)
+            .unwrap();
         assert_eq!(
             meta.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
             vec!["one", "two"]
         );
-        assert_eq!(meta[1].sha, head);
+        assert_eq!(meta[0].sha, f.first);
+        assert_eq!(meta[1].sha, f.second);
         assert_eq!(meta[0].date.len(), "MM-DD HH:MM".len(), "{:?}", meta[0]);
-        assert_eq!(repo.parents("HEAD").unwrap(), vec![anc[0].clone()]);
-        assert_eq!(repo.read_at("HEAD~1", "lib/a.cc").unwrap(), b"one");
-        assert!(repo.read_at("HEAD~1", "lib/b.cc").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_parent_log_meta_is_not_confused_by_signature_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = TwoCommits::new();
+        // A stand-in for gpg that vouches for every signature on stderr, as
+        // gpg does. With log.showSignature set, git copies that into the log
+        // output, among the formatted lines.
+        let gpg = f.dir.path().join("gpg");
+        std::fs::write(&gpg, "#!/bin/sh\necho 'gpg: Good signature' >&2\n").unwrap();
+        std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A commit carrying a signature, written by hand so no real gpg or
+        // key is involved.
+        let tree = f.git(&["rev-parse", "HEAD^{tree}"]);
+        let object = f.dir.path().join("signed-commit");
+        std::fs::write(
+            &object,
+            format!(
+                "tree {tree}\nparent {}\n\
+                 author t <t@example.com> 1700000000 +0000\n\
+                 committer t <t@example.com> 1700000000 +0000\n\
+                 gpgsig -----BEGIN PGP SIGNATURE-----\n \n c2lnbmVk\n -----END PGP SIGNATURE-----\n\
+                 \nsigned\n",
+                f.second
+            ),
+        )
+        .unwrap();
+        let signed = f.git(&[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            object.to_str().unwrap(),
+        ]);
+        f.git(&["update-ref", "refs/heads/main", &signed]);
+        f.git(&["config", "gpg.program", gpg.to_str().unwrap()]);
+        f.git(&["config", "log.showSignature", "true"]);
+
+        let meta = Repo::new(&f.root)
+            .first_parent_log_meta("HEAD", 10)
+            .unwrap();
+        assert_eq!(
+            meta.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+            vec![f.first.as_str(), f.second.as_str(), signed.as_str()]
+        );
+        assert_eq!(meta[2].subject, "signed");
+    }
+
+    #[test]
+    fn first_parent_ancestors_start_at_the_parent() {
+        let f = TwoCommits::new();
+        assert_eq!(
+            Repo::new(&f.root)
+                .first_parent_ancestors("HEAD", 5)
+                .unwrap(),
+            vec![f.first]
+        );
+    }
+
+    #[test]
+    fn a_walk_limit_beyond_what_git_counts_walks_everything() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(
+            repo.first_parent_ancestors("HEAD", usize::MAX).unwrap(),
+            vec![f.first.clone()]
+        );
+        assert_eq!(
+            repo.first_parent_log("HEAD", usize::MAX).unwrap(),
+            vec![f.first.clone(), f.second]
+        );
+        assert_eq!(
+            repo.first_parent_log_meta("HEAD", usize::MAX).unwrap()[0].sha,
+            f.first
+        );
+    }
+
+    #[test]
+    fn no_ancestors_are_walked_when_none_are_allowed() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert!(repo.first_parent_ancestors("HEAD", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parents_lists_the_parent_commit() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).parents("HEAD").unwrap(), vec![f.first]);
+    }
+
+    #[test]
+    fn read_at_reads_a_file_as_it_was_and_misses_an_absent_one() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(repo.read_at(&f.first, "lib/a.cc").unwrap(), b"one");
+        assert!(repo.read_at(&f.first, "lib/b.cc").is_none());
+    }
+
+    #[test]
+    fn read_at_does_not_read_a_directory_as_a_file() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).read_at(&f.first, "lib"), None);
     }
 }
