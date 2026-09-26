@@ -589,6 +589,10 @@ fn gen_targets(
 /// The dependency edges: preferential attachment towards what already has
 /// in-edges, same-package edges at the configured ratio, a test on something
 /// in its own package, hubs at layer 0, and the `select`/external counts.
+///
+/// Every draw from `rng` here is load-bearing: the helpers below draw in
+/// exactly the order the single loop they came from did, and the pinned
+/// digest test fails if a draw moves, is added or is skipped.
 fn gen_deps(
     spec: &GraphSpec,
     rng: &mut ChaCha8Rng,
@@ -598,12 +602,11 @@ fn gen_deps(
 ) {
     let layers = spec.layers.max(1);
     // Hubs live at layer 0 so everything may depend on them.
-    let mut hubs: Vec<u32> = Vec::new();
-    if !layer_members[0].is_empty() {
-        for i in 0..spec.hub_count.min(layer_members[0].len() as u32) {
-            hubs.push(layer_members[0][i as usize]);
-        }
-    }
+    let hubs: Vec<u32> = layer_members[0]
+        .iter()
+        .take(spec.hub_count as usize)
+        .copied()
+        .collect();
 
     // Prefix sums over lower layers, so a dep can be drawn uniformly from
     // "everything below me" in O(1).
@@ -615,105 +618,39 @@ fn gen_deps(
         lower_offsets.push(flat_by_layer.len());
     }
 
-    // Preferential attachment reservoir: ids appear once per in-edge received.
-    const PA_CAP: usize = 4 << 20;
-    let mut reservoir: Vec<u32> = Vec::new();
-    let mut seen_edges: u64 = 0;
-
+    let mut reservoir = Reservoir::default();
     for id in 0..targets.len() as u32 {
-        let layer = targets[id as usize].layer;
+        let t = &targets[id as usize];
+        let (layer, kind) = (t.layer, t.kind);
         if layer == 0 {
             continue;
         }
-        let pool_end = lower_offsets[layer as usize];
-        if pool_end == 0 {
+        let below = &flat_by_layer[..lower_offsets[layer as usize]];
+        if below.is_empty() {
             continue;
         }
-        let pkg = targets[id as usize].package as usize;
+        let pkg_layers = &pkg_layer_members[t.package as usize];
+
+        // Alias rules have exactly one dep. The count is still drawn for
+        // one, so every later target's draws stay where they were.
         let want = spec.deps_per_target.sample(rng) as usize;
+        let want = if kind == Kind::Alias { 1 } else { want };
         let mut deps: Vec<u32> = Vec::with_capacity(want + 2);
-
-        // Alias rules have exactly one dep.
-        let want = if targets[id as usize].kind == Kind::Alias {
-            1
-        } else {
-            want
-        };
-
         for _ in 0..want {
-            let pick = if rng.gen::<f64>() < spec.preferential_attachment && !reservoir.is_empty() {
-                let c = reservoir[rng.gen_range(0..reservoir.len())];
-                // Only accept if it keeps the DAG property.
-                if targets[c as usize].layer < layer {
-                    Some(c)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let pick = pick.or_else(|| {
-                if rng.gen::<f64>() >= spec.cross_package_dep_ratio {
-                    // Same package, strictly lower layer.
-                    let mut cands: Vec<u32> = Vec::new();
-                    for l in 0..layer {
-                        if let Some(v) = pkg_layer_members[pkg].get(&l) {
-                            cands.extend_from_slice(v);
-                        }
-                    }
-                    if !cands.is_empty() {
-                        return Some(cands[rng.gen_range(0..cands.len())]);
-                    }
-                }
-                Some(flat_by_layer[rng.gen_range(0..pool_end)])
-            });
-            if let Some(d) = pick {
-                if d != id && !deps.contains(&d) {
-                    deps.push(d);
-                }
+            let d = draw_dep(spec, rng, targets, &reservoir.ids, pkg_layers, below, layer);
+            if d != id && !deps.contains(&d) {
+                deps.push(d);
             }
         }
-
-        // A test depends on something in its own package where possible.
-        if targets[id as usize].kind == Kind::Test {
-            let mut cands: Vec<u32> = Vec::new();
-            for l in 0..layer {
-                if let Some(v) = pkg_layer_members[pkg].get(&l) {
-                    cands.extend(
-                        v.iter()
-                            .copied()
-                            .filter(|&c| matches!(targets[c as usize].kind, Kind::Lib | Kind::Bin)),
-                    );
-                }
-            }
-            if !cands.is_empty() {
-                let d = cands[rng.gen_range(0..cands.len())];
+        if kind == Kind::Test {
+            if let Some(d) = own_package_lib(rng, targets, pkg_layers, layer) {
                 if !deps.contains(&d) {
                     deps.push(d);
                 }
             }
         }
-
-        // Hub attachment.
-        if !hubs.is_empty() && rng.gen::<f64>() < spec.hub_fraction {
-            let h = hubs[rng.gen_range(0..hubs.len())];
-            if h != id && targets[h as usize].layer < layer && !deps.contains(&h) {
-                deps.push(h);
-            }
-        }
-
-        for &d in &deps {
-            seen_edges += 1;
-            if reservoir.len() < PA_CAP {
-                reservoir.push(d);
-            } else {
-                // Reservoir replacement keeps the hub skew without unbounded memory.
-                let slot = (rng.gen::<u64>() % seen_edges) as usize;
-                if slot < PA_CAP {
-                    reservoir[slot] = d;
-                }
-            }
-        }
+        attach_hub(spec, rng, targets, &hubs, id, &mut deps);
+        reservoir.note_edges(rng, &deps);
 
         let n_select = if spec.select_ratio > 0.0 && !deps.is_empty() {
             let n = (deps.len() as f64 * spec.select_ratio).round() as u16;
@@ -721,9 +658,7 @@ fn gen_deps(
         } else {
             0
         };
-        let ext = if targets[id as usize].kind != Kind::Alias
-            && rng.gen::<f64>() < spec.external_dep_ratio
-        {
+        let ext = if kind != Kind::Alias && rng.gen::<f64>() < spec.external_dep_ratio {
             1 + (rng.gen::<u16>() % 2)
         } else {
             0
@@ -732,6 +667,106 @@ fn gen_deps(
         t.deps = deps;
         t.select_deps = n_select;
         t.ext_deps = ext;
+    }
+}
+
+/// One dep for a target at `layer`: a preferential-attachment pick when it
+/// keeps the DAG, else something below it in its own package at the
+/// configured ratio, else anything in a lower layer (`below`).
+fn draw_dep(
+    spec: &GraphSpec,
+    rng: &mut ChaCha8Rng,
+    targets: &[SynthTarget],
+    reservoir: &[u32],
+    pkg_layers: &FxHashMap<u32, Vec<u32>>,
+    below: &[u32],
+    layer: u32,
+) -> u32 {
+    if rng.gen::<f64>() < spec.preferential_attachment && !reservoir.is_empty() {
+        let c = reservoir[rng.gen_range(0..reservoir.len())];
+        // Only accept if it keeps the DAG property.
+        if targets[c as usize].layer < layer {
+            return c;
+        }
+    }
+    if rng.gen::<f64>() >= spec.cross_package_dep_ratio {
+        let cands: Vec<u32> = in_package_below(pkg_layers, layer).collect();
+        if !cands.is_empty() {
+            return cands[rng.gen_range(0..cands.len())];
+        }
+    }
+    below[rng.gen_range(0..below.len())]
+}
+
+/// A lib or bin in a test's own package, below it, for the test to exercise.
+/// Draws only when there is one.
+fn own_package_lib(
+    rng: &mut ChaCha8Rng,
+    targets: &[SynthTarget],
+    pkg_layers: &FxHashMap<u32, Vec<u32>>,
+    layer: u32,
+) -> Option<u32> {
+    let cands: Vec<u32> = in_package_below(pkg_layers, layer)
+        .filter(|&c| matches!(targets[c as usize].kind, Kind::Lib | Kind::Bin))
+        .collect();
+    (!cands.is_empty()).then(|| cands[rng.gen_range(0..cands.len())])
+}
+
+/// A package's targets on layers below `layer`, lowest layer first.
+fn in_package_below(
+    pkg_layers: &FxHashMap<u32, Vec<u32>>,
+    layer: u32,
+) -> impl Iterator<Item = u32> + '_ {
+    (0..layer)
+        .filter_map(|l| pkg_layers.get(&l))
+        .flatten()
+        .copied()
+}
+
+/// With probability `hub_fraction`, a dep on one of the hubs, if it keeps
+/// the DAG and is not already there.
+fn attach_hub(
+    spec: &GraphSpec,
+    rng: &mut ChaCha8Rng,
+    targets: &[SynthTarget],
+    hubs: &[u32],
+    id: u32,
+    deps: &mut Vec<u32>,
+) {
+    if !hubs.is_empty() && rng.gen::<f64>() < spec.hub_fraction {
+        let h = hubs[rng.gen_range(0..hubs.len())];
+        if h != id && targets[h as usize].layer < targets[id as usize].layer && !deps.contains(&h) {
+            deps.push(h);
+        }
+    }
+}
+
+/// The preferential attachment reservoir: ids appear once per in-edge
+/// received, up to a cap, after which reservoir replacement keeps the hub
+/// skew without unbounded memory.
+#[derive(Default)]
+struct Reservoir {
+    ids: Vec<u32>,
+    /// Every edge noted, kept or not.
+    seen: u64,
+}
+
+impl Reservoir {
+    const CAP: usize = 4 << 20;
+
+    /// Records a target's new deps as in-edges. Draws only once full.
+    fn note_edges(&mut self, rng: &mut ChaCha8Rng, deps: &[u32]) {
+        for &d in deps {
+            self.seen += 1;
+            if self.ids.len() < Self::CAP {
+                self.ids.push(d);
+            } else {
+                let slot = (rng.gen::<u64>() % self.seen) as usize;
+                if slot < Self::CAP {
+                    self.ids[slot] = d;
+                }
+            }
+        }
     }
 }
 
