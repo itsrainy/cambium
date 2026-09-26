@@ -520,7 +520,7 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
                 "targets on a typical commit (p50), {} of {} (manual included); mean {}, \
                  p90 {}",
                 percent(s.affected_share),
-                group(p.cold.targets as u64),
+                group(i.targets as u64),
                 group(a.mean.round() as u64),
                 group(a.p90),
             ),
@@ -531,7 +531,7 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
             format!(
                 "tests on a typical commit (p50), {} of {}; mean {}, p90 {}",
                 percent(s.tests_share),
-                group(p.cold.tests as u64),
+                group(i.tests as u64),
                 group(t.mean.round() as u64),
                 group(t.p90),
             ),
@@ -680,10 +680,10 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             inc.commits,
             plural_s(inc.commits),
             group(s.incremental_affected.p50),
-            group(p.cold.targets as u64),
+            group(p.index.targets as u64),
             percent(s.affected_share),
             group(s.incremental_tests.p50),
-            group(p.cold.tests as u64),
+            group(p.index.tests as u64),
             percent(s.tests_share),
         );
     }
@@ -797,26 +797,27 @@ mod tests {
             targets: 500,
             tests: 40,
         };
-        let summary = profile::summarise(&steps, &cold);
+        let index = profile::IndexSummary {
+            commit: "b34514a91abc".into(),
+            targets: 456,
+            tests: 180,
+            packages: 24,
+            nodes: 900,
+            edges: 2000,
+            external_repos: 12,
+            bytes_on_disk: 46_000,
+            compression: "zstd-3".into(),
+            load_ms: 0,
+            bazel_version: "8.4.2".into(),
+        };
+        let summary = profile::summarise(&steps, index.targets, index.tests);
         Profile {
             schema: cambium_engine::report::SCHEMA_VERSION,
             repository: "skylib".into(),
             head: "b34514a91abc".into(),
             from: "53f6d0dfe3aa".into(),
             from_failed: None,
-            index: profile::IndexSummary {
-                commit: "b34514a91abc".into(),
-                targets: 456,
-                tests: 180,
-                packages: 24,
-                nodes: 900,
-                edges: 2000,
-                external_repos: 12,
-                bytes_on_disk: 46_000,
-                compression: "zstd-3".into(),
-                load_ms: 0,
-                bazel_version: "8.4.2".into(),
-            },
+            index,
             cold,
             commits: steps,
             summary,
@@ -845,10 +846,15 @@ mod tests {
             "{text}"
         );
         // Two incremental steps, 375 and 25 affected: the p50 is 25, 5% of
-        // the cold index's 500.
+        // the head index's 456 targets (the cold index's 500 is the full
+        // index line's, not the share's). Tests: 4 of the head's 180.
         assert!(line("affected").contains("25 "), "{text}");
-        assert!(line("affected").contains("5% of 500"), "{text}");
-        assert!(line("tests").contains("10% of 40"), "{text}");
+        assert!(line("affected").contains("5% of 456"), "{text}");
+        assert!(line("tests").contains("2% of 180"), "{text}");
+        assert!(
+            line("full index").contains("500 targets, 40 tests"),
+            "{text}"
+        );
         // The failed step is out of every figure: one global in three.
         assert!(line("global").contains("1/3"), "{text}");
         assert!(line("global").contains("33% of commits"), "{text}");

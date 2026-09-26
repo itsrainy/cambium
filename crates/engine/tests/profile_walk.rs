@@ -266,16 +266,29 @@ fn consecutive_failures_stop_the_walk_with_a_report_for_what_was_walked() {
     ));
 }
 
+/// The shares are of the index the walk ends with, the repository at the
+/// head the report's `targets` line describes, and not of the cold index at
+/// the range's oldest commit: a repository that grew in the window would
+/// otherwise read "200% of 1" under a line that says it has 24 tests.
 #[test]
-fn the_shares_are_of_the_cold_index() {
+fn the_shares_are_of_the_head_index() {
     let (dir, engine, _, snapshots) = history(6);
     let out = dir.path().join("head.cmbx");
     let p = profile(&engine, &snapshots, "HEAD", 4, &out, &mut |_| {}).unwrap();
-    assert!(p.cold.targets > 0);
+    assert!(p.index.targets > 0);
+    assert_ne!(
+        (p.index.targets, p.index.tests),
+        (p.cold.targets, p.cold.tests),
+        "the fixture has to grow or shrink in the window for this to say anything"
+    );
     let s = &p.summary;
     assert_eq!(
-        s.incremental_affected.p50 as f64 / p.cold.targets as f64,
+        s.incremental_affected.p50 as f64 / p.index.targets as f64,
         s.affected_share
+    );
+    assert_eq!(
+        s.incremental_tests.p50 as f64 / p.index.tests as f64,
+        s.tests_share
     );
     assert!(!p.repository.is_empty());
     assert!(p.commits.iter().all(|c| !c.subject.is_empty()));

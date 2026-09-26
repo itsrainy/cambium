@@ -156,7 +156,14 @@ use serde::{Deserialize, Serialize};
 ///   transitive deps closure runs through a repository that moved (index
 ///   format 16), and for no other reason. `external_direct_targets` counts
 ///   the rules above them as before. Purely additive.
-pub const SCHEMA_VERSION: u32 = 19;
+/// - **20** changes `cambi profile`'s `summary.affected_share` and
+///   `summary.tests_share`: they are shares of `index.targets` and
+///   `index.tests`, the index the walk ends with (the repository the
+///   report's `targets` line describes), where they were shares of
+///   `cold.targets` and `cold.tests`, the oldest commit's. A window that
+///   began where the repository was small read "200% of 1". No field is
+///   added or removed.
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.

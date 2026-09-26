@@ -103,8 +103,8 @@ cold index at the oldest of the last 30 first-parent commits, then one
 incremental step per commit up to `HEAD`, in a scratch worktree (the checkout
 and the store are left alone). The report gives the graph's size, the cold
 index's time and size, what a typical commit costs and affects as a share of
-the repository's targets and tests, and how often a commit goes global and
-under which `CAMBI-W` code. Its times come from one warm Bazel server with
+the repository's targets and tests at `HEAD`, and how often a commit goes
+global and under which `CAMBI-W` code. Its times come from one warm Bazel server with
 the index in memory; a cold CI runner also pays the store fetch, a server
 start and external fetches. A commit that does not build is reported as
 failed and the walk goes on; if the oldest one is the problem, a smaller
@@ -423,7 +423,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 19, "base": "...", "head": "...", ... }
+{ "schema": 20, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -499,7 +499,7 @@ not also show:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -537,7 +537,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -561,7 +561,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -596,7 +596,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
@@ -635,6 +635,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
 | 18 | `stats.consumer_leaves_seeded`: leaves of external repositories seeded because the consumer table's leaf map (index format 14) says their transitive deps reach a package of an indexed repository that moved, or does not know the leaf; a consumer seeded this way is still counted in `repos_dirty_by_consumer`, but only its reaching leaves are seeded rather than all of them |
 | 19 | `stats.closure_leaves_seeded`: leaves seeded because their transitive deps closure runs through an external repository that moved (index format 16), and for no other reason: envoy's `@grpc//:grpc++` when an input of `@c-ares` moves |
+| 20 | `cambi profile`: `summary.affected_share` and `summary.tests_share` are shares of `index.targets` and `index.tests`, the index the walk ends with (the repository the report's `targets` line describes); they were shares of `cold.targets` and `cold.tests`, the oldest commit's, which read "200% of 1" on a window that began where the repository was small. No field is added or removed |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints. As of 17 it holds `repository`, `from` and

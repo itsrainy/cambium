@@ -191,12 +191,13 @@ pub struct ColdBuild {
     /// to build, the first later commit that did.
     pub commit: String,
     pub wall_ms: u64,
-    /// Rule targets in the index it built, manual ones included: what
-    /// `summary.affected_share` is a share of.
+    /// Rule targets in the index it built, manual ones included. The shares
+    /// in `summary` are not of this but of `index.targets`, the repository
+    /// at the walk's end: a window that starts where the repository was
+    /// small would otherwise read "200% of 1".
     #[serde(default)]
     pub targets: u32,
-    /// Test rules in the same index: what `summary.tests_share` is a share
-    /// of.
+    /// Test rules in the same index.
     #[serde(default)]
     pub tests: u32,
 }
@@ -354,11 +355,13 @@ pub struct Summary {
     /// Affected tests over the same steps.
     #[serde(default)]
     pub incremental_tests: Spread,
-    /// `incremental_affected.p50` over `cold.targets`: the share of the
-    /// repository's rule targets a typical commit affects.
+    /// `incremental_affected.p50` over `index.targets`: the share of the
+    /// repository's rule targets, at the commit the walk ends on, that a
+    /// typical commit affects. Of `cold.targets` before schema 20.
     #[serde(default)]
     pub affected_share: f64,
-    /// `incremental_tests.p50` over `cold.tests`.
+    /// `incremental_tests.p50` over `index.tests` (of `cold.tests` before
+    /// schema 20).
     #[serde(default)]
     pub tests_share: f64,
     /// `globals / commits`: the share of commits whose answer is `//...`.
@@ -644,7 +647,8 @@ pub fn profile(
         let _ = f.view().counts();
         sw.elapsed_ms()
     };
-    let summary = summarise(&walked, &cold);
+    let described = describe(&index, bytes_on_disk, compression, load_ms);
+    let summary = summarise(&walked, described.targets, described.tests);
     diagnostics.extend(engine.diagnostics().drain());
     Ok(Profile {
         schema: SCHEMA_VERSION,
@@ -656,7 +660,7 @@ pub fn profile(
         head: head.clone(),
         from,
         from_failed,
-        index: describe(&index, bytes_on_disk, compression, load_ms),
+        index: described,
         cold,
         commits: walked,
         summary,
@@ -776,11 +780,13 @@ fn describe(
     }
 }
 
-/// The summary of a walk. `cold` is the build the shares are shares of.
+/// The summary of a walk. `targets` and `tests` are the counts the shares are
+/// shares of: the index the walk ends with, which is the repository the
+/// report's `targets` line describes.
 ///
 /// A failed step is counted in `commits` and `failed` and nowhere else: it
 /// answered nothing and its time is not what a commit costs.
-pub fn summarise(steps: &[CommitStep], cold: &ColdBuild) -> Summary {
+pub fn summarise(steps: &[CommitStep], targets: u32, tests: u32) -> Summary {
     let failed = steps.iter().filter(|s| s.failed.is_some()).count();
     let walked = steps.len();
     let steps: Vec<&CommitStep> = steps.iter().filter(|s| s.failed.is_none()).collect();
@@ -855,8 +861,8 @@ pub fn summarise(steps: &[CommitStep], cold: &ColdBuild) -> Summary {
                 .filter(|s| s.engine_cold_rebuild)
                 .map(|s| s.wall_ms),
         ),
-        affected_share: share(incremental_affected.p50, cold.targets),
-        tests_share: share(incremental_tests.p50, cold.tests),
+        affected_share: share(incremental_affected.p50, targets),
+        tests_share: share(incremental_tests.p50, tests),
         incremental_affected,
         incremental_tests,
         global_share: fraction(globals),
@@ -915,15 +921,6 @@ mod tests {
         }
     }
 
-    fn cold(targets: u32, tests: u32) -> ColdBuild {
-        ColdBuild {
-            commit: "p".into(),
-            wall_ms: 1000,
-            targets,
-            tests,
-        }
-    }
-
     #[test]
     fn rebuild_cadence_is_commits_per_global_and_absent_without_one() {
         let s = summarise(
@@ -935,7 +932,8 @@ mod tests {
                 step(40, Some("MODULE.bazel changed"), 0),
                 step(50, None, 2),
             ],
-            &cold(40, 10),
+            40,
+            10,
         );
         assert_eq!(s.commits, 6);
         assert_eq!(s.globals, 3);
@@ -971,7 +969,7 @@ mod tests {
         assert!((s.zero_dirty_fraction - 1.0 / 6.0).abs() < 1e-9);
         assert!((s.global_share - 0.5).abs() < 1e-9);
 
-        let quiet = summarise(&[step(10, None, 1)], &cold(40, 10));
+        let quiet = summarise(&[step(10, None, 1)], 40, 10);
         assert_eq!(quiet.rebuild_every_commits, None);
         assert!(quiet.global_reasons.is_empty());
     }
@@ -985,7 +983,7 @@ mod tests {
             s.tests = tests;
             steps.push(s);
         }
-        let s = summarise(&steps, &cold(200, 20));
+        let s = summarise(&steps, 200, 20);
         // The existing mean keeps its meaning: the global counts as 0.
         assert_eq!(s.mean_affected, (10 + 20 + 30 + 40) as f64 / 5.0);
         assert_eq!(s.incremental_affected.p50, 20);
@@ -1007,7 +1005,8 @@ mod tests {
         };
         let s = summarise(
             &[step(10, None, 1), requery, step(3000, Some("x"), 0)],
-            &cold(10, 1),
+            10,
+            1,
         );
         assert_eq!(s.rebuild.commits, 2);
         assert_eq!(s.requery.commits, 1);
@@ -1029,7 +1028,8 @@ mod tests {
         };
         let s = summarise(
             &[step(10, None, 1), failed, recovered, step(30, None, 1)],
-            &cold(10, 1),
+            10,
+            1,
         );
         assert_eq!(s.commits, 4);
         assert_eq!(s.failed, 1);
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn an_empty_walk_summarises_to_zeros() {
-        let s = summarise(&[], &cold(0, 0));
+        let s = summarise(&[], 0, 0);
         assert_eq!(s.commits, 0);
         assert_eq!(s.p90_ms, 0);
         assert_eq!(s.mean_affected, 0.0);

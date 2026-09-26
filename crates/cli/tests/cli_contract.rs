@@ -144,7 +144,7 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
 
 /// The `schema` every JSON document carries. Pinned here, not read from
 /// `SCHEMA_VERSION`, so a bump is a deliberate edit to this file as well.
-const SCHEMA: u64 = 19;
+const SCHEMA: u64 = 20;
 
 /// Builds a synthetic index in `dir` and returns its path.
 ///
