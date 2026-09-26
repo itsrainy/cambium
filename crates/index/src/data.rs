@@ -380,6 +380,21 @@ pub struct IndexData {
     // rather than what the marker table predicts.
     pub repo_boundary_traversed: Vec<bool>,
 
+    // ---- what the round-trip rows were derived through (format 15) ----
+    //
+    // Sorted, deduplicated entries in the spelling of
+    // `externals::Consumer::via`: `//pkg:file` for a main-repo file the
+    // packages outside the universe on the leaves' closure load (a `.bzl`
+    // defining a rule class or macro they use), `//pkg` for a main-repo
+    // package an answer named a target of that the index had no node for,
+    // and `@name` for an indexed repository one of those packages loads a
+    // file of. The leaves' own rows are in the forward CSR; this is what can
+    // make those rows wrong without a repository outside the universe
+    // moving. Empty when no leaf was ever asked about, which is what an index
+    // with no leaves holds as well.
+    pub round_trip_via_bytes: Vec<u8>,
+    pub round_trip_via_offsets: Vec<u32>,
+
     // ---- the Skyframe loading layer (format 11) ----
     //
     // Bazel's own loading-phase graph, taken from `bazel dump
@@ -502,6 +517,9 @@ pub struct IndexRef<'a> {
     pub repo_boundary_ignored: &'a [bool],
     /// Per boundary, whether `//...` loaded a main-repo package under it.
     pub repo_boundary_traversed: &'a [bool],
+    /// What the leaves' round-trip rows were derived through; see
+    /// [`IndexData::round_trip_via_bytes`].
+    pub round_trip_via: StrTabRef<'a>,
 
     /// Bazel's own loading-phase graph; see [`crate::sky`].
     pub sky: crate::sky::SkyRef<'a>,
@@ -529,6 +547,7 @@ impl<'a> IndexRef<'a> {
             ("repo_consumers", self.repo_consumers),
             ("repo_consumer_leaves", self.repo_consumer_leaves),
             ("repo_boundaries", self.repo_boundaries),
+            ("round_trip_via", self.round_trip_via),
             ("sky_roots", self.sky.roots),
             ("sky_keys", self.sky.keys),
         ] {
@@ -958,6 +977,12 @@ impl<'a> IndexRef<'a> {
         (0..self.repo_boundaries.len() as u32).map(|i| self.repo_boundaries.get(i))
     }
 
+    /// What the leaves' round-trip rows were derived through, sorted; see
+    /// [`IndexData::round_trip_via_bytes`]. Empty for an index with no leaf.
+    pub fn round_trip_via(&self) -> impl Iterator<Item = &'a str> + '_ {
+        (0..self.round_trip_via.len() as u32).map(|i| self.round_trip_via.get(i))
+    }
+
     /// The same directories, each with whether `.bazelignore` names it.
     pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
         let flags = self.repo_boundary_ignored;
@@ -1160,6 +1185,10 @@ macro_rules! index_view {
             },
             repo_boundary_ignored: &$d.repo_boundary_ignored,
             repo_boundary_traversed: &$d.repo_boundary_traversed,
+            round_trip_via: StrTabRef {
+                bytes: &$d.round_trip_via_bytes,
+                offsets: $u32s(&$d.round_trip_via_offsets),
+            },
             sky: crate::sky::SkyRef {
                 present: $d.header.sky_layer,
                 roots: StrTabRef {

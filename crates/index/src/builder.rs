@@ -277,6 +277,12 @@ pub struct IndexBuilder<'a> {
     /// whoever has a checkout to walk.
     boundaries: Vec<crate::Boundary>,
 
+    /// What the leaves' round-trip rows were derived through, sorted and
+    /// deduplicated ([`IndexData::round_trip_via_bytes`]). Carried across a
+    /// splice from the base, and replaced or widened by whoever asks Bazel
+    /// for rows again.
+    round_trip_via: Vec<String>,
+
     lineage: [u8; 16],
     bazel_version: String,
     config_hash: [u8; 32],
@@ -305,6 +311,7 @@ impl<'a> IndexBuilder<'a> {
             sky: None,
             sky_unread: false,
             boundaries: Vec::new(),
+            round_trip_via: Vec::new(),
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
@@ -358,6 +365,7 @@ impl<'a> IndexBuilder<'a> {
             sky: None,
             sky_unread: v.sky.present,
             boundaries: v.boundaries().collect(),
+            round_trip_via: v.round_trip_via().map(str::to_string).collect(),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -374,6 +382,22 @@ impl<'a> IndexBuilder<'a> {
         dirs.sort();
         dirs.dedup_by(|a, b| a.dir == b.dir);
         self.boundaries = dirs;
+    }
+
+    /// Records what the leaves' round-trip rows were derived through
+    /// ([`IndexData::round_trip_via_bytes`]), replacing what was carried.
+    /// Sorted and deduplicated here, like the boundaries.
+    pub fn set_round_trip_via(&mut self, via: impl IntoIterator<Item = String>) {
+        let mut v: Vec<String> = via.into_iter().collect();
+        v.sort();
+        v.dedup();
+        self.round_trip_via = v;
+    }
+
+    /// What this generation will record the round-trip rows as derived
+    /// through: the base's, until [`IndexBuilder::set_round_trip_via`].
+    pub fn round_trip_via(&self) -> &[String] {
+        &self.round_trip_via
     }
 
     pub fn set_bazel_version(&mut self, v: impl Into<String>) {
@@ -877,6 +901,12 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_ignored.push(b.bazelignored);
             repo_boundary_traversed.push(b.traversed);
         }
+        let mut round_trip_via_bytes = Vec::new();
+        let mut round_trip_via_offsets = vec![0u32];
+        for v in &self.round_trip_via {
+            round_trip_via_bytes.extend_from_slice(v.as_bytes());
+            round_trip_via_offsets.push(round_trip_via_bytes.len() as u32);
+        }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
         let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
@@ -990,6 +1020,8 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_offsets,
             repo_boundary_ignored,
             repo_boundary_traversed,
+            round_trip_via_bytes,
+            round_trip_via_offsets,
             sky_root_bytes: sky.root_bytes,
             sky_root_offsets: sky.root_offsets,
             sky_key_bytes: sky.key_bytes,

@@ -161,12 +161,33 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// `bench-precheck/` pull or in a results directory, is unreadable to an
 /// engine at this version and is rebuilt rather than read.
 ///
+/// Format 15 gave every external leaf its edges back into the universe, and
+/// added what those edges were derived through (`round_trip_via_*`). A leaf's
+/// edges are its own forward row, in the CSR every format has had: the
+/// targets inside the universe (`//...` and the indexed repositories) it
+/// reaches through targets outside it, asked of Bazel at cold build
+/// (`cambium_engine`'s `round_trip` module). Before them every leaf was
+/// edgeless, and a run missed the rules above a leaf whose closure comes back
+/// into the main repository: every test of `bazelbuild/rules_shell` behind
+/// `@bazel_tools//tools/test:collect_coverage`, which reaches the root
+/// module's own `//shell/runfiles:runfiles`. The new column is the via set:
+/// the main-repo files (`//pkg:file`) the packages outside the universe on
+/// the leaves' closure load, the indexed repositories (`@name`) whose files
+/// they load, and the main-repo packages (`//pkg`) an answer named a target
+/// of that the index had no node for. `collect_coverage` is an `sh_binary`
+/// whose rule class is the root module's own `shell/private/sh_binary.bzl`,
+/// and its edge to the runfiles library is that class's implicit
+/// `_runfiles_dep`: an edit to the `.bzl` moves the leaf's edges with no
+/// repository outside the universe moving, and a run in which a via entry
+/// moved asks for the edges again. Every index written at format 14 is
+/// unreadable to an engine at this version and is rebuilt rather than read.
+///
 /// Compression is outside this version. A file holds either the layout
 /// verbatim or one zstd frame containing it (see the module docs); this
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 14;
+pub const FORMAT_VERSION: u32 = 15;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means
@@ -219,17 +240,7 @@ pub const FORMAT_VERSION: u32 = 14;
 /// before this says nothing of the kind, so a run that spliced onto one
 /// would keep reading xla's `third_party/tsl` as a hole in the graph and
 /// answer the whole world for a change to a package Bazel loaded.
-/// 5 --- an external leaf gained its outgoing edges back into the universe:
-/// the targets inside it that the leaf reaches through targets outside it,
-/// asked of Bazel at cold build and stored as the leaf's own forward row
-/// (`cambium_engine`'s `round_trip` module). No column moved, so
-/// [`FORMAT_VERSION`] did not; what a correct index holds did. An index
-/// written before this keeps every leaf edgeless, and a run that spliced
-/// onto one would keep missing the rules above a leaf whose closure comes
-/// back into the main repository: every test of `bazelbuild/rules_shell`,
-/// through `@bazel_tools//tools/test:collect_coverage` and the root module's
-/// own `//shell/runfiles:runfiles`.
-pub const CONTENT_REVISION: u32 = 5;
+pub const CONTENT_REVISION: u32 = 4;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;
