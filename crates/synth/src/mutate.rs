@@ -341,9 +341,16 @@ fn generate<R: Rng>(
                 slot: srcs[rng.gen_range(0..srcs.len())],
             }
         }
-        MutKind::AddSource => Mutation::AddSource {
-            target: pick_target(g, spec, rng)?,
-        },
+        MutKind::AddSource => {
+            // Only a rule whose stanza globs its own files picks the new one
+            // up. An alias or a test_suite has no glob, so the file would be
+            // on disk and in no target's inputs while the in-memory graph
+            // counted it as the target's source.
+            let target = (0..8)
+                .filter_map(|_| pick_target(g, spec, rng))
+                .find(|&t| globs_sources(g.targets[t as usize].kind))?;
+            Mutation::AddSource { target }
+        }
         MutKind::DeleteSource => {
             let t = pick_target(g, spec, rng)?;
             let srcs = &g.targets[t as usize].srcs;
@@ -366,7 +373,12 @@ fn generate<R: Rng>(
             Mutation::EditRuleAttr { target }
         }
         MutKind::AddDep => {
-            let t = pick_target(g, spec, rng)?;
+            // An alias names exactly one target, its `actual`, and the
+            // emitter writes only that one: a second dep would be an edge the
+            // reference follows and Bazel never sees.
+            let t = (0..8)
+                .filter_map(|_| pick_target(g, spec, rng))
+                .find(|&t| g.targets[t as usize].kind != Kind::Alias)?;
             let layer = g.targets[t as usize].layer;
             if layer == 0 {
                 return None;
@@ -445,6 +457,12 @@ fn generate<R: Rng>(
         }
         MutKind::Global => Mutation::Global,
     })
+}
+
+/// Whether the emitted stanza of a `kind` globs the target's own files, so a
+/// file added next to it becomes one of its inputs.
+fn globs_sources(kind: Kind) -> bool {
+    matches!(kind, Kind::Lib | Kind::Test | Kind::Bin)
 }
 
 fn apply(g: &mut SynthGraph, m: &Mutation, changes: &mut Vec<Change>) {
@@ -791,6 +809,62 @@ mod tests {
                 assert!(g.targets[d as usize].layer < t.layer);
             }
         }
+    }
+
+    /// A history long enough to offer every alias and test_suite to
+    /// `AddSource` and `AddDep`, as the graph looks after it.
+    fn after_a_long_build_edit_history() -> SynthGraph {
+        let spec = ChangeSpec {
+            weights: MutationWeights {
+                add_source: 100,
+                add_dep: 100,
+                ..MutationWeights::default()
+            },
+            ..ChangeSpec::default()
+        };
+        let mut g = graph();
+        for rev in 0..60 {
+            commit(&mut g, &spec, rev);
+        }
+        g
+    }
+
+    /// An alias or a test_suite stanza globs nothing, so a source added to
+    /// one would be a file no target reads.
+    #[test]
+    fn only_a_rule_that_globs_its_files_gains_a_source() {
+        let g = after_a_long_build_edit_history();
+        let wrong: Vec<String> = (0..g.targets.len() as u32)
+            .filter(|&t| {
+                let t = &g.targets[t as usize];
+                t.alive && !globs_sources(t.kind) && !t.srcs.is_empty()
+            })
+            .map(|t| g.target_label(t))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "sources on targets with no glob: {wrong:?}"
+        );
+    }
+
+    /// An alias names one target however many deps are added around it.
+    #[test]
+    fn an_alias_never_gains_a_second_target() {
+        let g = after_a_long_build_edit_history();
+        let wrong: Vec<String> = (0..g.targets.len() as u32)
+            .filter(|&t| {
+                let t = &g.targets[t as usize];
+                t.alive
+                    && t.kind == Kind::Alias
+                    && t.deps
+                        .iter()
+                        .filter(|&&d| g.targets[d as usize].alive)
+                        .count()
+                        > 1
+            })
+            .map(|t| g.target_label(t))
+            .collect();
+        assert!(wrong.is_empty(), "aliases naming two targets: {wrong:?}");
     }
 
     #[test]
