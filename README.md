@@ -19,7 +19,7 @@ says what that rests on, and where it does not yet hold.
 
 ## Install
 
-Prebuilt binaries, once a release exists (none has been made yet):
+Prebuilt binaries:
 
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh
@@ -28,9 +28,12 @@ $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/ins
 
 No release exists yet, so today these commands fail; build from a clone
 (below) instead. When `curl` fails, `curl ... | sh` still exits 0, because
-`sh` runs the empty script it was given: in a script or a CI step, run
+`sh` runs the empty script it was given: in a bash script or CI step, run
 `set -o pipefail` first so a failed download fails the step, as the
-templates in [docs/ci/](docs/ci/) do.
+templates in [docs/ci/](docs/ci/) do. Older POSIX shells (dash before
+0.5.12) reject `pipefail`; there, download the script to a file with
+`curl -fsSL -o install.sh ...` and run `sh install.sh` only if that
+succeeded.
 
 The script picks the build for the machine, checks the download against the
 release's `SHA256SUMS`, and installs `cambi` to `~/.local/bin` (or
