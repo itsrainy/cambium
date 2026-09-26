@@ -1898,12 +1898,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
     }
 
     fn module_at(rev: &str, text: &str) -> cambium_engine::externals::FixedText {
-        let mut m = BTreeMap::new();
-        m.insert(
-            (rev.to_string(), externals::MODULE_FILE.to_string()),
-            text.to_string(),
-        );
-        cambium_engine::externals::FixedText(m)
+        files_at(rev, &[(externals::MODULE_FILE, text)])
     }
 
     /// Both drift guards, on the shapes envoy produced: the stage names a
