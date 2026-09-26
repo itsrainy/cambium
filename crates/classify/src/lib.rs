@@ -59,7 +59,7 @@ pub enum ClassifyError {
 }
 
 /// Path patterns that decide how a change is treated. Built from `cambium.toml`.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Rules {
     /// Exact repo-relative paths that invalidate everything.
     pub invalidator_paths: Vec<String>,

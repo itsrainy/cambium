@@ -12,6 +12,4 @@ cambium-diff.workspace = true
 cambium-index.workspace = true
 globset.workspace = true
 rustc-hash.workspace = true
-serde = { workspace = true }
 thiserror.workspace = true
-tracing.workspace = true
