@@ -285,17 +285,9 @@ impl PackageSet {
         if self.unwalked_boundary_of(path).is_some() {
             return None;
         }
-        let mut end = path.rfind('/');
-        loop {
-            // `None` is the root package, which is the last candidate rather
-            // than the end of the walk.
-            let dir = end.map_or("", |i| &path[..i]);
-            if let Some(p) = self.packages.get(dir) {
-                return Some(p.as_str());
-            }
-            let i = end?;
-            end = path[..i].rfind('/');
-        }
+        package_candidates(path)
+            .find_map(|dir| self.packages.get(dir))
+            .map(String::as_str)
     }
 }
 
@@ -347,6 +339,18 @@ pub fn is_build_file(path: &str) -> bool {
 /// else it is.
 pub fn is_bzl_file(path: &str) -> bool {
     path.ends_with(".bzl")
+}
+
+/// The directories that could be the package owning `path`, deepest first
+/// and ending at the root package `""`.
+///
+/// This is the order [`PackageSet::owner_of`] tries them in. A caller
+/// resolving a path against some other set of package names (an in-tree
+/// repository's, say) walks the same order.
+pub fn package_candidates(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(Some(dirname(path)), |dir| {
+        (!dir.is_empty()).then(|| dirname(dir))
+    })
 }
 
 pub fn basename(path: &str) -> &str {
@@ -738,6 +742,15 @@ mod tests {
         assert_eq!(p.owner_of("README"), Some(""));
         let q = PackageSet::new(["lib".to_string()]);
         assert_eq!(q.owner_of("README"), None);
+    }
+
+    #[test]
+    fn package_candidates_run_deepest_first_down_to_the_root() {
+        assert_eq!(
+            package_candidates("lib/core/a.cc").collect::<Vec<_>>(),
+            vec!["lib/core", "lib", ""]
+        );
+        assert_eq!(package_candidates("README").collect::<Vec<_>>(), vec![""]);
     }
 
     #[test]
