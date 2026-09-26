@@ -492,3 +492,155 @@ fn a_repository_outside_moving_is_answered_at_head() {
     let _ = run(&index, &quiet, &edit(RUNFILES_EDIT));
     assert!(quiet.round_trip_questions().is_empty());
 }
+
+const PROBE: &str = "//shell/runfiles:probe";
+const SH_BINARY_BZL: &str = "//shell/private:sh_binary.bzl";
+
+/// [`rows`], with a filegroup `//shell/runfiles:probe` nothing inside names.
+fn rows_with_probe(pkg: &str) -> PackageUpdate {
+    match pkg {
+        "shell/runfiles" => {
+            let mut u = rows(pkg);
+            u.targets
+                .push(TargetRow::source_file("//shell/runfiles:probe.txt"));
+            u.targets.push(TargetRow::rule(
+                PROBE,
+                "filegroup",
+                vec!["//shell/runfiles:probe.txt".into()],
+            ));
+            u
+        }
+        other => rows(other),
+    }
+}
+
+/// Bazel's answer with the probe: the coverage collector's class, defined in
+/// the main repository's `shell/private/sh_binary.bzl`, which the collector's
+/// package loads.
+fn probing(entries: &[&str]) -> Scanning {
+    scanning_with(rows_with_probe)
+        .with_round_trip(COVERAGE, entries)
+        .with_round_trip_via(&[SH_BINARY_BZL])
+}
+
+/// The reviewer's reproduction on rules_shell, cut down. The coverage
+/// collector is an `sh_binary`, and `sh_binary`'s class is the root
+/// module's own `.bzl`: an edit there giving the class an implicit
+/// `_rt_probe = //shell/runfiles:probe` moves what the leaf reaches, and no
+/// `BUILD` file, package or repository outside the universe moved. The
+/// closure's loads are what the edges were derived through, so the edit
+/// asks at head, the index the splice writes carries the new edge, and the
+/// next edit to the probe reaches the tests. One run over both edits
+/// answers the same.
+#[test]
+fn a_main_repo_bzl_the_closure_loads_asks_again() {
+    let a = probing(&[RUNFILES]);
+    let index = engine().full_build_with("c0", &a).unwrap();
+    assert_eq!(row_of(&index, COVERAGE), vec![RUNFILES.to_string()]);
+    assert_eq!(
+        index.view().round_trip_via().collect::<Vec<_>>(),
+        vec![SH_BINARY_BZL]
+    );
+
+    let bzl_edit = edit(&["shell/private/sh_binary.bzl"]);
+    let b = probing(&[PROBE, RUNFILES]);
+    let out = materialized_with(
+        Config::default(),
+        &index,
+        &b,
+        &bzl_edit,
+        &FixedText(BTreeMap::new()),
+    );
+    assert_eq!(
+        b.round_trip_questions().len(),
+        1,
+        "{:?}",
+        b.round_trip_questions()
+    );
+    let head = out.index.expect("the spliced index");
+    assert_eq!(
+        row_of(&head, COVERAGE),
+        vec![PROBE.to_string(), RUNFILES.to_string()]
+    );
+    assert_eq!(
+        head.view().round_trip_via().collect::<Vec<_>>(),
+        vec![SH_BINARY_BZL]
+    );
+    let probe_edit = edit(&["shell/runfiles/probe.txt"]);
+    let r = run(&head, &b, &probe_edit);
+    assert_eq!(
+        tests_of(&r),
+        vec![
+            "//tests:env_test".to_string(),
+            "//tests:other_test".to_string()
+        ]
+    );
+
+    // Both edits in one run: the answer at head has the path, and the
+    // overlay walks it.
+    let both = probing(&[PROBE, RUNFILES]);
+    let r = run(
+        &index,
+        &both,
+        &edit(&["shell/private/sh_binary.bzl", "shell/runfiles/probe.txt"]),
+    );
+    assert_eq!(both.round_trip_questions().len(), 1);
+    assert!(
+        tests_of(&r).contains(&"//tests:env_test".to_string()),
+        "{r:?}"
+    );
+
+    // Without the via entry the edit asks nothing and the edge is never
+    // written: the answer the branch gave before, one label for the probe.
+    let blind_q = scanning_with(rows_with_probe).with_round_trip(COVERAGE, &[RUNFILES]);
+    let blind = engine().full_build_with("c0", &blind_q).unwrap();
+    let after = scanning_with(rows_with_probe).with_round_trip(COVERAGE, &[PROBE, RUNFILES]);
+    let head = materialized(&blind, &after, &bzl_edit);
+    assert!(after.round_trip_questions().is_empty());
+    assert!(tests_of(&run(&head, &after, &probe_edit)).is_empty());
+
+    // A main-repo file the closure does not load asks nothing.
+    let quiet = probing(&[RUNFILES]);
+    let _ = run(&index, &quiet, &edit(&["shell/private/sh_library.bzl"]));
+    assert!(quiet.round_trip_questions().is_empty());
+}
+
+/// An entry the index has no node for (`//shell:marker` here, in a package
+/// the index does not hold yet) is dropped from the row, and its package
+/// is what the edges were derived through: when the package moves, the
+/// leaf is asked about again and the entry, now a node, becomes an edge.
+#[test]
+fn an_entry_with_no_node_is_asked_for_when_its_package_moves() {
+    const MARKER: &str = "//shell:marker";
+    let q = scanning_with(rows).with_round_trip(COVERAGE, &[RUNFILES, MARKER]);
+    let index = engine().full_build_with("c0", &q).unwrap();
+    assert_eq!(row_of(&index, COVERAGE), vec![RUNFILES.to_string()]);
+    assert_eq!(
+        index.view().round_trip_via().collect::<Vec<_>>(),
+        vec!["//shell"]
+    );
+    fn with_shell(pkg: &str) -> PackageUpdate {
+        match pkg {
+            "shell" => PackageUpdate {
+                package: pkg.to_string(),
+                targets: vec![TargetRow::rule(MARKER, "filegroup", vec![])],
+                ..Default::default()
+            },
+            other => rows(other),
+        }
+    }
+    const WITH_SHELL: &[&str] = &["shell/runfiles", "tests", "lib", "app", "tool", "shell"];
+    let mut f = files();
+    f.0.insert("shell/BUILD".to_string(), String::new());
+    let after = Scanning::new(WITH_SHELL, with_shell)
+        .with_files(f)
+        .with_repo_mapping(REPO_MAPPING)
+        .with_round_trip(COVERAGE, &[RUNFILES, MARKER]);
+    let head = materialized(&index, &after, &[Change::new(Status::Added, "shell/BUILD")]);
+    assert_eq!(after.round_trip_questions().len(), 1);
+    assert_eq!(
+        row_of(&head, COVERAGE),
+        vec![RUNFILES.to_string(), MARKER.to_string()]
+    );
+    assert!(head.view().round_trip_via().next().is_none());
+}

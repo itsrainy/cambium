@@ -282,6 +282,8 @@ pub struct Scanning {
     /// What `round_trips` answers: leaf -> the inside labels it reaches.
     /// `None` answers `None`, which is a querier with no Bazel behind it.
     round_trips: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// What `round_trips` says its answer was derived through.
+    round_trip_via: BTreeSet<String>,
     /// Every `round_trips` question, as the leaves asked about.
     round_trip_questions: std::sync::Mutex<Vec<Vec<String>>>,
     probed: std::sync::Mutex<Vec<String>>,
@@ -326,6 +328,7 @@ impl Scanning {
             consumer_leaves: BTreeMap::new(),
             leaf_questions: std::sync::Mutex::new(Vec::new()),
             round_trips: None,
+            round_trip_via: BTreeSet::new(),
             round_trip_questions: std::sync::Mutex::new(Vec::new()),
             probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
@@ -445,6 +448,17 @@ impl Scanning {
                 .or_default()
                 .extend(entries.iter().map(|e| e.to_string()));
         }
+        self
+    }
+
+    /// Answer `round_trips` with these via entries beside the edges
+    /// (`cambium_bazel::RoundTrips::via`): `//pkg:file` for a main-repo file
+    /// the closure's external packages load, `@name` for an indexed
+    /// repository's.
+    pub fn with_round_trip_via(mut self, via: &[&str]) -> Self {
+        self.round_trips.get_or_insert_with(BTreeMap::new);
+        self.round_trip_via
+            .extend(via.iter().map(|v| v.to_string()));
         self
     }
 
@@ -596,18 +610,19 @@ impl PackageQuerier for Scanning {
         &self,
         _indexed: &[String],
         leaves: &[String],
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    ) -> Option<cambium_bazel::RoundTrips> {
         self.round_trip_questions
             .lock()
             .unwrap()
             .push(leaves.to_vec());
         let known = self.round_trips.as_ref()?;
-        Some(
-            leaves
+        Some(cambium_bazel::RoundTrips {
+            reach: leaves
                 .iter()
                 .filter_map(|l| known.get(l).map(|e| (l.clone(), e.clone())))
                 .collect(),
-        )
+            via: self.round_trip_via.clone(),
+        })
     }
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {

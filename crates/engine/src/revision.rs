@@ -257,7 +257,7 @@ impl PackageQuerier for RevisionQuerier {
         &self,
         indexed: &[String],
         leaves: &[String],
-    ) -> Option<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+    ) -> Option<cambium_bazel::RoundTrips> {
         self.querier.round_trips(indexed, leaves)
     }
 
@@ -395,8 +395,9 @@ mod tests {
             &[],
             &["@bazel_tools//tools/test:collect_coverage".to_string()],
         );
-        // Nothing printed is an answer too: no leaf reaches the universe.
-        assert_eq!(trips, Some(std::collections::BTreeMap::new()));
+        // Nothing printed is an answer too: no leaf reaches the universe,
+        // and the closure loads nothing of it.
+        assert_eq!(trips, Some(cambium_bazel::RoundTrips::default()));
         // An empty graph is an answer, and it knows no leaf; the default
         // would have been no answer at all.
         assert_eq!(leaves, Some(std::collections::BTreeMap::new()));
@@ -415,6 +416,11 @@ mod tests {
             asked.iter().any(|a| a
                 .contains("deps(set(\"@bazel_tools//tools/test:collect_coverage\"))")
                 && a.contains("--output=package")),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|a| a
+                .contains("loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")))")),
             "{asked:?}"
         );
     }

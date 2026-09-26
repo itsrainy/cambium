@@ -31,18 +31,41 @@
 //! -> (main-repo edges) -> changed target` is walked through rows that are
 //! already current. A path that leaves the universe again goes out through
 //! another label a main-repo rule names, which is a leaf with edges of its
-//! own. So an answer depends on the repositories outside the universe alone,
-//! and it can move only when one of them does, or when a leaf appears.
+//! own.
 //!
+//! What stays is the part of the path outside the universe, and that is not
+//! a function of the repositories outside alone. The packages there load
+//! `.bzl` files, and some of those can be the main repository's: on
+//! rules_shell, `collect_coverage` is an `sh_binary`, whose rule class is the
+//! root module's own `shell/private/sh_binary.bzl`, and the edge to the
+//! runfiles library is that class's implicit `_runfiles_dep`. An edit there
+//! can give the leaf a new entry, or take one away, with no `BUILD` file, no
+//! package of the index and no repository outside moving. So an answer is
+//! stored with what it was derived through (`IndexRef::round_trip_via`, in
+//! the spelling `crate::via` reads, shared with the consumer table's leaf
+//! map):
+//!
+//! - `//pkg:file`, every main-repo file the packages outside the universe on
+//!   the leaves' closure load ([`cambium_bazel::Bazel::closure_loads`]);
+//! - `@name`, every indexed repository one of those packages loads a file
+//!   of;
+//! - `//pkg` (or `@name`), the package (or indexed repository) of an entry
+//!   the index had no node for when the answer was written, so that the
+//!   entry becomes an edge once it is a node.
+//!
+//! The answer can move when one of those does, when a repository outside
+//! the universe moves, or when a leaf appears, and at no other time.
+
 //! # When it is asked
 //!
 //! - At cold build, for every leaf, after everything else the build asks of
 //!   Bazel.
 //! - At head, in the dirty stage of a run in which a repository outside the
-//!   universe moved ([`at_head`]): its targets may now reach the universe
-//!   where they did not, and a change in the same commit to what they reach
-//!   would otherwise miss the rules above the leaf. This run's rows are
-//!   Bazel's answer at head, like every row a splice writes.
+//!   universe moved, or an entry of the via set did ([`at_head`]): the
+//!   leaves may now reach the universe where they did not, and a change in
+//!   the same commit to what they reach would otherwise miss the rules above
+//!   the leaf. This run's rows are Bazel's answer at head, like every row a
+//!   splice writes, and so is the via set the index it writes carries.
 //! - In a splice that writes an index ([`refresh`]): for every leaf after an
 //!   overflow's re-query of `//...`, and for a leaf this splice added
 //!   otherwise. A leaf added by a splice does not need its edges for that
@@ -56,23 +79,24 @@
 //!
 //! # Cost
 //!
-//! One `deps` over every leaf, `--output=package`, and an `allpaths` graph
-//! only when that closure reaches back in. At the pins on warm output
-//! bases: envoy, 752 leaves and a closure of 1399 packages, 5.6 s of a 227 s
-//! cold build, 2 leaves with edges; xla, 636 leaves and 488 packages, 1.8 s
-//! of 245 s, 34 leaves with 74 edges. rules_shell, 28 leaves, 0.5 s. On a
-//! machine that has fetched nothing, the closure fetches every repository
-//! the leaves reach, which a build would too; that is not measured.
-//!
+//! One `deps` over every leaf, `--output=package`; one `loadfiles` over the
+//! same closure less the universe's packages, `--output=label`; and an
+//! `allpaths` graph only when the closure reaches back in. At the pins on
+//! warm output bases, before the `loadfiles` question was added: envoy, 752
+//! leaves and a closure of 1399 packages, 5.6 s of a 227 s cold build, 2
+//! leaves with edges; xla, 636 leaves and 488 packages, 1.8 s of 245 s, 34
+//! leaves with 74 edges. rules_shell, 28 leaves, 0.5 s. On a machine that
+//! has fetched nothing, the closure fetches every repository the leaves
+//! reach, which a build would too; that is not measured.
+
 //! # Where the edges live
 //!
 //! In the forward CSR, as the leaf node's own row. No package owns a leaf, so
 //! `apply_packages` and `delete_package`, which replace and retire the rows of
 //! the packages they are given, never touch it, and every splice carries it
-//! verbatim ([`cambium_index::IndexBuilder::set_leaf_row`]). No column was
-//! added, so the index format did not move; what an index derives did
-//! (`cambium_index::format::CONTENT_REVISION` 5), which retires every index
-//! written without the edges.
+//! verbatim ([`cambium_index::IndexBuilder::set_leaf_row`]). The via set is
+//! a column of its own, carried by every splice until an answer replaces it
+//! (index format 15, which retires every index written without the edges).
 //!
 //! # The consumer table, and why both exist
 //!
@@ -97,14 +121,17 @@ use cambium_index::{IndexBuilder, IndexRef, NodeKind};
 
 use crate::externals::Externals;
 use crate::query::PackageQuerier;
+use crate::via::Moved;
 
-/// One round-trip question and Bazel's answer: the leaves asked about, and
-/// for each that reaches the universe, the inside labels it reaches. An asked
+/// One round-trip question and Bazel's answer: the leaves asked about, for
+/// each that reaches the universe the inside labels it reaches, and what the
+/// answer was derived through ([`cambium_bazel::RoundTrips::via`]). An asked
 /// leaf missing from `reach` reaches nothing inside.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answer {
     pub leaves: Vec<String>,
     pub reach: BTreeMap<String, BTreeSet<String>>,
+    pub via: BTreeSet<String>,
 }
 
 /// Which leaves a splice asks for, beyond any answer the run already has.
@@ -162,39 +189,56 @@ pub(crate) fn ask(
         return Some(Answer::default());
     }
     let started = std::time::Instant::now();
-    let reach = q.round_trips(indexed, &leaves);
+    let answer = q.round_trips(indexed, &leaves);
     tracing::debug!(
         leaves = leaves.len(),
-        answered = reach.is_some(),
-        reaching = reach.as_ref().map(BTreeMap::len),
+        answered = answer.is_some(),
+        reaching = answer.as_ref().map(|a| a.reach.len()),
+        via = answer.as_ref().map(|a| a.via.len()),
         ms = started.elapsed().as_millis() as u64,
         "the round-trip edges were asked for"
     );
-    reach.map(|reach| Answer { leaves, reach })
+    answer.map(|a| Answer {
+        leaves,
+        reach: a.reach,
+        via: a.via,
+    })
+}
+
+/// The via entry that stands for an entry the index has no node for: its
+/// package (`//pkg`) for a main-repo label, its repository (`@name`) for an
+/// indexed repository's. When that moves, the entry may have a node, and
+/// the leaf is asked about again.
+fn missing_via(label: &str) -> Option<String> {
+    if let Some(rest) = label.strip_prefix("//") {
+        return Some(format!(
+            "//{}",
+            rest.split_once(':').map_or(rest, |(p, _)| p)
+        ));
+    }
+    let (repo, _) = label.strip_prefix('@')?.split_once("//")?;
+    (!repo.is_empty()).then(|| format!("@{repo}"))
 }
 
 /// Writes an answer into the index being built: each asked leaf's row
-/// becomes the entries it reaches, empty for one that reaches nothing. An
-/// entry the index has no node for (a target of a package that failed to
-/// load) is dropped. Returns how many rows changed.
-pub(crate) fn apply(b: &mut IndexBuilder<'_>, answer: &Answer) -> usize {
+/// becomes the entries it reaches, empty for one that reaches nothing.
+/// Returns how many rows changed, and the via entries that stand for the
+/// entries the index has no node for ([`missing_via`]): a target of a
+/// package that failed to load, or one the index does not hold yet.
+pub(crate) fn apply(b: &mut IndexBuilder<'_>, answer: &Answer) -> (usize, BTreeSet<String>) {
     let mut changed = 0;
-    let mut unknown = 0usize;
+    let mut missing = BTreeSet::new();
     for leaf in &answer.leaves {
         let Some(id) = b.label_id(leaf) else {
             continue;
         };
-        let mut dsts: Vec<u32> = answer
-            .reach
-            .get(leaf)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| {
-                let id = b.label_id(e);
-                unknown += usize::from(id.is_none());
-                id
-            })
-            .collect();
+        let mut dsts: Vec<u32> = Vec::new();
+        for e in answer.reach.get(leaf).into_iter().flatten() {
+            match b.label_id(e) {
+                Some(d) => dsts.push(d),
+                None => missing.extend(missing_via(e)),
+            }
+        }
         dsts.sort_unstable();
         dsts.dedup();
         if b.forward_row(id) == dsts {
@@ -204,13 +248,13 @@ pub(crate) fn apply(b: &mut IndexBuilder<'_>, answer: &Answer) -> usize {
             changed += 1;
         }
     }
-    if unknown > 0 {
+    if !missing.is_empty() {
         tracing::debug!(
-            unknown,
-            "round-trip entries the index has no node for were dropped"
+            ?missing,
+            "round-trip entries the index has no node for; their packages are watched"
         );
     }
-    changed
+    (changed, missing)
 }
 
 /// The repositories outside the universe that moved in this run: every
@@ -225,19 +269,22 @@ pub(crate) fn moved_outside(ext: &Externals, indexed: &[String]) -> BTreeSet<Str
         .collect()
 }
 
-/// Asks Bazel at head for every leaf's edges when a repository outside the
-/// universe moved: what the leaves reach is a function of those repositories
-/// alone, so this is the one run in which the base's answer can be wrong.
-/// `None` when nothing outside moved, when the index holds no leaf, or when
-/// Bazel would not answer (the base's rows then stand).
+/// Asks Bazel at head for every leaf's edges when something they were
+/// derived through moved: a repository outside the universe, or an entry of
+/// the base's via set ([`IndexRef::round_trip_via`], read by `through`).
+/// This is the one run in which the base's answer can be wrong. `None` when
+/// nothing moved, when the index holds no leaf, or when Bazel would not
+/// answer (the base's rows then stand).
 pub(crate) fn at_head(
     base: IndexRef<'_>,
     q: &dyn PackageQuerier,
     ext: &Externals,
+    through: &Moved<'_>,
 ) -> Option<Answer> {
     let indexed = base.indexed_repos();
     let moved = moved_outside(ext, &indexed);
-    if moved.is_empty() {
+    let hit = through.hit(base.round_trip_via(), None);
+    if moved.is_empty() && hit.is_none() {
         return None;
     }
     let leaves = base_leaves(base);
@@ -246,15 +293,18 @@ pub(crate) fn at_head(
     }
     tracing::debug!(
         ?moved,
+        through = hit,
         leaves = leaves.len(),
-        "a repository outside the universe moved, so the round-trip edges are asked for at head"
+        "something the round-trip edges were derived through moved, so they are asked for at head"
     );
     ask(q, &indexed, leaves)
 }
 
 /// The round-trip rows of an index being built: `known` (an answer this run
-/// already has, from [`at_head`]) goes in, then the leaves `want` names that
-/// it did not cover are asked for and go in too.
+/// already has, from [`at_head`], over every leaf of the base) goes in, then
+/// the leaves `want` names that it did not cover are asked for and go in
+/// too, and the via set follows: replaced when the answers cover every leaf
+/// the index holds, widened otherwise.
 pub(crate) fn refresh(
     q: &dyn PackageQuerier,
     b: &mut IndexBuilder<'_>,
@@ -262,7 +312,6 @@ pub(crate) fn refresh(
     known: Option<&Answer>,
     want: Want,
 ) {
-    let mut changed = 0;
     let asked: BTreeSet<&str> = known
         .map(|a| a.leaves.iter().map(String::as_str).collect())
         .unwrap_or_default();
@@ -275,10 +324,24 @@ pub(crate) fn refresh(
     .filter(|l| !asked.contains(l.as_str()))
     .collect();
     let fresh = ask(q, indexed, rest);
+    let mut changed = 0;
+    let mut via: BTreeSet<String> = BTreeSet::new();
     for a in known.into_iter().chain(fresh.as_ref()) {
-        changed += apply(b, a);
+        let (c, missing) = apply(b, a);
+        changed += c;
+        via.extend(a.via.iter().cloned());
+        via.extend(missing);
+    }
+    // Every leaf is covered when the run's answer was over the base's
+    // leaves and this splice asked for the ones it added, or when this
+    // splice asked for all of them; otherwise what the base was derived
+    // through still stands beside the new answers.
+    let complete = fresh.is_some() && (known.is_some() || want == Want::All);
+    if !complete {
+        via.extend(b.round_trip_via().iter().cloned());
     }
     if changed > 0 {
-        tracing::debug!(changed, "round-trip rows written");
+        tracing::debug!(changed, via = via.len(), "round-trip rows written");
     }
+    b.set_round_trip_via(via);
 }

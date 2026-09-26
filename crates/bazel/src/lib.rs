@@ -454,6 +454,68 @@ fn round_trip_expr(leaves: &[String], patterns: &BTreeSet<String>) -> String {
     )
 }
 
+/// Bazel's answer to [`Bazel::round_trips`]: the edges, and what they were
+/// derived through that a run can see move without a repository outside the
+/// universe moving.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundTrips {
+    /// Leaf -> the labels inside the universe it reaches through labels
+    /// outside it alone, spelled as the index spells them. A leaf that
+    /// reaches nothing inside, or that Bazel could not resolve, is left out.
+    pub reach: BTreeMap<String, BTreeSet<String>>,
+    /// The files the packages outside the universe on the leaves' closure
+    /// load that are not themselves outside it ([`closure_loads_via`]):
+    /// `//pkg:file` for the main repository's, `@name` for an indexed
+    /// repository's.
+    pub via: BTreeSet<String>,
+}
+
+/// The query behind [`Bazel::closure_loads`]: every `.bzl` (and `.scl`) file
+/// loaded to load the packages of the leaves' closure, less the packages
+/// `except` names.
+fn loads_expr(leaves: &[String], except: &BTreeSet<String>) -> String {
+    let d = format!("deps({})", quoted_set(leaves));
+    if except.is_empty() {
+        return format!("loadfiles({d})");
+    }
+    let except = except.iter().cloned().collect::<Vec<_>>().join(" + ");
+    format!("loadfiles({d} except ({except}))")
+}
+
+/// Reads [`Bazel::closure_loads`]'s `--output=label` lines into via entries:
+/// `//pkg:file` for a file of the main repository (the root package's
+/// `//:file`), `@name` for one of an `indexed` repository, under the name
+/// the index knows it by. Every other repository's files are dropped: a run
+/// in which such a repository moves asks for the edges again whatever they
+/// were derived through.
+///
+/// This is what makes an answer about a path through an external rule
+/// depend on the main repository. On `bazelbuild/rules_shell` at `b1eed28`
+/// `@bazel_tools//tools/test:collect_coverage` is an `sh_binary`, whose rule
+/// class is the root module's own `//shell/private:sh_binary.bzl`, and its
+/// edge to `//shell/runfiles:runfiles` is that class's implicit
+/// `_runfiles_dep`: an edit to the `.bzl` moves the leaf's edges, and no
+/// `BUILD` file or repository outside moved.
+fn closure_loads_via(labels: &str, indexed: &[String]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in labels.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let main = line
+            .strip_prefix("@@//")
+            .or_else(|| line.strip_prefix("@//"))
+            .or_else(|| line.strip_prefix("//"));
+        if let Some(rest) = main {
+            out.insert(format!("//{rest}"));
+            continue;
+        }
+        if let Some(r) =
+            label_repo_token(line).and_then(|t| indexed.iter().find(|r| token_names(t, r)))
+        {
+            out.insert(format!("@{r}"));
+        }
+    }
+    out
+}
+
 /// Reads [`Bazel::round_trips`]'s graph: per leaf, the nodes inside the
 /// universe it reaches through nodes outside it alone.
 ///
@@ -461,8 +523,9 @@ fn round_trip_expr(leaves: &[String], patterns: &BTreeSet<String>) -> String {
 /// first inside one, which it records. What lies beyond that node is the
 /// index's own rows, re-queried with its package, so a `BUILD` edit there
 /// never makes an answer stale; a path that leaves again through another
-/// leaf is that leaf's answer. A leaf that reaches nothing, or that the graph
-/// never printed, is left out.
+/// leaf is that leaf's answer. What the outside part was derived through is
+/// the other half of the answer ([`RoundTrips::via`]). A leaf that reaches
+/// nothing, or that the graph never printed, is left out.
 fn parse_round_trips(
     graph: &str,
     indexed: &[String],
@@ -1068,22 +1131,7 @@ impl Bazel {
         on_batch: impl FnMut(&[u8], &[(usize, usize)]) -> std::result::Result<(), ReadError>,
     ) -> Result<QueryOutcome> {
         let mut cmd = self.command("query");
-
-        // Long expressions go in a file: argv limits are OS-dependent and a
-        // dirty set of thousands of packages will exceed them.
-        let _scratch_file = if expr.len() > MAX_INLINE_QUERY {
-            let path = self.scratch.join(format!(
-                "cambium-query-{}-{}.txt",
-                std::process::id(),
-                now_nanos()
-            ));
-            std::fs::write(&path, expr)?;
-            cmd.arg(format!("--query_file={}", path.display()));
-            Some(ScratchFile(path))
-        } else {
-            cmd.arg(expr);
-            None
-        };
+        let _scratch_file = self.expression_arg(&mut cmd, expr, "query")?;
 
         for f in QUERY_FLAGS.iter().chain(HYGIENE.iter()) {
             cmd.arg(f);
@@ -1354,36 +1402,33 @@ impl Bazel {
         if leaves.is_empty() {
             return Some(BTreeMap::new());
         }
-        let mut cmd = self.command("query");
-        cmd.arg(leaf_expr(repo, leaves))
-            .arg("--output=graph")
-            .arg("--nograph:factored")
-            .arg("--graph:node_limit=-1")
-            .arg("--keep_going");
-        for f in HYGIENE {
-            cmd.arg(f);
-        }
         let started = std::time::Instant::now();
-        let o = match self.runner.output(&mut cmd) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::debug!(error = %e, repo, "the leaf query could not run");
-                return None;
-            }
-        };
-        if !o.exit.success && o.exit.code != Some(3) {
-            tracing::debug!(status = %o.exit, repo, leaves = leaves.len(), "the leaf query failed");
-            return None;
+        let graph = self.text_query(
+            &leaf_expr(repo, leaves),
+            &[
+                "--output=graph",
+                "--nograph:factored",
+                "--graph:node_limit=-1",
+            ],
+            "leaf map",
+        )?;
+        let mut out = parse_leaf_reach(&graph, repo, leaves);
+        // The main-repo files the closure's packages load are part of what
+        // the map was derived through, pooled over the leaves: a rule class
+        // defined there can give an external rule an implicit edge into the
+        // repository ([`closure_loads_via`]).
+        let loads = self.closure_loads(leaves, &BTreeSet::new(), &[])?;
+        for reach in out.values_mut() {
+            reach.via.extend(loads.iter().cloned());
         }
-        let out = parse_leaf_reach(&String::from_utf8_lossy(&o.stdout), repo, leaves);
         tracing::debug!(
-            status = %o.exit,
             repo,
             leaves = leaves.len(),
             resolved = out.len(),
             reaching = out.values().filter(|r| !r.packages.is_empty()).count(),
             via = out.values().flat_map(|r| &r.via).collect::<BTreeSet<_>>().len(),
-            bytes = o.stdout.len(),
+            loads = loads.len(),
+            bytes = graph.len(),
             ms = started.elapsed().as_millis() as u64,
             "leaf query answered"
         );
@@ -1398,8 +1443,8 @@ impl Bazel {
     ///
     /// The leaves are the external labels the index holds that no package
     /// of it owns, and the universe is `//...:*` plus `indexed`, the in-tree
-    /// repositories the index holds the packages of. Two questions at most,
-    /// both `--keep_going` (exit 3 is an answer, as it is for
+    /// repositories the index holds the packages of. Three questions at most,
+    /// all `--keep_going` (exit 3 is an answer, as it is for
     /// [`Bazel::leaf_reaches`]):
     ///
     /// 1. `deps(set(leaves))` with `--output=package`: which packages the
@@ -1407,8 +1452,14 @@ impl Bazel {
     ///    loaded the repository does not load it for this, and the answer is
     ///    one line per package however large the closure. Usually no package
     ///    of the universe is among them, and that is the answer.
-    /// 2. Otherwise `allpaths(set(leaves), deps(set(leaves)) intersect (P))`
-    ///    over those packages `P` with `--output=graph`, walked per leaf
+    /// 2. `loadfiles` over the same closure less `P`, the packages of the
+    ///    universe among them ([`Bazel::closure_loads`]): which files of the
+    ///    main repository or an indexed one the packages outside load. A
+    ///    rule class or macro defined there decides what an external target
+    ///    depends on, so an edit to one moves the answer with nothing outside
+    ///    moving ([`RoundTrips::via`]).
+    /// 3. When `P` is not empty, `allpaths(set(leaves), deps(set(leaves))
+    ///    intersect (P))` with `--output=graph`, walked per leaf
     ///    ([`parse_round_trips`]).
     ///
     /// On `bazelbuild/rules_shell` at `b1eed28` (Bazel 9.1.1, 29 leaves) the
@@ -1417,13 +1468,9 @@ impl Bazel {
     /// `//shell/runfiles:runfiles` and `//shell:toolchain_type`: the root
     /// module's own runfiles library, which every test depends on through
     /// the coverage collector.
-    pub fn round_trips(
-        &self,
-        indexed: &[String],
-        leaves: &[String],
-    ) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    pub fn round_trips(&self, indexed: &[String], leaves: &[String]) -> Option<RoundTrips> {
         if leaves.is_empty() {
-            return Some(BTreeMap::new());
+            return Some(RoundTrips::default());
         }
         let started = std::time::Instant::now();
         let closure = self.text_query(
@@ -1432,14 +1479,21 @@ impl Bazel {
             "round-trip closure",
         )?;
         let patterns = inside_patterns(&closure, indexed);
+        // Asked even when nothing comes back in today: an edit to one of
+        // these files is how a leaf that reaches nothing starts to.
+        let via = self.closure_loads(leaves, &patterns, indexed)?;
         if patterns.is_empty() {
             tracing::debug!(
                 leaves = leaves.len(),
                 packages = closure.lines().count(),
+                via = via.len(),
                 ms = started.elapsed().as_millis() as u64,
                 "no leaf's closure reaches a package of the universe"
             );
-            return Some(BTreeMap::new());
+            return Some(RoundTrips {
+                reach: BTreeMap::new(),
+                via,
+            });
         }
         let graph = self.text_query(
             &round_trip_expr(leaves, &patterns),
@@ -1450,17 +1504,69 @@ impl Bazel {
             ],
             "round-trip paths",
         )?;
-        let out = parse_round_trips(&graph, indexed, leaves);
+        let reach = parse_round_trips(&graph, indexed, leaves);
         tracing::debug!(
             leaves = leaves.len(),
             packages = closure.lines().count(),
             inside_packages = patterns.len(),
-            reaching = out.len(),
-            entries = out.values().map(BTreeSet::len).sum::<usize>(),
+            reaching = reach.len(),
+            entries = reach.values().map(BTreeSet::len).sum::<usize>(),
+            via = via.len(),
             ms = started.elapsed().as_millis() as u64,
             "round-trip query answered"
         );
-        Some(out)
+        Some(RoundTrips { reach, via })
+    }
+
+    /// The files of the main repository and of the `indexed` repositories
+    /// that the packages of the leaves' closure load, less the packages
+    /// `except` names (package patterns, `//pkg:*`), as via entries
+    /// ([`closure_loads_via`]). `None` when the query will not run: the
+    /// caller then knows nothing about what its answer was derived through,
+    /// and must not keep the answer as if it did.
+    ///
+    /// The index's own packages carry their loads already, so a caller
+    /// whose closure runs through them excludes them; a caller that does
+    /// not gets their loads too, which only makes it ask again more often.
+    pub fn closure_loads(
+        &self,
+        leaves: &[String],
+        except: &BTreeSet<String>,
+        indexed: &[String],
+    ) -> Option<BTreeSet<String>> {
+        if leaves.is_empty() {
+            return Some(BTreeSet::new());
+        }
+        let loads = self.text_query(
+            &loads_expr(leaves, except),
+            &["--output=label"],
+            "closure loads",
+        )?;
+        Some(closure_loads_via(&loads, indexed))
+    }
+
+    /// Puts `expr` on `cmd`: as an argument, or through `--query_file` when
+    /// it is long, since argv limits are OS-dependent and a dirty set of
+    /// thousands of packages will exceed them. The file lives as long as the
+    /// returned guard, named after `stem`.
+    fn expression_arg(
+        &self,
+        cmd: &mut Command,
+        expr: &str,
+        stem: &str,
+    ) -> std::io::Result<Option<ScratchFile>> {
+        if expr.len() <= MAX_INLINE_QUERY {
+            cmd.arg(expr);
+            return Ok(None);
+        }
+        let path = self.scratch.join(format!(
+            "cambium-{stem}-{}-{}.txt",
+            std::process::id(),
+            now_nanos()
+        ));
+        std::fs::write(&path, expr)?;
+        cmd.arg(format!("--query_file={}", path.display()));
+        Ok(Some(ScratchFile(path)))
     }
 
     /// One `bazel query` whose stdout is text, with the flags that define the
@@ -1470,21 +1576,12 @@ impl Bazel {
     /// with exit 3.
     fn text_query(&self, expr: &str, args: &[&str], what: &str) -> Option<String> {
         let mut cmd = self.command("query");
-        let _scratch = if expr.len() > MAX_INLINE_QUERY {
-            let path = self.scratch.join(format!(
-                "cambium-query-{}-{}.txt",
-                std::process::id(),
-                now_nanos()
-            ));
-            if let Err(e) = std::fs::write(&path, expr) {
+        let _scratch = match self.expression_arg(&mut cmd, expr, "query") {
+            Ok(s) => s,
+            Err(e) => {
                 tracing::debug!(error = %e, what, "the query file could not be written");
                 return None;
             }
-            cmd.arg(format!("--query_file={}", path.display()));
-            Some(ScratchFile(path))
-        } else {
-            cmd.arg(expr);
-            None
         };
         cmd.args(args)
             .arg("--keep_going")
@@ -1631,19 +1728,7 @@ impl Bazel {
                 .join(" ")
         );
         let mut cmd = self.command("query");
-        let _scratch = if expr.len() > MAX_INLINE_QUERY {
-            let path = self.scratch.join(format!(
-                "cambium-reload-{}-{}.txt",
-                std::process::id(),
-                now_nanos()
-            ));
-            std::fs::write(&path, &expr)?;
-            cmd.arg(format!("--query_file={}", path.display()));
-            Some(ScratchFile(path))
-        } else {
-            cmd.arg(&expr);
-            None
-        };
+        let _scratch = self.expression_arg(&mut cmd, &expr, "reload")?;
         cmd.arg("--output=label").arg("--keep_going");
         for f in HYGIENE {
             cmd.arg(f);
@@ -2365,8 +2450,53 @@ mod consumer_tests {
 
 #[cfg(test)]
 mod round_trip_tests {
-    use super::{inside_label, inside_patterns, parse_round_trips, round_trip_expr};
+    use super::{
+        closure_loads_via, inside_label, inside_patterns, loads_expr, parse_round_trips,
+        round_trip_expr,
+    };
     use std::collections::BTreeSet;
+
+    /// `loadfiles` over the closure less the universe's packages, which carry
+    /// their own loads; with none of them in it, over the whole closure.
+    #[test]
+    fn the_loads_query_leaves_out_the_universes_packages() {
+        let leaves = ["@bazel_tools//tools/test:collect_coverage".to_string()];
+        assert_eq!(
+            loads_expr(&leaves, &BTreeSet::new()),
+            "loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")))"
+        );
+        assert_eq!(
+            loads_expr(&leaves, &set(&["//shell/runfiles:*", "//shell:*"])),
+            "loadfiles(deps(set(\"@bazel_tools//tools/test:collect_coverage\")) \
+             except (//shell/runfiles:* + //shell:*))"
+        );
+    }
+
+    /// `bazel query 'loadfiles(deps(@bazel_tools//tools/test:collect_coverage))'`
+    /// on rules_shell at `b1eed28` (Bazel 9.1.1), cut down, plus an indexed
+    /// repository's file: the root module's `.bzl` files are the ones the
+    /// collector's rule class comes from.
+    #[test]
+    fn the_closures_loads_become_via_entries() {
+        const LOADS: &str = "//shell:sh_binary.bzl\n\
+            //shell/private:sh_binary.bzl\n\
+            //shell/private:sh_executable.bzl\n\
+            @@//:defs.bzl\n\
+            @bazel_skylib//:bzl_library.bzl\n\
+            @@bazel_tools//tools/test:BUILD\n\
+            @@envoy_api+//bazel:api_build_system.bzl\n";
+        assert_eq!(
+            closure_loads_via(LOADS, &["envoy_api".to_string()]),
+            set(&[
+                "//:defs.bzl",
+                "//shell/private:sh_binary.bzl",
+                "//shell/private:sh_executable.bzl",
+                "//shell:sh_binary.bzl",
+                "@envoy_api",
+            ])
+        );
+        assert!(closure_loads_via("@rules_cc//cc:defs.bzl\n", &[]).is_empty());
+    }
 
     fn set(ps: &[&str]) -> BTreeSet<String> {
         ps.iter().map(|p| p.to_string()).collect()
