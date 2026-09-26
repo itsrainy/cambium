@@ -79,8 +79,8 @@ impl Repo {
 
     /// Finds the repository root containing `start`.
     pub fn discover(start: &Path) -> Result<Self> {
-        let out = run(start, &["rev-parse", "--show-toplevel"])?;
-        Ok(Self::new(PathBuf::from(out.trim())))
+        let top = run_line(start, &["rev-parse", "--show-toplevel"])?;
+        Ok(Self::new(PathBuf::from(top)))
     }
 
     pub fn root(&self) -> &Path {
@@ -89,12 +89,7 @@ impl Repo {
 
     /// Resolves a revision to a full object id.
     pub fn rev_parse(&self, rev: &str) -> Result<String> {
-        Ok(run(
-            &self.root,
-            &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
-        )?
-        .trim()
-        .to_string())
+        self.peel(rev, "commit")
     }
 
     /// The tree object a revision points at.
@@ -104,12 +99,16 @@ impl Repo {
     /// rebased or squash-merged commit finds the index built for its
     /// pre-rebase twin.
     pub fn tree_of(&self, rev: &str) -> Result<String> {
-        Ok(run(
+        self.peel(rev, "tree")
+    }
+
+    /// The id of the `kind` object `rev` peels to (`rev^{kind}`), which
+    /// fails rather than guessing when `rev` names nothing of that kind.
+    fn peel(&self, rev: &str, kind: &str) -> Result<String> {
+        run_line(
             &self.root,
-            &["rev-parse", "--verify", &format!("{rev}^{{tree}}")],
-        )?
-        .trim()
-        .to_string())
+            &["rev-parse", "--verify", &format!("{rev}^{{{kind}}}")],
+        )
     }
 
     /// First-parent history of `rev`, oldest first, at most `max` commits
@@ -226,7 +225,7 @@ impl Repo {
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
-        Ok(run(&self.root, &["merge-base", a, b])?.trim().to_string())
+        run_line(&self.root, &["merge-base", a, b])
     }
 
     /// `git diff --name-status -M -z base head`, with renames and copies
@@ -286,6 +285,11 @@ fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
         }
     }
     Ok(changes)
+}
+
+/// Runs a git command whose answer is one line, and returns that line.
+fn run_line(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(run(dir, args)?.trim().to_string())
 }
 
 /// Runs git in `dir` and returns its stdout as text.
