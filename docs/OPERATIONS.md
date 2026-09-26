@@ -3,6 +3,8 @@
 How to run the expensive subjects, and what has already bitten someone.
 Methodology is in [METHODOLOGY.md](METHODOLOGY.md), numbers in
 [RESULTS.md](RESULTS.md); what's in flight lives in the issue tracker.
+Running `cambi` in a CI pipeline, as against benchmarking it, is
+[CI.md](CI.md).
 
 Nothing here is needed on a laptop: `cambium-bench walk synth:small --tier
 correctness` emits its own subject with no setup. A real subject needs

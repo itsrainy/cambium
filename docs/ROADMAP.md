@@ -560,8 +560,8 @@ The remaining work is product, and it is where the next decision is:
 - **Diagnostics for an operator.** Every `CAMBI-W` code gets a one-line
   "what to do about it" in docs/DIAGNOSTICS.md, and `cambi` prints it.
 - **Lineage in CI.** How the index moves between runners: an artifact
-  store, the cache key, what happens on a lineage break. The store format
-  is done; the operational story is not written.
+  store, the cache key, what happens on a lineage break. Written as
+  docs/CI.md, with GitHub Actions templates under docs/ci/.
 - **One external-facing write-up.** What the tool answers, what it
   declines, and the box numbers, for someone deciding whether to run it.
 
