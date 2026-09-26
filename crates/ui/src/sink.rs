@@ -39,6 +39,21 @@ impl Sink for Null {
     fn emit(&mut self, _event: Event) {}
 }
 
+/// A phase line up to its result: `  <name> <dots>`.
+fn phase_head(name: &str) -> String {
+    let dots = DOT_COL.saturating_sub(name.chars().count() + 3);
+    format!("  {} {}", name, ".".repeat(dots))
+}
+
+/// The phase head padded out to [`RESULT_COL`], so a result starts in the
+/// same column whichever line wrote it, as far as the name allows: a name
+/// long enough to reach the column pushes its result along.
+fn result_prefix(name: &str) -> String {
+    let head = phase_head(name);
+    let pad = RESULT_COL.saturating_sub(head.chars().count() + 1);
+    format!("{head} {:pad$}", "")
+}
+
 /// The lines both text sinks print. `live` is the only difference between
 /// them, and it changes no row.
 struct Text<W: Write> {
@@ -88,14 +103,9 @@ impl<W: Write> Text<W> {
         let _ = writeln!(self.w, "{text}");
     }
 
-    fn head(&self, name: &str) -> String {
-        let dots = DOT_COL.saturating_sub(name.chars().count() + 3);
-        format!("  {} {}", name, ".".repeat(dots))
-    }
-
     fn phase_start(&mut self, name: &str, detail: Option<String>) {
         self.erase();
-        let head = self.head(name);
+        let head = phase_head(name);
         let text = match detail {
             Some(d) => format!("{head} {}", self.p.dim(&d)),
             None => head,
@@ -108,16 +118,14 @@ impl<W: Write> Text<W> {
         self.erase();
         let rewrite = self.rewritable;
         self.rewritable = false;
-        let head = self.head(name);
-        let pad = RESULT_COL.saturating_sub(head.chars().count() + 1);
+        let prefix = result_prefix(name);
         let time = crate::report::human_ms(elapsed_ms);
-        let plain_len = head.chars().count() + 1 + pad + result.chars().count();
+        let plain_len = prefix.chars().count() + result.chars().count();
         let gap = TIME_END
             .saturating_sub(plain_len + time.chars().count())
             .max(2);
         let body = format!(
-            "{head} {:pad$}{}{:gap$}{}",
-            "",
+            "{prefix}{}{:gap$}{}",
             self.p.green(result),
             "",
             self.p.dim(&time),
@@ -134,11 +142,9 @@ impl<W: Write> Text<W> {
     fn phase_skipped(&mut self, name: &str, reason: &str) {
         self.erase();
         self.rewritable = false;
-        let head = self.head(name);
-        let pad = RESULT_COL.saturating_sub(head.chars().count() + 1);
         let body = format!(
-            "{head} {:pad$}{}",
-            "",
+            "{}{}",
+            result_prefix(name),
             self.p.dim(&format!("skipped ({reason})")),
         );
         let _ = writeln!(self.w, "{body}");
