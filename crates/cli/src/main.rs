@@ -1,11 +1,11 @@
 //! `cambi` — incremental changed-target computation for Bazel monorepos.
 //!
-//! Eight verbs, and nothing else is in this binary: `init`, `status`,
-//! `doctor`, `affected`, `explain`, `index`, `inspect`, `config`. The surface
-//! they make — what each one is for, the configuration, the output contract,
-//! the diagnostics format and the deprecated spellings still accepted — is
-//! `docs/CLI.md`, and `crates/cli/tests/cli_contract.rs` pins it. The
-//! benchmark harness is a separate binary, `cambium-bench`.
+//! Nine verbs, and nothing else is in this binary: `init`, `status`,
+//! `doctor`, `affected`, `explain`, `profile`, `index`, `inspect`, `config`.
+//! The surface they make (what each one is for, the configuration, the
+//! output contract, the diagnostics format and the deprecated spellings
+//! still accepted) is `docs/CLI.md`, and `crates/cli/tests/cli_contract.rs`
+//! pins it. The benchmark harness is a separate binary, `cambium-bench`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
