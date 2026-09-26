@@ -748,5 +748,8 @@ mod tests {
         let painted = drain(Plain::to_writer(Shared(a.clone()), mode(true)), a);
         assert!(painted.contains("\x1b[36m"), "the index cell is cyan");
         assert!(painted.contains("\x1b[1mcambium\x1b[0m"));
+        let b = buffer();
+        let plain = drain(Plain::to_writer(Shared(b.clone()), mode(false)), b);
+        assert_eq!(crate::paint::strip_ansi(&painted), plain);
     }
 }

@@ -109,6 +109,7 @@ pub fn render_header(cols: &[Column], term: usize, p: &Paint) -> String {
 mod tests {
     use super::*;
     use crate::event::Style;
+    use crate::paint::strip_ansi;
 
     fn cols() -> Vec<Column> {
         vec![
@@ -199,22 +200,5 @@ mod tests {
         let painted = render(&cols(), &cells, 96, &Paint::new(true));
         let stripped: String = strip_ansi(&painted);
         assert_eq!(plain, stripped);
-    }
-
-    fn strip_ansi(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
     }
 }
