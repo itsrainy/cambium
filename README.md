@@ -430,7 +430,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 | 0 | success |
 | 1 | error, or a usage error: one `cambi` diagnoses (`CAMBI-E013`), or a command line the argument parser rejects (an unknown flag or verb, a missing value), which prints the parser's message on stderr and nothing on stdout |
 | 2 | global invalidation: everything is affected; stdout is `//...` |
-| 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`) |
+| 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`), or the Bazel binary could not be started (`CAMBI-E015`) |
 | 4 | no index available and `--no-full-build` was given |
 | 5 | the store is there and could not be read (as against holding no index, which is 4): a CI job can retry this one. A directory store whose directory does not exist holds no index; the `aws s3 cp`/`gsutil cp` templates cannot tell an outage from a miss ([docs/STORE.md](docs/STORE.md#misses-and-outages)) |
 

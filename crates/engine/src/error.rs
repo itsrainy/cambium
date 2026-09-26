@@ -127,6 +127,23 @@ impl EngineError {
         use crate::diag::{Code, Diagnostic};
         use crate::store::StoreError;
 
+        // A Bazel that could not be started at all is the fact `doctor`
+        // reports as `CAMBI-E015`, and it gets the same code and help here:
+        // the workspace is fine, the binary is what is missing.
+        if let EngineError::Bazel(cambium_bazel::BazelError::Spawn { source, .. }) = self {
+            let help = match source.kind() {
+                std::io::ErrorKind::NotFound => {
+                    "install Bazel or bazelisk, or name the binary with --bazel-binary, \
+                     [bazel].binary in cambium.toml, or bazel.binary in cambium.local.toml"
+                }
+                _ => {
+                    "check that the binary can be run by this user, or name another with \
+                     --bazel-binary, [bazel].binary in cambium.toml, or bazel.binary in \
+                     cambium.local.toml"
+                }
+            };
+            return Diagnostic::error(Code::E015BazelNotFound, self.to_string()).with_help(help);
+        }
         let (code, help): (Code, Option<&str>) = match self {
             EngineError::Config(crate::config::ConfigError::LocalOverrideKey { .. }) => (
                 Code::E014LocalOverrideKey,

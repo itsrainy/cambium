@@ -1772,3 +1772,46 @@ fn publish_base_on_a_global_run_publishes_the_base_and_nothing_else() {
         "the fixture's index and the computed base: {stdout}"
     );
 }
+
+/// A run that has to query Bazel and cannot start it says so under the code
+/// `doctor` gives the same fact, `CAMBI-E015`, with the help that names where
+/// the binary is configured; not `CAMBI-E004`, whose help sends the caller
+/// looking for a workspace that is there. The exit code stays 3: a Bazel
+/// that never ran is a Bazel that failed.
+#[test]
+fn a_bazel_that_cannot_be_started_is_e015_not_e004() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let base = &f.commits[1];
+    // A commit on the indexed base that edits a BUILD file: the run has to
+    // ask Bazel for that package.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    let build = std::fs::read_dir(&f.ws)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("BUILD.bazel"))
+        .find(|p| p.is_file())
+        .expect("the synthetic tree has a package");
+    let mut text = std::fs::read_to_string(&build).unwrap();
+    text.push_str("\n# touched\n");
+    std::fs::write(&build, text).unwrap();
+    cambium_testkit::git(&f.ws, &["commit", "-qam", "touch a BUILD file"]);
+
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "--bazel-binary",
+        "/nonexistent/bazel",
+        "affected",
+        &format!("{base}..HEAD"),
+    ]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E015]"), "{stderr}");
+    assert!(!stderr.contains("CAMBI-E004"), "{stderr}");
+    assert!(stderr.contains("/nonexistent/bazel"), "{stderr}");
+    assert!(stderr.contains("--bazel-binary"), "{stderr}");
+    assert!(!stderr.contains("pass -C"), "{stderr}");
+}
