@@ -39,7 +39,7 @@ impl Kind {
 }
 
 /// Tag bits.
-pub const TAG_MANUAL: u8 = 1 << 0;
+pub(crate) const TAG_MANUAL: u8 = 1 << 0;
 
 /// Size of the pool of `@synth_ext//ext:lib<n>` targets. [`SynthGraph::ext_label`]
 /// draws from it and the emitter writes exactly this many, so the two cannot
@@ -131,7 +131,7 @@ impl SynthGraph {
         out
     }
 
-    pub fn src_name(target: u32, slot: u32) -> String {
+    pub(crate) fn src_name(target: u32, slot: u32) -> String {
         SrcName(target, slot).to_string()
     }
 

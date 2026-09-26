@@ -138,7 +138,7 @@ fn clear(out: &Path) -> Result<()> {
 /// Shared by the emitter and by [`SynthFiles`], which is what makes the
 /// property tests exercise the real `load()` parser: the text the engine scans
 /// in memory is the text [`emit_workspace`] writes to disk.
-pub fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
+pub(crate) fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
     let p = &g.packages[pkg as usize];
     let mut build = String::new();
     // Each generated .bzl exposes macros suffixed with its index, so a package
