@@ -14,7 +14,7 @@ use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
-use crate::cmd::{emit, human_bytes as human, plural, Context};
+use crate::cmd::{emit, hex, human_bytes, plural, Context};
 
 /// Options every query shares.
 #[derive(ClapArgs)]
@@ -484,7 +484,7 @@ fn print_stats(s: &inspect::IndexStats) {
     }
     println!();
     let b = &s.bytes;
-    println!("bytes:           {} total", human(b.file_total));
+    println!("bytes:           {} total", human_bytes(b.file_total));
     let rows: [(&str, i64); 13] = [
         ("label table", b.label_table as i64),
         ("label sort index", b.label_sorted as i64),
@@ -503,26 +503,26 @@ fn print_stats(s: &inspect::IndexStats) {
     for (name, v) in rows {
         println!(
             "  {name:<18} {:>10}  {:>5.1}%",
-            human(v.max(0) as u64),
+            human_bytes(v.max(0) as u64),
             share(v, b.file_total)
         );
     }
     println!(
         "  {:<18} {:>10}  {:>5.1}%",
         "framing/padding",
-        human(b.framing.max(0) as u64),
+        human_bytes(b.framing.max(0) as u64),
         share(b.framing, b.file_total)
     );
     println!();
     let lp = &b.label_packing;
     println!(
         "labels:          {:>10}  {:>5.1}% of the file (table + sort index)",
-        human(b.label_table + b.label_sorted),
+        human_bytes(b.label_table + b.label_sorted),
         b.label_total_share * 100.0
     );
     println!(
         "  packed         {:>10}  {:>5.1}% would remain, storing (package, name)",
-        human(lp.packed_label_table + b.label_sorted),
+        human_bytes(lp.packed_label_table + b.label_sorted),
         share(
             (lp.packed_label_table + b.label_sorted) as i64,
             b.file_total
@@ -530,7 +530,7 @@ fn print_stats(s: &inspect::IndexStats) {
     );
     println!(
         "  saving         {:>10}  {:>5.1}% of the file, {} labels not packable",
-        human(lp.prefix_bytes),
+        human_bytes(lp.prefix_bytes),
         lp.file_saving_share * 100.0,
         lp.unpackable_nodes
     );
@@ -559,18 +559,18 @@ pub fn show(ctx: &Context, file: &std::path::Path) -> Result<u8> {
         println!("file:            {}", f.path().display());
         println!("format version:  {}", v.format_version);
         println!("commit:          {}", v.commit);
-        println!("lineage:         {}", inspect::hex(&v.lineage));
+        println!("lineage:         {}", hex(&v.lineage));
         println!("bazel:           {}", v.bazel_version);
-        println!("config hash:     {}", inspect::hex(&v.config_hash));
+        println!("config hash:     {}", hex(&v.config_hash));
         println!("created:         {}", v.created_unix);
         if let Some(w) = inspect::PartialLoad::from(v).warning() {
             println!("WARNING:         {w}");
         }
-        println!("size on disk:    {}", human(f.file_size() as u64));
+        println!("size on disk:    {}", human_bytes(f.file_size() as u64));
         if f.is_compressed() {
             println!(
                 "                 zstd, {} decompressed",
-                human(f.framed_size() as u64)
+                human_bytes(f.framed_size() as u64)
             );
         }
         println!("nodes:           {}", v.num_nodes());

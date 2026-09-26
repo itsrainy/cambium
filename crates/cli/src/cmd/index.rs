@@ -5,18 +5,18 @@
 //! is what it is. `cambi baseline ...` stays for one release as a deprecated
 //! spelling of these verbs.
 
-use anyhow::{Context as _, Result};
-use cambium_engine::{AffectedRequest, EngineError, OnGlobal, PublishPolicy, PublishSource};
-use clap::Subcommand;
-
 use std::time::Instant;
 
-use cambium_engine::{Code, Diagnostic};
-use cambium_ui::report::{group, human_bytes};
+use anyhow::{Context as _, Result};
+use cambium_engine::{
+    AffectedRequest, Code, Diagnostic, EngineError, OnGlobal, PublishPolicy, PublishSource,
+};
+use cambium_ui::report::group;
 use cambium_ui::{Event, Level, Sink};
+use clap::Subcommand;
 
 use crate::cmd::narrate::{repo_name, start_indexing};
-use crate::cmd::{hex, plural_s, short, Context};
+use crate::cmd::{hex, human_bytes, plural_s, short, Context};
 
 #[derive(Subcommand)]
 pub enum Args {

@@ -16,12 +16,12 @@ use cambium_engine::profile::{self, CommitStep, Progress, WorktreeRevisions};
 use cambium_engine::report::Stopwatch;
 use cambium_engine::Diagnostic;
 use cambium_engine::Profile;
-use cambium_ui::report::{group, human_bytes, human_ms, kv, Pair};
+use cambium_ui::report::{group, human_ms, kv, Pair};
 use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit, plural, plural_s, short, Context};
+use crate::cmd::{emit, human_bytes, plural, plural_s, short, Context};
 
 /// What lands on stdout above the table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
