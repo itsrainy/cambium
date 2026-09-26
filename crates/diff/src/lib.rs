@@ -179,9 +179,13 @@ impl Repo {
     /// True when the working tree has uncommitted changes to tracked files.
     ///
     /// A dirty tree is not an error: `cambi affected` on a developer's
-    /// checkout is meant to see the edits. It only means the tree is not
-    /// exactly `HEAD`, which the engine takes into account when it decides
-    /// whether a revision can be read from the tree it already has.
+    /// checkout is meant to see the edits. The answer is reported, not acted
+    /// on: `cambi status` tells the reader a run will index the edits as they
+    /// are. The engine's choice of checkout compares trees and ignores dirt on
+    /// purpose (see `Engine::needs_revision_workspace`).
+    ///
+    /// A `git status` that fails reads as clean, not as an error, because the
+    /// flag only annotates a report and a probe should not fail over it.
     pub fn is_dirty(&self) -> bool {
         match run(
             &self.root,
