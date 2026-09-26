@@ -685,6 +685,18 @@ mod tests {
         "lib/old.bzl",
     ];
 
+    /// [`classify`] over the window `FROM..TO`, with the applied paths and
+    /// the packages that failed to load in the rebuild.
+    fn in_window(d: &SkyDiff, applied: &[&str], failed: &[&str]) -> (Vec<Row>, Vec<Row>) {
+        classify(
+            d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(applied),
+            &errs(failed),
+        )
+    }
+
     /// (i) A node under a directory the window created, with nothing of the
     /// applied layer under it, is a `//...`-only row.
     #[test]
@@ -693,13 +705,7 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir/sub"));
         assert_eq!(m[0].package.as_deref(), Some("newdir/sub"));
@@ -713,13 +719,7 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["newdir/BUILD"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["newdir/BUILD"], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -741,13 +741,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
     }
 
@@ -768,13 +762,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(
             classes(&m),
             vec![
@@ -794,13 +782,7 @@ mod tests {
     #[test]
     fn a_path_present_at_the_base_is_unexplained() {
         let d = diff(vec![SkyItem::Node(name(Kind::File, "lib/a.cc"))], vec![]);
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -817,13 +799,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, _) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
     }
 
@@ -835,26 +811,14 @@ mod tests {
             vec![SkyItem::Node(name(Kind::FileState, "newdir/sub/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         // But a probe of a directory that exists nowhere resolves to nothing.
         let d = diff(
             vec![SkyItem::Node(name(Kind::FileState, "nowhere/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -868,13 +832,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir"));
         // A load error at either end is a load error.
@@ -885,13 +843,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, _) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError]);
     }
 
@@ -910,13 +862,7 @@ mod tests {
                 },
             ],
         );
-        let (_, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (_, e) = in_window(&d, &[], &[]);
         assert_eq!(
             classes(&e),
             vec![
@@ -1013,13 +959,7 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::FileState, "lib/a.cc"))],
         );
-        let (m, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, e) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError; 6], "{m:?}");
         assert!(
             m.iter().all(|r| r.package.as_deref() == Some("lib")),
@@ -1225,13 +1165,7 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
-        let (m, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, e) = in_window(&d, &[], &[]);
         let doc = RebuildRows::new("subj", "abc123", "f0", "abc123", "9.2.0", m, e);
         assert_eq!(
             classes(&doc.missing),
