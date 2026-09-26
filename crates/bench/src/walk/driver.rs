@@ -32,7 +32,7 @@ use super::steps::Step;
 use super::tier::Schedule;
 
 /// What the live checks read for one step, once cambium has answered it.
-pub struct StepContext<'a> {
+pub struct AnsweredStep<'a> {
     pub step: &'a Step,
     /// The head index cambium wrote for this step; `None` on a global.
     pub head_index: Option<&'a Path>,
@@ -57,11 +57,11 @@ pub struct StepContext<'a> {
 pub trait LiveChecks {
     /// The `rdeps` oracle at this step, or `None` when it was not wanted or
     /// could not run.
-    fn oracle(&self, ctx: &StepContext<'_>) -> Result<Option<RdepsResult>>;
+    fn oracle(&self, ctx: &AnsweredStep<'_>) -> Result<Option<RdepsResult>>;
 
     /// Each peer over this step, scored against `oracle`. cambium is not a
     /// peer here: the driver scores it itself from the same oracle.
-    fn peers(&self, ctx: &StepContext<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep>;
+    fn peers(&self, ctx: &AnsweredStep<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep>;
 
     /// The output base each tool wrote to, for the environment record.
     fn output_bases(&self) -> std::collections::BTreeMap<String, String> {
@@ -73,10 +73,10 @@ pub trait LiveChecks {
 pub struct NoLiveChecks;
 
 impl LiveChecks for NoLiveChecks {
-    fn oracle(&self, _: &StepContext<'_>) -> Result<Option<RdepsResult>> {
+    fn oracle(&self, _: &AnsweredStep<'_>) -> Result<Option<RdepsResult>> {
         Ok(None)
     }
-    fn peers(&self, _: &StepContext<'_>, _: Option<&RdepsResult>) -> Vec<ToolStep> {
+    fn peers(&self, _: &AnsweredStep<'_>, _: Option<&RdepsResult>) -> Vec<ToolStep> {
         Vec::new()
     }
 }
@@ -395,7 +395,7 @@ impl<'a> Runner<'a> {
         // The live checks, scheduled per step. cambium's oracle scoring is
         // done here from the same oracle the peers were scored with.
         let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
-        let ctx = StepContext {
+        let ctx = AnsweredStep {
             step,
             head_index: run.wrote_index.then_some(self.index_path.as_path()),
             cambium_set: &run.labels,

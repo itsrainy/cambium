@@ -21,7 +21,7 @@ use crate::oracles::rdeps::{OracleInputs, RdepsOracle, RdepsResult};
 use crate::tools::{BaseWorktree, RunContext, Tool, ToolRun};
 use crate::util::absolute;
 
-use super::driver::{LiveChecks, StepContext};
+use super::driver::{AnsweredStep, LiveChecks};
 use super::model::ToolStep;
 use super::score;
 
@@ -53,7 +53,7 @@ impl BazelChecks<'_> {
 }
 
 impl LiveChecks for BazelChecks<'_> {
-    fn oracle(&self, ctx: &StepContext<'_>) -> Result<Option<RdepsResult>> {
+    fn oracle(&self, ctx: &AnsweredStep<'_>) -> Result<Option<RdepsResult>> {
         if !ctx.want_oracle {
             return Ok(None);
         }
@@ -90,7 +90,7 @@ impl LiveChecks for BazelChecks<'_> {
         Ok(Some(out))
     }
 
-    fn peers(&self, ctx: &StepContext<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep> {
+    fn peers(&self, ctx: &AnsweredStep<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep> {
         if !ctx.want_peers || self.tools.is_empty() {
             return Vec::new();
         }

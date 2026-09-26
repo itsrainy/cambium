@@ -37,7 +37,7 @@ pub mod tier;
 pub use cambi::{
     cold_build, tree_paths, CambiDriver, ColdBuild, Driver, EngineDriver, RowSource, Update,
 };
-pub use driver::{score, walk, walk_only, LiveChecks, NoLiveChecks, StepContext, WalkOptions};
+pub use driver::{score, walk, walk_only, AnsweredStep, LiveChecks, NoLiveChecks, WalkOptions};
 pub use live::BazelChecks;
 pub use model::{StepRecord, WalkResult, WalkSummary};
 pub use rebuild_rows::{RebuildRows, Row, RowClass, RowCounts};

@@ -276,14 +276,14 @@ fn the_live_checks_get_the_steps_dirty_packages() {
     impl walk::LiveChecks for Recorder {
         fn oracle(
             &self,
-            ctx: &walk::StepContext<'_>,
+            ctx: &walk::AnsweredStep<'_>,
         ) -> anyhow::Result<Option<cambium_bench::oracles::rdeps::RdepsResult>> {
             self.seen.lock().unwrap().push(ctx.dirty_packages.clone());
             Ok(None)
         }
         fn peers(
             &self,
-            _: &walk::StepContext<'_>,
+            _: &walk::AnsweredStep<'_>,
             _: Option<&cambium_bench::oracles::rdeps::RdepsResult>,
         ) -> Vec<cambium_bench::walk::model::ToolStep> {
             Vec::new()
