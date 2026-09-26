@@ -1278,3 +1278,57 @@ fn index_gc_and_list_report_store_problems_under_their_own_codes() {
         assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
     }
 }
+
+/// What `CAMBI-W019`'s help promises, end to end: after a `cambium.toml`
+/// edit, `cambi index gc` removes the lineage the old configuration built,
+/// at once rather than once it is `retention_days` old, and
+/// `--keep-incompatible` keeps it.
+#[test]
+fn gc_removes_a_lineage_the_configuration_moved_away_from() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("CAMBI-W019"), "{stdout}");
+    assert!(
+        stdout.contains("`cambi index gc` removes it now"),
+        "{stdout}"
+    );
+
+    let listed = || -> String {
+        let (code, stdout, stderr) = run(&["-C", ws, "index", "list"]);
+        assert_eq!(code, 0, "{stderr}");
+        stdout
+    };
+    assert!(listed().contains(&f.lineage));
+
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "index",
+        "gc",
+        "--keep-incompatible",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "removed 0 index files");
+    assert!(
+        listed().contains(&f.lineage),
+        "--keep-incompatible keeps it"
+    );
+
+    let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "index", "gc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "removed 2 index files", "{stderr}");
+    assert!(
+        stderr.contains(&format!("lineage {}", f.lineage)),
+        "the narration names the lineage:\n{stderr}"
+    );
+    assert!(!listed().contains(&f.lineage));
+}

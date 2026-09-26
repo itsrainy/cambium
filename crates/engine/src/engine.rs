@@ -605,6 +605,21 @@ impl Engine {
         }
     }
 
+    /// `cambi index gc`: drops the store's stale lineages (unless
+    /// `keep_incompatible`) and everything older than
+    /// `baseline.retention_days`, sparing `keep`. See
+    /// [`BaselineCache::collect`].
+    pub fn collect_garbage(
+        &self,
+        keep: &str,
+        keep_incompatible: bool,
+    ) -> Result<crate::baseline::Collected> {
+        let Some(cache) = self.baselines() else {
+            return Err(EngineError::NoStore);
+        };
+        cache.collect(self.cfg.baseline.retention_days, keep, keep_incompatible)
+    }
+
     /// Publishes an index under every key the store layout wants for its
     /// commit (see [`BaselineCache::publish`]), and returns them.
     ///

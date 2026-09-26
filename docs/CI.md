@@ -114,11 +114,15 @@ or GCS store, delete the old `indexes/<lineage>/` and
 `commits/<lineage>/` prefixes after the fresh build has published, or
 leave the lineages to the lifecycle rule and the choice to the listing.
 
-**Retention.** On a directory store, `cambi index gc` deletes every index
-file and pointer older than `[baseline].retention_days`, by modification
-time and whatever its lineage. A publish rewrites the file, so the index
-the job just published is never old enough to go. `gc` is implemented for
-the `dir` backend only; an S3 or GCS store gets a lifecycle rule instead.
+**Retention.** On a directory store, `cambi index gc` deletes every lineage
+this `cambi` cannot read (another `cambium.toml`, an older index format),
+then every index file and pointer older than `[baseline].retention_days`,
+by modification time and whatever its lineage. A publish rewrites the file,
+so the index the job just published is never old enough to go. A store that
+branches with different `cambium.toml` files share wants
+`--keep-incompatible`, or one branch's `gc` deletes the other's lineage.
+`gc` is implemented for the `dir` backend only; an S3 or GCS store gets a
+lifecycle rule instead.
 
 The workflow: [docs/ci/cambium-index.yml](ci/cambium-index.yml).
 
@@ -235,8 +239,8 @@ configuration is not the one main's indexes were built with, and testing
 How it heals: once the edit (or the upgrade) is on the default branch, its
 post-merge run refuses the old lineage the same way, builds the merge
 commit cold and publishes a new lineage; pull requests based on that
-commit or later find it. The old lineage is skipped until `gc` or a
-lifecycle rule removes it. To upgrade `cambi`, change the pinned version
+commit or later find it. The old lineage is skipped until `gc` (at once,
+on a directory store) or a lifecycle rule removes it. To upgrade `cambi`, change the pinned version
 in both workflows in one commit and expect that commit's post-merge run to
 be a cold build, and pull requests opened against older commits to test
 `//...` until they are rebased or the merge ref moves.

@@ -9,6 +9,8 @@ use anyhow::{Context as _, Result};
 use cambium_engine::{AffectedRequest, EngineError, OnGlobal, PublishPolicy, PublishSource};
 use clap::Subcommand;
 
+use cambium_ui::{Event, Level};
+
 use crate::cmd::{hex, Context};
 
 #[derive(Subcommand)]
@@ -75,11 +77,21 @@ pub enum Args {
         /// The index file to read.
         file: std::path::PathBuf,
     },
-    /// Delete published indexes older than the configured retention.
+    /// Delete stale lineages, and published indexes older than the
+    /// configured retention. A directory store only.
+    ///
+    /// A lineage is stale when this cambi cannot splice onto it: built with
+    /// another cambium.toml (or an older rule-hash version or index content
+    /// revision), or written in an older index format. Its index files and
+    /// commit pointers all go, whatever their age.
     Gc {
-        /// Keep this artifact whatever its age.
+        /// Keep this artifact whatever its age or lineage.
         #[arg(long)]
         keep: Option<String>,
+        /// Keep stale lineages, and delete by age alone: for a store that
+        /// another configuration or an older cambi still reads from.
+        #[arg(long)]
+        keep_incompatible: bool,
     },
 }
 
@@ -161,15 +173,31 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             )?;
             Ok(crate::EXIT_OK)
         }
-        Args::Gc { keep } => {
+        Args::Gc {
+            keep,
+            keep_incompatible,
+        } => {
             let engine = ctx.engine()?;
-            let removed = configured_store(&engine)?
-                .gc(
-                    engine.config().baseline.retention_days,
-                    keep.as_deref().unwrap_or(""),
-                )
-                .map_err(EngineError::from)?;
-            println!("removed {removed} index files");
+            let got = engine.collect_garbage(keep.as_deref().unwrap_or(""), keep_incompatible)?;
+            let mut sink = cambium_ui::boxed(ctx.ui);
+            sink.emit(Event::Header {
+                verb: "index gc".into(),
+                repo: repo_name(&engine),
+                range: String::new(),
+                note: format!("retention {} days", engine.config().baseline.retention_days),
+            });
+            for (s, n) in &got.stale {
+                sink.emit(Event::Log(
+                    Level::Info,
+                    format!("lineage {}: {}; removed {}", s.lineage, s.why, files(*n)),
+                ));
+            }
+            sink.emit(Event::Log(
+                Level::Info,
+                format!("older than the retention: removed {}", files(got.aged)),
+            ));
+            sink.emit(Event::Done);
+            println!("removed {} index files", got.total());
             Ok(crate::EXIT_OK)
         }
         Args::Publish { file } => {
@@ -194,6 +222,20 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             Ok(crate::EXIT_OK)
         }
     }
+}
+
+/// The workspace directory's name, which the narration header calls the repo.
+fn repo_name(engine: &cambium_engine::Engine) -> String {
+    engine
+        .workspace()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// `1 file`, `3 files`.
+fn files(n: usize) -> String {
+    format!("{n} file{}", if n == 1 { "" } else { "s" })
 }
 
 /// The store `[baseline].store` names, or `CAMBI-E008` saying there is none.

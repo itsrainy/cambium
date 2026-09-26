@@ -71,6 +71,22 @@ pub trait ArtifactStore: Send + Sync {
     fn gc(&self, _retention_days: u64, _keep: &str) -> Result<usize> {
         Err(StoreError::Unsupported("gc"))
     }
+    /// Whether this backend garbage-collects at all: [`gc`](Self::gc) and
+    /// [`remove`](Self::remove) do something. Asked before `cambi index gc`
+    /// reads anything, so a store that cannot is told so without being read.
+    fn collects_garbage(&self) -> bool {
+        false
+    }
+    /// Deletes one key; `Ok(false)` when it was not there. Garbage
+    /// collection's other half, for a lineage this `cambi` cannot read.
+    fn remove(&self, _name: &str) -> Result<bool> {
+        Err(StoreError::Unsupported("gc"))
+    }
+    /// Where `name` already sits on this machine, when the backend is a
+    /// directory, so a reader of its header need not copy it first.
+    fn local_path(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
     fn describe(&self) -> String;
 }
 
@@ -376,6 +392,30 @@ impl ArtifactStore for DirStore {
             }
         }
         Ok(removed)
+    }
+
+    fn collects_garbage(&self) -> bool {
+        true
+    }
+
+    fn remove(&self, name: &str) -> Result<bool> {
+        let p = self.root.join(name);
+        match std::fs::remove_file(&p) {
+            Ok(()) => {
+                // The lineage's directory, once its last key is gone; a
+                // directory that still holds something is left.
+                if let Some(dir) = p.parent().filter(|d| *d != self.root) {
+                    let _ = std::fs::remove_dir(dir);
+                }
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(StoreError::Io { path: p, source }),
+        }
+    }
+
+    fn local_path(&self, name: &str) -> Option<PathBuf> {
+        Some(self.root.join(name))
     }
 
     fn describe(&self) -> String {

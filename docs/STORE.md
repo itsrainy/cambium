@@ -87,8 +87,9 @@ layout (`indexes/<lineage>/<sha>.bin`, `indexes/by-commit/<sha>.bin`) are
 still read, so upgrades don't orphan a warm store, but are no longer
 written.
 
-`cambi index list` prints keys; `cambi index gc` deletes those older than
-`retention_days` (see [Garbage collection](#garbage-collection)).
+`cambi index list` prints keys; `cambi index gc` deletes the lineages this
+`cambi` cannot read and the keys older than `retention_days` (see
+[Garbage collection](#garbage-collection)).
 
 ### Readers that cannot list
 
@@ -436,13 +437,23 @@ reader that may not list. With the plain templates it is a miss.
 give the prefix a lifecycle rule (expire objects some days after creation)
 instead.
 
-On a directory store it is by age and blind to lineage: every index file
-and `commits/` pointer whose modification time is older than
-`[baseline].retention_days` (30 by default) is deleted, whatever lineage it
-belongs to, and everything younger is kept. `--keep <key>` keeps one key
-whatever its age. It does not look for the newest index of the live
-lineage, so a lineage nobody has published to for `retention_days` goes
-entirely, and a run then builds cold once and mints a new one.
+On a directory store it runs two rules. First, every stale lineage goes
+whole, whatever its age: one this `cambi` cannot splice onto, because its
+indexes were built with another `cambium.toml` (or an older rule-hash
+version or index content revision) or are in an older index format. Each
+lineage is judged by one of its indexes' headers, read in place; its index
+files and `commits/` pointers are deleted. A lineage in a *newer* format is
+left alone, and so is one whose files cannot be read at all. Pass
+`--keep-incompatible` to skip this rule, for a store that another
+configuration or an older `cambi` still reads.
+
+Then, by age and blind to lineage: every index file and `commits/` pointer
+whose modification time is older than `[baseline].retention_days` (30 by
+default) is deleted, and everything younger is kept. `--keep <key>` keeps
+one key through both rules. The age rule does not look for the newest
+index of the live lineage, so a lineage nobody has published to for
+`retention_days` goes entirely, and a run then builds cold once and mints a
+new one.
 
 Republishing refreshes the age: a publish writes a new file and renames it
 into place, even when the bytes are identical, so an index a post-merge job

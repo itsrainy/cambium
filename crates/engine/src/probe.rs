@@ -661,8 +661,9 @@ pub fn index_at(path: &Path) -> (Option<IndexProbe>, Vec<Diagnostic>) {
                     ),
                 )
                 .with_help(
-                    "mint a fresh lineage with `cambi index build --publish`; the old \
-                     blobs age out under the retention policy",
+                    "mint a fresh lineage with `cambi index build --publish`; on a \
+                     directory store `cambi index gc` then removes the old one, and on S3 or \
+                     GCS the prefix's lifecycle rule ages it out",
                 )],
             );
         }
@@ -762,8 +763,9 @@ pub fn lineage(
             )
             .with_help(
                 "expected right after a cambium.toml edit or a cambi upgrade; the stale \
-                 lineage is skipped, not used, and ages out under [baseline].retention_days. \
-                 Run `cambi index gc` to remove it now",
+                 lineage is skipped, never used. On a directory store `cambi index gc` \
+                 removes it now (`--keep-incompatible` keeps it for a configuration still \
+                 reading it); on S3 or GCS the prefix's lifecycle rule ages it out",
             ),
         );
     }

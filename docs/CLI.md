@@ -169,8 +169,10 @@ The stored artifact is an index; the chain of them is a lineage. `build
 forward (bare `FROM` means `FROM..HEAD`). Both need `--out <file>`; only a
 run also `--publish`ing may omit it (indexes run gigabytes). `publish`
 uploads one, `list` shows the store's holdings, `show` prints an index's
-header/counts, `gc` applies retention (`[baseline].retention_days`, by age;
-`--keep <key>` spares one key; a directory store only, see
+header/counts, `gc` removes the lineages this `cambi` cannot read (another
+`cambium.toml`, an older index format; `--keep-incompatible` keeps them) and
+applies retention (`[baseline].retention_days`, by age; `--keep <key>`
+spares one key; a directory store only, see
 [STORE.md](STORE.md#garbage-collection)). These were the `baseline` verbs,
 renamed; `baseline` survives one release as a deprecation alias.
 
