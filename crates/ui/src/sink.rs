@@ -256,7 +256,7 @@ const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
 /// The line redraws itself. A verb that spends two minutes inside one Bazel
 /// query emits nothing for two minutes, and a spinner that only moves when
 /// an event arrives would sit frozen through exactly the wait it exists to
-/// cover, so the sink owns a thread that ticks it every [`TICK`]. The thread
+/// cover, so the sink owns a thread that ticks it every `TICK`. The thread
 /// and `emit` share the writer through one mutex, so a tick can never land
 /// in the middle of a row.
 pub struct Stream<W: Write + Send + 'static = std::io::Stderr> {
