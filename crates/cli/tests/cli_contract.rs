@@ -1484,3 +1484,49 @@ fn a_refused_index_is_one_w003() {
         "{stderr}"
     );
 }
+
+/// A depth-1 clone of one branch, the way a CI checkout of a pull request
+/// leaves it: no `main`, no `origin/main`, and no history behind `HEAD`.
+/// Each missing revision gets the help that fits it, and none is told to
+/// check its spelling when the fix is a fetch.
+#[test]
+fn a_depth_one_clone_names_the_fetch_or_the_deepen() {
+    let f = published_fixture(1);
+    cambium_testkit::git(&f.ws, &["branch", "-q", "pr", &f.commits[3]]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clone = dir.path().join("clone");
+    let url = format!("file://{}", f.ws.display());
+    cambium_testkit::git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            "--branch",
+            "pr",
+            &url,
+            clone.to_str().unwrap(),
+        ],
+    );
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    let c = clone.to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", c, "affected", "main", "--dry-run"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E003]: `main`"), "{stderr}");
+    assert!(
+        stderr.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pass `origin/main`"), "{stderr}");
+
+    for rev in ["HEAD~1", "origin/pr~1"] {
+        let (code, _, stderr) = run(&["-C", c, "affected", rev, "--dry-run"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("git fetch --deepen=N"), "{rev}:\n{stderr}");
+        assert!(!stderr.contains("check the spelling"), "{rev}:\n{stderr}");
+        assert!(!stderr.contains("pr~1:refs"), "{rev}:\n{stderr}");
+    }
+}
