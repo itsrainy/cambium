@@ -301,6 +301,8 @@ fn rule_stanza(g: &SynthGraph, tid: u32, macro_name: &str) -> String {
         ));
     }
 
+    // This pattern matches every name `SynthGraph::src_name` gives the
+    // target's slots, so the two change together.
     let mut srcs = format!("glob([\"t{tid}_*.src\"], allow_empty = True)");
     if !t.foreign_srcs.is_empty() {
         let f: Vec<String> = t
