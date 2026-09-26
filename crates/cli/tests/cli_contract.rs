@@ -1139,6 +1139,14 @@ fn point_store_at(ws: &std::path::Path, path: &str) {
     std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
 }
 
+/// Changes one hashed key of the fixture's `cambium.toml`, so every index it
+/// published was built with a configuration the workspace no longer has.
+fn move_the_configuration(ws: &std::path::Path) {
+    let mut cfg = cambium_engine::Config::load(ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+}
+
 /// A relative directory store in the checked-in `cambium.toml` is read from
 /// the workspace root, so `-C` from anywhere else reaches the same store.
 #[test]
@@ -1291,9 +1299,7 @@ fn gc_removes_a_lineage_the_configuration_moved_away_from() {
     let f = published_fixture(1);
     let ws = f.ws.to_str().unwrap();
     let cache = f.cache.to_str().unwrap();
-    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
-    cfg.externals.index_max_packages += 1;
-    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    move_the_configuration(&f.ws);
 
     let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "status"]);
     assert_eq!(code, 0, "{stderr}");
@@ -1464,9 +1470,7 @@ fn no_index_under_no_full_build_narrates_no_cold_build() {
 #[test]
 fn a_refused_index_is_one_w003() {
     let f = published_fixture(1);
-    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
-    cfg.externals.index_max_packages += 1;
-    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    move_the_configuration(&f.ws);
     let base = &f.commits[1];
     let (code, _, stderr) = run(&[
         "-C",
