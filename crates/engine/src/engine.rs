@@ -259,6 +259,10 @@ pub struct IndexUpdate {
     /// Set when the range invalidated everything and the index is a cold
     /// build rather than the base brought forward; the reason the run gave.
     pub rebuilt_because: Option<String>,
+    /// What the run that brought it forward said (a refused index, a store
+    /// read as empty), which the report it came from would otherwise take
+    /// with it. A rebuild's own findings are still in the engine's sink.
+    pub diagnostics: Vec<crate::diag::Diagnostic>,
 }
 
 /// The parts are the crate's to reach into — the stages in `run`, `plan` and
@@ -1105,10 +1109,12 @@ impl Engine {
             ..req.clone()
         };
         let outcome = self.affected(&req)?;
+        let diagnostics = outcome.report.diagnostics;
         if let Some(index) = outcome.index {
             return Ok(IndexUpdate {
                 index,
                 rebuilt_because: None,
+                diagnostics,
             });
         }
         let reason = outcome
@@ -1126,6 +1132,7 @@ impl Engine {
                 Ok(IndexUpdate {
                     index: self.full_build(&head)?,
                     rebuilt_because: Some(reason),
+                    diagnostics,
                 })
             }
         }

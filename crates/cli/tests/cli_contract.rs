@@ -1394,3 +1394,36 @@ fn the_narration_header_prints_a_ref_whole_and_a_sha_short() {
         "{header}"
     );
 }
+
+/// The `index` verbs narrate in the grammar every other verb does: a header,
+/// phase lines, the keys under the `publish` phase. No bare `cambium: ...`
+/// lines, and nothing at all under `--quiet`.
+#[test]
+fn index_publish_narrates_through_the_renderer() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let file = f.cache.join("published.cmbx");
+    let (code, stdout, stderr) = run(&["-C", ws, "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    let first = stderr.lines().next().unwrap_or_default();
+    assert!(first.starts_with("cambium index publish"), "{stderr}");
+    assert!(first.contains(&f.lineage), "{stderr}");
+    assert!(stderr.contains("  publish ...."), "{stderr}");
+    assert!(
+        stderr.contains(&format!("    indexes/{}/", f.lineage)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cambium: "), "{stderr}");
+
+    let (code, _, stderr) = run(&["-C", ws, "-q", "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+
+    // An index that would go nowhere is said before anything is built.
+    let bare = bare_workspace();
+    let (code, _, stderr) = run(&["-C", bare.path().to_str().unwrap(), "index", "build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
+    assert!(stderr.contains("--out <file>"), "{stderr}");
+}
