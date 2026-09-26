@@ -197,138 +197,132 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         let files: Vec<String> = p
             .exported
             .iter()
-            .map(|&(t, s)| format!("\"{}\"", SynthGraph::src_name(t, s)))
+            .map(|&(t, s)| quoted(&SynthGraph::src_name(t, s)))
             .collect();
         build.push_str(&format!("exports_files([{}])\n\n", files.join(", ")));
     }
 
     let suffix = p.bzl.first().map(|b| b.to_string()).unwrap_or_default();
     for &tid in &p.targets {
-        let t = &g.targets[tid as usize];
-        if !t.alive {
+        if !g.targets[tid as usize].alive {
             continue;
         }
-        // Source files: written empty, picked up by a per-target glob so that
-        // adding a file really does change the target's inputs.
-        for &slot in &t.srcs {
-            let name = SynthGraph::src_name(tid, slot);
-            let mut f = std::fs::File::create(dir.join(&name))
-                .or_else(|_| {
-                    std::fs::create_dir_all(&dir)
-                        .and_then(|_| std::fs::File::create(dir.join(&name)))
-                })
-                .map_err(|source| EmitError::Io {
-                    path: dir.join(&name),
-                    source,
-                })?;
-            // Content version goes in the file so that a ModifySource commit
-            // produces a real diff.
-            let version = t
-                .srcs
-                .iter()
-                .position(|&s| s == slot)
-                .map(|i| t.src_versions[i])
-                .unwrap_or(0);
-            writeln!(f, "// v{version}").map_err(|source| EmitError::Io {
-                path: dir.join(&name),
-                source,
-            })?;
-        }
-
-        let name = format!("t{tid}");
-        let (macro_name, is_suite) = match t.kind {
-            Kind::TestSuite => ("test_suite".to_string(), true),
-            Kind::Alias => ("alias".to_string(), false),
-            k => (format!("{}{}", k.rule_class(), suffix), false),
-        };
-
-        if is_suite {
-            let tests: Vec<String> = t
-                .deps
-                .iter()
-                .filter(|&&d| g.targets[d as usize].alive)
-                .map(|&d| format!("\"{}\"", g.target_label(d)))
-                .collect();
-            build.push_str(&format!(
-                "test_suite(\n    name = \"{name}\",\n    tests = [{}],\n)\n\n",
-                tests.join(", ")
-            ));
-            continue;
-        }
-        if t.kind == Kind::Alias {
-            match t.deps.iter().find(|&&d| g.targets[d as usize].alive) {
-                Some(&d) => {
-                    build.push_str(&format!(
-                        "alias(\n    name = \"{name}\",\n    actual = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
-                        g.target_label(d)
-                    ));
-                }
-                // An alias whose target was deleted still has to exist, or the
-                // emitted repo would disagree with the in-memory graph about
-                // which labels are present.
-                None => build.push_str(&format!(
-                    "synth_lib{suffix}(\n    name = \"{name}\",\n    salt = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
-                    t.attr_salt
-                )),
-            }
-            continue;
-        }
-
-        let live_deps: Vec<u32> = t
-            .deps
-            .iter()
-            .copied()
-            .filter(|&d| g.targets[d as usize].alive)
-            .collect();
-        let split = live_deps.len().saturating_sub(t.select_deps as usize);
-        let plain: Vec<String> = live_deps[..split]
-            .iter()
-            .map(|&d| format!("\"{}\"", g.target_label(d)))
-            .collect();
-        let selected: Vec<String> = live_deps[split..]
-            .iter()
-            .map(|&d| format!("\"{}\"", g.target_label(d)))
-            .collect();
-        let mut ext: Vec<String> = (0..t.ext_deps)
-            .map(|k| format!("\"{}\"", SynthGraph::ext_label(tid, k)))
-            .collect();
-        let mut dep_expr = format!(
-            "[{}]",
-            plain
-                .into_iter()
-                .chain(ext.drain(..))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        if !selected.is_empty() {
-            // The union over select branches is what --proto:flatten_selects
-            // reports, and that union is the over-approximation we want.
-            dep_expr.push_str(&format!(
-                " + select({{\n        \"//tools/synth:opt\": [{}],\n        \"//conditions:default\": [{}],\n    }})",
-                selected.join(", "),
-                selected.join(", ")
-            ));
-        }
-
-        let mut srcs = format!("glob([\"t{tid}_*.src\"], allow_empty = True)");
-        if !t.foreign_srcs.is_empty() {
-            let f: Vec<String> = t
-                .foreign_srcs
-                .iter()
-                .map(|&(_, ft, fs)| format!("\"{}\"", g.src_label(ft, fs)))
-                .collect();
-            srcs.push_str(&format!(" + [{}]", f.join(", ")));
-        }
-
-        let tags = if t.is_manual() { "[\"manual\"]" } else { "[]" };
-        build.push_str(&format!(
-            "{macro_name}(\n    name = \"{name}\",\n    srcs = {srcs},\n    deps = {dep_expr},\n    \
-             salt = \"{}\",\n    tags = {tags},\n    visibility = [\"//visibility:public\"],\n)\n\n",
-            t.attr_salt
-        ));
+        write_sources(g, tid, &dir)?;
+        build.push_str(&target_stanza(g, tid, &suffix));
     }
 
     write(&dir.join("BUILD.bazel"), &build)
+}
+
+/// A target's source files. Each holds its content version, so that a
+/// `ModifySource` commit produces a real diff, and a per-target glob picks
+/// them up, so that adding a file really does change the target's inputs.
+fn write_sources(g: &SynthGraph, tid: u32, dir: &Path) -> Result<()> {
+    let t = &g.targets[tid as usize];
+    for (&slot, version) in t.srcs.iter().zip(&t.src_versions) {
+        let path = dir.join(SynthGraph::src_name(tid, slot));
+        let mut f = std::fs::File::create(&path)
+            .or_else(|_| std::fs::create_dir_all(dir).and_then(|_| std::fs::File::create(&path)))
+            .map_err(|source| EmitError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        writeln!(f, "// v{version}").map_err(|source| EmitError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+/// One live target's BUILD stanza. `suffix` names the generated `.bzl` whose
+/// macros the package calls.
+fn target_stanza(g: &SynthGraph, tid: u32, suffix: &str) -> String {
+    let t = &g.targets[tid as usize];
+    let mut live_deps = t
+        .deps
+        .iter()
+        .copied()
+        .filter(|&d| g.targets[d as usize].alive);
+    match t.kind {
+        Kind::TestSuite => {
+            let tests: Vec<String> = live_deps.map(|d| quoted(&g.target_label(d))).collect();
+            format!(
+                "test_suite(\n    name = \"t{tid}\",\n    tests = [{}],\n)\n\n",
+                tests.join(", ")
+            )
+        }
+        Kind::Alias => match live_deps.next() {
+            Some(d) => format!(
+                "alias(\n    name = \"t{tid}\",\n    actual = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
+                g.target_label(d)
+            ),
+            // An alias whose target was deleted still has to exist, or the
+            // emitted repo would disagree with the in-memory graph about
+            // which labels are present.
+            None => format!(
+                "synth_lib{suffix}(\n    name = \"t{tid}\",\n    salt = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
+                t.attr_salt
+            ),
+        },
+        Kind::Lib | Kind::Test | Kind::Bin => {
+            rule_stanza(g, tid, &format!("{}{suffix}", t.kind.rule_class()))
+        }
+    }
+}
+
+/// The stanza of a `synth_lib`, `synth_test` or `synth_bin`: its own files by
+/// glob plus the ones it consumes from other packages, and its deps with the
+/// last `select_deps` of them behind a `select()`.
+fn rule_stanza(g: &SynthGraph, tid: u32, macro_name: &str) -> String {
+    let t = &g.targets[tid as usize];
+    let live_deps: Vec<u32> = t
+        .deps
+        .iter()
+        .copied()
+        .filter(|&d| g.targets[d as usize].alive)
+        .collect();
+    let (plain, selected) =
+        live_deps.split_at(live_deps.len().saturating_sub(t.select_deps as usize));
+    let label = |&d: &u32| quoted(&g.target_label(d));
+    let ext = (0..t.ext_deps).map(|k| quoted(&SynthGraph::ext_label(tid, k)));
+    let mut dep_expr = format!(
+        "[{}]",
+        plain
+            .iter()
+            .map(label)
+            .chain(ext)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !selected.is_empty() {
+        // The union over select branches is what --proto:flatten_selects
+        // reports, and that union is the over-approximation we want.
+        let selected = selected.iter().map(label).collect::<Vec<_>>().join(", ");
+        dep_expr.push_str(&format!(
+            " + select({{\n        \"//tools/synth:opt\": [{selected}],\n        \"//conditions:default\": [{selected}],\n    }})"
+        ));
+    }
+
+    let mut srcs = format!("glob([\"t{tid}_*.src\"], allow_empty = True)");
+    if !t.foreign_srcs.is_empty() {
+        let f: Vec<String> = t
+            .foreign_srcs
+            .iter()
+            .map(|&(_, ft, fs)| quoted(&g.src_label(ft, fs)))
+            .collect();
+        srcs.push_str(&format!(" + [{}]", f.join(", ")));
+    }
+
+    let tags = if t.is_manual() { "[\"manual\"]" } else { "[]" };
+    format!(
+        "{macro_name}(\n    name = \"t{tid}\",\n    srcs = {srcs},\n    deps = {dep_expr},\n    \
+         salt = \"{}\",\n    tags = {tags},\n    visibility = [\"//visibility:public\"],\n)\n\n",
+        t.attr_salt
+    )
+}
+
+/// `s` as a Starlark string literal. Labels and file names never hold a quote
+/// or a backslash, so nothing needs escaping.
+fn quoted(s: &str) -> String {
+    format!("\"{s}\"")
 }
 
 fn module_bazel() -> String {
