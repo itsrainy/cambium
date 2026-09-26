@@ -504,7 +504,11 @@ pub fn regenerate_report(
     // Every subject at once, not just the named one: a per-subject nightly job
     // rewrites the top table wholesale, and must not drop its neighbours' rows
     // on the way.
-    let results = report::SubjectResults::collect(&session.manifest, parent)?;
+    let results = report::SubjectResults::collect(
+        &session.manifest,
+        parent,
+        session.bazel_version.as_deref(),
+    )?;
     anyhow::ensure!(
         !results.is_empty(),
         "report: no walk-*.json under {}",

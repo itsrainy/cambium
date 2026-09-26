@@ -42,22 +42,74 @@ impl SubjectResults {
         self.walk.is_none()
     }
 
-    /// The newest walk under `bench-results/<id>/walk/`. More than one can be
-    /// present (a subject whose `bazel_version` changed leaves the older file
-    /// behind); the newest by name wins.
-    pub fn load(dir: &Path, id: &str) -> Result<Self> {
-        let mut walks = json_files(&dir.join("walk"), "walk-");
-        walks.sort();
+    /// The walk `<dir>/walk/` holds for `pin` under Bazel `version`, and only
+    /// that: `walk-<pin>[-<version>].json`. The directory also keeps the
+    /// records of earlier pins and Bazel versions, and a `--only` gate's
+    /// beside the full walk, and none of those is the subject's result. A
+    /// directory with records but not this one is refused, naming what it
+    /// holds; one with no record at all is a subject that has not walked.
+    pub fn load(dir: &Path, id: &str, pin: &str, version: Option<&str>) -> Result<Self> {
+        let walk_dir = dir.join("walk");
+        let records = json_files(&walk_dir, "walk-");
+        let want = WalkResult::path(&walk_dir, pin, version);
+        if records.is_empty() {
+            return Ok(Self::new(id));
+        }
+        anyhow::ensure!(
+            records.contains(&want),
+            "{}: no walk record for {id} at the pin {pin}{}: expected {}, found {}. Walk the \
+             pin, or move the other records aside",
+            walk_dir.display(),
+            version
+                .map(|v| format!(" under Bazel {v}"))
+                .unwrap_or_default(),
+            file_name(&want),
+            names(&records),
+        );
         Ok(Self {
             id: id.to_string(),
-            walk: walks.last().map(|p| WalkResult::read(p)).transpose()?,
+            walk: Some(WalkResult::read(&want)?),
+        })
+    }
+
+    /// A results directory the manifest no longer names, so no pin says which
+    /// record is its result: the one full walk there, never a `--only` gate.
+    /// Refused when there is none or more than one.
+    pub fn load_unnamed(dir: &Path, id: &str) -> Result<Self> {
+        let walk_dir = dir.join("walk");
+        let records = json_files(&walk_dir, "walk-");
+        if records.is_empty() {
+            return Ok(Self::new(id));
+        }
+        let full: Vec<_> = records
+            .iter()
+            .filter(|p| !WalkResult::is_only_record(file_name(p)))
+            .collect();
+        let [one] = full.as_slice() else {
+            anyhow::bail!(
+                "{}: the manifest does not name {id}, so exactly one full walk record must be \
+                 there to report, and {} are ({}). Move the others aside",
+                walk_dir.display(),
+                full.len(),
+                names(&records),
+            );
+        };
+        Ok(Self {
+            id: id.to_string(),
+            walk: Some(WalkResult::read(one)?),
         })
     }
 
     /// Every manifest entry with a results directory under `parent`, in
     /// manifest order, plus any stray directory the manifest no longer names.
     /// A renamed or removed entry still has numbers worth showing.
-    pub fn collect(manifest: &crate::manifest::Manifest, parent: &Path) -> Result<Vec<Self>> {
+    /// `bazel_version` is `--bazel-version`, which outranks each entry's own
+    /// as it did for the walk that wrote the record.
+    pub fn collect(
+        manifest: &crate::manifest::Manifest,
+        parent: &Path,
+        bazel_version: Option<&str>,
+    ) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for entry in &manifest.repos {
@@ -66,7 +118,8 @@ impl SubjectResults {
             if !dir.is_dir() {
                 continue;
             }
-            let r = Self::load(&dir, &entry.id)?;
+            let version = crate::session::version_for(bazel_version, entry);
+            let r = Self::load(&dir, &entry.id, &entry.pin, version.as_deref())?;
             if !r.is_empty() {
                 out.push(r);
             }
@@ -86,7 +139,7 @@ impl SubjectResults {
             if seen.contains(id) {
                 continue;
             }
-            let r = Self::load(&dir, id)?;
+            let r = Self::load_unnamed(&dir, id)?;
             if !r.is_empty() {
                 out.push(r);
             }
@@ -95,20 +148,34 @@ impl SubjectResults {
     }
 }
 
-/// The `<prefix>*.json` files in `dir`, if it is one. A missing directory is
-/// a subject that has not run the workload, not an error.
+/// The `<prefix>*.json` files in `dir`, if it is one, in name order. A
+/// missing directory is a subject that has not run the workload, not an
+/// error.
 fn json_files(dir: &Path, prefix: &str) -> Vec<std::path::PathBuf> {
-    std::fs::read_dir(dir)
+    let mut out: Vec<_> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
+            let n = file_name(p);
+            n.starts_with(prefix) && n.ends_with(".json")
         })
-        .collect()
+        .collect();
+    out.sort();
+    out
+}
+
+fn file_name(p: &Path) -> &str {
+    p.file_name().and_then(|n| n.to_str()).unwrap_or_default()
+}
+
+fn names(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| file_name(p))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// One row of the cross-subject table.
@@ -341,6 +408,111 @@ mod tests {
         assert!(table.contains("tango p50"));
         // A subject missing a peer shows a dash, not a zero.
         assert!(table.contains(" — |"));
+    }
+
+    /// A subject's walk directory as a pin bump and a gate leave it: the
+    /// current pin's full walk, a `--only` gate at the same pin (whose name
+    /// sorts after it), and the previous pin's walk (whose pin sorts last).
+    fn a_walk_dir(root: &Path, id: &str, pin: &str, old: &str) -> std::path::PathBuf {
+        let walk = root.join(id).join("walk");
+        std::fs::create_dir_all(&walk).unwrap();
+        let write = |pin: &str, name: &str, steps: usize| {
+            let mut w = a_walk(id, &[]);
+            w.pin = pin.into();
+            w.steps = vec![w.steps[0].clone(); steps];
+            w.summarise();
+            w.write(&WalkResult::path(&walk, name, Some("7.4.1")))
+                .unwrap();
+        };
+        write(pin, pin, 5);
+        write(pin, &WalkResult::only_pin(pin), 2);
+        write(old, old, 3);
+        walk
+    }
+
+    fn a_manifest(id: &str, pin: &str) -> crate::manifest::Manifest {
+        toml::from_str(&format!(
+            "[[repo]]\nid = \"{id}\"\nurl = \"u\"\npin = \"{pin}\"\nbazel_version = \"7.4.1\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_report_reads_the_pins_full_walk_and_never_a_gate_or_an_old_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pin, old) = ("a".repeat(40), "f".repeat(40));
+        a_walk_dir(dir.path(), "envoy", &pin, &old);
+        // Without the old pin's walk the gate's record is the one that sorts
+        // last.
+        let xla = a_walk_dir(dir.path(), "xla", &pin, &old);
+        std::fs::remove_file(WalkResult::path(&xla, &old, Some("7.4.1"))).unwrap();
+        let mut manifest = a_manifest("envoy", &pin);
+        manifest.repos.extend(a_manifest("xla", &pin).repos);
+        let got: Vec<(String, String, usize)> =
+            SubjectResults::collect(&manifest, dir.path(), None)
+                .unwrap()
+                .into_iter()
+                .map(|r| {
+                    let w = r.walk.unwrap();
+                    (r.id, w.pin, w.steps.len())
+                })
+                .collect();
+        assert_eq!(
+            got,
+            [
+                ("envoy".to_string(), pin.clone(), 5),
+                ("xla".to_string(), pin.clone(), 5)
+            ],
+            "the full walk at the manifest's pin and Bazel version"
+        );
+        // `--bazel-version` names the record as it named the walk's.
+        let e = SubjectResults::collect(&manifest, dir.path(), Some("8.0.0"))
+            .map(|r| r.len())
+            .unwrap_err();
+        assert!(
+            format!("{e:#}").contains(&format!("walk-{pin}-8.0.0.json")),
+            "{e:#}"
+        );
+        assert!(WalkResult::is_only_record(&format!(
+            "walk-{}-7.4.1.json",
+            WalkResult::only_pin(&pin)
+        )));
+        assert!(!WalkResult::is_only_record(&format!(
+            "walk-{pin}-7.4.1.json"
+        )));
+    }
+
+    #[test]
+    fn the_report_refuses_a_subject_whose_pin_has_no_full_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pin, old) = ("a".repeat(40), "f".repeat(40));
+        let walk = a_walk_dir(dir.path(), "envoy", &pin, &old);
+        std::fs::remove_file(WalkResult::path(&walk, &pin, Some("7.4.1"))).unwrap();
+        let e = SubjectResults::collect(&a_manifest("envoy", &pin), dir.path(), None)
+            .map(|r| r.len())
+            .unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains(&walk.display().to_string()), "{msg}");
+        assert!(msg.contains(&format!("walk-{pin}-7.4.1.json")), "{msg}");
+    }
+
+    #[test]
+    fn a_subject_the_manifest_no_longer_names_needs_exactly_one_full_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pin, old) = ("a".repeat(40), "f".repeat(40));
+        let walk = a_walk_dir(dir.path(), "gone", &pin, &old);
+        let manifest = a_manifest("envoy", &pin);
+        let e = SubjectResults::collect(&manifest, dir.path(), None)
+            .map(|r| r.len())
+            .unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains(&walk.display().to_string()), "{msg}");
+        // With the old pin's walk moved aside, the one full walk left is read
+        // and the gate beside it is not.
+        std::fs::remove_file(WalkResult::path(&walk, &old, Some("7.4.1"))).unwrap();
+        let got = SubjectResults::collect(&manifest, dir.path(), None).unwrap();
+        let w = got[0].walk.as_ref().unwrap();
+        assert_eq!((got[0].id.as_str(), w.steps.len()), ("gone", 5));
     }
 
     fn a_walk(id: &str, peers: &[&str]) -> WalkResult {

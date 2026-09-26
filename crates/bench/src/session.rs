@@ -175,11 +175,16 @@ impl Session {
     /// The flag wins; the manifest's own pin is the fallback for a subject
     /// that needs a specific Bazel and has no `.bazelversion` to say so.
     fn version_for(&self, entry: &RepoEntry) -> Option<String> {
-        self.bazel_version
-            .clone()
-            .or_else(|| entry.bazel_version.clone())
-            .filter(|v| !v.is_empty())
+        version_for(self.bazel_version.as_deref(), entry)
     }
+}
+
+/// The Bazel version a subject's result files are named by: `--bazel-version`
+/// (`flag`) when given, else the manifest entry's own.
+pub fn version_for(flag: Option<&str>, entry: &RepoEntry) -> Option<String> {
+    flag.or(entry.bazel_version.as_deref())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// One subject inside a session.
