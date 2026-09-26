@@ -29,21 +29,16 @@ impl Worktree {
     /// Adds a worktree of `owner` at `rev`, in `path`.
     ///
     /// If `path` already holds a worktree it is reused: it is forced back onto
-    /// `rev` and left in place when this handle drops. Reuse matters when
-    /// consecutive runs share a revision, and re-adding a worktree per run
-    /// would dominate.
-    ///
-    /// `--force` on the checkout, never a plain one: a plain checkout keeps
-    /// local modifications, and on a case-insensitive filesystem a worktree
-    /// acquires them without anyone editing anything (two paths that differ
-    /// only in case collide, and git leaves one of them reported as deleted).
+    /// `rev`, losing local changes to tracked files, and left in place when
+    /// this handle drops. Reuse matters when consecutive runs share a
+    /// revision, and re-adding a worktree per run would dominate.
     pub fn create(owner: &Path, rev: &str, path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(GitError::Spawn)?;
         }
         if path.join(".git").exists() {
             run(owner, &["worktree", "prune"]).ok();
-            run(path, &["checkout", "--quiet", "--force", "--detach", rev])?;
+            force_checkout(path, rev)?;
             return Ok(Self {
                 path: path.to_path_buf(),
                 owner: owner.to_path_buf(),
@@ -98,13 +93,10 @@ impl Worktree {
         self.borrowed = true;
     }
 
-    /// Moves this worktree to another revision.
+    /// Moves this worktree to another revision, losing local changes to
+    /// tracked files.
     pub fn checkout(&self, rev: &str) -> Result<()> {
-        run(
-            &self.path,
-            &["checkout", "--quiet", "--force", "--detach", rev],
-        )?;
-        Ok(())
+        force_checkout(&self.path, rev)
     }
 
     /// Unregisters and deletes the worktree. `Drop` calls this and ignores
@@ -132,6 +124,18 @@ impl Drop for Worktree {
             tracing::warn!(path = %self.path.display(), error = %e, "could not remove the worktree");
         }
     }
+}
+
+/// Puts the worktree in `dir` on `rev`, discarding local changes to
+/// tracked files.
+///
+/// `--force`, never a plain checkout: a plain one keeps local
+/// modifications, and on a case-insensitive filesystem a worktree acquires
+/// them without anyone editing anything (two paths that differ only in
+/// case collide, and git leaves one of them reported as deleted).
+fn force_checkout(dir: &Path, rev: &str) -> Result<()> {
+    run(dir, &["checkout", "--quiet", "--force", "--detach", rev])?;
+    Ok(())
 }
 
 #[cfg(test)]
