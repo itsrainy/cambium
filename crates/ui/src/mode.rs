@@ -38,7 +38,11 @@ pub struct OutputMode {
 }
 
 impl OutputMode {
-    /// What a terminal gets when nothing is suppressing it.
+    /// The mode this invocation gets. The kind: `--quiet` first, then
+    /// `--format jsonl`, then whether stderr is a terminal that can carry a
+    /// live line (not under CI, not `TERM=dumb`). Colour is
+    /// [`OutputMode::stderr_colour`]'s answer, off for the kinds that draw
+    /// no text. The width is measured here, once, for the whole run.
     pub fn detect(quiet: bool, jsonl: bool, colour: ColorChoice) -> Self {
         Self::decide(quiet, jsonl, colour, &Env::read())
     }
