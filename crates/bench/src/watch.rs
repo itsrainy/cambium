@@ -79,9 +79,11 @@ pub struct SubjectSnapshot {
     /// run on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_recall: Option<f64>,
-    /// Steps that passed, over how many the oracle ran on.
+    /// Steps that passed. A step the oracle did not run on passes too, so
+    /// this can exceed [`compared`](Self::compared).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed: Option<usize>,
+    /// Steps the oracle ran on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compared: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
