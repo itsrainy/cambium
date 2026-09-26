@@ -365,6 +365,79 @@ impl<'a> Runner<'a> {
             p.item(i, &step.head);
             p.tool(Some(crate::tools::cambi::NAME));
         }
+        let answer = self.answer(step)?;
+        let (run, r) = (&answer.run, &answer.run.report);
+        let labels_dir =
+            crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
+
+        // The set beside the JSON, under the shared layout.
+        if !r.global {
+            std::fs::create_dir_all(&labels_dir)?;
+            crate::labels::write_set(&labels_dir, crate::tools::cambi::NAME, &run.labels)?;
+        }
+
+        let index = if run.wrote_index || !r.global {
+            let f = IndexFile::open(&self.index_path)?;
+            let v = f.view();
+            IndexCounts {
+                nodes: v.counts().nodes,
+                edges: v.counts().edges,
+                lineage: cambium_engine::inspect::hex(&v.lineage),
+            }
+        } else {
+            IndexCounts {
+                nodes: 0,
+                edges: 0,
+                lineage: String::new(),
+            }
+        };
+
+        // The live checks, scheduled per step. cambium's oracle scoring is
+        // done here from the same oracle the peers were scored with.
+        let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
+        let ctx = StepContext {
+            step,
+            head_index: run.wrote_index.then_some(self.index_path.as_path()),
+            cambium_set: &run.labels,
+            dirty_packages: &dirty_packages,
+            want_oracle: self.opts.oracle_sample.contains(i - 1),
+            want_peers: self.opts.peer_sample.contains(i - 1),
+        };
+        let oracle = self.live.oracle(&ctx)?;
+        if let Some(o) = &oracle {
+            std::fs::create_dir_all(&labels_dir)?;
+            crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
+        }
+        let mut tools = vec![score_cambium(&run.labels, answer.wall_ms, oracle.as_ref())];
+        tools.extend(self.live.peers(&ctx, oracle.as_ref()));
+
+        let rebuild_step = self.opts.schedule.rebuilds_at(i);
+        let rec = record(step, &answer, index, oracle, tools, rebuild_step);
+        if let Some(p) = self.progress() {
+            p.diagnostics(&r.diagnostics);
+            p.tool(None);
+        }
+        // Pushed before the mid-walk oracle so that, when this step itself
+        // cold-rebuilt, the rows are classified against its head.
+        self.result.steps.push(rec);
+        if rebuild_step {
+            self.mid_walk_rebuild(step)?;
+        }
+        self.result.summarise();
+        self.result.write(&self.path)?;
+        if let Some(rs) = self.state.history.as_mut() {
+            rs.last_completed = Some(step.head.clone());
+        }
+        self.state.stamp("walk", "updated");
+        self.state.save(&self.opts.state_dir)?;
+        tracing::info!(step = i, of, head = %step.head, ms = answer.wall_ms, "stepped");
+        Ok(())
+    }
+
+    /// cambium's answer at the step's head, carried from the index the step
+    /// before left, or cold-built when the range invalidated everything and a
+    /// fresh lineage had to start.
+    fn answer(&self, step: &Step) -> Result<Answer> {
         self.driver.checkout(&step.head)?;
         let run = match self.driver.update(
             &step.parent,
@@ -381,120 +454,17 @@ impl<'a> Runner<'a> {
             }
         };
         let mut wall_ms = run.wall.as_millis() as u64;
-        let r = &run.report;
-        // The step carried the previous step's index unless the range
-        // invalidated everything and a fresh lineage had to be cold-built.
         let mut carried_index = true;
-        if !run.wrote_index && !r.global {
+        if !run.wrote_index && !run.report.global {
             let cold = cold_build(self.driver, &step.head, &self.index_path, self.opts.publish)?;
             wall_ms += cold.wall_ms;
             carried_index = false;
         }
-
-        // The set beside the JSON, under the shared layout.
-        if !r.global {
-            let labels_dir =
-                crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
-            std::fs::create_dir_all(&labels_dir)?;
-            crate::labels::write_set(&labels_dir, crate::tools::cambi::NAME, &run.labels)?;
-        }
-
-        let (nodes, edges, lineage) = if run.wrote_index || !r.global {
-            let f = IndexFile::open(&self.index_path)?;
-            let v = f.view();
-            (
-                v.counts().nodes,
-                v.counts().edges,
-                cambium_engine::inspect::hex(&v.lineage),
-            )
-        } else {
-            (0, 0, String::new())
-        };
-
-        // The live checks, scheduled per step. cambium's oracle scoring is
-        // done here from the same oracle the peers were scored with.
-        let want_oracle = self.opts.oracle_sample.contains(i - 1);
-        let want_peers = self.opts.peer_sample.contains(i - 1);
-        let head_index = (run.wrote_index).then_some(self.index_path.as_path());
-        let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
-        let ctx = StepContext {
-            step,
-            head_index,
-            cambium_set: &run.labels,
-            dirty_packages: &dirty_packages,
-            want_oracle,
-            want_peers,
-        };
-        let oracle = self.live.oracle(&ctx)?;
-        if let Some(o) = &oracle {
-            let labels_dir =
-                crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
-            std::fs::create_dir_all(&labels_dir)?;
-            crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
-        }
-
-        let mut tools = vec![score_cambium(&run.labels, wall_ms, oracle.as_ref())];
-        tools.extend(self.live.peers(&ctx, oracle.as_ref()));
-
-        let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
-        let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
-        let rebuild_step = self.opts.schedule.rebuilds_at(i);
-        let pass = cambium_ok && peers_ran;
-
-        let rec = StepRecord {
-            parent: step.parent.clone(),
-            head: step.head.clone(),
-            tags: step.tags.clone(),
-            changed_files: r.stats.changed_files,
-            dirty_packages: r.stats.dirty_packages,
-            queried_targets: r.stats.queried_targets,
-            timings: StepTimings {
-                dirty: r.timings_ms.dirty,
-                query: r.timings_ms.query,
-                splice: r.timings_ms.splice,
-                direct: r.timings_ms.direct,
-                walk: r.timings_ms.walk,
-                engine_total: r.timings_ms.total,
-            },
+        Ok(Answer {
+            run,
             wall_ms,
             carried_index,
-            rebuild_step,
-            global: r.global,
-            global_reason: r.global_reason.clone(),
-            index: IndexCounts {
-                nodes,
-                edges,
-                lineage,
-            },
-            cambium: CambiumAnswer {
-                direct: r.direct.len(),
-                affected: r.affected.len(),
-                tests: r.tests.len(),
-                cold_rebuild: r.stats.cold_rebuild,
-            },
-            oracle,
-            tools,
-            pass,
-        };
-        if let Some(p) = self.progress() {
-            p.diagnostics(&run.report.diagnostics);
-            p.tool(None);
-        }
-        // Pushed before the mid-walk oracle so that, when this step itself
-        // cold-rebuilt, the rows are classified against its head.
-        self.result.steps.push(rec);
-        if rebuild_step {
-            self.mid_walk_rebuild(step)?;
-        }
-        self.result.summarise();
-        self.result.write(&self.path)?;
-        if let Some(rs) = self.state.history.as_mut() {
-            rs.last_completed = Some(step.head.clone());
-        }
-        self.state.stamp("walk", "updated");
-        self.state.save(&self.opts.state_dir)?;
-        tracing::info!(step = i, of, head = %step.head, ms = wall_ms, "stepped");
-        Ok(())
+        })
     }
 
     /// The tree at `rev`, or `None` with a warning: a driver that cannot
@@ -696,6 +666,65 @@ impl<'a> Runner<'a> {
             p.done();
         }
         Ok(self.result)
+    }
+}
+
+/// cambium's answer to one step, before any check has looked at it.
+struct Answer {
+    run: super::cambi::Update,
+    /// The wall CI pays for the step: the update, plus the cold build when
+    /// one had to follow it.
+    wall_ms: u64,
+    /// False when the step cold-built a fresh lineage instead of carrying
+    /// the previous step's index.
+    carried_index: bool,
+}
+
+/// The step's record, from cambium's answer and what the checks made of it.
+///
+/// A step passes when the oracle, where it ran, found nothing cambium missed
+/// and every peer that was asked answered.
+fn record(
+    step: &Step,
+    answer: &Answer,
+    index: IndexCounts,
+    oracle: Option<RdepsResult>,
+    tools: Vec<ToolStep>,
+    rebuild_step: bool,
+) -> StepRecord {
+    let r = &answer.run.report;
+    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
+    let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
+    StepRecord {
+        parent: step.parent.clone(),
+        head: step.head.clone(),
+        tags: step.tags.clone(),
+        changed_files: r.stats.changed_files,
+        dirty_packages: r.stats.dirty_packages,
+        queried_targets: r.stats.queried_targets,
+        timings: StepTimings {
+            dirty: r.timings_ms.dirty,
+            query: r.timings_ms.query,
+            splice: r.timings_ms.splice,
+            direct: r.timings_ms.direct,
+            walk: r.timings_ms.walk,
+            engine_total: r.timings_ms.total,
+        },
+        wall_ms: answer.wall_ms,
+        carried_index: answer.carried_index,
+        rebuild_step,
+        global: r.global,
+        global_reason: r.global_reason.clone(),
+        index,
+        cambium: CambiumAnswer {
+            direct: r.direct.len(),
+            affected: r.affected.len(),
+            tests: r.tests.len(),
+            cold_rebuild: r.stats.cold_rebuild,
+        },
+        oracle,
+        tools,
+        pass: cambium_ok && peers_ran,
     }
 }
 
