@@ -10,7 +10,7 @@ pub enum EngineError {
     Git(#[from] cambium_diff::GitError),
     #[error(transparent)]
     Bazel(#[from] cambium_bazel::BazelError),
-    #[error("bazel query for {what} failed (exit {code:?})\n--- last stderr ---\n{stderr}")]
+    #[error("bazel query for {what} failed ({})\n--- last stderr ---\n{stderr}", exit_text(*.code))]
     BazelQuery {
         what: String,
         code: Option<i32>,
@@ -225,6 +225,15 @@ impl EngineError {
             Some(h) => d.with_help(h),
             None => d,
         }
+    }
+}
+
+/// How a child process ended, for a message: `exit 1`, or `killed by a signal` when
+/// there is no exit code to print. Never Rust's `Some(1)`/`None`.
+pub(crate) fn exit_text(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("exit {c}"),
+        None => "killed by a signal".to_string(),
     }
 }
 

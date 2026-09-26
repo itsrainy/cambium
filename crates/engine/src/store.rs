@@ -586,7 +586,7 @@ impl ArtifactStore for CommandStore {
             Some(nf) if code != Some(nf) => Err(StoreError::Backend {
                 op: "fetch",
                 name: name.to_string(),
-                detail: format!("exit {code:?}: {stderr}"),
+                detail: format!("{}: {stderr}", crate::error::exit_text(code)),
             }),
             // A non-zero exit is how most CLIs report "not found", and the
             // ancestor walk asks for many keys that do not exist. But a
@@ -617,9 +617,10 @@ impl ArtifactStore for CommandStore {
                         crate::diag::Diagnostic::warning(
                             crate::diag::Code::W007StoreFetchFailed,
                             format!(
-                                "the store's fetch command failed for `{name}` (exit \
-                                 {code:?}) and said: {stderr}. Treating the artifact as \
-                                 absent, which means a cold build rather than a splice"
+                                "the store's fetch command failed for `{name}` ({}) and said: \
+                                 {stderr}. Treating the artifact as absent, which means a \
+                                 cold build rather than a splice",
+                                crate::error::exit_text(code)
                             ),
                         )
                         .with_help(
@@ -656,9 +657,12 @@ impl ArtifactStore for CommandStore {
                 op: "list",
                 name: "list_cmd".into(),
                 detail: if stderr.is_empty() {
-                    format!("exit {:?}, nothing on stderr", out.status.code())
+                    format!(
+                        "{}, nothing on stderr",
+                        crate::error::exit_text(out.status.code())
+                    )
                 } else {
-                    format!("exit {:?}: {stderr}", out.status.code())
+                    format!("{}: {stderr}", crate::error::exit_text(out.status.code()))
                 },
             });
         }
@@ -853,6 +857,49 @@ mod tests {
             said_failed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(!store.fetch("x", &dir.path().join("x")).unwrap());
+    }
+
+    /// A failing command reads `exit 2`, and one killed by a signal says so,
+    /// never Rust's `Some(2)` or `None`.
+    #[test]
+    fn a_failing_store_command_says_how_it_exited_in_words() {
+        let store = |list: &str| CommandStore {
+            fetch_cmd: vec!["true".into()],
+            push_cmd: vec![],
+            list_cmd: vec!["sh".into(), "-c".into(), list.into()],
+            not_found_exit: None,
+            diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let said = store("exit 2").list().unwrap_err().to_string();
+        assert!(said.contains("exit 2, nothing on stderr"), "{said}");
+        assert!(!said.contains("Some("), "{said}");
+        let said = store("kill -9 $$").list().unwrap_err().to_string();
+        assert!(said.contains("killed by a signal"), "{said}");
+        assert!(!said.contains("None"), "{said}");
+    }
+
+    /// A read-only `command` store (`push_cmd = []`) is a real setup, so a
+    /// publish to it is `CAMBI-E012` naming `push_cmd`, not a crash.
+    #[test]
+    fn a_command_store_with_no_push_cmd_cannot_publish_and_says_which_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CommandStore {
+            fetch_cmd: vec!["true".into()],
+            push_cmd: vec![],
+            list_cmd: vec![],
+            not_found_exit: None,
+            diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let err = store.publish("x", &dir.path().join("x")).unwrap_err();
+        assert!(matches!(err, StoreError::Unsupported("publish")), "{err:?}");
+        let d = crate::EngineError::from(err).diagnostic();
+        assert_eq!(d.code, crate::diag::Code::E012StoreUnsupported);
+        assert!(
+            d.help.as_deref().unwrap_or("").contains("push_cmd"),
+            "{d:?}"
+        );
     }
 
     #[test]

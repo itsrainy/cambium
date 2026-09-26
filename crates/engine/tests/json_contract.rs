@@ -336,7 +336,7 @@ fn exit_codes_are_pinned() {
         EngineError::Store(cambium_engine::store::StoreError::Backend {
             op: "fetch",
             name: "indexes/x".into(),
-            detail: "exit Some(1)".into(),
+            detail: "exit 1".into(),
         })
         .exit_code(),
         5,

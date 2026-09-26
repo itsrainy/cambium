@@ -424,7 +424,7 @@ mod tests {
                 cambium_engine::store::StoreError::Backend {
                     op: "fetch",
                     name: "indexes/x".into(),
-                    detail: "exit Some(1)".into(),
+                    detail: "exit 1".into(),
                 }
             )),
             EXIT_STORE,
