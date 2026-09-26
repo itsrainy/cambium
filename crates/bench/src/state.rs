@@ -24,9 +24,9 @@ pub struct State {
     /// Cold builds that completed, by commit, with the index file each wrote.
     #[serde(default)]
     pub built: BTreeMap<String, PathBuf>,
-    #[serde(default)]
     /// The walk's window and how far it got, under the name the history
     /// workload that preceded it gave the field.
+    #[serde(default)]
     pub history: Option<HistoryState>,
     /// Change-set keys (`<base>..<head>`) the retired change-set comparison
     /// finished. Nothing adds to it since the walk replaced that workload; it
