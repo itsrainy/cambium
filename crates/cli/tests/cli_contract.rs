@@ -8,6 +8,7 @@
 //! `crates/engine/tests/json_contract.rs` pins the document shapes and the
 //! error-to-exit-code mapping; this pins the surface a caller types.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 use cambium_testkit::published_fixture;
@@ -20,12 +21,12 @@ use cambium_testkit::published_fixture;
 /// so a rename fails this file at compile time rather than at a customer.
 const CAMBI: &str = env!("CARGO_BIN_EXE_cambi");
 
-fn run(args: &[&str]) -> (i32, String, String) {
+fn run(args: &[impl AsRef<OsStr>]) -> (i32, String, String) {
     run_with_env(args, &[])
 }
 
 /// As [`run`], with environment variables set for the child alone.
-fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+fn run_with_env(args: &[impl AsRef<OsStr>], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(CAMBI);
     cmd.args(args);
     for (k, v) in env {
@@ -1208,7 +1209,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
 
     point_store_at(&f.ws, "never-published");
     let a = args(ws);
-    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, _, stderr) = run(&a);
     assert_eq!(code, 4, "{stderr}");
     assert_eq!(
         stderr.matches("CAMBI-W007").count(),
@@ -1225,7 +1226,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
     // would be on success; the error stays on stderr.
     let mut j = a.clone();
     j.splice(2..2, ["--format".to_string(), "jsonl".to_string()]);
-    let (code, stdout, stderr) = run(&j.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, stdout, stderr) = run(&j);
     assert_eq!(code, 4, "{stderr}");
     let events: Vec<serde_json::Value> = stdout
         .lines()
@@ -1244,7 +1245,7 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
 
     // A file where the directory should be: `/dev/null/nope`'s shape.
     point_store_at(&f.ws, "cambium.toml/nope");
-    let (code, _, stderr) = run(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, _, stderr) = run(&a);
     assert_eq!(code, 5, "{stderr}");
     assert!(stderr.contains("CAMBI-E011"), "{stderr}");
     assert!(
