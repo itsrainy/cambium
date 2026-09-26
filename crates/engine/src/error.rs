@@ -223,13 +223,23 @@ impl EngineError {
             EngineError::Store(StoreError::Unsupported(op)) => {
                 (Code::E012StoreUnsupported, Some(unsupported_help(op)))
             }
-            EngineError::Query(_) => (
+            EngineError::Query(crate::inspect::QueryError::UnknownPackage(_)) => (
                 Code::E017IndexQuery,
                 Some(
-                    "check the spelling against the index: `cambi inspect targets <package>` \
-                     lists what a package holds",
+                    "a package is written `//pkg` or `pkg` (the root package is `//`), and one \
+                     in an external repository `@repo//pkg`; `cambi inspect owner <file> \
+                     <path>` names the package that owns a path",
                 ),
             ),
+            EngineError::Query(crate::inspect::QueryError::UnknownLabel(_)) => (
+                Code::E017IndexQuery,
+                Some(
+                    "check the spelling against the index: `cambi inspect targets <file> \
+                     <package>` lists what a package holds, the package written `//pkg` or \
+                     `@repo//pkg`",
+                ),
+            ),
+            EngineError::Query(_) => (Code::E017IndexQuery, None),
             EngineError::RangeInvalidated { .. } => (
                 Code::E018RangeInvalidated,
                 Some("drop --no-rebuild-on-global to mint a fresh lineage instead"),

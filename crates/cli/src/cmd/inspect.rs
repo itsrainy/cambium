@@ -101,6 +101,8 @@ pub enum Query {
     Package {
         #[command(flatten)]
         common: Common,
+        /// The package: `//pkg` or `pkg`, `//` for the root, `@repo//pkg` in
+        /// an external repository.
         package: String,
     },
     /// Targets that depend on a label.
@@ -146,6 +148,8 @@ pub enum Query {
     Targets {
         #[command(flatten)]
         common: Common,
+        /// The package: `//pkg` or `pkg`, `//` for the root, `@repo//pkg` in
+        /// an external repository.
         package: String,
         /// Filter by node kind: rule, source_file, generated_file,
         /// package_group, environment_group, unknown, tombstone.

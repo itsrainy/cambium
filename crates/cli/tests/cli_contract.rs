@@ -1868,3 +1868,76 @@ fn no_index_with_no_store_says_to_configure_one() {
     assert!(help.contains("[baseline].store"), "{help}");
     assert!(help.contains("drop --no-full-build"), "{help}");
 }
+
+/// `inspect targets` and `inspect package` take a package the way every
+/// other place writes one, `//pkg`, as well as the bare path the index keys
+/// it by; an unknown one's help says how a package is spelled, rather than
+/// naming the command that just failed.
+#[test]
+fn inspect_takes_a_package_with_or_without_its_slashes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = synth_index(dir.path());
+    let file = index.to_str().unwrap();
+    let hub = hub_labels(&index).first().expect("a hub").clone();
+    let bare = hub
+        .trim_start_matches("//")
+        .split_once(':')
+        .expect("a hub label names a package")
+        .0
+        .to_string();
+    let slashed = format!("//{bare}");
+    let targets = |verb: &str, package: &str| {
+        let (code, stdout, stderr) = run(&["inspect", verb, file, package, "--format", "json"]);
+        assert_eq!(code, 0, "`inspect {verb} {package}`:\n{stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+        v["targets"].clone()
+    };
+    for verb in ["targets", "package"] {
+        let want = targets(verb, &bare);
+        assert!(want.as_array().is_some_and(|a| !a.is_empty()), "{want}");
+        assert_eq!(targets(verb, &slashed), want, "`inspect {verb} {slashed}`");
+        assert_eq!(
+            targets(verb, &format!("@{slashed}")),
+            want,
+            "`@//pkg` is the main repository spelled out"
+        );
+    }
+
+    let (code, _, stderr) = run(&["inspect", "targets", file, "//no/such/package"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E017]"), "{stderr}");
+    let help = stderr
+        .lines()
+        .find(|l| l.contains("= help:"))
+        .unwrap_or_else(|| panic!("a help line:\n{stderr}"));
+    assert!(
+        help.contains("`//pkg`"),
+        "the help gives the spelling: {help}"
+    );
+    assert!(help.contains("@repo//pkg"), "{help}");
+    assert!(
+        !help.contains("`cambi inspect targets <package>`"),
+        "the help should not name the command that just failed: {help}"
+    );
+
+    for verb in ["targets", "package"] {
+        let (code, stdout, _) = run(&["inspect", verb, "--help"]);
+        assert_eq!(code, 0);
+        // `--help` puts an argument's help on the line after its name, and
+        // `-h` beside it; either way it is the text right after `<PACKAGE>`.
+        let lines: Vec<&str> = stdout.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("<PACKAGE>"))
+            .unwrap_or_else(|| panic!("a <PACKAGE> line:\n{stdout}"));
+        let help = format!(
+            "{} {}",
+            lines[at].trim_start().trim_start_matches("<PACKAGE>"),
+            lines.get(at + 1).copied().unwrap_or_default()
+        );
+        assert!(
+            help.contains("`//pkg`"),
+            "`inspect {verb} --help` leaves <PACKAGE> blank:\n{stdout}"
+        );
+    }
+}

@@ -195,7 +195,11 @@ Graph questions against one index file: reverse/forward dependencies,
 shortest path between two targets, which rule consumes a file, which
 package owns a path, a package's targets, byte accounting, externals
 tables, and `verify` against Bazel. Plumbing, for checking a surprising
-`explain` answer without reading the index by hand.
+`explain` answer without reading the index by hand. Each takes the index
+file first. A package is written as a label writes it, `//pkg` (or `pkg`,
+and `//` for the root package), and `@repo//pkg` in an external
+repository: `cambi inspect targets FILE //shell` lists what `//shell`
+holds.
 
 `inspect verify FILE` samples rule targets (`--sample`, `--seed`) and
 checks that the index's reverse closure of each holds every target `bazel
