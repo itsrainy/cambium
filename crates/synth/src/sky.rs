@@ -86,6 +86,10 @@ impl Tree for Listed<'_> {
 }
 
 /// A tree read off the filesystem, for the directory-backed queriers.
+///
+/// Anything it cannot read, other than a path that is not a file, panics
+/// with the path: a dump silently missing part of the tree would make a test
+/// wrong with nothing to say so.
 pub struct OnDisk(pub std::path::PathBuf);
 
 impl Tree for OnDisk {
@@ -97,16 +101,31 @@ impl Tree for OnDisk {
     }
 
     fn text(&self, path: &str) -> Option<String> {
-        std::fs::read_to_string(self.0.join(path)).ok()
+        use std::io::ErrorKind;
+        let full = self.0.join(path);
+        match std::fs::read_to_string(&full) {
+            Ok(text) => Some(text),
+            // A load can name a file that is not there.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::NotFound | ErrorKind::IsADirectory | ErrorKind::NotADirectory
+                ) =>
+            {
+                None
+            }
+            Err(e) => panic!("reading {}: {e}", full.display()),
+        }
     }
 }
 
 fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("listing {}: {e}", dir.display()));
+    for e in entries {
+        let p = e
+            .unwrap_or_else(|e| panic!("listing {}: {e}", dir.display()))
+            .path();
         if p.file_name().is_some_and(|n| n == ".git") {
             continue;
         }
@@ -412,6 +431,24 @@ mod tests {
         // `.bazelignore` reaches every package.
         let w = v.walk(&seeds([(".bazelignore", false)]));
         assert_eq!(w.packages, ["".to_string(), "a".to_string()].into());
+    }
+
+    /// The walk skips `.git`, and a path that names no file (missing, or a
+    /// directory) has no text rather than stopping the dump.
+    #[test]
+    fn a_tree_on_disk_lists_its_files_and_reads_only_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in [("BUILD", "x"), ("a/b.bzl", "y"), (".git/HEAD", "z")] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let tree = OnDisk(dir.path().to_path_buf());
+        assert_eq!(tree.paths(), ["BUILD", "a/b.bzl"]);
+        assert_eq!(tree.text("a/b.bzl").as_deref(), Some("y"));
+        assert_eq!(tree.text("a/missing.bzl"), None);
+        assert_eq!(tree.text("a"), None);
+        assert_eq!(tree.text("BUILD/under_a_file.bzl"), None);
     }
 
     /// A sibling that shares a prefix is not below a package, whichever side
