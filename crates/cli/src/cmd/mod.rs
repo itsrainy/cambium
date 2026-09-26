@@ -182,7 +182,7 @@ pub fn emit<T: serde::Serialize>(
 /// of the document (`affected`, whose human output is the label list).
 pub fn emit_json<T: serde::Serialize>(value: &T, fmt: crate::DataFormat) -> Result<()> {
     match fmt {
-        crate::DataFormat::Jsonl => println!("{}", result_event(value)?),
+        crate::DataFormat::Jsonl => println!("{}", tagged_event("result", value)?),
         crate::DataFormat::Json | crate::DataFormat::Text => {
             println!("{}", serde_json::to_string_pretty(value)?)
         }
@@ -190,15 +190,17 @@ pub fn emit_json<T: serde::Serialize>(value: &T, fmt: crate::DataFormat) -> Resu
     Ok(())
 }
 
-/// One `jsonl` result line: the document, with `"event": "result"` in front of
-/// its own fields.
-pub fn result_event<T: serde::Serialize>(value: &T) -> Result<String> {
-    let mut doc = serde_json::json!({"event": "result"});
+/// One `jsonl` line: `"event": kind` in front of the value's own fields, or
+/// in front of the value itself, under `kind`, when it is not an object. The
+/// framing a watcher parses, for the `result` at the end of a run and the
+/// `diagnostic`s streamed ahead of it alike.
+pub fn tagged_event<T: serde::Serialize>(kind: &str, value: &T) -> Result<String> {
+    let mut doc = serde_json::json!({ "event": kind });
     let map = doc.as_object_mut().expect("an object");
     match serde_json::to_value(value)? {
         serde_json::Value::Object(fields) => map.extend(fields),
         other => {
-            map.insert("result".into(), other);
+            map.insert(kind.into(), other);
         }
     }
     Ok(serde_json::to_string(&doc)?)
@@ -248,5 +250,19 @@ mod tests {
         assert_eq!(plural(0u32, "repository", "repositories"), "repositories");
         assert_eq!(format!("{} file{}", 2u64, plural_s(2u64)), "2 files");
         assert_eq!(format!("{} file{}", 1u64, plural_s(1u64)), "1 file");
+    }
+
+    /// A watcher reads the kind off `event` and the rest off the same
+    /// object, so a document's fields sit beside the tag rather than under it.
+    #[test]
+    fn an_event_line_is_its_kind_beside_the_value_s_own_fields() {
+        let read = |line: String| serde_json::from_str::<serde_json::Value>(&line).unwrap();
+        let v = read(tagged_event("result", &serde_json::json!({ "schema": 18 })).unwrap());
+        assert_eq!(v, serde_json::json!({ "event": "result", "schema": 18 }));
+        let v = read(tagged_event("result", &"a bare value").unwrap());
+        assert_eq!(
+            v,
+            serde_json::json!({ "event": "result", "result": "a bare value" })
+        );
     }
 }

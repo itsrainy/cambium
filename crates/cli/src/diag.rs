@@ -61,7 +61,7 @@ impl Renderer {
             Format::Jsonl => {
                 if !self.quiet {
                     for d in diagnostics {
-                        println!("{}", diagnostic_event(d)?);
+                        println!("{}", crate::cmd::tagged_event("diagnostic", d)?);
                     }
                 }
             }
@@ -77,17 +77,6 @@ impl Renderer {
             _ => render_human(d, self.color),
         }
     }
-}
-
-/// One streamed `jsonl` diagnostic line: the diagnostic's own fields behind
-/// `"event": "diagnostic"`.
-fn diagnostic_event(d: &Diagnostic) -> anyhow::Result<String> {
-    let mut doc = serde_json::json!({"event": "diagnostic"});
-    let map = doc.as_object_mut().expect("an object");
-    if let serde_json::Value::Object(fields) = serde_json::to_value(d)? {
-        map.extend(fields);
-    }
-    Ok(serde_json::to_string(&doc)?)
 }
 
 /// ANSI, when colour is on: bold yellow for a `warning[CODE]` header, bold red
