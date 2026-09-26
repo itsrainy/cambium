@@ -88,7 +88,7 @@ impl ToolLocations {
 /// at its place under the installation directory, which is explicit or the
 /// cache directory `fetch.sh` writes into.
 #[derive(Clone, Copy, Debug)]
-pub struct Install {
+pub(crate) struct Install {
     /// `~/.cache/cambium/<cache_name>`.
     pub cache_name: &'static str,
     /// The binary's path under the installation directory.
@@ -474,7 +474,7 @@ pub fn run_capture_accepting(
 }
 
 /// The last `n` lines of `s`.
-pub fn tail(s: &str, n: usize) -> String {
+pub(crate) fn tail(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
 }

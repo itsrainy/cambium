@@ -264,7 +264,7 @@ impl RebuildRows {
 }
 
 /// The tallies over two classified lists.
-pub fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
+pub(crate) fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
     let of = |rows: &[Row], class: RowClass| rows.iter().filter(|r| r.class == class).count();
     RowCounts {
         missing: missing.len(),
@@ -284,7 +284,7 @@ pub fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
 /// (`@`); a glob names its package; a `BZL_LOAD` of a main-repository label
 /// names the `.bzl` file. The ignore singleton, a tombstone and anything
 /// under another root name nothing.
-pub fn locate(name: &SkyName) -> (Option<String>, Option<String>) {
+pub(crate) fn locate(name: &SkyName) -> (Option<String>, Option<String>) {
     match name.kind {
         Kind::File | Kind::FileState | Kind::DirectoryListing | Kind::DirectoryListingState => {
             if name.root.is_empty() {
@@ -327,13 +327,13 @@ fn bzl_path(key: &str) -> Option<String> {
 
 /// Whether `p` is a file in the tree or a directory some file sits under.
 /// The empty path is the root package and always exists.
-pub fn exists(tree: &BTreeSet<String>, p: &str) -> bool {
+pub(crate) fn exists(tree: &BTreeSet<String>, p: &str) -> bool {
     tree.contains(p) || is_dir(tree, p)
 }
 
 /// Whether `p` is a directory in the tree: some file sits under it. The
 /// empty path is the root and always is.
-pub fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
+pub(crate) fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
     if p.is_empty() {
         return true;
     }
@@ -346,7 +346,7 @@ pub fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
 /// The package whose directory holds `p` in the tree: the nearest of `p`
 /// (when it is a directory) and its ancestors with a `BUILD` or
 /// `BUILD.bazel`, the root package included. `None` when none has one.
-pub fn enclosing_package(tree: &BTreeSet<String>, p: &str) -> Option<String> {
+pub(crate) fn enclosing_package(tree: &BTreeSet<String>, p: &str) -> Option<String> {
     let mut dir = p;
     loop {
         if ["BUILD", "BUILD.bazel"]

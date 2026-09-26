@@ -698,7 +698,7 @@ fn exists_at_head(workspace: &Path, path: &str) -> bool {
 }
 
 /// `//pkg:rel`, the source-file target a workspace-relative path names.
-pub fn source_label(package: &str, path: &str) -> String {
+pub(crate) fn source_label(package: &str, path: &str) -> String {
     let rel = match package.is_empty() {
         true => path,
         false => path
@@ -710,7 +710,7 @@ pub fn source_label(package: &str, path: &str) -> String {
 }
 
 /// The package half of `//pkg:name`, for the deleted-file containment check.
-pub fn package_of_label(label: &str) -> Option<&str> {
+pub(crate) fn package_of_label(label: &str) -> Option<&str> {
     label.strip_prefix("//")?.split_once(':').map(|(p, _)| p)
 }
 
@@ -880,7 +880,7 @@ pub const MAX_ROUTE_PROBES: usize = 200;
 /// How many roots the probe's `somepath` target set carries. The full oracle's
 /// root list can be thousands of labels; a probe is a hint about *why* a label
 /// is missing, so it takes the first batch's worth and no more.
-pub const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
+pub(crate) const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
 
 /// Splits the oracle's answer into the halves the verdict is made of.
 ///
@@ -948,7 +948,7 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// A deterministic sample of at most `k` labels, sorted so the JSON is stable.
-pub fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
+pub(crate) fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
     let mut all: Vec<String> = labels.to_vec();
     all.sort();
     all.dedup();
@@ -970,7 +970,7 @@ pub fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
 /// at most `max_bytes` of expression each. A single label longer than the byte
 /// cap still gets its own batch — dropping it would silently weaken the
 /// oracle, and Bazel will say if it is really too long.
-pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[String]> {
+pub(crate) fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[String]> {
     let max_labels = max_labels.max(1);
     let mut out = Vec::new();
     let mut start = 0;
@@ -997,7 +997,7 @@ pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[S
 /// query *words*, and the lexer ends a word at a `+`, so one unquoted
 /// `//bazel:libc++` makes the whole batch a syntax error rather than one
 /// missing label.
-pub fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
+pub(crate) fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
     format!(
         "set({})",
         labels
@@ -1021,7 +1021,7 @@ pub fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
 /// restriction is applied to the other tools' answers
 /// (`ToolRun::restrict_to_rules`), so all three are compared over one
 /// universe.
-pub fn rdeps_expression(roots: &[String]) -> String {
+pub(crate) fn rdeps_expression(roots: &[String]) -> String {
     format!("kind(rule, rdeps(//..., {}))", label_set(roots))
 }
 

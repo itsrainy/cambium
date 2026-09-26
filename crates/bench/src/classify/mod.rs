@@ -709,10 +709,7 @@ fn external_load_nondeterminism(label: &str, facts: &dyn Facts) -> bool {
 }
 
 mod bazel_facts;
-pub use bazel_facts::{
-    directory_contains_changed_path, explicit_dep_labels, label_to_path, names_external_input,
-    rule_without_visibility, substitute_paths, BazelFacts, PREFETCH_CHUNK,
-};
+pub use bazel_facts::BazelFacts;
 
 #[cfg(test)]
 mod tests {

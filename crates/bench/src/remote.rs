@@ -277,7 +277,7 @@ fn local_sums(dir: &Path) -> BTreeMap<String, String> {
 }
 
 /// `sha256sum` output, `<hash>  <path>` (or `<hash> *<path>`), as path to hash.
-pub fn parse_sums(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_sums(text: &str) -> BTreeMap<String, String> {
     text.lines()
         .filter_map(|l| {
             let (hash, path) = l.trim().split_once(char::is_whitespace)?;
@@ -291,7 +291,7 @@ pub fn parse_sums(text: &str) -> BTreeMap<String, String> {
 /// (`index-<pin>[-<bazel version>].bin` -> `paths-<pin>[-<version>].json`):
 /// the pin spelling carries the Bazel-version suffix, which is also the name
 /// `cambium-bench replay` looks the cache up under.
-pub fn paths_file_name(dir: &Path) -> Option<String> {
+pub(crate) fn paths_file_name(dir: &Path) -> Option<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
