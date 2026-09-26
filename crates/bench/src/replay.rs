@@ -1397,8 +1397,9 @@ pub fn diverge(recorded: &RecordedAnswer, replayed: &ReplayOutcome) -> Vec<Diver
 
 // ----------------------------------------------------------------- a whole run
 
-/// Every replay of one subject, which is both the `--all` report and the
-/// baseline a later `--all` is compared against.
+/// Every replay of one subject, which is both the `--all` report and, saved
+/// with `--save-baseline`, the `--baseline` file a later `--all` is compared
+/// against.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplayRun {
     pub schema: u32,

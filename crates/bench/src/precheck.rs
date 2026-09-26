@@ -69,8 +69,9 @@ pub struct ReplayReport {
     pub recorded: Vec<RecordedAnswer>,
     pub divergences: Vec<Divergence>,
     pub skipped: Vec<String>,
-    /// What the divergences are against: the baseline, the recorded run, or
-    /// nothing (an explicit `--paths` has nothing to be held against).
+    /// What the divergences are against: `baseline` (the `--baseline` file),
+    /// `the recorded run`, or `nothing` (an explicit `--paths` has nothing to
+    /// be held against).
     pub compared_against: &'static str,
     pub index: PathBuf,
     pub rederived: bool,
