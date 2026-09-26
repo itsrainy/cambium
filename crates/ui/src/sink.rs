@@ -330,7 +330,7 @@ pub struct Plain<W: Write = std::io::Stderr>(Text<W>);
 
 impl Plain<std::io::Stderr> {
     pub fn to_stderr(mode: OutputMode) -> Self {
-        Self(Text::new(std::io::stderr(), mode, false))
+        Self::to_writer(std::io::stderr(), mode)
     }
 }
 
@@ -355,10 +355,7 @@ pub struct Jsonl<W: Write = std::io::Stderr> {
 
 impl Jsonl<std::io::Stderr> {
     pub fn to_stderr() -> Self {
-        Self {
-            w: std::io::stderr(),
-            columns: Vec::new(),
-        }
+        Self::to_writer(std::io::stderr())
     }
 }
 
