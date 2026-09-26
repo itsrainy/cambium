@@ -101,8 +101,10 @@ hid four real xla misses this way (steps 41, 45, 193 and 195: the head
 index had tombstoned the file's package, the oracle answered 0 of 0, the
 step scored recall 1.0). A root is *blind* when Bazel skipped it for any
 reason but `no such target`, or when it is unresolved and a `BUILD` file on
-disk at head sits between its package and the file; the step record lists
-them in `oracle.blind_roots`. Applied to run F's xla record, the second
+disk at head sits between its package and the file in a directory the
+workspace's `.bazelrc` (or a `%workspace%/` file it imports) does not name
+in `--deleted_packages`; the step record lists them in
+`oracle.blind_roots`. Applied to run F's xla record, the second
 test alone marks steps 12, 41, 45, 174, 175, 193 and 195 blind, of the 37
 steps with an unresolved root.
 

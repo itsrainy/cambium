@@ -872,13 +872,14 @@ pub(crate) fn blind_roots(
     unresolved: &BTreeSet<String>,
     ws: &Path,
 ) -> Vec<String> {
+    let deleted = declared_deleted(ws);
     roots
         .iter()
         .filter(|r| {
             let why = skipped.get(*r);
             let package_failed = why.is_some_and(|w| !w.starts_with("no such target"));
             let unanswered = why.is_some() || unresolved.contains(*r);
-            package_failed || (unanswered && crosses_a_package(ws, r))
+            package_failed || (unanswered && crosses_a_package(ws, r, &deleted))
         })
         .cloned()
         .collect()
@@ -886,23 +887,84 @@ pub(crate) fn blind_roots(
 
 /// Whether a main-repository label `//pkg:a/b/c` names a file under a
 /// directory of `pkg` that is a package of its own at head (it has a
-/// `BUILD` or `BUILD.bazel` file on disk), so the label spells the file
-/// with the wrong package. An external label answers no.
-pub(crate) fn crosses_a_package(ws: &Path, label: &str) -> bool {
+/// `BUILD` or `BUILD.bazel` file on disk and is not in `deleted`, the
+/// workspace's `--deleted_packages`), so the label spells the file with the
+/// wrong package. An external label answers no.
+pub(crate) fn crosses_a_package(ws: &Path, label: &str, deleted: &BTreeSet<String>) -> bool {
     let Some((pkg, rel)) = label.strip_prefix("//").and_then(|l| l.split_once(':')) else {
         return false;
     };
     let mut dir = ws.join(pkg);
+    let mut name = pkg.to_string();
     let Some((dirs, _file)) = rel.rsplit_once('/') else {
         return false;
     };
     for seg in dirs.split('/') {
         dir.push(seg);
-        if dir.join("BUILD").is_file() || dir.join("BUILD.bazel").is_file() {
+        if !name.is_empty() {
+            name.push('/');
+        }
+        name.push_str(seg);
+        if (dir.join("BUILD").is_file() || dir.join("BUILD.bazel").is_file())
+            && !deleted.contains(&name)
+        {
             return true;
         }
     }
     false
+}
+
+/// Every package a `--deleted_packages` flag names in the workspace's
+/// `.bazelrc` or a `%workspace%/` file it imports, under any command or
+/// config.
+///
+/// A directory so named has a `BUILD` file on disk and is not a package, so
+/// a changed file under it resolves to the enclosing package and the oracle's
+/// empty answer for it is the true one (envoy's generated `repo.bazelrc`
+/// declares its `mobile/` test packages this way). Reading every command
+/// and config over-counts, which can only make a root not blind, the
+/// behaviour before blind roots existed.
+pub(crate) fn declared_deleted(ws: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![ws.join(".bazelrc")];
+    while let Some(path) = todo.pop() {
+        if !seen.insert(path.clone()) || seen.len() > 32 {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let mut words = line.split_whitespace().peekable();
+            match words.peek().copied() {
+                Some("import") | Some("try-import") => {
+                    words.next();
+                    if let Some(rel) = words.next().and_then(|w| w.strip_prefix("%workspace%/")) {
+                        todo.push(ws.join(rel));
+                    }
+                    continue;
+                }
+                Some(w) if w.starts_with('#') => continue,
+                _ => {}
+            }
+            while let Some(w) = words.next() {
+                let value = match w.strip_prefix("--deleted_packages") {
+                    Some(v) if v.starts_with('=') => Some(&v[1..]),
+                    Some("") => words.next(),
+                    _ => None,
+                };
+                for p in value.into_iter().flat_map(|v| v.split(',')) {
+                    let p = p.trim_matches(['"', '\'']).trim_start_matches("//");
+                    let p = p.strip_prefix("%workspace%/").unwrap_or(p);
+                    if !p.is_empty() {
+                        out.insert(p.trim_end_matches('/').to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The first marker read, taken before the oracle's own queries touch the
@@ -1430,10 +1492,51 @@ mod tests {
         std::fs::create_dir_all(ws.path().join("a/b/c")).unwrap();
         std::fs::write(ws.path().join("a/BUILD"), "").unwrap();
         std::fs::write(ws.path().join("a/b/c/BUILD.bazel"), "").unwrap();
-        assert!(crosses_a_package(ws.path(), "//a:b/c/x.cc"));
-        assert!(!crosses_a_package(ws.path(), "//a:b/x.cc"));
-        assert!(!crosses_a_package(ws.path(), "//a:x.cc"));
-        assert!(!crosses_a_package(ws.path(), "@r//a:b/c/x.cc"));
+        let none = BTreeSet::new();
+        assert!(crosses_a_package(ws.path(), "//a:b/c/x.cc", &none));
+        assert!(!crosses_a_package(ws.path(), "//a:b/x.cc", &none));
+        assert!(!crosses_a_package(ws.path(), "//a:x.cc", &none));
+        assert!(!crosses_a_package(ws.path(), "@r//a:b/c/x.cc", &none));
+        let deleted: BTreeSet<String> = ["a/b/c".to_string()].into_iter().collect();
+        assert!(!crosses_a_package(ws.path(), "//a:b/c/x.cc", &deleted));
+    }
+
+    /// A directory the workspace declares deleted has a `BUILD` file and is
+    /// not a package, so a root under it is not blind. envoy's shape: the
+    /// flag lives in a generated file the root `.bazelrc` try-imports.
+    #[test]
+    fn a_declared_deleted_directory_is_not_a_package_to_cross() {
+        let ws = tempfile::tempdir().unwrap();
+        for d in [
+            "mobile/test/common",
+            "mobile/test/common/integration",
+            "x/y",
+        ] {
+            std::fs::create_dir_all(ws.path().join(d)).unwrap();
+            std::fs::write(ws.path().join(d).join("BUILD"), "").unwrap();
+        }
+        std::fs::write(
+            ws.path().join(".bazelrc"),
+            "# --deleted_packages=commented/out\n\
+             build --jobs=4\n\
+             try-import %workspace%/repo.bazelrc\n\
+             try-import %workspace%/missing.bazelrc\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.path().join("repo.bazelrc"),
+            "common --deleted_packages=//mobile/test/common/integration,other/pkg\n\
+             query:ci --deleted_packages x/y\n",
+        )
+        .unwrap();
+        let deleted = declared_deleted(ws.path());
+        assert_eq!(
+            deleted.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["mobile/test/common/integration", "other/pkg", "x/y"]
+        );
+        let root = "//mobile/test/common:integration/client_test.cc".to_string();
+        let unresolved: BTreeSet<String> = [root.clone()].into_iter().collect();
+        assert!(blind_roots(&[root], &BTreeMap::new(), &unresolved, ws.path()).is_empty());
     }
 
     #[test]
