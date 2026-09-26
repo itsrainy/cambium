@@ -888,11 +888,8 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
     let Some(explanations) = &report.explanations else {
         return;
     };
-    let wanted: std::collections::HashSet<&str> = if tests_only {
-        report.tests.iter().map(|s| s.as_str()).collect()
-    } else {
-        report.affected.iter().map(|t| t.label.as_str()).collect()
-    };
+    // Only the labels the answer above listed get a why.
+    let wanted: std::collections::HashSet<&str> = labels(report, tests_only).into_iter().collect();
     eprintln!("\n--- why ---");
     for e in explanations {
         if !wanted.contains(e.target.as_str()) {
