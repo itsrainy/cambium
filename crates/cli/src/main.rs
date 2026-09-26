@@ -251,11 +251,8 @@ fn main() -> ExitCode {
         quiet: cli.quiet,
         color: cambium_ui::OutputMode::stderr_colour(cli.color.into()),
     };
-    let ui = cambium_ui::OutputMode::detect(
-        cli.quiet,
-        cli.format == Format::Jsonl,
-        cli.color.into(),
-    );
+    let ui =
+        cambium_ui::OutputMode::detect(cli.quiet, cli.format == Format::Jsonl, cli.color.into());
     // After the output mode, because the log lines go to the same stderr and
     // colour by the same rule: escape codes on a terminal, plain bytes in a
     // pipe or a CI log.
