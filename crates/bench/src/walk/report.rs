@@ -64,44 +64,24 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
     if s.oracle_partial_steps > 0 {
         let _ = writeln!(
             out,
-            "The oracle's answer was a lower bound on {} of {} steps: Bazel could not resolve {}{}, \
+            "The oracle's answer was a lower bound on {} of {} steps: Bazel could not resolve {}, \
              and under `--keep_going` every target that depends on an unresolvable one leaves the \
              `rdeps` universe, so recall is measured against what was left.",
             s.oracle_partial_steps,
             s.steps_with_oracle,
-            s.oracle_unresolved
-                .iter()
-                .take(8)
-                .map(|l| format!("`{l}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if s.oracle_unresolved.len() > 8 {
-                format!(" and {} more", s.oracle_unresolved.len() - 8)
-            } else {
-                String::new()
-            },
+            listed(&s.oracle_unresolved, 8, |l| format!("`{l}`")),
         );
     }
     if s.oracle_repository_steps > 0 {
         let _ = writeln!(
             out,
             "Repository-rule inputs rooted the oracle on {} of {} steps: Bazel's marker files \
-             named a changed path among the inputs of {}{}, and rooting the oracle at each of \
+             named a changed path among the inputs of {}, and rooting the oracle at each of \
              them as `@@R//...:*` reached {} main-repository rules that the changed paths' own \
              labels did not.",
             s.oracle_repository_steps,
             s.steps_with_oracle,
-            s.oracle_repositories
-                .iter()
-                .take(8)
-                .map(|l| format!("`@@{l}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if s.oracle_repositories.len() > 8 {
-                format!(" and {} more", s.oracle_repositories.len() - 8)
-            } else {
-                String::new()
-            },
+            listed(&s.oracle_repositories, 8, |l| format!("`@@{l}`")),
             s.oracle_repository_labels,
         );
     }
@@ -138,19 +118,9 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         if !o.rule_hash_mismatch.is_empty() {
             let _ = write!(
                 out,
-                " Rule hashes differ from the cold rebuild for {}: {}{}.",
+                " Rule hashes differ from the cold rebuild for {}: {}.",
                 o.rule_hash_mismatch.len(),
-                o.rule_hash_mismatch
-                    .iter()
-                    .take(6)
-                    .map(|l| format!("`{l}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                if o.rule_hash_mismatch.len() > 6 {
-                    format!(" and {} more", o.rule_hash_mismatch.len() - 6)
-                } else {
-                    String::new()
-                }
+                listed(&o.rule_hash_mismatch, 6, |l| format!("`{l}`")),
             );
         }
         let _ = writeln!(out);
@@ -232,6 +202,23 @@ fn render_coverage(out: &mut String, r: &WalkResult) {
 }
 
 /// `parent..head` -> `parent12..head12`.
+/// The first `n` of `items` through `fmt`, comma-separated, then ` and M
+/// more` when there were more than `n`.
+fn listed<'a, I>(items: I, n: usize, fmt: impl Fn(&str) -> String) -> String
+where
+    I: IntoIterator<Item = &'a String>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let items = items.into_iter();
+    let total = items.len();
+    let shown = items.take(n).map(|l| fmt(l)).collect::<Vec<_>>().join(", ");
+    if total > n {
+        format!("{shown} and {} more", total - n)
+    } else {
+        shown
+    }
+}
+
 fn short_key(key: &str) -> String {
     match key.split_once("..") {
         Some((a, b)) => format!("{}..{}", short(a, 12), short(b, 12)),
@@ -248,6 +235,16 @@ mod tests {
     use super::*;
     use crate::env::Environment;
     use crate::harness::Machine;
+
+    #[test]
+    fn a_long_list_shows_its_first_n_and_counts_the_rest() {
+        let v: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let tick = |l: &str| format!("`{l}`");
+        assert_eq!(listed(&v, 8, tick), "`a`, `b`, `c`");
+        assert_eq!(listed(&v, 3, tick), "`a`, `b`, `c`");
+        assert_eq!(listed(&v, 2, tick), "`a`, `b` and 1 more");
+        assert_eq!(listed(&Vec::new(), 2, tick), "");
+    }
 
     fn a_walk() -> WalkResult {
         let steps: Vec<Step> = vec![Step {
