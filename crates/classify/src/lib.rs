@@ -704,14 +704,13 @@ fn is_content_edit(status: Status) -> bool {
 mod tests {
     use super::*;
 
+    /// Rules shaped like a repository's configuration. The paths are among
+    /// the defaults; the globs are ones a repository configures itself (no
+    /// glob is on by default), `tools/toolchains/**` being the directory of
+    /// `.bzl` files `is_bzl_file`'s doc says one can configure back.
     fn matchers() -> Matchers {
         Matchers::compile(&Rules {
-            invalidator_paths: vec![
-                "MODULE.bazel".into(),
-                "WORKSPACE".into(),
-                ".bazelrc".into(),
-                "BUILD".into(),
-            ],
+            invalidator_paths: vec!["MODULE.bazel".into(), "WORKSPACE".into(), ".bazelrc".into()],
             invalidator_globs: vec!["tools/toolchains/**".into(), "third_party/**/*.bzl".into()],
             ignore_globs: vec!["**/*.md".into(), "docs/**".into()],
         })
