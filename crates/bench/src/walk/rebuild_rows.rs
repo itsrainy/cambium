@@ -136,7 +136,7 @@ pub struct RebuildRows {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RowCounts {
     pub missing: usize,
-    /// `created_in_window` plus `load_error`.
+    /// `created_in_window`, `load_error` and `boundary_probe`.
     pub missing_expected: usize,
     /// What the oracle's verdict counts.
     pub missing_unexplained: usize,

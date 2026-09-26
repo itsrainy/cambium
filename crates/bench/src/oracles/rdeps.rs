@@ -175,10 +175,11 @@
 //!
 //! ## The escape hatch
 //!
-//! `--oracle-sample N` caps how many source labels are queried, seeded and
-//! sorted so a failure reproduces from the run's seed. It exists for subjects
-//! whose change sets are enormous; `0`, the default, is the full oracle and is
-//! what every published number must come from.
+//! [`RdepsOracle::sample`] caps how many source labels are queried, seeded
+//! and sorted so a failure reproduces from the run's seed. It exists for
+//! subjects whose change sets are enormous; `0` is the full oracle and is what
+//! every recorded number must come from. The walk always passes `0`
+//! (`BazelChecks::oracle_k`); its `--oracle-sample` samples steps, not roots.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -885,7 +886,7 @@ pub const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
 ///
 /// The main repository is what recall is over, so `oracle_set`, `matched` and
 /// `missing` are all main-repo labels and `missing_external` is the rest.
-/// Nothing in Phase 5 changes this: `missing` is what fails a change set
+/// That split does not move: `missing` is what fails a change set
 /// (`RdepsResult::ok`), and `external_route` is a filter of `missing`, so it
 /// stays a subset of it however wide cambium's own vocabulary grows. A
 /// repository whose targets cambium does not reach shows up as a main-repo

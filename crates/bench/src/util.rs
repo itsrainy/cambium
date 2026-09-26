@@ -75,9 +75,10 @@ pub fn rfc3339(secs: u64) -> String {
 }
 
 /// An RFC 3339 timestamp back to seconds since the epoch, or `None` when it is
-/// not one. Only the shape [`rfc3339`] writes is accepted, plus an offset of
-/// `Z` or `+00:00`: the harness is the only writer, and guessing at a local
-/// time would make an elapsed reading silently hours wrong.
+/// not one. Only UTC is accepted: the shape [`rfc3339`] writes, with a `T` or
+/// a space between date and time and an offset of `Z`, `+00:00` or `+0000`.
+/// The harness is the only writer, and guessing at a local time would make an
+/// elapsed reading silently hours wrong.
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;

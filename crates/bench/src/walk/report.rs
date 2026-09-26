@@ -3,10 +3,9 @@
 //! explanation layer.
 //!
 //! Pure over [`WalkResult`], so the table a run prints is checked without a
-//! Bazel. The top line is the one an engine change reads first: pin, Bazel,
-//! index build, walk p50/p90, rebuild steps, worst recall, tightness p50, and
-//! the peers' wall on the sample. cambium is a tightness row like any peer;
-//! the oracle is what every row is measured against.
+//! Bazel. The cross-subject line an engine change reads first is not here but
+//! in [`crate::report::render_top_table`]. cambium is a tightness row like
+//! any peer; the oracle is what every row is measured against.
 
 use std::fmt::Write as _;
 

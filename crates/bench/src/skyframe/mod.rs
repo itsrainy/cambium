@@ -385,8 +385,9 @@ impl Strategy for CambiStrategy<'_> {
     }
 }
 
-/// Builds the strategy a name asks for. A prototype branch adds its arm here
-/// and nothing else in this file changes.
+/// The strategy names this build knows, for the error an unknown one gets. A
+/// prototype branch adds its name here and its arm to `runner::open`, and
+/// nothing else in this file changes.
 pub fn strategies() -> &'static [&'static str] {
     &["cambi"]
 }
