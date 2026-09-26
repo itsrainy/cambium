@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::event::{Cell, Column, Event, Level};
 use crate::mode::{Kind, OutputMode};
@@ -246,9 +246,9 @@ impl<W: Write> Text<W> {
 }
 
 /// How often the live line redraws itself while the run is busy elsewhere.
-const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+const TICK: Duration = Duration::from_millis(100);
 /// How often the ticker looks up to see whether the run is over.
-const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+const SLICE: Duration = Duration::from_millis(10);
 
 /// A terminal: one live bottom line, and a finished phase written back over
 /// its own start line as long as it has printed no rows.
@@ -273,6 +273,12 @@ impl Stream<std::io::Stderr> {
 
 impl<W: Write + Send + 'static> Stream<W> {
     pub fn to_writer(w: W, mode: OutputMode) -> Self {
+        Self::ticking_every(w, mode, TICK)
+    }
+
+    /// [`Stream::to_writer`] with the ticker's period as an argument, so a
+    /// test can watch the line turn without waiting on the real period.
+    fn ticking_every(w: W, mode: OutputMode, tick: Duration) -> Self {
         let text = Arc::new(Mutex::new(Text::new(w, mode, true)));
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
@@ -284,7 +290,7 @@ impl<W: Write + Send + 'static> Stream<W> {
                     while !stop.load(Ordering::Relaxed) {
                         // Slept in slices, so the end of a run waits for the
                         // thread to notice rather than for a whole tick.
-                        for _ in 0..(TICK.as_millis() / SLICE.as_millis()) {
+                        for _ in 0..(tick.as_millis() / SLICE.as_millis()).max(1) {
                             std::thread::sleep(SLICE);
                             if stop.load(Ordering::Relaxed) {
                                 return;
@@ -679,18 +685,30 @@ mod tests {
             .collect()
     }
 
+    /// Waits, up to a bound no loaded runner reaches, until `out` holds at
+    /// least `n` live-line frames.
+    fn wait_for_frames(out: &Arc<Mutex<Vec<u8>>>, n: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let frames = spinner_frames(&read(out));
+            if frames.len() >= n || Instant::now() > deadline {
+                return frames;
+            }
+            std::thread::sleep(SLICE);
+        }
+    }
+
     #[test]
     fn the_live_line_redraws_itself_while_the_run_says_nothing() {
         let out = buffer();
-        let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
+        let mut sink = Stream::ticking_every(Shared(out.clone()), mode(false), SLICE);
         sink.emit(Event::Current("bazel query //...".into()));
         // Nothing is emitted from here on: a long query is exactly the case
         // the spinner exists for.
-        std::thread::sleep(std::time::Duration::from_millis(1_300));
-        let frames = spinner_frames(&read(&out));
+        let frames = wait_for_frames(&out, 5);
         assert!(
             frames.len() >= 5,
-            "the line should have redrawn itself about a dozen times: {frames:?}"
+            "the line should have redrawn itself on its own: {frames:?}"
         );
         let distinct: std::collections::BTreeSet<char> =
             frames.iter().filter_map(|f| f.chars().next()).collect();
@@ -700,45 +718,65 @@ mod tests {
             "{:?}",
             frames.first()
         );
-        assert!(
-            frames.last().unwrap().ends_with("0:01"),
-            "the elapsed counts up: {:?}",
-            frames.last()
-        );
         // Done takes the line off the screen and stops the thread.
         sink.emit(Event::Done);
         let after = read(&out).len();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(SLICE * 10);
         assert_eq!(read(&out).len(), after, "the ticker stopped at Done");
+    }
+
+    /// The live line's text alone, with no ticker, so a test can move its
+    /// clock rather than wait on it.
+    fn live_text(out: &Arc<Mutex<Vec<u8>>>) -> Text<Shared> {
+        Text::new(Shared(out.clone()), mode(false), true)
+    }
+
+    /// Moves the current step's start `secs` into the past.
+    fn backdate(text: &mut Text<Shared>, secs: u64) {
+        text.current_since = text
+            .current_since
+            .checked_sub(Duration::from_secs(secs))
+            .expect("a monotonic clock older than the backdate");
+    }
+
+    #[test]
+    fn the_elapsed_counts_up_in_minutes_and_seconds() {
+        let out = buffer();
+        let mut text = live_text(&out);
+        text.emit(Event::Current("bazel query //...".into()));
+        backdate(&mut text, 61);
+        text.tick_line();
+        let frames = spinner_frames(&read(&out));
+        let last = frames.last().expect("a frame");
+        assert!(last.ends_with("1:01"), "{last}");
     }
 
     #[test]
     fn the_elapsed_is_this_step_s_own_not_the_run_s() {
         let out = buffer();
-        let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
-        sink.emit(Event::Current("first step".into()));
-        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        let mut text = live_text(&out);
+        text.emit(Event::Current("first step".into()));
+        backdate(&mut text, 5);
         // A new step resets the clock, so its line starts again at 0:00.
-        sink.emit(Event::Current("second step".into()));
+        text.emit(Event::Current("second step".into()));
         let frames = spinner_frames(&read(&out));
         let last = frames.last().expect("a frame").clone();
         assert!(last.contains("second step"), "{last}");
         assert!(last.ends_with("0:00"), "a new step starts at zero: {last}");
-        sink.emit(Event::Done);
     }
 
     #[test]
     fn dropping_a_stream_mid_run_leaves_no_line_behind_and_does_not_panic() {
         let out = buffer();
         {
-            let mut sink = Stream::to_writer(Shared(out.clone()), mode(false));
+            let mut sink = Stream::ticking_every(Shared(out.clone()), mode(false), SLICE);
             sink.emit(Event::Current("half way through".into()));
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            wait_for_frames(&out, 3);
         }
         let text = read(&out);
         assert!(text.ends_with("\r\x1b[2K"), "the line was erased: {text:?}");
         let before = text.len();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(SLICE * 10);
         assert_eq!(read(&out).len(), before, "the ticker stopped with the sink");
     }
 
