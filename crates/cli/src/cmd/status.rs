@@ -35,8 +35,25 @@ pub fn run(ctx: &Context) -> Result<u8> {
     Ok(crate::EXIT_OK)
 }
 
-/// The sections `docs/CLI.md` lists, in that order.
+/// The sections `docs/CLI.md` lists, in that order, a blank line apart.
 fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
+    print_workspace(p);
+    println!();
+    print_position(p);
+    println!();
+    print_index(p);
+    println!();
+    print_lineage(p);
+    println!();
+    print_store(p);
+    if !diagnostics.is_empty() {
+        println!();
+        print_warnings(diagnostics);
+    }
+}
+
+/// Where the workspace is, how Bazel will read it, and the configuration.
+fn print_workspace(p: &probe::Probes) {
     println!("Workspace");
     match &p.workspace.root {
         None => {
@@ -91,9 +108,10 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
         (None, Some(e)) => println!("  hash       unknown: {e}"),
         (None, None) => {}
     }
+}
 
-    // The line this verb exists for.
-    println!();
+/// Where HEAD is against the store: the line this verb exists for.
+fn print_position(p: &probe::Probes) {
     println!("Position");
     match &p.position {
         None => println!("  no git repository here, so there is no revision to place"),
@@ -121,8 +139,10 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
     if p.position.as_ref().is_some_and(|pos| pos.dirty) {
         println!("  the working tree has uncommitted changes, which a run indexes as they are");
     }
+}
 
-    println!();
+/// The index a run would load, when there is one.
+fn print_index(p: &probe::Probes) {
     println!("Index");
     match &p.index {
         None => println!("  none: the next run builds one with `bazel query //...`"),
@@ -143,23 +163,24 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
             println!("  format     version {}", i.format_version);
         }
     }
+}
 
-    println!();
+/// The lineage a run would splice onto, and the others the store holds.
+fn print_lineage(p: &probe::Probes) {
     println!("Lineage");
     match &p.lineage {
-        None | Some(probe::LineageProbe { current: None, .. }) => {
-            println!("  none yet: a cold build mints one")
-        }
-        Some(l) => {
-            println!(
-                "  current    {}",
-                &l.current.clone().unwrap_or_default()[..16]
-            );
-            if !l.others.is_empty() {
+        Some(probe::LineageProbe {
+            current: Some(current),
+            others,
+            conflicting,
+            ..
+        }) => {
+            println!("  current    {}", &current[..16]);
+            if !others.is_empty() {
                 println!(
                     "  others     {} in the store{}",
-                    l.others.len(),
-                    if l.conflicting.is_empty() {
+                    others.len(),
+                    if conflicting.is_empty() {
                         ""
                     } else {
                         ", and at least one was built with a different config hash"
@@ -167,9 +188,14 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
                 );
             }
         }
+        None | Some(probe::LineageProbe { current: None, .. }) => {
+            println!("  none yet: a cold build mints one")
+        }
     }
+}
 
-    println!();
+/// The configured store and whether it answered.
+fn print_store(p: &probe::Probes) {
     println!("Store");
     if !p.store.configured {
         println!("  none configured: every run builds its own index");
@@ -193,15 +219,15 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
             (None, _) => {}
         }
     }
+}
 
-    if !diagnostics.is_empty() {
-        println!();
-        println!("Warnings");
-        for d in diagnostics {
-            println!("  {} {}", d.code, d.message);
-            if let Some(h) = &d.help {
-                println!("    help: {h}");
-            }
+/// Whatever the probes raised, as they raised it.
+fn print_warnings(diagnostics: &[cambium_engine::Diagnostic]) {
+    println!("Warnings");
+    for d in diagnostics {
+        println!("  {} {}", d.code, d.message);
+        if let Some(h) = &d.help {
+            println!("    help: {h}");
         }
     }
 }
