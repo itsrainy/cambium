@@ -49,8 +49,10 @@ pub enum Status {
     Added,
     Modified,
     Deleted,
-    /// Mode or type change (symlink <-> file). Treated as a modification of the
-    /// content, which is the conservative reading.
+    /// The path changed type (file to symlink, or the reverse). Treated as a
+    /// modification of the content, which is the conservative reading. A
+    /// change of mode alone (the executable bit) is `Modified`, as git
+    /// reports it.
     TypeChanged,
 }
 
