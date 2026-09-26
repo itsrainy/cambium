@@ -177,8 +177,8 @@ impl cambium_index::FileText for SynthFiles<'_> {
             return Some(generated_bzl(b, g.bzl[b as usize].version));
         }
         let dir = path.strip_suffix("/BUILD.bazel").or_else(|| {
-            // The root package, and the `BUILD` spelling, neither of which the
-            // emitter writes.
+            // The root package's BUILD file has no `/` to strip. A `BUILD`
+            // spelling, which the emitter never writes, is not served.
             (path == "BUILD.bazel").then_some("")
         })?;
         let &pkg = g.pkg_by_path.get(dir)?;
