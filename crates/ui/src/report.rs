@@ -102,14 +102,7 @@ pub fn kv(pairs: &[Pair]) -> Vec<String> {
     pairs
         .iter()
         .map(|p| {
-            let line = format!(
-                "{:<kw$}  {:<vw$}  {}",
-                p.key,
-                p.value,
-                p.note,
-                kw = kw,
-                vw = vw
-            );
+            let line = format!("{:<kw$}  {:<vw$}  {}", p.key, p.value, p.note);
             line.trim_end().to_string()
         })
         .collect()

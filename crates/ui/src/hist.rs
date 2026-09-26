@@ -153,13 +153,7 @@ pub fn bars(counts: &[u64], labels: &[String], width: usize) -> Vec<String> {
         .enumerate()
         .map(|(i, &count)| {
             let label = labels.get(i).cloned().unwrap_or_default();
-            format!(
-                "  {:>lw$}  {} {}",
-                label,
-                bar(count, max, width),
-                count,
-                lw = lw
-            )
+            format!("  {label:>lw$}  {} {count}", bar(count, max, width))
         })
         .collect()
 }
