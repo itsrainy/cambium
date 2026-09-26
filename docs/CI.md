@@ -138,7 +138,7 @@ for try in 1 2 3; do
   cambi affected HEAD^1..HEAD --tests-only --no-full-build --format labels \
     > targets.txt || rc=$?
   [ "$rc" = 5 ] || break
-  sleep 20
+  [ "$try" = 3 ] || sleep 20
 done
 case $rc in
   0) if [ -s targets.txt ]; then bazel test --target_pattern_file=targets.txt
@@ -396,7 +396,7 @@ first parent of a merge commit, or the target branch's tip):
 # Pull request: test what BASE..HEAD affects. BASE is the commit the change lands on.
 for try in 1 2 3; do
   rc=0; cambi affected "$BASE..HEAD" --tests-only --no-full-build --format labels > targets.txt || rc=$?
-  [ "$rc" = 5 ] || break; sleep 20
+  [ "$rc" = 5 ] || break; [ "$try" = 3 ] || sleep 20
 done
 case $rc in
   0) [ ! -s targets.txt ] || exec bazel test --target_pattern_file=targets.txt ;;
