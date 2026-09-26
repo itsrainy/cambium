@@ -133,36 +133,29 @@ impl GraphSpec {
         self
     }
 
-    /// The size presets, smallest first.
-    pub const SIZES: &[&str] = &["tiny", "small", "medium", "large", "xl", "xxl"];
+    /// The size presets, smallest first, each with its target count and DAG
+    /// depth. Bigger repos are deeper (and, below, have more `.bzl` files).
+    const SIZES: &[(&str, u64, u32)] = &[
+        ("tiny", 200, 8),
+        ("small", 2_000, 8),
+        ("medium", 50_000, 12),
+        ("large", 500_000, 16),
+        ("xl", 2_000_000, 20),
+        ("xxl", 10_000_000, 20),
+    ];
 
-    /// The shape suffixes a size may carry, as in `large-hubby`.
-    pub const SHAPES: &[&str] = &["hubby", "deep", "flat", "wide-packages"];
-
-    /// Named presets: every [`Self::SIZES`] entry, optionally
-    /// suffixed with one of [`Self::SHAPES`]: `large-hubby`, `medium-deep`,
-    /// `small-flat`, `xl-wide-packages`.
+    /// Named presets: a size (`tiny` to `xxl`), optionally suffixed with a
+    /// shape: `large-hubby`, `medium-deep`, `small-flat`, `xl-wide-packages`.
     pub fn preset(name: &str) -> Option<GraphSpec> {
         let (size, shape) = match name.split_once('-') {
             Some((s, sh)) => (s, Some(sh)),
             None => (name, None),
         };
-        let mut spec = GraphSpec::default();
-        spec.targets = match size {
-            "tiny" => 200,
-            "small" => 2_000,
-            "medium" => 50_000,
-            "large" => 500_000,
-            "xl" => 2_000_000,
-            "xxl" => 10_000_000,
-            _ => return None,
-        };
-        // Bigger repos are deeper and have more .bzl files.
-        spec.layers = match size {
-            "tiny" | "small" => 8,
-            "medium" => 12,
-            "large" => 16,
-            _ => 20,
+        let &(_, targets, layers) = Self::SIZES.iter().find(|&&(n, ..)| n == size)?;
+        let mut spec = GraphSpec {
+            targets,
+            layers,
+            ..GraphSpec::default()
         };
         spec.bzl_files = (spec.targets / 200).clamp(4, 4_000) as u32;
         spec.hub_count = (spec.targets / 5_000).clamp(4, 200) as u32;
@@ -191,8 +184,8 @@ impl GraphSpec {
     }
 
     /// Every name [`Self::preset`] accepts: the sizes, then each size with each
-    /// shape. `presets()` derives the same list from `SIZES` and `SHAPES`, and
-    /// a test holds the two together.
+    /// shape. A test derives the same list from `SIZES` and the shapes, and
+    /// holds the two together.
     pub const PRESETS: &[&str] = &[
         "tiny",
         "small",
@@ -225,33 +218,33 @@ impl GraphSpec {
         "xxl-flat",
         "xxl-wide-packages",
     ];
-
-    /// [`Self::PRESETS`], derived rather than written out.
-    pub fn presets() -> Vec<String> {
-        let mut out: Vec<String> = Self::SIZES.iter().map(|s| s.to_string()).collect();
-        for size in Self::SIZES {
-            for shape in Self::SHAPES {
-                out.push(format!("{size}-{shape}"));
-            }
-        }
-        out
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The shape suffixes a size may carry, as in `large-hubby`.
+    const SHAPES: &[&str] = &["hubby", "deep", "flat", "wide-packages"];
+
+    /// [`GraphSpec::PRESETS`], derived rather than written out.
+    fn presets() -> Vec<String> {
+        let sizes = GraphSpec::SIZES.iter().map(|&(size, ..)| size);
+        let mut out: Vec<String> = sizes.clone().map(String::from).collect();
+        for size in sizes {
+            for shape in SHAPES {
+                out.push(format!("{size}-{shape}"));
+            }
+        }
+        out
+    }
+
     #[test]
     fn every_listed_preset_resolves_and_nothing_else_does() {
-        for p in GraphSpec::presets() {
+        for p in presets() {
             assert!(GraphSpec::preset(&p).is_some(), "{p}");
         }
-        assert_eq!(
-            GraphSpec::presets(),
-            GraphSpec::PRESETS,
-            "PRESETS is SIZES x SHAPES"
-        );
+        assert_eq!(presets(), GraphSpec::PRESETS, "PRESETS is SIZES x SHAPES");
         assert!(GraphSpec::preset("nope").is_none());
         assert!(GraphSpec::preset("medium-nope").is_none());
         assert!(GraphSpec::preset("-hubby").is_none());
