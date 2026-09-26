@@ -1891,6 +1891,10 @@ fn doctor_fails_a_bazel_that_cannot_read_the_workspace_mode() {
     let (code, stdout, stderr) = doctor(ws_only.path(), "9.2.0");
     assert_eq!(code, 1, "{stdout}{stderr}");
     assert!(stdout.contains("fail   bazel"), "{stdout}");
+    assert!(
+        stdout.contains("bazel 9.2.0"),
+        "the check names the version:\n{stdout}"
+    );
     assert!(stdout.contains("error[CAMBI-E015]"), "{stdout}");
     assert!(stdout.contains("WORKSPACE"), "{stdout}");
     assert!(

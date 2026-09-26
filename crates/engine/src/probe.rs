@@ -972,7 +972,14 @@ pub fn judge(p: &Probes) -> Vec<Check> {
     // ---- bazel ----
     if let Some(b) = &p.bazel {
         checks.push(match (b.diagnostics.first(), &b.version) {
-            (Some(d), _) => Check::from("bazel", b.binary.clone(), d.clone()),
+            // The version when there is one: "bazel 9.2.0" is what a
+            // version finding is about, and the binary is what a missing one
+            // is.
+            (Some(d), v) => Check::from(
+                "bazel",
+                v.clone().unwrap_or_else(|| b.binary.clone()),
+                d.clone(),
+            ),
             (None, Some(v)) => Check::ok("bazel", v.clone()),
             (None, None) => Check::ok("bazel", b.binary.clone()),
         });
