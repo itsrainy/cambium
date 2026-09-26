@@ -190,7 +190,7 @@ impl PackageSet {
         // the repository vendored inside it that `//...` really did stop at.
         self.containing_boundaries(path)
             .find(|b| !self.is_traversed(b))
-            .map(|b| &b[..b.len() - 1])
+            .map(dir_of)
     }
 
     /// The boundaries `path` lies under, outermost first, each with its
@@ -204,7 +204,7 @@ impl PackageSet {
         self.boundaries
             .iter()
             .map(String::as_str)
-            .filter(move |b| path.starts_with(b) || path == &b[..b.len() - 1])
+            .filter(move |b| path.starts_with(b) || path == dir_of(b))
     }
 
     /// Whether `b` (with its trailing `/`) is a boundary the cold universe
@@ -224,7 +224,7 @@ impl PackageSet {
     ) -> impl Iterator<Item = &'s str> + use<'s, 'p> {
         self.containing_boundaries(path)
             .filter(|b| self.is_traversed(b))
-            .map(|b| &b[..b.len() - 1])
+            .map(dir_of)
     }
 
     /// The nested repository `path` sits in, if any: the *outermost* one,
@@ -239,8 +239,8 @@ impl PackageSet {
     pub fn boundary_of(&self, path: &str) -> Option<&str> {
         self.boundaries
             .iter()
-            .find(|b| path.starts_with(b.as_str()) || path == &b[..b.len() - 1])
-            .map(|b| &b[..b.len() - 1])
+            .find(|b| path.starts_with(b.as_str()) || path == dir_of(b))
+            .map(|b| dir_of(b))
     }
 
     /// Live packages recorded in an index.
@@ -332,6 +332,14 @@ fn boundary_dirs(dirs: impl IntoIterator<Item = String>) -> Vec<String> {
     v.sort();
     v.dedup();
     v
+}
+
+/// A stored boundary without its trailing `/`, as callers name it.
+///
+/// Boundaries are stored with the slash so that a prefix test for
+/// `third_party/xla` cannot match a sibling such as `third_party/xla_other`.
+fn dir_of(boundary: &str) -> &str {
+    boundary.strip_suffix('/').unwrap_or(boundary)
 }
 
 /// True if the path is a package definition file.
