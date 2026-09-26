@@ -45,6 +45,14 @@ pub enum EngineError {
          disagree with a full build. Run `cambi index build` to mint a new lineage."
     )]
     ConfigHashMismatch { path: PathBuf },
+    /// A publish was handed an index whose `config_hash` is not this
+    /// workspace's. Every run here would skip it (`CAMBI-W003`), so storing
+    /// it only fills the store with something nothing here can use.
+    #[error(
+        "refusing to publish {path}: it was built with a different cambium.toml than this \
+         workspace's, so no run here could use it"
+    )]
+    PublishConfigMismatch { path: PathBuf },
     #[error("no index store is configured")]
     NoStore,
     #[error(
@@ -176,6 +184,13 @@ impl EngineError {
             EngineError::ConfigHashMismatch { .. } => (
                 Code::E007ConfigHashMismatch,
                 Some("mint a new lineage: `cambi index build --publish`"),
+            ),
+            EngineError::PublishConfigMismatch { .. } => (
+                Code::E007ConfigHashMismatch,
+                Some(
+                    "publish it from the workspace whose cambium.toml built it, or build one \
+                     under this configuration: `cambi index build --publish`",
+                ),
             ),
             EngineError::NoStore => (
                 Code::E008NoStore,

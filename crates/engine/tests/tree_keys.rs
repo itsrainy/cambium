@@ -69,6 +69,24 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Writes `idx` straight into the store, past the checks a publish
+    /// makes: how a store comes to hold another configuration's index (an
+    /// older `cambium.toml` published it), which no publish here would.
+    fn store_idx(&self, sha: &str, idx: IndexData) {
+        let path = self
+            .root
+            .join(format!("../{}-{sha}.bin", idx.header.lineage[0]));
+        format::write_index(&path, &idx).unwrap();
+        let cache = self.root.join("../cache");
+        cambium_engine::BaselineCache::new(
+            self.engine.store().unwrap(),
+            &cache,
+            idx.header.config_hash,
+        )
+        .publish(&path, &idx.header.lineage, sha, &self.engine.tree_of(sha))
+        .unwrap();
+    }
+
     fn keys(&self) -> Vec<String> {
         self.engine.store().unwrap().list().unwrap()
     }
@@ -221,7 +239,7 @@ fn a_stale_lineage_never_wins_over_a_compatible_one() {
     stale[0] ^= 0xff;
 
     // Lineage 0x01 sorts before 0x03 in the listing and is stale.
-    f.publish_idx(&a, index_in_lineage(&a, [1u8; 16], stale));
+    f.store_idx(&a, index_in_lineage(&a, [1u8; 16], stale));
     assert!(
         f.engine.fetch_baseline(&a).unwrap().is_none(),
         "a stale blob is not a baseline"

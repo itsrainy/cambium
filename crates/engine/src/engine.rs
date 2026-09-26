@@ -678,8 +678,15 @@ impl Engine {
                 lineage,
                 commit,
             } => {
+                let f = IndexFile::open(path)?;
+                // An index built under another configuration is one every
+                // run here skips (`CAMBI-W003`); no policy makes it usable.
+                if f.view().config_hash != self.cfg.hash() {
+                    return Err(EngineError::PublishConfigMismatch {
+                        path: path.to_path_buf(),
+                    });
+                }
                 if !policy.allow_partial {
-                    let f = IndexFile::open(path)?;
                     let load = crate::inspect::PartialLoad::from(f.view());
                     if load.partial {
                         use crate::config::PartialVerdict;
@@ -712,6 +719,7 @@ impl Engine {
                         }
                     }
                 }
+                drop(f);
                 cache.publish(path, lineage, commit, &self.tree_of(commit))
             }
         }

@@ -1815,3 +1815,45 @@ fn a_bazel_that_cannot_be_started_is_e015_not_e004() {
     assert!(stderr.contains("--bazel-binary"), "{stderr}");
     assert!(!stderr.contains("pass -C"), "{stderr}");
 }
+
+/// `index publish` refuses an index built under another `cambium.toml`: a
+/// run here skips such an index with `CAMBI-W003`, so publishing one only
+/// fills the store with something nothing here can use (another
+/// repository's index, left at a shared path). Refused before anything is
+/// written, under the code that means "built with a different
+/// cambium.toml".
+#[test]
+fn index_publish_refuses_an_index_built_under_another_configuration() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let file = f.cache.join("published.cmbx");
+    move_the_configuration(&f.ws);
+
+    let (code, stdout, stderr) = run(&["-C", ws, "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E007]"), "{stderr}");
+    assert!(stderr.contains("refusing to publish"), "{stderr}");
+    assert!(stderr.contains("cambi index build --publish"), "{stderr}");
+    let (_, listing, _) = run(&["-C", ws, "index", "list"]);
+    assert_eq!(
+        listing
+            .lines()
+            .filter(|l| l.starts_with("indexes/"))
+            .count(),
+        1,
+        "nothing new reached the store: {listing}"
+    );
+
+    // `--allow-partial` is about load errors, not about whose index it is.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "index",
+        "publish",
+        "--allow-partial",
+        file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("CAMBI-E007"), "{stderr}");
+}
