@@ -576,8 +576,12 @@ pub fn dirty_set(
             continue;
         }
         match classify(&c.path, packages, m) {
-            Classification::Invalidator => return DirtySet::invalidated_by(&c.path),
-            Classification::Build(_) => unreachable!("handled in pass one"),
+            // Pass one returned on the first invalidator, with the same
+            // matchers over the same paths, and took every main-repo BUILD
+            // file.
+            Classification::Invalidator | Classification::Build(_) => {
+                unreachable!("handled in pass one")
+            }
             // A `.bzl` is a Starlark input *and* an ordinary file in its
             // package. `filegroup(name = "srcs", srcs = glob(["**"]))` and the
             // hand-written `bzl_srcs` / `embedded_tools` lists `bazel/bazel`
