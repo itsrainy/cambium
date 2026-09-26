@@ -472,40 +472,10 @@ impl RdepsOracle {
     pub fn run(&self, bazel: &Bazel, inputs: &OracleInputs<'_>) -> Result<RdepsResult> {
         let started = std::time::Instant::now();
         let mut result = RdepsResult::default();
-        let packages = PackageSet::from_index(inputs.head);
         let ws = bazel.workspace();
 
-        let mut deleted: Vec<&String> = Vec::new();
-        let mut roots: Vec<String> = Vec::new();
-        for path in inputs.changed {
-            if !exists_at_head(ws, path) {
-                deleted.push(path);
-                continue;
-            }
-            // Every label the path has: its main-repo one, and the one it
-            // has inside an in-tree repository whose packages the index
-            // holds. A `.proto` under envoy's `api/` has no main-repo owner
-            // (`//...` stops at the boundary) and only the second, and an
-            // oracle rooted at main-repo labels alone never asked Bazel what
-            // it reaches: recall read 1.0 on every such step while the
-            // answer under test could have missed all of them.
-            let mut found = false;
-            if let Some(pkg) = packages.owner_of(path) {
-                roots.push(source_label(pkg, path));
-                found = true;
-            }
-            for label in cambium_engine::in_tree_labels(inputs.head, &packages, path) {
-                roots.push(label);
-                found = true;
-            }
-            if !found {
-                result.unowned_paths += 1;
-            }
-        }
-        roots.sort();
-        roots.dedup();
-        let all = roots.len();
-        if self.sample > 0 && all > self.sample {
+        let (mut roots, deleted) = roots_of(inputs, ws, &mut result);
+        if self.sample > 0 && roots.len() > self.sample {
             roots = sample(&roots, self.sample, self.seed);
             result.sampled = true;
         }
@@ -513,10 +483,15 @@ impl RdepsOracle {
 
         // The first marker read: before any query of ours has touched the
         // server, so base's inputs where the last check was at base.
-        let read_at = std::time::Instant::now();
-        let before = inputs.output_base.map(|ob| Markers::read(ob, ws));
-        let markers_first = before.as_ref().map_or(0, |m| m.by_repo.len());
-        let mut read_ms = read_at.elapsed().as_millis() as u64;
+        let first = inputs.output_base.map(|output_base| {
+            let read_at = std::time::Instant::now();
+            let markers = Markers::read(output_base, ws);
+            FirstRead {
+                output_base,
+                markers,
+                read_ms: read_at.elapsed().as_millis() as u64,
+            }
+        });
 
         let mut answer = BTreeSet::new();
         let mut unresolved: BTreeSet<String> = BTreeSet::new();
@@ -524,69 +499,21 @@ impl RdepsOracle {
             self.run_batch(bazel, batch, &mut answer, &mut unresolved, &mut result);
         }
 
-        // The second read, after a universe that checked every repository
-        // `//...` reaches at head; then the repository patterns.
-        let mut own: Vec<String> = Vec::new();
-        let mut repo_only: BTreeSet<String> = BTreeSet::new();
-        if let (Some(before), Some(ob)) = (before, inputs.output_base) {
-            let read_at = std::time::Instant::now();
-            // With no changed path's label to ask about, no query has run
-            // yet, the markers are as the first read found them, and a
-            // second read would only repeat it.
-            let (markers, markers_second) = match result.batches {
-                0 => (before, None),
-                _ => {
-                    let after = Markers::read(ob, ws);
-                    let n = after.by_repo.len();
-                    (before.union(after), Some(n))
-                }
-            };
-            let repos = repo_inputs::dirty(
-                &markers,
-                &Changes {
-                    changed: inputs.changed,
-                    added_or_deleted: inputs.added_or_deleted,
-                },
-                ws,
-            );
-            read_ms += read_at.elapsed().as_millis() as u64;
-            let patterns: Vec<String> = repos
-                .iter()
-                .map(|r| repo_inputs::root_pattern(&r.name))
-                .collect();
-            let query_at = std::time::Instant::now();
-            let mut from_repos = BTreeSet::new();
-            for batch in batches(&patterns, self.max_labels, self.max_expr_bytes) {
-                self.run_batch(bazel, batch, &mut from_repos, &mut unresolved, &mut result);
+        let (own, repo_only) = match first {
+            Some(first) => {
+                let half = self.repository_half(
+                    bazel,
+                    inputs,
+                    first,
+                    &mut answer,
+                    &mut unresolved,
+                    &mut result,
+                );
+                result.repository_inputs = Some(half.roots);
+                (half.own, half.repo_only)
             }
-            let query_ms = query_at.elapsed().as_millis() as u64;
-            let failed: Vec<String> = patterns
-                .iter()
-                .filter(|p| result.skipped_roots.contains(p))
-                .cloned()
-                .collect();
-            repo_only = from_repos
-                .iter()
-                .filter(|l| !is_external(l) && !answer.contains(*l))
-                .cloned()
-                .collect();
-            let labels_added = repo_only.len();
-            own = repos.iter().map(|r| r.name.clone()).collect();
-            answer.extend(from_repos);
-            result.repository_inputs = Some(RepositoryRoots {
-                markers: markers.by_repo.len(),
-                markers_first,
-                markers_second,
-                unreadable: markers.unreadable.into_iter().collect(),
-                repositories: repos,
-                roots: patterns,
-                failed,
-                labels_added,
-                own_labels: 0,
-                read_ms,
-                query_ms,
-            });
-        }
+            None => (Vec::new(), BTreeSet::new()),
+        };
 
         partition(answer, inputs.cambium, &mut result);
         // A rooted repository's own targets are roots, not targets that
@@ -634,6 +561,83 @@ impl RdepsOracle {
         }
         result.wall_ms = started.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// The repository-input half: a second marker read, after a universe
+    /// that checked every repository `//...` reaches at head, then one
+    /// `rdeps` root per repository whose recorded inputs a changed path
+    /// touched. What those roots reach joins `answer`.
+    fn repository_half(
+        &self,
+        bazel: &Bazel,
+        inputs: &OracleInputs<'_>,
+        first: FirstRead<'_>,
+        answer: &mut BTreeSet<String>,
+        unresolved: &mut BTreeSet<String>,
+        result: &mut RdepsResult,
+    ) -> RepositoryHalf {
+        let ws = bazel.workspace();
+        let markers_first = first.markers.by_repo.len();
+        let read_at = std::time::Instant::now();
+        // With no changed path's label to ask about, no query has run yet,
+        // the markers are as the first read found them, and a second read
+        // would only repeat it.
+        let (markers, markers_second) = match result.batches {
+            0 => (first.markers, None),
+            _ => {
+                let after = Markers::read(first.output_base, ws);
+                let n = after.by_repo.len();
+                (first.markers.union(after), Some(n))
+            }
+        };
+        let repos = repo_inputs::dirty(
+            &markers,
+            &Changes {
+                changed: inputs.changed,
+                added_or_deleted: inputs.added_or_deleted,
+            },
+            ws,
+        );
+        let read_ms = first.read_ms + read_at.elapsed().as_millis() as u64;
+        let patterns: Vec<String> = repos
+            .iter()
+            .map(|r| repo_inputs::root_pattern(&r.name))
+            .collect();
+        let query_at = std::time::Instant::now();
+        let mut from_repos = BTreeSet::new();
+        for batch in batches(&patterns, self.max_labels, self.max_expr_bytes) {
+            self.run_batch(bazel, batch, &mut from_repos, unresolved, result);
+        }
+        let query_ms = query_at.elapsed().as_millis() as u64;
+        let failed: Vec<String> = patterns
+            .iter()
+            .filter(|p| result.skipped_roots.contains(p))
+            .cloned()
+            .collect();
+        let repo_only: BTreeSet<String> = from_repos
+            .iter()
+            .filter(|l| !is_external(l) && !answer.contains(*l))
+            .cloned()
+            .collect();
+        let own = repos.iter().map(|r| r.name.clone()).collect();
+        answer.extend(from_repos);
+        RepositoryHalf {
+            roots: RepositoryRoots {
+                markers: markers.by_repo.len(),
+                markers_first,
+                markers_second,
+                unreadable: markers.unreadable.into_iter().collect(),
+                repositories: repos,
+                roots: patterns,
+                failed,
+                labels_added: repo_only.len(),
+                own_labels: 0,
+                read_ms,
+                query_ms,
+            },
+            repo_only,
+            own,
+        }
     }
 
     fn run_batch(
@@ -779,6 +783,64 @@ fn deleted_consumers(
 ///
 /// The condition on the package-spelling escape hatch: only a rule that no
 /// longer exists may be credited to its package rather than to itself.
+/// The oracle's roots for the changed paths, sorted and deduplicated, and
+/// the paths that no longer exist at head (the deleted half's input).
+///
+/// A path's roots are every label it has: its main-repo one, and the one it
+/// has inside an in-tree repository whose packages the index holds. A
+/// `.proto` under envoy's `api/` has no main-repo owner (`//...` stops at the
+/// boundary) and only the second, and an oracle rooted at main-repo labels
+/// alone never asked Bazel what it reaches: recall read 1.0 on every such
+/// step while the answer under test could have missed all of them. A path
+/// with neither is counted in [`RdepsResult::unowned_paths`].
+fn roots_of<'a>(
+    inputs: &OracleInputs<'a>,
+    ws: &Path,
+    result: &mut RdepsResult,
+) -> (Vec<String>, Vec<&'a String>) {
+    let packages = PackageSet::from_index(inputs.head);
+    let mut deleted: Vec<&String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for path in inputs.changed {
+        if !exists_at_head(ws, path) {
+            deleted.push(path);
+            continue;
+        }
+        let mut found = false;
+        if let Some(pkg) = packages.owner_of(path) {
+            roots.push(source_label(pkg, path));
+            found = true;
+        }
+        for label in cambium_engine::in_tree_labels(inputs.head, &packages, path) {
+            roots.push(label);
+            found = true;
+        }
+        if !found {
+            result.unowned_paths += 1;
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    (roots, deleted)
+}
+
+/// The first marker read, taken before the oracle's own queries touch the
+/// server.
+struct FirstRead<'a> {
+    output_base: &'a Path,
+    markers: Markers,
+    read_ms: u64,
+}
+
+/// What [`RdepsOracle::repository_half`] found: the record, the
+/// main-repository rules only its roots reached, and the dirty repositories
+/// by name.
+struct RepositoryHalf {
+    roots: RepositoryRoots,
+    repo_only: BTreeSet<String>,
+    own: Vec<String>,
+}
+
 fn gone_at_head(head: IndexRef<'_>, label: &str) -> bool {
     match head.id_of(label) {
         Some(id) => head.is_tombstone(id),
