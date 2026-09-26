@@ -844,10 +844,48 @@ mod tests {
         run_with(packages(), &matchers(), &NoConsumers, &changes).0
     }
 
+    /// The contract `DirtySet::dirty`'s doc states: the classifier names no
+    /// dirty package, whatever the diff. Which packages moved is the loading
+    /// layer's answer.
+    #[test]
+    fn dirty_set_names_no_dirty_package() {
+        let p = PackageSet::new(
+            ["", "lib", "lib/core", "third_party/tsl/tsl/platform"].map(String::from),
+        )
+        .with_boundaries(["third_party/tsl".to_string(), "third_party/xla".to_string()])
+        .with_traversed(["third_party/tsl".to_string()]);
+        let (d, _) = run_with(
+            p,
+            &matchers(),
+            &NoConsumers,
+            &[
+                Change::new(Status::Added, "lib/core/sub/BUILD"),
+                Change::new(Status::Added, "lib/core/sub/x.cc"),
+                Change::new(Status::Deleted, "lib/BUILD"),
+                Change::new(Status::Modified, "lib/core/BUILD.bazel"),
+                Change::new(Status::Modified, "lib/core/a.cc"),
+                Change::new(Status::Modified, "lib/core/rules.bzl"),
+                Change::new(Status::Modified, "docs/notes.md"),
+                Change::new(Status::Modified, "third_party/xla/a.cc"),
+                Change::new(Status::Modified, "third_party/tsl/tsl/platform/x.cc"),
+            ],
+        );
+        assert!(!d.global);
+        // Every other field heard from this diff, so the empty one is the
+        // classifier's choice rather than a diff that reached nothing.
+        assert!(
+            !d.deleted_packages.is_empty()
+                && !d.direct_files.is_empty()
+                && !d.nested.is_empty()
+                && d.ignored > 0,
+            "{d:?}"
+        );
+        assert!(d.dirty.is_empty(), "{:?}", d.dirty);
+    }
+
     #[test]
     fn modified_source_marks_the_file_direct() {
         let d = run(vec![Change::new(Status::Modified, "lib/core/a.cc")]);
-        assert!(d.dirty.is_empty());
         assert_eq!(d.direct_files.iter().next().unwrap(), "lib/core/a.cc");
     }
 
@@ -857,14 +895,12 @@ mod tests {
     #[test]
     fn an_added_source_names_no_package_and_no_file() {
         let d = run(vec![Change::new(Status::Added, "lib/core/new.cc")]);
-        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
 
     #[test]
     fn a_modified_build_file_is_also_a_changed_source_file() {
         let d = run(vec![Change::new(Status::Modified, "lib/core/BUILD.bazel")]);
-        assert!(d.dirty.is_empty(), "the layer names the dirty package");
         assert!(
             d.direct_files.contains("lib/core/BUILD.bazel"),
             "a BUILD file is also a source file: a glob(['**']) filegroup consumes it"
@@ -881,13 +917,11 @@ mod tests {
             d.direct_files.contains("lib/core/rules.bzl"),
             "a .bzl consumed as a source must reach its consumers"
         );
-        assert!(d.dirty.is_empty());
     }
 
     #[test]
     fn an_added_bzl_names_no_package() {
         let d = run(vec![Change::new(Status::Added, "lib/core/new.bzl")]);
-        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
 
@@ -902,7 +936,6 @@ mod tests {
             &[Change::new(Status::Modified, "vendor/x.bzl")],
         );
         assert!(d.direct_files.is_empty());
-        assert!(d.dirty.is_empty());
     }
 
     #[test]
@@ -928,8 +961,8 @@ mod tests {
     /// `PACKAGE:lib/core -> PACKAGE_LOOKUP:lib/core/sub` edge is what says the
     /// parent moved, and the engine walks it.
     #[test]
-    fn a_new_package_enters_the_layout_and_dirties_nothing() {
-        let (d, p) = run_with(
+    fn a_new_package_enters_the_layout() {
+        let (_, p) = run_with(
             packages(),
             &matchers(),
             &NoConsumers,
@@ -938,7 +971,6 @@ mod tests {
                 Change::new(Status::Added, "lib/core/sub/x.cc"),
             ],
         );
-        assert!(d.dirty.is_empty(), "{:?}", d.dirty);
         assert!(p.contains("lib/core/sub"));
         assert_eq!(p.owner_of("lib/core/sub/x.cc"), Some("lib/core/sub"));
     }
@@ -949,7 +981,6 @@ mod tests {
     #[test]
     fn a_deleted_build_file_names_the_package_it_deleted() {
         let d = run(vec![Change::new(Status::Deleted, "lib/core/BUILD.bazel")]);
-        assert!(d.dirty.is_empty());
         assert_eq!(
             d.deleted_packages.iter().cloned().collect::<Vec<_>>(),
             vec!["lib/core"]
@@ -1005,7 +1036,6 @@ mod tests {
             .collect();
         let d = run(changes);
         assert!(!d.global);
-        assert_eq!(d.dirty.len(), 0, "sources do not re-query their package");
         assert_eq!(d.direct_files.len(), 10_000);
     }
 
@@ -1018,7 +1048,6 @@ mod tests {
             &[Change::new(Status::Modified, "README.md")],
         );
         assert!(!d.global);
-        assert!(d.dirty.is_empty());
         assert_eq!(d.ignored, 1);
     }
 
@@ -1036,7 +1065,6 @@ mod tests {
         );
         assert!(d.direct_files.contains("CHANGELOG.md"));
         assert_eq!(d.ignored, 0);
-        assert!(d.dirty.is_empty());
     }
 
     /// The case the ignore glob exists for: nothing consumes the file, so the
@@ -1050,7 +1078,6 @@ mod tests {
             &[Change::new(Status::Modified, "CHANGELOG.md")],
         );
         assert!(d.direct_files.is_empty());
-        assert!(d.dirty.is_empty());
         assert_eq!(d.ignored, 1);
     }
 
@@ -1065,7 +1092,6 @@ mod tests {
             &NoConsumers,
             &[Change::new(Status::Added, "docs/new.md")],
         );
-        assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
     }
     /// The xla shape: a `REPO.bazel` directory Bazel 8.7 walked into anyway.
@@ -1255,7 +1281,6 @@ mod tests {
                 Change::new(Status::Modified, "third_party/xla/service/a.cc"),
             ],
         );
-        assert!(d.dirty.is_empty(), "{:?}", d.dirty);
         assert!(d.deleted_packages.is_empty());
         assert!(d.direct_files.is_empty());
         assert!(!p.contains("third_party/xla/service"));
