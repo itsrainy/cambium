@@ -264,6 +264,7 @@ mod tests {
         assert_eq!(short("0123456789abcdef", 7), "0123456");
         assert_eq!(short("abc", 12), "abc");
         assert_eq!(short("", 7), "");
+        assert_eq!(short("äöü-rev", 3), "äöü", "the width counts characters");
     }
 
     #[test]
