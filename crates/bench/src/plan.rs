@@ -6,8 +6,8 @@
 //! and calls `run`. Nothing else knows the flags a `walk` step takes, so the
 //! three cannot drift.
 //!
-//! Every step is a child `cambium-bench` process — the same one a person
-//! would type — so a step that fails leaves its result files and its
+//! Every step is a child `cambium-bench` process (the same one a person
+//! would type) so a step that fails leaves its result files and its
 //! progress file exactly as an interactive run would, and the next step
 //! resumes from them.
 
@@ -334,7 +334,7 @@ impl Invocation {
 /// The steps of a plan, handed out one at a time, with the rule that a failed
 /// gating step (a fetch, a build) skips the rest of that subject.
 ///
-/// Both drivers — the launcher's screen and `cambium-bench run` — pull from
+/// Both drivers (the launcher's screen and `cambium-bench run`) pull from
 /// one of these, so the skip rule is written once.
 #[derive(Debug)]
 pub struct Queue {
@@ -430,7 +430,7 @@ fn clock() -> String {
 /// the tree at `sha`.
 ///
 /// Twice a run went on for hours with a binary that was not what the log said
-/// it was — a resumed result file, then a stale build — so the driver script
+/// it was (a resumed result file, then a stale build) so the driver script
 /// compared shas; this is that check, on both the product under measurement
 /// and the harness itself.
 pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {

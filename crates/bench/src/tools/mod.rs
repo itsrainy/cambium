@@ -2,9 +2,9 @@
 //!
 //! The comparison is not specific to bazel-diff. It asks: given a
 //! `(base, head)` change set, which targets does *tool X* say are affected, and how
-//! long did it take to say it? Anything that can answer that — bazel-diff's
+//! long did it take to say it? Anything that can answer that (bazel-diff's
 //! Rust binary, its Kotlin jar, Uber's Tango, bazel-contrib's
-//! target-determinator, a shell script — plugs in here
+//! target-determinator, a shell script) plugs in here
 //! by implementing [`Tool`], and [`crate::walk`] scores whatever it is
 //! handed against the `rdeps` oracle, as it scores cambium, without knowing
 //! which tool it is talking to.
@@ -43,8 +43,8 @@ pub mod target_determinator;
 /// Where the peer tools are, as the command line said.
 ///
 /// Every field is "nothing was said", and the binary fills them from its
-/// flags — each with the environment variable of the same meaning as a
-/// fallback — so the library reads no environment on a workload's behalf.
+/// flags (each with the environment variable of the same meaning as a
+/// fallback) so the library reads no environment on a workload's behalf.
 /// [`ToolLocations::from_env`] is the one place it can, for a caller with no
 /// command line (the real-tool tests).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -161,8 +161,8 @@ impl Install {
 /// The tool names a `--tools` list asks for, before any is looked for on
 /// disk.
 ///
-/// The list is exact when given; otherwise the default is two peers — a
-/// bazel-diff and Tango — because a comparison against one tool only tells
+/// The list is exact when given; otherwise the default is two peers (a
+/// bazel-diff and Tango) because a comparison against one tool only tells
 /// you which of the two disagrees with cambium, not which of the three is the
 /// odd one out. target-determinator is the third peer and is named
 /// explicitly rather than run by default: a published run is already eight
@@ -252,7 +252,7 @@ impl ToolRun {
     ///
     /// cambium's walk emits `NodeKind::Rule` nodes only (see
     /// `cambium_index::walk`), so a tool's source-file rows would show up
-    /// as `cambium_missing` — a *failure* — for a difference that is purely
+    /// as `cambium_missing` (a *failure*) for a difference that is purely
     /// one of vocabulary. A label the index does not know at all is kept: that
     /// is a real disagreement (an external label, or something cambium never
     /// indexed) and the classifier should see it.
@@ -267,8 +267,8 @@ impl ToolRun {
 /// One label, in the spelling every tool and cambium can be compared in.
 ///
 /// Three tools print the same target three ways. Bazel's query proto under
-/// bzlmod uses *canonical* repository names — `@@rules_cc+//:x`, or
-/// `@@rules_cc~//:x` on Bazel 7 — while Tango prints whatever the proto said
+/// bzlmod uses *canonical* repository names (`@@rules_cc+//:x`, or
+/// `@@rules_cc~//:x` on Bazel 7) while Tango prints whatever the proto said
 /// and bazel-diff prints the apparent name `@rules_cc//:x`. Left alone, every
 /// external label in the run would appear on both sides of the symmetric
 /// difference at once, drowning the classes that matter. So each tool runs
@@ -338,15 +338,15 @@ impl RunContext {
     ///
     /// An output base is only safe to share between invocations that run in
     /// the same workspace directory. Repository rules may write absolute paths
-    /// into the external tree — envoy's `envoy_api` repo symlinks every entry
-    /// of `api/` into the workspace it was fetched from — and the fetch marker
+    /// into the external tree (envoy's `envoy_api` repo symlinks every entry
+    /// of `api/` into the workspace it was fetched from) and the fetch marker
     /// does not mention the workspace, so Bazel never refetches. Point a
     /// second workspace (a tool's base worktree, tango's own scratch
     /// checkouts) at the same output base and it inherits the *first*
     /// workspace's symlinks; delete that first workspace and every one of them
     /// dangles. That is how a benchmark run ended with
     /// `Error computing the main repository mapping: ... '@@envoy_api//bazel'
-    /// does not have [a package]` on every subsequent query — a hard exit 1,
+    /// does not have [a package]` on every subsequent query: a hard exit 1,
     /// raised before the query is evaluated, so `--keep_going` cannot soften
     /// it, and cambium's own index queries were the casualty.
     ///
@@ -366,7 +366,7 @@ impl RunContext {
     /// A child process carrying this context's environment.
     ///
     /// Stdin is always `/dev/null` and `CI=1` rides along unless the caller's
-    /// own environment already sets `CI` — see
+    /// own environment already sets `CI`: see
     /// [`noninteractive_command`] for why.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         noninteractive_command(program, &self.env)
@@ -380,8 +380,8 @@ impl RunContext {
 /// A child process carrying `env`, unable to block on a prompt: stdin is
 /// nulled, and `CI=1` is set unless `env` already names `CI`.
 ///
-/// A tool never has a terminal to prompt against — it runs unattended, in a
-/// batch of hundreds of change sets — but some of them assume one anyway.
+/// A tool never has a terminal to prompt against (it runs unattended, in a
+/// batch of hundreds of change sets) but some of them assume one anyway.
 /// Nulling stdin makes any such prompt fail at once with EOF instead of
 /// hanging, and removes any ambiguity about where that EOF came from; `CI=1`
 /// is the general signal most such CLIs (Aspect's plugins included; see
@@ -391,7 +391,7 @@ impl RunContext {
 ///
 /// Neither is a fix for a prompt that *cannot* be skipped. The Aspect CLI's
 /// `query` wrapper opens an interactive preset picker whenever it gets no
-/// positional expression — bazel-diff's `--query_file` invocation exactly —
+/// positional expression (bazel-diff's `--query_file` invocation exactly)
 /// and `CI=1` does not stop it; that is why the run never reaches the Aspect
 /// CLI at all: see [`crate::checkout::bazelisk_env`].
 ///
@@ -439,7 +439,7 @@ pub struct Captured {
 }
 
 /// Runs `cmd`, timing it, and turns a non-zero exit into an error that carries
-/// the tail of stderr — a tool failing on one change set out of two hundred is
+/// the tail of stderr: a tool failing on one change set out of two hundred is
 /// only debuggable if the message says why.
 pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
     run_capture_accepting(cmd, what, |s| s.success())
@@ -484,7 +484,7 @@ pub(crate) fn tail(s: &str, n: usize) -> String {
 ///
 /// The git plumbing lives in [`cambium_diff::Worktree`], which the engine also
 /// uses to run Bazel at a revision the working tree is not on; this adds the
-/// one thing the comparison needs on top — a copy of the untracked
+/// one thing the comparison needs on top: a copy of the untracked
 /// `cambium.toml`.
 #[derive(Debug)]
 pub struct BaseWorktree {
@@ -494,7 +494,7 @@ pub struct BaseWorktree {
 /// Copies the workspace's generated `cambium.toml` into the base worktree.
 ///
 /// The benchmark writes that file into the repository root and excludes it from
-/// git, so a fresh `git worktree add` does not have it — and on `bazel/bazel`
+/// git, so a fresh `git worktree add` does not have it, and on `bazel/bazel`
 /// the root package is `filegroup(name = "srcs", srcs = glob(["*"]))`, which
 /// swallows it. The head tree's `//:srcs` then lists `//:cambium.toml` and the
 /// base tree's does not, so the tools see the filegroup change on every
@@ -503,7 +503,7 @@ pub struct BaseWorktree {
 /// whose only changed files were `.github/workflows/*.yml`, which no rule
 /// consumes at all: a disagreement manufactured entirely by the harness.
 ///
-/// A tracked `cambium.toml` is left alone — the checkout already has the right
+/// A tracked `cambium.toml` is left alone: the checkout already has the right
 /// version of it.
 pub(crate) fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
     let src = repo_worktree.join(cambium_engine::config::CONFIG_FILE);
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(ctx().tool_startup_flags(), vec!["--bazelrc=/tmp/rc"]);
     }
 
-    /// A tool's stdin must never be a terminal a prompt could wait on —
+    /// A tool's stdin must never be a terminal a prompt could wait on:
     /// see [`noninteractive_command`]. `cat` on a null stdin sees
     /// EOF immediately and produces no output.
     #[test]

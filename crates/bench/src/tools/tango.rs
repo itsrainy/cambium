@@ -16,8 +16,8 @@
 //!
 //! Tango's driver runs `bazel query 'deps(//...:all-targets)'` once per
 //! revision, and on a real repository at a real pin that query does not load
-//! cleanly — `bazel/bazel` on macOS pulls in a GraalVM distribution with no
-//! `macos-x64` build and an RBE config that needs Docker — so without
+//! cleanly (`bazel/bazel` on macOS pulls in a GraalVM distribution with no
+//! `macos-x64` build and an RBE config that needs Docker) so without
 //! `--keep_going` Bazel exits 3 and tango-cli fails the change set. So
 //! [`Tango::DEFAULT_EXTRA_ARGS`] passes `--keep_going` through tango-cli's
 //! `-extra-args`, which places it after the `query` word. The result is the
@@ -32,8 +32,8 @@
 //! `--keep_going` alone is not enough: upstream Tango's Bazel client treats
 //! *any* non-zero exit as a failed query, and `--keep_going` turns a load
 //! error into exit **3** rather than into no error at all. So
-//! `tools/tango/0001-keep-going-partial-graph.patch` — applied by `fetch.sh`, which
-//! is the supported way to carry a local change to upstream — accepts exit 3
+//! `tools/tango/0001-keep-going-partial-graph.patch` (applied by `fetch.sh`, which
+//! is the supported way to carry a local change to upstream) accepts exit 3
 //! when the proto stream parsed, logs a warning, and uses the partial graph;
 //! it also registers a dep that names an unloadable repository as an opaque
 //! zero-hash node instead of failing the revision, which is sound here because
@@ -218,10 +218,10 @@ mod tests {
     /// That is exactly what a killed run leaves behind: `tango-cli`'s own
     /// `addWorktree` (`tools/tango/cmd/tango-cli/main.go`) removes the
     /// directory before re-adding it, but a run that dies before its
-    /// deferred cleanup runs can leave the registration behind, and — as
+    /// deferred cleanup runs can leave the registration behind, and (as
     /// happened against sourcegraph/sourcegraph, where 9 of 10 change sets failed
     /// with `fatal: '.../tango-worktrees/head' is a missing but locked
-    /// worktree` — git then refuses `worktree add` outright rather than
+    /// worktree`) git then refuses `worktree add` outright rather than
     /// treating the stale entry as prunable. `tango-cli`'s `addWorktree` now
     /// unlocks, prunes, and force-removes a stale registration before
     /// adding (in that order: `prune` skips a locked entry by design, so the
@@ -266,7 +266,7 @@ mod tests {
         )
         .unwrap();
         git(&repo, &["worktree", "lock", head_wt.to_str().unwrap()]).unwrap();
-        // Gone from disk, but still registered and locked — exactly the
+        // Gone from disk, but still registered and locked: exactly the
         // state a killed run leaves behind and `git worktree prune` alone
         // will not clear, since prune skips locked entries by design.
         std::fs::remove_dir_all(&worktrees).unwrap();
@@ -295,9 +295,9 @@ mod tests {
     }
 
     /// A stand-in `tango-cli` that performs the same recovery
-    /// `addWorktree` does before `git worktree add` — unlock, then prune
+    /// `addWorktree` does before `git worktree add` (unlock, then prune
     /// (which only drops a missing entry once it is unlocked), then a
-    /// force-remove for a locked entry prune does not cover — then adds both
+    /// force-remove for a locked entry prune does not cover) then adds both
     /// worktrees and writes one row of JSON to `-o`.
     fn write_recovering_stub(dir: &Path) -> PathBuf {
         let path = dir.join("tango-cli-stub.sh");

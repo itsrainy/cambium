@@ -29,7 +29,7 @@ pub struct GraphDiff {
     /// input map, the per-repository path mapping and its `target_only`
     /// flags, the `.bzl` and package external-label rows. These decide how
     /// wide a diff goes before any query happens, and none of them is a node,
-    /// an edge or a rule hash — an index that lost one describes the same
+    /// an edge or a rule hash: an index that lost one describes the same
     /// graph and answers a different question. Absent from records written
     /// before the field existed, which read as agreeing here.
     #[serde(default)]

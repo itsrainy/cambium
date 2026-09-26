@@ -3,7 +3,7 @@
 //! Everything a user would type, the harness types too: `cambi index build`
 //! for a cold index, `cambi index publish` to upload it, and `cambi affected
 //! --format json --out` for the answer and the index carried forward. The
-//! harness reads the documents back with the engine's own report types — it
+//! harness reads the documents back with the engine's own report types: it
 //! links `cambium-engine` for those types, and for the offline tools
 //! ([`crate::replay`], [`crate::precheck`]), never to run the product path
 //! in-process.
@@ -189,7 +189,7 @@ impl Cambi {
     }
 
     /// An invocation rooted at `ws`, with this run's environment and no stdin
-    /// to prompt on — built exactly as a peer's is.
+    /// to prompt on: built exactly as a peer's is.
     pub fn command(&self, ws: &Path) -> Command {
         let mut cmd = crate::tools::noninteractive_command(&self.path, &self.env);
         cmd.arg("-C").arg(ws);

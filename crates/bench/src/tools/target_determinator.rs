@@ -168,8 +168,8 @@ impl Tool for TargetDeterminator {
     ///
     /// The tool checks the "before" revision out *in the directory it was
     /// given* whenever that directory is clean, and restores it afterwards.
-    /// Pointed at `ws` — cambium's own checkout, which the rest of the run is
-    /// reading — that would move head out from under the run and throw the
+    /// Pointed at `ws` (cambium's own checkout, which the rest of the run is
+    /// reading) that would move head out from under the run and throw the
     /// Bazel analysis cache away twice per change set. So it gets a worktree
     /// of its own under the run's scratch instead, pinned at head.
     ///
@@ -217,7 +217,7 @@ impl Tool for TargetDeterminator {
 ///
 /// Anything that is not a label is an error rather than a skipped line. An
 /// empty set reads as "the tools agree", so it must never be what output we
-/// failed to understand degrades to — and the one thing the binary is known to
+/// failed to understand degrades to, and the one thing the binary is known to
 /// print to stdout that is not a label is the sentinel it emits when it is
 /// about to die.
 pub fn parse_output(text: &str) -> Result<BTreeSet<String>> {

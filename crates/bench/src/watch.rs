@@ -3,8 +3,8 @@
 //! Two pure halves, because the point of issue #1 is a view that can be
 //! checked without a terminal:
 //!
-//! - [`snapshot`] reads `bench-results/` — the progress file, the state file
-//!   and whichever result files are there — and answers with a plain data
+//! - [`snapshot`] reads `bench-results/` (the progress file, the state file
+//!   and whichever result files are there) and answers with a plain data
 //!   structure. It opens nothing else: no IPC, no log scraping, no handle on
 //!   the running process, which is what lets it work on a finished run and on
 //!   results copied off another machine.

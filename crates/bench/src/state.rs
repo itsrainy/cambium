@@ -95,7 +95,7 @@ impl State {
     /// The state file as it stands, whatever subject or pin it is for, or
     /// `None` when there is none.
     ///
-    /// For a *reader* — `cambium-bench watch` — which wants the file's own id,
+    /// For a *reader* (`cambium-bench watch`), which wants the file's own id,
     /// pin and step stamps and has no pin to check them against. [`load`] is
     /// for a run, and starting over on a pin mismatch (loudly) is the whole
     /// point of it there.

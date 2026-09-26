@@ -4,18 +4,18 @@
 //! this crate is its implementation. Four nouns, and every module is one of
 //! them:
 //!
-//! - **Subject** — a Bazel repository a benchmark points at ([`subject`]),
+//! - **Subject**: a Bazel repository a benchmark points at ([`subject`]),
 //!   either a real one from `subject_repos.toml` ([`manifest`]) or a synthetic
 //!   one emitted from a preset. Mirrors, worktrees, stores and the generated
 //!   per-subject `cambium.toml` live in [`checkout`], under the subjects cache
 //!   directory ([`checkout::SubjectsDir`]).
-//! - **Tool** — anything that answers "which targets could this change
+//! - **Tool**: anything that answers "which targets could this change
 //!   affect": cambium itself, bazel-diff and Tango ([`tools`]).
-//! - **Oracle** — an independent check named by what it proves
+//! - **Oracle**: an independent check named by what it proves
 //!   ([`oracles`]): `rdeps` (did a tool miss a target?), `rebuild` (is the
 //!   incremental updater exact?) and `load` (is the static `.bzl` load closure
 //!   complete?). No workload runs `load` at present.
-//! - **Workload** — what the tools are run on. There is one, the [`walk`]: it
+//! - **Workload**: what the tools are run on. There is one, the [`walk`]: it
 //!   cold-builds an index at the start of a subject's first-parent window and
 //!   carries it forward one commit at a time to the pin, asking cambium and
 //!   the peers the question a CI job asks at each step and scoring every
@@ -30,8 +30,8 @@
 //! the fact rather than through the twenty examples the JSON has room for.
 //!
 //! Beside them sits [`progress`], which is not a result either: it is the one
-//! file a run writes purely so that a reader can follow it — which step,
-//! which commit or change set, which tool, since when — and what
+//! file a run writes purely so that a reader can follow it (which step,
+//! which commit or change set, which tool, since when) and what
 //! `cambium-bench watch` polls. The harness is its only writer.
 //!
 //! [`watch`] is its reader: it turns the progress, state and result files into
@@ -78,8 +78,8 @@ pub mod watch;
 /// It is the benchmark's own contract, not the engine's: the two used to share
 /// `cambium_engine::report::SCHEMA_VERSION`, which meant a benchmark field could
 /// not be renamed without claiming the `cambi affected` JSON had changed.
-/// Bumped to 6 by the rename to the methodology's vocabulary — `pairs` became
-/// `change_sets`, `producers` became `tools` — and to 7 by the one-walk
+/// Bumped to 6 by the rename to the methodology's vocabulary (`pairs` became
+/// `change_sets`, `producers` became `tools`) and to 7 by the one-walk
 /// redesign (issue #14), which replaced the `history`/`changes` result shapes
 /// with `walk-<pin>.json`. Old schema-6 files are not migrated; they stay in
 /// place and this cambium refuses to read them.
@@ -91,7 +91,7 @@ pub const RESULT_SCHEMA: u32 = 7;
 /// result file.
 pub const QUICK_COMMITS: usize = 50;
 
-/// `bench-results/<subject>/` — the per-subject directory that holds
+/// `bench-results/<subject>/`: the per-subject directory that holds
 /// `state.json` and the cold indexes every workload shares.
 pub fn subject_dir(root: &std::path::Path, subject: &str) -> std::path::PathBuf {
     root.join(subject)

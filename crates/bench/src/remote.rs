@@ -2,7 +2,7 @@
 //! results off it for an offline replay.
 //!
 //! What this does on the box is read-only: `scp` of result files and index
-//! archives, and — for the paths cache — one `cambium-bench replay
+//! archives, and (for the paths cache) one `cambium-bench replay
 //! --write-paths` over the mirror, which is `git diff` and nothing else.
 //! Never Bazel, never a write into the results tree.
 //!
@@ -139,7 +139,7 @@ impl BenchBox {
     }
 
     /// Pulls one subject into `<cache>/<subject>/`: the index at the pin, the
-    /// results, the archived bases and heads, and — with `paths` — the diff
+    /// results, the archived bases and heads, and (with `paths`) the diff
     /// of every recorded change set, derived on the box by the same binary.
     ///
     /// A subject already under `cache` is pulled again only when the box's
@@ -222,7 +222,7 @@ impl BenchBox {
         Ok(parse_sums(&String::from_utf8_lossy(&out.stdout)))
     }
 
-    /// The recorded change sets carry (base, head) and no diff — it was taken
+    /// The recorded change sets carry (base, head) and no diff: it was taken
     /// from the mirror at run time and never written down. This asks the box
     /// for it, once, with the box's own `cambium-bench replay --write-paths`
     /// over the mirror, printed to stdout and written beside the index here.

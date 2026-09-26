@@ -218,7 +218,7 @@ impl SubjectsDir {
     ///
     /// Emitting and cloning a synthetic subject touches no network and is
     /// idempotent, so a workload can run one without a separate `subjects
-    /// fetch` step first — which is what CI does. A real subject still needs
+    /// fetch` step first, which is what CI does. A real subject still needs
     /// that step: [`fetch`](Self::fetch) clones from `entry.url`, which may
     /// cost gigabytes or need credentials, and no workload should start that
     /// by surprise.
@@ -336,9 +336,9 @@ pub const BAZEL_RELEASES_URL: &str = "https://github.com/bazelbuild/bazel/releas
 /// the rc routes to the Aspect CLI this names the Bazel it would have run
 /// (`.bazelversion`, unless the run asked for one) and points bazelisk back
 /// at the official releases. bazelisk consults the environment before
-/// `.bazeliskrc`, so the two variables win in every workspace of the run —
-/// the subject's checkout, the tools' base worktree, Tango's scratch
-/// checkouts — without touching a tracked file.
+/// `.bazeliskrc`, so the two variables win in every workspace of the run
+/// (the subject's checkout, the tools' base worktree, Tango's scratch
+/// checkouts) without touching a tracked file.
 pub fn bazelisk_env(worktree: &Path, bazel_version: Option<&str>) -> Vec<(String, String)> {
     let requested = bazel_version.filter(|v| !v.is_empty()).map(str::to_string);
     let mut env = Vec::new();

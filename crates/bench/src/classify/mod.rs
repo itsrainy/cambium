@@ -4,14 +4,14 @@
 //! actionable: on a real repository it is thousands of labels, almost all of
 //! them explained by a handful of known, *expected* differences in what the
 //! two tools model. Seven classes were planned up front; the real runs turned
-//! up the rest. Thirteen of the seventeen are benign and three fail the run — plus
+//! up the rest. Thirteen of the seventeen are benign and three fail the run, plus
 //! `tool_missing`, which is a fact about the peer and gates nothing:
 //!
 //! | class | side | meaning |
 //! |---|---|---|
 //! | `cambium_extra_select` | cambium only | reached through a `select` branch that is not taken in the current configuration; cambium indexes the unconfigured graph, so it keeps every branch |
 //! | `cambium_extra_implicit` | cambium only | reached only through an implicit (`$`-prefixed) attribute edge |
-//! | `cambium_extra_external_repo` | cambium only | cambium reached it from an external repository whose contents moved — a `MODULE.bazel` edit, or a main-repo file a repository rule is built from; the hash-diffing tools resolve the repository and see its targets unchanged |
+//! | `cambium_extra_external_repo` | cambium only | cambium reached it from an external repository whose contents moved (a `MODULE.bazel` edit, or a main-repo file a repository rule is built from); the hash-diffing tools resolve the repository and see its targets unchanged |
 //! | `cambium_extra_bzl` | cambium only | the target's own rule is byte-identical at both revisions, but a `.bzl` its package loads changed, so cambium marked the whole loading package direct |
 //! | `cambium_extra_build_glob` | cambium only | reached from a changed `BUILD` file that a `glob(["**"])` filegroup consumes; the file's *content* is an input, so the filegroup and everything embedding it really do change |
 //! | `cambium_extra_deleted` | cambium only | reached from a target that existed at base and not at head; cambium marks every consumer of a deleted target direct, the hash-diffing tools cannot see a target that is no longer there |
@@ -22,10 +22,10 @@
 //! | `bazeldiff_extra_line_shift` | tool only | the rule is byte-identical at the two revisions and nothing it consumes changed, but its `BUILD` file did: only the rule's *line number* moved, which bazel-diff hashes (`generator_location`) and cambium deliberately does not |
 //! | `bazeldiff_extra_workspace_path` | tool only | the rule is byte-identical at the two revisions once each side's own workspace root is normalised away: it embeds the absolute path of the checkout it was queried in, and the tool's base checkout is a different directory from head |
 //! | `tool_extra_source_directory` | tool only | the target consumes a *directory* as a source file (`src_dir = ["."]`, rendered by Bazel as `//pkg:.`) and a changed path lies under it. Tango hashes a source directory's contents on disk; Bazel's own graph has no edge from a file to the directory above it, so neither `rdeps` nor cambium reaches the target. Bazel documents source directories as untracked, and the oracle is asked to make sure it did not reach the label anyway |
-//! | `tool_missing` | cambium only | the tool missed a target the reverse-dependency oracle independently confirms is affected; cambium is right and the tool is wrong. Reported, not failed — it is not a defect of cambium |
-//! | `cambium_missing_bzl_closure` | oracle only | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty. Not a per-label class — it is counted from the load oracle's `missing_packages` |
+//! | `tool_missing` | cambium only | the tool missed a target the reverse-dependency oracle independently confirms is affected; cambium is right and the tool is wrong. Reported, not failed: it is not a defect of cambium |
+//! | `cambium_missing_bzl_closure` | oracle only | **fails**: `rbuildfiles` names a loading package the static `.bzl` closure did not dirty. Not a per-label class: it is counted from the load oracle's `missing_packages` |
 //! | `cambium_missing` | tool only | **fails**: the other tool reached something cambium did not, with no benign explanation |
-//! | `unclassified` | cambium only | **fails**: an extra target nothing explains — either a real over-approximation bug or a missing predicate here |
+//! | `unclassified` | cambium only | **fails**: an extra target nothing explains, either a real over-approximation bug or a missing predicate here |
 //!
 //! The classifier is a pure function of a [`Facts`] oracle so every class can
 //! be tested without a Bazel; [`BazelFacts`] is the implementation that
@@ -94,7 +94,7 @@ pub enum Class {
     /// to that filegroup.
     CambiumExtraBuildGlob,
     /// bazel-diff reports a changed path with no consumer in cambium's head
-    /// index — a file outside any package, or a hash-only artifact. It hashes
+    /// index: a file outside any package, or a hash-only artifact. It hashes
     /// source content cambium's graph does not name.
     BazeldiffExtraContent,
     /// The disagreement is confined to `@external//...` labels, which the
@@ -117,12 +117,12 @@ pub enum Class {
     /// A harness artifact: the other tools hash base in a second git worktree
     /// while cambium carries its base index forward inside one checkout, so a
     /// rule that bakes the workspace root into `args`/`cmd`/`env` reads as
-    /// changed to them and unchanged to cambium. All three conditions — rule
+    /// changed to them and unchanged to cambium. All three conditions (rule
     /// identical once normalised, no changed source input, no affected
-    /// dependency — must hold.
+    /// dependency) must hold.
     BazeldiffExtraWorkspacePath,
     /// The rule did not move, its inputs did not move, and nothing it depends
-    /// on is affected — but the `BUILD` file it lives in changed, so its line
+    /// on is affected, but the `BUILD` file it lives in changed, so its line
     /// number did.
     ///
     /// bazel-diff hashes `generator_location`; cambium drops it from the
@@ -140,9 +140,9 @@ pub enum Class {
     /// (`tools/install/install.bzl`): Bazel renders the label as the source
     /// file `//modules/perception:.`, and the install script copies the
     /// directory at run time. Bazel's own graph has no edge from a file to the
-    /// directory above it — source directories are documented as untracked
+    /// directory above it (source directories are documented as untracked
     /// (`label_directory`), and `rdeps(//..., //modules/perception/x:y.cc)`
-    /// stops at the rules naming `y.cc` — so neither cambium nor the
+    /// stops at the rules naming `y.cc`) so neither cambium nor the
     /// reverse-dependency oracle reaches the target. Tango hashes a source
     /// directory by walking it on disk (`targethasher.hashDir`), so to Tango
     /// every file under `modules/perception/` is an input of
@@ -153,15 +153,15 @@ pub enum Class {
     /// Tango is describing the filesystem truthfully and Bazel is not, but
     /// the benchmark's definition of "affected" is Bazel's graph, which is
     /// what the oracle measures and what cambium indexes. The class needs
-    /// two things: the mechanism — a directory source label on the target or
-    /// in its dependency closure with a changed path strictly under it — and
+    /// two things: the mechanism (a directory source label on the target or
+    /// in its dependency closure with a changed path strictly under it) and
     /// the oracle's silence. When `rdeps` *does* reach the label, the
     /// directory is not the explanation and the label stays
     /// [`Class::CambiumMissing`]; when the oracle did not run there is no
     /// witness either way and it stays there too. Reported, not failed: it is
     /// a limitation of Bazel's source model, not of cambium's walk, and the
-    /// one thing cambium could do about it — hash source directories itself
-    /// — would mean reading the tree on every run.
+    /// one thing cambium could do about it (hash source directories itself)
+    /// would mean reading the tree on every run.
     ///
     /// Ranked ahead of the three "nothing could have impacted it"
     /// conjunctions on the tool side, because when it holds it is the more
@@ -189,7 +189,7 @@ pub enum Class {
     /// another tool's defect would make the suite unrunnable for a reason that
     /// is not cambium's to fix. First seen on `bazel/bazel`, where Tango
     /// dropped `//docs:docs`, `//docs:srcs` and
-    /// `//scripts/docs:gen_mdx_release_docs` — three plain consumers of a
+    /// `//scripts/docs:gen_mdx_release_docs`: three plain consumers of a
     /// changed `docs/docs/user-manual.mdx` that both cambium and bazel-diff
     /// reported and the oracle confirmed.
     ToolMissing,
@@ -204,8 +204,8 @@ pub enum Class {
     /// The one class no *label* is ever filed under: it is counted from the
     /// load oracle's `missing_packages` (`oracles::load`), one per package,
     /// not from a symmetric difference. It is the same defect as
-    /// [`Class::CambiumMissing`] one level up — a package cambium should have
-    /// marked direct and did not — caught by an oracle rather than a tool,
+    /// [`Class::CambiumMissing`] one level up (a package cambium should have
+    /// marked direct and did not) caught by an oracle rather than a tool,
     /// and it fails the run for the same reason.
     CambiumMissingBzlClosure,
     /// A failure: no predicate explained the disagreement.
@@ -373,8 +373,8 @@ pub trait Facts {
     /// that names a label in it is direct. On `bazel/bazel`'s
     /// `5c47f233..bfd201d1` one `maven.install` version bump, plus the
     /// `//:MODULE.bazel` that `//:extensions.bzl` reads by label, put
-    /// sixty-nine targets in cambium's answer that bazel-diff — which resolves
-    /// the repositories and hashes their contents — reported as unchanged.
+    /// sixty-nine targets in cambium's answer that bazel-diff (which resolves
+    /// the repositories and hashes their contents) reported as unchanged.
     ///
     /// Over-approximation, not unsoundness, and the price of not fetching
     /// every external repository on every run.
@@ -386,8 +386,8 @@ pub trait Facts {
     /// cambium marks *every* rule in a package whose `.bzl` load closure moved
     /// as direct, because a macro can change what a rule builds without moving
     /// a single byte of its proto (see `engine::direct_set`). The price is
-    /// that the rules in the package which the macro does not touch — a
-    /// hand-written `config_setting` next to a macro-generated genrule — are
+    /// that the rules in the package which the macro does not touch (a
+    /// hand-written `config_setting` next to a macro-generated genrule) are
     /// reported too. That is over-approximation, not unsoundness, and on a
     /// real repository it is the single largest source of cambium-side extras.
     fn bzl_closure_only(&self, label: &str) -> bool;
@@ -407,8 +407,8 @@ pub trait Facts {
     /// cambium reached this target from a changed `BUILD` file that some rule
     /// consumes as a *source*.
     ///
-    /// `filegroup(name = "srcs", srcs = glob(["**"]))` — the shape every
-    /// package in `bazel/bazel` uses — has its own `BUILD` file among its
+    /// `filegroup(name = "srcs", srcs = glob(["**"]))` (the shape every
+    /// package in `bazel/bazel` uses) has its own `BUILD` file among its
     /// inputs, so editing the `BUILD` file changes the filegroup's content
     /// even when no rule proto moves. In `bazel/bazel` that propagates a long
     /// way: `//third_party:srcs` is embedded by
@@ -416,7 +416,7 @@ pub trait Facts {
     /// server binary depends on, so one `third_party/BUILD` edit legitimately
     /// reaches six hundred targets. The hash-diffing tools report the
     /// filegroup itself and stop short of that closure, so the difference is
-    /// theirs, not cambium's — but it is expected, and counted rather than
+    /// theirs, not cambium's, but it is expected, and counted rather than
     /// failed.
     fn reached_via_build_file(&self, label: &str) -> bool;
 
@@ -425,7 +425,7 @@ pub trait Facts {
     /// it changed.
     ///
     /// Weaker than [`Facts::visibility_only_change`], which additionally
-    /// requires the *hashed* rule to differ — here "nothing changed at all" is
+    /// requires the *hashed* rule to differ: here "nothing changed at all" is
     /// the case of interest.
     fn rule_unchanged_modulo_visibility(&self, label: &str) -> bool;
 
@@ -437,7 +437,7 @@ pub trait Facts {
     /// head index, is in cambium's affected set.
     fn no_affected_deps(&self, label: &str) -> bool;
 
-    /// The target depends on at least one external (`@`-prefixed) label —
+    /// The target depends on at least one external (`@`-prefixed) label:
     /// through the head index, or through an implicit edge the index does not
     /// carry. The implicit half is not a detail: a target's whole toolchain
     /// graph is external and implicit, and it is the commonest thing for a
@@ -445,13 +445,13 @@ pub trait Facts {
     fn has_external_input(&self, label: &str) -> bool;
 
     /// The label corresponds to a path that changed in this change set but that no
-    /// target in the head index consumes — a file bazel-diff hashes and
+    /// target in the head index consumes: a file bazel-diff hashes and
     /// cambium correctly has no consumer for.
     fn changed_path_without_consumer(&self, label: &str) -> bool;
 
     /// The `BUILD` file of the target's own package is in this change set's changed
-    /// path set. Says nothing on its own — a changed `BUILD` file usually means
-    /// a changed rule — and is only ever asked after the rule has been shown to
+    /// path set. Says nothing on its own (a changed `BUILD` file usually means
+    /// a changed rule) and is only ever asked after the rule has been shown to
     /// be byte-identical.
     fn build_file_changed(&self, label: &str) -> bool;
 
@@ -519,7 +519,7 @@ pub trait Facts {
 /// Order matters only in that the cheap, certain predicates come first:
 /// `external` before `content`, and on cambium's side `select` before
 /// `implicit` before `visibility`, so a target explained by more than one is
-/// attributed to the most specific reason. Anything left over is a failure —
+/// attributed to the most specific reason. Anything left over is a failure:
 /// deliberately, because a silent "other" bucket is how an unsoundness gets
 /// shipped.
 pub fn classify(label: &str, side: Side, facts: &dyn Facts) -> Class {
@@ -604,7 +604,7 @@ fn source_directory_untracked(label: &str, facts: &dyn Facts) -> bool {
 /// tool is right and cambium is wrong for an unrelated reason.
 ///
 /// 1. base and head agree once each side's own workspace root is normalised
-///    away, and disagree before that — so the path is the whole difference;
+///    away, and disagree before that, so the path is the whole difference;
 /// 2. no source file it consumes changed;
 /// 3. nothing it transitively depends on inside `//...` is in cambium's
 ///    affected set.
@@ -627,15 +627,15 @@ fn workspace_path_artefact(label: &str, facts: &dyn Facts) -> bool {
 /// Same three "nothing could have impacted it" facts the other tool-side
 /// classes insist on, plus the explanation: the target's own `BUILD` file
 /// changed. The rule proto is byte-identical, so whatever the edit did, it did
-/// not do it to this rule — it moved it down the file. bazel-diff hashes
+/// not do it to this rule: it moved it down the file. bazel-diff hashes
 /// `generator_location`; cambium dropped it from the canonical rule
 /// deliberately (see `docs/STORE.md` and `cambium_proto::RULE_HASH_VERSION`),
 /// because a macro's BUILD line shifts whenever a line is inserted above it,
 /// and Tango ignores it too.
 ///
 /// Note the order: [`Facts::no_changed_source_inputs`] runs first, so the
-/// `filegroup(srcs = glob(["**"]))` shape — where the `BUILD` file really *is*
-/// an input and the target really did change — never reaches here.
+/// `filegroup(srcs = glob(["**"]))` shape (where the `BUILD` file really *is*
+/// an input and the target really did change) never reaches here.
 ///
 /// Found on the `apollo` subject: one commit reordered
 /// `modules/common/vehicle_model/BUILD`, and bazel-diff reported the two
@@ -661,8 +661,8 @@ fn line_shift_only(label: &str, facts: &dyn Facts) -> bool {
 /// bazel-diff seeds a target's digest from its dependencies' digests, and its
 /// dependency set includes the external graph. On `bazel/bazel` under
 /// `--keep_going`, how much of that external graph loads is not stable between
-/// invocations — a repository rule that fetched on one run and did not on the
-/// next changes the digest of everything above it — so bazel-diff reports
+/// invocations (a repository rule that fetched on one run and did not on the
+/// next changes the digest of everything above it) so bazel-diff reports
 /// labels like `//:bootstrap-jars` as impacted on change sets where nothing inside
 /// `//...` that they depend on moved at all.
 ///
@@ -673,12 +673,12 @@ fn line_shift_only(label: &str, facts: &dyn Facts) -> bool {
 /// explanation:
 ///
 /// 1. the target's own rule is identical at base and head (modulo
-///    `visibility`/`tags`, which cannot change outputs) — so it is not a rule
+///    `visibility`/`tags`, which cannot change outputs), so it is not a rule
 ///    edit;
-/// 2. no source file it consumes changed — so it is not a content edit;
+/// 2. no source file it consumes changed, so it is not a content edit;
 /// 3. nothing it transitively depends on inside `//...` is in cambium's
-///    affected set — so it is not a propagation cambium dropped;
-/// 4. it does depend on something external — so there *is* an external
+///    affected set, so it is not a propagation cambium dropped;
+/// 4. it does depend on something external, so there *is* an external
 ///    explanation for the difference. "Depends on" here means Bazel's full
 ///    dependency set, implicit edges included: a target's toolchains are
 ///    external and reached only implicitly, and asking the
@@ -1090,7 +1090,7 @@ mod tests {
         // Two kinds of class do not fail: an over-approximation by cambium
         // (every one of them named `*_extra_*`), and `tool_missing`, which is
         // a defect of the peer rather than of cambium. Nothing else may be
-        // waved through — a silent "other" bucket is how an unsoundness ships.
+        // waved through: a silent "other" bucket is how an unsoundness ships.
         for c in Class::ALL.iter().filter(|c| !c.is_failure()) {
             assert!(
                 c.name().contains("extra") || *c == Class::ToolMissing,

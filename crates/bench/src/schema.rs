@@ -1,8 +1,8 @@
 //! Every document the harness writes to disk, in one place.
 //!
 //! Each has its own version constant, declared where its type lives; this
-//! lists them so a reader can see the whole on-disk surface — and which
-//! files a version bump orphans — without walking the modules. The
+//! lists them so a reader can see the whole on-disk surface (and which
+//! files a version bump orphans) without walking the modules. The
 //! constants are re-exported here under one roof, not redefined.
 //!
 //! | file | schema | written by | read by |

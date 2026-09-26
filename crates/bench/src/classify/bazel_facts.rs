@@ -28,7 +28,7 @@ type RuleCache = RefCell<HashMap<String, Option<Rule>>>;
 /// populates from *all* attributes including the implicit ones. If none of the
 /// explicit dependency labels is in the direct set but some other `rule_input`
 /// is, the only way the change reaches this target is an implicit attribute.
-/// That is an approximation in one direction — it only looks one hop back — so
+/// That is an approximation in one direction (it only looks one hop back) so
 /// it is conservative: a multi-hop implicit path lands in `unclassified` and
 /// gets a human's attention rather than being waved through.
 pub struct BazelFacts<'a> {
@@ -190,7 +190,7 @@ impl<'a> BazelFacts<'a> {
     /// external". External labels *are* in the index: `rule_input` is interned
     /// unfiltered, so an `@repo//...` dependency of an indexed rule exists as
     /// an [`cambium_index::NodeKind::Unknown`] node with no package and no
-    /// rule class — enough to see it and to walk past it, which is all this
+    /// rule class, enough to see it and to walk past it, which is all this
     /// needs. (Its own dependencies are not there: cambium queries `//...`, so
     /// the external graph stops at its first node.)
     fn dep_facts(&self, label: &str) -> DepFacts {
@@ -225,9 +225,9 @@ impl<'a> BazelFacts<'a> {
         }
         // A dependency named in the rule but absent from the index still
         // counts: the index is `//...`, so an external label the walk cannot
-        // reach is exactly the case this looks for. The toolchain graph —
-        // `@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
-        // toolchain — is exactly what a tool's two runs disagree about
+        // reach is exactly the case this looks for. The toolchain graph
+        // (`@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
+        // toolchain) is exactly what a tool's two runs disagree about
         // most often, and it is reached through implicit attributes; the index
         // now carries those (`cambium_bazel::QUERY_FLAGS`), so the walk above
         // usually settles it and this is the fallback for a label the index
@@ -269,7 +269,7 @@ impl<'a> BazelFacts<'a> {
     /// so the forward walk usually settles it without a Bazel. When the index
     /// does not know the label, or the walk found nothing, the rule protos of
     /// the label and every rule in its closure are asked the same question of
-    /// their `rule_input` — batched and memoised the way
+    /// their `rule_input`: batched and memoised the way
     /// [`Self::any_implicit_external`] is.
     fn compute_source_directory(&self, label: &str) -> bool {
         let under = |l: &str| directory_contains_changed_path(l, &self.changed_paths);
@@ -325,7 +325,7 @@ impl<'a> BazelFacts<'a> {
     /// Without this the classifier is one `bazel query <label>` per label, and
     /// the first real run on `bazel/bazel` produced symmetric differences of
     /// tens of thousands of labels: at roughly a second per invocation that is
-    /// hours per change set, and it is *all* process startup — one batched
+    /// hours per change set, and it is *all* process startup; one batched
     /// `query 'set(a b c ...)'` answers five hundred labels in the same time.
     /// Labels the batch does not return are cached as `None`, so a target
     /// Bazel will not talk about is not retried one at a time either.
@@ -549,9 +549,9 @@ impl Facts for BazelFacts<'_> {
         // Looking only at the target's own rule (which is all this could do
         // before the comparison carried `--explain` paths) misses the common
         // shape by a mile: on `bazel/bazel` the extra targets are reached
-        // through a `select` several hops down — a `cc_library` picking a
+        // through a `select` several hops down (a `cc_library` picking a
         // platform-specific dep, with plain `java_library` rules stacked above
-        // it — and every one of those landed in `unclassified`, which fails
+        // it) and every one of those landed in `unclassified`, which fails
         // the run for a difference that is exactly what cambium promises to
         // over-approximate.
         let path = self.paths.get(label);
@@ -799,7 +799,7 @@ mod tests {
     }
 
     /// The substitution reaches an `args` list, a `cmd` string and a `select`
-    /// branch — the three shapes envoy's `@envoy_repo//:path.bzl` constant
+    /// branch: the three shapes envoy's `@envoy_repo//:path.bzl` constant
     /// lands in.
     #[test]
     fn substitution_normalises_every_string_shape() {

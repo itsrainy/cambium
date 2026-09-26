@@ -3,16 +3,16 @@
 //! A *subject* is a Bazel repository a workload runs on, and there are two
 //! kinds (docs/METHODOLOGY.md):
 //!
-//! - [`Subject::Real`] — an entry of `subject_repos.toml`: a URL, a pinned
+//! - [`Subject::Real`]: an entry of `subject_repos.toml`: a URL, a pinned
 //!   commit, a history window, and the Bazel version it runs under.
-//! - [`Subject::Synthetic`] — a generated graph, named `synth:<preset>` on the
+//! - [`Subject::Synthetic`]: a generated graph, named `synth:<preset>` on the
 //!   command line, from the presets `cambium-bench synth presets` lists.
 //!
 //! Every workload accepts either, which is only possible because a synthetic
 //! subject is *emitted as a real Bazel workspace with a git history* the first
 //! time one is asked for. Once emitted it is described by the same
-//! [`RepoEntry`] a real subject is — a local `file://`-shaped URL, a pin, a
-//! window — and every step downstream (mirror, worktree, generated
+//! [`RepoEntry`] a real subject is (a local `file://`-shaped URL, a pin, a
+//! window) and every step downstream (mirror, worktree, generated
 //! `cambium.toml`, history, change sets) is the same code path. The alternative,
 //! a second set of workloads that understand in-memory graphs, is how the
 //! synthetic and real numbers came to be incomparable in the first place.

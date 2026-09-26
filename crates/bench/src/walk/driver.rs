@@ -2,8 +2,8 @@
 //! where the schedule calls for them, and the rebuild oracle at the pin.
 //!
 //! The cambium side is driven through [`crate::walk::Driver`], the same
-//! trait the offline synthetic test uses, so the walk's loop — resume, the
-//! carried index, the per-step record — is exercised with no Bazel and no
+//! trait the offline synthetic test uses, so the walk's loop (resume, the
+//! carried index, the per-step record) is exercised with no Bazel and no
 //! product binary. The live checks (the `rdeps` oracle and the peers) need a
 //! real Bazel and a checkout, so they are a separate [`LiveChecks`] the real
 //! subject supplies and the synthetic test leaves out.

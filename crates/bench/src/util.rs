@@ -51,8 +51,8 @@ pub fn now_unix() -> u64 {
 
 /// Now, as RFC 3339 in UTC: `2026-09-10T14:02:11Z`.
 ///
-/// Every timestamp the harness writes for a *reader* is this shape — the
-/// progress file, the per-step stamps in the state file — because a watcher
+/// Every timestamp the harness writes for a *reader* is this shape (the
+/// progress file, the per-step stamps in the state file) because a watcher
 /// subtracts them and a person reads them, and `now_unix` above serves
 /// neither. No `chrono`: the conversion is twenty lines of civil-calendar
 /// arithmetic and a dependency that parses every timezone on earth is not
@@ -155,7 +155,7 @@ pub fn tool_sha() -> &'static str {
     }
 }
 
-/// `$HOME`, or the system temp directory when there is none — a CI runner or a
+/// `$HOME`, or the system temp directory when there is none: a CI runner or a
 /// daemon with no home still has to put a cache somewhere.
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")

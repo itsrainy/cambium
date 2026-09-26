@@ -10,13 +10,13 @@
 //!
 //! Two ways in, because half the verbs measure nothing:
 //!
-//! - [`Session::subject`] reads files a run left behind — `labels`, `report`,
-//!   `replay` — on a laptop that need not have a Bazel or a `cambi` at all.
+//! - [`Session::subject`] reads files a run left behind (`labels`, `report`,
+//!   `replay`) on a laptop that need not have a Bazel or a `cambi` at all.
 //!   It resolves no binary and creates no directory.
 //! - [`Session::run_subject`] is a workload: it resolves the Bazel binary and
 //!   creates the subject's results directory, absolute, so that every child
-//!   process the workload spawns — in the subject's worktree, in a scratch
-//!   worktree — names the same directory.
+//!   process the workload spawns (in the subject's worktree, in a scratch
+//!   worktree) names the same directory.
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -151,7 +151,7 @@ impl Session {
         // Absolute, always. Tools and Bazel run as child processes with a
         // different working directory (the subject's worktree, a scratch
         // worktree), so a relative `--results-dir bench-results` would name a
-        // different directory in each of them — which is exactly how
+        // different directory in each of them, which is exactly how
         // bazel-diff came to be handed a base worktree that did not exist.
         std::fs::create_dir_all(&run.results)?;
         run.results = absolute(&run.results);
@@ -271,7 +271,7 @@ impl SubjectRun<'_> {
         ))
     }
 
-    /// `<stem>[-<version>].<ext>` — one result file per Bazel version, since
+    /// `<stem>[-<version>].<ext>`: one result file per Bazel version, since
     /// the whole point of naming one is that two can disagree.
     pub fn result_path(&self, dir: &Path, stem: &str, ext: &str) -> PathBuf {
         dir.join(versioned_name(stem, self.version(), ext))

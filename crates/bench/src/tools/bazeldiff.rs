@@ -18,7 +18,7 @@
 //! load cleanly: `bazel/bazel` on macOS references a GraalVM distribution with
 //! no `macos-x64` build and an RBE config that shells out to Docker, so the
 //! query exits 3 and bazel-diff, without `-k`, fails the change set outright. With
-//! `-k` it hashes everything that loaded — the same universe cambium indexes
+//! `-k` it hashes everything that loaded: the same universe cambium indexes
 //! with its own `--keep_going`, and the same universe the `rdeps` oracle sees
 //! (see [`crate::oracles::rdeps`]). No `--useCquery`, no
 //! `--fineGrainedHashExternalRepos` and no `--excludeExternalTargets`: each
@@ -184,7 +184,7 @@ impl BazelDiff {
     ///
     /// The startup options are the run's, minus `--output_base`, so
     /// bazel-diff gets one output base per workspace directory rather than
-    /// sharing cambium's — see [`RunContext::tool_startup_flags`] for what
+    /// sharing cambium's: see [`RunContext::tool_startup_flags`] for what
     /// sharing it costs. `-k` always rides along; see the module docs for why.
     pub fn generate_hashes(
         &self,

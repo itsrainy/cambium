@@ -4,7 +4,7 @@
 //! example labels, and that cap is a schema commitment: the file is read by
 //! the report and by published tooling, so it cannot grow to hold thousands
 //! of labels. But the counts are also where an investigation starts and
-//! stops — a change set where the tools named 990 targets cambium lacked was
+//! stops: a change set where the tools named 990 targets cambium lacked was
 //! only ever visible through twenty of them, and a regression that put 165
 //! labels in `unclassified` could not be looked at offline at all, because
 //! the sets themselves were gone the moment the run moved on.
@@ -20,7 +20,7 @@
 //!     classes.tsv.zst        tool \t side \t class \t label, every disagreement
 //! ```
 //!
-//! One label per line, sorted, zstd-compressed — tens of kilobytes a change
+//! One label per line, sorted, zstd-compressed: tens of kilobytes a change
 //! set, which is why none of it is behind a flag: a debugging artifact that
 //! has to be asked for in advance is not there on the run that needed it.
 //! The walk ([`crate::walk::driver`]) writes them; `cambium-bench labels`
@@ -125,8 +125,8 @@ pub fn write_classes(dir: &Path, rows: &[ClassRow]) -> Result<PathBuf> {
 
 /// Reads the rows written by [`write_classes`].
 ///
-/// A line this build cannot parse — an unknown class name from a newer
-/// cambium, a truncated write — is skipped rather than raised: the file is
+/// A line this build cannot parse (an unknown class name from a newer
+/// cambium, a truncated write) is skipped rather than raised: the file is
 /// evidence about a run, and refusing to show any of it because one row is
 /// unreadable is the wrong trade for a debugging tool.
 pub fn read_classes(path: &Path) -> Result<Vec<ClassRow>> {
@@ -172,8 +172,8 @@ pub fn stored_sets(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
 
 /// The `classes.tsv.zst` of a change set directory, when it has one.
 ///
-/// A globally invalidated change set has no classification — cambium answered
-/// `//...` and nothing was compared — so the absence is an answer, not an
+/// A globally invalidated change set has no classification (cambium answered
+/// `//...` and nothing was compared) so the absence is an answer, not an
 /// error.
 pub fn classes_path(dir: &Path) -> Option<PathBuf> {
     let p = dir.join(CLASSES_FILE);

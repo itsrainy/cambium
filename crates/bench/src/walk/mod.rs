@@ -3,7 +3,7 @@
 //!
 //! A walk cold-builds an index at the start of a first-parent window and then
 //! takes one step per commit forward to the pin, each step `(parent, head)`
-//! with the index carried from the step before — the shape a CI job's
+//! with the index carried from the step before: the shape a CI job's
 //! incremental run has. Every step asks the same three questions of cambium
 //! and of every peer alike: did it miss anything (recall against the rdeps
 //! oracle), how much wider than the truth was it (tightness against the
@@ -11,11 +11,11 @@
 //! ground truth for cambium too; the peers survive only as the explanation
 //! layer, never as the yardstick.
 //!
-//! Two tiers ([`tier`]) share this one workload. The correctness tier — no
-//! peers, the oracle on a sample — is what every engine change pays for,
-//! beside the offline [`crate::replay`]. The full tier — the oracle on every
+//! Two tiers ([`tier`]) share this one workload. The correctness tier (no
+//! peers, the oracle on a sample) is what every engine change pays for,
+//! beside the offline [`crate::replay`]. The full tier (the oracle on every
 //! step, the peers on a stratified sample, the periodic rebuild oracle for
-//! drift — is the box run.
+//! drift) is the box run.
 //!
 //! The pieces: [`steps`](mod@steps) turns the window into tagged `(parent, head)` pairs;
 //! [`sampling`] draws the seeded, prefix-stable, stratified sample the

@@ -51,7 +51,7 @@ pub struct RepoEntry {
     /// written for the Bazel of its day, and running the history 300 commits walks back
     /// into flags a pinned Bazel no longer recognises, which fails the query
     /// outright rather than degrading. Use it only where the repo's rc is the
-    /// obstacle, and note what it costs — `--deleted_packages` and friends
+    /// obstacle, and note what it costs: `--deleted_packages` and friends
     /// live in those files and do change the graph.
     #[serde(default)]
     pub extra_startup_flags: Vec<String>,

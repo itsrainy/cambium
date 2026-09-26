@@ -23,8 +23,8 @@
 //! cambium never seeded at all. `tools/build_defs/repo/utils.bzl` is listed in
 //! the `srcs` of fifteen filegroups in `bazel/bazel`; when a `.bzl` only ever
 //! went to the load closure, none of those filegroups was direct, none was in
-//! cambium's answer, and — because the roots were drawn from cambium's own
-//! direct set — no query the oracle made could have named them. Seeding from
+//! cambium's answer, and (because the roots were drawn from cambium's own
+//! direct set) no query the oracle made could have named them. Seeding from
 //! the *changed paths* instead makes the oracle independent of cambium's
 //! seeding decisions, which is the only way it can catch one being wrong.
 //!
@@ -160,8 +160,8 @@
 //!
 //! A file deleted between base and head cannot be named at head: `//pkg:gone.cc`
 //! is not a target there and the query would fail. Those paths are taken from
-//! the **base** index instead — its `file -> consumers` rows say which rules
-//! read the file before it went away — and each such consumer must be in
+//! the **base** index instead (its `file -> consumers` rows say which rules
+//! read the file before it went away) and each such consumer must be in
 //! cambium's answer, or its package must be (a rule deleted along with its
 //! source is not in anyone's answer at head, and asking for the label itself
 //! would fail a change set for being right). "Its package" is the affected
@@ -235,7 +235,7 @@ pub struct RdepsResult {
     /// The `@repo//...` half of Bazel's answer.
     ///
     /// `rdeps(//..., …)` takes `//...` as the *universe expression*, and Bazel
-    /// expands a universe to its transitive closure — so the answer contains
+    /// expands a universe to its transitive closure, so the answer contains
     /// external targets that depend on a root, and on envoy that is most of it
     /// (157 of the 173 labels on one change set, all `@quiche//...`). cambium
     /// indexes `//...` by construction and can never contain them, so counting
@@ -312,7 +312,7 @@ pub struct RdepsResult {
     /// Bazel could not load everything (an external repository that will not
     /// fetch on this machine, say) but answered for what did load. The oracle
     /// is a *lower bound* on what cambium must contain, so a partial answer is
-    /// still sound to check against — it just proves less.
+    /// still sound to check against: it just proves less.
     #[serde(default)]
     pub partial: bool,
     /// How many batches came back partial.
@@ -409,7 +409,7 @@ impl RdepsResult {
 /// The oracle's configuration.
 #[derive(Clone, Debug)]
 pub struct RdepsOracle {
-    /// Cap on how many source labels are queried. 0 — the default — is the
+    /// Cap on how many source labels are queried. 0 (the default) is the
     /// full change set, which is what the methodology specifies.
     pub sample: usize,
     pub seed: u64,
@@ -447,7 +447,7 @@ pub struct OracleInputs<'a> {
     /// package deleted outright: every rule in it is tombstoned, so cambium
     /// rightly emits no label carrying that package, and the package name
     /// survives nowhere else in the report. Without this the escape hatch in
-    /// `deleted_consumers` — "the rule, or its package" — is unsatisfiable
+    /// `deleted_consumers` ("the rule, or its package") is unsatisfiable
     /// by construction for exactly the case it was written for.
     pub dirty_packages: &'a BTreeSet<String>,
     /// The output base the queries run on, whose `external/@*.marker` files
@@ -717,7 +717,7 @@ pub(crate) fn package_of_label(label: &str) -> Option<&str> {
 /// Consumers of the deleted paths that cambium's answer does not account for.
 ///
 /// A rule that read a file which no longer exists must show up somewhere in
-/// cambium's answer — either as itself, or, when the rule was deleted along
+/// cambium's answer: either as itself, or, when the rule was deleted along
 /// with its source and so exists at neither end, as its package. Requiring the
 /// label alone would fail a change set for being right about a target that is
 /// gone.
@@ -746,7 +746,7 @@ fn deleted_consumers(
     let packages = PackageSet::from_index(base);
     // Both spellings of "cambium accounted for this package": a surviving
     // affected target inside it, or the package itself in the dirty set. A
-    // package deleted outright has only the second — all its rules are
+    // package deleted outright has only the second: all its rules are
     // tombstoned and none can appear in the affected set.
     let cambium_packages: BTreeSet<&str> = cambium
         .iter()
@@ -968,7 +968,7 @@ pub(crate) fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
 
 /// Splits the roots into query-sized batches: at most `max_labels` each, and
 /// at most `max_bytes` of expression each. A single label longer than the byte
-/// cap still gets its own batch — dropping it would silently weaken the
+/// cap still gets its own batch: dropping it would silently weaken the
 /// oracle, and Bazel will say if it is really too long.
 pub(crate) fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[String]> {
     let max_labels = max_labels.max(1);
@@ -1012,8 +1012,8 @@ pub(crate) fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
 /// changed files.
 ///
 /// The `kind(rule, ...)` wrapper is not cosmetic. Bazel's `rdeps` answer
-/// includes *file* targets — the generated `//lib:lib.out` of a genrule, the
-/// `//pkg:BUILD.bazel` of a package, and the roots themselves — while cambium's
+/// includes *file* targets (the generated `//lib:lib.out` of a genrule, the
+/// `//pkg:BUILD.bazel` of a package, and the roots themselves) while cambium's
 /// walk emits rules only (`cambium_index::walk` filters on `NodeKind::Rule`).
 /// Without the wrapper every changed file in the change set reads as a target
 /// Bazel reached and cambium missed, which is the one thing this oracle is
@@ -1035,7 +1035,7 @@ struct Batch {
 /// Runs one batched `rdeps` query.
 ///
 /// **Exit 3 is accepted.** Under `--keep_going` Bazel exits 3 when it finished
-/// but hit errors — on a real repository that is routine: `bazel/bazel` at
+/// but hit errors: on a real repository that is routine: `bazel/bazel` at
 /// these pins references external repositories that cannot be fetched on macOS
 /// (a GraalVM distribution with no macos-x64 build, an RBE config that needs
 /// Docker), so the transitive closure of `//...` cannot be completed. Bazel
@@ -1592,7 +1592,7 @@ mod tests {
         // package and `dirty_packages` is the only place its name survives.
         // Before the dirty set was consulted this case could not be satisfied
         // at all, and it failed every such change set on the 2026-09-08
-        // published run — `//internal/search/smartsearch` on sourcegraph,
+        // published run: `//internal/search/smartsearch` on sourcegraph,
         // `//modules/drivers/lidar/vanjeelidar` on apollo.
         assert!(run(&none, &set(&["lib"])).ok());
         // A different package does not satisfy it.

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every method is an operation a user performs: put the worktree here, build
 /// an index from scratch, bring one forward. The walk never holds an index in
-/// memory — each step writes one to a file and the next step's base comes from
+/// memory: each step writes one to a file and the next step's base comes from
 /// the store, exactly as it would for someone running `cambi` twice.
 pub trait Driver {
     /// Puts the worktree at `rev`. A no-op when the row source does not read

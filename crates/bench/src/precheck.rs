@@ -1,7 +1,7 @@
 //! `cambium-bench replay` as a whole: which change sets to replay, against
 //! which index, with which diffs, and what to hold the answers against.
 //!
-//! [`crate::replay`] is the stage — one diff against one index — and knows
+//! [`crate::replay`] is the stage (one diff against one index) and knows
 //! nothing about a results directory. This is the orchestration over a
 //! finished walk's artefacts: the recorded answers, any archived bases, the
 //! paths cache, the re-derivation cache. It runs no Bazel and needs no
@@ -401,7 +401,7 @@ impl Replays<'_> {
 /// fresh Bazel build at the pin, and that fresh build is the only artefact
 /// that says what the externals tables *are* there. The walk archives it;
 /// this opens it, re-derives its tables from the head tree's own text with
-/// this build, and compares. `None` when the run archived no head index —
+/// this build, and compares. `None` when the run archived no head index:
 /// quiet by design, since the precheck runs this for every subject and a run
 /// from before the head was archived has none.
 pub fn head_check_subject(
