@@ -1,5 +1,5 @@
-//! Git plumbing: what changed between two revisions, and how to find an
-//! ancestor with a published baseline.
+//! Git plumbing: what changed between two revisions, and which ancestors
+//! to try when looking for one that has an index.
 //!
 //! We shell out to `git` rather than linking a library: the operations are few,
 //! the output formats are stable, and it keeps cambium honest about running in
@@ -99,7 +99,7 @@ impl Repo {
     /// The tree object a revision points at.
     ///
     /// Two commits with identical content have identical trees whatever their
-    /// shas, which is what lets the baseline store key indexes by tree: a
+    /// shas, which is what lets the index store key indexes by tree: a
     /// rebased or squash-merged commit finds the index built for its
     /// pre-rebase twin.
     pub fn tree_of(&self, rev: &str) -> Result<String> {
@@ -199,8 +199,9 @@ impl Repo {
         run(&self.root, args)
     }
 
-    /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself
-    /// (spec 6.5: walk back looking for a published baseline).
+    /// First-parent ancestors of `rev`, nearest first, excluding `rev` itself:
+    /// the order to try them in when looking for the nearest one with an
+    /// index.
     pub fn first_parent_ancestors(&self, rev: &str, max: usize) -> Result<Vec<String>> {
         if max == 0 {
             return Ok(Vec::new());
@@ -222,7 +223,7 @@ impl Repo {
     }
 
     /// `git diff --name-status -M -z base head`, with renames and copies
-    /// expanded into a delete plus an add (spec 6.2).
+    /// expanded into plain adds and deletes.
     pub fn diff(&self, base: &str, head: &str) -> Result<Vec<Change>> {
         let out = run(
             &self.root,
@@ -244,9 +245,11 @@ impl Repo {
 
 /// Parses the NUL-separated form of `--name-status`.
 ///
-/// Rename and copy records carry two paths (`R100\0old\0new`); both become a
-/// delete of the old path and an add of the new one, which is what makes the
-/// dirty-set rules in spec 6.2 uniform.
+/// Rename and copy records carry two paths (`R100\0old\0new`). A rename
+/// becomes a delete of the old path and an add of the new one; a copy
+/// leaves its source in place, so it becomes only the add. Either way the
+/// dirty-set rules see one shape for every change: a path that appeared,
+/// changed or went away.
 pub fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut changes = Vec::new();
