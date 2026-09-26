@@ -50,7 +50,7 @@ fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
 /// macro-instantiated rule, and its value is a function of *position in the
 /// file*, so inserting or deleting a target shifts every later target's value
 /// without changing anything those targets build. Reproducing that here is what
-/// lets the synthetic sweeps exercise the attribute — `canonical_rule` drops
+/// lets the synthetic sweeps exercise the attribute: `canonical_rule` drops
 /// it, so a shift must move no hash.
 ///
 /// `LINES_PER_TARGET` is a plausible stanza height; the column is 1 because a
@@ -127,8 +127,8 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                     // The macro frames a real `--proto:instantiation_stack`
                     // query reports. cambium's canonical hash strips them, but
                     // they are how a consumer of this dump learns which `.bzl`
-                    // defined a rule — bazel-diff seeds each rule's digest from
-                    // exactly these paths — so a dump without them would hide
+                    // defined a rule (bazel-diff seeds each rule's digest from
+                    // exactly these paths), so a dump without them would hide
                     // every `.bzl` edit from anything measured against it.
                     instantiation_stack: instantiation_stack(g, pkg),
                     attribute,

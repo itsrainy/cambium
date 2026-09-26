@@ -1,7 +1,7 @@
 //! The naive O(graph) reference algorithm.
 //!
 //! For every target, hash its own definition together with the transitive
-//! closure of its inputs — the thing the whole incremental design exists to
+//! closure of its inputs: the thing the whole incremental design exists to
 //! avoid computing. Diffing those hashes between two revisions gives the ground
 //! truth the engine's answer is checked against.
 

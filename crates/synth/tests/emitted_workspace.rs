@@ -36,7 +36,7 @@ fn build_index_is_byte_identical_across_runs() {
 }
 
 /// Every file the emitter writes that the in-memory server also answers for
-/// must come back with the same text — or, for a BUILD file, with the prologue
+/// must come back with the same text or, for a BUILD file, with the prologue
 /// the emitted file starts with, which is the part the engine's `.bzl` scan
 /// reads.
 #[test]

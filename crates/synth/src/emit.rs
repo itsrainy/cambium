@@ -1,7 +1,7 @@
 //! Emitting a synthetic graph as a real Bazel workspace, with a git history.
 //!
-//! The rules do no real work — each action just writes a file listing its
-//! inputs — so `bazel build //...` succeeds on any machine with no compilers or
+//! The rules do no real work (each action just writes a file listing its
+//! inputs), so `bazel build //...` succeeds on any machine with no compilers or
 //! toolchains. That makes the same graph usable three ways: differential
 //! correctness against `bazel query`, end-to-end timing that includes real
 //! Bazel loading cost, and a like-for-like comparison with the "dump the whole
@@ -47,7 +47,7 @@ fn write(path: &Path, contents: &str) -> Result<()> {
 
 /// Writes the whole workspace, replacing whatever was there (except `.git`).
 ///
-/// `out` must be empty, missing, or a workspace this emitter wrote earlier —
+/// `out` must be empty, missing, or a workspace this emitter wrote earlier,
 /// recognised by its `MODULE.bazel` naming the `synth` module. Anything else is
 /// refused with [`EmitError::NotSynthetic`]; a caller that means to replace it
 /// removes the directory first.

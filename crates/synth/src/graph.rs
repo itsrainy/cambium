@@ -885,9 +885,9 @@ mod tests {
     /// The generator's output is pinned to a hash: a preset and a seed must
     /// produce the same workspace on every machine and after every refactor,
     /// because a synthetic subject is emitted on demand and compared with
-    /// itself across runs. Everything the emitter writes is folded in — the
+    /// itself across runs. Everything the emitter writes is folded in (the
     /// package paths and their `BUILD` text, the `.bzl` files, every target's
-    /// hash — plus five commits of the default change preset, so a change to
+    /// hash), plus five commits of the default change preset, so a change to
     /// the order of a single random draw moves the digest.
     #[test]
     fn a_small_workspace_and_its_history_hash_to_what_they_did() {

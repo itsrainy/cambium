@@ -165,7 +165,7 @@ impl Dump {
 
         // The workspace closure gets a second set of nodes under the key the
         // module system uses. That is how Bazel says a `.bzl` can define
-        // repository rules — `KeyForBzlmod` on 8/9, `KeyForWorkspace` on 7 —
+        // repository rules (`KeyForBzlmod` on 8/9, `KeyForWorkspace` on 7),
         // and it is what the engine reads instead of a flag on a stored
         // closure.
         for f in workspace_closure(tree, &exists, &mapping) {

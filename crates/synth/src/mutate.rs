@@ -353,7 +353,7 @@ fn generate<R: Rng>(
         MutKind::EditRuleAttr => {
             // An alias or a test_suite has no attribute the emitted BUILD file
             // carries the salt in, so editing one would move the in-memory
-            // hash without changing anything git can see — an edit no real
+            // hash without changing anything git can see: an edit no real
             // repository can make. Pick a rule that has attributes.
             let target = (0..8)
                 .filter_map(|_| pick_target(g, spec, rng))
@@ -674,7 +674,7 @@ fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<
     }
 }
 
-/// Drops `target`'s exported files — one slot, or all of them — from its
+/// Drops `target`'s exported files (one slot, or all of them) from its
 /// package's `exports_files` and from every consumer's `srcs`, recording the
 /// BUILD edits that implies.
 fn unexport(g: &mut SynthGraph, target: u32, slot: Option<u32>, changes: &mut Vec<Change>) {
