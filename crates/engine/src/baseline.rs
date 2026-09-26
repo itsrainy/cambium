@@ -190,7 +190,9 @@ impl<'a> BaselineCache<'a> {
             Err(e) => return Err(e.into()),
         };
         if f.view().config_hash != self.config_hash {
-            tracing::warn!(
+            // At info, not warn: CAMBI-W003 below says the same thing at the
+            // default log level, and two lines per skipped index read as two.
+            tracing::info!(
                 key = name,
                 "skipping an index built with a different cambium.toml (or an older rule-hash \
                  version or index content revision)"

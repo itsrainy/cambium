@@ -972,7 +972,8 @@ impl<'a> Run<'a> {
         if unnamed.is_empty() {
             return None;
         }
-        tracing::warn!(
+        // At info: the reason's diagnostic below is the default-level line.
+        tracing::info!(
             files = ?unnamed,
             "a changed .bzl is loaded by the module system and the index cannot name the \
              repositories it defines; treating the change as global"
@@ -1007,7 +1008,8 @@ impl<'a> Run<'a> {
         }
         if !self.base.sky.present {
             let reason = GlobalReason::NoLoadingLayer;
-            tracing::warn!(
+            // At info: the reason's diagnostic below is the default-level line.
+            tracing::info!(
                 "the base index carries no Skyframe loading layer; \
                  treating the change as global"
             );
@@ -1117,7 +1119,8 @@ impl<'a> Run<'a> {
                 .into_iter()
                 .partition(|u| edited_here.contains(&u.package));
             if !reapplied.is_empty() {
-                tracing::warn!(
+                // At info: CAMBI-W005 below is the default-level line.
+                tracing::info!(
                     packages = reapplied.len(),
                     first = ?reapplied.iter().take(5).map(|u| &u.package).collect::<Vec<_>>(),
                     "these packages failed to load and their own BUILD file is what changed; \
@@ -1135,8 +1138,8 @@ impl<'a> Run<'a> {
                         ),
                     )
                     .with_help(
-                        "fix the load error bazel reported for those packages; \
-                         run with --log warn to see its stderr",
+                        "fix the load error bazel reported for those packages: \
+                         `bazel query` on the package shows it",
                     ),
                 );
             }

@@ -607,7 +607,8 @@ impl ArtifactStore for CommandStore {
                         "fetch command failed again; treating the artifact as absent"
                     );
                 } else {
-                    tracing::warn!(
+                    // At info: CAMBI-W007 below is the default-level line.
+                    tracing::info!(
                         name,
                         status = ?code,
                         %stderr,

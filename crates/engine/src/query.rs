@@ -390,7 +390,8 @@ impl PackageQuerier for BazelQuerier {
                 q.updates = kept;
             }
             if !unloaded.is_empty() {
-                tracing::warn!(
+                // At info: CAMBI-W028 below is the default-level line.
+                tracing::info!(
                     packages = unloaded.len(),
                     first = ?unloaded.iter().take(5).map(|u| &u.package).collect::<Vec<_>>(),
                     "bazel named these dirty packages in a load error; carrying their \
@@ -576,7 +577,8 @@ impl PackageQuerier for BazelQuerier {
             });
         }
         let partial = partial_of(&q.outcome).inspect(|e| {
-            tracing::warn!(
+            // At info: CAMBI-W006 below is the default-level line.
+            tracing::info!(
                 packages_in_error = e.count,
                 loaded = q.updates.len(),
                 first = ?e.packages,
@@ -624,7 +626,8 @@ impl PackageQuerier for BazelQuerier {
             return cambium_index::RepoMapping::identity();
         };
         cambium_index::RepoMapping::try_from_dump(&dump).unwrap_or_else(|why| {
-            tracing::warn!("{why}; falling back to the identity repository mapping");
+            // At info: CAMBI-W022 below is the default-level line.
+            tracing::info!("{why}; falling back to the identity repository mapping");
             self.diags.emit(
                 crate::diag::Diagnostic::warning(
                     crate::diag::Code::W022RepoMappingUnparsed,

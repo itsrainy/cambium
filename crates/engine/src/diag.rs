@@ -3,8 +3,10 @@
 //! A diagnostic is not a log line. `tracing` says what the run did; a
 //! diagnostic says what someone should do about it, and carries a stable code
 //! so a script can branch on it and `docs/DIAGNOSTICS.md` can explain it. The
-//! two live side by side: the `tracing::warn!` calls stay exactly where they
-//! were, and a diagnostic is emitted beside the ones that are actionable.
+//! two live side by side, one line per fact at the default log level: where a
+//! site raises a diagnostic, its `tracing` line is at `info`, so `--log warn`
+//! prints the diagnostic alone. The one exception is CAMBI-W005's query-phase
+//! line, which carries Bazel's stderr that the diagnostic points to.
 //!
 //! The rendering is the CLI's business (see `crates/cli/src/diag.rs`); this
 //! module is the vocabulary and the sink.
