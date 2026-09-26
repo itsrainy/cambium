@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub mod worktree;
+mod worktree;
 
 pub use worktree::Worktree;
 
