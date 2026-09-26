@@ -419,10 +419,6 @@ pub struct EmittedRepo {
     pub dir: PathBuf,
     /// Commit shas, oldest first.
     pub commits: Vec<String>,
-    /// The graph after the last commit.
-    pub graph: SynthGraph,
-    /// The commit applied at each step, aligned with `commits[1..]`.
-    pub steps: Vec<crate::mutate::Commit>,
     /// Graph snapshot per commit, when the caller asked for them. Aligned with
     /// `commits`, so `graphs[i]` is the graph at `commits[i]`.
     pub graphs: Vec<SynthGraph>,
@@ -443,20 +439,18 @@ pub fn emit_git_history(
     git(out, &["config", "user.email", "synth@example.com"])?;
     git(out, &["config", "user.name", "cambi synth"])?;
     let mut commits = vec![commit_all(out, "synthetic base")?];
-    let mut steps = Vec::new();
     let mut graphs = Vec::new();
     if keep_graphs {
         graphs.push(graph.clone());
     }
 
     for rev in 0..revisions {
-        let c = crate::mutate::commit(&mut graph, change_spec, rev);
-        if c.changes.is_empty() {
+        let changes = crate::mutate::commit(&mut graph, change_spec, rev).changes;
+        if changes.is_empty() {
             continue;
         }
         emit_workspace(&graph, out)?;
         commits.push(commit_all(out, &format!("synthetic revision {rev}"))?);
-        steps.push(c);
         if keep_graphs {
             graphs.push(graph.clone());
         }
@@ -465,8 +459,6 @@ pub fn emit_git_history(
     Ok(EmittedRepo {
         dir: out.to_path_buf(),
         commits,
-        graph,
-        steps,
         graphs,
     })
 }
