@@ -1857,3 +1857,105 @@ fn index_publish_refuses_an_index_built_under_another_configuration() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("CAMBI-E007"), "{stderr}");
 }
+
+/// A stub Bazel that answers `--version` with `version` and nothing else.
+fn stub_bazel(dir: &std::path::Path, version: &str) -> String {
+    let path = dir.join(format!("bazel-{version}"));
+    cambium_testkit::executable_script(&path, &format!("echo \"bazel {version}\""));
+    path.display().to_string()
+}
+
+/// `doctor` fails a Bazel that cannot read the workspace it is in: Bazel 9
+/// reads no `WORKSPACE`, so on a tree with only that file every query loads
+/// a fraction of the packages and a run answers from a partial index; and a
+/// Bazel before 6 has no bzlmod, and 6 has it only when `.bazelrc` turns it
+/// on, so a tree with only `MODULE.bazel` has no external repositories
+/// under it. A Bazel that can read the tree passes.
+#[test]
+fn doctor_fails_a_bazel_that_cannot_read_the_workspace_mode() {
+    let bins = tempfile::tempdir().expect("tempdir");
+    let doctor = |ws: &std::path::Path, version: &str| {
+        let bazel = stub_bazel(bins.path(), version);
+        run(&[
+            "-C",
+            ws.to_str().unwrap(),
+            "--bazel-binary",
+            &bazel,
+            "doctor",
+        ])
+    };
+
+    let ws_only = tempfile::tempdir().expect("tempdir");
+    std::fs::write(ws_only.path().join("WORKSPACE"), "").unwrap();
+    std::fs::write(ws_only.path().join(".bazelversion"), "9.2.0\n").unwrap();
+    let (code, stdout, stderr) = doctor(ws_only.path(), "9.2.0");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("fail   bazel"), "{stdout}");
+    assert!(stdout.contains("error[CAMBI-E015]"), "{stdout}");
+    assert!(stdout.contains("WORKSPACE"), "{stdout}");
+    assert!(
+        stdout.contains(".bazelversion"),
+        "the help names the pin:\n{stdout}"
+    );
+    let (code, stdout, stderr) = doctor(ws_only.path(), "7.4.1");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let module_only = tempfile::tempdir().expect("tempdir");
+    std::fs::write(module_only.path().join("MODULE.bazel"), "").unwrap();
+    for old in ["5.4.1", "6.5.0"] {
+        let (code, stdout, stderr) = doctor(module_only.path(), old);
+        assert_eq!(code, 1, "{old}: {stdout}{stderr}");
+        assert!(stdout.contains("error[CAMBI-E015]"), "{old}: {stdout}");
+        assert!(stdout.contains("MODULE.bazel"), "{old}: {stdout}");
+    }
+    std::fs::write(
+        module_only.path().join(".bazelrc"),
+        "common --enable_bzlmod\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = doctor(module_only.path(), "6.5.0");
+    assert_eq!(
+        code, 0,
+        "6 with bzlmod turned on reads it: {stdout}{stderr}"
+    );
+    let (code, stdout, stderr) = doctor(module_only.path(), "8.4.2");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+/// A tree with only a `WORKSPACE` file and no `.bazelversion` runs whatever
+/// Bazel bazelisk picks, which is the latest, and the latest reads no
+/// `WORKSPACE`. `init` says so when it detects the mode, and so do `status`
+/// and `doctor`, under `CAMBI-W016`, whose fix is the pin.
+#[test]
+fn an_unpinned_workspace_only_tree_is_warned_about() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("WORKSPACE"), "").unwrap();
+    let ws = dir.path().to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", ws, "init", "--store-none"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("warning[CAMBI-W016]"), "{stdout}{stderr}");
+    assert!(stderr.contains(".bazelversion"), "{stderr}");
+
+    let (code, stdout, stderr) = run(&["-C", ws, "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("CAMBI-W016"),
+        "{stdout}{stderr}"
+    );
+
+    let bins = tempfile::tempdir().expect("tempdir");
+    let bazel = stub_bazel(bins.path(), "7.4.1");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 0, "a warning, not a failure: {stdout}{stderr}");
+    assert!(stdout.contains("warn   workspace"), "{stdout}");
+    assert!(stdout.contains("CAMBI-W016"), "{stdout}");
+
+    // Pinned, there is nothing to say.
+    std::fs::write(dir.path().join(".bazelversion"), "7.4.1\n").unwrap();
+    let (_, stdout, stderr) = run(&["-C", ws, "status"]);
+    assert!(
+        !format!("{stdout}{stderr}").contains("CAMBI-W016"),
+        "{stdout}{stderr}"
+    );
+}

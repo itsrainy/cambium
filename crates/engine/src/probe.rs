@@ -79,6 +79,76 @@ const MARKER_FILES: &[&str] = &[
     "WORKSPACE.bzlmod",
 ];
 
+/// Whether a `.bazeliskrc` at `root` names the Bazel version, which pins
+/// it as `.bazelversion` would.
+fn bazeliskrc_pins(root: &Path) -> bool {
+    std::fs::read_to_string(root.join(".bazeliskrc")).is_ok_and(|t| {
+        t.lines()
+            .any(|l| l.trim_start().starts_with("USE_BAZEL_VERSION="))
+    })
+}
+
+/// `CAMBI-E015` when the Bazel that answered `--version` cannot read the
+/// workspace in the mode its marker files leave it: a tree with only a
+/// `WORKSPACE` file under Bazel 9, which reads none; or a tree with only
+/// `MODULE.bazel` under a Bazel before 6, which has no bzlmod, or under 6
+/// with no `--enable_bzlmod` in the root `.bazelrc`. Either way every query
+/// a run makes loads a different graph from the one the build uses, or a
+/// fraction of it.
+pub fn mode_misfit(ws: &WorkspaceProbe, major: Option<u32>) -> Option<Diagnostic> {
+    let (root, major) = (ws.root.as_ref()?, major?);
+    let module = ws.markers.iter().any(|m| m == "MODULE.bazel");
+    let marker = ws.markers.iter().find(|m| *m != "MODULE.bazel");
+    match (module, marker) {
+        (false, Some(marker)) if major >= 9 => Some(
+            Diagnostic::error(
+                Code::E015BazelNotFound,
+                format!(
+                    "Bazel {major} cannot read this workspace: it has only a {marker} file, \
+                     and Bazel 9 reads no WORKSPACE file, so a query here loads a fraction \
+                     of the packages"
+                ),
+            )
+            .at(marker.clone(), None)
+            .with_help(
+                "pin a Bazel that reads WORKSPACE in .bazelversion (7.x, or 8.x with \
+                 --enable_workspace in .bazelrc), or move the dependencies to MODULE.bazel",
+            ),
+        ),
+        (true, None) if major < 6 => Some(
+            Diagnostic::error(
+                Code::E015BazelNotFound,
+                format!(
+                    "Bazel {major} cannot read this workspace: it has only a MODULE.bazel \
+                     file, and Bazel before 6 has no bzlmod"
+                ),
+            )
+            .at("MODULE.bazel", None)
+            .with_help("pin Bazel 7 or later in .bazelversion"),
+        ),
+        (true, None)
+            if major == 6
+                && !std::fs::read_to_string(root.join(".bazelrc"))
+                    .is_ok_and(|t| t.contains("enable_bzlmod")) =>
+        {
+            Some(
+                Diagnostic::error(
+                    Code::E015BazelNotFound,
+                    "Bazel 6 cannot read this workspace as it stands: it has only a \
+                     MODULE.bazel file, and Bazel 6 reads one only under --enable_bzlmod, \
+                     which the root .bazelrc does not set",
+                )
+                .at("MODULE.bazel", None)
+                .with_help(
+                    "pin Bazel 7 or later in .bazelversion, or add `common --enable_bzlmod` \
+                     to .bazelrc",
+                ),
+            )
+        }
+        _ => None,
+    }
+}
+
 /// Walks up from `start` for a workspace root and reads what is there.
 pub fn workspace(start: &Path) -> WorkspaceProbe {
     let mut p = WorkspaceProbe {
@@ -108,7 +178,30 @@ pub fn workspace(start: &Path) -> WorkspaceProbe {
     let workspace = p.markers.iter().any(|m| m != "MODULE.bazel");
     p.mode = match (module, workspace) {
         (true, false) => Some(WorkspaceMode::Bzlmod),
-        (false, true) => Some(WorkspaceMode::Workspace),
+        (false, true) => {
+            // Only a WORKSPACE file, and nothing that pins a Bazel: bazelisk
+            // runs the latest, and the latest reads no WORKSPACE at all.
+            if p.bazelversion.is_none() && !bazeliskrc_pins(&root) {
+                let marker = p.markers.first().cloned().unwrap_or_default();
+                p.diagnostics.push(
+                    Diagnostic::warning(
+                        Code::W016WorkspaceModeAmbiguous,
+                        format!(
+                            "this workspace has only a {marker} file and no .bazelversion, \
+                             so which Bazel runs here (and whether it reads {marker} at all) \
+                             depends on the machine: bazelisk picks the latest release, and \
+                             Bazel 9 reads no WORKSPACE file"
+                        ),
+                    )
+                    .at(marker, None)
+                    .with_help(
+                        "pin a Bazel that reads WORKSPACE in .bazelversion: 7.x, or 8.x with \
+                         --enable_workspace in .bazelrc",
+                    ),
+                );
+            }
+            Some(WorkspaceMode::Workspace)
+        }
         (false, false) => None,
         // Both. Which one Bazel reads is a function of its version — bzlmod is
         // the default from 7 on — so the pin decides, and without a pin
@@ -851,6 +944,13 @@ pub fn judge(p: &Probes) -> Vec<Check> {
                 .cloned()
                 .expect("an ambiguous mode always carries its diagnostic"),
         ),
+        (Some(root), Some(WorkspaceMode::Workspace)) if !p.workspace.diagnostics.is_empty() => {
+            Check::from(
+                "workspace",
+                format!("{} (WORKSPACE, no Bazel pinned)", root.display()),
+                p.workspace.diagnostics[0].clone(),
+            )
+        }
         (Some(root), mode) => Check::ok(
             "workspace",
             format!(
@@ -1062,7 +1162,15 @@ pub fn collect(opts: &Options) -> Probes {
     let (cfg, config_probe) = config(&root, opts.config_path.as_deref(), &opts.overrides);
     let effective = cfg.clone().unwrap_or_default();
 
-    let bazel_probe = opts.run_bazel.then(|| bazel(&root, &effective));
+    let bazel_probe = opts.run_bazel.then(|| {
+        let mut b = bazel(&root, &effective);
+        // First, so the check is graded by it: a Bazel that runs and cannot
+        // read this tree is worse than one that is merely untested.
+        if let Some(d) = mode_misfit(&ws, b.major) {
+            b.diagnostics.insert(0, d);
+        }
+        b
+    });
 
     // The store's own diagnostics (a `command` backend's failed fetch) go into
     // the store probe, not into a sink nobody drains.
@@ -1226,6 +1334,48 @@ mod tests {
         assert!(p.inert_workspace, "bazel 7 reads MODULE.bazel");
         assert_eq!(p.bazelversion.as_deref(), Some("7.4.1"));
         assert_eq!(p.bazelversion_major, Some(7));
+    }
+
+    /// A `.bazeliskrc` that names the version pins it as well as
+    /// `.bazelversion` does; with neither, a `WORKSPACE`-only tree is warned
+    /// about.
+    #[test]
+    fn a_workspace_only_tree_needs_a_pin_from_either_file() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "WORKSPACE.bazel", "");
+        let p = workspace(d.path());
+        assert_eq!(p.mode, Some(WorkspaceMode::Workspace));
+        assert_eq!(p.diagnostics.len(), 1);
+        assert_eq!(p.diagnostics[0].code, Code::W016WorkspaceModeAmbiguous);
+        assert!(p.diagnostics[0].message.contains("WORKSPACE.bazel"));
+        write(d.path(), ".bazeliskrc", "USE_BAZEL_VERSION=7.4.1\n");
+        assert!(workspace(d.path()).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_bazel_that_cannot_read_the_mode_is_named() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "WORKSPACE", "");
+        let ws = workspace(d.path());
+        assert_eq!(
+            mode_misfit(&ws, Some(9)).map(|d| d.code),
+            Some(Code::E015BazelNotFound)
+        );
+        assert!(mode_misfit(&ws, Some(8)).is_none());
+        assert!(
+            mode_misfit(&ws, None).is_none(),
+            "an unknown version is not judged"
+        );
+        write(d.path(), "MODULE.bazel", "");
+        let both = workspace(d.path());
+        assert!(
+            mode_misfit(&both, Some(9)).is_none(),
+            "9 reads the MODULE.bazel"
+        );
+        assert!(
+            mode_misfit(&both, Some(5)).is_none(),
+            "5 reads the WORKSPACE"
+        );
     }
 
     #[test]

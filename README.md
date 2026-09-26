@@ -77,18 +77,22 @@ $ cambi init --store-dir .cambium-store
 Writes `cambium.toml` and nothing else (no index, no Bazel, no credentials),
 detecting `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
 `try-import`s and the default branch, and asking only for the store. A
-relative store path is read from the workspace root, so
-`.cambium-store/` goes in `.gitignore` beside the `cambium.local.toml` line
-`init` asks for.
+relative store path is read from the workspace root, so `.cambium-store/`
+goes in `.gitignore` beside the `cambium.local.toml` line `init` asks for.
+A tree with only a `WORKSPACE` file and no `.bazelversion` is warned about
+(`CAMBI-W016`): bazelisk then runs the latest Bazel, which reads no
+`WORKSPACE`, so pin one that does.
 
 ```console
 $ cambi doctor
 ```
 
-Grades what a run needs: Bazel found and its version supported, the workspace
-mode unambiguous, the config parsed, the store answering both a fetch and a
-push of a probe object. Exit 0 if a run can work here, 1 otherwise. Every
-finding is a diagnostic with a code and a `help:` line.
+Grades what a run needs: Bazel found, its version supported and able to
+read the workspace's mode (Bazel 9 on a `WORKSPACE`-only tree fails under
+`CAMBI-E015`), the workspace mode unambiguous, the config parsed, the store
+answering both a fetch and a push of a probe object. Exit 0 if a run can
+work here, 1 otherwise. Every finding is a diagnostic with a code and a
+`help:` line.
 
 ```console
 $ cambi profile --commits 30 --out /tmp/cambium-index.bin

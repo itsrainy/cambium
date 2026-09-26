@@ -257,8 +257,12 @@ frequency:
 ### `doctor`
 
 What a new user runs first, and a bug report asks for: Bazel found and
-version supported; workspace mode consistent (an inert `MODULE.bazel`
-beside WORKSPACE named, not guessed); config parses, every value's origin
+version supported, and able to read the workspace's mode (a `WORKSPACE`-only
+tree under Bazel 9, or a `MODULE.bazel`-only one under a Bazel with no
+bzlmod, fails under `CAMBI-E015`); workspace mode consistent (an inert
+`MODULE.bazel` beside WORKSPACE named, not guessed; a `WORKSPACE`-only tree
+with no `.bazelversion` warned about under `CAMBI-W016`, since bazelisk then
+runs the latest Bazel); config parses, every value's origin
 known; store answers a probe fetch/push; index format current; packages
 `bazel query` couldn't load last time. Each finding is a diagnostic with a
 code and `help:` line. Exit 0 if a run can work, 1 otherwise.
