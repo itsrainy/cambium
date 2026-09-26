@@ -28,7 +28,7 @@ pub enum GitError {
     BadStatus(String),
 }
 
-type Result<T> = std::result::Result<T, GitError>;
+pub(crate) type Result<T> = std::result::Result<T, GitError>;
 
 /// What happened to one path between two revisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,7 +293,7 @@ fn run_line(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Runs git in `dir` and returns its stdout as text.
-fn run(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(run_bytes(dir, args)?).map_err(|_| GitError::NotUtf8)
 }
 

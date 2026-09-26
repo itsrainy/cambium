@@ -11,9 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{GitError, Repo};
-
-type Result<T> = std::result::Result<T, GitError>;
+use crate::{run, GitError, Result};
 
 /// A detached worktree of `owner`, removed when it goes out of scope.
 #[derive(Debug)]
@@ -44,8 +42,8 @@ impl Worktree {
             std::fs::create_dir_all(parent).map_err(GitError::Spawn)?;
         }
         if path.join(".git").exists() {
-            git(owner, &["worktree", "prune"]).ok();
-            git(path, &["checkout", "--quiet", "--force", "--detach", sha])?;
+            run(owner, &["worktree", "prune"]).ok();
+            run(path, &["checkout", "--quiet", "--force", "--detach", sha])?;
             return Ok(Self {
                 path: path.to_path_buf(),
                 owner: owner.to_path_buf(),
@@ -56,8 +54,8 @@ impl Worktree {
         if path.exists() {
             std::fs::remove_dir_all(path).map_err(GitError::Spawn)?;
         }
-        git(owner, &["worktree", "prune"]).ok();
-        git(
+        run(owner, &["worktree", "prune"]).ok();
+        run(
             owner,
             &[
                 "worktree",
@@ -102,7 +100,7 @@ impl Worktree {
 
     /// Moves this worktree to another revision.
     pub fn checkout(&self, sha: &str) -> Result<()> {
-        git(
+        run(
             &self.path,
             &["checkout", "--quiet", "--force", "--detach", sha],
         )?;
@@ -112,7 +110,7 @@ impl Worktree {
     /// Unregisters and deletes the worktree. `Drop` calls this and ignores
     /// failures; call it directly to see them.
     pub fn remove(&self) -> Result<()> {
-        git(
+        run(
             &self.owner,
             &[
                 "worktree",
@@ -136,13 +134,10 @@ impl Drop for Worktree {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    Repo::new(dir).git(args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Repo;
 
     #[test]
     fn adds_and_removes_a_detached_worktree() {
