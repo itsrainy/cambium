@@ -261,13 +261,16 @@ impl Repo {
         parse_name_status_z(&out)
     }
 
-    /// Reads a blob at a revision. `None` if the path does not exist there.
+    /// Reads a blob at a revision. `None` if the path does not exist there,
+    /// or is a directory there.
     ///
-    /// Any git failure reads as `None`, so a revision git cannot resolve
-    /// looks the same as an absent path; callers that must tell the two
-    /// apart resolve the revision first.
+    /// `cat-file blob` rather than `show`: `show` answers a directory with a
+    /// listing of it, which a caller reading a BUILD or rc file would take
+    /// for the file's text. Any git failure reads as `None`, so a revision
+    /// git cannot resolve looks the same as an absent path; callers that
+    /// must tell the two apart resolve the revision first.
     pub fn read_at(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
-        run_bytes(&self.root, &["show", &format!("{rev}:{path}")]).ok()
+        run_bytes(&self.root, &["cat-file", "blob", &format!("{rev}:{path}")]).ok()
     }
 }
 
@@ -553,5 +556,11 @@ mod tests {
         let repo = Repo::new(&f.root);
         assert_eq!(repo.read_at(&f.first, "lib/a.cc").unwrap(), b"one");
         assert!(repo.read_at(&f.first, "lib/b.cc").is_none());
+    }
+
+    #[test]
+    fn read_at_does_not_read_a_directory_as_a_file() {
+        let f = TwoCommits::new();
+        assert_eq!(Repo::new(&f.root).read_at(&f.first, "lib"), None);
     }
 }
