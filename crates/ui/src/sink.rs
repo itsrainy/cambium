@@ -297,6 +297,9 @@ impl<W: Write + Send + 'static> Stream<W> {
                         text.tick_line();
                     }
                 })
+                // A thread that cannot be spawned costs only the clock: the
+                // live line still redraws on every `Current`, and a frozen
+                // spinner is no reason to fail the verb it narrates.
                 .ok()
         };
         Self { text, stop, ticker }
