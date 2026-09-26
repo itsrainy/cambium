@@ -161,14 +161,7 @@ impl PackageSet {
     /// own, as `cambium_index::repo_boundaries` found them: repo-relative and
     /// without a trailing slash.
     pub fn with_boundaries(mut self, dirs: impl IntoIterator<Item = String>) -> Self {
-        let mut v: Vec<String> = dirs
-            .into_iter()
-            .filter(|d| !d.is_empty())
-            .map(|d| format!("{}/", d.trim_end_matches('/')))
-            .collect();
-        v.sort();
-        v.dedup();
-        self.boundaries = v;
+        self.boundaries = boundary_dirs(dirs);
         self
     }
 
@@ -176,14 +169,7 @@ impl PackageSet {
     /// main-repo package under, as `cambium_index::Boundary::traversed`
     /// records them. Repo-relative and without a trailing slash.
     pub fn with_traversed(mut self, dirs: impl IntoIterator<Item = String>) -> Self {
-        let mut v: Vec<String> = dirs
-            .into_iter()
-            .filter(|d| !d.is_empty())
-            .map(|d| format!("{}/", d.trim_end_matches('/')))
-            .collect();
-        v.sort();
-        v.dedup();
-        self.traversed = v;
+        self.traversed = boundary_dirs(dirs);
         self
     }
 
@@ -328,6 +314,24 @@ impl PackageSet {
             end = path[..i].rfind('/');
         }
     }
+}
+
+/// Boundary directories in the form [`PackageSet`] stores them: each with
+/// one trailing `/`, sorted, without duplicates, and never the root.
+///
+/// Every boundary query leans on this shape. `is_traversed` binary-searches
+/// it, and `containing_boundaries` relies on a prefix sorting before what it
+/// prefixes to yield outer boundaries first.
+fn boundary_dirs(dirs: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut v: Vec<String> = dirs
+        .into_iter()
+        .map(|d| d.trim_end_matches('/').to_string())
+        .filter(|d| !d.is_empty())
+        .map(|d| d + "/")
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// True if the path is a package definition file.
@@ -1155,6 +1159,18 @@ mod tests {
         // No main-repo package owns anything in there, not even the parent's.
         assert_eq!(p.owner_of("third_party/xla/service/a.cc"), None);
         assert_eq!(p.owner_of("third_party/other/a.cc"), Some("third_party"));
+    }
+
+    /// The root is the main repository itself, never a boundary inside it,
+    /// however it is spelled.
+    #[test]
+    fn the_root_is_never_a_boundary() {
+        let p = PackageSet::new(["".to_string()])
+            .with_boundaries(["".to_string(), "/".to_string()])
+            .with_traversed(["/".to_string()]);
+        assert_eq!(p.boundary_of(""), None);
+        assert_eq!(p.boundary_of("a.cc"), None);
+        assert_eq!(p.owner_of("a.cc"), Some(""));
     }
 
     #[test]
