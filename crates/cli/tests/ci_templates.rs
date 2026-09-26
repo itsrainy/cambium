@@ -153,3 +153,25 @@ fn the_retry_loops_do_not_sleep_after_the_last_try() {
         assert_eq!(stubs.calls("bazel"), 1, "{from}: then `bazel test //...`");
     }
 }
+
+/// `curl -fsSL URL | sh` exits 0 when the download fails, because `sh` reads
+/// an empty script and runs it. The Install step must fail there, not pass
+/// and leave the next step to find no `cambi`.
+#[test]
+fn the_install_steps_fail_when_the_download_does() {
+    for yml in ["ci/affected-tests.yml", "ci/cambium-index.yml"] {
+        let script = run_block(&read(yml), "Install cambi");
+        assert!(script.contains("curl"), "{yml}:\n{script}");
+        // curl -f on a 404: nothing on stdout, exit 22.
+        let stubs = Stubs::new(&[("curl", "echo 'curl: (22) 404' >&2\nexit 22")]);
+        let (code, stderr) = stubs.run(&["bash", "-e"], &script, &[("CAMBI_VERSION", "v0.1.0")]);
+        assert_ne!(
+            code, 0,
+            "docs/{yml}: the Install step passed with the download failing:\n{script}\n{stderr}"
+        );
+        assert!(
+            !stubs.dir.path().join("github_path").exists(),
+            "docs/{yml}: nothing is added to PATH after a failed install"
+        );
+    }
+}

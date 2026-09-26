@@ -26,8 +26,13 @@ jobs:
           # it. For a shallower clone see docs/CI.md, "Clone depth".
           fetch-depth: 0
 
+      # No release exists yet, so until one does this step fails; build cambi
+      # from a clone instead (README.md, "Install"). pipefail makes a failed
+      # download fail the step: without it `curl | sh` exits 0, because sh
+      # runs the empty script it was given.
       - name: Install cambi
         run: |
+          set -o pipefail
           curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh \
             | sh -s -- --version "$CAMBI_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

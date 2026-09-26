@@ -26,11 +26,18 @@ $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/ins
 $ curl -fsSL https://raw.githubusercontent.com/itsrainy/cambium/main/scripts/install.sh | sh -s -- --version v0.1.0 --prefix /usr/local
 ```
 
+No release exists yet, so today these commands fail; build from a clone
+(below) instead. When `curl` fails, `curl ... | sh` still exits 0, because
+`sh` runs the empty script it was given: in a script or a CI step, run
+`set -o pipefail` first so a failed download fails the step, as the
+templates in [docs/ci/](docs/ci/) do.
+
 The script picks the build for the machine, checks the download against the
 release's `SHA256SUMS`, and installs `cambi` to `~/.local/bin` (or
-`<prefix>/bin`). The latest release is the default; `--version` pins one,
-which is what a CI job should do. The tarballs and `SHA256SUMS` are on the
-release page for a download by hand.
+`<prefix>/bin`); it exits non-zero when there is no tarball to download.
+The latest release is the default; `--version` pins one, which is what a
+CI job should do. The tarballs and `SHA256SUMS` are on the release page for
+a download by hand.
 
 From source, with Rust 1.98 or newer (the workspace `rust-version`) and a C
 compiler (`blake3`, `ring` and `zstd` build C code):
@@ -41,6 +48,9 @@ $ cargo install --path crates/cli --locked    # from a clone
 $ cambi --version
 cambi 0.1.0 (0a4a001)
 ```
+
+`cargo install --git` works only once the repository is public; until then
+it cannot fetch it, and the from-a-clone line is the route that works.
 
 The crate is `cambium-cli`, the binary `cambi`. The crate named `cambi` on
 crates.io is an unrelated project. `--version` names the commit the binary
