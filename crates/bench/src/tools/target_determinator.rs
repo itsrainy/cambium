@@ -7,20 +7,9 @@
 //! revision and diffs the graphs; cambium keeps a persistent index and splices
 //! the packages a commit touched; target-determinator runs `bazel cquery` at
 //! each revision, hashes each *configured* target, and reports the ones whose
-//! hash moved. Its answer is a flat set of labels printed one per line.
-//!
-//! Three consequences for this file:
-//!
-//! - **No distance.** The binary prints labels and, under `-verbose`, an
-//!   explanation of why each one is in the set; neither is a number of hops.
-//!   So [`ToolRun::depths`] is `None`, which is not the same as every depth
-//!   being zero. Tango remains the only foil with a depth column.
-//! - **No warm mode.** bazel-diff's cold splits into "hash base" and "hash
-//!   head, diff", and the second half is what a CI system that kept yesterday's
-//!   hashes pays. target-determinator is one invocation that does both
-//!   revisions, and its cross-run cache is off here, so there is no honest
-//!   half to quote as warm and [`ToolRun::warm_wall`] is `None`.
-//! - **Its own checkout.** See [`TargetDeterminator::affected`].
+//! hash moved. Its answer is a flat set of labels printed one per line, from
+//! one invocation that does both revisions; it runs in a checkout of its own
+//! (see [`TargetDeterminator::affected`]).
 //!
 //! # Flags
 //!
@@ -215,10 +204,6 @@ impl Tool for TargetDeterminator {
         Ok(ToolRun {
             labels: parse_output(&c.stdout)?,
             cold_wall: c.wall,
-            warm_wall: None,
-            raw_output_path: Some(out),
-            depths: None,
-            dropped_file_targets: 0,
         })
     }
 }
@@ -431,10 +416,13 @@ mod tests {
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string()]
         );
-        assert!(run.warm_wall.is_none(), "there is no warm half to quote");
-        assert!(run.depths.is_none(), "the tool reports no distance");
         // The raw answer is written down, since the tool only prints it.
-        let raw = std::fs::read_to_string(run.raw_output_path.unwrap()).unwrap();
+        let raw = std::fs::read_to_string(scratch.join(format!(
+            "{NAME}-{}-{}.txt",
+            short_sha(&base),
+            short_sha(&head)
+        )))
+        .unwrap();
         assert!(raw.contains("//pkg:t"), "{raw}");
 
         let wt = scratch.join(HEAD_WORKTREE);

@@ -3,13 +3,9 @@
 //! bazel-diff answers the same question cambium does by a different route: it
 //! runs one whole-repository `bazel query` per revision, hashes every target's
 //! definition transitively into a `{label: hash}` JSON file, and diffs the two
-//! files. That shape is why the comparison is worth making — it is the tool CI
-//! systems actually use — and it is also why the timings are reported in two
-//! flavours:
-//!
-//! - **cold**: hash base, hash head, diff. What a cache-less run costs.
-//! - **warm**: hash head, diff, reusing yesterday's base hash file. What a CI
-//!   system that persists hashes actually pays per commit.
+//! files. That shape is why the comparison is worth making: it is the tool CI
+//! systems actually use. The wall recorded is the cache-less one (hash base,
+//! hash head, diff), the same cold question every peer is asked.
 //!
 //! Both implementations (the Rust binary and the Kotlin jar) take the same
 //! flags, so they differ here only in how the process is spawned and in the
@@ -17,7 +13,7 @@
 //!
 //! # Flags
 //!
-//! `generate-hashes` is run with **`-k` (`--keep_going`)** by default. On a
+//! `generate-hashes` is always run with **`-k` (`--keep_going`)**. On a
 //! real repository at a real pin, `bazel query '//...:all-targets'` does not
 //! load cleanly: `bazel/bazel` on macOS references a GraalVM distribution with
 //! no `macos-x64` build and an RBE config that shells out to Docker, so the
@@ -29,7 +25,7 @@
 //! changes what "affected" means, and on a real subject the external graph
 //! bazel-diff hashes is one of the things the comparison measures.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -220,9 +216,6 @@ impl BazelDiff {
     }
 }
 
-/// The labels a tool reported, and the distances it attached to them.
-pub type Impacted = (BTreeSet<String>, Option<BTreeMap<String, u32>>);
-
 impl BazelDiff {
     /// `get-impacted-targets` over two hash files.
     pub fn get_impacted_targets(
@@ -232,7 +225,7 @@ impl BazelDiff {
         final_: &Path,
         out: &Path,
         ctx: &RunContext,
-    ) -> Result<(Impacted, Duration)> {
+    ) -> Result<(BTreeSet<String>, Duration)> {
         let mut cmd = self.command(ctx);
         cmd.arg("get-impacted-targets")
             .arg("--startingHashes")
@@ -282,16 +275,12 @@ impl Tool for BazelDiff {
         let head_wall = self
             .generate_hashes(ws, &head_hashes, ctx, &[])
             .with_context(|| format!("hashing {head} in {}", ws.display()))?;
-        let ((labels, depths), diff_wall) =
+        let (labels, diff_wall) =
             self.get_impacted_targets(ws, &base_hashes, &head_hashes, &out, ctx)?;
 
         Ok(ToolRun {
             labels,
             cold_wall: base_wall + head_wall + diff_wall,
-            warm_wall: Some(head_wall + diff_wall),
-            raw_output_path: Some(out),
-            depths,
-            dropped_file_targets: 0,
         })
     }
 }
@@ -304,43 +293,29 @@ fn binary_version(bin: &Path) -> Option<String> {
 
 /// Parses `get-impacted-targets` output: one label per line, or, when
 /// `--depEdgesFile` was used, a JSON array of
-/// `{label, targetDistance, packageDistance}`.
+/// `{label, targetDistance, packageDistance}` whose labels are read and whose
+/// distances are not.
 ///
 /// Labels go through [`normalise_label`] so an external target has the same
 /// spelling here as it does in Tango's and cambium's output; without that a
 /// canonical-vs-apparent repository name puts one target on *both* sides of
 /// the symmetric difference.
-pub fn parse_impacted(text: &str) -> Impacted {
+pub fn parse_impacted(text: &str) -> BTreeSet<String> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
         #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
         struct Entry {
             label: String,
-            target_distance: Option<i64>,
         }
         if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(trimmed) {
-            let mut labels = BTreeSet::new();
-            let mut depths = BTreeMap::new();
-            for e in entries {
-                let label = normalise_label(&e.label);
-                if let Some(d) = e.target_distance.filter(|d| *d >= 0) {
-                    depths.insert(label.clone(), d as u32);
-                }
-                labels.insert(label);
-            }
-            let depths = (!depths.is_empty()).then_some(depths);
-            return (labels, depths);
+            return entries.iter().map(|e| normalise_label(&e.label)).collect();
         }
     }
-    (
-        text.lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(normalise_label)
-            .collect(),
-        None,
-    )
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(normalise_label)
+        .collect()
 }
 
 #[cfg(test)]
@@ -350,7 +325,7 @@ mod tests {
     #[test]
     fn impacted_targets_parse_from_lines() {
         let out = "//a:b\n  //c:d  \n\n//e:f\n";
-        let (got, _) = parse_impacted(out);
+        let got = parse_impacted(out);
         assert_eq!(
             got.into_iter().collect::<Vec<_>>(),
             vec!["//a:b", "//c:d", "//e:f"]
@@ -361,21 +336,19 @@ mod tests {
     fn impacted_targets_parse_from_the_dep_edges_json() {
         let out = r#"[{"label":"//a:b","targetDistance":0,"packageDistance":0},
                       {"label":"@@ext+//c:d","targetDistance":2,"packageDistance":1}]"#;
-        let (got, depths) = parse_impacted(out);
+        let got = parse_impacted(out);
         assert_eq!(
             got.into_iter().collect::<Vec<_>>(),
             vec!["//a:b", "@ext//c:d"],
             "the canonical external name is normalised"
         );
-        let depths = depths.expect("targetDistance is a depth");
-        assert_eq!(depths["@ext//c:d"], 2);
     }
 
     #[test]
     fn a_json_object_that_is_not_a_list_falls_back_to_lines() {
         // Defensive: an unexpected shape must not silently produce an empty
         // set, because an empty set reads as "the tools agree".
-        let (got, _) = parse_impacted("[not json\n//a:b\n");
+        let got = parse_impacted("[not json\n//a:b\n");
         assert_eq!(
             got.into_iter().collect::<Vec<_>>(),
             vec!["//a:b", "[not json"]

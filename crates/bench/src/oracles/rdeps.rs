@@ -1072,32 +1072,6 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
     })
 }
 
-/// Every rule target `//...` names, at whatever revision the workspace is on.
-///
-/// This is the *size of cambium's answer* on a globally invalidated change set:
-/// it says `//...`, and `//...` is this set. Without the number the report can
-/// only say "cambium went global", which hides the thing a reader actually
-/// wants — bazel-diff found M targets, cambium is asking the user to build N,
-/// and N/M is what a global costs.
-///
-/// It doubles as the rule filter for that change set's other tools
-/// ([`crate::tools::ToolRun::restrict_to_rule_set`]), so the one query
-/// serves both and the two sides stay in one vocabulary.
-///
-/// Exit 3 is accepted for the reason `query_rdeps` gives: a partial universe
-/// under `--keep_going` under-counts N, which understates cambium's
-/// over-approximation rather than flattering it.
-pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
-    let (labels, partial) = bazel_query::labels(bazel, "kind(rule, //...)", "kind(rule, //...)")?;
-    if partial {
-        tracing::warn!(
-            labels = labels.len(),
-            "the universe query exited 3 under --keep_going; the global answer size is a lower bound"
-        );
-    }
-    Ok(labels)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;

@@ -249,25 +249,6 @@ pub struct ToolRun {
     /// Wall time for the answer with nothing cached: for a hash-diffing tool,
     /// hashing *both* revisions plus the diff.
     pub cold_wall: Duration,
-    /// Wall time for the answer when the base side was already computed — the
-    /// number a CI system that keeps yesterday's hashes would see. `None` for
-    /// tools with no such split.
-    pub warm_wall: Option<Duration>,
-    /// The tool's own output file, kept for post-hoc inspection of a
-    /// disagreement.
-    pub raw_output_path: Option<PathBuf>,
-    /// The tool's own notion of how far each label sits from the change, when
-    /// it has one (Tango's `distance`; bazel-diff's `targetDistance` when it
-    /// was run with `--depEdgesFile`). Compared against cambium's per-target
-    /// depth in the report; `None` when the tool reports no such number, which
-    /// is not the same as "every depth is zero".
-    pub depths: Option<BTreeMap<String, u32>>,
-    /// How many rows were dropped by [`ToolRun::restrict_to_rules`]
-    /// because they name a *file*, not a rule. Both bazel-diff and Tango emit
-    /// source-file targets (`//pkg:BUILD.bazel`) that cambium's affected set
-    /// never contains, so counting them keeps the universe honest instead of
-    /// hiding the filter.
-    pub dropped_file_targets: usize,
 }
 
 impl ToolRun {
@@ -281,50 +262,10 @@ impl ToolRun {
     /// is a real disagreement (an external label, or something cambium never
     /// indexed) and the classifier should see it.
     pub fn restrict_to_rules(&mut self, index: cambium_index::IndexRef<'_>) {
-        let mut dropped = 0usize;
-        self.labels.retain(|label| {
-            let keep = match index.id_of(label) {
-                Some(id) => index.is_rule(id),
-                None => true,
-            };
-            if !keep {
-                dropped += 1;
-            }
-            keep
+        self.labels.retain(|label| match index.id_of(label) {
+            Some(id) => index.is_rule(id),
+            None => true,
         });
-        if let Some(d) = self.depths.as_mut() {
-            d.retain(|label, _| self.labels.contains(label));
-        }
-        self.dropped_file_targets += dropped;
-    }
-
-    /// The same restriction, against an explicit set of rule labels rather
-    /// than an index.
-    ///
-    /// A *globally invalidated* change set has no head index — that is the whole
-    /// point of it — so [`ToolRun::restrict_to_rules`] has nothing to ask.
-    /// The tools still run there (their cost, and the size of the precise
-    /// answer they found, are exactly what a global change set has to report), and
-    /// their answers still have to be counted in cambium's vocabulary, so the
-    /// rule universe comes from one `kind(rule, //...)` query instead
-    /// ([`crate::oracles::rdeps::rule_universe`]).
-    ///
-    /// A main-repository label the universe does not name is a file target and
-    /// is dropped; an `@repo//...` label is kept, for the same reason
-    /// `restrict_to_rules` keeps a label the index does not know.
-    pub fn restrict_to_rule_set(&mut self, rules: &BTreeSet<String>) {
-        let mut dropped = 0usize;
-        self.labels.retain(|label| {
-            let keep = crate::oracles::rdeps::is_external(label) || rules.contains(label);
-            if !keep {
-                dropped += 1;
-            }
-            keep
-        });
-        if let Some(d) = self.depths.as_mut() {
-            d.retain(|label, _| self.labels.contains(label));
-        }
-        self.dropped_file_targets += dropped;
     }
 }
 
@@ -397,12 +338,6 @@ pub struct RunContext {
 }
 
 impl RunContext {
-    /// The startup flags as one space-joined string, which is how bazel-diff
-    /// and friends take them (`--bazelStartupOptions "<flags>"`).
-    pub fn startup_flags_arg(&self) -> String {
-        self.startup_flags.join(" ")
-    }
-
     /// The startup flags a tool may use: the run's *minus*
     /// `--output_base`.
     ///
@@ -431,11 +366,6 @@ impl RunContext {
             .filter(|f| !f.starts_with("--output_base"))
             .cloned()
             .collect()
-    }
-
-    /// [`Self::tool_startup_flags`], space-joined.
-    pub fn tool_startup_flags_arg(&self) -> String {
-        self.tool_startup_flags().join(" ")
     }
 
     /// A child process carrying this context's environment.
@@ -696,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_filter_drops_file_targets_and_counts_them() {
+    fn the_rule_filter_drops_file_targets_and_keeps_unknown_labels() {
         // A hand-built index with one rule and one source file: the file-target
         // row is what cambium never reports, so it must not read as missing.
         let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
@@ -719,12 +649,6 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            depths: Some(
-                [("//pkg:t", 0u32), ("//pkg:a.txt", 0)]
-                    .iter()
-                    .map(|(l, d)| (l.to_string(), *d))
-                    .collect(),
-            ),
             ..Default::default()
         };
         run.restrict_to_rules(index.view());
@@ -733,55 +657,13 @@ mod tests {
             vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
             "unknown labels stay: they are a real disagreement"
         );
-        assert_eq!(run.dropped_file_targets, 1);
-        assert_eq!(run.depths.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn the_rule_filter_also_works_from_a_bare_universe() {
-        // What a global change set has instead of an index: the answer to
-        // `kind(rule, //...)`.
-        let universe: BTreeSet<String> = ["//pkg:t".to_string()].into_iter().collect();
-        let mut run = ToolRun {
-            labels: ["//pkg:t", "//pkg:a.txt", "@ext//:x"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            depths: Some(
-                [("//pkg:t", 0u32), ("//pkg:a.txt", 0)]
-                    .iter()
-                    .map(|(l, d)| (l.to_string(), *d))
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-        run.restrict_to_rule_set(&universe);
-        assert_eq!(
-            run.labels.iter().cloned().collect::<Vec<_>>(),
-            vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
-            "external labels stay; a main-repo label //... does not name is a file"
-        );
-        assert_eq!(run.dropped_file_targets, 1);
-        assert_eq!(run.depths.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn startup_flags_are_passed_as_one_string() {
-        assert_eq!(
-            ctx().startup_flags_arg(),
-            "--output_base=/tmp/ob --bazelrc=/tmp/rc"
-        );
     }
 
     /// An output base is per workspace directory; tools run in other
     /// workspaces, so they must not inherit ours.
     #[test]
     fn tools_do_not_inherit_the_output_base() {
-        assert_eq!(ctx().tool_startup_flags_arg(), "--bazelrc=/tmp/rc");
-        assert!(!ctx()
-            .tool_startup_flags()
-            .iter()
-            .any(|f| f.contains("output_base")));
+        assert_eq!(ctx().tool_startup_flags(), vec!["--bazelrc=/tmp/rc"]);
     }
 
     /// A tool's stdin must never be a terminal a prompt could wait on —

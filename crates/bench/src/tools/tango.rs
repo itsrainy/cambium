@@ -5,28 +5,12 @@
 //! revision's targets into a `{label: hash}` file and diffs the files;
 //! cambium keeps a persistent index and splices the packages a commit
 //! touched; Tango computes a *target graph* per revision, encodes both into
-//! its TGB blob, and diffs the graphs — which is why it, alone of the three,
-//! reports a **distance**: 0 for a target that changed in its own right, and
-//! otherwise the number of reverse-dependency hops from the nearest such seed.
+//! its TGB blob, and diffs the graphs. Its rows carry a distance (0 for a
+//! target that changed in its own right, otherwise the reverse-dependency hops
+//! from the nearest such seed), which the walk does not read: it scores sets.
 //!
-//! Two consequences for this file:
-//!
-//! - **No warm mode.** Tango's server caches graph blobs; the driver does not,
-//!   and computes both graphs on every invocation. So [`ToolRun::warm_wall`]
-//!   is `None` rather than a copy of the cold number — quoting the cold number
-//!   twice would flatter cambium by making Tango look like it has no cache to
-//!   lose, and quoting it as warm would flatter Tango.
-//! - **Distances are kept.** They land in [`ToolRun::depths`] and are
-//!   reported against cambium's own per-target depth. Do not read a
-//!   disagreement there as a bug in either tool: Tango's seed set is wider
-//!   than cambium's direct set (every string attribute counts, including
-//!   `generator_location`), so its seeds are systematically *wider*; and its
-//!   graph contains file nodes, so a hop through a generated file costs a
-//!   distance that cambium's rule-to-rule edge does not. On the smoke
-//!   workspace, editing `lib/lib.txt` puts `//app:app` at Tango distance 2
-//!   (`lib -> lib.out -> app`) against cambium depth 1 — a full agreement of
-//!   0.5 on that change set, with neither tool wrong. The number is there to make
-//!   that drift visible and measurable, not to gate anything.
+//! Tango's server caches graph blobs; the driver does not, and computes both
+//! graphs on every invocation, so the wall recorded is the whole of that.
 //!
 //! # Flags
 //!
@@ -57,7 +41,7 @@
 //!
 //! [Tango]: https://github.com/uber/tango
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -193,16 +177,9 @@ impl Tool for Tango {
 
         let text = std::fs::read_to_string(&out)
             .with_context(|| format!("reading tango output {}", out.display()))?;
-        let (labels, depths) = parse_output(&text)?;
         Ok(ToolRun {
-            labels,
-            // Tango computes both graphs every time: there is no warm side to
-            // report.
+            labels: parse_output(&text)?,
             cold_wall: c.wall,
-            warm_wall: None,
-            raw_output_path: Some(out),
-            depths: Some(depths),
-            dropped_file_targets: 0,
         })
     }
 }
@@ -219,30 +196,14 @@ pub struct Row {
     pub change_type: String,
 }
 
-/// Parses tango-cli's output into normalised labels plus their distances.
+/// Parses tango-cli's output into normalised labels.
 ///
 /// Every row is kept, `deleted` ones included: a target that vanished between
 /// base and head is exactly what cambium reports through `DeletedDep`, and
-/// dropping them here would manufacture disagreements. A negative distance
-/// (unreachable from any seed) is recorded as no depth rather than as zero,
-/// because zero means something specific.
-pub fn parse_output(text: &str) -> Result<(BTreeSet<String>, BTreeMap<String, u32>)> {
+/// dropping them here would manufacture disagreements.
+pub fn parse_output(text: &str) -> Result<BTreeSet<String>> {
     let rows: Vec<Row> = serde_json::from_str(text.trim()).context("parsing tango-cli JSON")?;
-    let mut labels = BTreeSet::new();
-    let mut depths = BTreeMap::new();
-    for r in rows {
-        let label = normalise_label(&r.label);
-        if r.distance >= 0 {
-            // Keep the shortest, in case two spellings normalised together.
-            let d = r.distance as u32;
-            depths
-                .entry(label.clone())
-                .and_modify(|e: &mut u32| *e = (*e).min(d))
-                .or_insert(d);
-        }
-        labels.insert(label);
-    }
-    Ok((labels, depths))
+    Ok(rows.iter().map(|r| normalise_label(&r.label)).collect())
 }
 
 #[cfg(test)]
@@ -386,33 +347,26 @@ JSON
     }
 
     #[test]
-    fn the_output_parses_into_labels_and_distances() {
+    fn the_output_parses_into_labels() {
         let text = r#"[
           {"label": "//pkg:t", "distance": 0, "change_type": "changed"},
           {"label": "//pkg:BUILD.bazel", "distance": 0, "change_type": "changed"},
           {"label": "//other:u", "distance": 2, "change_type": "changed"},
           {"label": "//gone:g", "distance": -1, "change_type": "deleted"}
         ]"#;
-        let (labels, depths) = parse_output(text).unwrap();
+        let labels = parse_output(text).unwrap();
         assert_eq!(
             labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//gone:g", "//other:u", "//pkg:BUILD.bazel", "//pkg:t"],
             "deleted targets are part of the answer"
-        );
-        assert_eq!(depths["//pkg:t"], 0);
-        assert_eq!(depths["//other:u"], 2);
-        assert!(
-            !depths.contains_key("//gone:g"),
-            "an unreachable target has no depth, which is not depth zero"
         );
     }
 
     #[test]
     fn external_labels_are_normalised_on_the_way_in() {
         let text = r#"[{"label": "@@rules_cc+//:x", "distance": 1, "change_type": "changed"}]"#;
-        let (labels, depths) = parse_output(text).unwrap();
+        let labels = parse_output(text).unwrap();
         assert!(labels.contains("@rules_cc//:x"), "{labels:?}");
-        assert_eq!(depths["@rules_cc//:x"], 1);
     }
 
     #[test]
@@ -420,7 +374,7 @@ JSON
         // An empty set reads as "the tools agree", so it must never be the
         // fallback for output we failed to understand.
         assert!(parse_output("tango-cli: boom").is_err());
-        assert_eq!(parse_output("[]").unwrap().0.len(), 0);
+        assert_eq!(parse_output("[]").unwrap().len(), 0);
     }
 
     #[test]
