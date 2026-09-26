@@ -240,13 +240,12 @@ impl Repo {
     }
 
     /// Reads a blob at a revision. `None` if the path does not exist there.
+    ///
+    /// Any git failure reads as `None`, so a revision git cannot resolve
+    /// looks the same as an absent path; callers that must tell the two
+    /// apart resolve the revision first.
     pub fn read_at(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
-        let out = Command::new("git")
-            .current_dir(&self.root)
-            .args(["show", &format!("{rev}:{path}")])
-            .output()
-            .ok()?;
-        out.status.success().then_some(out.stdout)
+        run_bytes(&self.root, &["show", &format!("{rev}:{path}")]).ok()
     }
 }
 
@@ -289,7 +288,15 @@ fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
+/// Runs git in `dir` and returns its stdout as text.
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    String::from_utf8(run_bytes(dir, args)?).map_err(|_| GitError::NotUtf8)
+}
+
+/// Runs git in `dir` and returns its stdout as it came: the one place this
+/// crate starts git, and the form for output that is file content rather
+/// than text git wrote.
+fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -302,7 +309,7 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    String::from_utf8(out.stdout).map_err(|_| GitError::NotUtf8)
+    Ok(out.stdout)
 }
 
 #[cfg(test)]
