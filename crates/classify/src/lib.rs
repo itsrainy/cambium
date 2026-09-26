@@ -222,8 +222,8 @@ impl PackageSet {
     }
 
     /// The boundaries `path` lies under that `//...` walked into: the
-    /// repositories a main-repo path is *also* a file of. See the second pass
-    /// in [`dirty_set`].
+    /// repositories a main-repo path is *also* a file of. See the third pass
+    /// of [`dirty_set`].
     pub fn traversed_boundaries_of<'s, 'p>(
         &'s self,
         path: &'p str,
@@ -514,19 +514,42 @@ impl DirtySet {
 ///
 /// It names no dirty package. Which packages a change moved is the loading
 /// layer's answer, in `cambium_engine`'s dirty stage.
+///
+/// Three passes over the diff: the BUILD file changes first, so that every
+/// other path is classified against the layout at head, then every other
+/// path, then the paths under traversed boundaries a second time, for the
+/// repository half of their answer.
 pub fn dirty_set(
     changes: &[impl Borrow<Change>],
     packages: &mut PackageSet,
     m: &Matchers,
     consumed: &dyn Consumed,
 ) -> DirtySet {
-    // Pass one: apply BUILD file adds and deletes so ownership questions in
-    // pass two see the package layout at head.
     let mut out = DirtySet::default();
+    if let Some(path) = apply_build_changes(changes, packages, m, &mut out) {
+        return DirtySet::invalidated_by(path);
+    }
+    classify_changes(changes, packages, m, consumed, &mut out);
+    route_traversed(changes, packages, &mut out);
+    out
+}
+
+/// Pass one: applies the diff's main-repo BUILD file adds and deletes to
+/// `packages`, so that ownership questions in pass two see the package
+/// layout at head, and records deleted packages and edited BUILD files.
+///
+/// Returns the first changed path that matches an invalidator. The whole
+/// answer is then global, so the rest of the diff is not read.
+fn apply_build_changes<'c>(
+    changes: &'c [impl Borrow<Change>],
+    packages: &mut PackageSet,
+    m: &Matchers,
+    out: &mut DirtySet,
+) -> Option<&'c str> {
     for c in changes {
         let c = c.borrow();
         if m.is_invalidator(&c.path) {
-            return DirtySet::invalidated_by(&c.path);
+            return Some(&c.path);
         }
         if !is_main_repo_build_file(&c.path, packages) {
             continue;
@@ -568,8 +591,18 @@ pub fn dirty_set(
     // package, which would otherwise leave the package marked deleted.
     out.deleted_packages
         .retain(|p| !packages.contains(p.as_str()));
+    None
+}
 
-    // Pass two: everything else.
+/// Pass two: classifies every path pass one did not take, against the
+/// package layout at head, and records what each one means.
+fn classify_changes(
+    changes: &[impl Borrow<Change>],
+    packages: &PackageSet,
+    m: &Matchers,
+    consumed: &dyn Consumed,
+    out: &mut DirtySet,
+) {
     for c in changes {
         let c = c.borrow();
         if is_main_repo_build_file(&c.path, packages) {
@@ -588,8 +621,8 @@ pub fn dirty_set(
             // keeps in `tools/build_defs/repo/BUILD` name the `.bzl` as a
             // source, so `//tools/build_defs/repo:utils.bzl` is a genuine input
             // of a dozen targets whose rule protos do not move when the file's
-            // text does. That is exactly the case the modified-BUILD arm
-            // above exists for.
+            // text does. That is exactly the case the modified-BUILD arm of
+            // pass one exists for.
             //
             // The loading layer does not stand in for this and is not asked
             // to. It answers "which packages did this file's `BZL_LOAD` node
@@ -626,15 +659,20 @@ pub fn dirty_set(
             Classification::Nested(dir) => out.nested.entry(dir).or_default().push(c.path.clone()),
         }
     }
+}
 
-    // A traversed boundary is two things at once, and both answers are owed.
-    // xla's `third_party/tsl` is a main-repo directory whose packages Bazel
-    // loaded (handled above, as any other path is) *and* the repository
-    // `@tsl`, whose targets consume those same files. Classification is
-    // single-owner, so the repository half is recorded here rather than as a
-    // classification: the paths go into `nested` beside the untraversed
-    // boundaries' paths, and the engine routes them to the repository the
-    // directory is, if it knows one.
+/// Pass three: records every path under a traversed boundary in
+/// [`DirtySet::nested`] too.
+///
+/// A traversed boundary is two things at once, and both answers are owed.
+/// xla's `third_party/tsl` is a main-repo directory whose packages Bazel
+/// loaded (classified in pass two, as any other path is) *and* the
+/// repository `@tsl`, whose targets consume those same files. Classification
+/// is single-owner, so the repository half is recorded here rather than as a
+/// classification: the paths go into `nested` beside the untraversed
+/// boundaries' paths, and the engine routes them to the repository the
+/// directory is, if it knows one.
+fn route_traversed(changes: &[impl Borrow<Change>], packages: &PackageSet, out: &mut DirtySet) {
     for c in changes {
         let c = c.borrow();
         if packages.unwalked_boundary_of(&c.path).is_some() {
@@ -647,8 +685,6 @@ pub fn dirty_set(
                 .push(c.path.clone());
         }
     }
-
-    out
 }
 
 /// Whether `path` is a BUILD file of this repository, which is what pass one
