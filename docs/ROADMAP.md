@@ -436,16 +436,21 @@ precision item:
   packages or repositories moved, the map is asked for again at head (each
   leaf then held against what it reaches at either end, or the pooled
   answer if Bazel will not say) and the splice stores the new one, as it
-  does when the indexed repository itself is unsettled. On run E's 288
-  oracle steps, 58 touch `api/`, and at most 16 of those also edit a
-  `BUILD` file on quiche's closure or a `.bzl` under `bazel/` (counting
-  every such `.bzl` edit as one that reaches the closure): those are the
-  steps that pay the extra question. Local gate with laptop Bazel on run C's four
-  steps and run E's three: 0 missing against both box oracles on every
-  step; step 121 answers 662 (was 5035, oracle 649) and step 244 answers
-  2489 (was 5583; run C, without the table, answered 2325, and none of the
-  1837 labels outside the oracle is in `@grpc//:grpc++`'s closure). The
-  73-step manifest walk and a box run have not been done on it.
+  does when the indexed repository itself is unsettled. Local gate with
+  laptop Bazel on run C's four steps and run E's three: 0 missing against
+  both box oracles on every step; step 121 answers 662 (was 5035, oracle
+  649) and step 244 answers 2489 (was 5583; every label of it outside the
+  oracle is also in run C's answer, which had no table). The 73-step
+  manifest walk (pin `86c52279`, window 73, carrying the index across the
+  step-32 rename and the overflows): 72 non-global steps, 0 missing
+  against both box oracles on every one. Five steps answer about 14300
+  where run E answered 219 to 6491: `@envoy_api` is unsettled there by
+  `bazel/*.bzl` files through the extension-load route (`d2bf2d2`, after
+  run E) or by its own `api/bazel/*.bzl`, which seeds every leaf; main at
+  `0a4a001` gives the same 14303 labels on one of them (`964cf8c2`). The
+  walk's rebuild oracle differs from a cold index at the pin in 1634
+  `@envoy_api` rule hashes; nothing on this branch writes rule rows. No
+  box run has been done on it.
 
 ### Box run B: phase 5, and phase 6 if it is ready
 
