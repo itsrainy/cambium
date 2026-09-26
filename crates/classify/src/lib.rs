@@ -347,10 +347,8 @@ pub fn is_bzl_file(path: &str) -> bool {
 /// The directories that could be the package owning `path`, deepest first
 /// and ending at the root package `""`.
 ///
-/// This is the order [`PackageSet::owner_of`] tries them in. A caller
-/// resolving a path against some other set of package names (an in-tree
-/// repository's, say) walks the same order.
-pub fn package_candidates(path: &str) -> impl Iterator<Item = &str> {
+/// This is the order [`PackageSet::owner_of`] tries them in.
+fn package_candidates(path: &str) -> impl Iterator<Item = &str> {
     std::iter::successors(Some(dirname(path)), |dir| {
         (!dir.is_empty()).then(|| dirname(dir))
     })
