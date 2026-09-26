@@ -52,8 +52,9 @@ fn deprecated(message: impl Into<String>) -> Diagnostic {
         .with_help("the old spelling is removed after one release")
 }
 
-/// Index of the `n`th positional token in `argv`, skipping flags and the
-/// values of the flags that take one.
+/// Index of the first positional token in `argv` at or after `from`,
+/// skipping flags and the values of the flags that take one. A `--` makes
+/// the token after it positional whatever it looks like.
 fn positional(argv: &[String], from: usize) -> Option<usize> {
     let mut i = from;
     while i < argv.len() {
