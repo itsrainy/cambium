@@ -301,9 +301,10 @@ fn pick_target<R: Rng>(g: &SynthGraph, spec: &ChangeSpec, rng: &mut R) -> Option
     // Biasing towards layer 0, which everything may depend on, is how the
     // `hub-touch` and `pathological` presets get their blast radius. This
     // takes the first 64 live layer-0 targets by id, while the generator's
-    // hubs are the first `hub_count` of them, live or not: the two share a
-    // prefix but are not the same set. The graph does not record the
-    // generator's, and using them here would move these draws.
+    // hubs are the first `hub_count` of them, live or not: the two start as
+    // a shared prefix and drift apart once a layer-0 target is deleted. The
+    // graph does not record the generator's, and using them here would move
+    // these draws.
     if rng.gen::<f64>() < spec.hub_bias {
         let hubs: Vec<u32> = (0..g.targets.len() as u32)
             .filter(|&i| g.targets[i as usize].alive && g.targets[i as usize].layer == 0)
