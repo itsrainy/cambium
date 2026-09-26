@@ -158,11 +158,11 @@ codes! {
     E004Bazel => "CAMBI-E004",
     /// A `bazel query` failed.
     E005BazelQuery => "CAMBI-E005",
-    /// No baseline index is available and `--no-full-build` was given.
+    /// No index is available for the base and `--no-full-build` was given.
     E006BaselineUnavailable => "CAMBI-E006",
     /// The index on hand was built with a different `cambium.toml`.
     E007ConfigHashMismatch => "CAMBI-E007",
-    /// No baseline store is configured.
+    /// No index store is configured.
     E008NoStore => "CAMBI-E008",
     /// Refusing to publish an index Bazel could not fully load.
     E009PartialIndex => "CAMBI-E009",

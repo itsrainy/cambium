@@ -114,11 +114,15 @@ or GCS store, delete the old `indexes/<lineage>/` and
 `commits/<lineage>/` prefixes after the fresh build has published, or
 leave the lineages to the lifecycle rule and the choice to the listing.
 
-**Retention.** On a directory store, `cambi index gc` deletes every index
-file and pointer older than `[baseline].retention_days`, by modification
-time and whatever its lineage. A publish rewrites the file, so the index
-the job just published is never old enough to go. `gc` is implemented for
-the `dir` backend only; an S3 or GCS store gets a lifecycle rule instead.
+**Retention.** On a directory store, `cambi index gc` deletes every lineage
+this `cambi` cannot read (another `cambium.toml`, an older index format),
+then every index file and pointer older than `[baseline].retention_days`,
+by modification time and whatever its lineage. A publish rewrites the file,
+so the index the job just published is never old enough to go. A store that
+branches with different `cambium.toml` files share wants
+`--keep-incompatible`, or one branch's `gc` deletes the other's lineage.
+`gc` is implemented for the `dir` backend only; an S3 or GCS store gets a
+lifecycle rule instead.
 
 The workflow: [docs/ci/cambium-index.yml](ci/cambium-index.yml).
 
@@ -160,10 +164,9 @@ the `case` reads the code. What each exit code means here:
 
 Two details the script relies on:
 
-- **A usage error clap rejects exits 2 too.** A mistyped flag prints
-  clap's usage text and exits 2 with nothing on stdout. Running the file
-  on exit 2, rather than `//...`, makes that a failure: the file is empty,
-  and `bazel test --target_pattern_file` on an empty file exits non-zero.
+- **A usage error exits 1.** A mistyped flag prints the parser's message
+  and exits 1 with nothing on stdout, so the `*)` arm fails the job. Exit 2
+  is only ever the global answer, and the file then holds `//...`.
 - **Exit 5 happens only where a store can tell an outage from a miss**: a
   directory store whose path is a file or refused (`CAMBI-E011`), an HTTP
   store answering `5xx` or `401` or not answering (`CAMBI-E010`), and a
@@ -225,8 +228,8 @@ things cause one:
   more than `max_ancestor_walk` merges without a post-merge job.
 
 What the pull-request job sees: `CAMBI-W003` lines naming each stored
-index it skipped (each one more than once today), then, under `--no-full-build`, `CAMBI-E006` and exit 4, and the
-job tests `//...`. Without the flag the run builds the base cold instead.
+index it skipped, once each, then, under `--no-full-build`, `CAMBI-E006`
+and exit 4, and the job tests `//...`. Without the flag the run builds the base cold instead.
 `cambi status` on the same checkout also shows `CAMBI-W019`, naming the
 store's lineage that this configuration cannot use. A pull request that
 edits `cambium.toml` itself always sees this, because its own
@@ -236,8 +239,8 @@ configuration is not the one main's indexes were built with, and testing
 How it heals: once the edit (or the upgrade) is on the default branch, its
 post-merge run refuses the old lineage the same way, builds the merge
 commit cold and publishes a new lineage; pull requests based on that
-commit or later find it. The old lineage is skipped until `gc` or a
-lifecycle rule removes it. To upgrade `cambi`, change the pinned version
+commit or later find it. The old lineage is skipped until `gc` (at once,
+on a directory store) or a lifecycle rule removes it. To upgrade `cambi`, change the pinned version
 in both workflows in one commit and expect that commit's post-merge run to
 be a cold build, and pull requests opened against older commits to test
 `//...` until they are rebased or the merge ref moves.

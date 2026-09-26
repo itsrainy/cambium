@@ -154,8 +154,9 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
+/// A sha cut to seven digits; a ref name (`origin/main`) whole.
 fn short(rev: &str) -> String {
-    cambium_engine::probe::short(rev)
+    cambium_ui::report::rev(rev, 7)
 }
 
 // --------------------------------------------------------------------- human

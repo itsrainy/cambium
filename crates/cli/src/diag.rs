@@ -24,7 +24,8 @@ pub struct Renderer {
     /// `--quiet`: nothing on stderr on success. An error still speaks, because
     /// an exit code with no message is not a diagnosis.
     pub quiet: bool,
-    /// Resolved from `--color`, `$NO_COLOR` and whether stderr is a TTY.
+    /// Resolved from `--color` and the environment by the narration's rule
+    /// ([`cambium_ui::OutputMode::stderr_colour`]).
     pub color: bool,
 }
 
@@ -271,10 +272,10 @@ mod tests {
 
     #[test]
     fn a_bare_diagnostic_is_one_line() {
-        let d = Diagnostic::error(Code::E008NoStore, "no baseline store is configured");
+        let d = Diagnostic::error(Code::E008NoStore, "no index store is configured");
         assert_eq!(
             render_human(&d, false),
-            "error[CAMBI-E008]: no baseline store is configured"
+            "error[CAMBI-E008]: no index store is configured"
         );
     }
 

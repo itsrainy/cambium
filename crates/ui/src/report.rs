@@ -10,6 +10,31 @@ pub fn human_ms(ms: u64) -> String {
     }
 }
 
+/// The longest a ref name is printed whole. Past it, the middle goes.
+pub const REF_MAX: usize = 40;
+
+/// A revision the way a line names it: a sha (all hex, longer than
+/// `sha_len`) cut to its first `sha_len` digits, as git abbreviates one;
+/// anything else is a name someone typed (`origin/main`, `HEAD~3`,
+/// `release/2026-09`) and is printed whole, since cutting a name at a fixed
+/// width turns `origin/main` into `origin/mai`. A name longer than
+/// [`REF_MAX`] keeps its start and its end around an ellipsis, so both the
+/// remote and the branch's last word stay readable.
+pub fn rev(rev: &str, sha_len: usize) -> String {
+    let n = rev.chars().count();
+    if n > sha_len && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return rev.chars().take(sha_len).collect();
+    }
+    if n <= REF_MAX {
+        return rev.to_string();
+    }
+    let tail = (REF_MAX - 1) / 2;
+    let head = REF_MAX - 1 - tail;
+    let start: String = rev.chars().take(head).collect();
+    let end: String = rev.chars().skip(n - tail).collect();
+    format!("{start}\u{2026}{end}")
+}
+
 /// Thousands separated, which is how a target count is read aloud.
 pub fn group(n: u64) -> String {
     let digits = n.to_string();
@@ -93,6 +118,27 @@ pub fn kv(pairs: &[Pair]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sha_is_abbreviated_and_a_name_is_not() {
+        assert_eq!(
+            rev("b1eed289a766d8fe820cf45ffc277d29b3d8ddca", 10),
+            "b1eed289a7"
+        );
+        assert_eq!(
+            rev("b1eed289a766d8fe820cf45ffc277d29b3d8ddca", 7),
+            "b1eed28"
+        );
+        assert_eq!(rev("origin/main", 10), "origin/main");
+        assert_eq!(rev("HEAD~3", 7), "HEAD~3");
+        assert_eq!(rev("b1eed28", 10), "b1eed28");
+        let long = "origin/feature/a-very-long-branch-name-that-goes-on-and-on";
+        let shown = rev(long, 10);
+        assert_eq!(shown.chars().count(), REF_MAX);
+        assert!(shown.starts_with("origin/feature/"), "{shown}");
+        assert!(shown.ends_with("-goes-on-and-on"), "{shown}");
+        assert!(shown.contains('\u{2026}'), "{shown}");
+    }
 
     #[test]
     fn times_read_in_the_unit_a_person_would_use() {

@@ -104,15 +104,41 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     }
 }
 
+/// A caller that mistypes must not have an empty stdout read as "nothing is
+/// affected", nor exit 2, which says "everything is affected" and makes a CI
+/// script test `//...` on a typo. A command line the parser rejects is an
+/// error, exit 1, with the parser's own message and its `--help` hint.
 #[test]
 fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
-    // A caller that mistypes must not have an empty stdout read as "nothing is
-    // affected". clap uses 2 for usage errors; what matters here is that it is
-    // not 0, and that stdout stays empty.
-    let (code, stdout, stderr) = run(&["affected", "--not-a-flag"]);
-    assert_ne!(code, 0, "a usage error must not look like success");
-    assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
-    assert!(!stderr.is_empty(), "the error should say what went wrong");
+    for argv in [
+        &["affected", "--not-a-flag"][..],
+        &["affected", "--max-depth"],
+        &["--format", "nope", "status"],
+        &["no-such-verb"],
+        &["index"],
+    ] {
+        let (code, stdout, stderr) = run(argv);
+        assert_eq!(
+            code,
+            1,
+            "`cambi {}` is an error, exit 1:\n{stderr}",
+            argv.join(" ")
+        );
+        assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
+        assert!(
+            stderr.contains("error:") || stderr.contains("Usage: cambi"),
+            "the parser says what went wrong:\n{stderr}"
+        );
+    }
+    let (_, _, stderr) = run(&["affected", "--not-a-flag"]);
+    assert!(stderr.contains("--not-a-flag"), "{stderr}");
+    assert!(stderr.contains("--help"), "the hint stays:\n{stderr}");
+    // Help and the version are answers, not errors.
+    for argv in [&["--help"][..], &["affected", "--help"], &["--version"]] {
+        let (code, stdout, _) = run(argv);
+        assert_eq!(code, 0, "`cambi {}`", argv.join(" "));
+        assert!(!stdout.is_empty());
+    }
 }
 
 /// Builds a synthetic index in `dir` and returns its path.
@@ -1199,4 +1225,308 @@ fn a_missing_store_directory_is_a_miss_and_an_unreadable_one_is_exit_5() {
         !stderr.contains("CAMBI-W007"),
         "an error is not also a miss:\n{stderr}"
     );
+}
+
+/// `index gc` and `index list` report a store problem under the code every
+/// other verb uses for it: `CAMBI-E008` when no store is configured,
+/// `CAMBI-E012` when the backend has no such operation, each with its
+/// `help:` line. Never the generic `CAMBI-E001`.
+#[test]
+fn index_gc_and_list_report_store_problems_under_their_own_codes() {
+    let ws = bare_workspace();
+    let w = ws.path().to_str().unwrap();
+    for verb in ["gc", "list"] {
+        let (code, stdout, stderr) = run(&["-C", w, "index", verb]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stdout.is_empty(), "{stdout:?}");
+        assert!(
+            stderr.contains("error[CAMBI-E008]: no index store is configured"),
+            "`index {verb}` with no store:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("= help: set [baseline].store in cambium.toml"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("CAMBI-E001"), "{stderr}");
+        assert!(!stderr.contains("baseline store"), "{stderr}");
+    }
+
+    // A command store with no `list_cmd` can neither enumerate nor collect.
+    std::fs::write(
+        ws.path().join("cambium.toml"),
+        "[baseline]\nstore = { kind = \"command\", fetch_cmd = [\"false\"], push_cmd = [\"false\"] }\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = run(&["-C", w, "index", "gc"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    assert!(stderr.contains("lifecycle rule"), "{stderr}");
+    let (code, _, stderr) = run(&["-C", w, "index", "list"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    assert!(stderr.contains("`list_cmd`"), "{stderr}");
+
+    // Plain HTTP cannot list either; nothing is contacted to find that out.
+    std::fs::write(
+        ws.path().join("cambium.toml"),
+        "[baseline]\nstore = { kind = \"http\", url = \"http://127.0.0.1:9/cambium\" }\n",
+    )
+    .unwrap();
+    for verb in ["gc", "list"] {
+        let (code, _, stderr) = run(&["-C", w, "index", verb]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("error[CAMBI-E012]"), "{stderr}");
+    }
+}
+
+/// What `CAMBI-W019`'s help promises, end to end: after a `cambium.toml`
+/// edit, `cambi index gc` removes the lineage the old configuration built,
+/// at once rather than once it is `retention_days` old, and
+/// `--keep-incompatible` keeps it.
+#[test]
+fn gc_removes_a_lineage_the_configuration_moved_away_from() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "status"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("CAMBI-W019"), "{stdout}");
+    assert!(
+        stdout.contains("`cambi index gc` removes it now"),
+        "{stdout}"
+    );
+
+    let listed = || -> String {
+        let (code, stdout, stderr) = run(&["-C", ws, "index", "list"]);
+        assert_eq!(code, 0, "{stderr}");
+        stdout
+    };
+    assert!(listed().contains(&f.lineage));
+
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "index",
+        "gc",
+        "--keep-incompatible",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "removed 0 index files");
+    assert!(
+        listed().contains(&f.lineage),
+        "--keep-incompatible keeps it"
+    );
+
+    let (code, stdout, stderr) = run(&["-C", ws, "--cache-dir", cache, "index", "gc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "removed 2 index files", "{stderr}");
+    assert!(
+        stderr.contains(&format!("lineage {}", f.lineage)),
+        "the narration names the lineage:\n{stderr}"
+    );
+    assert!(!listed().contains(&f.lineage));
+}
+
+/// Diagnostics colour by the narration's rule: `CLICOLOR_FORCE` colours a
+/// pipe, and `TERM=dumb` and `CLICOLOR=0` keep even that plain.
+#[test]
+fn diagnostics_colour_by_the_same_rule_as_the_narration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.cmbx");
+    let stderr_under = |env: &[(&str, &str)]| {
+        let mut cmd = Command::new(CAMBI);
+        cmd.args(["inspect", "stats", missing.to_str().unwrap()]);
+        for k in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "TERM", "CI"] {
+            cmd.env_remove(k);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("the binary should be runnable");
+        assert_eq!(out.status.code(), Some(1));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let forced = stderr_under(&[("CLICOLOR_FORCE", "1")]);
+    assert!(
+        forced.contains("\x1b[1;31merror[CAMBI-E"),
+        "CLICOLOR_FORCE colours the diagnostic down a pipe:\n{forced:?}"
+    );
+    for off in [
+        &[("CLICOLOR_FORCE", "1"), ("TERM", "dumb")][..],
+        &[("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")],
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+        &[],
+    ] {
+        let plain = stderr_under(off);
+        assert!(!plain.contains('\x1b'), "{off:?}:\n{plain:?}");
+    }
+}
+
+/// The narration names a ref the way it was typed. Cutting every revision
+/// at ten characters, as a sha is cut, printed `origin/main` as
+/// `origin/mai`.
+#[test]
+fn the_narration_header_prints_a_ref_whole_and_a_sha_short() {
+    let f = published_fixture(1);
+    let base = &f.commits[1];
+    cambium_testkit::git(&f.ws, &["branch", "-q", "release/2026-09-25", base]);
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        &format!("release/2026-09-25..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let header = stderr
+        .lines()
+        .find(|l| l.starts_with("cambium affected"))
+        .expect("a header line");
+    assert!(
+        header.contains(&format!("release/2026-09-25..{}", &base[..10])),
+        "{header}"
+    );
+}
+
+/// The `index` verbs narrate in the grammar every other verb does: a header,
+/// phase lines, the keys under the `publish` phase. No bare `cambium: ...`
+/// lines, and nothing at all under `--quiet`.
+#[test]
+fn index_publish_narrates_through_the_renderer() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let file = f.cache.join("published.cmbx");
+    let (code, stdout, stderr) = run(&["-C", ws, "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    let first = stderr.lines().next().unwrap_or_default();
+    assert!(first.starts_with("cambium index publish"), "{stderr}");
+    assert!(first.contains(&f.lineage), "{stderr}");
+    assert!(stderr.contains("  publish ...."), "{stderr}");
+    assert!(
+        stderr.contains(&format!("    indexes/{}/", f.lineage)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cambium: "), "{stderr}");
+
+    let (code, _, stderr) = run(&["-C", ws, "-q", "index", "publish", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+
+    // An index that would go nowhere is said before anything is built.
+    let bare = bare_workspace();
+    let (code, _, stderr) = run(&["-C", bare.path().to_str().unwrap(), "index", "build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
+    assert!(stderr.contains("--out <file>"), "{stderr}");
+}
+
+/// Under `--no-full-build` with no index in reach, the narration says what
+/// the search found and stops there: it does not announce a cold build the
+/// run is about to refuse. The error says index, not baseline.
+#[test]
+fn no_index_under_no_full_build_narrates_no_cold_build() {
+    let f = published_fixture(1);
+    point_store_at(&f.ws, "never-published");
+    let range = format!("{}..{}", f.commits[2], f.commits[3]);
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--no-full-build",
+        &range,
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("none within"), "{stderr}");
+    assert!(!stderr.contains("building cold"), "{stderr}");
+    assert!(!stderr.contains("cold index"), "{stderr}");
+    assert!(
+        stderr.contains("error[CAMBI-E006]: no index is available for"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("baseline index"), "{stderr}");
+}
+
+/// One refused index is one `CAMBI-W003`, and one log line, though the
+/// lookup reaches it by its tree and again through its `commits/` pointer.
+#[test]
+fn a_refused_index_is_one_w003() {
+    let f = published_fixture(1);
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    let base = &f.commits[1];
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--no-full-build",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    assert_eq!(stderr.matches("warning[CAMBI-W003]").count(), 1, "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("skipping an index built with a different cambium.toml")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
+
+/// A depth-1 clone of one branch, the way a CI checkout of a pull request
+/// leaves it: no `main`, no `origin/main`, and no history behind `HEAD`.
+/// Each missing revision gets the help that fits it, and none is told to
+/// check its spelling when the fix is a fetch.
+#[test]
+fn a_depth_one_clone_names_the_fetch_or_the_deepen() {
+    let f = published_fixture(1);
+    cambium_testkit::git(&f.ws, &["branch", "-q", "pr", &f.commits[3]]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clone = dir.path().join("clone");
+    let url = format!("file://{}", f.ws.display());
+    cambium_testkit::git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            "--branch",
+            "pr",
+            &url,
+            clone.to_str().unwrap(),
+        ],
+    );
+    std::fs::copy(f.ws.join("cambium.toml"), clone.join("cambium.toml")).unwrap();
+    let c = clone.to_str().unwrap();
+
+    let (code, stdout, stderr) = run(&["-C", c, "affected", "main", "--dry-run"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E003]: `main`"), "{stderr}");
+    assert!(
+        stderr.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pass `origin/main`"), "{stderr}");
+
+    for rev in ["HEAD~1", "origin/pr~1"] {
+        let (code, _, stderr) = run(&["-C", c, "affected", rev, "--dry-run"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("git fetch --deepen=N"), "{rev}:\n{stderr}");
+        assert!(!stderr.contains("check the spelling"), "{rev}:\n{stderr}");
+        assert!(!stderr.contains("pr~1:refs"), "{rev}:\n{stderr}");
+    }
 }

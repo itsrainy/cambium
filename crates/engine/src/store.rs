@@ -30,7 +30,7 @@ use crate::config::StoreConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("no baseline store is configured")]
+    #[error("no index store is configured")]
     NotConfigured,
     #[error("io error on {path}: {source}")]
     Io {
@@ -70,6 +70,22 @@ pub trait ArtifactStore: Send + Sync {
     /// Returns the number removed.
     fn gc(&self, _retention_days: u64, _keep: &str) -> Result<usize> {
         Err(StoreError::Unsupported("gc"))
+    }
+    /// Whether this backend garbage-collects at all: [`gc`](Self::gc) and
+    /// [`remove`](Self::remove) do something. Asked before `cambi index gc`
+    /// reads anything, so a store that cannot is told so without being read.
+    fn collects_garbage(&self) -> bool {
+        false
+    }
+    /// Deletes one key; `Ok(false)` when it was not there. Garbage
+    /// collection's other half, for a lineage this `cambi` cannot read.
+    fn remove(&self, _name: &str) -> Result<bool> {
+        Err(StoreError::Unsupported("gc"))
+    }
+    /// Where `name` already sits on this machine, when the backend is a
+    /// directory, so a reader of its header need not copy it first.
+    fn local_path(&self, _name: &str) -> Option<PathBuf> {
+        None
     }
     fn describe(&self) -> String;
 }
@@ -378,6 +394,30 @@ impl ArtifactStore for DirStore {
         Ok(removed)
     }
 
+    fn collects_garbage(&self) -> bool {
+        true
+    }
+
+    fn remove(&self, name: &str) -> Result<bool> {
+        let p = self.root.join(name);
+        match std::fs::remove_file(&p) {
+            Ok(()) => {
+                // The lineage's directory, once its last key is gone; a
+                // directory that still holds something is left.
+                if let Some(dir) = p.parent().filter(|d| *d != self.root) {
+                    let _ = std::fs::remove_dir(dir);
+                }
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(StoreError::Io { path: p, source }),
+        }
+    }
+
+    fn local_path(&self, name: &str) -> Option<PathBuf> {
+        Some(self.root.join(name))
+    }
+
     fn describe(&self) -> String {
         format!("dir:{}", self.root.display())
     }
@@ -546,7 +586,7 @@ impl ArtifactStore for CommandStore {
             Some(nf) if code != Some(nf) => Err(StoreError::Backend {
                 op: "fetch",
                 name: name.to_string(),
-                detail: format!("exit {code:?}: {stderr}"),
+                detail: format!("{}: {stderr}", crate::error::exit_text(code)),
             }),
             // A non-zero exit is how most CLIs report "not found", and the
             // ancestor walk asks for many keys that do not exist. But a
@@ -577,9 +617,10 @@ impl ArtifactStore for CommandStore {
                         crate::diag::Diagnostic::warning(
                             crate::diag::Code::W007StoreFetchFailed,
                             format!(
-                                "the store's fetch command failed for `{name}` (exit \
-                                 {code:?}) and said: {stderr}. Treating the artifact as \
-                                 absent, which means a cold build rather than a splice"
+                                "the store's fetch command failed for `{name}` ({}) and said: \
+                                 {stderr}. Treating the artifact as absent, which means a \
+                                 cold build rather than a splice",
+                                crate::error::exit_text(code)
                             ),
                         )
                         .with_help(
@@ -609,10 +650,20 @@ impl ArtifactStore for CommandStore {
     fn list(&self) -> Result<Vec<String>> {
         let out = Self::run(&self.list_cmd, "", Path::new(""), "list")?;
         if !out.status.success() {
+            // There is no key to name, so the message names the template,
+            // and a command that failed silently still says how it exited.
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(StoreError::Backend {
                 op: "list",
-                name: String::new(),
-                detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                name: "list_cmd".into(),
+                detail: if stderr.is_empty() {
+                    format!(
+                        "{}, nothing on stderr",
+                        crate::error::exit_text(out.status.code())
+                    )
+                } else {
+                    format!("{}: {stderr}", crate::error::exit_text(out.status.code()))
+                },
             });
         }
         Ok(String::from_utf8_lossy(&out.stdout)
@@ -806,6 +857,49 @@ mod tests {
             said_failed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(!store.fetch("x", &dir.path().join("x")).unwrap());
+    }
+
+    /// A failing command reads `exit 2`, and one killed by a signal says so,
+    /// never Rust's `Some(2)` or `None`.
+    #[test]
+    fn a_failing_store_command_says_how_it_exited_in_words() {
+        let store = |list: &str| CommandStore {
+            fetch_cmd: vec!["true".into()],
+            push_cmd: vec![],
+            list_cmd: vec!["sh".into(), "-c".into(), list.into()],
+            not_found_exit: None,
+            diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let said = store("exit 2").list().unwrap_err().to_string();
+        assert!(said.contains("exit 2, nothing on stderr"), "{said}");
+        assert!(!said.contains("Some("), "{said}");
+        let said = store("kill -9 $$").list().unwrap_err().to_string();
+        assert!(said.contains("killed by a signal"), "{said}");
+        assert!(!said.contains("None"), "{said}");
+    }
+
+    /// A read-only `command` store (`push_cmd = []`) is a real setup, so a
+    /// publish to it is `CAMBI-E012` naming `push_cmd`, not a crash.
+    #[test]
+    fn a_command_store_with_no_push_cmd_cannot_publish_and_says_which_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CommandStore {
+            fetch_cmd: vec!["true".into()],
+            push_cmd: vec![],
+            list_cmd: vec![],
+            not_found_exit: None,
+            diags: crate::diag::Diagnostics::new(),
+            said_failed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let err = store.publish("x", &dir.path().join("x")).unwrap_err();
+        assert!(matches!(err, StoreError::Unsupported("publish")), "{err:?}");
+        let d = crate::EngineError::from(err).diagnostic();
+        assert_eq!(d.code, crate::diag::Code::E012StoreUnsupported);
+        assert!(
+            d.help.as_deref().unwrap_or("").contains("push_cmd"),
+            "{d:?}"
+        );
     }
 
     #[test]

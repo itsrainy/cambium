@@ -1,11 +1,11 @@
 //! `cambi` — incremental changed-target computation for Bazel monorepos.
 //!
-//! Eight verbs, and nothing else is in this binary: `init`, `status`,
-//! `doctor`, `affected`, `explain`, `index`, `inspect`, `config`. The surface
-//! they make — what each one is for, the configuration, the output contract,
-//! the diagnostics format and the deprecated spellings still accepted — is
-//! `docs/CLI.md`, and `crates/cli/tests/cli_contract.rs` pins it. The
-//! benchmark harness is a separate binary, `cambium-bench`.
+//! Nine verbs, and nothing else is in this binary: `init`, `status`,
+//! `doctor`, `affected`, `explain`, `profile`, `index`, `inspect`, `config`.
+//! The surface they make (what each one is for, the configuration, the
+//! output contract, the diagnostics format and the deprecated spellings
+//! still accepted) is `docs/CLI.md`, and `crates/cli/tests/cli_contract.rs`
+//! pins it. The benchmark harness is a separate binary, `cambium-bench`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -87,7 +87,9 @@ struct Cli {
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 
-    /// Colour on stderr. `auto` means: a TTY, and `$NO_COLOR` unset.
+    /// Colour on stderr. `auto` means: a TTY, `$NO_COLOR` unset,
+    /// `$CLICOLOR` not 0 and `$TERM` not dumb; `$CLICOLOR_FORCE` colours a
+    /// pipe.
     #[arg(long, value_enum, global = true, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
 
@@ -201,18 +203,12 @@ pub enum ColorChoice {
     Never,
 }
 
-impl ColorChoice {
-    /// Whether to colour stderr. `$NO_COLOR` wins over `auto` and loses to an
-    /// explicit `--color always`, which is what a caller asking for colour in
-    /// a pipe means.
-    fn resolve(self) -> bool {
-        use std::io::IsTerminal;
-        match self {
-            ColorChoice::Always => true,
-            ColorChoice::Never => false,
-            ColorChoice::Auto => {
-                std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
-            }
+impl From<ColorChoice> for cambium_ui::ColorChoice {
+    fn from(c: ColorChoice) -> Self {
+        match c {
+            ColorChoice::Auto => cambium_ui::ColorChoice::Auto,
+            ColorChoice::Always => cambium_ui::ColorChoice::Always,
+            ColorChoice::Never => cambium_ui::ColorChoice::Never,
         }
     }
 }
@@ -227,8 +223,14 @@ fn main() -> ExitCode {
     // came from is still known: `--cache-dir` and `$CAMBIUM_CACHE_DIR` reach
     // the struct as one `Option`, and `cambi config explain` has to say
     // which one set it.
-    let matches = Cli::command().get_matches_from(argv);
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let matches = match Cli::command().try_get_matches_from(argv) {
+        Ok(m) => m,
+        Err(e) => return clap_exit(&e),
+    };
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => return clap_exit(&e),
+    };
     let overrides = overrides(&cli, &matches);
 
     let root = match cli.workspace.clone() {
@@ -241,20 +243,16 @@ fn main() -> ExitCode {
             }
         },
     };
+    // One colour rule for the diagnostics and the narration (the ui crate's):
+    // a diagnostic that ignored CLICOLOR or TERM=dumb would paint escapes
+    // into a log the narration beside it kept plain.
     let render = diag::Renderer {
         format: cli.format,
         quiet: cli.quiet,
-        color: cli.color.resolve(),
+        color: cambium_ui::OutputMode::stderr_colour(cli.color.into()),
     };
-    let ui = cambium_ui::OutputMode::detect(
-        cli.quiet,
-        cli.format == Format::Jsonl,
-        match cli.color {
-            ColorChoice::Auto => cambium_ui::ColorChoice::Auto,
-            ColorChoice::Always => cambium_ui::ColorChoice::Always,
-            ColorChoice::Never => cambium_ui::ColorChoice::Never,
-        },
-    );
+    let ui =
+        cambium_ui::OutputMode::detect(cli.quiet, cli.format == Format::Jsonl, cli.color.into());
     // After the output mode, because the log lines go to the same stderr and
     // colour by the same rule: escape codes on a terminal, plain bytes in a
     // pipe or a CI log.
@@ -296,6 +294,27 @@ fn main() -> ExitCode {
                 .unwrap_or(EXIT_ERROR);
             ExitCode::from(code)
         }
+    }
+}
+
+/// Where clap's own answer goes, and the code it exits with.
+///
+/// `--help` and `--version` are answers: stdout, exit 0. Anything else clap
+/// stops on (an unknown flag or verb, a missing value, a verb with no
+/// subcommand) is a command line that does not parse, and that is an error,
+/// exit 1. Clap's own default is 2, which is this binary's "everything is
+/// affected": a CI script that tests `//...` on exit 2 would test everything
+/// on a typo. Clap's message and its `--help` hint are printed unchanged.
+fn clap_exit(e: &clap::Error) -> ExitCode {
+    let _ = e.print();
+    ExitCode::from(clap_exit_code(e))
+}
+
+fn clap_exit_code(e: &clap::Error) -> u8 {
+    if e.use_stderr() {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
     }
 }
 
@@ -405,7 +424,7 @@ mod tests {
                 cambium_engine::store::StoreError::Backend {
                     op: "fetch",
                     name: "indexes/x".into(),
-                    detail: "exit Some(1)".into(),
+                    detail: "exit 1".into(),
                 }
             )),
             EXIT_STORE,
@@ -440,6 +459,32 @@ mod tests {
         assert!(!is_closed_stdout(
             "failed printing to stderr: Broken pipe (os error 32)"
         ));
+    }
+
+    #[test]
+    fn a_command_line_clap_rejects_is_an_error_and_help_is_an_answer() {
+        let code = |argv: &[&str]| match Cli::command().try_get_matches_from(argv) {
+            Ok(_) => None,
+            Err(e) => Some(clap_exit_code(&e)),
+        };
+        assert_eq!(
+            code(&["cambi", "affected", "--not-a-flag"]),
+            Some(EXIT_ERROR)
+        );
+        assert_eq!(
+            code(&["cambi", "affected", "--max-depth"]),
+            Some(EXIT_ERROR)
+        );
+        assert_eq!(code(&["cambi", "no-such-verb"]), Some(EXIT_ERROR));
+        assert_eq!(code(&["cambi", "index"]), Some(EXIT_ERROR));
+        assert_eq!(code(&["cambi", "--help"]), Some(EXIT_OK));
+        assert_eq!(code(&["cambi", "affected", "--help"]), Some(EXIT_OK));
+        assert_eq!(code(&["cambi", "--version"]), Some(EXIT_OK));
+        assert_ne!(
+            Some(EXIT_GLOBAL),
+            code(&["cambi", "--format", "nope"]),
+            "a typo must never read as everything affected"
+        );
     }
 
     #[test]

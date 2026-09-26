@@ -62,7 +62,8 @@ rebuild` plan can still end as a `//...` run, exit 2.
 While it runs it narrates itself on stderr in the shared grammar below: an
 `index` phase (where it looked for an index, and what it found: `found at
 <sha>  (N commits behind, lineage <hex>, 2 d old)`, or `none within N
-ancestors, building cold`), a `splice` phase for the replay up to the base
+ancestors`, after which a `cold index` phase builds one, or `CAMBI-E006`
+ends the run under `--no-full-build`), a `splice` phase for the replay up to the base
 with a row in `profile`'s five columns, or `skipped (index already at base)`
 / `skipped (cold index is at base)` when there was nothing to replay, and a
 `query` phase with the changed files, the packages they dirtied and what the
@@ -169,8 +170,10 @@ The stored artifact is an index; the chain of them is a lineage. `build
 forward (bare `FROM` means `FROM..HEAD`). Both need `--out <file>`; only a
 run also `--publish`ing may omit it (indexes run gigabytes). `publish`
 uploads one, `list` shows the store's holdings, `show` prints an index's
-header/counts, `gc` applies retention (`[baseline].retention_days`, by age;
-`--keep <key>` spares one key; a directory store only, see
+header/counts, `gc` removes the lineages this `cambi` cannot read (another
+`cambium.toml`, an older index format; `--keep-incompatible` keeps them) and
+applies retention (`[baseline].retention_days`, by age; `--keep <key>`
+spares one key; a directory store only, see
 [STORE.md](STORE.md#garbage-collection)). These were the `baseline` verbs,
 renamed; `baseline` survives one release as a deprecation alias.
 
@@ -371,12 +374,10 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   consumer succeeded.
 - Results to stdout; progress and diagnostics to stderr, and nothing at all
   on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
-  loses the live line, not the run. The narration below and `--log` lines
-  are coloured only when stderr is a TTY, never under `NO_COLOR`,
-  `CLICOLOR=0` or `TERM=dumb`, always under `--color always` or
-  `CLICOLOR_FORCE`. Diagnostics read only `--color` and `NO_COLOR`: colour
-  on a TTY unless `NO_COLOR` is set, never down a pipe unless `--color
-  always`.
+  loses the live line, not the run. The narration below, `--log` lines
+  and the diagnostics are coloured by one rule: only when stderr is a TTY,
+  never under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under
+  `--color always` or `CLICOLOR_FORCE`.
 - A long run narrates itself on stderr in one grammar, the same for every
   verb that has one (`profile` is the first on it): a
   header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per
@@ -411,10 +412,9 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   | 5 | the store is there and could not be read |
 
   A command line the argument parser rejects before `cambi` runs (an
-  unknown flag or verb, a missing value) exits 2 with the parser's usage
-  text on stderr and nothing on stdout, so a script should read 2 as
-  "everything" only when stdout says `//...` (docs/CI.md's scripts run the
-  label file on 2, which fails on an empty one).
+  unknown flag or verb, a missing value) exits 1 with the parser's message
+  and its `--help` hint on stderr and nothing on stdout: it is an error,
+  and 2 is only ever the global answer. `--help` and `--version` exit 0.
 
   0-4 keep their numbers. 5 is new: a store that is there and cannot be
   read differs from one with no index; CI retries the first, builds for the

@@ -287,12 +287,45 @@ fn require_commit(repo: &cambium_diff::Repo, rev: &str) -> Result<()> {
         return Ok(());
     }
     let remotes = remotes(repo);
-    let twin = remote_twin(rev, &remotes).filter(|t| has_commit(repo, t));
+    // `main~1` has the twin `main` would: `origin/main`, counted back the
+    // same way.
+    let twin = remote_twin(ancestry_root(rev).unwrap_or(rev), &remotes);
+    let clue = Clue {
+        twin_here: twin.as_deref().is_some_and(|t| has_commit(repo, t)),
+        twin: twin.as_deref(),
+        root_here: ancestry_root(rev).is_some_and(|root| has_commit(repo, root)),
+        shallow: repo
+            .git(&["rev-parse", "--is-shallow-repository"])
+            .is_ok_and(|o| o.trim() == "true"),
+    };
     Err(anyhow::Error::new(crate::diag::Raised(missing_revision(
-        rev,
-        &remotes,
-        twin.as_deref(),
+        rev, &remotes, &clue,
     ))))
+}
+
+/// What the clone says about a revision it does not have, beyond its
+/// spelling: the facts [`missing_revision`] picks its help line from.
+#[derive(Clone, Copy, Debug, Default)]
+struct Clue<'a> {
+    /// The remote-tracking branch a bare branch name would be
+    /// (`origin/main` for `main` and for `main~1`), whether or not it is
+    /// here.
+    twin: Option<&'a str>,
+    /// That twin names a commit here.
+    twin_here: bool,
+    /// The revision is `<root>~N` or `<root>^` and `<root>` is here: what is
+    /// missing is history, not the ref.
+    root_here: bool,
+    /// The clone is shallow.
+    shallow: bool,
+}
+
+/// `origin/main` for `origin/main~3`, `main^2` or `main~2^`: the ref an
+/// ancestry suffix counts back from. `None` for a revision with no suffix.
+fn ancestry_root(rev: &str) -> Option<&str> {
+    rev.find(['~', '^'])
+        .map(|i| &rev[..i])
+        .filter(|root| !root.is_empty())
 }
 
 fn has_commit(repo: &cambium_diff::Repo, rev: &str) -> bool {
@@ -333,23 +366,51 @@ fn looks_like_sha(rev: &str) -> bool {
     (7..=64).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `CAMBI-E003` for a revision this clone does not have. `twin` is its
-/// remote-tracking branch when that one is here.
-fn missing_revision(rev: &str, remotes: &[String], twin: Option<&str>) -> Diagnostic {
+/// `CAMBI-E003` for a revision this clone does not have, with the help line
+/// that fits what the clone does have (`clue`).
+fn missing_revision(rev: &str, remotes: &[String], clue: &Clue<'_>) -> Diagnostic {
     let message = format!("`{rev}` does not name a commit in this clone");
-    let tracking = rev
+    // A remote-tracking spelling, `origin/main` or `origin/main~3`: the ref
+    // is the part before any ancestry suffix.
+    let root = ancestry_root(rev).unwrap_or(rev);
+    // `~1` of `main~1`, empty for a revision with no ancestry suffix: the
+    // twin to pass is the twin counted back the same way.
+    let suffix = &rev[root.len()..];
+    let tracking = root
         .split_once('/')
         .filter(|(remote, name)| !name.is_empty() && remotes.iter().any(|r| r == remote));
-    let help = if let Some(t) = twin {
+    // The root being here comes first: `main~1` with a local `main` is
+    // missing history, whatever `origin/main` is.
+    let help = if clue.root_here && clue.shallow {
         format!(
-            "there is no local `{rev}` (a CI checkout usually makes none); its \
-             remote-tracking branch `{t}` is here, so pass that"
+            "`{root}` is here but not the history behind it, because this clone is \
+             shallow: deepen it with `git fetch --deepen=N` (or `--unshallow`)"
+        )
+    } else if clue.root_here {
+        format!(
+            "`{root}` is here and has fewer ancestors than that: `git log --oneline \
+             --first-parent {root}` lists them"
+        )
+    } else if let (Some(t), true) = (clue.twin, clue.twin_here) {
+        format!(
+            "there is no local `{root}` (a CI checkout usually makes none); its \
+             remote-tracking branch `{t}` is here, so pass `{t}{suffix}`"
         )
     } else if let Some((remote, name)) = tracking {
         format!(
             "fetch it by name: `git fetch {remote} {name}:refs/remotes/{remote}/{name} \
              --depth=N` (in a shallow clone, `git fetch {remote} {name}` can leave it only in \
              FETCH_HEAD)"
+        )
+    } else if let Some((remote, name)) = clue.twin.and_then(|t| t.split_once('/')) {
+        // A bare branch name with neither a local copy nor a remote-tracking
+        // branch here: what a depth-1 CI clone of one branch leaves of every
+        // other one.
+        format!(
+            "neither `{root}` nor `{remote}/{name}` is in this clone; if it is a branch on \
+             {remote}, fetch it by name, `git fetch {remote} \
+             {name}:refs/remotes/{remote}/{name} --depth=N`, and pass \
+             `{remote}/{name}{suffix}`; otherwise check the spelling"
         )
     } else if let (true, Some(remote)) = (looks_like_sha(rev), remotes.first()) {
         format!(
@@ -579,12 +640,15 @@ impl Narrator<'_> {
                     elapsed_ms,
                 });
             }
+            // What happens next is not this phase's to say: the engine
+            // decides it after, and says it with a `cold index` phase, or
+            // with `CAMBI-E006` under `--no-full-build`.
             Progress::IndexAbsent {
                 searched,
                 elapsed_ms,
             } => self.sink.emit(Event::PhaseEnd {
                 name: "index".into(),
-                result: format!("none within {searched} ancestors, building cold"),
+                result: format!("none within {searched} ancestors"),
                 elapsed_ms,
             }),
             Progress::ColdBuild { commit } => {
@@ -879,8 +943,9 @@ fn package_of(label: &str) -> &str {
     }
 }
 
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(10)]
+/// A sha cut to ten digits; a ref name (`origin/main`) whole.
+fn short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 10)
 }
 
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {
@@ -912,6 +977,8 @@ mod tests {
     use cambium_engine::report::{AffectedReport, AffectedTarget};
     use cambium_ui::{ColorChoice, Kind, OutputMode};
     use clap::Parser;
+
+    use super::Clue;
 
     /// A sink writing into a buffer this test can read back.
     #[derive(Clone)]
@@ -1206,7 +1273,7 @@ mod tests {
     /// and never the `--base`/`--head` flags nobody passed.
     #[test]
     fn a_missing_remote_tracking_branch_is_fetched_by_name() {
-        let d = super::missing_revision("origin/main", &remotes(&["origin"]), None);
+        let d = super::missing_revision("origin/main", &remotes(&["origin"]), &Clue::default());
         assert_eq!(d.code, cambium_engine::Code::E003Git);
         assert!(d.message.contains("`origin/main`"), "{}", d.message);
         let help = d.help.expect("a help line");
@@ -1222,21 +1289,119 @@ mod tests {
 
     #[test]
     fn a_missing_local_branch_points_at_its_remote_tracking_twin() {
-        let d = super::missing_revision("main", &remotes(&["origin"]), Some("origin/main"));
+        let clue = Clue {
+            twin: Some("origin/main"),
+            twin_here: true,
+            ..Clue::default()
+        };
+        let d = super::missing_revision("main", &remotes(&["origin"]), &clue);
         let help = d.help.expect("a help line");
-        assert!(help.contains("`origin/main`"), "{help}");
+        assert!(help.contains("pass `origin/main`"), "{help}");
+    }
+
+    /// `main~1` where `main` has no local copy: the twin is `origin/main`,
+    /// and the spelling to pass keeps the `~1`. With `main` itself here, it
+    /// is history that is missing, whatever the twin is.
+    #[test]
+    fn a_bare_branch_with_an_ancestry_suffix_gets_its_twin_counted_back() {
+        let o = remotes(&["origin"]);
+        assert_eq!(
+            super::remote_twin(super::ancestry_root("main~1").unwrap(), &o).as_deref(),
+            Some("origin/main")
+        );
+        let absent = Clue {
+            twin: Some("origin/main"),
+            ..Clue::default()
+        };
+        let help = super::missing_revision("main~1", &o, &absent).help.unwrap();
+        assert!(
+            help.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+            "{help}"
+        );
+        assert!(help.contains("pass `origin/main~1`"), "{help}");
+        assert!(!help.contains("main~1:refs"), "{help}");
+        let here = Clue {
+            twin: Some("origin/main"),
+            twin_here: true,
+            ..Clue::default()
+        };
+        let help = super::missing_revision("main~1", &o, &here).help.unwrap();
+        assert!(help.contains("no local `main`"), "{help}");
+        assert!(help.contains("pass `origin/main~1`"), "{help}");
+        let local = Clue {
+            twin: Some("origin/main"),
+            twin_here: true,
+            root_here: true,
+            shallow: true,
+        };
+        let help = super::missing_revision("main~1", &o, &local).help.unwrap();
+        assert!(help.contains("git fetch --deepen=N"), "{help}");
+    }
+
+    /// The depth-1 clone of one branch: `main` has no local copy and
+    /// `origin/main` was never fetched. It names a branch on the remote as
+    /// often as a typo, so the help gives the fetch first.
+    #[test]
+    fn a_bare_branch_with_no_twin_here_names_the_fetch_and_the_spelling() {
+        let clue = Clue {
+            twin: Some("origin/main"),
+            ..Clue::default()
+        };
+        let d = super::missing_revision("main", &remotes(&["origin"]), &clue);
+        let help = d.help.expect("a help line");
+        assert!(
+            help.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+            "{help}"
+        );
+        assert!(help.contains("pass `origin/main`"), "{help}");
+        assert!(help.contains("check the spelling"), "{help}");
+    }
+
+    /// `origin/main~3` in a shallow clone that has `origin/main`: the ref
+    /// is fine and the history is missing, so the fix is to deepen, not to
+    /// fetch a branch called `main~3`.
+    #[test]
+    fn an_ancestor_past_a_shallow_boundary_says_deepen() {
+        let o = remotes(&["origin"]);
+        let shallow = Clue {
+            root_here: true,
+            shallow: true,
+            ..Clue::default()
+        };
+        for rev in ["origin/main~3", "HEAD~1", "main^"] {
+            let d = super::missing_revision(rev, &o, &shallow);
+            let help = d.help.expect("a help line");
+            assert!(help.contains("git fetch --deepen=N"), "{rev}: {help}");
+            assert!(!help.contains("~3:refs"), "{rev}: {help}");
+        }
+        let deep = Clue {
+            root_here: true,
+            ..Clue::default()
+        };
+        let help = super::missing_revision("HEAD~9", &o, &deep).help.unwrap();
+        assert!(help.contains("fewer ancestors"), "{help}");
+        // The ref itself missing: fetch the ref, named without the suffix.
+        let help = super::missing_revision("origin/main~3", &o, &Clue::default())
+            .help
+            .unwrap();
+        assert!(
+            help.contains("git fetch origin main:refs/remotes/origin/main --depth=N"),
+            "{help}"
+        );
+        assert_eq!(super::ancestry_root("origin/main~3^2"), Some("origin/main"));
+        assert_eq!(super::ancestry_root("main"), None);
     }
 
     #[test]
     fn a_missing_sha_is_fetched_or_deepened() {
-        let d = super::missing_revision("0a4a001", &remotes(&["origin"]), None);
+        let d = super::missing_revision("0a4a001", &remotes(&["origin"]), &Clue::default());
         let help = d.help.expect("a help line");
         assert!(
             help.contains("git fetch origin 0a4a001 --depth=N"),
             "{help}"
         );
         assert!(help.contains("--deepen"), "{help}");
-        let d = super::missing_revision("0a4a001", &[], None);
+        let d = super::missing_revision("0a4a001", &[], &Clue::default());
         assert!(d.help.expect("a help line").contains("check the spelling"));
     }
 

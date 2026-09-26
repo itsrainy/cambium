@@ -10,7 +10,7 @@ pub enum EngineError {
     Git(#[from] cambium_diff::GitError),
     #[error(transparent)]
     Bazel(#[from] cambium_bazel::BazelError),
-    #[error("bazel query for {what} failed (exit {code:?})\n--- last stderr ---\n{stderr}")]
+    #[error("bazel query for {what} failed ({})\n--- last stderr ---\n{stderr}", exit_text(*.code))]
     BazelQuery {
         what: String,
         code: Option<i32>,
@@ -35,14 +35,17 @@ pub enum EngineError {
         #[source]
         source: std::io::Error,
     },
-    #[error("no baseline index available for {base} and --no-full-build was given")]
+    #[error(
+        "no index is available for {base}, in the store or within the ancestor walk, and \
+         --no-full-build was given"
+    )]
     BaselineUnavailable { base: String },
     #[error(
         "{path} was built with a different cambium.toml; splicing onto it could \
          disagree with a full build. Run `cambi index build` to mint a new lineage."
     )]
     ConfigHashMismatch { path: PathBuf },
-    #[error("no baseline store is configured; set [baseline].store in cambium.toml")]
+    #[error("no index store is configured")]
     NoStore,
     #[error(
         "refusing to publish the index for {commit}: bazel could not load every package \
@@ -194,10 +197,9 @@ impl EngineError {
                 Code::E011StoreIo,
                 Some("check the path and the permissions on [baseline].store"),
             ),
-            EngineError::Store(StoreError::Unsupported(_)) => (
-                Code::E012StoreUnsupported,
-                Some("use a store backend that supports it, or skip the operation"),
-            ),
+            EngineError::Store(StoreError::Unsupported(op)) => {
+                (Code::E012StoreUnsupported, Some(unsupported_help(op)))
+            }
             EngineError::Query(_) => (
                 Code::E017IndexQuery,
                 Some(
@@ -223,6 +225,33 @@ impl EngineError {
             Some(h) => d.with_help(h),
             None => d,
         }
+    }
+}
+
+/// How a child process ended, for a message: `exit 1`, or `killed by a signal` when
+/// there is no exit code to print. Never Rust's `Some(1)`/`None`.
+pub(crate) fn exit_text(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("exit {c}"),
+        None => "killed by a signal".to_string(),
+    }
+}
+
+/// The `help:` line of `CAMBI-E012`, by the operation the backend lacks.
+/// `docs/DIAGNOSTICS.md`'s row says the same for each.
+fn unsupported_help(op: &str) -> &'static str {
+    match op {
+        "gc" => {
+            "garbage collection runs on a `dir` store only; give an S3 or GCS prefix a \
+             lifecycle rule instead (docs/STORE.md, \"Garbage collection\")"
+        }
+        op if op.starts_with("list") => {
+            "listing needs a store that can enumerate: a `dir` store, or a `command` store \
+             with `list_cmd` set"
+        }
+        "fetch" => "set `fetch_cmd` in [baseline].store",
+        "publish" => "set `push_cmd` in [baseline].store",
+        _ => "use a store backend that supports it, or skip the operation",
     }
 }
 

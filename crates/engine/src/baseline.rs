@@ -26,6 +26,10 @@ pub struct BaselineCache<'a> {
     /// Lineages (hex) of the indexes a fetch refused for their config hash,
     /// so the lineage probe can name them without reading the W003 text.
     refused: std::cell::RefCell<Vec<String>>,
+    /// Keys already fetched and refused. A lookup reaches the same key
+    /// by its tree and again through every `commits/` pointer naming that
+    /// tree; the key is fetched, logged and reported the first time only.
+    skipped: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// Write the lineage-less keys on publish even to a store that can list
     /// (`baseline.lineage_less_copies`).
     lineage_less_copies: bool,
@@ -39,6 +43,7 @@ impl<'a> BaselineCache<'a> {
             config_hash,
             diags: crate::diag::Diagnostics::new(),
             refused: std::cell::RefCell::new(Vec::new()),
+            skipped: Default::default(),
             lineage_less_copies: false,
         }
     }
@@ -156,6 +161,9 @@ impl<'a> BaselineCache<'a> {
     /// skipped, so that a store carrying an older lineage neither wins over a
     /// compatible one nor stops the ancestor walk.
     fn fetch_if_compatible(&self, name: &str) -> Result<Option<PathBuf>> {
+        if self.skipped.borrow().contains(name) {
+            return Ok(None);
+        }
         let dest = self.cache_dir.join(cache_name(name));
         if !self.store.fetch(name, &dest)? {
             return Ok(None);
@@ -176,6 +184,7 @@ impl<'a> BaselineCache<'a> {
             ) => {
                 tracing::warn!(key = name, error = %e, "skipping an index this build cannot read");
                 let _ = std::fs::remove_file(&dest);
+                self.skipped.borrow_mut().insert(name.to_string());
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),
@@ -203,6 +212,7 @@ impl<'a> BaselineCache<'a> {
             self.refused
                 .borrow_mut()
                 .push(crate::inspect::hex(&f.view().lineage));
+            self.skipped.borrow_mut().insert(name.to_string());
             return Ok(None);
         }
         Ok(Some(dest))
@@ -258,6 +268,185 @@ impl<'a> BaselineCache<'a> {
         }
         Ok(names)
     }
+}
+
+/// A lineage in the store that this `cambi` cannot splice onto, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleLineage {
+    /// The lineage, as hex.
+    pub lineage: String,
+    pub why: Stale,
+}
+
+/// Why a lineage is stale. Both are the refusals a fetch makes (`CAMBI-W018`
+/// and `CAMBI-W003`/`CAMBI-W019`), decided once per lineage from one of its
+/// indexes: every index of a lineage shares its configuration and format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stale {
+    /// Written in an older on-disk format than this `cambi` reads.
+    OlderFormat { found: u32, expected: u32 },
+    /// Built with a different `cambium.toml`, rule-hash version or index
+    /// content revision.
+    Config,
+}
+
+impl std::fmt::Display for Stale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stale::OlderFormat { found, expected } => {
+                write!(f, "format version {found}; this cambi reads {expected}")
+            }
+            Stale::Config => f.write_str(
+                "built with a different cambium.toml, rule-hash version or index content \
+                 revision",
+            ),
+        }
+    }
+}
+
+/// What garbage collection removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// Each stale lineage removed, with how many of its keys went.
+    pub stale: Vec<(StaleLineage, usize)>,
+    /// Keys removed for being older than `retention_days`.
+    pub aged: usize,
+}
+
+impl Collected {
+    /// Every key removed.
+    pub fn total(&self) -> usize {
+        self.aged + self.stale.iter().map(|(_, n)| n).sum::<usize>()
+    }
+}
+
+impl BaselineCache<'_> {
+    /// The lineages in the store a fetch would refuse: those whose indexes are
+    /// in an older format than this `cambi` reads, or were built with another
+    /// configuration. A lineage is judged by the first of its indexes that
+    /// opens or is refused for its format; one whose files are all unreadable
+    /// for any other reason (a truncated transfer) is left to the age rule,
+    /// and so is a lineage in a *newer* format, which is a newer `cambi`'s to
+    /// judge.
+    pub fn stale_lineages(&self) -> Result<Vec<StaleLineage>> {
+        let names = self.store.list()?;
+        let mut by_lineage: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+        for n in &names {
+            if let Some((lineage, _)) = format::parse_index_key(n) {
+                if is_lineage(&lineage) {
+                    by_lineage.entry(lineage).or_default().push(n);
+                }
+            }
+        }
+        let mut stale = Vec::new();
+        for (lineage, keys) in by_lineage {
+            for key in keys {
+                match self.judge(key)? {
+                    Judged::Live => break,
+                    Judged::Stale(why) => {
+                        stale.push(StaleLineage { lineage, why });
+                        break;
+                    }
+                    Judged::Unknown => continue,
+                }
+            }
+        }
+        Ok(stale)
+    }
+
+    /// Reads one stored index's header: in place on a directory store,
+    /// through the cache (and deleted again) on any other.
+    fn judge(&self, key: &str) -> Result<Judged> {
+        let (path, scratch) = match self.store.local_path(key) {
+            Some(p) => (p, false),
+            None => {
+                std::fs::create_dir_all(self.cache_dir)
+                    .map_err(EngineError::io_at(self.cache_dir))?;
+                let dest = self.cache_dir.join(format!(
+                    "{}.gc.{}",
+                    cache_name(key),
+                    format::temp_suffix()
+                ));
+                if !self.store.fetch(key, &dest)? {
+                    return Ok(Judged::Unknown);
+                }
+                (dest, true)
+            }
+        };
+        let judged = match IndexFile::open(&path) {
+            Ok(f) if f.view().config_hash == self.config_hash => Judged::Live,
+            Ok(_) => Judged::Stale(Stale::Config),
+            Err(cambium_index::IndexError::BadVersion {
+                found, expected, ..
+            }) if found < expected => Judged::Stale(Stale::OlderFormat { found, expected }),
+            Err(e) => {
+                tracing::debug!(key, error = %e, "cannot judge this index's lineage from it");
+                Judged::Unknown
+            }
+        };
+        if scratch {
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(judged)
+    }
+
+    /// `cambi index gc`: removes every key of every stale lineage (unless
+    /// `keep_incompatible`), then every key older than `retention_days`.
+    /// `keep` survives both.
+    ///
+    /// A backend that cannot collect is refused before anything is read, with
+    /// the same `CAMBI-E012` the age rule alone always gave it.
+    pub fn collect(
+        &self,
+        retention_days: u64,
+        keep: &str,
+        keep_incompatible: bool,
+    ) -> Result<Collected> {
+        if !self.store.collects_garbage() {
+            return Err(crate::store::StoreError::Unsupported("gc").into());
+        }
+        let mut out = Collected::default();
+        if !keep_incompatible {
+            let stale = self.stale_lineages()?;
+            if !stale.is_empty() {
+                let names = self.store.list()?;
+                for s in stale {
+                    let mut removed = 0;
+                    for n in names
+                        .iter()
+                        .filter(|n| n.as_str() != keep && in_lineage(n, &s.lineage))
+                    {
+                        if self.store.remove(n)? {
+                            removed += 1;
+                        }
+                    }
+                    out.stale.push((s, removed));
+                }
+            }
+        }
+        out.aged = self.store.gc(retention_days, keep)?;
+        Ok(out)
+    }
+}
+
+/// What one index says about its lineage.
+enum Judged {
+    Live,
+    Stale(Stale),
+    /// Nothing, from this file: try another.
+    Unknown,
+}
+
+/// A lineage id as keys spell it: 32 hex digits. `by-tree` and `by-commit`
+/// hold the lineage-less copies and are nobody's lineage.
+fn is_lineage(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `key` is one of `lineage`'s index files or `commits/` pointers.
+fn in_lineage(key: &str, lineage: &str) -> bool {
+    format::parse_index_key(key).is_some_and(|(l, _)| l == lineage)
+        || format::parse_commit_pointer_key(key).is_some_and(|(l, _)| l == lineage)
 }
 
 /// Fallback key for stores that cannot be listed: no lineage in the path,
@@ -454,6 +643,124 @@ mod tests {
         assert!(c.fetch("sha0", "tree0").unwrap().is_none());
         let said: Vec<_> = diags.drain().iter().map(|d| d.code).collect();
         assert_eq!(said, vec![crate::diag::Code::W007StoreFetchFailed]);
+    }
+
+    /// A refused index is reached by its tree and again through each
+    /// `commits/` pointer naming that tree. It is fetched and reported once.
+    #[test]
+    fn a_refused_index_is_reported_once_however_many_ways_it_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirStore::new(dir.path().join("store"));
+        let cache = dir.path().join("cache");
+        let diags = crate::diag::Diagnostics::new();
+        let c = BaselineCache::new(&store, &cache, HASH).with_diagnostics(diags.clone());
+        // Two stale lineages hold the same tree, each with a pointer to it.
+        for (l, sha) in [(1u8, "sha1"), (2, "sha1")] {
+            let stale = index(sha, [l; 16], [0; 32]);
+            c.publish(&write(dir.path(), &stale), &[l; 16], sha, "tree1")
+                .unwrap();
+        }
+        assert!(c.fetch("sha1", "tree1").unwrap().is_none());
+        let w003: Vec<_> = diags
+            .drain()
+            .into_iter()
+            .filter(|d| d.code == crate::diag::Code::W003IndexConfigMismatch)
+            .collect();
+        assert_eq!(w003.len(), 2, "one per refused index: {w003:#?}");
+        assert_eq!(c.refused_lineages().len(), 2);
+    }
+
+    /// Publishes `idx` raw (uncompressed), with its format version set to
+    /// `version`, the way an older or newer `cambi` would have left it.
+    fn publish_as_version(c: &BaselineCache<'_>, dir: &Path, idx: &IndexData, version: u32) {
+        let p = dir.join(format!("{}.v{version}.bin", idx.provenance.commit));
+        format::write_index_with(&p, idx, format::Compression::None).unwrap();
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
+        std::fs::write(&p, bytes).unwrap();
+        c.publish(&p, &idx.header.lineage, &idx.provenance.commit, "tree1")
+            .unwrap();
+    }
+
+    #[test]
+    fn gc_drops_the_lineages_this_cambi_cannot_read_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let store = DirStore::new(root.clone());
+        let cache = dir.path().join("cache");
+        let c = BaselineCache::new(&store, &cache, HASH);
+        // Live: this configuration, this format.
+        let live = index("sha1", [1; 16], HASH);
+        c.publish(&write(dir.path(), &live), &[1; 16], "sha1", "tree1")
+            .unwrap();
+        // Another configuration.
+        let other = index("sha2", [2; 16], [0; 32]);
+        c.publish(&write(dir.path(), &other), &[2; 16], "sha2", "tree1")
+            .unwrap();
+        // An older format, and a newer one, which is not this cambi's to judge.
+        let v = format::FORMAT_VERSION;
+        publish_as_version(&c, dir.path(), &index("sha3", [3; 16], HASH), v - 1);
+        publish_as_version(&c, dir.path(), &index("sha4", [4; 16], HASH), v + 1);
+
+        let hex = |b: u8| crate::inspect::hex(&[b; 16]);
+        let stale = c.stale_lineages().unwrap();
+        assert_eq!(
+            stale,
+            vec![
+                StaleLineage {
+                    lineage: hex(2),
+                    why: Stale::Config
+                },
+                StaleLineage {
+                    lineage: hex(3),
+                    why: Stale::OlderFormat {
+                        found: v - 1,
+                        expected: v
+                    }
+                },
+            ]
+        );
+
+        // `--keep-incompatible`: by age alone, and nothing is that old.
+        let got = c.collect(30, "", true).unwrap();
+        assert_eq!(got, Collected::default());
+        assert_eq!(store.list().unwrap().len(), 8);
+
+        // A pinned key of a stale lineage survives; the rest of it goes.
+        let pinned = format::commit_pointer_key(&[2; 16], "sha2");
+        let got = c.collect(30, &pinned, false).unwrap();
+        assert_eq!(got.total(), 3, "{got:?}");
+        assert_eq!(got.stale.len(), 2);
+        let mut left = store.list().unwrap();
+        left.sort();
+        let mut want = vec![
+            format::index_key(&[1; 16], "tree1"),
+            format::commit_pointer_key(&[1; 16], "sha1"),
+            pinned,
+            format::index_key(&[4; 16], "tree1"),
+            format::commit_pointer_key(&[4; 16], "sha4"),
+        ];
+        want.sort();
+        assert_eq!(left, want);
+        assert!(
+            !root.join("indexes").join(hex(3)).exists(),
+            "an emptied lineage directory goes with its last key"
+        );
+    }
+
+    #[test]
+    fn gc_on_a_store_that_cannot_collect_reads_nothing_and_says_e012() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Unlistable(DirStore::new(dir.path().join("store")));
+        let cache = dir.path().join("cache");
+        let err = BaselineCache::new(&store, &cache, HASH)
+            .collect(30, "", false)
+            .unwrap_err();
+        assert_eq!(
+            err.diagnostic().code,
+            crate::diag::Code::E012StoreUnsupported
+        );
+        assert!(!cache.exists(), "nothing was fetched to find that out");
     }
 
     #[test]
