@@ -49,8 +49,8 @@ fn write(path: &Path, contents: &str) -> Result<()> {
 ///
 /// `out` must be empty, missing, or a workspace this emitter wrote earlier —
 /// recognised by its `MODULE.bazel` naming the `synth` module. Anything else is
-/// refused with [`EmitError::NotSynthetic`]; a caller that really means it can
-/// [`force_clear`] first.
+/// refused with [`EmitError::NotSynthetic`]; a caller that means to replace it
+/// removes the directory first.
 pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
     if !is_synthetic_workspace(out)? {
         return Err(EmitError::NotSynthetic {
@@ -103,14 +103,8 @@ fn is_synthetic_workspace(out: &Path) -> Result<bool> {
     }
 }
 
-/// Deletes everything under `out` except `.git`, whatever wrote it.
-///
-/// This is the `--force` path; [`emit_workspace`] on its own only clears a
-/// directory it recognises as its own.
-pub fn force_clear(out: &Path) -> Result<()> {
-    clear(out)
-}
-
+/// Deletes everything under `out` except `.git`. Only called once
+/// [`is_synthetic_workspace`] has said the directory is ours.
 fn clear(out: &Path) -> Result<()> {
     if !out.exists() {
         return std::fs::create_dir_all(out).map_err(|source| EmitError::Io {
@@ -143,7 +137,7 @@ fn clear(out: &Path) -> Result<()> {
 ///
 /// Shared by the emitter and by [`SynthFiles`], which is what makes the
 /// property tests exercise the real `load()` parser: the text the engine scans
-/// in memory is the text `emit-bazel` would have written to disk.
+/// in memory is the text [`emit_workspace`] writes to disk.
 pub fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
     let p = &g.packages[pkg as usize];
     let mut build = String::new();
@@ -528,12 +522,6 @@ mod tests {
         std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"real\")\n").unwrap();
         assert!(emit_workspace(&g, dir.path()).is_err());
         assert!(precious.exists());
-
-        // --force is the only way through, and it takes everything.
-        force_clear(dir.path()).unwrap();
-        emit_workspace(&g, dir.path()).unwrap();
-        assert!(!precious.exists());
-        assert!(dir.path().join("MODULE.bazel").exists());
     }
 
     #[test]

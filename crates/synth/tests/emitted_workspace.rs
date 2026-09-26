@@ -1,8 +1,8 @@
 //! The emitted workspace against the in-memory graph.
 //!
 //! Three things have to agree: the index built straight from the graph, the
-//! files `emit-bazel` writes, and the files `SynthFiles` serves the engine from
-//! memory. A disagreement between any two would let a property test pass on a
+//! files `emit_workspace` writes, and the files `SynthFiles` serves the engine
+//! from memory. A disagreement between any two would let a property test pass on a
 //! graph Bazel itself would reject.
 
 use std::collections::{BTreeMap, BTreeSet};
