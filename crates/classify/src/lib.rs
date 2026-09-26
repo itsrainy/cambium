@@ -23,16 +23,16 @@
 //! which paths invalidate everything, which are inside a nested repository,
 //! and which are not in the graph at all.
 //!
-//! It stays pure by being handed the one fact a path cannot tell it: which
-//! directories of the tree are Bazel repositories of their own. `bazel query
-//! //...` stops at a subdirectory carrying a WORKSPACE or a MODULE.bazel, so
-//! the index has no package under one, and a path there is not this
-//! repository's to classify. The index records those directories when it is
-//! built and [`PackageSet::from_index`] carries them in, which is what stops a
-//! changed `third_party/xla/service/BUILD` from minting a package name Bazel
-//! will never load. Such a path becomes [`Classification::Nested`] and lands
-//! in [`DirtySet::nested`]; what to do about the repository it names is the
-//! engine's question.
+//! It stays pure by being handed what a path cannot tell it. One such fact is
+//! which directories of the tree are Bazel repositories of their own. `bazel
+//! query //...` stops at a subdirectory carrying a WORKSPACE or a
+//! MODULE.bazel, so the index has no package under one, and a path there is
+//! not this repository's to classify. The index records those directories when
+//! it is built and [`PackageSet::from_index`] carries them in, which is what
+//! stops a changed `third_party/xla/service/BUILD` from minting a package name
+//! Bazel will never load. Such a path becomes [`Classification::Nested`] and
+//! lands in [`DirtySet::nested`]; what to do about the repository it names is
+//! the engine's question.
 //!
 //! Not every such directory stopped `//...`. Which markers stop it differs by
 //! Bazel version, and xla's `third_party/tsl` is walked into anyway. A path
