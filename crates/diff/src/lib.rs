@@ -234,24 +234,8 @@ impl Repo {
     pub fn diff(&self, base: &str, head: &str) -> Result<Vec<Change>> {
         let out = run(
             &self.root,
-            &[
-                "diff",
-                "--name-status",
-                "-M",
-                "-z",
-                "--no-renames-empty",
-                base,
-                head,
-            ],
-        );
-        // --no-renames-empty is not a real flag on older gits; retry without it.
-        let out = match out {
-            Ok(o) => o,
-            Err(_) => run(
-                &self.root,
-                &["diff", "--name-status", "-M", "-z", base, head],
-            )?,
-        };
+            &["diff", "--name-status", "-M", "-z", base, head],
+        )?;
         parse_name_status_z(&out)
     }
 
