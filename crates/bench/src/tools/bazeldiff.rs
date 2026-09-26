@@ -307,6 +307,11 @@ pub fn parse_impacted(text: &str) -> BTreeSet<String> {
         #[derive(serde::Deserialize)]
         struct Entry {
             label: String,
+            /// Unread, but kept typed so an array whose distances are not
+            /// integers still falls back to line parsing.
+            #[serde(rename = "targetDistance")]
+            #[allow(dead_code)]
+            target_distance: Option<i64>,
         }
         if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(trimmed) {
             return entries.iter().map(|e| normalise_label(&e.label)).collect();
