@@ -300,9 +300,10 @@ impl PackageSet {
 fn boundary_dirs(dirs: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut v: Vec<String> = dirs
         .into_iter()
-        .map(|d| d.trim_end_matches('/').to_string())
-        .filter(|d| !d.is_empty())
-        .map(|d| d + "/")
+        .filter_map(|d| {
+            let dir = d.trim_end_matches('/');
+            (!dir.is_empty()).then(|| format!("{dir}/"))
+        })
         .collect();
     v.sort();
     v.dedup();
