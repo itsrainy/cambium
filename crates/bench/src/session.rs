@@ -317,6 +317,22 @@ impl SubjectRun<'_> {
         tracing::info!(hubs = pkgs.len(), "hub packages from the index");
         Ok(pkgs)
     }
+
+    /// What the walk's step tagger reads besides the commits: the hub
+    /// packages and the configured invalidators. The walk and the Skyframe
+    /// runner both tag through this, so they see the same steps.
+    ///
+    /// The hubs are best effort: three of the four content tags need no
+    /// index, and a fresh subject has none. Missing hubs cost the `hub` tag
+    /// its steps and nothing else.
+    pub fn probes(&self) -> crate::walk::Probes {
+        let (paths, globs) = self.entry.invalidator_rules();
+        crate::walk::Probes {
+            hub_packages: self.hub_packages().unwrap_or_default(),
+            invalidator_paths: paths,
+            invalidator_globs: globs,
+        }
+    }
 }
 
 /// A Bazel binary the benchmark can run: an explicit path as given, otherwise

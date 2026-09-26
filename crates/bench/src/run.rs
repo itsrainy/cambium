@@ -237,16 +237,8 @@ pub fn run_walk(
         .steps
         .or(run.session.quick.then_some(crate::QUICK_COMMITS))
         .unwrap_or(run.entry.history_window);
-    let (paths, globs) = run.entry.invalidator_rules();
-    let probes = crate::walk::Probes {
-        // Best effort: three of the four content tags need no index, and a
-        // fresh subject has none. Missing hubs cost the `hub` tag its steps
-        // and nothing else.
-        hub_packages: run.hub_packages().unwrap_or_default(),
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
-    let (commits, steps) = crate::walk::steps(&checkout.repo, &run.entry.pin, range, &probes)?;
+    let (commits, steps) =
+        crate::walk::steps(&checkout.repo, &run.entry.pin, range, &run.probes())?;
     anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
     let only = select_only(&steps, &req.only)?;
     let steps = only.clone().unwrap_or(steps);
@@ -271,10 +263,9 @@ pub fn run_walk(
     };
 
     let results = run.workload("walk")?;
-    let bazel_used = engine.bazel().version();
     let environment = crate::env::Environment {
         machine: crate::harness::Machine::detect(),
-        bazel_version_used: bazel_used.lines().next().unwrap_or("").trim().to_string(),
+        bazel_version_used: crate::env::bazel_version_used(engine.bazel()),
         cambi_version: cambi.version().to_string(),
         tool_sha: crate::util::tool_sha().to_string(),
         engine_id: String::new(),

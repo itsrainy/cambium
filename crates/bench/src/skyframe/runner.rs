@@ -65,20 +65,11 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
     let cambi = run.cambi(&checkout)?;
     let env = crate::checkout::bazelisk_env(&checkout.dir, run.version());
 
-    let (paths, globs) = run.entry.invalidator_rules();
-    let probes = crate::walk::Probes {
-        // Best effort, as in the walk: without an index at the pin there are
-        // no hub packages, which costs the `hub` tag its steps and nothing
-        // else.
-        hub_packages: run.hub_packages().unwrap_or_default(),
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
     let (_, all) = crate::walk::steps(
         &checkout.repo,
         &run.entry.pin,
         run.entry.history_window,
-        &probes,
+        &run.probes(),
     )?;
     anyhow::ensure!(!all.is_empty(), "the window holds no steps");
     let sample = crate::walk::sample(&all, req.seed, PER_TAG, Some(req.steps));
@@ -105,14 +96,7 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
     let mut result = RunResult {
         strategy: strategy.name().to_string(),
         subject: run.entry.id.clone(),
-        bazel_version: engine
-            .bazel()
-            .version()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string(),
+        bazel_version: crate::env::bazel_version_used(engine.bazel()),
         started: crate::util::now_unix(),
         steps: Vec::new(),
     };

@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::Machine;
 
+/// The first line of `bazel --version`, trimmed: `bazel 7.4.1`, or empty when
+/// the binary could not be asked. What a result records as the Bazel that
+/// answered.
+pub fn bazel_version_used(bazel: &cambium_bazel::Bazel) -> String {
+    bazel
+        .version()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// What a walk was run in. Stamped into [`super::walk::model::WalkResult`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Environment {
