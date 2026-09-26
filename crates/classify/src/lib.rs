@@ -528,14 +528,7 @@ pub fn dirty_set(
         if m.is_invalidator(&c.path) {
             return DirtySet::invalidated_by(&c.path);
         }
-        if !is_build_file(&c.path) {
-            continue;
-        }
-        // A BUILD file inside a nested repository defines a package of *that*
-        // repository. Pass two records it; pass one must not mint a main-repo
-        // package name from it, nor touch the parent package, which is in a
-        // different repository and cannot gain or lose files to it.
-        if packages.unwalked_boundary_of(&c.path).is_some() {
+        if !is_main_repo_build_file(&c.path, packages) {
             continue;
         }
         let pkg = dirname(&c.path).to_string();
@@ -579,7 +572,7 @@ pub fn dirty_set(
     // Pass two: everything else.
     for c in changes {
         let c = c.borrow();
-        if is_build_file(&c.path) && packages.unwalked_boundary_of(&c.path).is_none() {
+        if is_main_repo_build_file(&c.path, packages) {
             continue;
         }
         match classify(&c.path, packages, m) {
@@ -652,6 +645,17 @@ pub fn dirty_set(
     }
 
     out
+}
+
+/// Whether `path` is a BUILD file of this repository, which is what pass one
+/// of [`dirty_set`] applies and pass two leaves alone.
+///
+/// A BUILD file inside a nested repository defines a package of *that*
+/// repository. Pass two records it; pass one must not mint a main-repo
+/// package name from it, nor touch the parent package, which is in a
+/// different repository and cannot gain or lose files to it.
+fn is_main_repo_build_file(path: &str, packages: &PackageSet) -> bool {
+    is_build_file(path) && packages.unwalked_boundary_of(path).is_none()
 }
 
 /// Whether a change edited a file's content in place, which is the only
