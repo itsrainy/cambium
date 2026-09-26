@@ -302,8 +302,7 @@ impl PackageSet {
     }
 
     /// Longest-prefix owner of `path`: walk the path's ancestors and return the
-    /// first that is a package. O(depth) hash lookups — no binary search per
-    /// component.
+    /// first that is a package, in O(depth) hash lookups.
     pub fn owner_of(&self, path: &str) -> Option<&str> {
         if self.unwalked_boundary_of(path).is_some() {
             return None;
@@ -414,15 +413,15 @@ pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classificati
 
 /// Whether the build graph names a path as a source of some rule.
 ///
-/// An ignore glob is a claim about paths the graph does not name — "`**/*.md`
-/// is documentation, not input". On a real repository that claim is often
+/// An ignore glob is a claim about paths the graph does not name ("`**/*.md`
+/// is documentation, not input"). On a real repository that claim is often
 /// wrong: `bazel/bazel` feeds its distribution tarball from
 /// `filegroup(name = "srcs", srcs = glob(["**"]))` in every package, so
 /// `CHANGELOG.md` is a genuine input of `//:changelog-file` and
 /// `site/en/**/*.md` of `//site/en:srcs`. Taking the glob at its word there is
-/// an under-approximation — the one class of bug this design does not tolerate
-/// — so [`dirty_set`] asks the index instead and lets the glob decide only the
-/// cases the graph does not contradict.
+/// an under-approximation, the one class of bug this design does not
+/// tolerate. So [`dirty_set`] asks the index instead and lets the glob decide
+/// only the cases the graph does not contradict.
 pub trait Consumed {
     /// Some rule consumes `path` (owned by `pkg`) as a source input.
     fn is_consumed(&self, pkg: &str, path: &str) -> bool;
@@ -549,8 +548,8 @@ pub fn dirty_set(
             }
             // A modified BUILD file is also a changed *source file*. That is
             // not a technicality: `filegroup(name = "srcs", srcs =
-            // glob(["**"]))` — the shape every package in `bazel/bazel` uses to
-            // feed the distfile — has the BUILD file itself among its inputs,
+            // glob(["**"]))` (the shape every package in `bazel/bazel` uses to
+            // feed the distfile) has the BUILD file itself among its inputs,
             // and its rule proto does not move when the BUILD file's text
             // does. Re-querying the package therefore finds nothing changed,
             // and without this the filegroup and everything above it
@@ -586,8 +585,8 @@ pub fn dirty_set(
             // keeps in `tools/build_defs/repo/BUILD` name the `.bzl` as a
             // source, so `//tools/build_defs/repo:utils.bzl` is a genuine input
             // of a dozen targets whose rule protos do not move when the file's
-            // text does — exactly the case the modified-BUILD arm above exists
-            // for.
+            // text does. That is exactly the case the modified-BUILD arm
+            // above exists for.
             //
             // The loading layer does not stand in for this and is not asked
             // to. It answers "which packages did this file's `BZL_LOAD` node
