@@ -188,7 +188,7 @@ pub struct IndexStats {
 /// error at its head (a package the base named heals when the splice
 /// re-queries it and it loads), so one broken step does not leave every later
 /// index of the lineage partial and naming that step's packages.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartialLoad {
     pub partial: bool,
     /// `error loading package` / `package contains errors` lines the query

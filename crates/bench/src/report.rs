@@ -560,6 +560,7 @@ mod tests {
                 nodes: 1234,
                 edges: 5,
                 lineage: String::new(),
+                ..Default::default()
             },
             cambium: CambiumAnswer::default(),
             oracle: Some(crate::oracles::rdeps::RdepsResult {

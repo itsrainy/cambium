@@ -262,6 +262,20 @@ needs a class, and a non-zero `unexplained` count still fails the walk.
   | `hub` | it touches a package holding one of the index's highest in-degree targets, so the reverse closure is as large as this subject gets |
   | `invalidator` | it touches a path the configuration names as an invalidator, the one way to make cambium answer `//...` on purpose |
 
+  A step whose head cannot load some of the packages it dirtied (xla at an
+  LLVM integrate whose patches no longer apply to the new LLVM) leaves a
+  partial index: those packages keep the rows of the last query that loaded
+  them. The walk publishes it to its own store all the same and walks on,
+  because the steps after it are the ones that show whether the carried
+  packages heal. `cambi` itself refuses such a publish by default
+  (`CAMBI-E009`); the walk passes `--allow-partial` for its step indexes
+  only. The step record keeps the index's partial state (`index.partial`:
+  the packages still in error at that head), and the summary counts the
+  steps (`partial_index_steps`) and names the packages. The cold build at
+  the window's start, and any cold rebuild after a global step, keep the
+  default policy: the subject's `publish_partial` decides, and a subject
+  whose tree does not load there stops the walk.
+
 **Tier.** One workload, two budgets, recorded beside the tier's name in
 the result so a number says which budget produced it.
 

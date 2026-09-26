@@ -74,6 +74,10 @@ pub enum Args {
     Publish {
         /// The index file to upload.
         file: std::path::PathBuf,
+        /// Publish even if the index is partial: Bazel could not load every
+        /// package its query asked for.
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// List published indexes.
     List,
@@ -149,7 +153,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             keep,
             keep_incompatible,
         } => gc(ctx, keep.as_deref(), keep_incompatible),
-        Args::Publish { file } => publish(ctx, &file),
+        Args::Publish {
+            file,
+            allow_partial,
+        } => publish(ctx, &file, PublishPolicy { allow_partial }),
         Args::List => list(ctx),
     }
 }
@@ -289,7 +296,7 @@ fn gc(ctx: &Context, keep: Option<&str>, keep_incompatible: bool) -> Result<u8> 
 
 /// `index publish`: an index file uploaded under the lineage and commit it
 /// names itself.
-fn publish(ctx: &Context, file: &std::path::Path) -> Result<u8> {
+fn publish(ctx: &Context, file: &std::path::Path, policy: PublishPolicy) -> Result<u8> {
     let engine = ctx.engine()?;
     // No store is E008 before the header, as `index gc` does: a header
     // announcing a publish that cannot start reads as one that started and
@@ -306,7 +313,14 @@ fn publish(ctx: &Context, file: &std::path::Path) -> Result<u8> {
         note: format!("lineage {}", hex(&lineage)),
     });
     let started = Instant::now();
-    let names = engine.publish_index(file, &lineage, &commit);
+    let names = engine.publish(
+        PublishSource::File {
+            path: file,
+            lineage: &lineage,
+            commit: &commit,
+        },
+        policy,
+    );
     let names = finish_or_say(ctx, &engine, sink.as_mut(), names)?;
     say_published(sink.as_mut(), &names, started);
     sink.emit(Event::Done);

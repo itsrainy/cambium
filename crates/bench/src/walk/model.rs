@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use cambium_engine::inspect::PartialLoad;
+
 use crate::env::Environment;
 use crate::oracles::rdeps::RdepsResult;
 use crate::util::percentile;
@@ -127,6 +129,13 @@ pub struct IndexCounts {
     /// Lineage, hex: a fresh lineage means a cold rebuild happened here.
     #[serde(default)]
     pub lineage: String,
+    /// The index's partial state: the packages still in error at this head
+    /// (carried because they failed to load, or missing since a cold build
+    /// that could not load them). Absent when the index is complete. The
+    /// walk publishes a partial step index to its own store rather than
+    /// stopping (`walk::cambi::STEP_PUBLISH`), so this is where it shows.
+    #[serde(default, skip_serializing_if = "PartialLoad::is_complete")]
+    pub partial: PartialLoad,
 }
 
 /// What cambium said, by size.
@@ -211,6 +220,14 @@ pub struct WalkSummary {
     /// Steps the engine answered with a whole-repository re-query. Not
     /// globals: the answer was exact.
     pub engine_cold_rebuilds: usize,
+    /// Steps whose head index was partial: packages that failed to load at
+    /// that head were carried, or were missing since a cold build. The
+    /// steps were walked and scored like any other.
+    #[serde(default)]
+    pub partial_index_steps: usize,
+    /// The packages those indexes named, unioned and sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_index_packages: Vec<String>,
     /// Steps whose oracle answer was a lower bound: some `rdeps` batch
     /// exited 3 under `--keep_going`.
     #[serde(default)]
@@ -256,6 +273,8 @@ impl Default for WalkSummary {
             cost: Cost::default(),
             globals: 0,
             engine_cold_rebuilds: 0,
+            partial_index_steps: 0,
+            partial_index_packages: Vec::new(),
             oracle_partial_steps: 0,
             oracle_unresolved: Vec::new(),
             oracle_repository_steps: 0,
@@ -420,6 +439,18 @@ pub fn summarise(
     s.steps_with_peers = peer_sample.len().min(steps.len());
     s.globals = steps.iter().filter(|st| st.global).count();
     s.engine_cold_rebuilds = steps.iter().filter(|st| st.cambium.cold_rebuild).count();
+    let partial: Vec<&PartialLoad> = steps
+        .iter()
+        .map(|st| &st.index.partial)
+        .filter(|p| p.partial)
+        .collect();
+    s.partial_index_steps = partial.len();
+    s.partial_index_packages = partial
+        .iter()
+        .flat_map(|p| p.packages.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     // What the oracle could not resolve, over the steps it ran on.
     let mut unresolved: BTreeSet<String> = BTreeSet::new();

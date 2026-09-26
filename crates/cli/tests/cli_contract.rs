@@ -1604,6 +1604,35 @@ fn index_publish_narrates_through_the_renderer() {
     assert!(stderr.contains("--out <file>"), "{stderr}");
 }
 
+/// `index publish` refuses a partial index by default, with E009 and the
+/// help naming `--allow-partial`, and takes the flag the way `index build`
+/// and `index update` do. The flag is what the help promised and what a
+/// walk that publishes each step's index to its own store passes.
+#[test]
+fn index_publish_refuses_a_partial_index_unless_allowed() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let file = f.cache.join("published.cmbx");
+    let mut index = cambium_index::IndexFile::open(&file)
+        .unwrap()
+        .deserialize()
+        .unwrap();
+    index.provenance.partial = true;
+    index.provenance.packages_in_error = 1;
+    index.provenance.error_packages = vec!["xla/mlir_hlo".into()];
+    let partial = f.cache.join("partial.cmbx");
+    cambium_index::format::write_index(&partial, &index).unwrap();
+    let partial = partial.to_str().unwrap();
+
+    let (code, _, stderr) = run(&["-C", ws, "index", "publish", partial]);
+    assert_ne!(code, 0, "{stderr}");
+    assert!(stderr.contains("CAMBI-E009"), "{stderr}");
+    assert!(stderr.contains("--allow-partial"), "{stderr}");
+
+    let (code, _, stderr) = run(&["-C", ws, "index", "publish", "--allow-partial", partial]);
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// Under `--no-full-build` with no index in reach, the narration says what
 /// the search found and stops there: it does not announce a cold build the
 /// run is about to refuse. The error says index, not baseline.

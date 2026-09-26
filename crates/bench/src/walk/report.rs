@@ -129,6 +129,17 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
         "Globals: {}. Engine cold rebuilds: {}.",
         s.globals, s.engine_cold_rebuilds
     );
+    if s.partial_index_steps > 0 {
+        let _ = writeln!(
+            out,
+            "Steps whose index carried packages that failed to load: {} of {} ({}). They were \
+             walked, scored and published to the walk's own store; the carried rows are as \
+             old as the last query that loaded each package.",
+            s.partial_index_steps,
+            s.steps,
+            listed(&s.partial_index_packages, 8, |l| format!("`{l}`")),
+        );
+    }
     let _ = writeln!(out);
 }
 

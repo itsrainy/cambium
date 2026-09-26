@@ -383,13 +383,10 @@ impl<'a> Runner<'a> {
                 nodes: v.counts().nodes,
                 edges: v.counts().edges,
                 lineage: cambium_engine::inspect::hex(&v.lineage),
+                partial: cambium_engine::inspect::PartialLoad::from(v),
             }
         } else {
-            IndexCounts {
-                nodes: 0,
-                edges: 0,
-                lineage: String::new(),
-            }
+            IndexCounts::default()
         };
 
         // The live checks, scheduled per step. cambium's oracle scoring is
