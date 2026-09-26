@@ -604,8 +604,10 @@ fn gen_targets(
 /// in its own package, hubs at layer 0, and the `select`/external counts.
 ///
 /// Every draw from `rng` here is load-bearing: the helpers below draw in
-/// exactly the order the single loop they came from did, and the pinned
-/// digest test fails if a draw moves, is added or is skipped.
+/// exactly the order the single loop they came from did. The pinned digest
+/// test catches a draw that moves, is added or is skipped, but only on the
+/// small preset. That preset never fills [`Reservoir`], so the reservoir's
+/// replacement draw, which runs only past its cap, is guarded by no test.
 fn gen_deps(
     spec: &GraphSpec,
     rng: &mut ChaCha8Rng,
