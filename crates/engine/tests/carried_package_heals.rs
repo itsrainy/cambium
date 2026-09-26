@@ -248,3 +248,34 @@ fn a_step_that_does_not_dirty_a_carried_package_leaves_it_alone() {
     );
     assert_eq!(partial.packages, vec!["tbl".to_string()]);
 }
+
+/// The whole lineage in one run, as a walk sees it: the fetch breaks at n,
+/// step n+1 dirties something else while it is still broken, and step n+2
+/// dirties `//tbl` again with the fetch working. The partial state names
+/// `//tbl` through n+1 and is gone at n+2, and W028 is raised at n alone.
+#[test]
+fn a_carried_package_survives_an_unrelated_step_and_heals_after_it() {
+    let (_base, out) = broken_step();
+    let n = out.index.expect("not globally invalidated");
+
+    let q = scanning().failing_to_load(&["tbl"]);
+    let next = step(&n, "other/BUILD", &q);
+    assert!(!queried(&q, "tbl"), "{:?}", q.queries());
+    assert_eq!(w028(&q), 0);
+    let next = next.index.expect("not globally invalidated");
+    assert!(live(next.view(), "//tbl:ir"));
+    assert_eq!(partial_on_disk(&next).packages, vec!["tbl".to_string()]);
+
+    let q = scanning();
+    let healed = step(&next, "third_party/raw/build.patch", &q);
+    assert!(queried(&q, "tbl"), "{:?}", q.queries());
+    assert_eq!(w028(&q), 0);
+    assert!(healed
+        .report
+        .affected_labels()
+        .contains(&"//app:test".to_string()));
+    let healed = healed.index.expect("not globally invalidated");
+    assert!(live(healed.view(), "//tbl:ir"));
+    let partial = partial_on_disk(&healed);
+    assert!(!partial.partial, "{partial:?}");
+}
