@@ -820,16 +820,18 @@ mod tests {
     #[test]
     fn splitting_a_package_moves_targets_and_files() {
         let mut g = graph();
-        let pkg = g.targets[0].package;
-        let live: Vec<u32> = g.packages[pkg as usize]
-            .targets
-            .iter()
-            .copied()
-            .filter(|&t| g.targets[t as usize].alive)
-            .collect();
-        if live.len() < 2 {
-            return;
-        }
+        let (pkg, live) = (0..g.packages.len() as u32)
+            .map(|p| {
+                let live: Vec<u32> = g.packages[p as usize]
+                    .targets
+                    .iter()
+                    .copied()
+                    .filter(|&t| g.targets[t as usize].alive)
+                    .collect();
+                (p, live)
+            })
+            .find(|(_, live)| live.len() >= 2)
+            .expect("the small preset has a package with two live targets");
         let moved = live[..1].to_vec();
         let changes = apply_one(
             &mut g,
