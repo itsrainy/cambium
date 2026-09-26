@@ -43,7 +43,6 @@ impl Layout {
     /// The first step whose `n` bins fit inside the cap, or the last step
     /// when none does.
     fn fit(n: usize, w_val: usize, w_lab: usize) -> Self {
-        let budget = ROW_CAP.saturating_sub(COL_INDENT);
         let steps = STEPS.map(|(val_every, lab_every, bar_w)| Layout {
             // A label printed every k columns may borrow the k columns it
             // spans.
@@ -55,11 +54,23 @@ impl Layout {
             lab_every,
         });
         let last = steps[steps.len() - 1];
-        // The last bin's blank neighbour is never drawn, hence the one spare.
         steps
             .into_iter()
-            .find(|l| n * l.cell <= budget + 1)
+            .find(|l| l.width(n) <= ROW_CAP)
             .unwrap_or(last)
+    }
+
+    /// Columns the chart spans for `n` bins: the indent, then every cell but
+    /// the last one's blank neighbour.
+    fn width(&self, n: usize) -> usize {
+        COL_INDENT + n * self.cell - 1
+    }
+
+    /// Where bin `i`'s bar starts: centred in its cell, blank neighbour
+    /// aside. The bars, their values and their labels are all placed by it,
+    /// so a label cannot drift off its bar.
+    fn bar_x(&self, i: usize) -> usize {
+        COL_INDENT + i * self.cell + (self.cell - 1 - self.bar_w) / 2
     }
 }
 
@@ -79,23 +90,29 @@ pub fn columns(counts: &[u64], labels: &[String]) -> Vec<String> {
         .max()
         .unwrap_or(1)
         .max(1);
-    let Layout {
-        cell,
-        bar_w,
-        val_every,
-        lab_every,
-    } = Layout::fit(n, w_val, w_lab);
-    let content = cell - 1;
-    let bar_w = bar_w.min(content);
-    let total = COL_INDENT + n * cell - 1;
+    let layout = Layout::fit(n, w_val, w_lab);
+    let total = layout.width(n);
 
+    let mut out = plot(counts, &values, &layout, total);
+    out.push(format!(
+        "{}{}",
+        " ".repeat(COL_INDENT),
+        "─".repeat(total - COL_INDENT)
+    ));
+    out.push(label_line(labels, n, &layout, total));
+    out
+}
+
+/// The bars with their values above them, top row first, from the tallest
+/// value down to the axis.
+fn plot(counts: &[u64], values: &[String], layout: &Layout, total: usize) -> Vec<String> {
     // One row above the tallest column, so its value has somewhere to sit.
     let mut grid = vec![vec![' '; total]; COL_HEIGHT + 1];
     let max = counts.iter().copied().max().unwrap_or(1).max(1);
 
     for (i, &count) in counts.iter().enumerate() {
-        let x0 = COL_INDENT + i * cell;
-        let bar_x = x0 + (content - bar_w) / 2;
+        let x = layout.bar_x(i);
+        let bar = x..x + layout.bar_w;
         let mut eighths = (count as f64 / max as f64 * (COL_HEIGHT * 8) as f64).round() as usize;
         if count > 0 && eighths == 0 {
             eighths = 1;
@@ -103,65 +120,52 @@ pub fn columns(counts: &[u64], labels: &[String]) -> Vec<String> {
         let full = eighths / 8;
         let frac = eighths % 8;
         let top = 1 + COL_HEIGHT - full - usize::from(frac > 0);
-        for row in grid
-            .iter_mut()
-            .take(COL_HEIGHT + 1)
-            .skip(top + usize::from(frac > 0))
-        {
-            for dx in 0..bar_w {
-                row[bar_x + dx] = '█';
-            }
+        for row in grid.iter_mut().skip(top + usize::from(frac > 0)) {
+            row[bar.clone()].fill('█');
         }
         if frac > 0 {
-            for dx in 0..bar_w {
-                grid[top][bar_x + dx] = EIGHTHS[frac - 1];
-            }
+            grid[top][bar.clone()].fill(EIGHTHS[frac - 1]);
         }
-        if i % val_every == 0 {
+        if i % layout.val_every == 0 {
             let v = &values[i];
-            let end = bar_x + bar_w;
-            let start = end.saturating_sub(v.chars().count());
-            let row = top.saturating_sub(1);
-            for (k, ch) in v.chars().enumerate() {
-                if start + k < total {
-                    grid[row][start + k] = ch;
-                }
-            }
+            let start = bar.end.saturating_sub(v.chars().count());
+            stamp(&mut grid[top.saturating_sub(1)], start, v);
         }
     }
 
-    let mut out: Vec<String> = grid
-        .into_iter()
-        .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
-        .collect();
+    let mut out: Vec<String> = grid.iter().map(|row| line_of(row)).collect();
     // Drop the blank rows above the tallest value.
     while out.first().is_some_and(|l| l.is_empty()) {
         out.remove(0);
     }
+    out
+}
 
-    let mut axis = " ".repeat(COL_INDENT);
-    axis.push_str(&"─".repeat(n * cell - 1));
-    out.push(axis);
-
+/// The labels under the axis, each centred under its bar and kept inside
+/// the chart.
+fn label_line(labels: &[String], n: usize, layout: &Layout, total: usize) -> String {
     let mut line = vec![' '; total];
-    for (i, d) in labels.iter().enumerate().take(n) {
-        if i % lab_every != 0 {
-            continue;
-        }
-        let x0 = COL_INDENT + i * cell;
-        let bar_x = x0 + (content - bar_w) / 2;
+    for (i, d) in labels.iter().enumerate().take(n).step_by(layout.lab_every) {
         let w = d.chars().count();
-        let start = (bar_x + bar_w / 2)
+        let start = (layout.bar_x(i) + layout.bar_w / 2)
             .saturating_sub(w / 2)
             .min(total.saturating_sub(w));
-        for (k, ch) in d.chars().enumerate() {
-            if start + k < total {
-                line[start + k] = ch;
-            }
-        }
+        stamp(&mut line, start, d);
     }
-    out.push(line.into_iter().collect::<String>().trim_end().to_string());
-    out
+    line_of(&line)
+}
+
+/// Writes `text` into `row` from column `start`, dropping whatever would
+/// fall past the row's end.
+fn stamp(row: &mut [char], start: usize, text: &str) {
+    for (slot, ch) in row.iter_mut().skip(start).zip(text.chars()) {
+        *slot = ch;
+    }
+}
+
+/// One row of the chart as a line, without its trailing blanks.
+fn line_of(row: &[char]) -> String {
+    row.iter().collect::<String>().trim_end().to_string()
 }
 
 /// One horizontal block bar per bin, with its label before it and its count
