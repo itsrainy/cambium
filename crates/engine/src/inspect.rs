@@ -182,6 +182,12 @@ pub struct IndexStats {
 /// How incomplete an index is, if at all. Serialised into every stats and
 /// replay document so a downstream reader is never told a number that silently
 /// describes less than the whole repository.
+///
+/// It describes the index it was read from. A cold build records what its
+/// `//...` query could not load; a splice recomputes it from what is still in
+/// error at its head (a package the base named heals when the splice
+/// re-queries it and it loads), so one broken step does not leave every later
+/// index of the lineage partial and naming that step's packages.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PartialLoad {
     pub partial: bool,
@@ -208,7 +214,8 @@ impl PartialLoad {
             };
             format!(
                 "PARTIAL INDEX: bazel could not load every package ({} error lines){sample}. \
-                 Targets in those packages are absent from this index.",
+                 Targets in those packages are absent from this index, or as old as the \
+                 last query that loaded them.",
                 self.packages_in_error
             )
         })

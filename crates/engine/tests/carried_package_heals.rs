@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use cambium_diff::{Change, Status};
 use cambium_engine::externals::FixedText;
+use cambium_engine::inspect::PartialLoad;
 use cambium_engine::{AffectedRequest, Code};
 use cambium_index::{IndexData, IndexRef, PackageUpdate, TargetRow};
 use cambium_testkit::{base, engine, req, Files, Scanning};
@@ -151,6 +152,17 @@ fn w028(q: &Scanning) -> usize {
         .count()
 }
 
+/// The partial state as a reader of the published file sees it: written,
+/// read back, and turned into what `cambi index stats` and the publish check
+/// read.
+fn partial_on_disk(index: &IndexData) -> PartialLoad {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("i.bin");
+    cambium_index::format::write_index(&path, index).unwrap();
+    let f = cambium_index::IndexFile::open(&path).unwrap();
+    PartialLoad::from(f.view())
+}
+
 fn queried(q: &Scanning, package: &str) -> bool {
     q.queries().iter().flatten().any(|p| p == package)
 }
@@ -184,6 +196,10 @@ fn a_package_that_failed_to_load_is_carried_and_its_consumers_answered() {
     let v = index.view();
     assert!(live(v, "//tbl:ir"), "carried, not tombstoned");
     assert!(!tombstoned_package(v, "tbl"));
+    let partial = partial_on_disk(&index);
+    assert!(partial.partial, "the carried rows are older than this head");
+    assert_eq!(partial.packages, vec!["tbl".to_string()]);
+    assert_eq!(partial.packages_in_error, 1);
 }
 
 /// The next step that dirties `//tbl` again, with the fetch working, asks
@@ -204,6 +220,12 @@ fn the_next_step_that_dirties_a_carried_package_re_queries_it() {
         .contains(&"//app:test".to_string()));
     let healed = healed.index.expect("not globally invalidated");
     assert!(live(healed.view(), "//tbl:ir"));
+    let partial = partial_on_disk(&healed);
+    assert!(
+        !partial.partial,
+        "the only package in error loaded again, so nothing is: {partial:?}"
+    );
+    assert!(partial.packages.is_empty());
 }
 
 /// A step that does not dirty the carried package does not ask for it, so
@@ -219,4 +241,10 @@ fn a_step_that_does_not_dirty_a_carried_package_leaves_it_alone() {
     assert_eq!(w028(&q), 0);
     let later = later.index.expect("not globally invalidated");
     assert!(live(later.view(), "//tbl:ir"));
+    let partial = partial_on_disk(&later);
+    assert!(
+        partial.partial,
+        "tbl was not asked about and is still carried"
+    );
+    assert_eq!(partial.packages, vec!["tbl".to_string()]);
 }

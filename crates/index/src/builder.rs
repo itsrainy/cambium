@@ -435,14 +435,32 @@ impl<'a> IndexBuilder<'a> {
 
     /// Records that the query behind these rows finished with load errors, so
     /// the index describes a repository minus the packages Bazel could not
-    /// load. Carried through splices by [`IndexBuilder::from_view`]: an
-    /// incremental update over a partial base is still partial.
+    /// load. Adds to what is already recorded: the larger count stands, and
+    /// the names already recorded stay. A cold build calls this once on an
+    /// empty builder; a splice recomputes the whole state for its own head
+    /// instead, through [`IndexBuilder::replace_partial`].
     pub fn set_partial(&mut self, packages_in_error: u32, error_packages: Vec<String>) {
         self.partial = true;
         self.packages_in_error = self.packages_in_error.max(packages_in_error);
         if self.error_packages.is_empty() {
             self.error_packages = error_packages;
         }
+    }
+
+    /// Replaces the partial state outright: `None` records a complete index,
+    /// `Some((count, names))` a partial one that failed `count` error lines
+    /// naming `names`. What [`IndexBuilder::from_view`] carried from the base
+    /// is dropped, so the state describes this index and not its lineage.
+    pub fn replace_partial(&mut self, state: Option<(u32, Vec<String>)>) {
+        (self.partial, self.packages_in_error, self.error_packages) = match state {
+            Some((count, names)) => (true, count, names),
+            None => (false, 0, Vec::new()),
+        };
+    }
+
+    /// The partial state as it stands: carried from the base until replaced.
+    pub fn partial_state(&self) -> (bool, u32, &[String]) {
+        (self.partial, self.packages_in_error, &self.error_packages)
     }
 
     /// Installs (or replaces) the static `.bzl` load closure.
