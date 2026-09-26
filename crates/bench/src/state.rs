@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 pub const STATE_FILE: &str = "state.json";
@@ -74,7 +75,7 @@ impl State {
         match std::fs::read_to_string(&path) {
             Ok(s) => {
                 let st: State = serde_json::from_str(&s)
-                    .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
+                    .with_context(|| format!("parsing {}", path.display()))?;
                 if st.id == id && st.pin == pin {
                     return Ok(st);
                 }
@@ -87,7 +88,7 @@ impl State {
                 Ok(Self::fresh(id, pin))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::fresh(id, pin)),
-            Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 

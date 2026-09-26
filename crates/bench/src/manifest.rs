@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 /// The manifest file name at the cambium repository root.
@@ -87,10 +88,10 @@ fn default_bazel() -> String {
 
 impl Manifest {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let s = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        let s =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let m: Manifest =
-            toml::from_str(&s).map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
+            toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
         m.validate()?;
         Ok(m)
     }
@@ -168,6 +169,26 @@ impl RepoEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The io or toml error stays the source, and the rendered chain reads
+    /// the way the flattened message did.
+    #[test]
+    fn a_manifest_that_cannot_be_read_or_parsed_says_which_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subject_repos.toml");
+        let err = Manifest::load(&path).unwrap_err();
+        assert!(err.downcast_ref::<std::io::Error>().is_some(), "{err:?}");
+        assert!(
+            format!("{err:#}").starts_with(&format!("reading {}: ", path.display())),
+            "{err:#}"
+        );
+        std::fs::write(&path, "[[repo]\n").unwrap();
+        let err = Manifest::load(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").starts_with(&format!("parsing {}: ", path.display())),
+            "{err:#}"
+        );
+    }
 
     #[test]
     fn parses_a_full_entry() {
