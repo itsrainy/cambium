@@ -373,14 +373,7 @@ fn join(dir: &str, name: &str) -> String {
 /// The paths the applied layer's nodes name, for the created-in-window test.
 pub fn applied_paths(layer: SkyRef<'_>) -> BTreeSet<String> {
     (0..layer.len() as u32)
-        .filter_map(|id| {
-            let name = SkyName {
-                kind: layer.kind_of(id),
-                root: layer.root_name(id).into_owned(),
-                key: layer.text(id).to_string(),
-            };
-            locate(&name).0
-        })
+        .filter_map(|id| locate(&SkyName::of(layer, id)).0)
         .collect()
 }
 

@@ -137,7 +137,9 @@ pub struct SkyName {
 }
 
 impl SkyName {
-    fn of(v: SkyRef<'_>, id: u32) -> Self {
+    /// Node `id` of a loading layer, by the identity that survives across
+    /// lineages.
+    pub(crate) fn of(v: SkyRef<'_>, id: u32) -> Self {
         SkyName {
             kind: v.kind_of(id),
             root: v.root_name(id).into_owned(),
