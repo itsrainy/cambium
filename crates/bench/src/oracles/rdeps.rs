@@ -1134,6 +1134,27 @@ mod tests {
         assert_eq!(clean.missing_external.len(), 1);
     }
 
+    static EMPTY: BTreeSet<String> = BTreeSet::new();
+
+    /// The oracle's inputs for a step with no base index, no dirty packages
+    /// and no output base: what most of these tests vary is the changed
+    /// paths and cambium's answer.
+    fn inputs<'a>(
+        head: IndexRef<'a>,
+        changed: &'a BTreeSet<String>,
+        cambium: &'a BTreeSet<String>,
+    ) -> OracleInputs<'a> {
+        OracleInputs {
+            head,
+            base: None,
+            changed,
+            cambium,
+            dirty_packages: &EMPTY,
+            output_base: None,
+            added_or_deleted: None,
+        }
+    }
+
     /// A stub Bazel whose every `query` prints `stdout` and exits `code`.
     ///
     /// `bazel_query::labels` spawns the binary rather than going through
@@ -1339,18 +1360,7 @@ mod tests {
         // cambium answers with the loading package only: the miss.
         let loads_only = set(&["//app:app"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &loads_only,
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &loads_only))
             .unwrap();
         assert_eq!(
             r.roots,
@@ -1367,18 +1377,7 @@ mod tests {
         // With the file's consumers in the answer, the same oracle passes.
         let with_consumers = set(&["//app:app", "//defs:bzl_srcs"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &with_consumers,
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &with_consumers))
             .unwrap();
         assert!(r.missing.is_empty());
         assert_eq!(r.recall(), 1.0);
@@ -1396,18 +1395,7 @@ mod tests {
         let idx = bzl_filegroup_index();
         let changed = set(&["docs/README.md"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &EMPTY))
             .unwrap();
         assert!(r.roots.is_empty());
         assert_eq!(r.unowned_paths, 1);
@@ -1427,15 +1415,11 @@ mod tests {
         let r = RdepsOracle::default()
             .run(
                 &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &set(&["defs/defs.bzl"]),
-                    cambium: &set(&["//defs:bzl_srcs"]),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
+                &inputs(
+                    idx.view(),
+                    &set(&["defs/defs.bzl"]),
+                    &set(&["//defs:bzl_srcs"]),
+                ),
             )
             .unwrap();
         assert!(r.missing.is_empty(), "{:?}", r.missing);
@@ -1615,18 +1599,7 @@ mod tests {
         assert!(!run(&none, &set(&["other"])).ok());
         // And with no base index the half is skipped rather than failed.
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: head.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(head.view(), &changed, &EMPTY))
             .unwrap();
         assert!(!r.deleted_checked);
         assert!(r.ok());
@@ -1645,19 +1618,11 @@ mod tests {
         }
         let bazel = bazel_answering(ws, 0, "\n");
         let idx = bzl_filegroup_index();
-        let inputs = OracleInputs {
-            head: idx.view(),
-            base: None,
-            changed: &changed,
-            cambium: &changed,
-            dirty_packages: &BTreeSet::new(),
-            output_base: None,
-            added_or_deleted: None,
-        };
-        let full = RdepsOracle::default().run(&bazel, &inputs).unwrap();
+        let step = inputs(idx.view(), &changed, &changed);
+        let full = RdepsOracle::default().run(&bazel, &step).unwrap();
         assert_eq!(full.roots.len(), 10);
         assert!(!full.sampled);
-        let capped = RdepsOracle::new(3, 7).run(&bazel, &inputs).unwrap();
+        let capped = RdepsOracle::new(3, 7).run(&bazel, &step).unwrap();
         assert_eq!(capped.roots.len(), 3);
         assert!(capped.sampled);
     }
@@ -1798,13 +1763,8 @@ mod tests {
             .run(
                 &bazel,
                 &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &quiet_changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
                     output_base: Some(ob.path()),
-                    added_or_deleted: None,
+                    ..inputs(idx.view(), &quiet_changed, &EMPTY)
                 },
             )
             .unwrap();
@@ -1846,13 +1806,8 @@ mod tests {
             .run(
                 &bazel,
                 &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
                     output_base: Some(ob.path()),
-                    added_or_deleted: None,
+                    ..inputs(idx.view(), &changed, &EMPTY)
                 },
             )
             .unwrap();
