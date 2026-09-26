@@ -150,9 +150,12 @@ branch behind `origin/main` it is not, and the run says so (`origin/main is
 not an ancestor of HEAD; comparing from their merge base <sha>`) rather than
 reading every commit `main` gained since as a change the branch reverted.
 Two commits with no merge base in the clone (a shallow clone cut above it)
-are `CAMBI-E013`, whose help says to deepen. No range means the merge base
-of `[git].default_branch` with `HEAD` (or with `origin/<branch>` in a CI
-checkout that has no local branch).
+are `CAMBI-E013`, whose help says to deepen; in a CI checkout that means
+`HEAD`'s parent must be in the clone (`fetch-depth: 2`). A reversed range
+(`HEAD..HEAD~3`, the base descending from `HEAD~3`) compares nothing, exit 0,
+and the narration says so and names the range the other way round. No
+range means the merge base of `[git].default_branch` with `HEAD` (or with
+`origin/<branch>` in a CI checkout that has no local branch).
 `--dry-run` prints the plan (which index would load, how the diff classifies,
 whether the run would splice, cold-rebuild or go global) and exits before any
 Bazel query. One verdict is pending that query: the toolchain check reads rule

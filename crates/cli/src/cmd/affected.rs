@@ -194,8 +194,10 @@ pub fn check_usage(args: &Args) -> Result<()> {
 pub struct Range {
     pub base: String,
     pub head: String,
-    /// Said once in the narration: `[git].default_branch` names a branch this
-    /// clone has no local copy of, and its remote-tracking branch stood in.
+    /// Said once in the narration, when the base compared from is not the
+    /// one typed: `[git].default_branch` names a branch this clone has no
+    /// local copy of, and its remote-tracking branch stood in; or the base
+    /// is not an ancestor of the head, and their merge base stood in.
     pub note: Option<String>,
 }
 
@@ -288,10 +290,18 @@ fn fork_point(repo: &cambium_diff::Repo, base: String, head: String) -> Result<R
             note: None,
         });
     }
-    let note = format!(
-        "{base} is not an ancestor of {head}; comparing from their merge base {}",
-        &merge_base[..merge_base.len().min(7)]
-    );
+    let short = &merge_base[..merge_base.len().min(7)];
+    let note = if repo.rev_parse(&head).is_ok_and(|h| h == merge_base) {
+        // Reversed: `head` is an ancestor of `base`, so it changed nothing
+        // since the two forked. The commits between them are the other way
+        // round, which is most likely what was meant.
+        format!(
+            "{base} descends from {head}, so {head} changed nothing since they forked and \
+             nothing is compared; the commits between them are {head}..{base}"
+        )
+    } else {
+        format!("{base} is not an ancestor of {head}; comparing from their merge base {short}")
+    };
     Ok(Range {
         base: merge_base,
         head,

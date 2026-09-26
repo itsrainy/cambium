@@ -47,7 +47,9 @@ base of the two, which is the base itself when `HEAD` descends from it, so
 `A..B` and `A...B` are the same range. When the base is not an ancestor (a
 branch behind `origin/main`), the narration says so and names the merge base
 it compares from; with no merge base in the clone the run is `CAMBI-E013`,
-whose help says to deepen a shallow clone.
+whose help says to deepen a shallow clone. A reversed range (`HEAD..HEAD~3`)
+has the head itself as the merge base, so nothing is compared (exit 0), and
+the narration says so and names `HEAD~3..HEAD`, the commits between them.
 When `[git].default_branch` has no local branch here (a CI checkout
 usually makes none), its remote-tracking branch `origin/<branch>` stands in,
 and the narration says so. A revision the clone does not have is

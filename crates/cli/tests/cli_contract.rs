@@ -2065,6 +2065,14 @@ fn every_spelling_of_a_range_compares_from_the_merge_base() {
     assert_eq!(first, expected);
     assert!(!stderr.contains("merge base"), "{stderr}");
 
+    // A reversed range: HEAD changed nothing since it forked from a commit
+    // that descends from it, so nothing is compared, and the narration says
+    // so and names the range that was probably meant.
+    let (first, stderr) = plan(&[&format!("HEAD..{fork}")]);
+    assert_eq!(first, format!("plan for {}..{}", &fork[..7], &fork[..7]));
+    assert!(stderr.contains("descends from"), "{stderr}");
+    assert!(stderr.contains(&format!("{fork}..HEAD")), "{stderr}");
+
     // A range that cannot be anchored is an error that says why, not a diff
     // against an unrelated tip.
     cambium_testkit::git(&f.ws, &["checkout", "-q", "--orphan", "island"]);
