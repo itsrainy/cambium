@@ -88,11 +88,12 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
     // rather than that there is no workspace.
     check_usage(&args)?;
     let engine = ctx.engine()?;
-    let resolved = request(&engine, &args, Shape::affected(&args))?;
     if args.dry_run {
+        let resolved = request(&engine, &args, Shape::PLAN)?;
         say_note(ctx, &resolved);
         return crate::cmd::plan::run(ctx, &engine, &resolved.req);
     }
+    let resolved = request(&engine, &args, Shape::affected(&args))?;
     let outcome = narrate(ctx, &engine, &resolved, "affected")?;
     let report = &outcome.report;
     ctx.render.report(&report.diagnostics)?;
