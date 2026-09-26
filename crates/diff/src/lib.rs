@@ -257,7 +257,7 @@ impl Repo {
 /// leaves its source in place, so it becomes only the add. Either way the
 /// dirty-set rules see one shape for every change: a path that appeared,
 /// changed or went away.
-pub fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
+fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut changes = Vec::new();
     while let Some(status) = fields.next() {
