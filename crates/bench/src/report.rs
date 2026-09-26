@@ -57,11 +57,7 @@ impl SubjectResults {
     /// Every manifest entry with a results directory under `parent`, in
     /// manifest order, plus any stray directory the manifest no longer names.
     /// A renamed or removed entry still has numbers worth showing.
-    pub fn collect(
-        manifest: &crate::manifest::Manifest,
-        parent: &Path,
-        _subjects: &crate::checkout::SubjectsDir,
-    ) -> Result<Vec<Self>> {
+    pub fn collect(manifest: &crate::manifest::Manifest, parent: &Path) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for entry in &manifest.repos {

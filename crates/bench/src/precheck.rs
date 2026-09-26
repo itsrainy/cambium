@@ -117,7 +117,7 @@ pub fn index_path(run: &SubjectRun<'_>, req: &ReplayRequest) -> PathBuf {
 }
 
 /// Every step the subject's walk recorded, through the schema gate.
-pub fn load_recorded(run: &SubjectRun<'_>, _history: bool) -> Result<Vec<RecordedAnswer>> {
+pub fn load_recorded(run: &SubjectRun<'_>) -> Result<Vec<RecordedAnswer>> {
     let walk = run.walk_result_path();
     anyhow::ensure!(
         walk.exists(),
@@ -161,7 +161,7 @@ pub fn replay_subject(run: &SubjectRun<'_>, req: &ReplayRequest) -> Result<Repla
             p.exists().then(|| PathsCache::read(&p)).transpose()?
         }
     };
-    let recorded = load_recorded(run, req.history)?;
+    let recorded = load_recorded(run)?;
     let wanted = wanted(req, &recorded)?;
     let cfg = run.config();
 

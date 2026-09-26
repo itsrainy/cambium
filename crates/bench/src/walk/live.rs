@@ -102,7 +102,7 @@ impl LiveChecks for BazelChecks<'_> {
                     error = format!("{e:#}"),
                     "no base worktree; peers skipped this step"
                 );
-                return self.tools.iter().map(|p| failed(p, &e)).collect();
+                return self.tools.iter().map(|p| failed(*p)).collect();
             }
         };
         let ctx_run = run_context(self.engine, self.scratch, base_wt.path());
@@ -125,7 +125,7 @@ impl LiveChecks for BazelChecks<'_> {
                             run.restrict_to_rules(i.view());
                         }
                         let _ = crate::labels::write_set(&labels_dir, p.name(), &run.labels);
-                        step_of(p, &run, oracle)
+                        step_of(*p, &run, oracle)
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -133,7 +133,7 @@ impl LiveChecks for BazelChecks<'_> {
                             error = format!("{e:#}"),
                             "peer failed on this step"
                         );
-                        failed(p, &e)
+                        failed(*p)
                     }
                 }
             })
@@ -167,7 +167,7 @@ fn changed_paths(
         .collect())
 }
 
-fn step_of(p: &&dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolStep {
+fn step_of(p: &dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolStep {
     let (recall, tightness) = score(&run.labels, oracle);
     ToolStep {
         name: p.name().to_string(),
@@ -180,7 +180,7 @@ fn step_of(p: &&dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolSt
     }
 }
 
-fn failed(p: &&dyn Tool, _e: &anyhow::Error) -> ToolStep {
+fn failed(p: &dyn Tool) -> ToolStep {
     ToolStep {
         name: p.name().to_string(),
         version: p.version(),
