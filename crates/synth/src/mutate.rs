@@ -7,7 +7,6 @@
 
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use serde::{Deserialize, Serialize};
 
 use cambium_diff::{Change, Status};
 
@@ -66,7 +65,7 @@ pub enum Mutation {
 }
 
 /// Relative frequencies for the mutation kinds.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MutationWeights {
     pub modify_source: u32,
     pub add_source: u32,
@@ -139,7 +138,7 @@ enum MutKind {
     Global,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChangeSpec {
     pub seed: u64,
     /// Mutations per commit.

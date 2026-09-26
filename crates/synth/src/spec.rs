@@ -1,9 +1,7 @@
 //! Shapes for the synthetic generator (spec 13.2).
 
-use serde::{Deserialize, Serialize};
-
 /// A distribution over small non-negative integers.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Dist {
     Const(u64),
     /// Uniform over `[lo, hi]`.
@@ -68,7 +66,7 @@ impl Dist {
 }
 
 /// The full shape of a synthetic repository.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GraphSpec {
     pub seed: u64,
     /// Total rule count (approximate: package sizes are sampled).
@@ -130,17 +128,6 @@ impl Default for GraphSpec {
 }
 
 impl GraphSpec {
-    /// Stable hash of the spec, recorded in benchmark results.
-    ///
-    /// Hashes the serde form, so it moves when a field's value moves and not
-    /// when `Debug` output is reformatted.
-    pub fn hash(&self) -> String {
-        let mut h = blake3::Hasher::new();
-        let json = serde_json::to_vec(self).expect("a GraphSpec serialises");
-        h.update(&json);
-        h.finalize().to_hex()[..16].to_string()
-    }
-
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -268,13 +255,5 @@ mod tests {
         assert!(GraphSpec::preset("nope").is_none());
         assert!(GraphSpec::preset("medium-nope").is_none());
         assert!(GraphSpec::preset("-hubby").is_none());
-    }
-
-    #[test]
-    fn the_hash_follows_values_not_formatting() {
-        let a = GraphSpec::preset("small").unwrap();
-        assert_eq!(a.hash(), a.clone().hash());
-        assert_ne!(a.hash(), a.clone().with_seed(7).hash());
-        assert_ne!(a.hash(), GraphSpec::preset("small-hubby").unwrap().hash());
     }
 }
