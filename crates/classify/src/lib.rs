@@ -247,25 +247,18 @@ impl PackageSet {
 
     /// Live packages recorded in an index.
     pub fn from_index(index: IndexRef<'_>) -> Self {
-        let mut packages = FxHashSet::default();
-        for p in 0..index.num_packages() {
-            if !index.package_tombstoned(p) {
-                packages.insert(index.package_name(p).to_string());
-            }
-        }
+        let packages = (0..index.num_packages())
+            .filter(|&p| !index.package_tombstoned(p))
+            .map(|p| index.package_name(p).to_string());
         let boundaries: Vec<cambium_index::Boundary> = index.boundaries().collect();
-        Self {
-            packages,
-            boundaries: Vec::new(),
-            traversed: Vec::new(),
-        }
-        .with_boundaries(boundaries.iter().map(|b| b.dir.clone()))
-        .with_traversed(
-            boundaries
-                .iter()
-                .filter(|b| b.traversed)
-                .map(|b| b.dir.clone()),
-        )
+        Self::new(packages)
+            .with_boundaries(boundaries.iter().map(|b| b.dir.clone()))
+            .with_traversed(
+                boundaries
+                    .iter()
+                    .filter(|b| b.traversed)
+                    .map(|b| b.dir.clone()),
+            )
     }
 
     pub fn contains(&self, pkg: &str) -> bool {
