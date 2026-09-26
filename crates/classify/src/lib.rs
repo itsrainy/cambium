@@ -215,7 +215,9 @@ impl PackageSet {
     /// Whether `b` (with its trailing `/`) is a boundary the cold universe
     /// query returned a main-repo package under.
     fn is_traversed(&self, b: &str) -> bool {
-        self.traversed.binary_search_by(|t| t.as_str().cmp(b)).is_ok()
+        self.traversed
+            .binary_search_by(|t| t.as_str().cmp(b))
+            .is_ok()
     }
 
     /// The boundaries `path` lies under that `//...` walked into: the
@@ -1025,7 +1027,10 @@ mod tests {
         );
         // But not one `//...` stopped at, so the packages under it are this
         // repository's and own their files.
-        assert_eq!(p.unwalked_boundary_of("third_party/tsl/tsl/platform/x.cc"), None);
+        assert_eq!(
+            p.unwalked_boundary_of("third_party/tsl/tsl/platform/x.cc"),
+            None
+        );
         assert_eq!(
             p.owner_of("third_party/tsl/tsl/platform/dso_loader.cc"),
             Some("third_party/tsl/tsl/platform")
