@@ -21,30 +21,46 @@ const COL_INDENT: usize = 2;
 /// Partial column tops, one eighth to seven eighths.
 const EIGHTHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
-/// Column width, bar width, and how often a value and a label are printed:
-/// the first step that fits inside the cap, or the last step when none does.
-/// The bars narrow to two before anything is thinned, and to one only once
-/// values and labels are both thinned.
-fn layout(n: usize, w_val: usize, w_lab: usize) -> (usize, usize, usize, usize) {
-    let budget = ROW_CAP.saturating_sub(COL_INDENT);
-    let mut last = (3usize, 3usize, 1usize, 1usize);
-    for (val_every, lab_every, bar_w) in [
-        (1usize, 1usize, 3usize),
-        (1, 1, 2),
-        (2, 1, 2),
-        (2, 2, 2),
-        (2, 2, 1),
-    ] {
-        // A label printed every k columns may borrow the k columns it spans.
-        let cell = (bar_w + 1)
-            .max((w_val + 1).div_ceil(val_every))
-            .max((w_lab + 1).div_ceil(lab_every));
-        last = (cell, bar_w, val_every, lab_every);
-        if n * cell <= budget + 1 {
-            return last;
-        }
+/// How the column chart spends its width.
+#[derive(Copy, Clone)]
+struct Layout {
+    /// Columns per bin, including the one blank between neighbours.
+    cell: usize,
+    /// Columns of block in each bar.
+    bar_w: usize,
+    /// A value is printed above every `val_every`th bin.
+    val_every: usize,
+    /// A label is printed under every `lab_every`th bin.
+    lab_every: usize,
+}
+
+/// The steps the column chart narrows through as bins are added, as
+/// `(val_every, lab_every, bar_w)`. The bars narrow to two before anything is
+/// thinned, and to one only once values and labels are both thinned.
+const STEPS: [(usize, usize, usize); 5] = [(1, 1, 3), (1, 1, 2), (2, 1, 2), (2, 2, 2), (2, 2, 1)];
+
+impl Layout {
+    /// The first step whose `n` bins fit inside the cap, or the last step
+    /// when none does.
+    fn fit(n: usize, w_val: usize, w_lab: usize) -> Self {
+        let budget = ROW_CAP.saturating_sub(COL_INDENT);
+        let steps = STEPS.map(|(val_every, lab_every, bar_w)| Layout {
+            // A label printed every k columns may borrow the k columns it
+            // spans.
+            cell: (bar_w + 1)
+                .max((w_val + 1).div_ceil(val_every))
+                .max((w_lab + 1).div_ceil(lab_every)),
+            bar_w,
+            val_every,
+            lab_every,
+        });
+        let last = steps[steps.len() - 1];
+        // The last bin's blank neighbour is never drawn, hence the one spare.
+        steps
+            .into_iter()
+            .find(|l| n * l.cell <= budget + 1)
+            .unwrap_or(last)
     }
-    last
 }
 
 /// A vertical column chart: one column per bin, the value directly above each
@@ -63,7 +79,12 @@ pub fn columns(counts: &[u64], labels: &[String]) -> Vec<String> {
         .max()
         .unwrap_or(1)
         .max(1);
-    let (cell, bar_w, val_every, lab_every) = layout(n, w_val, w_lab);
+    let Layout {
+        cell,
+        bar_w,
+        val_every,
+        lab_every,
+    } = Layout::fit(n, w_val, w_lab);
     let content = cell - 1;
     let bar_w = bar_w.min(content);
     let total = COL_INDENT + n * cell - 1;
