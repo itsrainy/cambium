@@ -301,10 +301,9 @@ mod tests {
     /// worktrees and writes one row of JSON to `-o`.
     fn write_recovering_stub(dir: &Path) -> PathBuf {
         let path = dir.join("tango-cli-stub.sh");
-        std::fs::write(
+        cambium_testkit::executable_script(
             &path,
-            r#"#!/bin/sh
-set -e
+            r#"set -e
 ws=""; base=""; head=""; scratch=""; out=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -327,11 +326,7 @@ cat > "$out" <<JSON
 [{"label": "//pkg:t", "distance": 0, "change_type": "changed"}]
 JSON
 "#,
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        );
         path
     }
 

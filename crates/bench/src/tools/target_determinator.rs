@@ -433,10 +433,9 @@ mod tests {
     /// prints one label, the way the real binary does.
     fn write_stub(dir: &Path) -> PathBuf {
         let path = dir.join("target-determinator-stub.sh");
-        std::fs::write(
+        cambium_testkit::executable_script(
             &path,
-            r#"#!/bin/sh
-set -e
+            r#"set -e
 ws=""; cache=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -449,11 +448,7 @@ mkdir -p "$(dirname "$cache")"
 printf '%s' "$ws" > "$(dirname "$cache")/working-directory"
 echo "//pkg:t"
 "#,
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        );
         path
     }
 }
