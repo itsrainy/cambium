@@ -778,11 +778,7 @@ mod tests {
     fn build_files_are_never_ignored() {
         // Ignore globs apply only to non-BUILD, non-.bzl paths.
         let p = packages();
-        let m = Matchers::compile(&Rules {
-            ignore_globs: vec!["lib/**".into()],
-            ..Default::default()
-        })
-        .unwrap();
+        let m = ignoring(&["lib/**"]);
         assert_eq!(
             classify("lib/core/BUILD", &p, &m),
             Classification::Build("lib/core".into())
@@ -816,9 +812,36 @@ mod tests {
         }
     }
 
+    /// Rules with nothing but these ignore globs.
+    fn ignoring(globs: &[&str]) -> Matchers {
+        Matchers::compile(&Rules {
+            ignore_globs: globs.iter().map(|g| g.to_string()).collect(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// No rules at all: nothing invalidates and nothing is ignored.
+    fn no_rules() -> Matchers {
+        Matchers::compile(&Rules::default()).unwrap()
+    }
+
+    /// [`dirty_set`] over `changes`, with the package layout it leaves at
+    /// head.
+    fn run_with(
+        mut packages: PackageSet,
+        m: &Matchers,
+        consumers: &dyn Consumers,
+        changes: &[Change],
+    ) -> (DirtySet, PackageSet) {
+        let d = dirty_set(changes, &mut packages, m, consumers);
+        (d, packages)
+    }
+
+    /// [`run_with`] over the shared packages and rules, for tests that read
+    /// only the answer.
     fn run(changes: Vec<Change>) -> DirtySet {
-        let mut p = packages();
-        dirty_set(&changes, &mut p, &matchers(), &NoConsumers)
+        run_with(packages(), &matchers(), &NoConsumers, &changes).0
     }
 
     #[test]
@@ -872,12 +895,11 @@ mod tests {
     /// has anything to say about it at all.
     #[test]
     fn a_bzl_no_package_owns_is_left_to_the_layer() {
-        let mut p = PackageSet::new(["lib".to_string()]);
-        let d = dirty_set(
-            &[Change::new(Status::Modified, "vendor/x.bzl")],
-            &mut p,
+        let (d, _) = run_with(
+            PackageSet::new(["lib".to_string()]),
             &matchers(),
             &NoConsumers,
+            &[Change::new(Status::Modified, "vendor/x.bzl")],
         );
         assert!(d.direct_files.is_empty());
         assert!(d.dirty.is_empty());
@@ -891,12 +913,11 @@ mod tests {
         // `//:srcs` still see it.
         let mut m = matchers();
         m.exempt(["MODULE.bazel".to_string()]);
-        let mut p = packages();
-        let d = dirty_set(
-            &[Change::new(Status::Modified, "MODULE.bazel")],
-            &mut p,
+        let (d, _) = run_with(
+            packages(),
             &m,
             &NoConsumers,
+            &[Change::new(Status::Modified, "MODULE.bazel")],
         );
         assert!(!d.global);
         assert!(d.direct_files.contains("MODULE.bazel"));
@@ -908,15 +929,14 @@ mod tests {
     /// parent moved, and the engine walks it.
     #[test]
     fn a_new_package_enters_the_layout_and_dirties_nothing() {
-        let mut p = packages();
-        let d = dirty_set(
+        let (d, p) = run_with(
+            packages(),
+            &matchers(),
+            &NoConsumers,
             &[
                 Change::new(Status::Added, "lib/core/sub/BUILD.bazel"),
                 Change::new(Status::Added, "lib/core/sub/x.cc"),
             ],
-            &mut p,
-            &matchers(),
-            &NoConsumers,
         );
         assert!(d.dirty.is_empty(), "{:?}", d.dirty);
         assert!(p.contains("lib/core/sub"));
@@ -950,15 +970,14 @@ mod tests {
     /// change has to resolve to.
     #[test]
     fn files_under_a_deleted_package_move_to_the_parent() {
-        let mut p = packages();
-        let d = dirty_set(
+        let (d, p) = run_with(
+            packages(),
+            &matchers(),
+            &NoConsumers,
             &[
                 Change::new(Status::Deleted, "lib/core/BUILD.bazel"),
                 Change::new(Status::Modified, "lib/core/a.cc"),
             ],
-            &mut p,
-            &matchers(),
-            &NoConsumers,
         );
         assert!(d.direct_files.contains("lib/core/a.cc"));
         assert_eq!(p.owner_of("lib/core/a.cc"), Some("lib"));
@@ -984,8 +1003,7 @@ mod tests {
         let changes: Vec<Change> = (0..10_000)
             .map(|i| Change::new(Status::Modified, format!("lib/core/f{i}.cc")))
             .collect();
-        let mut p = packages();
-        let d = dirty_set(&changes, &mut p, &matchers(), &NoConsumers);
+        let d = run(changes);
         assert!(!d.global);
         assert_eq!(d.dirty.len(), 0, "sources do not re-query their package");
         assert_eq!(d.direct_files.len(), 10_000);
@@ -993,12 +1011,11 @@ mod tests {
 
     #[test]
     fn unowned_paths_are_ignored() {
-        let mut p = PackageSet::new(["lib".to_string()]);
-        let d = dirty_set(
-            &[Change::new(Status::Modified, "README.md")],
-            &mut p,
+        let (d, _) = run_with(
+            PackageSet::new(["lib".to_string()]),
             &matchers(),
             &NoConsumers,
+            &[Change::new(Status::Modified, "README.md")],
         );
         assert!(!d.global);
         assert!(d.dirty.is_empty());
@@ -1011,17 +1028,11 @@ mod tests {
     /// everything above it; the graph has the final word.
     #[test]
     fn a_consumed_ignored_file_is_still_direct() {
-        let m = Matchers::compile(&Rules {
-            ignore_globs: vec!["**/*.md".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let mut p = PackageSet::new(["".to_string()]);
-        let d = dirty_set(
-            &[Change::new(Status::Modified, "CHANGELOG.md")],
-            &mut p,
-            &m,
+        let (d, _) = run_with(
+            PackageSet::new(["".to_string()]),
+            &ignoring(&["**/*.md"]),
             &Consumes(&["CHANGELOG.md"]),
+            &[Change::new(Status::Modified, "CHANGELOG.md")],
         );
         assert!(d.direct_files.contains("CHANGELOG.md"));
         assert_eq!(d.ignored, 0);
@@ -1032,17 +1043,11 @@ mod tests {
     /// commit does no Bazel work at all.
     #[test]
     fn an_unconsumed_ignored_file_stays_ignored() {
-        let m = Matchers::compile(&Rules {
-            ignore_globs: vec!["**/*.md".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let mut p = PackageSet::new(["".to_string()]);
-        let d = dirty_set(
-            &[Change::new(Status::Modified, "CHANGELOG.md")],
-            &mut p,
-            &m,
+        let (d, _) = run_with(
+            PackageSet::new(["".to_string()]),
+            &ignoring(&["**/*.md"]),
             &NoConsumers,
+            &[Change::new(Status::Modified, "CHANGELOG.md")],
         );
         assert!(d.direct_files.is_empty());
         assert!(d.dirty.is_empty());
@@ -1054,17 +1059,11 @@ mod tests {
     /// path that does not exist there yet.
     #[test]
     fn an_added_ignored_file_names_no_package() {
-        let m = Matchers::compile(&Rules {
-            ignore_globs: vec!["docs/**".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let mut p = PackageSet::new(["docs".to_string()]);
-        let d = dirty_set(
-            &[Change::new(Status::Added, "docs/new.md")],
-            &mut p,
-            &m,
+        let (d, _) = run_with(
+            PackageSet::new(["docs".to_string()]),
+            &ignoring(&["docs/**"]),
             &NoConsumers,
+            &[Change::new(Status::Added, "docs/new.md")],
         );
         assert!(d.dirty.is_empty());
         assert!(d.direct_files.is_empty());
@@ -1107,16 +1106,14 @@ mod tests {
 
     #[test]
     fn a_change_under_a_traversed_boundary_is_also_the_repositorys() {
-        let mut p = traversed();
-        let m = Matchers::compile(&Rules::default()).unwrap();
-        let d = dirty_set(
+        let (d, _) = run_with(
+            traversed(),
+            &no_rules(),
+            &NoConsumers,
             &[Change::new(
                 Status::Modified,
                 "third_party/tsl/tsl/platform/dso_loader.cc",
             )],
-            &mut p,
-            &m,
-            &NoConsumers,
         );
         // The main-repo half.
         assert!(d
@@ -1173,16 +1170,14 @@ mod tests {
 
     #[test]
     fn the_inner_repository_is_routed_not_the_outer_one() {
-        let mut p = nested_in_traversed();
-        let m = Matchers::compile(&Rules::default()).unwrap();
-        let d = dirty_set(
+        let (d, _) = run_with(
+            nested_in_traversed(),
+            &no_rules(),
+            &NoConsumers,
             &[Change::new(
                 Status::Modified,
                 "third_party/tsl/third_party/gemm/lib/matmul.cc",
             )],
-            &mut p,
-            &m,
-            &NoConsumers,
         );
         assert_eq!(
             d.nested.keys().collect::<Vec<_>>(),
@@ -1249,18 +1244,16 @@ mod tests {
 
     #[test]
     fn a_nested_build_file_mints_no_package() {
-        let m = Matchers::compile(&Rules::default()).unwrap();
-        let mut p = nested();
-        let d = dirty_set(
+        let (d, p) = run_with(
+            nested(),
+            &no_rules(),
+            &NoConsumers,
             &[
                 Change::new(Status::Added, "third_party/xla/service/BUILD"),
                 Change::new(Status::Modified, "third_party/xla/BUILD"),
                 Change::new(Status::Deleted, "third_party/xla/old/BUILD"),
                 Change::new(Status::Modified, "third_party/xla/service/a.cc"),
             ],
-            &mut p,
-            &m,
-            &NoConsumers,
         );
         assert!(d.dirty.is_empty(), "{:?}", d.dirty);
         assert!(d.deleted_packages.is_empty());
