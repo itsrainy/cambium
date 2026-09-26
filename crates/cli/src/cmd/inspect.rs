@@ -102,7 +102,7 @@ pub enum Query {
         #[command(flatten)]
         common: Common,
         /// The package: `//pkg` or `pkg`, `//` for the root, `@repo//pkg` in
-        /// an external repository.
+        /// an external repository (the canonical name, e.g. `@rules_cc+//cc`).
         package: String,
     },
     /// Targets that depend on a label.
@@ -149,7 +149,7 @@ pub enum Query {
         #[command(flatten)]
         common: Common,
         /// The package: `//pkg` or `pkg`, `//` for the root, `@repo//pkg` in
-        /// an external repository.
+        /// an external repository (the canonical name, e.g. `@rules_cc+//cc`).
         package: String,
         /// Filter by node kind: rule, source_file, generated_file,
         /// package_group, environment_group, unknown, tombstone.

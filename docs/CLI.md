@@ -201,8 +201,9 @@ tables, and `verify` against Bazel. Plumbing, for checking a surprising
 `explain` answer without reading the index by hand. Each takes the index
 file first. A package is written as a label writes it, `//pkg` (or `pkg`,
 and `//` for the root package), and `@repo//pkg` in an external
-repository: `cambi inspect targets FILE //shell` lists what `//shell`
-holds.
+repository, with the canonical repository name Bazel prints (`rules_cc+`
+under bzlmod, not the apparent `rules_cc`; `@@rules_cc+//cc` works too):
+`cambi inspect targets FILE //shell` lists what `//shell` holds.
 
 `inspect verify FILE` samples rule targets (`--sample`, `--seed`) and
 checks that the index's reverse closure of each holds every target `bazel

@@ -231,7 +231,8 @@ impl EngineError {
                 Code::E017IndexQuery,
                 Some(
                     "a package is written `//pkg` or `pkg` (the root package is `//`), and one \
-                     in an external repository `@repo//pkg`; `cambi inspect owner <file> \
+                     in an external repository `@repo//pkg` with the canonical repository name \
+                     Bazel prints (`@@repo+//pkg` also works); `cambi inspect owner <file> \
                      <path>` names the package that owns a path",
                 ),
             ),
