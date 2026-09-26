@@ -163,7 +163,14 @@ use serde::{Deserialize, Serialize};
 ///   (this run carried the packages forward) as its cause, naming them in
 ///   `global_reason`. Such a run used to answer from the partial index with
 ///   `global: false`. `--allow-partial` on `affected` and `explain` answers
-///   from it as before.
+///   from it as before. `doctor` and `status` values change with it: the
+///   `bazel` check fails under `CAMBI-E015` for a Bazel that cannot read
+///   the workspace's mode, and its `detail` is the version, not the binary,
+///   whenever it carries a finding; a `WORKSPACE`-only tree with no pinned
+///   Bazel grades the `workspace` check warn and puts `CAMBI-W016` in
+///   `status`'s `workspace.diagnostics`; and a comment-only `MODULE.bazel`
+///   beside a `WORKSPACE` (the stub Bazel writes) is not a marker, so such
+///   a tree's `workspace.mode` is `workspace`, not `ambiguous`.
 pub const SCHEMA_VERSION: u32 = 20;
 
 /// What a document with no `schema` field is: version 1 predates the field, so

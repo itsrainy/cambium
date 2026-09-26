@@ -1926,6 +1926,55 @@ fn doctor_fails_a_bazel_that_cannot_read_the_workspace_mode() {
     assert_eq!(code, 0, "{stdout}{stderr}");
 }
 
+/// The `MODULE.bazel` Bazel 7 and later write on their first run in a tree
+/// that has none: comments only, untracked. It declares nothing, so beside a
+/// `WORKSPACE` the tree is still `WORKSPACE`-only as far as its dependencies
+/// go, and a Bazel 9 reading the stub instead of the `WORKSPACE` still loads a
+/// fraction of the packages. Any run leaves the stub behind, cambium's own
+/// cold query included, so `doctor` must not be passed by it.
+#[test]
+fn doctor_sees_through_the_module_bazel_stub_bazel_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("WORKSPACE"),
+        "workspace(name = \"x\")\nload(\"//:deps.bzl\", \"deps\")\ndeps()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("MODULE.bazel"),
+        "###############################################################################\n\
+         # Bazel now uses Bzlmod by default to manage external dependencies.\n\
+         # Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.\n\
+         #\n\
+         # For more details, please check https://github.com/bazelbuild/bazel/issues/18958\n\
+         ###############################################################################\n",
+    )
+    .unwrap();
+    let ws = dir.path().to_str().unwrap();
+    let bins = tempfile::tempdir().expect("tempdir");
+
+    let bazel = stub_bazel(bins.path(), "9.2.0");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("fail   bazel"), "{stdout}");
+    assert!(stdout.contains("error[CAMBI-E015]"), "{stdout}");
+    assert!(
+        stdout.contains("warn   workspace"),
+        "unpinned, and the stub does not make the mode undecided:\n{stdout}"
+    );
+    assert!(!stdout.contains("mode undecided"), "{stdout}");
+
+    let bazel = stub_bazel(bins.path(), "7.4.1");
+    let (code, stdout, stderr) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert_eq!(code, 0, "7 reads the WORKSPACE: {stdout}{stderr}");
+
+    // A MODULE.bazel that declares something is a real one: Bazel 9 reads it.
+    std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"x\")\n").unwrap();
+    let bazel = stub_bazel(bins.path(), "9.2.0");
+    let (_, stdout, _) = run(&["-C", ws, "--bazel-binary", &bazel, "doctor"]);
+    assert!(!stdout.contains("CAMBI-E015"), "{stdout}");
+}
+
 /// A tree with only a `WORKSPACE` file and no `.bazelversion` runs whatever
 /// Bazel bazelisk picks, which is the latest, and the latest reads no
 /// `WORKSPACE`. `init` says so when it detects the mode, and so do `status`
