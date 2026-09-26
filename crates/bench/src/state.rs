@@ -123,16 +123,16 @@ impl State {
     }
 
     /// The identity of the cambium that will use this state: index format plus
-    /// configuration hash, the two things that decide whether an index, a
-    /// history or a comparison written earlier is the same experiment.
+    /// configuration hash, the two things that decide whether an index or a
+    /// walk written earlier is the same experiment.
     pub fn engine_id(config_hash: &[u8; 32]) -> String {
         let hex: String = config_hash.iter().map(|b| format!("{b:02x}")).collect();
         format!("f{}/{}", cambium_index::format::FORMAT_VERSION, &hex[..16])
     }
 
     /// Loads the state and, when a different cambium wrote it, starts over:
-    /// built indexes, the history and the compared set all belong to that
-    /// other build. Resuming any of them would mix two experiments.
+    /// built indexes and the walk's progress belong to that other build.
+    /// Resuming either would mix two experiments.
     pub fn load_for(dir: &Path, id: &str, pin: &str, engine_id: &str) -> anyhow::Result<Self> {
         let mut st = Self::load(dir, id, pin)?;
         if st.engine != engine_id {
