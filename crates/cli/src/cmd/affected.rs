@@ -911,7 +911,7 @@ fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool)
 mod tests {
     use cambium_engine::profile::{CommitStep, IndexWork};
     use cambium_engine::report::{AffectedReport, AffectedTarget};
-    use cambium_ui::{ColorChoice, Kind, OutputMode};
+    use cambium_ui::{Kind, OutputMode};
     use clap::Parser;
 
     use super::Clue;
@@ -931,7 +931,6 @@ mod tests {
     }
 
     fn plain_mode() -> OutputMode {
-        let _ = ColorChoice::Never;
         OutputMode {
             kind: Kind::Plain,
             live: false,
