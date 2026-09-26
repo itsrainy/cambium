@@ -914,16 +914,31 @@ impl<'a> Run<'a> {
             return None;
         }
         let mut unnamed: Vec<String> = Vec::new();
+        // The repositories the table cannot name, asked for once and only
+        // when a changed file runs code the index did not read.
+        let mut unattributed: Option<BTreeSet<String>> = None;
         for path in changed_bzl {
             if !self.base.sky.bzl_is_workspace_level(path) {
                 continue;
             }
-            let repos = self
-                .base
-                .bzl_id(path)
-                .and_then(|id| crate::externals::repos_of_workspace_bzl(self.base, id));
+            let id = self.base.bzl_id(path);
+            let repos = id.and_then(|id| crate::externals::repos_of_workspace_bzl(self.base, id));
             match repos {
-                Some(repos) => {
+                Some(mut repos) => {
+                    // What the file declares through a function it loaded
+                    // from another repository is not in its row: the index
+                    // never read that function.
+                    if id.is_some_and(|id| crate::externals::reads_unread_code(self.base, id)) {
+                        let more = unattributed
+                            .get_or_insert_with(|| crate::externals::unattributed_repos(self.base));
+                        tracing::debug!(
+                            %path,
+                            repos = ?more,
+                            "a workspace-level .bzl runs code the index did not read; the \
+                             repositories the table cannot name move with it"
+                        );
+                        repos.extend(more.iter().cloned());
+                    }
                     tracing::debug!(%path, ?repos, "a workspace-level .bzl names its repositories");
                     ext.by_bzl += repos.len();
                     ext.name(path, repos.iter());
