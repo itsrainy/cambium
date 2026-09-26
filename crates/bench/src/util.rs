@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::de::DeserializeOwned;
 
-/// The `q`th percentile of an already-sorted sample, by nearest rank. Empty is
-/// 0: a distribution over no runs has no shape, and the reports say `n/a`
-/// beside it rather than reading the number.
 /// Makes a path absolute without requiring it to exist.
 ///
 /// A child process (a peer, Bazel) runs with its own working directory, so a
@@ -33,6 +30,9 @@ pub fn absolute(p: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The `q`th percentile of an already-sorted sample, by nearest rank. Empty is
+/// 0: a distribution over no runs has no shape, and the reports say `n/a`
+/// beside it rather than reading the number.
 pub fn percentile(sorted: &[u64], q: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
