@@ -63,7 +63,7 @@ pub struct SynthTarget {
     pub srcs: Vec<u32>,
     /// Content version per entry of `srcs`, bumped by `ModifySource`. Not part
     /// of the target hash: editing a file's contents cannot change the graph,
-    /// only mark the file's consumers direct (spec section 2).
+    /// only mark the file's consumers direct.
     pub src_versions: Vec<u32>,
     /// `(package, target, slot)` triples for files consumed via `exports_files`.
     pub foreign_srcs: Vec<(u32, u32, u32)>,
@@ -246,7 +246,8 @@ impl SynthGraph {
         *h.finalize().as_bytes()
     }
 
-    /// Hash of the package's `.bzl` load closure (spec 5.4).
+    /// Hash of the package's `.bzl` load closure: every file it loads, with
+    /// the version `EditBzl` bumps.
     pub fn bzl_closure_hash(&self, pkg: u32) -> [u8; 32] {
         let p = &self.packages[pkg as usize];
         let mut entries: Vec<(&str, u32)> = p

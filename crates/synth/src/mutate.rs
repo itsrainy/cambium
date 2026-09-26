@@ -1,4 +1,4 @@
-//! Mutations and commits (spec 13.3).
+//! Mutations and commits.
 //!
 //! A `Commit` is a set of mutations plus the `git diff --name-status` the same
 //! edit would have produced. Applying one to a `SynthGraph` yields the graph at
@@ -165,7 +165,8 @@ impl Default for ChangeSpec {
 }
 
 impl ChangeSpec {
-    /// Named presets from spec 13.3.
+    /// Named presets, one per kind of change a benchmark wants to measure.
+    /// [`Self::PRESETS`] lists them.
     pub fn preset(name: &str) -> Option<ChangeSpec> {
         let mut c = ChangeSpec::default();
         match name {

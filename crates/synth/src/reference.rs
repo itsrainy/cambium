@@ -1,4 +1,4 @@
-//! The naive O(graph) reference algorithm (spec 12.4).
+//! The naive O(graph) reference algorithm.
 //!
 //! For every target, hash its own definition together with the transitive
 //! closure of its inputs — the thing the whole incremental design exists to

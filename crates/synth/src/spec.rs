@@ -1,4 +1,4 @@
-//! Shapes for the synthetic generator (spec 13.2).
+//! Shapes for the synthetic generator, and the named presets.
 
 /// A distribution over small non-negative integers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +139,7 @@ impl GraphSpec {
     /// The shape suffixes a size may carry, as in `large-hubby`.
     pub const SHAPES: &[&str] = &["hubby", "deep", "flat", "wide-packages"];
 
-    /// Named presets from spec 13.2: every [`Self::SIZES`] entry, optionally
+    /// Named presets: every [`Self::SIZES`] entry, optionally
     /// suffixed with one of [`Self::SHAPES`]: `large-hubby`, `medium-deep`,
     /// `small-flat`, `xl-wide-packages`.
     pub fn preset(name: &str) -> Option<GraphSpec> {

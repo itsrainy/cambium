@@ -1,4 +1,4 @@
-//! Emitting a synthetic graph as a real Bazel workspace (spec 13.4).
+//! Emitting a synthetic graph as a real Bazel workspace, with a git history.
 //!
 //! The rules do no real work — each action just writes a file listing its
 //! inputs — so `bazel build //...` succeeds on any machine with no compilers or

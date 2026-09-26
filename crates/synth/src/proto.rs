@@ -1,4 +1,4 @@
-//! Emitting a synthetic graph as `blaze_query` protos (spec 13.5).
+//! Emitting a synthetic graph as `blaze_query` protos.
 //!
 //! Lets the proto parsing and rule hashing stages be benchmarked at any scale
 //! without Bazel in the loop.
