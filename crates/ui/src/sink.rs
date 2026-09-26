@@ -13,9 +13,15 @@ use crate::row;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Where the leader dots after a phase name stop.
 const DOT_COL: usize = 24;
-/// Where a phase result starts, and where its time ends.
+/// Where a phase result starts.
 const RESULT_COL: usize = 26;
+/// Where a finished phase's time ends, so the times of a run line up on
+/// their right edge. A result too long to leave room still gets a gap of
+/// two before its time.
 const TIME_END: usize = 74;
+/// Columns of the live line that are not its text: the spinner, the gaps
+/// around the text, and the elapsed clock, with room to spare.
+const LIVE_CHROME: usize = 16;
 
 /// Where a run says what it is doing.
 pub trait Sink {
@@ -158,7 +164,7 @@ impl<W: Write> Text<W> {
         let secs = self.current_since.elapsed().as_secs();
         let text = row::fit(
             &self.current,
-            self.width.saturating_sub(16),
+            self.width.saturating_sub(LIVE_CHROME),
             crate::event::Align::Left,
         );
         let _ = write!(
