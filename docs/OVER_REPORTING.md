@@ -2,8 +2,9 @@
 
 Every place the engine answers more than a cold `bazel query rdeps` would, on
 purpose or as a side effect. Each row says what fires it, what it answers, and
-whether a diagnostic names it. Under-reports are not here: each known one is
-an open issue (#22 through #27, filed 2026-09-17).
+whether a diagnostic names it. Under-reports are not here: the known ones
+are under [Known gaps](../README.md#known-gaps) in the README, and tracked
+in [docs/ROADMAP.md](ROADMAP.md).
 
 Two rules the design leans on, so they are stated once: over-attribution is
 safe and under-attribution is not, and a whole-repository answer is always
