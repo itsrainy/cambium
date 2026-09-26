@@ -247,6 +247,25 @@ impl PackageSet {
         self.containing_boundaries(path).next().map(dir_of)
     }
 
+    /// Whether `path` is a BUILD file of this repository: one that defines,
+    /// adds or removes a main-repo package.
+    ///
+    /// Pass one of [`dirty_set`] applies these and pass two leaves them
+    /// alone, and the engine names a package from one when its loading layer
+    /// has no node for it. Both must answer alike, so both ask here.
+    ///
+    /// A BUILD file inside a nested repository defines a package of *that*
+    /// repository: the main repository must not mint a package name from it,
+    /// nor touch the parent package, which is in a different repository and
+    /// cannot gain or lose files to it. A BUILD file under a boundary
+    /// `//...` walked into anyway (xla's `third_party/tsl`) is this
+    /// repository's, which is why the test is
+    /// [`PackageSet::unwalked_boundary_of`] and not
+    /// [`PackageSet::boundary_of`].
+    pub fn is_main_repo_build_file(&self, path: &str) -> bool {
+        is_build_file(path) && self.unwalked_boundary_of(path).is_none()
+    }
+
     /// Live packages recorded in an index.
     pub fn from_index(index: IndexRef<'_>) -> Self {
         let packages = (0..index.num_packages())
@@ -544,7 +563,7 @@ fn apply_build_changes<'c>(
         if m.is_invalidator(&c.path) {
             return Some(&c.path);
         }
-        if !is_main_repo_build_file(&c.path, packages) {
+        if !packages.is_main_repo_build_file(&c.path) {
             continue;
         }
         let pkg = dirname(&c.path).to_string();
@@ -598,7 +617,7 @@ fn classify_changes(
 ) {
     for c in changes {
         let c = c.borrow();
-        if is_main_repo_build_file(&c.path, packages) {
+        if packages.is_main_repo_build_file(&c.path) {
             continue;
         }
         match classify(&c.path, packages, m) {
@@ -678,17 +697,6 @@ fn route_traversed(changes: &[impl Borrow<Change>], packages: &PackageSet, out: 
                 .push(c.path.clone());
         }
     }
-}
-
-/// Whether `path` is a BUILD file of this repository, which is what pass one
-/// of [`dirty_set`] applies and pass two leaves alone.
-///
-/// A BUILD file inside a nested repository defines a package of *that*
-/// repository. Pass two records it; pass one must not mint a main-repo
-/// package name from it, nor touch the parent package, which is in a
-/// different repository and cannot gain or lose files to it.
-fn is_main_repo_build_file(path: &str, packages: &PackageSet) -> bool {
-    is_build_file(path) && packages.unwalked_boundary_of(path).is_none()
 }
 
 /// Whether a change edited a file's content in place, which is the only
@@ -1393,6 +1401,51 @@ mod tests {
             Some(2),
             "{:?}",
             d.nested
+        );
+    }
+
+    /// The engine names a package its loading layer has no node for by asking
+    /// [`PackageSet::is_main_repo_build_file`], and pass one of [`dirty_set`]
+    /// moves the layout by the same question. This pins that the two agree
+    /// path by path, over every kind of boundary: none, one `//...` walked
+    /// into, one it stopped at, and one it stopped at inside one it walked
+    /// into. `boundary_of` is the question that does not agree, and asking
+    /// it is how the engine once dropped xla's new `third_party/tsl`
+    /// packages.
+    #[test]
+    fn the_engine_and_the_layout_agree_on_which_build_files_are_this_repositorys() {
+        let layout = || {
+            PackageSet::new(["", "lib"].into_iter().map(String::from))
+                .with_boundaries([
+                    "third_party/tsl".to_string(),
+                    "third_party/tsl/third_party/gemm".to_string(),
+                    "third_party/xla".to_string(),
+                ])
+                .with_traversed(["third_party/tsl".to_string()])
+        };
+        let cases = [
+            ("lib/sub/BUILD", true),
+            ("third_party/tsl/tsl/newpkg/BUILD", true),
+            ("third_party/tsl/tsl/newpkg/BUILD.bazel", true),
+            ("third_party/tsl/third_party/gemm/lib/BUILD", false),
+            ("third_party/xla/service/BUILD", false),
+            ("third_party/tsl/tsl/newpkg/x.cc", false),
+        ];
+        let p = layout();
+        for (path, main) in cases {
+            assert_eq!(p.is_main_repo_build_file(path), main, "{path}");
+            let (_, head) = run_with(
+                layout(),
+                &no_rules(),
+                &NoConsumers,
+                &[Change::new(Status::Added, path)],
+            );
+            assert_eq!(head.contains(dirname(path)), main, "{path}");
+        }
+        // The traversed case is the one the two questions split on.
+        assert_eq!(
+            p.boundary_of("third_party/tsl/tsl/newpkg/BUILD"),
+            Some("third_party/tsl")
         );
     }
 }
