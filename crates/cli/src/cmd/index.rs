@@ -115,31 +115,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         } => {
             let rev = rev.or(commit).unwrap_or_else(|| "HEAD".to_string());
             let publish = publish.then_some(PublishPolicy { allow_partial });
-            check_destination(out.as_deref(), publish)?;
-            let engine = ctx.engine()?;
-            let sha = engine
-                .repo()
-                .rev_parse(&rev)
-                .with_context(|| format!("{rev} is not a revision in this repository"))?;
-            let mut sink = cambium_ui::boxed(ctx.ui);
-            sink.emit(Event::Header {
-                verb: "index build".into(),
-                repo: repo_name(&engine),
-                range: short(&rev),
-                note: String::new(),
-            });
-            start_indexing(sink.as_mut(), "index", &sha);
-            let started = Instant::now();
-            let built = engine.full_build(&sha);
-            let index = finish_or_say(ctx, &engine, sink.as_mut(), built)?;
-            sink.emit(Event::PhaseEnd {
-                name: "index".into(),
-                result: counts(&index),
-                elapsed_ms: ms(started),
-            });
-            let said = engine.diagnostics().drain();
-            write_and_publish(ctx, &engine, sink, &index, out.as_deref(), publish, said)?;
-            Ok(crate::EXIT_OK)
+            build(ctx, &rev, out.as_deref(), publish)
         }
         Args::Update {
             range,
@@ -153,142 +129,200 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             // A missing range is the caller's mistake, whatever the workspace's
             // state, so it is reported before the workspace is opened.
             let (from, to) = update_range(range, from, to)?;
-            let publish = publish.then_some(PublishPolicy { allow_partial });
-            check_destination(out.as_deref(), publish)?;
-            let engine = ctx.engine()?;
-            let to_sha = engine
-                .repo()
-                .rev_parse(&to)
-                .with_context(|| format!("{to} is not a revision in this repository"))?;
-            let req = AffectedRequest {
-                base: from,
-                head: to_sha,
-                include_manual: false,
-                explain: false,
-                // The head index is what `index update` is for, so it needs one.
-                materialize: true,
-                no_full_build: false,
-                // `index update` publishes its own output below; there is
-                // nothing for the base-side publish to add.
-                publish_base: false,
-                allow_partial,
-                max_depth: None,
-            };
             let on_global = if no_rebuild_on_global {
                 OnGlobal::Fail
             } else {
                 OnGlobal::Rebuild
             };
-            let mut sink = cambium_ui::boxed(ctx.ui);
-            sink.emit(Event::Header {
-                verb: "index update".into(),
-                repo: repo_name(&engine),
-                range: format!("{}..{}", short(&req.base), short(&to)),
-                note: String::new(),
-            });
-            sink.emit(Event::PhaseStart {
-                name: "index".into(),
-                detail: Some(format!(
-                    "bringing {} forward to {}",
-                    short(&req.base),
-                    short(&req.head)
-                )),
-            });
-            sink.emit(Event::Current(format!(
-                "bringing {} forward",
-                short(&req.base)
-            )));
-            let started = Instant::now();
-            let updated = engine.update_index(&req, on_global);
-            let updated = finish_or_say(ctx, &engine, sink.as_mut(), updated)?;
-            if let Some(reason) = &updated.rebuilt_because {
-                sink.emit(Event::Log(
-                    Level::Warning,
-                    format!(
-                        "the range invalidates everything ({reason}); rebuilt from scratch, \
-                         minting a fresh lineage"
-                    ),
-                ));
-            }
-            sink.emit(Event::PhaseEnd {
-                name: "index".into(),
-                result: counts(&updated.index),
-                elapsed_ms: ms(started),
-            });
-            let mut said = updated.diagnostics.clone();
-            cambium_engine::diag::extend_unique(&mut said, engine.diagnostics().drain());
-            write_and_publish(
+            let publish = publish.then_some(PublishPolicy { allow_partial });
+            update(
                 ctx,
-                &engine,
-                sink,
-                &updated.index,
+                from,
+                &to,
                 out.as_deref(),
                 publish,
-                said,
-            )?;
-            Ok(crate::EXIT_OK)
+                allow_partial,
+                on_global,
+            )
         }
         Args::Gc {
             keep,
             keep_incompatible,
-        } => {
-            let engine = ctx.engine()?;
-            let got = engine.collect_garbage(keep.as_deref().unwrap_or(""), keep_incompatible)?;
-            let mut sink = cambium_ui::boxed(ctx.ui);
-            sink.emit(Event::Header {
-                verb: "index gc".into(),
-                repo: repo_name(&engine),
-                range: String::new(),
-                note: format!("retention {} days", engine.config().baseline.retention_days),
-            });
-            for (s, n) in &got.stale {
-                sink.emit(Event::Log(
-                    Level::Info,
-                    format!("lineage {}: {}; removed {}", s.lineage, s.why, files(*n)),
-                ));
-            }
-            sink.emit(Event::Log(
-                Level::Info,
-                format!("older than the retention: removed {}", files(got.aged)),
-            ));
-            sink.emit(Event::Done);
-            println!("removed {} index files", got.total());
-            Ok(crate::EXIT_OK)
-        }
-        Args::Publish { file } => {
-            let engine = ctx.engine()?;
-            // No store is E008 before the header, as `index gc` does: a
-            // header announcing a publish that cannot start reads as one
-            // that started and failed.
-            configured_store(&engine)?;
-            let f = cambium_index::IndexFile::open(&file)?;
-            let v = f.view();
-            let (lineage, commit) = (v.lineage, v.commit.to_string());
-            let mut sink = cambium_ui::boxed(ctx.ui);
-            sink.emit(Event::Header {
-                verb: "index publish".into(),
-                repo: repo_name(&engine),
-                range: short(&commit),
-                note: format!("lineage {}", hex(&lineage)),
-            });
-            let started = Instant::now();
-            let names = engine.publish_index(&file, &lineage, &commit);
-            let names = finish_or_say(ctx, &engine, sink.as_mut(), names)?;
-            say_published(sink.as_mut(), &names, started);
-            sink.emit(Event::Done);
-            Ok(crate::EXIT_OK)
-        }
-        Args::List => {
-            let engine = ctx.engine()?;
-            for n in configured_store(&engine)?
-                .list()
-                .map_err(EngineError::from)?
-            {
-                println!("{n}");
-            }
-            Ok(crate::EXIT_OK)
-        }
+        } => gc(ctx, keep.as_deref(), keep_incompatible),
+        Args::Publish { file } => publish(ctx, &file),
+        Args::List => list(ctx),
     }
+}
+
+/// `index build`: a cold index of `rev`, written to `out` or published.
+fn build(
+    ctx: &Context,
+    rev: &str,
+    out: Option<&std::path::Path>,
+    publish: Option<PublishPolicy>,
+) -> Result<u8> {
+    check_destination(out, publish)?;
+    let engine = ctx.engine()?;
+    let sha = engine
+        .repo()
+        .rev_parse(rev)
+        .with_context(|| format!("{rev} is not a revision in this repository"))?;
+    let mut sink = cambium_ui::boxed(ctx.ui);
+    sink.emit(Event::Header {
+        verb: "index build".into(),
+        repo: repo_name(&engine),
+        range: short(rev),
+        note: String::new(),
+    });
+    start_indexing(sink.as_mut(), "index", &sha);
+    let started = Instant::now();
+    let built = engine.full_build(&sha);
+    let index = finish_or_say(ctx, &engine, sink.as_mut(), built)?;
+    sink.emit(Event::PhaseEnd {
+        name: "index".into(),
+        result: counts(&index),
+        elapsed_ms: ms(started),
+    });
+    let said = engine.diagnostics().drain();
+    write_and_publish(ctx, &engine, sink, &index, out, publish, said)?;
+    Ok(crate::EXIT_OK)
+}
+
+/// `index update`: the index for `from` brought forward to `to`, written to
+/// `out` or published.
+fn update(
+    ctx: &Context,
+    from: String,
+    to: &str,
+    out: Option<&std::path::Path>,
+    publish: Option<PublishPolicy>,
+    allow_partial: bool,
+    on_global: OnGlobal,
+) -> Result<u8> {
+    check_destination(out, publish)?;
+    let engine = ctx.engine()?;
+    let to_sha = engine
+        .repo()
+        .rev_parse(to)
+        .with_context(|| format!("{to} is not a revision in this repository"))?;
+    let req = AffectedRequest {
+        base: from,
+        head: to_sha,
+        include_manual: false,
+        explain: false,
+        // The head index is what `index update` is for, so it needs one.
+        materialize: true,
+        no_full_build: false,
+        // `index update` publishes its own output below; there is
+        // nothing for the base-side publish to add.
+        publish_base: false,
+        allow_partial,
+        max_depth: None,
+    };
+    let mut sink = cambium_ui::boxed(ctx.ui);
+    sink.emit(Event::Header {
+        verb: "index update".into(),
+        repo: repo_name(&engine),
+        range: format!("{}..{}", short(&req.base), short(to)),
+        note: String::new(),
+    });
+    sink.emit(Event::PhaseStart {
+        name: "index".into(),
+        detail: Some(format!(
+            "bringing {} forward to {}",
+            short(&req.base),
+            short(&req.head)
+        )),
+    });
+    sink.emit(Event::Current(format!(
+        "bringing {} forward",
+        short(&req.base)
+    )));
+    let started = Instant::now();
+    let updated = engine.update_index(&req, on_global);
+    let updated = finish_or_say(ctx, &engine, sink.as_mut(), updated)?;
+    if let Some(reason) = &updated.rebuilt_because {
+        sink.emit(Event::Log(
+            Level::Warning,
+            format!(
+                "the range invalidates everything ({reason}); rebuilt from scratch, minting a \
+                 fresh lineage"
+            ),
+        ));
+    }
+    sink.emit(Event::PhaseEnd {
+        name: "index".into(),
+        result: counts(&updated.index),
+        elapsed_ms: ms(started),
+    });
+    let mut said = updated.diagnostics.clone();
+    cambium_engine::diag::extend_unique(&mut said, engine.diagnostics().drain());
+    write_and_publish(ctx, &engine, sink, &updated.index, out, publish, said)?;
+    Ok(crate::EXIT_OK)
+}
+
+/// `index gc`: stale lineages and aged-out indexes removed from the store.
+fn gc(ctx: &Context, keep: Option<&str>, keep_incompatible: bool) -> Result<u8> {
+    let engine = ctx.engine()?;
+    let got = engine.collect_garbage(keep.unwrap_or(""), keep_incompatible)?;
+    let mut sink = cambium_ui::boxed(ctx.ui);
+    sink.emit(Event::Header {
+        verb: "index gc".into(),
+        repo: repo_name(&engine),
+        range: String::new(),
+        note: format!("retention {} days", engine.config().baseline.retention_days),
+    });
+    for (s, n) in &got.stale {
+        sink.emit(Event::Log(
+            Level::Info,
+            format!("lineage {}: {}; removed {}", s.lineage, s.why, files(*n)),
+        ));
+    }
+    sink.emit(Event::Log(
+        Level::Info,
+        format!("older than the retention: removed {}", files(got.aged)),
+    ));
+    sink.emit(Event::Done);
+    println!("removed {} index files", got.total());
+    Ok(crate::EXIT_OK)
+}
+
+/// `index publish`: an index file uploaded under the lineage and commit it
+/// names itself.
+fn publish(ctx: &Context, file: &std::path::Path) -> Result<u8> {
+    let engine = ctx.engine()?;
+    // No store is E008 before the header, as `index gc` does: a header
+    // announcing a publish that cannot start reads as one that started and
+    // failed.
+    configured_store(&engine)?;
+    let f = cambium_index::IndexFile::open(file)?;
+    let v = f.view();
+    let (lineage, commit) = (v.lineage, v.commit.to_string());
+    let mut sink = cambium_ui::boxed(ctx.ui);
+    sink.emit(Event::Header {
+        verb: "index publish".into(),
+        repo: repo_name(&engine),
+        range: short(&commit),
+        note: format!("lineage {}", hex(&lineage)),
+    });
+    let started = Instant::now();
+    let names = engine.publish_index(file, &lineage, &commit);
+    let names = finish_or_say(ctx, &engine, sink.as_mut(), names)?;
+    say_published(sink.as_mut(), &names, started);
+    sink.emit(Event::Done);
+    Ok(crate::EXIT_OK)
+}
+
+/// `index list`: the store's listing, one name per line.
+fn list(ctx: &Context) -> Result<u8> {
+    let engine = ctx.engine()?;
+    for n in configured_store(&engine)?
+        .list()
+        .map_err(EngineError::from)?
+    {
+        println!("{n}");
+    }
+    Ok(crate::EXIT_OK)
 }
 
 /// `1 file`, `3 files`.
