@@ -395,6 +395,21 @@ pub struct IndexData {
     pub round_trip_via_bytes: Vec<u8>,
     pub round_trip_via_offsets: Vec<u32>,
 
+    // ---- the repositories each leaf's closure runs through (format 16) ----
+    //
+    // Sorted, deduplicated `@name` entries (the name as Bazel printed it,
+    // the spelling of `round_trip_via_*`), and per entry the leaves (node
+    // ids) whose transitive deps closure, walked outside the universe, runs
+    // through that repository. Bazel's answer beside the round-trip rows. A
+    // repository that moves moves every leaf here under it, not only its own
+    // labels: envoy's `@grpc//:grpc++` runs through `@c-ares`, and an edit to
+    // `bazel/c-ares.patch` rebuilds every rule above it. A leaf in no row is
+    // one Bazel was never asked about or could not resolve.
+    pub leaf_closure_repo_bytes: Vec<u8>,
+    pub leaf_closure_repo_offsets: Vec<u32>,
+    pub leaf_closure_offsets: Vec<u32>,
+    pub leaf_closure_leaves: Vec<u32>,
+
     // ---- the Skyframe loading layer (format 11) ----
     //
     // Bazel's own loading-phase graph, taken from `bazel dump
@@ -520,6 +535,12 @@ pub struct IndexRef<'a> {
     /// What the leaves' round-trip rows were derived through; see
     /// [`IndexData::round_trip_via_bytes`].
     pub round_trip_via: StrTabRef<'a>,
+    /// The repositories the leaves' closures run through, sorted; see
+    /// [`IndexData::leaf_closure_repo_bytes`].
+    pub leaf_closure_repos: StrTabRef<'a>,
+    /// Row `i` is the leaves whose closure runs through
+    /// `leaf_closure_repos[i]`.
+    pub leaf_closure: CsrRef<'a>,
 
     /// Bazel's own loading-phase graph; see [`crate::sky`].
     pub sky: crate::sky::SkyRef<'a>,
@@ -548,6 +569,7 @@ impl<'a> IndexRef<'a> {
             ("repo_consumer_leaves", self.repo_consumer_leaves),
             ("repo_boundaries", self.repo_boundaries),
             ("round_trip_via", self.round_trip_via),
+            ("leaf_closure_repos", self.leaf_closure_repos),
             ("sky_roots", self.sky.roots),
             ("sky_keys", self.sky.keys),
         ] {
@@ -569,6 +591,19 @@ impl<'a> IndexRef<'a> {
             if ranges.windows(2).any(|w| w[0] > w[1]) || ranges.iter().any(|&r| r > len) {
                 return Err(format!("{what}: a run is out of order or past its table of {len}"));
             }
+        }
+        // One row per repository, over the leaves; read by slicing too.
+        let c = self.leaf_closure;
+        let rows_ok = c.offsets.len() == self.leaf_closure_repos.len() + 1
+            || (c.offsets.len() <= 1 && self.leaf_closure_repos.is_empty());
+        if !rows_ok
+            || c.offsets.windows(2).any(|w| w[0] > w[1])
+            || c.offsets
+                .last()
+                .is_some_and(|&e| e as usize != c.edges.len())
+            || c.edges.iter().any(|&id| id >= self.num_nodes())
+        {
+            return Err("leaf_closure: rows do not match the repositories or the nodes".into());
         }
         Ok(())
     }
@@ -983,6 +1018,14 @@ impl<'a> IndexRef<'a> {
         (0..self.round_trip_via.len() as u32).map(|i| self.round_trip_via.get(i))
     }
 
+    /// Each repository a leaf's closure runs through, with the leaves that
+    /// run through it; see [`IndexData::leaf_closure_repo_bytes`]. Empty for
+    /// an index whose leaves were never asked about.
+    pub fn leaf_closure(&self) -> impl Iterator<Item = (&'a str, &'a [u32])> + '_ {
+        (0..self.leaf_closure_repos.len() as u32)
+            .map(|i| (self.leaf_closure_repos.get(i), self.leaf_closure.row(i)))
+    }
+
     /// The same directories, each with whether `.bazelignore` names it.
     pub fn boundaries(&self) -> impl Iterator<Item = crate::Boundary> + '_ {
         let flags = self.repo_boundary_ignored;
@@ -1188,6 +1231,14 @@ macro_rules! index_view {
             round_trip_via: StrTabRef {
                 bytes: &$d.round_trip_via_bytes,
                 offsets: $u32s(&$d.round_trip_via_offsets),
+            },
+            leaf_closure_repos: StrTabRef {
+                bytes: &$d.leaf_closure_repo_bytes,
+                offsets: $u32s(&$d.leaf_closure_repo_offsets),
+            },
+            leaf_closure: CsrRef {
+                offsets: $u32s(&$d.leaf_closure_offsets),
+                edges: $u32s(&$d.leaf_closure_leaves),
             },
             sky: crate::sky::SkyRef {
                 present: $d.header.sky_layer,

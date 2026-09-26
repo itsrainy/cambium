@@ -5,6 +5,8 @@
 //! splice of the dirty packages into a loaded one. The difference is only how
 //! many rows get rebuilt.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use fixedbitset::FixedBitSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -283,6 +285,12 @@ pub struct IndexBuilder<'a> {
     /// for rows again.
     round_trip_via: Vec<String>,
 
+    /// Repository (`@name`) -> the leaves whose closure runs through it
+    /// ([`IndexData::leaf_closure_repo_bytes`]). Carried across a splice from
+    /// the base, a leaf's entries replaced whenever Bazel is asked about it
+    /// again ([`IndexBuilder::set_leaf_closure`]).
+    leaf_closure: BTreeMap<String, BTreeSet<u32>>,
+
     lineage: [u8; 16],
     bazel_version: String,
     config_hash: [u8; 32],
@@ -312,6 +320,7 @@ impl<'a> IndexBuilder<'a> {
             sky_unread: false,
             boundaries: Vec::new(),
             round_trip_via: Vec::new(),
+            leaf_closure: BTreeMap::new(),
             lineage,
             bazel_version: String::new(),
             config_hash: [0; 32],
@@ -366,6 +375,10 @@ impl<'a> IndexBuilder<'a> {
             sky_unread: v.sky.present,
             boundaries: v.boundaries().collect(),
             round_trip_via: v.round_trip_via().map(str::to_string).collect(),
+            leaf_closure: v
+                .leaf_closure()
+                .map(|(r, ids)| (r.to_string(), ids.iter().copied().collect()))
+                .collect(),
             lineage: v.lineage,
             bazel_version: v.bazel_version.to_string(),
             config_hash: v.config_hash,
@@ -398,6 +411,22 @@ impl<'a> IndexBuilder<'a> {
     /// through: the base's, until [`IndexBuilder::set_round_trip_via`].
     pub fn round_trip_via(&self) -> &[String] {
         &self.round_trip_via
+    }
+
+    /// Records that the closure of the leaf `id` runs through `repos`
+    /// (`@name` entries, [`IndexData::leaf_closure_repo_bytes`]), replacing
+    /// what was recorded for it. Empty `repos` forgets the leaf.
+    pub fn set_leaf_closure<'r>(&mut self, id: u32, repos: impl IntoIterator<Item = &'r str>) {
+        for leaves in self.leaf_closure.values_mut() {
+            leaves.remove(&id);
+        }
+        for r in repos {
+            self.leaf_closure
+                .entry(r.to_string())
+                .or_default()
+                .insert(id);
+        }
+        self.leaf_closure.retain(|_, leaves| !leaves.is_empty());
     }
 
     pub fn set_bazel_version(&mut self, v: impl Into<String>) {
@@ -907,6 +936,16 @@ impl<'a> IndexBuilder<'a> {
             round_trip_via_bytes.extend_from_slice(v.as_bytes());
             round_trip_via_offsets.push(round_trip_via_bytes.len() as u32);
         }
+        let mut leaf_closure_repo_bytes = Vec::new();
+        let mut leaf_closure_repo_offsets = vec![0u32];
+        let mut leaf_closure_offsets = vec![0u32];
+        let mut leaf_closure_leaves = Vec::new();
+        for (r, leaves) in &self.leaf_closure {
+            leaf_closure_repo_bytes.extend_from_slice(r.as_bytes());
+            leaf_closure_repo_offsets.push(leaf_closure_repo_bytes.len() as u32);
+            leaf_closure_leaves.extend(leaves.iter().copied());
+            leaf_closure_offsets.push(leaf_closure_leaves.len() as u32);
+        }
         let columns = self.nodes.finish();
         let bzl = finish_bzl(self.bzl.take(), &self.pkg_names);
         let (label_bytes, label_offsets, label_sorted) = self.labels.finish();
@@ -1022,6 +1061,10 @@ impl<'a> IndexBuilder<'a> {
             repo_boundary_traversed,
             round_trip_via_bytes,
             round_trip_via_offsets,
+            leaf_closure_repo_bytes,
+            leaf_closure_repo_offsets,
+            leaf_closure_offsets,
+            leaf_closure_leaves,
             sky_root_bytes: sky.root_bytes,
             sky_root_offsets: sky.root_offsets,
             sky_key_bytes: sky.key_bytes,
