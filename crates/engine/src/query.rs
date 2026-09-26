@@ -396,8 +396,8 @@ impl PackageQuerier for BazelQuerier {
                     )
                     .with_help(
                         "if those packages should load, fix the load error bazel reported: \
-                         its stderr is the `stderr=` field of the WARN line logged just before \
-                         this one",
+                         its stderr is the `stderr=` field of the WARN line logged during the \
+                         query phase",
                     ),
                 );
             }
@@ -919,7 +919,9 @@ mod tests {
     }
 
     /// `--log warn` is the default, so a help line naming it sends nobody
-    /// anywhere; the stderr is already in the WARN line logged beside it.
+    /// anywhere; the stderr is already in the WARN line the query phase
+    /// logged. The warning itself prints after the narration, not next to
+    /// that line, so the help names the phase rather than a position.
     #[test]
     fn the_tombstone_help_says_where_bazels_stderr_already_is() {
         let q = querier(3, &[rule("//a:x")], LOAD_ERROR);
@@ -928,6 +930,8 @@ mod tests {
         let help = said[0].help.as_deref().expect("a help line");
         assert!(!help.contains("--log warn"), "{help}");
         assert!(help.contains("`stderr=` field of the WARN line"), "{help}");
+        assert!(help.contains("during the query phase"), "{help}");
+        assert!(!help.contains("just before"), "{help}");
     }
 
     /// The same exit 3, but the package that did not come back still has a
