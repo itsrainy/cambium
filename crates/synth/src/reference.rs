@@ -81,6 +81,21 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "which is not on a lower layer")]
+    fn a_dep_on_a_higher_layer_stops_the_test() {
+        let mut g = graph();
+        let live = |g: &SynthGraph, i: u32| g.targets[i as usize].alive;
+        let low = (0..g.targets.len() as u32)
+            .find(|&i| live(&g, i) && g.targets[i as usize].layer == 0)
+            .unwrap();
+        let high = (0..g.targets.len() as u32)
+            .find(|&i| live(&g, i) && g.targets[i as usize].layer > 0)
+            .unwrap();
+        g.targets[low as usize].deps.push(high);
+        deep_hashes(&g);
+    }
+
+    #[test]
     fn an_unchanged_graph_affects_nothing() {
         let g = graph();
         assert!(reference_affected(&g, &g.clone()).is_empty());
