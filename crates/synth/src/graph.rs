@@ -866,22 +866,6 @@ fn gen_exports(spec: &GraphSpec, packages: &mut [SynthPackage], targets: &mut [S
 mod tests {
     use super::*;
 
-    #[test]
-    fn generation_is_deterministic() {
-        let spec = GraphSpec::preset("small").unwrap();
-        let a = generate(&spec);
-        let b = generate(&spec);
-        assert_eq!(a.targets.len(), b.targets.len());
-        for i in 0..a.targets.len() {
-            assert_eq!(a.targets[i].deps, b.targets[i].deps);
-            assert_eq!(a.target_hash(i as u32), b.target_hash(i as u32));
-        }
-        assert_eq!(
-            a.build_index("x").header.counts.edges,
-            b.build_index("x").header.counts.edges
-        );
-    }
-
     /// The generator's output is pinned to a hash: a preset and a seed must
     /// produce the same workspace on every machine and after every refactor,
     /// because a synthetic subject is emitted on demand and compared with
