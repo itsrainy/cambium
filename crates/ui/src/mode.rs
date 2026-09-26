@@ -54,15 +54,6 @@ impl OutputMode {
         colour_for(colour, &Env::read())
     }
 
-    pub fn silent() -> Self {
-        Self {
-            kind: Kind::Null,
-            live: false,
-            colour: false,
-            width: 80,
-        }
-    }
-
     fn decide(quiet: bool, jsonl: bool, colour: ColorChoice, env: &Env) -> Self {
         // `--quiet` means what the CLI has always said it means: nothing on
         // stderr when the run succeeds. `--format jsonl` means the progress
