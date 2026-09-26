@@ -9,6 +9,7 @@
 //! explanation layer, their label sets written beside the step for the
 //! `labels` verb.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
@@ -16,12 +17,11 @@ use cambium_engine::Engine;
 use cambium_index::IndexFile;
 
 use crate::checkout::Checkout;
-use crate::classify::BazelFacts;
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle, RdepsResult};
 use crate::tools::{BaseWorktree, RunContext, Tool, ToolRun};
 use crate::util::absolute;
 
-use super::driver::{LiveChecks, StepContext};
+use super::driver::{AnsweredStep, LiveChecks};
 use super::model::ToolStep;
 use super::score;
 
@@ -53,7 +53,7 @@ impl BazelChecks<'_> {
 }
 
 impl LiveChecks for BazelChecks<'_> {
-    fn oracle(&self, ctx: &StepContext<'_>) -> Result<Option<RdepsResult>> {
+    fn oracle(&self, ctx: &AnsweredStep<'_>) -> Result<Option<RdepsResult>> {
         if !ctx.want_oracle {
             return Ok(None);
         }
@@ -64,17 +64,14 @@ impl LiveChecks for BazelChecks<'_> {
             return Ok(None);
         };
         let index = IndexFile::open(index_path)?;
-        let changed =
-            BazelFacts::changed_paths(&self.checkout.dir, &ctx.step.parent, &ctx.step.head)?;
-        let base = self.base_index(&ctx.step.parent);
-        // For the marker files' directory listings; without it a listing is
-        // matched by any changed child, which only widens the oracle.
-        let added_or_deleted = BazelFacts::added_or_deleted_paths(
-            &self.checkout.dir,
-            &ctx.step.parent,
-            &ctx.step.head,
-        )
-        .ok();
+        let (dir, parent, head) = (&self.checkout.dir, &ctx.step.parent, &ctx.step.head);
+        let changed = changed_paths(dir, parent, head, None)?;
+        let base = self.base_index(parent);
+        // For the marker files' directory listings (renames count as both,
+        // since `diff` without `-M` reports them that way); without it a
+        // listing is matched by any changed child, which only widens the
+        // oracle.
+        let added_or_deleted = changed_paths(dir, parent, head, Some("AD")).ok();
         let output_base = crate::oracles::repo_inputs::output_base(self.engine.bazel());
         let out = RdepsOracle::new(self.oracle_k, self.seed).run(
             self.engine.bazel(),
@@ -93,7 +90,7 @@ impl LiveChecks for BazelChecks<'_> {
         Ok(Some(out))
     }
 
-    fn peers(&self, ctx: &StepContext<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep> {
+    fn peers(&self, ctx: &AnsweredStep<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep> {
         if !ctx.want_peers || self.tools.is_empty() {
             return Vec::new();
         }
@@ -105,7 +102,7 @@ impl LiveChecks for BazelChecks<'_> {
                     error = format!("{e:#}"),
                     "no base worktree; peers skipped this step"
                 );
-                return self.tools.iter().map(|p| failed(p, &e)).collect();
+                return self.tools.iter().map(|p| failed(*p)).collect();
             }
         };
         let ctx_run = run_context(self.engine, self.scratch, base_wt.path());
@@ -128,7 +125,7 @@ impl LiveChecks for BazelChecks<'_> {
                             run.restrict_to_rules(i.view());
                         }
                         let _ = crate::labels::write_set(&labels_dir, p.name(), &run.labels);
-                        step_of(p, &run, oracle)
+                        step_of(*p, &run, oracle)
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -136,7 +133,7 @@ impl LiveChecks for BazelChecks<'_> {
                             error = format!("{e:#}"),
                             "peer failed on this step"
                         );
-                        failed(p, &e)
+                        failed(*p)
                     }
                 }
             })
@@ -144,7 +141,33 @@ impl LiveChecks for BazelChecks<'_> {
     }
 }
 
-fn step_of(p: &&dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolStep {
+/// `git diff --no-renames --name-only [--diff-filter=<filter>] base..head` in
+/// `repo`.
+///
+/// Without `--no-renames` git's default rename detection lists only the new
+/// path of a moved file, and the old one reaches neither the deleted half of
+/// the oracle nor a marker that recorded it.
+fn changed_paths(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    filter: Option<&str>,
+) -> Result<BTreeSet<String>> {
+    let filter = filter.map(|f| format!("--diff-filter={f}"));
+    let range = format!("{base}..{head}");
+    let mut args = vec!["diff", "--no-renames", "--name-only"];
+    args.extend(filter.as_deref());
+    args.push(&range);
+    let out = crate::tools::git(repo, &args)?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn step_of(p: &dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolStep {
     let (recall, tightness) = score(&run.labels, oracle);
     ToolStep {
         name: p.name().to_string(),
@@ -157,7 +180,7 @@ fn step_of(p: &&dyn Tool, run: &ToolRun, oracle: Option<&RdepsResult>) -> ToolSt
     }
 }
 
-fn failed(p: &&dyn Tool, _e: &anyhow::Error) -> ToolStep {
+fn failed(p: &dyn Tool) -> ToolStep {
     ToolStep {
         name: p.name().to_string(),
         version: p.version(),
@@ -179,5 +202,40 @@ pub fn run_context(engine: &Engine, scratch: &Path, base_worktree: &Path) -> Run
         env: engine.bazel().env().to_vec(),
         scratch: absolute(scratch),
         base_worktree: absolute(base_worktree),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cambium_testkit::{commit_all, init_repo, write};
+
+    use super::*;
+
+    fn set(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A rename reaches the oracle as both of its paths, and only an add or a
+    /// delete reaches the directory-listing half.
+    #[test]
+    fn a_rename_is_changed_at_both_paths_and_edits_are_not_added_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        write(repo, "a/old.txt", "moved\n");
+        write(repo, "b/kept.txt", "one\n");
+        let base = commit_all(repo, "base");
+        std::fs::rename(repo.join("a/old.txt"), repo.join("a/new.txt")).unwrap();
+        write(repo, "b/kept.txt", "two\n");
+        let head = commit_all(repo, "head");
+
+        assert_eq!(
+            changed_paths(repo, &base, &head, None).unwrap(),
+            set(&["a/new.txt", "a/old.txt", "b/kept.txt"])
+        );
+        assert_eq!(
+            changed_paths(repo, &base, &head, Some("AD")).unwrap(),
+            set(&["a/new.txt", "a/old.txt"])
+        );
     }
 }

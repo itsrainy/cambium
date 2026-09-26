@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Enough about the machine to know whether two runs are comparable.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Machine {
     pub cpu: String,
     pub cores: usize,
@@ -83,22 +83,6 @@ fn total_ram_gb() -> f64 {
                 if let Some(v) = line.strip_prefix("MemTotal:") {
                     let kb: f64 = v.trim().trim_end_matches(" kB").parse().unwrap_or(0.0);
                     return kb / 1024.0 / 1024.0;
-                }
-            }
-        }
-    }
-    0.0
-}
-
-/// Peak resident set size of this process, in MiB. Linux only; 0 elsewhere.
-pub fn peak_rss_mb() -> f64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
-            for line in s.lines() {
-                if let Some(v) = line.strip_prefix("VmHWM:") {
-                    let kb: f64 = v.trim().trim_end_matches(" kB").parse().unwrap_or(0.0);
-                    return kb / 1024.0;
                 }
             }
         }

@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::de::DeserializeOwned;
 
-/// The `q`th percentile of an already-sorted sample, by nearest rank. Empty is
-/// 0: a distribution over no runs has no shape, and the reports say `n/a`
-/// beside it rather than reading the number.
 /// Makes a path absolute without requiring it to exist.
 ///
 /// A child process (a peer, Bazel) runs with its own working directory, so a
@@ -33,6 +30,9 @@ pub fn absolute(p: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The `q`th percentile of an already-sorted sample, by nearest rank. Empty is
+/// 0: a distribution over no runs has no shape, and the reports say `n/a`
+/// beside it rather than reading the number.
 pub fn percentile(sorted: &[u64], q: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -51,8 +51,8 @@ pub fn now_unix() -> u64 {
 
 /// Now, as RFC 3339 in UTC: `2026-09-10T14:02:11Z`.
 ///
-/// Every timestamp the harness writes for a *reader* is this shape — the
-/// progress file, the per-step stamps in the state file — because a watcher
+/// Every timestamp the harness writes for a *reader* is this shape (the
+/// progress file, the per-step stamps in the state file) because a watcher
 /// subtracts them and a person reads them, and `now_unix` above serves
 /// neither. No `chrono`: the conversion is twenty lines of civil-calendar
 /// arithmetic and a dependency that parses every timezone on earth is not
@@ -75,9 +75,10 @@ pub fn rfc3339(secs: u64) -> String {
 }
 
 /// An RFC 3339 timestamp back to seconds since the epoch, or `None` when it is
-/// not one. Only the shape [`rfc3339`] writes is accepted, plus an offset of
-/// `Z` or `+00:00`: the harness is the only writer, and guessing at a local
-/// time would make an elapsed reading silently hours wrong.
+/// not one. Only UTC is accepted: the shape [`rfc3339`] writes, with a `T` or
+/// a space between date and time and an offset of `Z`, `+00:00` or `+0000`.
+/// The harness is the only writer, and guessing at a local time would make an
+/// elapsed reading silently hours wrong.
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
@@ -154,7 +155,7 @@ pub fn tool_sha() -> &'static str {
     }
 }
 
-/// `$HOME`, or the system temp directory when there is none — a CI runner or a
+/// `$HOME`, or the system temp directory when there is none: a CI runner or a
 /// daemon with no home still has to put a cache somewhere.
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
@@ -188,27 +189,47 @@ pub fn versioned_name(stem: &str, version: Option<&str>, ext: &str) -> String {
     format!("{}.{ext}", versioned_stem(stem, version))
 }
 
-/// A size as a person types one: `1000`, `1e6`, `2M`, `500k`.
-pub fn parse_size(s: &str) -> Result<u64> {
-    let s = s.trim();
-    let (num, mult) = match s.chars().last() {
-        Some('k') | Some('K') => (&s[..s.len() - 1], 1_000.0),
-        Some('m') | Some('M') => (&s[..s.len() - 1], 1_000_000.0),
-        Some('g') | Some('G') => (&s[..s.len() - 1], 1_000_000_000.0),
-        _ => (s, 1.0),
-    };
-    let v: f64 = num
-        .parse()
-        .map_err(|_| anyhow::anyhow!("cannot parse size {s:?}"))?;
-    Ok((v * mult) as u64)
-}
-
 /// Just the `schema` field, so a file can be refused before it is parsed into
 /// a type whose fields have since been renamed.
 #[derive(serde::Deserialize)]
 struct SchemaProbe {
     #[serde(default)]
     schema: u32,
+}
+
+/// The first `n` characters of a revision, for a file name, a log line or a
+/// table cell.
+///
+/// Each caller keeps its own width: 12 where a sha names a file or a row, 7
+/// where it sits beside a tag the way git abbreviates. A revision shorter
+/// than `n` comes back whole.
+pub fn short(rev: &str, n: usize) -> &str {
+    match rev.char_indices().nth(n) {
+        Some((i, _)) => &rev[..i],
+        None => rev,
+    }
+}
+
+/// Two revisions name the same commit when one is a prefix of the other.
+///
+/// Result files, the paths cache and a binary's `--version` all carry full
+/// shas, but a person passing `--change-set` types a short one. An empty
+/// revision matches nothing, since it is a prefix of everything.
+pub fn revs_match(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// Writes `value` to `path` as pretty JSON, atomically: a temp file beside it
+/// and a rename, so a reader polling the file (`watch`, a resumed run) never
+/// sees half a document. The parent directory is created if need be.
+pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Reads a result file, refusing one this binary cannot read.
@@ -236,6 +257,26 @@ pub fn read_result<T: DeserializeOwned>(path: &Path) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_revision_is_a_prefix_and_a_shorter_one_comes_back_whole() {
+        assert_eq!(short("0123456789abcdef", 12), "0123456789ab");
+        assert_eq!(short("0123456789abcdef", 7), "0123456");
+        assert_eq!(short("abc", 12), "abc");
+        assert_eq!(short("", 7), "");
+        assert_eq!(short("äöü-rev", 3), "äöü", "the width counts characters");
+    }
+
+    #[test]
+    fn a_short_revision_matches_the_full_one_either_way_round() {
+        let full = "0123456789abcdef";
+        assert!(revs_match("0123", full));
+        assert!(revs_match(full, "0123"));
+        assert!(revs_match(full, full));
+        assert!(!revs_match(full, "0124"));
+        assert!(!revs_match("", full), "an empty revision names no commit");
+        assert!(!revs_match(full, ""));
+    }
 
     #[test]
     fn a_percentile_is_the_nearest_rank_and_an_empty_sample_is_zero() {
@@ -335,16 +376,6 @@ mod tests {
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad:?}");
         }
-    }
-
-    #[test]
-    fn a_size_takes_a_suffix_or_an_exponent() {
-        assert_eq!(parse_size("1000").unwrap(), 1000);
-        assert_eq!(parse_size("1e6").unwrap(), 1_000_000);
-        assert_eq!(parse_size("2M").unwrap(), 2_000_000);
-        assert_eq!(parse_size(" 500k ").unwrap(), 500_000);
-        assert_eq!(parse_size("1G").unwrap(), 1_000_000_000);
-        assert!(parse_size("lots").is_err());
     }
 
     #[test]

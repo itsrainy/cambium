@@ -3,8 +3,8 @@
 //! Two pure halves, because the point of issue #1 is a view that can be
 //! checked without a terminal:
 //!
-//! - [`snapshot`] reads `bench-results/` — the progress file, the state file
-//!   and whichever result files are there — and answers with a plain data
+//! - [`snapshot`] reads `bench-results/` (the progress file, the state file
+//!   and whichever result files are there) and answers with a plain data
 //!   structure. It opens nothing else: no IPC, no log scraping, no handle on
 //!   the running process, which is what lets it work on a finished run and on
 //!   results copied off another machine.
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::progress::Progress;
 use crate::state::State;
-use crate::util::{duration, parse_rfc3339, rfc3339_now};
+use crate::util::{duration, parse_rfc3339, rfc3339_now, short};
 use crate::walk::{StepRecord, WalkResult};
 
 /// The snapshot document's version, carried by `--once --format json`.
@@ -44,12 +44,13 @@ pub struct SubjectSnapshot {
     pub subject: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pin: String,
-    /// `history`, `changes`, `subjects`, or empty when only results are there.
+    /// `walk`, `subjects`, or empty when only results are there (a progress
+    /// file the retired workloads wrote says `history` or `changes`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workload: String,
-    /// The step's name: `fetch`, `build`, `history`, `changes`, `done`,
-    /// `failed`, `idle` for a subject with results and no progress file, or
-    /// `stale` for a finished or idle subject another engine build wrote.
+    /// The step's name: `fetch`, `build`, `walk`, `done`, `failed`, `idle`
+    /// for a subject with results and no progress file, or `stale` for a
+    /// finished or idle subject another engine build wrote.
     pub step: String,
     pub index: usize,
     pub of: usize,
@@ -66,22 +67,23 @@ pub struct SubjectSnapshot {
     /// Remaining items times the p50 of the ones that are done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_secs: Option<u64>,
-    /// The p50 the ETA is taken from: a commit's whole-process wall time for
-    /// the history, a change set's measured total for the comparison.
+    /// The p50 the ETA is taken from: cambium's per-step wall in the walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p50_ms: Option<u64>,
-    /// Globally invalidated commits or change sets so far, over how many are
-    /// recorded.
+    /// Globally invalidated steps so far, over how many are recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub globals: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded: Option<usize>,
-    /// The worst recall any change set has reached; `None` until one has.
+    /// The worst recall any step has reached; `None` until the oracle has
+    /// run on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_recall: Option<f64>,
-    /// Change sets that passed the three-way comparison, over how many ran.
+    /// Steps that passed. A step the oracle did not run on passes too, so
+    /// this can exceed [`compared`](Self::compared).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed: Option<usize>,
+    /// Steps the oracle ran on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compared: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,16 +98,19 @@ pub struct SubjectSnapshot {
     pub change_sets: Vec<ChangeSetRow>,
 }
 
-/// One change set of one subject, for the expanded view.
+/// One walk step of one subject, for the expanded view.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChangeSetRow {
+    /// The step's tags, comma-separated.
     pub kind: String,
     pub change_set: String,
     pub changed_files: usize,
     pub dirty_packages: usize,
     /// Wall milliseconds per tool, cambium included.
     pub tool_ms: Vec<(String, u64)>,
-    /// The disagreement classes this change set produced, largest first.
+    /// Each oracle-scored tool's recall, times 1000 and truncated, lowest
+    /// first: the field kept its name from when it listed disagreement
+    /// classes.
     pub classes: Vec<(String, usize)>,
     pub global: bool,
     pub pass: bool,
@@ -287,7 +292,7 @@ fn step_row(st: &StepRecord) -> ChangeSetRow {
         .join(",");
     ChangeSetRow {
         kind: tags,
-        change_set: format!("{}..{}", short(&st.parent), short(&st.head)),
+        change_set: format!("{}..{}", short(&st.parent, 7), short(&st.head, 7)),
         changed_files: st.changed_files,
         dirty_packages: st.dirty_packages,
         tool_ms,
@@ -353,10 +358,6 @@ fn since(stamp: &str) -> Option<u64> {
 
 fn elapsed_between(from: &str, to: &str) -> Option<u64> {
     Some(parse_rfc3339(to)?.saturating_sub(parse_rfc3339(from)?))
-}
-
-fn short(rev: &str) -> &str {
-    &rev[..rev.len().min(7)]
 }
 
 // --------------------------------------------------------------- the drawing
@@ -515,7 +516,7 @@ fn progress_cell(r: &SubjectSnapshot) -> String {
 fn current_cell(r: &SubjectSnapshot) -> String {
     let current = match r.current.is_empty() {
         true => dash(),
-        false => short(&r.current).to_string(),
+        false => short(&r.current, 7).to_string(),
     };
     match (&r.tool, r.tool_elapsed_secs) {
         (Some(t), Some(secs)) => format!("{current} {t} {}", duration(secs)),
@@ -667,9 +668,7 @@ mod tests {
                 bazel_version_used: "bazel 7.4.1".into(),
                 cambi_version: "cambi".into(),
                 tool_sha: "abc".into(),
-                engine_id: String::new(),
-                config_hash: String::new(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 60_000,

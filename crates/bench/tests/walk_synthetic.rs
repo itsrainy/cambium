@@ -204,22 +204,7 @@ fn append_loose_commit(f: &mut Fixture, paths: &[&str]) -> String {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "notes\n").unwrap();
     }
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
-    git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", "loose files"]);
-    let sha = git(&["rev-parse", "HEAD"]);
+    let sha = cambium_testkit::commit_all(root, "loose files");
     let graph = f.driver.graphs.last().unwrap().clone();
     f.driver.graphs.push(graph);
     f.driver.commits.push(sha.clone());
@@ -254,12 +239,7 @@ fn opts(f: &Fixture) -> WalkOptions {
         peer_sample: walk::Sample::default(),
         environment: cambium_bench::env::Environment {
             machine: cambium_bench::harness::Machine::detect(),
-            bazel_version_used: String::new(),
-            cambi_version: String::new(),
-            tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,
@@ -296,14 +276,14 @@ fn the_live_checks_get_the_steps_dirty_packages() {
     impl walk::LiveChecks for Recorder {
         fn oracle(
             &self,
-            ctx: &walk::StepContext<'_>,
+            ctx: &walk::AnsweredStep<'_>,
         ) -> anyhow::Result<Option<cambium_bench::oracles::rdeps::RdepsResult>> {
             self.seen.lock().unwrap().push(ctx.dirty_packages.clone());
             Ok(None)
         }
         fn peers(
             &self,
-            _: &walk::StepContext<'_>,
+            _: &walk::AnsweredStep<'_>,
             _: Option<&cambium_bench::oracles::rdeps::RdepsResult>,
         ) -> Vec<cambium_bench::walk::model::ToolStep> {
             Vec::new()
@@ -479,7 +459,10 @@ fn every_reference_build_and_only_those_starts_on_a_fresh_server() {
         .filter(|st| st.rebuild_step)
         .map(|st| st.head.as_str())
         .collect();
-    assert!(!mid_walk.is_empty(), "the schedule asked for mid-walk rebuilds");
+    assert!(
+        !mid_walk.is_empty(),
+        "the schedule asked for mid-walk rebuilds"
+    );
     assert_eq!(restarts.len(), mid_walk.len() + 1, "{events:#?}");
     // Each restart is followed by the reference build it was for, which is
     // never published.
@@ -666,7 +649,10 @@ fn only_answers_the_named_steps_the_way_the_full_walk_does() {
     )
     .unwrap();
     assert!(full.done);
-    assert!(s.len() >= 4, "the fixture needs steps between the named two");
+    assert!(
+        s.len() >= 4,
+        "the fixture needs steps between the named two"
+    );
 
     let named = vec![s[1].clone(), s[3].clone()];
     let mut o = opts(&f);
@@ -703,7 +689,10 @@ fn only_answers_the_named_steps_the_way_the_full_walk_does() {
     assert!(mine.exists(), "no record at {}", mine.display());
     let theirs = walk::WalkResult::path(&f.results.join("walk"), &o.pin, Some("synth"));
     assert!(theirs.exists(), "the full walk's record was overwritten");
-    assert_eq!(walk::WalkResult::read(&theirs).unwrap().steps.len(), s.len());
+    assert_eq!(
+        walk::WalkResult::read(&theirs).unwrap().steps.len(),
+        s.len()
+    );
 }
 
 /// `--only` with `--resume` continues the record it left, rather than
@@ -811,6 +800,14 @@ fn schema_seven_refuses_a_schema_six_walk_file() {
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     doc["schema"] = serde_json::json!(6);
     std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    // The walk record is read through the crate's one schema gate, which
+    // names both versions.
     let err = walk::WalkResult::read(&path).unwrap_err().to_string();
-    assert!(err.contains("schema") || err.contains("version"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "is schema 6 and this cambium reads {}",
+            cambium_bench::RESULT_SCHEMA
+        )),
+        "{err}"
+    );
 }

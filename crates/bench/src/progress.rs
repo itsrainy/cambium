@@ -27,7 +27,9 @@ pub const PROGRESS_FILE: &str = "progress.json";
 pub const PROGRESS_SCHEMA: u32 = 1;
 
 /// What a run is doing. `Fetch` and `Build` are the per-subject preparation
-/// steps; `History` and `Changes` are the workloads.
+/// steps and `Walk` is the workload; `History` and `Changes` are the
+/// workloads the walk replaced, kept so a progress file they wrote still
+/// reads.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
@@ -75,7 +77,8 @@ pub struct ToolProgress {
 pub struct Progress {
     #[serde(default)]
     pub schema: u32,
-    /// `history`, `changes`, or the preparation verb (`subjects`).
+    /// `walk`, or the preparation verb (`subjects`). A file the retired
+    /// workloads wrote says `history` or `changes`.
     pub workload: String,
     pub subject: String,
     pub pin: String,
@@ -126,15 +129,9 @@ impl Progress {
         }
     }
 
-    /// Atomically: a temp file and a rename, so a reader polling every second
-    /// never sees a half-written document.
+    /// Atomically, since a reader polls it every second.
     pub fn write(&self, subject_dir: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(subject_dir)?;
-        let path = Self::path(subject_dir);
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_json_atomic(&Self::path(subject_dir), self)
     }
 }
 
@@ -260,11 +257,6 @@ impl Reporter {
             p.step_started_at = crate::util::rfc3339_now();
             p.tool = None;
         });
-    }
-
-    /// The document as it stands, for a test or a caller that wants to log it.
-    pub fn snapshot(&self) -> Progress {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 

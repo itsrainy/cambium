@@ -136,7 +136,7 @@ pub struct RebuildRows {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RowCounts {
     pub missing: usize,
-    /// `created_in_window` plus `load_error`.
+    /// `created_in_window`, `load_error` and `boundary_probe`.
     pub missing_expected: usize,
     /// What the oracle's verdict counts.
     pub missing_unexplained: usize,
@@ -259,18 +259,12 @@ impl RebuildRows {
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        crate::util::write_json_atomic(path, self)
     }
 }
 
 /// The tallies over two classified lists.
-pub fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
+pub(crate) fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
     let of = |rows: &[Row], class: RowClass| rows.iter().filter(|r| r.class == class).count();
     RowCounts {
         missing: missing.len(),
@@ -290,7 +284,7 @@ pub fn counts(missing: &[Row], extra: &[Row]) -> RowCounts {
 /// (`@`); a glob names its package; a `BZL_LOAD` of a main-repository label
 /// names the `.bzl` file. The ignore singleton, a tombstone and anything
 /// under another root name nothing.
-pub fn locate(name: &SkyName) -> (Option<String>, Option<String>) {
+pub(crate) fn locate(name: &SkyName) -> (Option<String>, Option<String>) {
     match name.kind {
         Kind::File | Kind::FileState | Kind::DirectoryListing | Kind::DirectoryListingState => {
             if name.root.is_empty() {
@@ -333,13 +327,13 @@ fn bzl_path(key: &str) -> Option<String> {
 
 /// Whether `p` is a file in the tree or a directory some file sits under.
 /// The empty path is the root package and always exists.
-pub fn exists(tree: &BTreeSet<String>, p: &str) -> bool {
+pub(crate) fn exists(tree: &BTreeSet<String>, p: &str) -> bool {
     tree.contains(p) || is_dir(tree, p)
 }
 
 /// Whether `p` is a directory in the tree: some file sits under it. The
 /// empty path is the root and always is.
-pub fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
+pub(crate) fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
     if p.is_empty() {
         return true;
     }
@@ -352,7 +346,7 @@ pub fn is_dir(tree: &BTreeSet<String>, p: &str) -> bool {
 /// The package whose directory holds `p` in the tree: the nearest of `p`
 /// (when it is a directory) and its ancestors with a `BUILD` or
 /// `BUILD.bazel`, the root package included. `None` when none has one.
-pub fn enclosing_package(tree: &BTreeSet<String>, p: &str) -> Option<String> {
+pub(crate) fn enclosing_package(tree: &BTreeSet<String>, p: &str) -> Option<String> {
     let mut dir = p;
     loop {
         if ["BUILD", "BUILD.bazel"]
@@ -379,14 +373,7 @@ fn join(dir: &str, name: &str) -> String {
 /// The paths the applied layer's nodes name, for the created-in-window test.
 pub fn applied_paths(layer: SkyRef<'_>) -> BTreeSet<String> {
     (0..layer.len() as u32)
-        .filter_map(|id| {
-            let name = SkyName {
-                kind: layer.kind_of(id),
-                root: layer.root_name(id).into_owned(),
-                key: layer.text(id).to_string(),
-            };
-            locate(&name).0
-        })
+        .filter_map(|id| locate(&SkyName::of(layer, id)).0)
         .collect()
 }
 
@@ -556,7 +543,13 @@ fn missing_node_class(
 fn is_boundary_probe(p: &str) -> bool {
     matches!(
         p.rsplit_once('/').map_or(p, |(_, f)| f),
-        "WORKSPACE" | "WORKSPACE.bazel" | "WORKSPACE.bzlmod" | "REPO.bazel" | "MODULE.bazel" | "BUILD" | "BUILD.bazel"
+        "WORKSPACE"
+            | "WORKSPACE.bazel"
+            | "WORKSPACE.bzlmod"
+            | "REPO.bazel"
+            | "MODULE.bazel"
+            | "BUILD"
+            | "BUILD.bazel"
     )
 }
 
@@ -685,6 +678,18 @@ mod tests {
         "lib/old.bzl",
     ];
 
+    /// [`classify`] over the window `FROM..TO`, with the applied paths and
+    /// the packages that failed to load in the rebuild.
+    fn in_window(d: &SkyDiff, applied: &[&str], failed: &[&str]) -> (Vec<Row>, Vec<Row>) {
+        classify(
+            d,
+            Some(&tree(FROM)),
+            Some(&tree(TO)),
+            &set(applied),
+            &errs(failed),
+        )
+    }
+
     /// (i) A node under a directory the window created, with nothing of the
     /// applied layer under it, is a `//...`-only row.
     #[test]
@@ -693,13 +698,7 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir/sub"));
         assert_eq!(m[0].package.as_deref(), Some("newdir/sub"));
@@ -713,13 +712,7 @@ mod tests {
             vec![SkyItem::Node(name(Kind::PackageLookup, "newdir/sub"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["newdir/BUILD"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["newdir/BUILD"], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -741,13 +734,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained; 5], "{m:?}");
     }
 
@@ -768,13 +755,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(
             classes(&m),
             vec![
@@ -785,19 +766,16 @@ mod tests {
             ]
         );
         let c = counts(&m, &[]);
-        assert_eq!((c.missing, c.missing_expected, c.missing_unexplained), (4, 2, 2));
+        assert_eq!(
+            (c.missing, c.missing_expected, c.missing_unexplained),
+            (4, 2, 2)
+        );
     }
 
     #[test]
     fn a_path_present_at_the_base_is_unexplained() {
         let d = diff(vec![SkyItem::Node(name(Kind::File, "lib/a.cc"))], vec![]);
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -814,13 +792,7 @@ mod tests {
             ],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, _) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError, RowClass::LoadError]);
     }
 
@@ -832,26 +804,14 @@ mod tests {
             vec![SkyItem::Node(name(Kind::FileState, "newdir/sub/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         // But a probe of a directory that exists nowhere resolves to nothing.
         let d = diff(
             vec![SkyItem::Node(name(Kind::FileState, "nowhere/BUILD"))],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &[], &[]);
         assert_eq!(classes(&m), vec![RowClass::Unexplained]);
     }
 
@@ -865,13 +825,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&["lib"]),
-            &errs(&[]),
-        );
+        let (m, _) = in_window(&d, &["lib"], &[]);
         assert_eq!(classes(&m), vec![RowClass::CreatedInWindow]);
         assert_eq!(m[0].path.as_deref(), Some("newdir"));
         // A load error at either end is a load error.
@@ -882,13 +836,7 @@ mod tests {
             }],
             vec![],
         );
-        let (m, _) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, _) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError]);
     }
 
@@ -907,13 +855,7 @@ mod tests {
                 },
             ],
         );
-        let (_, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (_, e) = in_window(&d, &[], &[]);
         assert_eq!(
             classes(&e),
             vec![
@@ -1010,13 +952,7 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::FileState, "lib/a.cc"))],
         );
-        let (m, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&["lib"]),
-        );
+        let (m, e) = in_window(&d, &[], &["lib"]);
         assert_eq!(classes(&m), vec![RowClass::LoadError; 6], "{m:?}");
         assert!(
             m.iter().all(|r| r.package.as_deref() == Some("lib")),
@@ -1222,13 +1158,7 @@ mod tests {
             ],
             vec![SkyItem::Node(name(Kind::File, "old/x.txt"))],
         );
-        let (m, e) = classify(
-            &d,
-            Some(&tree(FROM)),
-            Some(&tree(TO)),
-            &set(&[]),
-            &errs(&[]),
-        );
+        let (m, e) = in_window(&d, &[], &[]);
         let doc = RebuildRows::new("subj", "abc123", "f0", "abc123", "9.2.0", m, e);
         assert_eq!(
             classes(&doc.missing),

@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 pub const STATE_FILE: &str = "state.json";
@@ -23,13 +24,13 @@ pub struct State {
     /// Cold builds that completed, by commit, with the index file each wrote.
     #[serde(default)]
     pub built: BTreeMap<String, PathBuf>,
+    /// The walk's window and how far it got, under the name the history
+    /// workload that preceded it gave the field.
     #[serde(default)]
     pub history: Option<HistoryState>,
-    /// ChangeSet keys (`<base>..<head>`) the comparison has finished. This is
-    /// what makes a killed `bench changes` resumable, and the only record of
-    /// what a run has already done -- there is no separate "reported" flag,
-    /// because `bench report` is a pure function of the result files and
-    /// re-running it is free.
+    /// Change-set keys (`<base>..<head>`) the retired change-set comparison
+    /// finished. Nothing adds to it since the walk replaced that workload; it
+    /// stays so that `state.json` keeps its shape.
     #[serde(default)]
     pub compared: BTreeSet<String>,
     /// Which cambium wrote the rest of this file: the index format version and
@@ -54,7 +55,7 @@ pub struct State {
 pub struct HistoryState {
     pub from: String,
     pub to: String,
-    /// Bazel version string the history ran under.
+    /// Bazel version string the walk ran under.
     #[serde(default)]
     pub bazel_version: String,
     /// The newest commit whose index was materialised and published.
@@ -74,7 +75,7 @@ impl State {
         match std::fs::read_to_string(&path) {
             Ok(s) => {
                 let st: State = serde_json::from_str(&s)
-                    .map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?;
+                    .with_context(|| format!("parsing {}", path.display()))?;
                 if st.id == id && st.pin == pin {
                     return Ok(st);
                 }
@@ -87,14 +88,14 @@ impl State {
                 Ok(Self::fresh(id, pin))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::fresh(id, pin)),
-            Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 
     /// The state file as it stands, whatever subject or pin it is for, or
     /// `None` when there is none.
     ///
-    /// For a *reader* — `cambium-bench watch` — which wants the file's own id,
+    /// For a *reader* (`cambium-bench watch`), which wants the file's own id,
     /// pin and step stamps and has no pin to check them against. [`load`] is
     /// for a run, and starting over on a pin mismatch (loudly) is the whole
     /// point of it there.
@@ -122,16 +123,16 @@ impl State {
     }
 
     /// The identity of the cambium that will use this state: index format plus
-    /// configuration hash, the two things that decide whether an index, a
-    /// history or a comparison written earlier is the same experiment.
+    /// configuration hash, the two things that decide whether an index or a
+    /// walk written earlier is the same experiment.
     pub fn engine_id(config_hash: &[u8; 32]) -> String {
         let hex: String = config_hash.iter().map(|b| format!("{b:02x}")).collect();
         format!("f{}/{}", cambium_index::format::FORMAT_VERSION, &hex[..16])
     }
 
     /// Loads the state and, when a different cambium wrote it, starts over:
-    /// built indexes, the history and the compared set all belong to that
-    /// other build. Resuming any of them would mix two experiments.
+    /// built indexes and the walk's progress belong to that other build.
+    /// Resuming either would mix two experiments.
     pub fn load_for(dir: &Path, id: &str, pin: &str, engine_id: &str) -> anyhow::Result<Self> {
         let mut st = Self::load(dir, id, pin)?;
         if st.engine != engine_id {
@@ -154,12 +155,7 @@ impl State {
     }
 
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let path = Self::path(dir);
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_json_atomic(&Self::path(dir), self)
     }
 
     /// Stamps `<step>.<event>` with the current time.

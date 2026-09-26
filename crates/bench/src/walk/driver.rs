@@ -1,9 +1,9 @@
 //! Running one walk: the cold build, the forward steps, the oracle and peers
 //! where the schedule calls for them, and the rebuild oracle at the pin.
 //!
-//! The cambium side is driven through [`crate::history::Driver`], the same
-//! trait the offline synthetic test uses, so the walk's loop — resume, the
-//! carried index, the per-step record — is exercised with no Bazel and no
+//! The cambium side is driven through [`crate::walk::Driver`], the same
+//! trait the offline synthetic test uses, so the walk's loop (resume, the
+//! carried index, the per-step record) is exercised with no Bazel and no
 //! product binary. The live checks (the `rdeps` oracle and the peers) need a
 //! real Bazel and a checkout, so they are a separate [`LiveChecks`] the real
 //! subject supplies and the synthetic test leaves out.
@@ -18,7 +18,7 @@ use cambium_index::IndexFile;
 
 use super::cambi::{cold_build, Driver};
 use crate::oracles::rdeps::RdepsResult;
-use crate::oracles::rebuild::{compare_by_label_with_sky, SkyDiff};
+use crate::oracles::rebuild::{compare_by_label_with_sky, GraphDiff, SkyDiff};
 use crate::state::{HistoryState, State};
 use crate::util::now_unix;
 
@@ -32,7 +32,7 @@ use super::steps::Step;
 use super::tier::Schedule;
 
 /// What the live checks read for one step, once cambium has answered it.
-pub struct StepContext<'a> {
+pub struct AnsweredStep<'a> {
     pub step: &'a Step,
     /// The head index cambium wrote for this step; `None` on a global.
     pub head_index: Option<&'a Path>,
@@ -57,11 +57,11 @@ pub struct StepContext<'a> {
 pub trait LiveChecks {
     /// The `rdeps` oracle at this step, or `None` when it was not wanted or
     /// could not run.
-    fn oracle(&self, ctx: &StepContext<'_>) -> Result<Option<RdepsResult>>;
+    fn oracle(&self, ctx: &AnsweredStep<'_>) -> Result<Option<RdepsResult>>;
 
     /// Each peer over this step, scored against `oracle`. cambium is not a
     /// peer here: the driver scores it itself from the same oracle.
-    fn peers(&self, ctx: &StepContext<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep>;
+    fn peers(&self, ctx: &AnsweredStep<'_>, oracle: Option<&RdepsResult>) -> Vec<ToolStep>;
 
     /// The output base each tool wrote to, for the environment record.
     fn output_bases(&self) -> std::collections::BTreeMap<String, String> {
@@ -73,10 +73,10 @@ pub trait LiveChecks {
 pub struct NoLiveChecks;
 
 impl LiveChecks for NoLiveChecks {
-    fn oracle(&self, _: &StepContext<'_>) -> Result<Option<RdepsResult>> {
+    fn oracle(&self, _: &AnsweredStep<'_>) -> Result<Option<RdepsResult>> {
         Ok(None)
     }
-    fn peers(&self, _: &StepContext<'_>, _: Option<&RdepsResult>) -> Vec<ToolStep> {
+    fn peers(&self, _: &AnsweredStep<'_>, _: Option<&RdepsResult>) -> Vec<ToolStep> {
         Vec::new()
     }
 }
@@ -105,13 +105,17 @@ pub struct WalkOptions {
     /// This is a `--only` walk: a handful of named steps rather than the
     /// first-parent range, each one cold-built at its own parent. Its record
     /// goes beside the full walk's under its own name, so a gate run never
-    /// overwrites a published one.
+    /// overwrites the full walk's record.
     pub only: bool,
 }
 
 impl WalkOptions {
     fn result_path(&self) -> PathBuf {
-        WalkResult::path(&self.results_dir, &self.result_pin(), Some(&self.bazel_version))
+        WalkResult::path(
+            &self.results_dir,
+            &self.result_pin(),
+            Some(&self.bazel_version),
+        )
     }
 
     /// The name the record is filed under: the pin, or the pin marked as a
@@ -143,38 +147,18 @@ pub fn walk(
         commits.len() - 1,
         steps.len()
     );
-    let from = commits[0].clone();
-    let to = commits[commits.len() - 1].clone();
-    let engine_id = State::engine_id(&engine.config().hash());
-    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
-    std::fs::create_dir_all(&opts.state_dir)?;
-    let index_path = opts.state_dir.join(crate::util::versioned_name(
-        &format!("index-{}", opts.pin),
-        Some(&opts.bazel_version),
-        "bin",
-    ));
-
-    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
-        Resume::Done(prev) => return Ok(prev),
-        Resume::From(prev, at) => (prev, at),
-        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    let from = &commits[0];
+    let to = &commits[commits.len() - 1];
+    let stem = format!("index-{}", opts.pin);
+    let (mut w, start_at) = match Runner::open(engine, driver, live, opts, from, to, &stem)? {
+        Opened::Finished(prev) => return Ok(prev),
+        Opened::Ready(w, start_at) => (w, start_at),
     };
-
-    let mut w = Runner {
-        engine,
-        driver,
-        live,
-        opts,
-        path: opts.result_path(),
-        index_path,
-        result,
-        state,
-    };
-    w.begin(steps.len(), &from, &to)?;
+    w.begin(steps.len(), from, to)?;
     for (i, step) in steps.iter().enumerate().skip(start_at) {
         w.step(i + 1, steps.len(), step)?;
     }
-    w.rebuild_oracle(&to)?;
+    w.rebuild_oracle(to)?;
     w.finish()
 }
 
@@ -199,51 +183,15 @@ pub fn walk_only(
     opts: &WalkOptions,
 ) -> Result<WalkResult> {
     anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
-    let from = steps[0].parent.clone();
-    let to = steps[steps.len() - 1].head.clone();
-    let engine_id = State::engine_id(&engine.config().hash());
-    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
-    std::fs::create_dir_all(&opts.state_dir)?;
-    let index_path = opts.state_dir.join(crate::util::versioned_name(
-        &format!("index-{}-only", opts.pin),
-        Some(&opts.bazel_version),
-        "bin",
-    ));
-
-    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
-        Resume::Done(prev) => return Ok(prev),
-        // A `--only` walk cold-builds at every step's own parent, so the
-        // index the last completed step left in the store is not the base the
-        // next one wants; `resume` looked for it anyway, and an answer either
-        // way is one this walk can continue from.
-        Resume::From(prev, at) => (prev, at),
-        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    let from = &steps[0].parent;
+    let to = &steps[steps.len() - 1].head;
+    let stem = format!("index-{}-only", opts.pin);
+    let (mut w, start_at) = match Runner::open(engine, driver, live, opts, from, to, &stem)? {
+        Opened::Finished(prev) => return Ok(prev),
+        Opened::Ready(w, start_at) => (w, start_at),
     };
-    if start_at >= steps.len() {
-        let mut w = Runner {
-            engine,
-            driver,
-            live,
-            opts,
-            path: opts.result_path(),
-            index_path,
-            result,
-            state,
-        };
-        w.begin(steps.len(), &from, &to)?;
-        return w.finish();
-    }
-    let mut w = Runner {
-        engine,
-        driver,
-        live,
-        opts,
-        path: opts.result_path(),
-        index_path,
-        result,
-        state,
-    };
-    w.begin(steps.len(), &from, &to)?;
+    w.begin(steps.len(), from, to)?;
+    // A resume past the last step takes none and only finishes the record.
     for (i, step) in steps.iter().enumerate().skip(start_at) {
         // `start` already cold-built at the first step's parent; a resumed
         // walk starts at a step nothing has built for.
@@ -259,8 +207,25 @@ pub fn walk_only(
 
 enum Resume {
     Done(WalkResult),
+    /// A record to continue, and the index of the first step it is missing.
+    ///
+    /// A `--only` walk cold-builds at every step's own parent, so the index
+    /// the last completed step left in the store is not the base the next one
+    /// wants; `resume` does not look for it, and an answer either way is one
+    /// such a walk can continue from.
     From(WalkResult, usize),
     Fresh,
+}
+
+/// A walk ready to take its steps from the one named, or the record of one
+/// that had already finished.
+///
+/// There is one of these per walk and it is moved once, so the size gap
+/// between the variants costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
+enum Opened<'a> {
+    Finished(WalkResult),
+    Ready(Runner<'a>, usize),
 }
 
 fn resume(
@@ -330,7 +295,46 @@ struct Runner<'a> {
     state: State,
 }
 
-impl Runner<'_> {
+impl<'a> Runner<'a> {
+    /// The setup a full walk and a `--only` walk share: the state file, the
+    /// index path (`<index_stem>[-<ver>].bin` beside it), and either the
+    /// record `--resume` continues or a cold build at `from` that starts a
+    /// fresh one.
+    fn open(
+        engine: &'a Engine,
+        driver: &'a dyn Driver,
+        live: &'a dyn LiveChecks,
+        opts: &'a WalkOptions,
+        from: &str,
+        to: &str,
+        index_stem: &str,
+    ) -> Result<Opened<'a>> {
+        let engine_id = State::engine_id(&engine.config().hash());
+        let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
+        std::fs::create_dir_all(&opts.state_dir)?;
+        let index_path = opts.state_dir.join(crate::util::versioned_name(
+            index_stem,
+            Some(&opts.bazel_version),
+            "bin",
+        ));
+        let (result, start_at) = match resume(engine, from, to, opts, &engine_id)? {
+            Resume::Done(prev) => return Ok(Opened::Finished(prev)),
+            Resume::From(prev, at) => (prev, at),
+            Resume::Fresh => start(driver, from, to, &index_path, opts, &engine_id)?,
+        };
+        let runner = Runner {
+            engine,
+            driver,
+            live,
+            opts,
+            path: opts.result_path(),
+            index_path,
+            result,
+            state,
+        };
+        Ok(Opened::Ready(runner, start_at))
+    }
+
     fn progress(&self) -> Option<&crate::progress::Reporter> {
         self.opts.progress.as_deref()
     }
@@ -361,6 +365,79 @@ impl Runner<'_> {
             p.item(i, &step.head);
             p.tool(Some(crate::tools::cambi::NAME));
         }
+        let answer = self.answer(step)?;
+        let (run, r) = (&answer.run, &answer.run.report);
+        let labels_dir =
+            crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
+
+        // The set beside the JSON, under the shared layout.
+        if !r.global {
+            std::fs::create_dir_all(&labels_dir)?;
+            crate::labels::write_set(&labels_dir, crate::tools::cambi::NAME, &run.labels)?;
+        }
+
+        let index = if run.wrote_index || !r.global {
+            let f = IndexFile::open(&self.index_path)?;
+            let v = f.view();
+            IndexCounts {
+                nodes: v.counts().nodes,
+                edges: v.counts().edges,
+                lineage: cambium_engine::inspect::hex(&v.lineage),
+            }
+        } else {
+            IndexCounts {
+                nodes: 0,
+                edges: 0,
+                lineage: String::new(),
+            }
+        };
+
+        // The live checks, scheduled per step. cambium's oracle scoring is
+        // done here from the same oracle the peers were scored with.
+        let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
+        let ctx = AnsweredStep {
+            step,
+            head_index: run.wrote_index.then_some(self.index_path.as_path()),
+            cambium_set: &run.labels,
+            dirty_packages: &dirty_packages,
+            want_oracle: self.opts.oracle_sample.contains(i - 1),
+            want_peers: self.opts.peer_sample.contains(i - 1),
+        };
+        let oracle = self.live.oracle(&ctx)?;
+        if let Some(o) = &oracle {
+            std::fs::create_dir_all(&labels_dir)?;
+            crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
+        }
+        let mut tools = vec![score_cambium(&run.labels, answer.wall_ms, oracle.as_ref())];
+        tools.extend(self.live.peers(&ctx, oracle.as_ref()));
+
+        let rebuild_step = self.opts.schedule.rebuilds_at(i);
+        let rec = record(step, &answer, index, oracle, tools, rebuild_step);
+        if let Some(p) = self.progress() {
+            p.diagnostics(&r.diagnostics);
+            p.tool(None);
+        }
+        // Pushed before the mid-walk oracle so that, when this step itself
+        // cold-rebuilt, the rows are classified against its head.
+        self.result.steps.push(rec);
+        if rebuild_step {
+            self.mid_walk_rebuild(step)?;
+        }
+        self.result.summarise();
+        self.result.write(&self.path)?;
+        if let Some(rs) = self.state.history.as_mut() {
+            rs.last_completed = Some(step.head.clone());
+        }
+        self.state.stamp("walk", "updated");
+        self.state.save(&self.opts.state_dir)?;
+        tracing::info!(step = i, of, head = %step.head, ms = answer.wall_ms, "stepped");
+        Ok(())
+    }
+
+    /// cambium's answer at the step's head, carried from the index the step
+    /// before left, or cold-built when the range invalidated everything and a
+    /// fresh lineage had to start.
+    fn answer(&self, step: &Step) -> Result<Answer> {
         self.driver.checkout(&step.head)?;
         let run = match self.driver.update(
             &step.parent,
@@ -377,120 +454,17 @@ impl Runner<'_> {
             }
         };
         let mut wall_ms = run.wall.as_millis() as u64;
-        let r = &run.report;
-        // The step carried the previous step's index unless the range
-        // invalidated everything and a fresh lineage had to be cold-built.
         let mut carried_index = true;
-        if !run.wrote_index && !r.global {
+        if !run.wrote_index && !run.report.global {
             let cold = cold_build(self.driver, &step.head, &self.index_path, self.opts.publish)?;
             wall_ms += cold.wall_ms;
             carried_index = false;
         }
-
-        // The set beside the JSON, under the shared layout.
-        if !r.global {
-            let labels_dir =
-                crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
-            std::fs::create_dir_all(&labels_dir)?;
-            crate::labels::write_set(&labels_dir, crate::tools::cambi::NAME, &run.labels)?;
-        }
-
-        let (nodes, edges, lineage) = if run.wrote_index || !r.global {
-            let f = IndexFile::open(&self.index_path)?;
-            let v = f.view();
-            (
-                v.counts().nodes,
-                v.counts().edges,
-                cambium_engine::inspect::hex(&v.lineage),
-            )
-        } else {
-            (0, 0, String::new())
-        };
-
-        // The live checks, scheduled per step. cambium's oracle scoring is
-        // done here from the same oracle the peers were scored with.
-        let want_oracle = self.opts.oracle_sample.contains(i - 1);
-        let want_peers = self.opts.peer_sample.contains(i - 1);
-        let head_index = (run.wrote_index).then_some(self.index_path.as_path());
-        let dirty_packages: BTreeSet<String> = r.dirty_packages.iter().cloned().collect();
-        let ctx = StepContext {
-            step,
-            head_index,
-            cambium_set: &run.labels,
-            dirty_packages: &dirty_packages,
-            want_oracle,
-            want_peers,
-        };
-        let oracle = self.live.oracle(&ctx)?;
-        if let Some(o) = &oracle {
-            let labels_dir =
-                crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, &step.head);
-            std::fs::create_dir_all(&labels_dir)?;
-            crate::labels::write_set(&labels_dir, crate::labels::ORACLE, &o.oracle_set)?;
-        }
-
-        let mut tools = vec![score_cambium(&run.labels, wall_ms, oracle.as_ref())];
-        tools.extend(self.live.peers(&ctx, oracle.as_ref()));
-
-        let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
-        let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
-        let rebuild_step = self.opts.schedule.rebuilds_at(i);
-        let pass = cambium_ok && peers_ran;
-
-        let rec = StepRecord {
-            parent: step.parent.clone(),
-            head: step.head.clone(),
-            tags: step.tags.clone(),
-            changed_files: r.stats.changed_files,
-            dirty_packages: r.stats.dirty_packages,
-            queried_targets: r.stats.queried_targets,
-            timings: StepTimings {
-                dirty: r.timings_ms.dirty,
-                query: r.timings_ms.query,
-                splice: r.timings_ms.splice,
-                direct: r.timings_ms.direct,
-                walk: r.timings_ms.walk,
-                engine_total: r.timings_ms.total,
-            },
+        Ok(Answer {
+            run,
             wall_ms,
             carried_index,
-            rebuild_step,
-            global: r.global,
-            global_reason: r.global_reason.clone(),
-            index: IndexCounts {
-                nodes,
-                edges,
-                lineage,
-            },
-            cambium: CambiumAnswer {
-                direct: r.direct.len(),
-                affected: r.affected.len(),
-                tests: r.tests.len(),
-                cold_rebuild: r.stats.cold_rebuild,
-            },
-            oracle,
-            tools,
-            pass,
-        };
-        if let Some(p) = self.progress() {
-            p.diagnostics(&run.report.diagnostics);
-            p.tool(None);
-        }
-        // Pushed before the mid-walk oracle so that, when this step itself
-        // cold-rebuilt, the rows are classified against its head.
-        self.result.steps.push(rec);
-        if rebuild_step {
-            self.mid_walk_rebuild(step)?;
-        }
-        self.result.summarise();
-        self.result.write(&self.path)?;
-        if let Some(rs) = self.state.history.as_mut() {
-            rs.last_completed = Some(step.head.clone());
-        }
-        self.state.stamp("walk", "updated");
-        self.state.save(&self.opts.state_dir)?;
-        tracing::info!(step = i, of, head = %step.head, ms = wall_ms, "stepped");
-        Ok(())
+        })
     }
 
     /// The tree at `rev`, or `None` with a warning: a driver that cannot
@@ -604,18 +578,27 @@ impl Runner<'_> {
         Ok(())
     }
 
+    /// The comparison both rebuild oracles make: a reference build at `rev`
+    /// into `fresh` ([`Self::reference_build`]), diffed node by node against
+    /// the walk's carried index, with the loading-layer rows classified.
+    /// `fresh` is left for the caller, which archives or deletes it.
+    fn rebuild_at(&self, rev: &str, fresh: &Path) -> Result<(GraphDiff, SkyDiff, RebuildRows)> {
+        self.reference_build(rev, fresh)?;
+        let applied = IndexFile::open(&self.index_path)?;
+        let rebuilt = IndexFile::open(fresh)?;
+        let (diff, sky) =
+            compare_by_label_with_sky(applied.view(), rebuilt.view(), self.opts.diff_cap);
+        let rows = self.layer_rows(&sky, rev, applied.view(), rebuilt.view());
+        Ok((diff, sky, rows))
+    }
+
     /// A mid-walk rebuild oracle: cold-build at the step's head on a fresh
     /// server and compare, without publishing (that would overwrite the
     /// walk's own carried index). The rows go beside the step's label sets.
     fn mid_walk_rebuild(&mut self, step: &Step) -> Result<()> {
         let head = step.head.as_str();
         let fresh = self.index_path.with_extension("rebuild.bin");
-        self.reference_build(head, &fresh)?;
-        let applied = IndexFile::open(&self.index_path)?;
-        let rebuilt = IndexFile::open(&fresh)?;
-        let (diff, sky) =
-            compare_by_label_with_sky(applied.view(), rebuilt.view(), self.opts.diff_cap);
-        let rows = self.layer_rows(&sky, head, applied.view(), rebuilt.view());
+        let (diff, sky, rows) = self.rebuild_at(head, &fresh)?;
         let dir = crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, head);
         rows.write(&dir.join(rebuild_rows::MID_WALK_FILE))?;
         let unexplained = rows.counts.missing_unexplained;
@@ -638,12 +621,7 @@ impl Runner<'_> {
             p.item(self.result.steps.len(), "rebuild oracle");
         }
         let fresh_path = self.index_path.with_extension("rebuild.bin");
-        self.reference_build(to, &fresh_path)?;
-        let applied = IndexFile::open(&self.index_path)?;
-        let fresh = IndexFile::open(&fresh_path)?;
-        let (diff, sky) =
-            compare_by_label_with_sky(applied.view(), fresh.view(), self.opts.diff_cap);
-        let rows = self.layer_rows(&sky, to, applied.view(), fresh.view());
+        let (diff, sky, rows) = self.rebuild_at(to, &fresh_path)?;
         let rows_path = RebuildRows::path(
             &self.opts.results_dir,
             &self.opts.pin,
@@ -688,6 +666,65 @@ impl Runner<'_> {
             p.done();
         }
         Ok(self.result)
+    }
+}
+
+/// cambium's answer to one step, before any check has looked at it.
+struct Answer {
+    run: super::cambi::Update,
+    /// The wall CI pays for the step: the update, plus the cold build when
+    /// one had to follow it.
+    wall_ms: u64,
+    /// False when the step cold-built a fresh lineage instead of carrying
+    /// the previous step's index.
+    carried_index: bool,
+}
+
+/// The step's record, from cambium's answer and what the checks made of it.
+///
+/// A step passes when the oracle, where it ran, found nothing cambium missed
+/// and every peer that was asked answered.
+fn record(
+    step: &Step,
+    answer: &Answer,
+    index: IndexCounts,
+    oracle: Option<RdepsResult>,
+    tools: Vec<ToolStep>,
+    rebuild_step: bool,
+) -> StepRecord {
+    let r = &answer.run.report;
+    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
+    let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
+    StepRecord {
+        parent: step.parent.clone(),
+        head: step.head.clone(),
+        tags: step.tags.clone(),
+        changed_files: r.stats.changed_files,
+        dirty_packages: r.stats.dirty_packages,
+        queried_targets: r.stats.queried_targets,
+        timings: StepTimings {
+            dirty: r.timings_ms.dirty,
+            query: r.timings_ms.query,
+            splice: r.timings_ms.splice,
+            direct: r.timings_ms.direct,
+            walk: r.timings_ms.walk,
+            engine_total: r.timings_ms.total,
+        },
+        wall_ms: answer.wall_ms,
+        carried_index: answer.carried_index,
+        rebuild_step,
+        global: r.global,
+        global_reason: r.global_reason.clone(),
+        index,
+        cambium: CambiumAnswer {
+            direct: r.direct.len(),
+            affected: r.affected.len(),
+            tests: r.tests.len(),
+            cold_rebuild: r.stats.cold_rebuild,
+        },
+        oracle,
+        tools,
+        pass: cambium_ok && peers_ran,
     }
 }
 
@@ -785,7 +822,6 @@ fn start(
         done: false,
     };
     result.write(&opts.result_path())?;
-    let _ = to;
     Ok((result, 0))
 }
 
@@ -816,11 +852,21 @@ mod tests {
         // They are not in the oracle's main-repo set and must not be charged
         // as extras, or a tool reads as looser the more vocabulary it carries.
         let (recall, tightness) = score(
-            &set(&["//a:a", "//b:b", "@quiche//:x", "@quiche//:y", "//external:z"]),
+            &set(&[
+                "//a:a",
+                "//b:b",
+                "@quiche//:x",
+                "@quiche//:y",
+                "//external:z",
+            ]),
             Some(&o),
         );
         assert_eq!(recall, Some(1.0));
-        assert_eq!(tightness, Some(1.0), "external rows are neither matched nor charged");
+        assert_eq!(
+            tightness,
+            Some(1.0),
+            "external rows are neither matched nor charged"
+        );
 
         // A genuine main-repo extra still costs tightness.
         let (_, tightness) = score(&set(&["//a:a", "//b:b", "//c:c"]), Some(&o));

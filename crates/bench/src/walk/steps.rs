@@ -61,15 +61,6 @@ impl Tag {
             Self::Adjacent => "adjacent",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|t| t.name() == s)
-    }
-
-    /// The tags that say what a step touches, as opposed to its shape.
-    pub fn is_content(self) -> bool {
-        !matches!(self, Self::Merge | Self::Adjacent)
-    }
 }
 
 impl std::fmt::Display for Tag {
@@ -263,15 +254,6 @@ pub fn steps(
     Ok((commits, steps))
 }
 
-/// How many steps carry each tag.
-pub fn present_by_tag(steps: &[Step]) -> BTreeMap<Tag, usize> {
-    let mut out = BTreeMap::new();
-    for t in Tag::ALL {
-        out.insert(t, steps.iter().filter(|s| s.has(t)).count());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,13 +267,10 @@ mod tests {
     }
 
     #[test]
-    fn tags_round_trip_by_name() {
+    fn a_tag_serialises_as_its_name() {
         for t in Tag::ALL {
-            assert_eq!(Tag::parse(t.name()), Some(t));
             let json = serde_json::to_string(&t).unwrap();
             assert_eq!(json, format!("\"{}\"", t.name()));
         }
-        assert_eq!(Tag::parse("nope"), None);
-        assert!(Tag::Bzl.is_content() && !Tag::Merge.is_content());
     }
 }

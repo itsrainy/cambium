@@ -3,7 +3,7 @@
 //!
 //! # Why
 //!
-//! A published run leaves behind, per subject, the index at the pin
+//! A finished walk leaves behind, per subject, the index at the pin
 //! (`bench-results/<subject>/index-<pin>.bin`) and what cambium answered on
 //! every recorded change set and history commit. Between the diff and the
 //! `bazel query` the engine does a substantial amount of work that needs
@@ -12,7 +12,7 @@
 //! `limits.max_dirty_packages` and the run therefore falls back to a cold
 //! rebuild. Every regression the last two runs found lived in exactly that
 //! stretch. Replaying it against a stored index costs milliseconds, so an
-//! engine change can be checked against the real corpus before the box is
+//! engine change can be checked against the real subjects before the box is
 //! started rather than seven hours after.
 //!
 //! # What a replay cannot know
@@ -23,18 +23,19 @@
 //! - **The answer.** `direct` and `affected` come from comparing rule hashes
 //!   after the head packages are re-queried. There is no query here, so
 //!   [`ReplayOutcome::affected_lower_bound`] is what the reverse walk reaches
-//!   from the changed files and external nodes the *base* index already knows
-//!   — a lower bound, never the run's number, and never gated on.
+//!   from the changed files and external nodes the *base* index already
+//!   knows: a lower bound, never the run's number, and never gated on.
 //! - **A cold rebuild's answer.** Past the limit the engine re-queries
 //!   `//...`. The replay reports *that the fallback would fire*, which is the
 //!   decision under test; what it would then answer needs Bazel.
 //! - **The base index**, when the run did not leave its own behind. A run
-//!   splices onto whatever the store served for the change set's base, and the
-//!   change-set driver archives that index at
-//!   `bench-results/<subject>/bases/<base>.bin`; a replay that finds one there
-//!   walks the graph the run walked, and the drift below does not apply to it
-//!   ([`BaseKind::RunsOwn`]). Without one the only stored index is the one at
-//!   the pin, and a change set's base is an ancestor of it. Package and
+//!   splices onto whatever the store served for the change set's base. The
+//!   retired change-set driver archived that index at
+//!   `bench-results/<subject>/bases/<base>.bin`, and a replay that finds one
+//!   there walks the graph the run walked, so the drift below does not apply
+//!   to it ([`BaseKind::RunsOwn`]); the walk archives none. Without one the
+//!   only stored index is the one at the pin, and a change set's base is an
+//!   ancestor of it. Package and
 //!   repository sets then reflect the graph at the pin, not the graph the run
 //!   walked.
 //!   That is why a divergence from a recorded answer is a *lead*, not a
@@ -55,7 +56,7 @@
 //!   stage does not derive which main-repo paths feed which repositories; it
 //!   reads tables `cambium_index::build_repo_inputs` wrote at index time, so a
 //!   replay of a build that changed that derivation still replays the old
-//!   one's output. [`rederive_externals`] — `--rederive` — closes that by
+//!   one's output. [`rederive_externals`] (`--rederive`) closes that by
 //!   rebuilding those tables from the repository text at each base before
 //!   replaying. What stays the pin's is everything `bazel query` established:
 //!   the packages, the targets, the edges, the package closures.
@@ -69,6 +70,8 @@ use cambium_engine::Config;
 use cambium_index::label::{Label, Repo};
 use cambium_index::{walk, IndexRef};
 use serde::{Deserialize, Serialize};
+
+use crate::util::revs_match;
 
 /// The schema of the JSON this module reads and writes.
 pub const REPLAY_SCHEMA: u32 = 1;
@@ -86,7 +89,7 @@ pub const REPLAY_SCHEMA: u32 = 1;
 pub struct PathEntry {
     pub base: String,
     pub head: String,
-    /// `A`, `M`, `D` or `T`, then the path — the `--name-status` spelling, so
+    /// `A`, `M`, `D` or `T`, then the path: the `--name-status` spelling, so
     /// the cache can be produced by a shell loop and read back exactly.
     pub changes: Vec<String>,
 }
@@ -102,19 +105,30 @@ pub struct PathsCache {
     pub entries: Vec<PathEntry>,
 }
 
+/// Reads one of this module's JSON files, refusing any schema but
+/// [`REPLAY_SCHEMA`].
+///
+/// Unlike [`crate::util::read_result`] the whole document is parsed before
+/// the schema is looked at, so an unparseable file is reported as one whatever
+/// schema it claims.
+fn read_replay_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    schema_of: impl Fn(&T) -> u32,
+) -> Result<T> {
+    let s = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: T = serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+    let schema = schema_of(&v);
+    anyhow::ensure!(
+        schema == REPLAY_SCHEMA,
+        "{} was written by schema {schema} and this build reads {REPLAY_SCHEMA}",
+        path.display(),
+    );
+    Ok(v)
+}
+
 impl PathsCache {
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        let s =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let c: PathsCache =
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-        anyhow::ensure!(
-            c.schema == REPLAY_SCHEMA,
-            "{} was written by schema {} and this build reads {REPLAY_SCHEMA}",
-            path.display(),
-            c.schema
-        );
-        Ok(c)
+        read_replay_json(path, |c: &Self| c.schema)
     }
 
     /// The diff for one pair, by either revision spelling the results use.
@@ -124,14 +138,6 @@ impl PathsCache {
             .find(|e| revs_match(&e.base, base) && revs_match(&e.head, head))
             .map(|e| parse_name_status(&e.changes))
     }
-}
-
-/// Two revisions name the same commit when one is a prefix of the other.
-///
-/// The results file and the paths cache are both written from full shas, but a
-/// person passing `--change-set` types a short one.
-pub fn revs_match(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 /// The recorded answer for `base..head`, by either revision spelling.
@@ -184,7 +190,7 @@ pub enum RepoRule {
     /// A main-repo file a repository rule reads by label moved.
     InputPath,
     /// The only thing naming the changed path is a target the repository rule
-    /// *writes*, so nothing it reads — no `.bzl` — can have moved.
+    /// *writes*, so nothing it reads (no `.bzl`) can have moved.
     TargetOnly,
     /// The `MODULE.bazel` diff named it: a version bump, a changed tag.
     ModuleDiff,
@@ -231,14 +237,15 @@ pub struct PackageDirty {
 // ------------------------------------------------------------ the base index
 //
 // A run does not splice onto the index at the pin. It asks the store for the
-// change set's own base and gets back whatever the history walk left there, and
+// change set's own base and gets back whatever the walk left there, and
 // the two are not the same graph: the pin is ahead of every base by as many
 // commits as the window is long. Most of what a replay computes survives that,
 // which is why replaying against the pin is worth anything at all -- but not
 // all of it did. An inert `MODULE.bazel` read in WORKSPACE mode was invisible
 // against the pin and reproduced immediately against the base the run itself
-// used. So the driver archives that base beside the results, and a replay
-// prefers it when it is there.
+// used. So the change-set driver archived that base beside the results, and a
+// replay prefers one when it is there. The walk does not archive bases, so a
+// replay of a walk's steps runs against the pin.
 
 /// Which index a change set was replayed against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,9 +255,10 @@ pub enum BaseKind {
     /// the far end, and the reason for every drift guard in [`replay_with`].
     #[default]
     Pin,
-    /// The base index the run itself spliced onto, archived by the change-set
-    /// driver at `<results>/<subject>/bases/<base>.bin`. At the base by
-    /// construction, so the drift guards have nothing to guard against.
+    /// The base index the run itself spliced onto, as the retired change-set
+    /// driver archived it at `<results>/<subject>/bases/<base>.bin`. At the
+    /// base by construction, so the drift guards have nothing to guard
+    /// against.
     RunsOwn,
     /// Whatever `--index` named. The replay is told to use it and cannot know
     /// which revision it is at, so it is treated as the pin's case.
@@ -274,8 +282,8 @@ impl BaseKind {
     }
 }
 
-/// `<results>/<subject>/bases/<base sha>.bin`, where the change-set driver
-/// archives the base index each change set actually ran against.
+/// `<results>/<subject>/bases/<base sha>.bin`, where the retired change-set
+/// driver archived the base index each change set actually ran against.
 pub fn archived_base_path(subject_results: &std::path::Path, base: &str) -> std::path::PathBuf {
     subject_results.join("bases").join(format!("{base}.bin"))
 }
@@ -286,12 +294,12 @@ pub fn archived_base(subject_results: &std::path::Path, base: &str) -> Option<st
     p.exists().then_some(p)
 }
 
-/// `<results>/<subject>/heads/<pin sha>.bin`, where the history's rebuild
-/// oracle archives the index Bazel cold-built at the pin.
+/// `<results>/<subject>/heads/<pin sha>.bin`, where the walk's rebuild oracle
+/// archives the index Bazel cold-built at the pin.
 ///
 /// That index is the oracle's truth half: the graph and the externals tables
 /// as a real `bazel query` at the pin established them. Keeping it is what
-/// makes the externals half of the oracle checkable offline — re-derive the
+/// makes the externals half of the oracle checkable offline: re-derive the
 /// tables from the head tree's own text with today's engine and compare
 /// against it, with no Bazel and no box. See [`head_check`].
 pub fn archived_head_path(subject_results: &std::path::Path, pin: &str) -> std::path::PathBuf {
@@ -306,9 +314,9 @@ pub fn archived_head(subject_results: &std::path::Path, pin: &str) -> Option<std
 
 /// Where an index being archived comes from: in memory, or already a file.
 ///
-/// A mapped file is copied byte for byte — it is already in whichever form
+/// A mapped file is copied byte for byte (it is already in whichever form
 /// the store wrote it, and re-encoding it would cost a deserialise for
-/// nothing — while an index that exists only in memory is written out in the
+/// nothing) while an index that exists only in memory is written out in the
 /// run's own compression, so an archive is the same on-disk form as the
 /// `index-<pin>.bin` beside it.
 pub enum ArchiveSource<'a> {
@@ -318,10 +326,10 @@ pub enum ArchiveSource<'a> {
 
 /// Puts one index at `dest`, unless something is already there.
 ///
-/// The shared half of [`crate::compare::driver::archive_base_index`] and the
-/// history's head archive: both leave an index beside the results for a later
-/// offline replay to open, and both must leave an existing file alone (an
-/// archive is megabytes, and the same base or pin recurs).
+/// What [`crate::walk::cambi::archive_head_index`] calls: it leaves an index
+/// beside the results for a later offline replay to open, and must leave an
+/// existing file alone (an archive is megabytes, and the same base or pin
+/// recurs).
 pub fn archive_index(
     dest: &std::path::Path,
     src: ArchiveSource<'_>,
@@ -348,12 +356,12 @@ pub fn archive_index(
 
 /// The rebuild oracle's externals half, offline.
 ///
-/// `archived` is the index Bazel cold-built at `rev` and the history archived
+/// `archived` is the index Bazel cold-built at `rev` and the walk archived
 /// (see [`archived_head_path`]); this rebuilds its externals side tables from
 /// the repository text at `rev` with *this* build's derivation and compares
 /// the two by label. The nodes, the edges and the rule hashes are the
-/// archived index's on both sides by construction — [`rederive_externals`]
-/// keeps everything the query established — so an empty node/edge diff is not
+/// archived index's on both sides by construction ([`rederive_externals`]
+/// keeps everything the query established) so an empty node/edge diff is not
 /// evidence and the externals section is the whole signal.
 ///
 /// What this cannot do is what no replay can: it says whether today's
@@ -408,7 +416,7 @@ pub struct ReplayOutcome {
     /// [`ReplayOutcome::base`] by this build, rather than read back out of the
     /// stored index as the run's cambium derived them. See
     /// [`rederive_externals`]. A re-derived replay and a plain one are not
-    /// comparable as engine evidence — the derivation under them differs — so
+    /// comparable as engine evidence (the derivation under them differs) so
     /// this travels in the JSON and in every divergence report.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rederived: bool,
@@ -454,8 +462,8 @@ impl WorkspaceText for NoText {
 /// the graph the replay walks is always a little ahead of the graph the run
 /// walked. Usually that is drift of a package or two and the answers still
 /// line up. `MODULE.bazel` is different in kind: the externals stage's whole
-/// input — which repositories exist, which main-repo paths feed them, which
-/// of those have a derivable path mapping — is derived from it, so a base
+/// input (which repositories exist, which main-repo paths feed them, which
+/// of those have a derivable path mapping) is derived from it, so a base
 /// whose module file declares a different set of repositories is not a
 /// smaller version of the pin's graph but a different one, and comparing the
 /// replay's answer against the run's says nothing about the engine.
@@ -501,8 +509,8 @@ fn repos_declared_at(base_rev: &str, texts: &dyn WorkspaceText) -> Option<BTreeS
 
 // ------------------------------------------------------- re-derived externals
 //
-// The externals side tables in a stored index — the repository input patterns,
-// `bzl_repos`, the path maps, `target_only`, the repository set — were derived
+// The externals side tables in a stored index (the repository input patterns,
+// `bzl_repos`, the path maps, `target_only`, the repository set) were derived
 // at index time by `cambium_index::build_repo_inputs` from the text of
 // `MODULE.bazel` / `WORKSPACE` and the workspace `.bzl` closure. A replay that
 // reads them back is therefore blind to a change in that derivation: it
@@ -510,7 +518,8 @@ fn repos_declared_at(base_rev: &str, texts: &dyn WorkspaceText) -> Option<BTreeS
 // `--rederive` closes that by rebuilding those tables from the repository text
 // at the change set's base, with the code in this build, before replaying.
 
-/// One revision of a [`WorkspaceText`], as the index's [`FileText`].
+/// One revision of a [`WorkspaceText`], as the index's
+/// [`FileText`](cambium_index::FileText).
 ///
 /// The git layer stays behind [`WorkspaceText`] so a test can re-derive from
 /// strings with no git anywhere; the CLI passes the same `git show`-backed
@@ -536,10 +545,11 @@ impl cambium_index::FileText for RevisionText<'_> {
 /// and no amount of reading text can recover them; see the module docs.
 ///
 /// The `.bzl` ids are the stored index's, because the package closures are
-/// expressed in them. The fresh walk gets its own [`LoadGraph`] and its
+/// expressed in them. The fresh walk gets its own
+/// [`LoadGraph`](cambium_index::LoadGraph) and its
 /// workspace closure is mapped back onto the stored ids by path, so a `.bzl`
 /// in the base's workspace closure that the pin's index has never heard of is
-/// dropped here — which is the drift the `indeterminate` guard already names.
+/// dropped here, which is the drift the `indeterminate` guard already names.
 pub fn rederive_externals(
     base: IndexRef<'_>,
     rev: &str,
@@ -627,8 +637,8 @@ pub fn rederive_externals(
 /// The re-derived indexes of a `--rederive` run, a few base revisions at a
 /// time.
 ///
-/// Re-deriving costs a full [`cambium_index::IndexBuilder::finish`] — every
-/// label and both CSRs materialised — which at envoy's size is the expensive
+/// Re-deriving costs a full [`cambium_index::IndexBuilder::finish`] (every
+/// label and both CSRs materialised) which at envoy's size is the expensive
 /// part of the replay by an order of magnitude, while consecutive change sets
 /// and history commits frequently share a base. Building once per revision is
 /// what keeps `--rederive` in the same minutes-long budget as the plain
@@ -647,10 +657,10 @@ pub struct RederiveCache {
 /// How many re-derived indexes to hold at once.
 ///
 /// A re-derived index is the whole index in memory, a few hundred megabytes at
-/// envoy's size, and `--all --history` walks three hundred bases; holding them
+/// envoy's size, and `--all` over a walk replays three hundred bases; holding them
 /// all would be tens of gigabytes for no gain. Replays are driven in recorded
-/// order, where a repeated base is a *consecutive* repeat — a change set and
-/// the history commit that shares its parent — so a handful of slots catch
+/// order, where a repeated base is a *consecutive* repeat (two recorded
+/// answers that share a parent) so a handful of slots catch
 /// every reuse there is. A base that recurs later is simply rebuilt.
 const REDERIVE_CACHE_SLOTS: usize = 4;
 
@@ -971,8 +981,8 @@ fn undecidable_inputs(
 
     // The bazelrc screen reads the file's *text* at both revisions and decides
     // whether every flag it changed is one that cannot reach loading. There is
-    // no text here, and the outcomes are opposite extremes — a global run, or
-    // the file dropped from the diff entirely — so the replay declines.
+    // no text here, and the outcomes are opposite extremes (a global run, or
+    // the file dropped from the diff entirely) so the replay declines.
     // By name, not by the engine's import-graph reachability: that needs the
     // root rc's text too, and declining a fixture rc's change set is the
     // conservative side of the replay's own rule.
@@ -1249,8 +1259,9 @@ fn lower_bound(base: IndexRef<'_>, changes: &[Change], external_nodes: &[u32]) -
 
 /// The part of a recorded result a replay can be held against.
 ///
-/// Both `changes-<pin>.json` and `history-<pin>.json` collapse onto this, so
-/// the comparison is written once and tested without either file.
+/// A walk step's record collapses onto this ([`crate::precheck`] reads
+/// `walk-<pin>.json`), so the comparison is written once and tested without
+/// the file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordedAnswer {
     pub base: String,
@@ -1330,7 +1341,7 @@ impl std::fmt::Display for Divergence {
 /// Only the three static verdicts are compared, because they are the only ones
 /// the replay computes: whether the run went global, how many packages it
 /// dirtied, and whether it would cold-rebuild. An indeterminate replay yields
-/// nothing — a question the replay declined to answer is not a disagreement.
+/// nothing: a question the replay declined to answer is not a disagreement.
 /// Nor is a global the run reached *after* its query, over the rows it read
 /// back (a toolchain-class rule the splice found moved, `CAMBI-W023`): the
 /// replay runs no query, so its "not global" there is the dirty stage's
@@ -1386,8 +1397,9 @@ pub fn diverge(recorded: &RecordedAnswer, replayed: &ReplayOutcome) -> Vec<Diver
 
 // ----------------------------------------------------------------- a whole run
 
-/// Every replay of one subject, which is both the `--all` report and the
-/// baseline a later `--all` is compared against.
+/// Every replay of one subject, which is both the `--all` report and, saved
+/// with `--save-baseline`, the `--baseline` file a later `--all` is compared
+/// against.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplayRun {
     pub schema: u32,
@@ -1398,17 +1410,7 @@ pub struct ReplayRun {
 
 impl ReplayRun {
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        let s =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let r: ReplayRun =
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-        anyhow::ensure!(
-            r.schema == REPLAY_SCHEMA,
-            "{} was written by schema {} and this build reads {REPLAY_SCHEMA}",
-            path.display(),
-            r.schema
-        );
-        Ok(r)
+        read_replay_json(path, |r: &Self| r.schema)
     }
 
     pub fn write(&self, path: &std::path::Path) -> Result<()> {
@@ -1422,7 +1424,7 @@ impl ReplayRun {
     /// Replay against replay: the tight loop.
     ///
     /// Both sides ran on the same stored index, so every difference is the
-    /// engine's — no base-index drift, no missing `MODULE.bazel`. A key
+    /// engine's: no base-index drift, no missing `MODULE.bazel`. A key
     /// present on one side only is reported as its own divergence rather than
     /// skipped, because a change set the new build declined to replay is
     /// itself a change.
@@ -1513,6 +1515,29 @@ impl ReplayRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paths cache from another schema is refused by name, and one that is
+    /// not JSON at all is reported as unparseable.
+    #[test]
+    fn a_paths_cache_from_another_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paths.json");
+        std::fs::write(
+            &path,
+            r#"{"schema": 0, "repo": "r", "pin": "p", "entries": []}"#,
+        )
+        .unwrap();
+        let err = format!("{:#}", PathsCache::read(&path).unwrap_err());
+        assert!(
+            err.ends_with(&format!(
+                "was written by schema 0 and this build reads {REPLAY_SCHEMA}"
+            )),
+            "{err}"
+        );
+        std::fs::write(&path, "not json").unwrap();
+        let err = format!("{:#}", PathsCache::read(&path).unwrap_err());
+        assert!(err.starts_with("parsing "), "{err}");
+    }
 
     /// The registered-repository escalation reads `MODULE.bazel` at head
     /// whatever the change set named, so an ordinary source edit that moves a
@@ -1715,8 +1740,8 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(rederived.repos[0].rule, RepoRule::InputPath);
         assert_eq!(rederived.repos[0].paths, vec![".github/config.yml"]);
 
-        // The stale table is gone, and what the run's query established — the
-        // packages — is not.
+        // The stale table is gone, and what the run's query established (the
+        // packages) is not.
         let view = rebuilt.view();
         assert!(!(0..view.num_repos()).any(|r| view.repo_name(r) == "stale_repo"));
         assert_eq!(view.num_packages(), stored.view().num_packages());
@@ -1874,12 +1899,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
     }
 
     fn module_at(rev: &str, text: &str) -> cambium_engine::externals::FixedText {
-        let mut m = BTreeMap::new();
-        m.insert(
-            (rev.to_string(), externals::MODULE_FILE.to_string()),
-            text.to_string(),
-        );
-        cambium_engine::externals::FixedText(m)
+        files_at(rev, &[(externals::MODULE_FILE, text)])
     }
 
     /// Both drift guards, on the shapes envoy produced: the stage names a
@@ -1967,8 +1987,8 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
         assert_eq!(own.dirty_packages, pin.dirty_packages);
     }
 
-    /// A `MODULE.bazel` the replay cannot read is not drift — it is a file
-    /// this process has no copy of — so the archived base does not excuse it.
+    /// A `MODULE.bazel` the replay cannot read is not drift (it is a file
+    /// this process has no copy of) so the archived base does not excuse it.
     #[test]
     fn an_archived_base_does_not_silence_the_guards_that_are_not_drift() {
         let index = stored_index();
@@ -2169,7 +2189,7 @@ use_repo(envoy_repo_ext, \"envoy_repo\")\n";
     }
 
     /// A re-derived run compared against a plain one is expected to differ,
-    /// so the report says which side was which — once, at the front, rather
+    /// so the report says which side was which: once, at the front, rather
     /// than once per change set.
     #[test]
     fn a_rederived_run_says_so_once_when_compared_against_a_plain_one() {

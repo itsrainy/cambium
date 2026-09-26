@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every method is an operation a user performs: put the worktree here, build
 /// an index from scratch, bring one forward. The walk never holds an index in
-/// memory — each step writes one to a file and the next step's base comes from
+/// memory: each step writes one to a file and the next step's base comes from
 /// the store, exactly as it would for someone running `cambi` twice.
 pub trait Driver {
     /// Puts the worktree at `rev`. A no-op when the row source does not read
@@ -155,14 +155,9 @@ pub fn stop_server(bazel: &cambium_bazel::Bazel, wait: Duration) -> Result<()> {
         out.status,
         String::from_utf8_lossy(&out.stderr).trim()
     );
-    let Some(base) = bazel
-        .startup_flags()
-        .iter()
-        .find_map(|f| f.strip_prefix("--output_base="))
-    else {
+    let Some(base) = crate::servers::configured_output_base(bazel.startup_flags()) else {
         return Ok(());
     };
-    let base = Path::new(base);
     let deadline = Instant::now() + wait;
     while let Some(pid) = crate::servers::running_on(base) {
         anyhow::ensure!(
@@ -196,7 +191,7 @@ pub trait RowSource {
 /// The test harness's driver, and the one place in the benchmark where the
 /// engine answers the product's question directly. It exists so the walk loop
 /// can be tested over a synthetic git history on a machine with no Bazel; it
-/// is never what a published number was measured with.
+/// is never what a recorded number was measured with.
 pub struct EngineDriver<'a> {
     pub engine: &'a Engine,
     pub rows: &'a dyn RowSource,
@@ -258,7 +253,7 @@ impl Driver for EngineDriver<'_> {
         let out_run = self
             .engine
             .compute(base_index.view(), &changes, &*q, &req)
-            .with_context(|| format!("update {} -> {head}", &base[..12.min(base.len())]))?;
+            .with_context(|| format!("update {} -> {head}", crate::util::short(base, 12)))?;
         let wall = t.elapsed();
         let wrote_index = match &out_run.index {
             Some(i) => {

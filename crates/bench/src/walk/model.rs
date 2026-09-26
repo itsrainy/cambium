@@ -340,13 +340,7 @@ impl WalkResult {
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        crate::util::write_json_atomic(path, self)
     }
 
     /// Rolls the steps up, and folds the pin's rebuild oracle into `pass`: a
@@ -600,12 +594,7 @@ mod tests {
             peer_sample: Sample::default(),
             environment: Environment {
                 machine: crate::harness::Machine::detect(),
-                bazel_version_used: String::new(),
-                cambi_version: String::new(),
-                tool_sha: String::new(),
-                engine_id: String::new(),
-                config_hash: String::new(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 0,

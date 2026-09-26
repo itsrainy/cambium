@@ -23,8 +23,8 @@
 //! cambium never seeded at all. `tools/build_defs/repo/utils.bzl` is listed in
 //! the `srcs` of fifteen filegroups in `bazel/bazel`; when a `.bzl` only ever
 //! went to the load closure, none of those filegroups was direct, none was in
-//! cambium's answer, and — because the roots were drawn from cambium's own
-//! direct set — no query the oracle made could have named them. Seeding from
+//! cambium's answer, and (because the roots were drawn from cambium's own
+//! direct set) no query the oracle made could have named them. Seeding from
 //! the *changed paths* instead makes the oracle independent of cambium's
 //! seeding decisions, which is the only way it can catch one being wrong.
 //!
@@ -160,8 +160,8 @@
 //!
 //! A file deleted between base and head cannot be named at head: `//pkg:gone.cc`
 //! is not a target there and the query would fail. Those paths are taken from
-//! the **base** index instead — its `file -> consumers` rows say which rules
-//! read the file before it went away — and each such consumer must be in
+//! the **base** index instead (its `file -> consumers` rows say which rules
+//! read the file before it went away) and each such consumer must be in
 //! cambium's answer, or its package must be (a rule deleted along with its
 //! source is not in anyone's answer at head, and asking for the label itself
 //! would fail a change set for being right). "Its package" is the affected
@@ -175,10 +175,11 @@
 //!
 //! ## The escape hatch
 //!
-//! `--oracle-sample N` caps how many source labels are queried, seeded and
-//! sorted so a failure reproduces from the run's seed. It exists for subjects
-//! whose change sets are enormous; `0`, the default, is the full oracle and is
-//! what every published number must come from.
+//! [`RdepsOracle::sample`] caps how many source labels are queried, seeded
+//! and sorted so a failure reproduces from the run's seed. It exists for
+//! subjects whose change sets are enormous; `0` is the full oracle and is what
+//! every recorded number must come from. The walk always passes `0`
+//! (`BazelChecks::oracle_k`); its `--oracle-sample` samples steps, not roots.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -234,7 +235,7 @@ pub struct RdepsResult {
     /// The `@repo//...` half of Bazel's answer.
     ///
     /// `rdeps(//..., …)` takes `//...` as the *universe expression*, and Bazel
-    /// expands a universe to its transitive closure — so the answer contains
+    /// expands a universe to its transitive closure, so the answer contains
     /// external targets that depend on a root, and on envoy that is most of it
     /// (157 of the 173 labels on one change set, all `@quiche//...`). cambium
     /// indexes `//...` by construction and can never contain them, so counting
@@ -311,7 +312,7 @@ pub struct RdepsResult {
     /// Bazel could not load everything (an external repository that will not
     /// fetch on this machine, say) but answered for what did load. The oracle
     /// is a *lower bound* on what cambium must contain, so a partial answer is
-    /// still sound to check against — it just proves less.
+    /// still sound to check against: it just proves less.
     #[serde(default)]
     pub partial: bool,
     /// How many batches came back partial.
@@ -405,81 +406,10 @@ impl RdepsResult {
     }
 }
 
-/// Roll-up over a run's change sets, for the report table: the counts the
-/// `rdeps` section prints, summed over every change set that ran the oracle.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RdepsOracleSummary {
-    /// Change sets that ran the oracle.
-    pub change_sets: usize,
-    /// Source labels queried.
-    pub roots: usize,
-    /// Labels whose batch failed even after bisection.
-    pub skipped_roots: usize,
-    /// Change sets with at least one partial batch.
-    pub partial_change_sets: usize,
-    pub partial_batches: usize,
-    /// Every label some change set's oracle could not resolve, unioned.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub unresolved: BTreeSet<String>,
-    /// Rules Bazel reached that cambium's answer did not contain. Must be
-    /// zero; it is the count that gates the run.
-    pub missing: usize,
-    /// Of those, unsatisfied consumers of a deleted file.
-    pub deleted_missing: usize,
-    /// Of those, reached only by leaving `//...` and coming back.
-    pub external_route: usize,
-    /// Of those, never probed, so neither an external route nor unexplained.
-    pub route_unprobed: usize,
-    /// The `@repo//...` half of the difference, which recall ignores.
-    pub missing_external: usize,
-    /// Change sets on which a repository's recorded inputs added roots that
-    /// reached a main-repository rule the changed paths' labels did not.
-    #[serde(default)]
-    pub repository_change_sets: usize,
-    /// Main-repository rules only those roots reached, summed.
-    #[serde(default)]
-    pub repository_labels: usize,
-}
-
-impl RdepsOracleSummary {
-    pub fn add(&mut self, o: &RdepsResult) {
-        self.change_sets += 1;
-        self.roots += o.roots.len();
-        self.skipped_roots += o.skipped_roots.len();
-        self.missing += o.missing.len();
-        self.missing_external += o.missing_external.len();
-        self.deleted_missing += o.deleted_missing.len();
-        self.external_route += o.external_route.len();
-        self.route_unprobed += o.route_unprobed;
-        if let Some(r) = o.repository_inputs.as_ref().filter(|r| r.labels_added > 0) {
-            self.repository_change_sets += 1;
-            self.repository_labels += r.labels_added;
-        }
-        if o.partial {
-            self.partial_change_sets += 1;
-            self.partial_batches += o.partial_batches;
-            self.unresolved.extend(o.unresolved.iter().cloned());
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.change_sets == 0
-    }
-}
-
-/// `|ours ∩ theirs| / |theirs|`, and 1.0 when there is nothing to recall — an
-/// empty oracle is not evidence of unsoundness.
-pub fn recall(ours: &BTreeSet<String>, theirs: &BTreeSet<String>) -> f64 {
-    if theirs.is_empty() {
-        return 1.0;
-    }
-    ours.intersection(theirs).count() as f64 / theirs.len() as f64
-}
-
 /// The oracle's configuration.
 #[derive(Clone, Debug)]
 pub struct RdepsOracle {
-    /// Cap on how many source labels are queried. 0 — the default — is the
+    /// Cap on how many source labels are queried. 0 (the default) is the
     /// full change set, which is what the methodology specifies.
     pub sample: usize,
     pub seed: u64,
@@ -517,7 +447,7 @@ pub struct OracleInputs<'a> {
     /// package deleted outright: every rule in it is tombstoned, so cambium
     /// rightly emits no label carrying that package, and the package name
     /// survives nowhere else in the report. Without this the escape hatch in
-    /// [`deleted_consumers`] — "the rule, or its package" — is unsatisfiable
+    /// `deleted_consumers` ("the rule, or its package") is unsatisfiable
     /// by construction for exactly the case it was written for.
     pub dirty_packages: &'a BTreeSet<String>,
     /// The output base the queries run on, whose `external/@*.marker` files
@@ -543,40 +473,10 @@ impl RdepsOracle {
     pub fn run(&self, bazel: &Bazel, inputs: &OracleInputs<'_>) -> Result<RdepsResult> {
         let started = std::time::Instant::now();
         let mut result = RdepsResult::default();
-        let packages = PackageSet::from_index(inputs.head);
         let ws = bazel.workspace();
 
-        let mut deleted: Vec<&String> = Vec::new();
-        let mut roots: Vec<String> = Vec::new();
-        for path in inputs.changed {
-            if !exists_at_head(ws, path) {
-                deleted.push(path);
-                continue;
-            }
-            // Every label the path has: its main-repo one, and the one it
-            // has inside an in-tree repository whose packages the index
-            // holds. A `.proto` under envoy's `api/` has no main-repo owner
-            // (`//...` stops at the boundary) and only the second, and an
-            // oracle rooted at main-repo labels alone never asked Bazel what
-            // it reaches: recall read 1.0 on every such step while the
-            // answer under test could have missed all of them.
-            let mut found = false;
-            if let Some(pkg) = packages.owner_of(path) {
-                roots.push(source_label(pkg, path));
-                found = true;
-            }
-            for label in cambium_engine::in_tree_labels(inputs.head, &packages, path) {
-                roots.push(label);
-                found = true;
-            }
-            if !found {
-                result.unowned_paths += 1;
-            }
-        }
-        roots.sort();
-        roots.dedup();
-        let all = roots.len();
-        if self.sample > 0 && all > self.sample {
+        let (mut roots, deleted) = roots_of(inputs, ws, &mut result);
+        if self.sample > 0 && roots.len() > self.sample {
             roots = sample(&roots, self.sample, self.seed);
             result.sampled = true;
         }
@@ -584,10 +484,15 @@ impl RdepsOracle {
 
         // The first marker read: before any query of ours has touched the
         // server, so base's inputs where the last check was at base.
-        let read_at = std::time::Instant::now();
-        let before = inputs.output_base.map(|ob| Markers::read(ob, ws));
-        let markers_first = before.as_ref().map_or(0, |m| m.by_repo.len());
-        let mut read_ms = read_at.elapsed().as_millis() as u64;
+        let first = inputs.output_base.map(|output_base| {
+            let read_at = std::time::Instant::now();
+            let markers = Markers::read(output_base, ws);
+            FirstRead {
+                output_base,
+                markers,
+                read_ms: read_at.elapsed().as_millis() as u64,
+            }
+        });
 
         let mut answer = BTreeSet::new();
         let mut unresolved: BTreeSet<String> = BTreeSet::new();
@@ -595,69 +500,21 @@ impl RdepsOracle {
             self.run_batch(bazel, batch, &mut answer, &mut unresolved, &mut result);
         }
 
-        // The second read, after a universe that checked every repository
-        // `//...` reaches at head; then the repository patterns.
-        let mut own: Vec<String> = Vec::new();
-        let mut repo_only: BTreeSet<String> = BTreeSet::new();
-        if let (Some(before), Some(ob)) = (before, inputs.output_base) {
-            let read_at = std::time::Instant::now();
-            // With no changed path's label to ask about, no query has run
-            // yet, the markers are as the first read found them, and a
-            // second read would only repeat it.
-            let (markers, markers_second) = match result.batches {
-                0 => (before, None),
-                _ => {
-                    let after = Markers::read(ob, ws);
-                    let n = after.by_repo.len();
-                    (before.union(after), Some(n))
-                }
-            };
-            let repos = repo_inputs::dirty(
-                &markers,
-                &Changes {
-                    changed: inputs.changed,
-                    added_or_deleted: inputs.added_or_deleted,
-                },
-                ws,
-            );
-            read_ms += read_at.elapsed().as_millis() as u64;
-            let patterns: Vec<String> = repos
-                .iter()
-                .map(|r| repo_inputs::root_pattern(&r.name))
-                .collect();
-            let query_at = std::time::Instant::now();
-            let mut from_repos = BTreeSet::new();
-            for batch in batches(&patterns, self.max_labels, self.max_expr_bytes) {
-                self.run_batch(bazel, batch, &mut from_repos, &mut unresolved, &mut result);
+        let (own, repo_only) = match first {
+            Some(first) => {
+                let half = self.repository_half(
+                    bazel,
+                    inputs,
+                    first,
+                    &mut answer,
+                    &mut unresolved,
+                    &mut result,
+                );
+                result.repository_inputs = Some(half.roots);
+                (half.own, half.repo_only)
             }
-            let query_ms = query_at.elapsed().as_millis() as u64;
-            let failed: Vec<String> = patterns
-                .iter()
-                .filter(|p| result.skipped_roots.contains(p))
-                .cloned()
-                .collect();
-            repo_only = from_repos
-                .iter()
-                .filter(|l| !is_external(l) && !answer.contains(*l))
-                .cloned()
-                .collect();
-            let labels_added = repo_only.len();
-            own = repos.iter().map(|r| r.name.clone()).collect();
-            answer.extend(from_repos);
-            result.repository_inputs = Some(RepositoryRoots {
-                markers: markers.by_repo.len(),
-                markers_first,
-                markers_second,
-                unreadable: markers.unreadable.into_iter().collect(),
-                repositories: repos,
-                roots: patterns,
-                failed,
-                labels_added,
-                own_labels: 0,
-                read_ms,
-                query_ms,
-            });
-        }
+            None => (Vec::new(), BTreeSet::new()),
+        };
 
         partition(answer, inputs.cambium, &mut result);
         // A rooted repository's own targets are roots, not targets that
@@ -705,6 +562,83 @@ impl RdepsOracle {
         }
         result.wall_ms = started.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// The repository-input half: a second marker read, after a universe
+    /// that checked every repository `//...` reaches at head, then one
+    /// `rdeps` root per repository whose recorded inputs a changed path
+    /// touched. What those roots reach joins `answer`.
+    fn repository_half(
+        &self,
+        bazel: &Bazel,
+        inputs: &OracleInputs<'_>,
+        first: FirstRead<'_>,
+        answer: &mut BTreeSet<String>,
+        unresolved: &mut BTreeSet<String>,
+        result: &mut RdepsResult,
+    ) -> RepositoryHalf {
+        let ws = bazel.workspace();
+        let markers_first = first.markers.by_repo.len();
+        let read_at = std::time::Instant::now();
+        // With no changed path's label to ask about, no query has run yet,
+        // the markers are as the first read found them, and a second read
+        // would only repeat it.
+        let (markers, markers_second) = match result.batches {
+            0 => (first.markers, None),
+            _ => {
+                let after = Markers::read(first.output_base, ws);
+                let n = after.by_repo.len();
+                (first.markers.union(after), Some(n))
+            }
+        };
+        let repos = repo_inputs::dirty(
+            &markers,
+            &Changes {
+                changed: inputs.changed,
+                added_or_deleted: inputs.added_or_deleted,
+            },
+            ws,
+        );
+        let read_ms = first.read_ms + read_at.elapsed().as_millis() as u64;
+        let patterns: Vec<String> = repos
+            .iter()
+            .map(|r| repo_inputs::root_pattern(&r.name))
+            .collect();
+        let query_at = std::time::Instant::now();
+        let mut from_repos = BTreeSet::new();
+        for batch in batches(&patterns, self.max_labels, self.max_expr_bytes) {
+            self.run_batch(bazel, batch, &mut from_repos, unresolved, result);
+        }
+        let query_ms = query_at.elapsed().as_millis() as u64;
+        let failed: Vec<String> = patterns
+            .iter()
+            .filter(|p| result.skipped_roots.contains(p))
+            .cloned()
+            .collect();
+        let repo_only: BTreeSet<String> = from_repos
+            .iter()
+            .filter(|l| !is_external(l) && !answer.contains(*l))
+            .cloned()
+            .collect();
+        let own = repos.iter().map(|r| r.name.clone()).collect();
+        answer.extend(from_repos);
+        RepositoryHalf {
+            roots: RepositoryRoots {
+                markers: markers.by_repo.len(),
+                markers_first,
+                markers_second,
+                unreadable: markers.unreadable.into_iter().collect(),
+                repositories: repos,
+                roots: patterns,
+                failed,
+                labels_added: repo_only.len(),
+                own_labels: 0,
+                read_ms,
+                query_ms,
+            },
+            repo_only,
+            own,
+        }
     }
 
     fn run_batch(
@@ -764,7 +698,7 @@ fn exists_at_head(workspace: &Path, path: &str) -> bool {
 }
 
 /// `//pkg:rel`, the source-file target a workspace-relative path names.
-pub fn source_label(package: &str, path: &str) -> String {
+pub(crate) fn source_label(package: &str, path: &str) -> String {
     let rel = match package.is_empty() {
         true => path,
         false => path
@@ -776,14 +710,14 @@ pub fn source_label(package: &str, path: &str) -> String {
 }
 
 /// The package half of `//pkg:name`, for the deleted-file containment check.
-pub fn package_of_label(label: &str) -> Option<&str> {
+pub(crate) fn package_of_label(label: &str) -> Option<&str> {
     label.strip_prefix("//")?.split_once(':').map(|(p, _)| p)
 }
 
 /// Consumers of the deleted paths that cambium's answer does not account for.
 ///
 /// A rule that read a file which no longer exists must show up somewhere in
-/// cambium's answer — either as itself, or, when the rule was deleted along
+/// cambium's answer: either as itself, or, when the rule was deleted along
 /// with its source and so exists at neither end, as its package. Requiring the
 /// label alone would fail a change set for being right about a target that is
 /// gone.
@@ -793,7 +727,7 @@ pub fn package_of_label(label: &str) -> Option<&str> {
 /// rule in it and correctly reports none of them, so reading packages off the
 /// affected labels alone would fail every wholly-deleted package. That was the
 /// whole of sourcegraph's and apollo's change-set failures on the 2026-09-08
-/// published run.
+/// box run.
 ///
 /// The package spelling is an escape hatch for a rule that cannot be named at
 /// head, so it is only offered to a consumer that is *gone* at head (absent
@@ -812,7 +746,7 @@ fn deleted_consumers(
     let packages = PackageSet::from_index(base);
     // Both spellings of "cambium accounted for this package": a surviving
     // affected target inside it, or the package itself in the dirty set. A
-    // package deleted outright has only the second — all its rules are
+    // package deleted outright has only the second: all its rules are
     // tombstoned and none can appear in the affected set.
     let cambium_packages: BTreeSet<&str> = cambium
         .iter()
@@ -844,6 +778,64 @@ fn deleted_consumers(
                     && package_of_label(l).is_some_and(|p| cambium_packages.contains(p)))
         })
         .collect()
+}
+
+/// The oracle's roots for the changed paths, sorted and deduplicated, and
+/// the paths that no longer exist at head (the deleted half's input).
+///
+/// A path's roots are every label it has: its main-repo one, and the one it
+/// has inside an in-tree repository whose packages the index holds. A
+/// `.proto` under envoy's `api/` has no main-repo owner (`//...` stops at the
+/// boundary) and only the second, and an oracle rooted at main-repo labels
+/// alone never asked Bazel what it reaches: recall read 1.0 on every such
+/// step while the answer under test could have missed all of them. A path
+/// with neither is counted in [`RdepsResult::unowned_paths`].
+fn roots_of<'a>(
+    inputs: &OracleInputs<'a>,
+    ws: &Path,
+    result: &mut RdepsResult,
+) -> (Vec<String>, Vec<&'a String>) {
+    let packages = PackageSet::from_index(inputs.head);
+    let mut deleted: Vec<&String> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for path in inputs.changed {
+        if !exists_at_head(ws, path) {
+            deleted.push(path);
+            continue;
+        }
+        let mut found = false;
+        if let Some(pkg) = packages.owner_of(path) {
+            roots.push(source_label(pkg, path));
+            found = true;
+        }
+        for label in cambium_engine::in_tree_labels(inputs.head, &packages, path) {
+            roots.push(label);
+            found = true;
+        }
+        if !found {
+            result.unowned_paths += 1;
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    (roots, deleted)
+}
+
+/// The first marker read, taken before the oracle's own queries touch the
+/// server.
+struct FirstRead<'a> {
+    output_base: &'a Path,
+    markers: Markers,
+    read_ms: u64,
+}
+
+/// What [`RdepsOracle::repository_half`] found: the record, the
+/// main-repository rules only its roots reached, and the dirty repositories
+/// by name.
+struct RepositoryHalf {
+    roots: RepositoryRoots,
+    repo_only: BTreeSet<String>,
+    own: Vec<String>,
 }
 
 /// Is this rule absent from head, or tombstoned there?
@@ -888,13 +880,13 @@ pub const MAX_ROUTE_PROBES: usize = 200;
 /// How many roots the probe's `somepath` target set carries. The full oracle's
 /// root list can be thousands of labels; a probe is a hint about *why* a label
 /// is missing, so it takes the first batch's worth and no more.
-pub const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
+pub(crate) const MAX_ROUTE_ROOTS: usize = MAX_BATCH_LABELS;
 
 /// Splits the oracle's answer into the halves the verdict is made of.
 ///
 /// The main repository is what recall is over, so `oracle_set`, `matched` and
 /// `missing` are all main-repo labels and `missing_external` is the rest.
-/// Nothing in Phase 5 changes this: `missing` is what fails a change set
+/// That split does not move: `missing` is what fails a change set
 /// (`RdepsResult::ok`), and `external_route` is a filter of `missing`, so it
 /// stays a subset of it however wide cambium's own vocabulary grows. A
 /// repository whose targets cambium does not reach shows up as a main-repo
@@ -956,7 +948,7 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// A deterministic sample of at most `k` labels, sorted so the JSON is stable.
-pub fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
+pub(crate) fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
     let mut all: Vec<String> = labels.to_vec();
     all.sort();
     all.dedup();
@@ -976,9 +968,9 @@ pub fn sample(labels: &[String], k: usize, seed: u64) -> Vec<String> {
 
 /// Splits the roots into query-sized batches: at most `max_labels` each, and
 /// at most `max_bytes` of expression each. A single label longer than the byte
-/// cap still gets its own batch — dropping it would silently weaken the
+/// cap still gets its own batch: dropping it would silently weaken the
 /// oracle, and Bazel will say if it is really too long.
-pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[String]> {
+pub(crate) fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[String]> {
     let max_labels = max_labels.max(1);
     let mut out = Vec::new();
     let mut start = 0;
@@ -1005,12 +997,12 @@ pub fn batches(roots: &[String], max_labels: usize, max_bytes: usize) -> Vec<&[S
 /// query *words*, and the lexer ends a word at a `+`, so one unquoted
 /// `//bazel:libc++` makes the whole batch a syntax error rather than one
 /// missing label.
-pub fn label_set(labels: &[String]) -> String {
+pub(crate) fn label_set<S: AsRef<str>>(labels: &[S]) -> String {
     format!(
         "set({})",
         labels
             .iter()
-            .map(|l| query_word(l))
+            .map(|l| query_word(l.as_ref()))
             .collect::<Vec<_>>()
             .join(" ")
     )
@@ -1020,8 +1012,8 @@ pub fn label_set(labels: &[String]) -> String {
 /// changed files.
 ///
 /// The `kind(rule, ...)` wrapper is not cosmetic. Bazel's `rdeps` answer
-/// includes *file* targets — the generated `//lib:lib.out` of a genrule, the
-/// `//pkg:BUILD.bazel` of a package, and the roots themselves — while cambium's
+/// includes *file* targets (the generated `//lib:lib.out` of a genrule, the
+/// `//pkg:BUILD.bazel` of a package, and the roots themselves) while cambium's
 /// walk emits rules only (`cambium_index::walk` filters on `NodeKind::Rule`).
 /// Without the wrapper every changed file in the change set reads as a target
 /// Bazel reached and cambium missed, which is the one thing this oracle is
@@ -1029,7 +1021,7 @@ pub fn label_set(labels: &[String]) -> String {
 /// restriction is applied to the other tools' answers
 /// (`ToolRun::restrict_to_rules`), so all three are compared over one
 /// universe.
-pub fn rdeps_expression(roots: &[String]) -> String {
+pub(crate) fn rdeps_expression(roots: &[String]) -> String {
     format!("kind(rule, rdeps(//..., {}))", label_set(roots))
 }
 
@@ -1043,7 +1035,7 @@ struct Batch {
 /// Runs one batched `rdeps` query.
 ///
 /// **Exit 3 is accepted.** Under `--keep_going` Bazel exits 3 when it finished
-/// but hit errors — on a real repository that is routine: `bazel/bazel` at
+/// but hit errors: on a real repository that is routine: `bazel/bazel` at
 /// these pins references external repositories that cannot be fetched on macOS
 /// (a GraalVM distribution with no macos-x64 build, an RBE config that needs
 /// Docker), so the transitive closure of `//...` cannot be completed. Bazel
@@ -1070,32 +1062,6 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
         partial: a.partial,
         unresolved: a.unresolved,
     })
-}
-
-/// Every rule target `//...` names, at whatever revision the workspace is on.
-///
-/// This is the *size of cambium's answer* on a globally invalidated change set:
-/// it says `//...`, and `//...` is this set. Without the number the report can
-/// only say "cambium went global", which hides the thing a reader actually
-/// wants — bazel-diff found M targets, cambium is asking the user to build N,
-/// and N/M is what a global costs.
-///
-/// It doubles as the rule filter for that change set's other tools
-/// ([`crate::tools::ToolRun::restrict_to_rule_set`]), so the one query
-/// serves both and the two sides stay in one vocabulary.
-///
-/// Exit 3 is accepted for the reason [`query_rdeps`] gives: a partial universe
-/// under `--keep_going` under-counts N, which understates cambium's
-/// over-approximation rather than flattering it.
-pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {
-    let (labels, partial) = bazel_query::labels(bazel, "kind(rule, //...)", "kind(rule, //...)")?;
-    if partial {
-        tracing::warn!(
-            labels = labels.len(),
-            "the universe query exited 3 under --keep_going; the global answer size is a lower bound"
-        );
-    }
-    Ok(labels)
 }
 
 #[cfg(test)]
@@ -1168,13 +1134,34 @@ mod tests {
         assert_eq!(clean.missing_external.len(), 1);
     }
 
+    static EMPTY: BTreeSet<String> = BTreeSet::new();
+
+    /// The oracle's inputs for a step with no base index, no dirty packages
+    /// and no output base: what most of these tests vary is the changed
+    /// paths and cambium's answer.
+    fn inputs<'a>(
+        head: IndexRef<'a>,
+        changed: &'a BTreeSet<String>,
+        cambium: &'a BTreeSet<String>,
+    ) -> OracleInputs<'a> {
+        OracleInputs {
+            head,
+            base: None,
+            changed,
+            cambium,
+            dirty_packages: &EMPTY,
+            output_base: None,
+            added_or_deleted: None,
+        }
+    }
+
     /// A stub Bazel whose every `query` prints `stdout` and exits `code`.
     ///
     /// `bazel_query::labels` spawns the binary rather than going through
     /// [`cambium_bazel::BazelRunner`], so the seam a test can take here is the
     /// executable itself.
     fn bazel_answering(dir: &Path, code: i32, stdout: &str) -> Bazel {
-        let binary = dir.join("bazel");
+        let binary = dir.join("stub-bazel");
         cambium_testkit::executable_script(
             &binary,
             &format!("printf '%s' {}\nexit {code}", shell_word(stdout)),
@@ -1311,11 +1298,6 @@ mod tests {
 
     #[test]
     fn recall_is_one_when_the_oracle_is_empty_and_a_fraction_otherwise() {
-        let ours: BTreeSet<String> = ["//a:a".to_string()].into_iter().collect();
-        assert_eq!(recall(&ours, &BTreeSet::new()), 1.0);
-        let theirs = set(&["//a:a", "//b:b"]);
-        assert_eq!(recall(&ours, &theirs), 0.5);
-        assert_eq!(recall(&theirs, &theirs), 1.0);
         let r = RdepsResult {
             oracle_labels: 4,
             matched: 3,
@@ -1325,19 +1307,13 @@ mod tests {
         assert_eq!(RdepsResult::default().recall(), 1.0);
     }
 
-    // ---- the stub Bazel ----
+    // ---- `run` end to end over a stub Bazel ----
     //
     // `Bazel::at` runs whatever binary it is given, so a script that ignores
-    // its arguments and prints a fixed answer is a complete Bazel as far as
-    // the oracle is concerned. That is enough to drive `run` end to end: what
-    // is under test here is which labels are asked about and how the answer is
-    // scored, not Bazel.
-    #[cfg(unix)]
-    fn stub_bazel(dir: &Path, answer: &str) -> Bazel {
-        let bin = dir.join("stub-bazel");
-        cambium_testkit::executable_script(&bin, &format!("cat <<'EOF'\n{answer}\nEOF"));
-        Bazel::at(dir.to_path_buf(), Some(bin.to_str().unwrap()))
-    }
+    // its arguments and prints a fixed answer ([`bazel_answering`]) is a
+    // complete Bazel as far as the oracle is concerned. That is enough to
+    // drive `run` end to end: what is under test here is which labels are
+    // asked about and how the answer is scored, not Bazel.
 
     /// The scenario of 11ae8e0: `defs/defs.bzl` is listed in the `srcs` of a
     /// filegroup in its own package. Bazel's `rdeps` names the filegroup; if
@@ -1377,25 +1353,14 @@ mod tests {
         // Bazel reaches the filegroup from the changed `.bzl`; the loading
         // package's rule is reached through the load, which `rdeps` over a
         // source label does not see, so the oracle names only the filegroup.
-        let bazel = stub_bazel(ws, "//defs:bzl_srcs");
+        let bazel = bazel_answering(ws, 0, "//defs:bzl_srcs\n");
         let idx = bzl_filegroup_index();
         let changed = set(&["defs/defs.bzl"]);
 
         // cambium answers with the loading package only: the miss.
         let loads_only = set(&["//app:app"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &loads_only,
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &loads_only))
             .unwrap();
         assert_eq!(
             r.roots,
@@ -1412,18 +1377,7 @@ mod tests {
         // With the file's consumers in the answer, the same oracle passes.
         let with_consumers = set(&["//app:app", "//defs:bzl_srcs"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &with_consumers,
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &with_consumers))
             .unwrap();
         assert!(r.missing.is_empty());
         assert_eq!(r.recall(), 1.0);
@@ -1437,22 +1391,11 @@ mod tests {
         let ws = tmp.path();
         std::fs::create_dir_all(ws.join("docs")).unwrap();
         std::fs::write(ws.join("docs/README.md"), "hi\n").unwrap();
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let idx = bzl_filegroup_index();
         let changed = set(&["docs/README.md"]);
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(idx.view(), &changed, &EMPTY))
             .unwrap();
         assert!(r.roots.is_empty());
         assert_eq!(r.unowned_paths, 1);
@@ -1467,20 +1410,16 @@ mod tests {
         let ws = tmp.path();
         std::fs::create_dir_all(ws.join("defs")).unwrap();
         std::fs::write(ws.join("defs/defs.bzl"), "x\n").unwrap();
-        let bazel = stub_bazel(ws, "//defs:bzl_srcs\n@quiche//:x\n//external:y");
+        let bazel = bazel_answering(ws, 0, "//defs:bzl_srcs\n@quiche//:x\n//external:y\n");
         let idx = bzl_filegroup_index();
         let r = RdepsOracle::default()
             .run(
                 &bazel,
-                &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &set(&["defs/defs.bzl"]),
-                    cambium: &set(&["//defs:bzl_srcs"]),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
+                &inputs(
+                    idx.view(),
+                    &set(&["defs/defs.bzl"]),
+                    &set(&["//defs:bzl_srcs"]),
+                ),
             )
             .unwrap();
         assert!(r.missing.is_empty(), "{:?}", r.missing);
@@ -1543,7 +1482,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         // Neither `lib/BUILD` nor `lib/gone.cc` is on disk at head.
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let head = head_index_without_the_deleted_package();
         let base = base_index_with_a_deleted_package();
         let changed = set(&["lib/BUILD", "lib/gone.cc"]);
@@ -1610,7 +1549,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         // `lib/gone.cc` is not on disk: that is what makes it deleted.
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let head = bzl_filegroup_index();
         let base = base_index_with_a_consumed_source();
         let changed = set(&["lib/gone.cc"]);
@@ -1653,25 +1592,14 @@ mod tests {
         // package and `dirty_packages` is the only place its name survives.
         // Before the dirty set was consulted this case could not be satisfied
         // at all, and it failed every such change set on the 2026-09-08
-        // published run — `//internal/search/smartsearch` on sourcegraph,
+        // box run: `//internal/search/smartsearch` on sourcegraph,
         // `//modules/drivers/lidar/vanjeelidar` on apollo.
         assert!(run(&none, &set(&["lib"])).ok());
         // A different package does not satisfy it.
         assert!(!run(&none, &set(&["other"])).ok());
         // And with no base index the half is skipped rather than failed.
         let r = RdepsOracle::default()
-            .run(
-                &bazel,
-                &OracleInputs {
-                    head: head.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
-                    output_base: None,
-                    added_or_deleted: None,
-                },
-            )
+            .run(&bazel, &inputs(head.view(), &changed, &EMPTY))
             .unwrap();
         assert!(!r.deleted_checked);
         assert!(r.ok());
@@ -1688,21 +1616,13 @@ mod tests {
             std::fs::write(ws.join(format!("defs/f{i}.bzl")), "x\n").unwrap();
             changed.insert(format!("defs/f{i}.bzl"));
         }
-        let bazel = stub_bazel(ws, "");
+        let bazel = bazel_answering(ws, 0, "\n");
         let idx = bzl_filegroup_index();
-        let inputs = OracleInputs {
-            head: idx.view(),
-            base: None,
-            changed: &changed,
-            cambium: &changed,
-            dirty_packages: &BTreeSet::new(),
-            output_base: None,
-            added_or_deleted: None,
-        };
-        let full = RdepsOracle::default().run(&bazel, &inputs).unwrap();
+        let step = inputs(idx.view(), &changed, &changed);
+        let full = RdepsOracle::default().run(&bazel, &step).unwrap();
         assert_eq!(full.roots.len(), 10);
         assert!(!full.sampled);
-        let capped = RdepsOracle::new(3, 7).run(&bazel, &inputs).unwrap();
+        let capped = RdepsOracle::new(3, 7).run(&bazel, &step).unwrap();
         assert_eq!(capped.roots.len(), 3);
         assert!(capped.sampled);
     }
@@ -1843,13 +1763,8 @@ mod tests {
             .run(
                 &bazel,
                 &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &quiet_changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
                     output_base: Some(ob.path()),
-                    added_or_deleted: None,
+                    ..inputs(idx.view(), &quiet_changed, &EMPTY)
                 },
             )
             .unwrap();
@@ -1891,13 +1806,8 @@ mod tests {
             .run(
                 &bazel,
                 &OracleInputs {
-                    head: idx.view(),
-                    base: None,
-                    changed: &changed,
-                    cambium: &BTreeSet::new(),
-                    dirty_packages: &BTreeSet::new(),
                     output_base: Some(ob.path()),
-                    added_or_deleted: None,
+                    ..inputs(idx.view(), &changed, &EMPTY)
                 },
             )
             .unwrap();
@@ -1906,30 +1816,5 @@ mod tests {
         assert_eq!(ri.failed, vec!["@@base_pip3//...:*"], "{r:#?}");
         assert_eq!(ri.labels_added, 0);
         assert!(r.skipped_roots.contains(&"@@base_pip3//...:*".to_string()));
-        let mut sum = RdepsOracleSummary::default();
-        sum.add(&r);
-        assert_eq!(sum.repository_change_sets, 0, "not counted as rooted");
-    }
-
-    #[test]
-    fn the_summary_counts_the_steps_the_repository_half_added_roots_on() {
-        let mut sum = RdepsOracleSummary::default();
-        let mut o = RdepsResult::default();
-        sum.add(&o);
-        o.repository_inputs = Some(RepositoryRoots {
-            roots: vec!["@@r//...:*".into()],
-            labels_added: 7,
-            ..Default::default()
-        });
-        sum.add(&o);
-        // A pattern that reached nothing new is not a rooted change set.
-        o.repository_inputs = Some(RepositoryRoots {
-            roots: vec!["@@gone//...:*".into()],
-            failed: vec!["@@gone//...:*".into()],
-            ..Default::default()
-        });
-        sum.add(&o);
-        assert_eq!(sum.repository_change_sets, 1);
-        assert_eq!(sum.repository_labels, 7);
     }
 }

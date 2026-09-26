@@ -1,9 +1,9 @@
 //! `cambium-bench replay` as a whole: which change sets to replay, against
 //! which index, with which diffs, and what to hold the answers against.
 //!
-//! [`crate::replay`] is the stage — one diff against one index — and knows
+//! [`crate::replay`] is the stage (one diff against one index) and knows
 //! nothing about a results directory. This is the orchestration over a
-//! published run's artefacts: the recorded answers, the archived bases, the
+//! finished walk's artefacts: the recorded answers, any archived bases, the
 //! paths cache, the re-derivation cache. It runs no Bazel and needs no
 //! checkout; a git repository (`--repo`) is optional and makes it exact.
 
@@ -29,11 +29,13 @@ pub struct ReplayRequest {
     pub paths: Vec<String>,
     /// `--change-set base..head`.
     pub change_set: Option<String>,
-    /// `--commit sha`: a recorded history commit.
+    /// `--commit sha`: the recorded step whose head it names.
     pub commit: Option<String>,
-    /// `--all`: every recorded change set.
+    /// `--all`: every recorded step.
     pub all: bool,
-    /// `--history`: with `--all`, the history commits too.
+    /// `--history`: meant, with `--all`, to add the history workload's
+    /// commits. A walk's steps are its commits and all of them are recorded,
+    /// so it adds nothing and nothing reads it.
     pub history: bool,
     /// `--index`: the index to replay against, outranking everything.
     pub index: Option<PathBuf>,
@@ -67,8 +69,9 @@ pub struct ReplayReport {
     pub recorded: Vec<RecordedAnswer>,
     pub divergences: Vec<Divergence>,
     pub skipped: Vec<String>,
-    /// What the divergences are against: the baseline, the recorded run, or
-    /// nothing (an explicit `--paths` has nothing to be held against).
+    /// What the divergences are against: `baseline` (the `--baseline` file),
+    /// `the recorded run`, or `nothing` (an explicit `--paths` has nothing to
+    /// be held against).
     pub compared_against: &'static str,
     pub index: PathBuf,
     pub rederived: bool,
@@ -114,9 +117,8 @@ pub fn index_path(run: &SubjectRun<'_>, req: &ReplayRequest) -> PathBuf {
     }
 }
 
-/// Every recorded answer under one subject: the change sets always, the
-/// history commits when asked. Both files go through the schema gate.
-pub fn load_recorded(run: &SubjectRun<'_>, _history: bool) -> Result<Vec<RecordedAnswer>> {
+/// Every step the subject's walk recorded, through the schema gate.
+pub fn load_recorded(run: &SubjectRun<'_>) -> Result<Vec<RecordedAnswer>> {
     let walk = run.walk_result_path();
     anyhow::ensure!(
         walk.exists(),
@@ -160,7 +162,7 @@ pub fn replay_subject(run: &SubjectRun<'_>, req: &ReplayRequest) -> Result<Repla
             p.exists().then(|| PathsCache::read(&p)).transpose()?
         }
     };
-    let recorded = load_recorded(run, req.history)?;
+    let recorded = load_recorded(run)?;
     let wanted = wanted(req, &recorded)?;
     let cfg = run.config();
 
@@ -332,9 +334,9 @@ impl Replays<'_> {
         texts: &dyn WorkspaceText,
         rederive: bool,
     ) -> Option<ReplayOutcome> {
-        // The base the run itself spliced onto, when the change-set driver
-        // archived one: that is the graph the run walked, where the index at
-        // the pin is the graph as of some later commit. `--index` is the one
+        // The base the run itself spliced onto, when the retired change-set
+        // driver archived one: that is the graph the run walked, where the
+        // index at the pin is the graph as of some later commit. `--index` is the one
         // thing that outranks it, because it is an explicit instruction.
         let opened = match &self.archived {
             None => None,
@@ -398,11 +400,11 @@ impl Replays<'_> {
 ///
 /// The oracle on the box compares the incrementally applied index against a
 /// fresh Bazel build at the pin, and that fresh build is the only artefact
-/// that says what the externals tables *are* there. The history archives it;
+/// that says what the externals tables *are* there. The walk archives it;
 /// this opens it, re-derives its tables from the head tree's own text with
-/// this build, and compares. `None` when the run archived no head index —
+/// this build, and compares. `None` when the run archived no head index:
 /// quiet by design, since the precheck runs this for every subject and a run
-/// published before the history archived its head has none.
+/// from before the head was archived has none.
 pub fn head_check_subject(
     run: &SubjectRun<'_>,
     repo: Option<&Path>,

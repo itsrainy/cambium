@@ -2,11 +2,11 @@
 //!
 //! The comparison is not specific to bazel-diff. It asks: given a
 //! `(base, head)` change set, which targets does *tool X* say are affected, and how
-//! long did it take to say it? Anything that can answer that — bazel-diff's
+//! long did it take to say it? Anything that can answer that (bazel-diff's
 //! Rust binary, its Kotlin jar, Uber's Tango, bazel-contrib's
-//! target-determinator, a shell script — plugs in here
-//! by implementing [`Tool`], and [`crate::compare`] compares whatever it
-//! is handed against cambium and against the `rdeps` oracle without knowing
+//! target-determinator, a shell script) plugs in here
+//! by implementing [`Tool`], and [`crate::walk`] scores whatever it is
+//! handed against the `rdeps` oracle, as it scores cambium, without knowing
 //! which tool it is talking to.
 //!
 //! Two things every such tool needs, and which is why they live in
@@ -40,11 +40,11 @@ pub mod target_determinator;
 
 // ------------------------------------------------------------ finding them
 
-/// Where the foil tools are, as the command line said.
+/// Where the peer tools are, as the command line said.
 ///
 /// Every field is "nothing was said", and the binary fills them from its
-/// flags — each with the environment variable of the same meaning as a
-/// fallback — so the library reads no environment on a workload's behalf.
+/// flags (each with the environment variable of the same meaning as a
+/// fallback) so the library reads no environment on a workload's behalf.
 /// [`ToolLocations::from_env`] is the one place it can, for a caller with no
 /// command line (the real-tool tests).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl ToolLocations {
 /// at its place under the installation directory, which is explicit or the
 /// cache directory `fetch.sh` writes into.
 #[derive(Clone, Copy, Debug)]
-pub struct Install {
+pub(crate) struct Install {
     /// `~/.cache/cambium/<cache_name>`.
     pub cache_name: &'static str,
     /// The binary's path under the installation directory.
@@ -136,7 +136,7 @@ impl Install {
     /// A `key=value` per line `VERSION` file, rendered as `tag` plus the
     /// short `commit`, or just the tag when there is no commit.
     ///
-    /// Both Go foils are pinned by tag and commit and neither can be asked its
+    /// Both Go peers are pinned by tag and commit and neither can be asked its
     /// own version (upstream Tango ships no CLI at all; a `go build` of
     /// target-determinator leaves the version unstamped), so the file the
     /// fetch script wrote is the only identity the comparison can record.
@@ -150,15 +150,10 @@ impl Install {
         }
         let tag = fields.get("tag").copied()?;
         Some(match fields.get("commit") {
-            Some(c) => format!("{tag} {}", &c[..c.len().min(7)]),
+            Some(c) => format!("{tag} {}", crate::util::short(c, 7)),
             None => tag.to_string(),
         })
     }
-}
-
-/// The first twelve characters of a sha, for a scratch file name.
-pub fn short_sha(s: &str) -> String {
-    s.chars().take(12).collect()
 }
 
 // ------------------------------------------------------------ naming them
@@ -166,13 +161,13 @@ pub fn short_sha(s: &str) -> String {
 /// The tool names a `--tools` list asks for, before any is looked for on
 /// disk.
 ///
-/// The list is exact when given; otherwise the default is two foils — a
-/// bazel-diff and Tango — because a comparison against one tool only tells
+/// The list is exact when given; otherwise the default is two peers (a
+/// bazel-diff and Tango) because a comparison against one tool only tells
 /// you which of the two disagrees with cambium, not which of the three is the
-/// odd one out. target-determinator is the third foil and is named
-/// explicitly rather than run by default: a published run is already eight
+/// odd one out. target-determinator is the third peer and is named
+/// explicitly rather than run by default: a full run is already eight
 /// hours, and its shape (one `cquery` per revision, no warm half) is the one
-/// a reader reaches for last. cambium is not a foil: it is what the foils are
+/// a reader reaches for last. cambium is not a peer: it is what the peers are
 /// compared against and runs on every change set whether or not it is named,
 /// so naming it alone is how a run measures cambium with no tool to disagree
 /// with it.
@@ -249,25 +244,6 @@ pub struct ToolRun {
     /// Wall time for the answer with nothing cached: for a hash-diffing tool,
     /// hashing *both* revisions plus the diff.
     pub cold_wall: Duration,
-    /// Wall time for the answer when the base side was already computed — the
-    /// number a CI system that keeps yesterday's hashes would see. `None` for
-    /// tools with no such split.
-    pub warm_wall: Option<Duration>,
-    /// The tool's own output file, kept for post-hoc inspection of a
-    /// disagreement.
-    pub raw_output_path: Option<PathBuf>,
-    /// The tool's own notion of how far each label sits from the change, when
-    /// it has one (Tango's `distance`; bazel-diff's `targetDistance` when it
-    /// was run with `--depEdgesFile`). Compared against cambium's per-target
-    /// depth in the report; `None` when the tool reports no such number, which
-    /// is not the same as "every depth is zero".
-    pub depths: Option<BTreeMap<String, u32>>,
-    /// How many rows were dropped by [`ToolRun::restrict_to_rules`]
-    /// because they name a *file*, not a rule. Both bazel-diff and Tango emit
-    /// source-file targets (`//pkg:BUILD.bazel`) that cambium's affected set
-    /// never contains, so counting them keeps the universe honest instead of
-    /// hiding the filter.
-    pub dropped_file_targets: usize,
 }
 
 impl ToolRun {
@@ -276,63 +252,23 @@ impl ToolRun {
     ///
     /// cambium's walk emits `NodeKind::Rule` nodes only (see
     /// `cambium_index::walk`), so a tool's source-file rows would show up
-    /// as `cambium_missing` — a *failure* — for a difference that is purely
+    /// as `cambium_missing` (a *failure*) for a difference that is purely
     /// one of vocabulary. A label the index does not know at all is kept: that
     /// is a real disagreement (an external label, or something cambium never
     /// indexed) and the classifier should see it.
     pub fn restrict_to_rules(&mut self, index: cambium_index::IndexRef<'_>) {
-        let mut dropped = 0usize;
-        self.labels.retain(|label| {
-            let keep = match index.id_of(label) {
-                Some(id) => index.is_rule(id),
-                None => true,
-            };
-            if !keep {
-                dropped += 1;
-            }
-            keep
+        self.labels.retain(|label| match index.id_of(label) {
+            Some(id) => index.is_rule(id),
+            None => true,
         });
-        if let Some(d) = self.depths.as_mut() {
-            d.retain(|label, _| self.labels.contains(label));
-        }
-        self.dropped_file_targets += dropped;
-    }
-
-    /// The same restriction, against an explicit set of rule labels rather
-    /// than an index.
-    ///
-    /// A *globally invalidated* change set has no head index — that is the whole
-    /// point of it — so [`ToolRun::restrict_to_rules`] has nothing to ask.
-    /// The tools still run there (their cost, and the size of the precise
-    /// answer they found, are exactly what a global change set has to report), and
-    /// their answers still have to be counted in cambium's vocabulary, so the
-    /// rule universe comes from one `kind(rule, //...)` query instead
-    /// ([`crate::oracles::rdeps::rule_universe`]).
-    ///
-    /// A main-repository label the universe does not name is a file target and
-    /// is dropped; an `@repo//...` label is kept, for the same reason
-    /// `restrict_to_rules` keeps a label the index does not know.
-    pub fn restrict_to_rule_set(&mut self, rules: &BTreeSet<String>) {
-        let mut dropped = 0usize;
-        self.labels.retain(|label| {
-            let keep = crate::oracles::rdeps::is_external(label) || rules.contains(label);
-            if !keep {
-                dropped += 1;
-            }
-            keep
-        });
-        if let Some(d) = self.depths.as_mut() {
-            d.retain(|label, _| self.labels.contains(label));
-        }
-        self.dropped_file_targets += dropped;
     }
 }
 
 /// One label, in the spelling every tool and cambium can be compared in.
 ///
 /// Three tools print the same target three ways. Bazel's query proto under
-/// bzlmod uses *canonical* repository names — `@@rules_cc+//:x`, or
-/// `@@rules_cc~//:x` on Bazel 7 — while Tango prints whatever the proto said
+/// bzlmod uses *canonical* repository names (`@@rules_cc+//:x`, or
+/// `@@rules_cc~//:x` on Bazel 7) while Tango prints whatever the proto said
 /// and bazel-diff prints the apparent name `@rules_cc//:x`. Left alone, every
 /// external label in the run would appear on both sides of the symmetric
 /// difference at once, drowning the classes that matter. So each tool runs
@@ -397,26 +333,20 @@ pub struct RunContext {
 }
 
 impl RunContext {
-    /// The startup flags as one space-joined string, which is how bazel-diff
-    /// and friends take them (`--bazelStartupOptions "<flags>"`).
-    pub fn startup_flags_arg(&self) -> String {
-        self.startup_flags.join(" ")
-    }
-
     /// The startup flags a tool may use: the run's *minus*
     /// `--output_base`.
     ///
     /// An output base is only safe to share between invocations that run in
     /// the same workspace directory. Repository rules may write absolute paths
-    /// into the external tree — envoy's `envoy_api` repo symlinks every entry
-    /// of `api/` into the workspace it was fetched from — and the fetch marker
+    /// into the external tree (envoy's `envoy_api` repo symlinks every entry
+    /// of `api/` into the workspace it was fetched from) and the fetch marker
     /// does not mention the workspace, so Bazel never refetches. Point a
     /// second workspace (a tool's base worktree, tango's own scratch
     /// checkouts) at the same output base and it inherits the *first*
     /// workspace's symlinks; delete that first workspace and every one of them
     /// dangles. That is how a benchmark run ended with
     /// `Error computing the main repository mapping: ... '@@envoy_api//bazel'
-    /// does not have [a package]` on every subsequent query — a hard exit 1,
+    /// does not have [a package]` on every subsequent query: a hard exit 1,
     /// raised before the query is evaluated, so `--keep_going` cannot soften
     /// it, and cambium's own index queries were the casualty.
     ///
@@ -433,16 +363,11 @@ impl RunContext {
             .collect()
     }
 
-    /// [`Self::tool_startup_flags`], space-joined.
-    pub fn tool_startup_flags_arg(&self) -> String {
-        self.tool_startup_flags().join(" ")
-    }
-
     /// A child process carrying this context's environment.
     ///
     /// Stdin is always `/dev/null` and `CI=1` rides along unless the caller's
-    /// own environment already sets `CI` — see
-    /// [`Self::apply_noninteractive`] for why.
+    /// own environment already sets `CI`: see
+    /// [`noninteractive_command`] for why.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         noninteractive_command(program, &self.env)
     }
@@ -455,8 +380,8 @@ impl RunContext {
 /// A child process carrying `env`, unable to block on a prompt: stdin is
 /// nulled, and `CI=1` is set unless `env` already names `CI`.
 ///
-/// A tool never has a terminal to prompt against — it runs unattended, in a
-/// batch of hundreds of change sets — but some of them assume one anyway.
+/// A tool never has a terminal to prompt against (it runs unattended, in a
+/// batch of hundreds of change sets) but some of them assume one anyway.
 /// Nulling stdin makes any such prompt fail at once with EOF instead of
 /// hanging, and removes any ambiguity about where that EOF came from; `CI=1`
 /// is the general signal most such CLIs (Aspect's plugins included; see
@@ -466,12 +391,12 @@ impl RunContext {
 ///
 /// Neither is a fix for a prompt that *cannot* be skipped. The Aspect CLI's
 /// `query` wrapper opens an interactive preset picker whenever it gets no
-/// positional expression — bazel-diff's `--query_file` invocation exactly —
+/// positional expression (bazel-diff's `--query_file` invocation exactly)
 /// and `CI=1` does not stop it; that is why the run never reaches the Aspect
 /// CLI at all: see [`crate::checkout::bazelisk_env`].
 ///
 /// The one process builder for every tool and for `cambi`: the product under
-/// measurement is run exactly as a foil is.
+/// measurement is run exactly as a peer is.
 pub fn noninteractive_command(
     program: impl AsRef<std::ffi::OsStr>,
     env: &[(String, String)],
@@ -487,8 +412,8 @@ pub fn noninteractive_command(
 
 /// A tool that answers "what is affected between base and head".
 ///
-/// Object-safe on purpose: [`crate::compare`] takes `&[&dyn Tool]` so a
-/// run can compare against several tools at once.
+/// Object-safe on purpose: [`crate::walk::BazelChecks`] holds `&[&dyn Tool]`
+/// so a walk can run several peers at every sampled step.
 pub trait Tool {
     /// Stable identifier used in JSON keys and report columns
     /// (`bazel-diff-rust`, `bazel-diff-kotlin`, `tango`).
@@ -514,7 +439,7 @@ pub struct Captured {
 }
 
 /// Runs `cmd`, timing it, and turns a non-zero exit into an error that carries
-/// the tail of stderr — a tool failing on one change set out of two hundred is
+/// the tail of stderr: a tool failing on one change set out of two hundred is
 /// only debuggable if the message says why.
 pub fn run_capture(cmd: &mut Command, what: &str) -> Result<Captured> {
     run_capture_accepting(cmd, what, |s| s.success())
@@ -549,7 +474,7 @@ pub fn run_capture_accepting(
 }
 
 /// The last `n` lines of `s`.
-pub fn tail(s: &str, n: usize) -> String {
+pub(crate) fn tail(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
@@ -559,7 +484,7 @@ pub fn tail(s: &str, n: usize) -> String {
 ///
 /// The git plumbing lives in [`cambium_diff::Worktree`], which the engine also
 /// uses to run Bazel at a revision the working tree is not on; this adds the
-/// one thing the comparison needs on top — a copy of the untracked
+/// one thing the comparison needs on top: a copy of the untracked
 /// `cambium.toml`.
 #[derive(Debug)]
 pub struct BaseWorktree {
@@ -569,17 +494,16 @@ pub struct BaseWorktree {
 /// Copies the workspace's generated `cambium.toml` into the base worktree.
 ///
 /// The benchmark writes that file into the repository root and excludes it from
-/// git, so a fresh `git worktree add` does not have it — and on `bazel/bazel`
+/// git, so a fresh `git worktree add` does not have it, and on `bazel/bazel`
 /// the root package is `filegroup(name = "srcs", srcs = glob(["*"]))`, which
 /// swallows it. The head tree's `//:srcs` then lists `//:cambium.toml` and the
 /// base tree's does not, so the tools see the filegroup change on every
 /// change set while cambium (whose base index was built in a tree that had the file)
 /// sees nothing. That surfaced as `//:srcs` in `cambium_missing` on a change set
 /// whose only changed files were `.github/workflows/*.yml`, which no rule
-/// consumes at all: a disagreement manufactured entirely by the harness, in
-/// the same family as the case-collision one above.
+/// consumes at all: a disagreement manufactured entirely by the harness.
 ///
-/// A tracked `cambium.toml` is left alone — the checkout already has the right
+/// A tracked `cambium.toml` is left alone: the checkout already has the right
 /// version of it.
 pub(crate) fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Result<()> {
     let src = repo_worktree.join(cambium_engine::config::CONFIG_FILE);
@@ -605,8 +529,8 @@ pub(crate) fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Resu
 
 impl BaseWorktree {
     /// Adds (or reuses) a worktree of `repo_worktree` at `base_sha`, under
-    /// `scratch`. Reuse matters: consecutive change sets in an adjacent-change set sweep
-    /// share revisions, and re-adding a worktree per change set would dominate.
+    /// `scratch`. Reuse matters: consecutive walk steps share revisions, and
+    /// re-adding a worktree per step would dominate.
     pub fn create(repo_worktree: &Path, base_sha: &str, scratch: &Path) -> Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let path = scratch.join("base-worktree");
@@ -696,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_filter_drops_file_targets_and_counts_them() {
+    fn the_rule_filter_drops_file_targets_and_keeps_unknown_labels() {
         // A hand-built index with one rule and one source file: the file-target
         // row is what cambium never reports, so it must not read as missing.
         let mut b = cambium_index::IndexBuilder::new(cambium_index::new_lineage());
@@ -719,12 +643,6 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            depths: Some(
-                [("//pkg:t", 0u32), ("//pkg:a.txt", 0)]
-                    .iter()
-                    .map(|(l, d)| (l.to_string(), *d))
-                    .collect(),
-            ),
             ..Default::default()
         };
         run.restrict_to_rules(index.view());
@@ -733,59 +651,17 @@ mod tests {
             vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
             "unknown labels stay: they are a real disagreement"
         );
-        assert_eq!(run.dropped_file_targets, 1);
-        assert_eq!(run.depths.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn the_rule_filter_also_works_from_a_bare_universe() {
-        // What a global change set has instead of an index: the answer to
-        // `kind(rule, //...)`.
-        let universe: BTreeSet<String> = ["//pkg:t".to_string()].into_iter().collect();
-        let mut run = ToolRun {
-            labels: ["//pkg:t", "//pkg:a.txt", "@ext//:x"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            depths: Some(
-                [("//pkg:t", 0u32), ("//pkg:a.txt", 0)]
-                    .iter()
-                    .map(|(l, d)| (l.to_string(), *d))
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-        run.restrict_to_rule_set(&universe);
-        assert_eq!(
-            run.labels.iter().cloned().collect::<Vec<_>>(),
-            vec!["//pkg:t".to_string(), "@ext//:x".to_string()],
-            "external labels stay; a main-repo label //... does not name is a file"
-        );
-        assert_eq!(run.dropped_file_targets, 1);
-        assert_eq!(run.depths.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn startup_flags_are_passed_as_one_string() {
-        assert_eq!(
-            ctx().startup_flags_arg(),
-            "--output_base=/tmp/ob --bazelrc=/tmp/rc"
-        );
     }
 
     /// An output base is per workspace directory; tools run in other
     /// workspaces, so they must not inherit ours.
     #[test]
     fn tools_do_not_inherit_the_output_base() {
-        assert_eq!(ctx().tool_startup_flags_arg(), "--bazelrc=/tmp/rc");
-        assert!(!ctx()
-            .tool_startup_flags()
-            .iter()
-            .any(|f| f.contains("output_base")));
+        assert_eq!(ctx().tool_startup_flags(), vec!["--bazelrc=/tmp/rc"]);
     }
 
-    /// A tool's stdin must never be a terminal a prompt could wait on —
-    /// see [`RunContext::apply_noninteractive`]. `cat` on a null stdin sees
+    /// A tool's stdin must never be a terminal a prompt could wait on:
+    /// see [`noninteractive_command`]. `cat` on a null stdin sees
     /// EOF immediately and produces no output.
     #[test]
     fn a_tool_command_gets_no_stdin() {
@@ -835,23 +711,11 @@ mod tests {
     fn a_base_worktree_is_created_moved_and_removed() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
-        git(&repo, &["config", "user.email", "t@example.com"]).unwrap();
-        git(&repo, &["config", "user.name", "t"]).unwrap();
-        std::fs::write(repo.join("a.txt"), "one").unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["commit", "--quiet", "-m", "one"]).unwrap();
-        let first = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
-        std::fs::write(repo.join("a.txt"), "two").unwrap();
-        git(&repo, &["commit", "--quiet", "-am", "two"]).unwrap();
-        let second = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
+        cambium_testkit::init_repo(&repo);
+        cambium_testkit::write(&repo, "a.txt", "one");
+        let first = cambium_testkit::commit_all(&repo, "one");
+        cambium_testkit::write(&repo, "a.txt", "two");
+        let second = cambium_testkit::commit_all(&repo, "two");
 
         let scratch = dir.path().join("scratch");
         let path = {

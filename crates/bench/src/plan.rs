@@ -1,13 +1,13 @@
 //! A run plan: which `cambium-bench` invocations a run is, in order.
 //!
-//! One definition of the published run. The launcher screen composes a
-//! [`Plan`] and shows its command lines; `cambium-bench run` takes the same
-//! plan from flags and executes it; `tools/bench/run-published.sh` builds the
-//! binaries and calls `run`. Nothing else knows the flags a published `history`
-//! or `changes` step takes, so the three cannot drift.
+//! One definition of the full run. The launcher screen composes a [`Plan`]
+//! and shows its command lines; `cambium-bench run` takes the same plan from
+//! flags and executes it; `tools/bench/run-published.sh` builds the binaries
+//! and calls `run`. Nothing else knows the flags a `walk` step takes, so the
+//! three cannot drift.
 //!
-//! Every step is a child `cambium-bench` process — the same one a person
-//! would type — so a step that fails leaves its result files and its
+//! Every step is a child `cambium-bench` process (the same one a person
+//! would type) so a step that fails leaves its result files and its
 //! progress file exactly as an interactive run would, and the next step
 //! resumes from them.
 
@@ -17,9 +17,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
+use crate::util::revs_match;
+
 /// How big a run is: small is the fifteen-minute check before a real run,
 /// medium the laptop-sized slice `--quick` is sugar for, and large the
-/// configuration `docs/RESULTS.md` is published from.
+/// configuration `docs/RESULTS.md` is generated from.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Size {
     Small,
@@ -106,7 +108,7 @@ impl StepKind {
 
     /// A step the rest of the subject cannot run without: a subject that
     /// cannot fetch must not cost the other four their run, but neither may
-    /// its history be attempted on a worktree that is not there.
+    /// its walk be attempted on a worktree that is not there.
     pub fn gates_subject(self) -> bool {
         matches!(self, StepKind::Fetch | StepKind::Build)
     }
@@ -116,8 +118,9 @@ impl StepKind {
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub subjects: Vec<String>,
-    /// Tool names as `--tools` takes them. `cambium` is always in the list it
-    /// passes, because it is what the others are compared against.
+    /// Tool names as `--tools` takes them. The walk step passes them on as
+    /// `--peers` with cambium left out (`Plan::peer_flag`): cambium is the
+    /// walk's driver and runs whether or not the list names it.
     pub tools: Vec<String>,
     /// Which steps to take, per subject. The order is [`StepKind::ALL`]'s
     /// whatever order they are named in.
@@ -134,7 +137,8 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The published run over `subjects`: every step, both foils.
+    /// The full run over `subjects`: every step, and bazel-diff and Tango as
+    /// the peers.
     pub fn published(subjects: Vec<String>) -> Self {
         Self {
             subjects,
@@ -170,7 +174,7 @@ impl Plan {
     }
 
     /// The results this plan's workloads would run over, one line per
-    /// subject: `envoy: history, changes`.
+    /// subject: `envoy: walk`.
     pub fn existing_results(&self) -> Vec<String> {
         let root = self.results();
         let mut out = Vec::new();
@@ -330,7 +334,7 @@ impl Invocation {
 /// The steps of a plan, handed out one at a time, with the rule that a failed
 /// gating step (a fetch, a build) skips the rest of that subject.
 ///
-/// Both drivers — the launcher's screen and `cambium-bench run` — pull from
+/// Both drivers (the launcher's screen and `cambium-bench run`) pull from
 /// one of these, so the skip rule is written once.
 #[derive(Debug)]
 pub struct Queue {
@@ -422,11 +426,11 @@ fn clock() -> String {
     now.get(11..19).unwrap_or(&now).to_string()
 }
 
-/// The preflight a published run refuses without: both binaries built from
+/// The preflight a full run refuses without: both binaries built from
 /// the tree at `sha`.
 ///
 /// Twice a run went on for hours with a binary that was not what the log said
-/// it was — a resumed result file, then a stale build — so the driver script
+/// it was (a resumed result file, then a stale build) so the driver script
 /// compared shas; this is that check, on both the product under measurement
 /// and the harness itself.
 pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {
@@ -434,13 +438,13 @@ pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {
     anyhow::ensure!(!expected.is_empty(), "--require-sha needs a sha");
     let bin = version_sha(cambi_version).unwrap_or_default();
     anyhow::ensure!(
-        same_sha(&bin, expected),
+        revs_match(&bin, expected),
         "REFUSING: cambi is built from '{}' but the tree is at '{expected}'; rebuild first",
         if bin.is_empty() { "?" } else { &bin }
     );
     let own = crate::util::tool_sha();
     anyhow::ensure!(
-        same_sha(own, expected),
+        revs_match(own, expected),
         "REFUSING: cambium-bench is built from '{own}' but the tree is at '{expected}'; rebuild first"
     );
     Ok(())
@@ -450,11 +454,6 @@ pub fn require_sha(cambi_version: &str, expected: &str) -> Result<()> {
 pub fn version_sha(version: &str) -> Option<String> {
     let inner = version.rsplit_once('(')?.1.split_once(')')?.0.trim();
     (!inner.is_empty() && inner.chars().all(|c| c.is_ascii_hexdigit())).then(|| inner.to_string())
-}
-
-/// Two shas name the same commit when one is a prefix of the other.
-fn same_sha(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 #[cfg(test)]
@@ -472,11 +471,11 @@ mod tests {
         p.steps().iter().map(|s| s.command_line()).collect()
     }
 
-    /// The published size is the run that produced the published numbers:
+    /// The large size is the run that produced the numbers in RESULTS.md:
     /// these command lines are the contract `run-published.sh` used to spell
     /// out by hand.
     #[test]
-    fn the_published_size_is_the_published_run() {
+    fn the_large_size_is_the_full_run() {
         assert_eq!(
             lines(&plan(Size::Large)),
             [
@@ -589,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn one_workload_runs_one_workload_and_cambium_is_always_a_tool() {
+    fn each_step_is_its_own_invocation_and_no_tools_passes_no_peers() {
         let p = Plan {
             steps: vec![
                 StepKind::Fetch,

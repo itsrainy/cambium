@@ -1,7 +1,7 @@
 //! What each verb does once its arguments are parsed.
 //!
 //! The clap files marshal arguments; this is where a `subjects fetch`, a
-//! `history` or a `changes` actually happens, against a [`SubjectRun`] the
+//! `walk` or a `report` actually happens, against a [`SubjectRun`] the
 //! session resolved. Nothing here prints: every function answers with the
 //! paths and documents it produced, and the binary decides how to show them
 //! (`--format`, exit codes). That is what lets the launcher, the `run` verb
@@ -207,21 +207,13 @@ pub fn run_walk(
         .ok_or_else(|| anyhow::anyhow!("unknown tier {:?}: correctness, full", req.tier))?;
     let schedule = tier.schedule(&req.overrides);
 
-    // The peers are the named tools, cambium excluded (it is the driver, not
-    // a peer). `--peers none` and a schedule with peers off both mean none.
+    // `--peers none` and a schedule with peers off both mean none.
     let peers_off = req.peers.iter().any(|p| p == "none") || !schedule.peers;
-    let wanted = if peers_off {
+    let owned = if peers_off {
         Vec::new()
     } else {
-        tools::wanted(&req.peers)?
+        open_peers(&req.peers, locations)?
     };
-    let owned: Vec<Box<dyn tools::Tool>> = wanted
-        .iter()
-        .map(|n| tools::open(n, locations))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
     let tool_refs: Vec<&dyn tools::Tool> = owned.iter().map(|p| p.as_ref()).collect();
 
     let checkout = run.checkout()?;
@@ -237,44 +229,18 @@ pub fn run_walk(
         .steps
         .or(run.session.quick.then_some(crate::QUICK_COMMITS))
         .unwrap_or(run.entry.history_window);
-    let (paths, globs) = run.entry.invalidator_rules();
-    let probes = crate::walk::Probes {
-        // Best effort: three of the four content tags need no index, and a
-        // fresh subject has none. Missing hubs cost the `hub` tag its steps
-        // and nothing else.
-        hub_packages: run.hub_packages().unwrap_or_default(),
-        invalidator_paths: paths,
-        invalidator_globs: globs,
-    };
-    let (commits, steps) = crate::walk::steps(&checkout.repo, &run.entry.pin, range, &probes)?;
+    let (commits, steps) =
+        crate::walk::steps(&checkout.repo, &run.entry.pin, range, &run.probes())?;
     anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
     let only = select_only(&steps, &req.only)?;
     let steps = only.clone().unwrap_or(steps);
 
-    let oracle_sample = if schedule.oracle_every_step {
-        crate::walk::Sample::all(&steps)
-    } else {
-        crate::walk::sample(
-            &steps,
-            run.session.seed,
-            schedule.per_tag,
-            Some(schedule.oracle_sample),
-        )
-    };
-    let peer_sample = if peers_off {
-        crate::walk::Sample::default()
-    } else {
-        match schedule.peer_sample {
-            Some(n) => crate::walk::sample(&steps, run.session.seed, schedule.per_tag, Some(n)),
-            None => crate::walk::Sample::all(&steps),
-        }
-    };
+    let (oracle_sample, peer_sample) = samples(&steps, &schedule, run.session.seed, peers_off);
 
     let results = run.workload("walk")?;
-    let bazel_used = engine.bazel().version();
     let environment = crate::env::Environment {
         machine: crate::harness::Machine::detect(),
-        bazel_version_used: bazel_used.lines().next().unwrap_or("").trim().to_string(),
+        bazel_version_used: crate::env::bazel_version_used(engine.bazel()),
         cambi_version: cambi.version().to_string(),
         tool_sha: crate::util::tool_sha().to_string(),
         engine_id: String::new(),
@@ -333,6 +299,43 @@ pub fn run_walk(
     Ok(Walked { result, path })
 }
 
+/// The peers a walk runs: the tools `names` asks for, cambium excluded (it is
+/// the driver, not a peer). One that is not installed is skipped with a
+/// warning rather than failing the walk ([`tools::open`]).
+fn open_peers(names: &[String], locations: &ToolLocations) -> Result<Vec<Box<dyn tools::Tool>>> {
+    Ok(tools::wanted(names)?
+        .iter()
+        .map(|n| tools::open(n, locations))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
+/// The steps the oracle runs on and the steps the peers run on, as the
+/// schedule draws them from `steps` at `seed`.
+fn samples(
+    steps: &[crate::walk::Step],
+    schedule: &crate::walk::Schedule,
+    seed: u64,
+    peers_off: bool,
+) -> (crate::walk::Sample, crate::walk::Sample) {
+    let oracle = if schedule.oracle_every_step {
+        crate::walk::Sample::all(steps)
+    } else {
+        crate::walk::sample(steps, seed, schedule.per_tag, Some(schedule.oracle_sample))
+    };
+    let peers = if peers_off {
+        crate::walk::Sample::default()
+    } else {
+        match schedule.peer_sample {
+            Some(n) => crate::walk::sample(steps, seed, schedule.per_tag, Some(n)),
+            None => crate::walk::Sample::all(steps),
+        }
+    };
+    (oracle, peers)
+}
+
 /// The steps `--only` names, in the order they were typed, or `None` when it
 /// named none.
 ///
@@ -340,7 +343,10 @@ pub fn run_walk(
 /// seven steps of a gate are read off a table of short hashes. A spec that
 /// names no step in the window is an error rather than a silent skip, since
 /// the whole point of the flag is to run exactly those steps.
-fn select_only(steps: &[crate::walk::Step], specs: &[String]) -> Result<Option<Vec<crate::walk::Step>>> {
+fn select_only(
+    steps: &[crate::walk::Step],
+    specs: &[String],
+) -> Result<Option<Vec<crate::walk::Step>>> {
     if specs.is_empty() {
         return Ok(None);
     }
@@ -483,9 +489,9 @@ pub fn read_labels(run: &SubjectRun<'_>, q: &LabelsQuery) -> Result<Labels> {
 
 // ------------------------------------------------------------------ report
 
-/// `report`: each subject's section, plus the top table and the synthetic
-/// headline, rebuilt from every subject that has results. Answers with the
-/// document and how many subjects it rendered.
+/// `report`: each subject's section, plus the top table, rebuilt from every
+/// subject that has results. Answers with the document and how many subjects
+/// it rendered.
 pub fn regenerate_report(
     session: &Session,
     subject: Option<&str>,
@@ -496,9 +502,9 @@ pub fn regenerate_report(
         .unwrap_or_else(|| session.root.join("docs/RESULTS.md"));
     let parent = &session.results_root;
     // Every subject at once, not just the named one: a per-subject nightly job
-    // rewrites the top table and the synthetic headline wholesale, and must not
-    // drop its neighbours' rows on the way.
-    let results = report::SubjectResults::collect(&session.manifest, parent, &session.subjects)?;
+    // rewrites the top table wholesale, and must not drop its neighbours' rows
+    // on the way.
+    let results = report::SubjectResults::collect(&session.manifest, parent)?;
     anyhow::ensure!(
         !results.is_empty(),
         "report: no walk-*.json under {}",
@@ -542,12 +548,7 @@ mod tests {
             peer_sample: Default::default(),
             environment: crate::env::Environment {
                 machine: crate::harness::Machine::detect(),
-                bazel_version_used: String::new(),
-                cambi_version: String::new(),
-                tool_sha: String::new(),
-                engine_id: String::new(),
-                config_hash: String::new(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 0,
@@ -582,7 +583,10 @@ mod tests {
     #[test]
     fn only_picks_the_named_steps_in_the_order_they_were_typed() {
         let all = window();
-        assert!(select_only(&all, &[]).unwrap().is_none(), "no flag walks the range");
+        assert!(
+            select_only(&all, &[]).unwrap().is_none(),
+            "no flag walks the range"
+        );
 
         let picked = select_only(
             &all,

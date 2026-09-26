@@ -2,9 +2,9 @@
 //!
 //! cambium works out which packages a changed `.bzl` reaches by scanning
 //! `load()` statements at index time (`cambium_index::loads`). That is a
-//! reimplementation of something Bazel already knows, so on every change set whose
-//! change set contains a `.bzl` the suite asks Bazel the same question —
-//! `rbuildfiles(<paths>)`, the call the engine used to make — and requires
+//! reimplementation of something Bazel already knows, so on every change set
+//! that contains a `.bzl` the oracle asks Bazel the same question
+//! (`rbuildfiles(<paths>)`, the call the engine used to make) and requires
 //! cambium's dirty set to be a **superset** of the packages Bazel names.
 //!
 //! One-sided on purpose, for the same reason the `rdeps` oracle is: extra
@@ -18,14 +18,14 @@
 //! Skyframe's *file* nodes, and under bzlmod every package's evaluation
 //! depends on the main repository's repository mapping, which depends on the
 //! module extensions, which depend on the `.bzl` files that declare
-//! repositories. So a change to a workspace-closure `.bzl` — envoy's
+//! repositories. So a change to a workspace-closure `.bzl` (envoy's
 //! `bazel/repository_locations.bzl`, `bazel/repositories_extra.bzl`,
-//! `api/bazel/repositories.bzl` — makes `rbuildfiles` name **every package in
+//! `api/bazel/repositories.bzl`) makes `rbuildfiles` name **every package in
 //! the repository**, whether or not anything loads the file.
 //!
-//! The second published run is the evidence. On all five envoy change sets
+//! The second full run on the box is the evidence. On all five envoy change sets
 //! that touched such a file, Bazel named 1211 packages and the packages
-//! cambium had not dirtied were exactly the complement of its dirty set —
+//! cambium had not dirtied were exactly the complement of its dirty set:
 //! 1099 + 112, 1102 + 109, 1104 + 110, 1101 + 111, 1099 + 112, all summing to
 //! the same 1211 no matter which `.bzl` moved. Among them is
 //! `bazel/external/c-ares/include/config_linux`, whose whole `BUILD` file is
@@ -35,19 +35,19 @@
 //! Requiring containment there would be requiring cambium to answer "the whole
 //! repository" for every repository-declaring `.bzl` edit, which is the answer
 //! the external-repository stage exists to avoid, and which the `rdeps` oracle
-//! — the check on the *affected set*, the thing that has to be right — already
+//! (the check on the *affected set*, the thing that has to be right) already
 //! covers. So the oracle looks for that signature before it fails: a package
 //! Bazel named, that cambium did not dirty, whose `BUILD` file contains no
 //! `load()` statement at all. One such witness proves the answer came through
 //! repository evaluation rather than through load edges, and the whole answer
 //! is recorded ([`LoadOracleResult::repository_evaluation`]) rather than
-//! failed. Without a witness — every named package does load something — the
+//! failed. Without a witness (every named package does load something) the
 //! containment check stands exactly as before.
 //!
 //! A second witness reads the head tree rather than the named packages: if no
 //! `BUILD` file reaches the changed `.bzl` through main-repository `load()`
-//! edges at all — the file is loaded only from `MODULE.bazel`, `WORKSPACE`,
-//! or the `.bzl` files those load — then no load closure could contain it, and
+//! edges at all (the file is loaded only from `MODULE.bazel`, `WORKSPACE`,
+//! or the `.bzl` files those load) then no load closure could contain it, and
 //! every package Bazel named came through repository evaluation by
 //! construction. xla's `third_party/stablehlo/workspace.bzl` is the case: a
 //! module extension's input, loaded by nothing a package loads, and yet
@@ -61,7 +61,7 @@
 //! a partial answer and recorded, exactly as the `rdeps` oracle accepts a
 //! partial batch: a shorter Bazel answer can only weaken the containment
 //! check, never invert it. That is also the failure mode this whole change
-//! exists to remove — on the real subjects, `rbuildfiles` exited 3 on 5 of 150
+//! exists to remove: on the real subjects, `rbuildfiles` exited 3 on 5 of 150
 //! `bazel/bazel` commits, and the engine had to answer `//...` each time.
 
 use std::collections::BTreeSet;
@@ -81,7 +81,7 @@ pub struct LoadOracleResult {
     pub partial: bool,
     /// Main-repository packages `rbuildfiles` named.
     pub bazel_packages: BTreeSet<String>,
-    /// Labels naming a loader outside any main-repo package — a module
+    /// Labels naming a loader outside any main-repo package: a module
     /// extension's `.bzl`, a `WORKSPACE` load. cambium answers those with a
     /// global invalidation, and a global change set never reaches this oracle, so
     /// they are recorded rather than compared.
@@ -126,7 +126,7 @@ impl LoadOracleResult {
 /// The witness for "this answer is not a load closure". Read from the tree and
 /// not from the index on purpose: the index's own load data is the thing under
 /// test, so excusing it with its own answer would be circular. A package whose
-/// `BUILD` file cannot be read is not a witness — the safe direction, since a
+/// `BUILD` file cannot be read is not a witness: the safe direction, since a
 /// missing witness only keeps the containment check on.
 pub fn build_file_loads_nothing(workspace: &Path, package: &str) -> bool {
     let dir = workspace.join(package);
@@ -144,8 +144,8 @@ pub fn build_file_loads_nothing(workspace: &Path, package: &str) -> bool {
 ///
 /// One scan of the tree's Starlark files, inverted; then a walk up the
 /// loaders of each checked file. A loader that is a workspace file is not
-/// followed — that is the repository-evaluation route, the one this witness
-/// exists to name — and a `BUILD` file anywhere on the way disqualifies the
+/// followed (that is the repository-evaluation route, the one this witness
+/// exists to name) and a `BUILD` file anywhere on the way disqualifies the
 /// file. Read from the tree and not from the index, like
 /// [`build_file_loads_nothing`], because the index's load data is what is
 /// under test. A file no `load()` names at all is vacuously in the answer: no
@@ -267,16 +267,16 @@ pub fn run<'a>(
 /// Roll-up over a run's change sets, for the summary document and the report table.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadOracleSummary {
-    /// ChangeSets whose change set contained a `.bzl`.
+    /// Change sets that contained a `.bzl`.
     pub change_sets: usize,
     /// `.bzl` files asked about, over those change sets.
     pub checked: usize,
-    /// ChangeSets where Bazel's answer was partial (exit 3).
+    /// Change sets where Bazel's answer was partial (exit 3).
     pub partial: usize,
     /// Packages Bazel named that cambium did not dirty, on the change sets
     /// where the answer was a load closure. Must be zero.
     pub missing_packages: usize,
-    /// ChangeSets whose `rbuildfiles` answer named a package that loads
+    /// Change sets whose `rbuildfiles` answer named a package that loads
     /// nothing, so it came through repository evaluation and the containment
     /// check did not apply. Reported, not failed.
     #[serde(default)]

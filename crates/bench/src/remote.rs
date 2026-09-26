@@ -2,7 +2,7 @@
 //! results off it for an offline replay.
 //!
 //! What this does on the box is read-only: `scp` of result files and index
-//! archives, and — for the paths cache — one `cambium-bench replay
+//! archives, and (for the paths cache) one `cambium-bench replay
 //! --write-paths` over the mirror, which is `git diff` and nothing else.
 //! Never Bazel, never a write into the results tree.
 //!
@@ -139,14 +139,14 @@ impl BenchBox {
     }
 
     /// Pulls one subject into `<cache>/<subject>/`: the index at the pin, the
-    /// results, the archived bases and heads, and — with `paths` — the diff
+    /// results, the archived bases and heads, and (with `paths`) the diff
     /// of every recorded change set, derived on the box by the same binary.
     ///
     /// A subject already under `cache` is pulled again only when the box's
     /// result files differ from the cached ones, compared by sha256 over ssh,
     /// so a precheck never replays a run the box has since replaced. With no
     /// running box the cache is used as it is. Read-only on the box, and small: the largest
-    /// index in the last published run was envoy's at 7.3 MB, the bases at
+    /// index in the last full run was envoy's at 7.3 MB, the bases at
     /// most a few hundred megabytes a subject.
     pub fn pull(&self, subject: &str, cache: &Path, paths: bool) -> Result<Pulled> {
         let dir = cache.join(subject);
@@ -222,7 +222,7 @@ impl BenchBox {
         Ok(parse_sums(&String::from_utf8_lossy(&out.stdout)))
     }
 
-    /// The recorded change sets carry (base, head) and no diff — it was taken
+    /// The recorded change sets carry (base, head) and no diff: it was taken
     /// from the mirror at run time and never written down. This asks the box
     /// for it, once, with the box's own `cambium-bench replay --write-paths`
     /// over the mirror, printed to stdout and written beside the index here.
@@ -277,7 +277,7 @@ fn local_sums(dir: &Path) -> BTreeMap<String, String> {
 }
 
 /// `sha256sum` output, `<hash>  <path>` (or `<hash> *<path>`), as path to hash.
-pub fn parse_sums(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_sums(text: &str) -> BTreeMap<String, String> {
     text.lines()
         .filter_map(|l| {
             let (hash, path) = l.trim().split_once(char::is_whitespace)?;
@@ -291,7 +291,7 @@ pub fn parse_sums(text: &str) -> BTreeMap<String, String> {
 /// (`index-<pin>[-<bazel version>].bin` -> `paths-<pin>[-<version>].json`):
 /// the pin spelling carries the Bazel-version suffix, which is also the name
 /// `cambium-bench replay` looks the cache up under.
-pub fn paths_file_name(dir: &Path) -> Option<String> {
+pub(crate) fn paths_file_name(dir: &Path) -> Option<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())

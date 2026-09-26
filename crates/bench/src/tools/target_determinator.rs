@@ -7,21 +7,9 @@
 //! revision and diffs the graphs; cambium keeps a persistent index and splices
 //! the packages a commit touched; target-determinator runs `bazel cquery` at
 //! each revision, hashes each *configured* target, and reports the ones whose
-//! hash moved. Its answer is a flat set of labels printed one per line.
-//!
-//! Three consequences for this file:
-//!
-//! - **No distance.** The binary prints labels and, under `-verbose`, an
-//!   explanation of why each one is in the set; neither is a number of hops.
-//!   So [`ToolRun::depths`] is `None`, which is not the same as every depth
-//!   being zero. Tango remains the only foil with a depth column.
-//! - **No warm mode.** bazel-diff's cold splits into "hash base" and "hash
-//!   head, diff", and the second half is what a CI system that kept yesterday's
-//!   hashes pays. target-determinator is one invocation that does both
-//!   revisions, and its cross-run cache ([`TargetDeterminator::with_cache`]) is
-//!   off here, so there is no honest half to quote as warm and
-//!   [`ToolRun::warm_wall`] is `None`.
-//! - **Its own checkout.** See [`TargetDeterminator::affected`].
+//! hash moved. Its answer is a flat set of labels printed one per line, from
+//! one invocation that does both revisions; it runs in a checkout of its own
+//! (see [`TargetDeterminator::affected`]).
 //!
 //! # Flags
 //!
@@ -34,12 +22,11 @@
 //!   "everything is affected" as target-determinator's *answer*, at the
 //!   precision of a global invalidation, rather than as the failure it is.
 //!   `fatal` turns it into a non-zero exit, which [`run_capture`] reports with
-//!   the tail of stderr the way every other foil's failure is reported.
-//! - **`-nocache_results`** ([`TargetDeterminator::with_cache`] turns it back
-//!   on). The cquery result cache persists across invocations, so with it on
-//!   a change set's cost would depend on which change sets ran before it. Its
-//!   key also excludes the environment and the machine, which upstream's own
-//!   README warns about.
+//!   the tail of stderr the way every other peer's failure is reported.
+//! - **`-nocache_results`**. The cquery result cache persists across
+//!   invocations, so with it on a change set's cost would depend on which
+//!   change sets ran before it. Its key also excludes the environment and the
+//!   machine, which upstream's own README warns about.
 //!
 //! `-enforce-clean` is left at upstream's `allow-ignored`: the harness writes
 //! an untracked `cambium.toml` into every checkout and excludes it through
@@ -55,8 +42,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::tools::{
-    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+    normalise_label, run_capture, Install, RunContext, Tool, ToolLocations, ToolRun,
 };
+use crate::util::short;
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_TARGET_DETERMINATOR";
@@ -82,11 +70,6 @@ const INSTALL: Install = Install {
     fetch_script: "tools/target-determinator/fetch.sh",
 };
 
-/// `~/.cache/cambium/target-determinator`, where the fetch script installs.
-pub fn default_dir() -> PathBuf {
-    INSTALL.dir(None)
-}
-
 /// The tag and commit `fetch.sh` recorded, as one line.
 ///
 /// Preferred over asking the binary: `go build` leaves upstream's version
@@ -101,31 +84,12 @@ pub fn read_version_file(dir: &Path) -> Option<String> {
 pub struct TargetDeterminator {
     bin: PathBuf,
     version: String,
-    /// `-targets`; the universe to consider.
-    targets: String,
-    /// `-enforce-clean`.
-    enforce_clean: String,
-    /// `-analysis-cache-clear-strategy`.
-    analysis_cache_clear_strategy: String,
-    /// `-before-query-error-behavior`.
-    before_query_error_behavior: String,
-    /// The negation of `-nocache_results`. Off; see the module docs.
-    cache: bool,
-    /// `-verbose`.
-    verbose: bool,
 }
 
 impl TargetDeterminator {
     /// The pattern every run considers unless told otherwise, which is also
     /// upstream's default and the universe cambium's index covers.
     pub const DEFAULT_TARGETS: &'static str = "//...";
-
-    /// `$CAMBIUM_TARGET_DETERMINATOR`, else
-    /// `$CAMBIUM_TARGET_DETERMINATOR_DIR/bin/target-determinator`, else the
-    /// one under `~/.cache/cambium/target-determinator`.
-    pub fn discover() -> Result<Self> {
-        Self::discover_with(&ToolLocations::from_env())
-    }
 
     /// The binary the command line named, else the one under the installation
     /// directory.
@@ -148,53 +112,7 @@ impl TargetDeterminator {
     }
 
     pub fn at(bin: PathBuf, version: String) -> Self {
-        Self {
-            bin,
-            version,
-            targets: Self::DEFAULT_TARGETS.to_string(),
-            enforce_clean: "allow-ignored".to_string(),
-            analysis_cache_clear_strategy: "skip".to_string(),
-            before_query_error_behavior: "fatal".to_string(),
-            cache: false,
-            verbose: false,
-        }
-    }
-
-    /// Replaces `-targets` (default `//...`).
-    pub fn with_targets(mut self, pattern: impl Into<String>) -> Self {
-        self.targets = pattern.into();
-        self
-    }
-
-    /// Replaces `-analysis-cache-clear-strategy`: `skip`, `shutdown`, or
-    /// `discard`.
-    pub fn with_analysis_cache_clear_strategy(mut self, strategy: impl Into<String>) -> Self {
-        self.analysis_cache_clear_strategy = strategy.into();
-        self
-    }
-
-    /// Replaces `-enforce-clean`: `enforce-clean`, `allow-ignored`, or
-    /// `allow-dirty`.
-    pub fn with_enforce_clean(mut self, mode: impl Into<String>) -> Self {
-        self.enforce_clean = mode.into();
-        self
-    }
-
-    /// Whether to let the tool keep and reuse its cquery result cache. Off;
-    /// see the module docs for what it would do to the timings.
-    pub fn with_cache(mut self, yes: bool) -> Self {
-        self.cache = yes;
-        self
-    }
-
-    /// Whether to pass `-verbose`, which appends an explanation to each label.
-    pub fn with_verbose(mut self, yes: bool) -> Self {
-        self.verbose = yes;
-        self
-    }
-
-    pub fn binary(&self) -> &Path {
-        &self.bin
+        Self { bin, version }
     }
 
     /// The command line for one change set, in order.
@@ -210,13 +128,13 @@ impl TargetDeterminator {
             "-bazel".to_string(),
             ctx.bazel_binary.display().to_string(),
             "-targets".to_string(),
-            self.targets.clone(),
+            Self::DEFAULT_TARGETS.to_string(),
             "-enforce-clean".to_string(),
-            self.enforce_clean.clone(),
+            "allow-ignored".to_string(),
             "-analysis-cache-clear-strategy".to_string(),
-            self.analysis_cache_clear_strategy.clone(),
+            "skip".to_string(),
             "-before-query-error-behavior".to_string(),
-            self.before_query_error_behavior.clone(),
+            "fatal".to_string(),
             "-cache-dir".to_string(),
             ctx.scratch_file("target-determinator-cache")
                 .display()
@@ -230,12 +148,8 @@ impl TargetDeterminator {
             args.push("-bazel-startup-opts".to_string());
             args.push(flag);
         }
-        if !self.cache {
-            args.push("-nocache_results".to_string());
-        }
-        if self.verbose {
-            args.push("-verbose".to_string());
-        }
+        // The cquery result cache stays off; see the module docs.
+        args.push("-nocache_results".to_string());
         args.push(base.to_string());
         args
     }
@@ -254,8 +168,8 @@ impl Tool for TargetDeterminator {
     ///
     /// The tool checks the "before" revision out *in the directory it was
     /// given* whenever that directory is clean, and restores it afterwards.
-    /// Pointed at `ws` — cambium's own checkout, which the rest of the run is
-    /// reading — that would move head out from under the run and throw the
+    /// Pointed at `ws` (cambium's own checkout, which the rest of the run is
+    /// reading) that would move head out from under the run and throw the
     /// Bazel analysis cache away twice per change set. So it gets a worktree
     /// of its own under the run's scratch instead, pinned at head.
     ///
@@ -274,7 +188,7 @@ impl Tool for TargetDeterminator {
         cmd.args(self.args(wt.path(), base, ctx));
         let c = run_capture(
             &mut cmd,
-            &format!("{NAME} {}..{}", short_sha(base), short_sha(head)),
+            &format!("{NAME} {}..{}", short(base, 12), short(head, 12)),
         )?;
         wt.keep();
 
@@ -282,8 +196,8 @@ impl Tool for TargetDeterminator {
         // answer is only inspectable after the fact if we write it down.
         let out = ctx.scratch_file(&format!(
             "{NAME}-{}-{}.txt",
-            short_sha(base),
-            short_sha(head)
+            short(base, 12),
+            short(head, 12)
         ));
         std::fs::write(&out, &c.stdout)
             .with_context(|| format!("writing {NAME} output {}", out.display()))?;
@@ -291,10 +205,6 @@ impl Tool for TargetDeterminator {
         Ok(ToolRun {
             labels: parse_output(&c.stdout)?,
             cold_wall: c.wall,
-            warm_wall: None,
-            raw_output_path: Some(out),
-            depths: None,
-            dropped_file_targets: 0,
         })
     }
 }
@@ -307,7 +217,7 @@ impl Tool for TargetDeterminator {
 ///
 /// Anything that is not a label is an error rather than a skipped line. An
 /// empty set reads as "the tools agree", so it must never be what output we
-/// failed to understand degrades to — and the one thing the binary is known to
+/// failed to understand degrades to, and the one thing the binary is known to
 /// print to stdout that is not a label is the sentinel it emits when it is
 /// about to die.
 pub fn parse_output(text: &str) -> Result<BTreeSet<String>> {
@@ -334,7 +244,6 @@ pub fn parse_output(text: &str) -> Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::git;
 
     fn ctx(scratch: &Path) -> RunContext {
         RunContext {
@@ -403,26 +312,6 @@ mod tests {
             .collect();
         assert_eq!(opts, vec!["--bazelrc=/tmp/rc"]);
         assert!(!args.iter().any(|a| a.contains("output_base")), "{args:?}");
-    }
-
-    #[test]
-    fn the_optional_flags_are_only_there_when_asked_for() {
-        let args = td()
-            .with_cache(true)
-            .with_verbose(true)
-            .with_targets("//src/...")
-            .with_enforce_clean("allow-dirty")
-            .with_analysis_cache_clear_strategy("discard")
-            .args(Path::new("/ws"), "abc123", &ctx(Path::new("/tmp/s")));
-        assert!(!args.iter().any(|a| a == "-nocache_results"));
-        assert!(args.iter().any(|a| a == "-verbose"));
-        assert!(args.windows(2).any(|w| w == ["-targets", "//src/..."]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-enforce-clean", "allow-dirty"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-analysis-cache-clear-strategy", "discard"]));
     }
 
     #[test]
@@ -500,23 +389,11 @@ mod tests {
         // worktree's registered path already resolved.
         let dir_path = dir.path().canonicalize().unwrap();
         let repo = dir_path.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
-        git(&repo, &["config", "user.email", "t@example.com"]).unwrap();
-        git(&repo, &["config", "user.name", "t"]).unwrap();
-        std::fs::write(repo.join("a.txt"), "one").unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["commit", "--quiet", "-m", "one"]).unwrap();
-        let base = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
-        std::fs::write(repo.join("a.txt"), "two").unwrap();
-        git(&repo, &["commit", "--quiet", "-am", "two"]).unwrap();
-        let head = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
+        cambium_testkit::init_repo(&repo);
+        cambium_testkit::write(&repo, "a.txt", "one");
+        let base = cambium_testkit::commit_all(&repo, "one");
+        cambium_testkit::write(&repo, "a.txt", "two");
+        let head = cambium_testkit::commit_all(&repo, "two");
 
         let scratch = dir_path.join("scratch");
         let stub = write_stub(&dir_path);
@@ -527,10 +404,13 @@ mod tests {
             run.labels.iter().cloned().collect::<Vec<_>>(),
             vec!["//pkg:t".to_string()]
         );
-        assert!(run.warm_wall.is_none(), "there is no warm half to quote");
-        assert!(run.depths.is_none(), "the tool reports no distance");
         // The raw answer is written down, since the tool only prints it.
-        let raw = std::fs::read_to_string(run.raw_output_path.unwrap()).unwrap();
+        let raw = std::fs::read_to_string(scratch.join(format!(
+            "{NAME}-{}-{}.txt",
+            short(&base, 12),
+            short(&head, 12)
+        )))
+        .unwrap();
         assert!(raw.contains("//pkg:t"), "{raw}");
 
         let wt = scratch.join(HEAD_WORKTREE);
@@ -553,10 +433,9 @@ mod tests {
     /// prints one label, the way the real binary does.
     fn write_stub(dir: &Path) -> PathBuf {
         let path = dir.join("target-determinator-stub.sh");
-        std::fs::write(
+        cambium_testkit::executable_script(
             &path,
-            r#"#!/bin/sh
-set -e
+            r#"set -e
 ws=""; cache=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -569,11 +448,7 @@ mkdir -p "$(dirname "$cache")"
 printf '%s' "$ws" > "$(dirname "$cache")/working-directory"
 echo "//pkg:t"
 "#,
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        );
         path
     }
 }

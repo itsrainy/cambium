@@ -5,7 +5,7 @@
 //! ```text
 //! <id>.git/              bare mirror, fetched once and updated on demand
 //! <id>/                  worktree, checked out at whatever commit a step needs
-//! store/<id>/            the benchmark lineage's baseline store (dir backend)
+//! store/<id>/            the benchmark lineage's index store (dir backend)
 //! output/<id>[-<ver>]/   per-repo (and per Bazel version) --output_base
 //! repository_cache/      shared --repository_cache: external fetches once per machine
 //! disk_cache/            shared --disk_cache
@@ -218,7 +218,7 @@ impl SubjectsDir {
     ///
     /// Emitting and cloning a synthetic subject touches no network and is
     /// idempotent, so a workload can run one without a separate `subjects
-    /// fetch` step first — which is what CI does. A real subject still needs
+    /// fetch` step first, which is what CI does. A real subject still needs
     /// that step: [`fetch`](Self::fetch) clones from `entry.url`, which may
     /// cost gigabytes or need credentials, and no workload should start that
     /// by surprise.
@@ -235,7 +235,6 @@ impl SubjectsDir {
 pub struct Checkout {
     pub id: String,
     pub dir: PathBuf,
-    pub mirror: PathBuf,
     pub repo: Repo,
     subjects: SubjectsDir,
 }
@@ -256,7 +255,6 @@ impl Checkout {
         Ok(Self {
             id: entry.id.clone(),
             dir: dir.clone(),
-            mirror: subjects.mirror(entry),
             repo: Repo::new(dir),
             subjects: subjects.clone(),
         })
@@ -326,7 +324,7 @@ pub const BAZEL_RELEASES_URL: &str = "https://github.com/bazelbuild/bazel/releas
 /// with `BAZELISK_BASE_URL` at the aspect-cli releases, so `bazelisk` there
 /// *is* the Aspect CLI, a wrapper that adds its own behaviour in front of the
 /// Bazel named by `.bazelversion`. One of those behaviours failed every
-/// bazel-diff change set on the first published run: bazel-diff hands the
+/// bazel-diff change set on the first full run: bazel-diff hands the
 /// query expression over as `--query_file`, and `aspect query` with no
 /// positional expression does not pass the flag through but opens its
 /// interactive preset picker ("Select a preset query: why / deps / …"),
@@ -338,9 +336,9 @@ pub const BAZEL_RELEASES_URL: &str = "https://github.com/bazelbuild/bazel/releas
 /// the rc routes to the Aspect CLI this names the Bazel it would have run
 /// (`.bazelversion`, unless the run asked for one) and points bazelisk back
 /// at the official releases. bazelisk consults the environment before
-/// `.bazeliskrc`, so the two variables win in every workspace of the run —
-/// the subject's checkout, the tools' base worktree, Tango's scratch
-/// checkouts — without touching a tracked file.
+/// `.bazeliskrc`, so the two variables win in every workspace of the run
+/// (the subject's checkout, the tools' base worktree, Tango's scratch
+/// checkouts) without touching a tracked file.
 pub fn bazelisk_env(worktree: &Path, bazel_version: Option<&str>) -> Vec<(String, String)> {
     let requested = bazel_version.filter(|v| !v.is_empty()).map(str::to_string);
     let mut env = Vec::new();
@@ -467,7 +465,6 @@ mod tests {
         Checkout {
             id: "r".into(),
             dir: PathBuf::from("/tmp/wt"),
-            mirror: PathBuf::from("/tmp/mirror"),
             repo: Repo::new("/tmp/wt"),
             subjects: SubjectsDir::new(PathBuf::from("/tmp/subjects")),
         }

@@ -57,11 +57,7 @@ impl SubjectResults {
     /// Every manifest entry with a results directory under `parent`, in
     /// manifest order, plus any stray directory the manifest no longer names.
     /// A renamed or removed entry still has numbers worth showing.
-    pub fn collect(
-        manifest: &crate::manifest::Manifest,
-        parent: &Path,
-        _subjects: &crate::checkout::SubjectsDir,
-    ) -> Result<Vec<Self>> {
+    pub fn collect(manifest: &crate::manifest::Manifest, parent: &Path) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for entry in &manifest.repos {
@@ -198,7 +194,7 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
     }
     let _ = writeln!(s);
     for r in &rows {
-        let short = &r.pin[..r.pin.len().min(12)];
+        let short = crate::util::short(&r.pin, 12);
         let tight = r
             .tightness_p50
             .map(|t| format!("{t:.3}"))
@@ -420,7 +416,7 @@ mod tests {
                 tool_sha: "sha".into(),
                 engine_id: "eng".into(),
                 config_hash: "h".into(),
-                output_bases: Default::default(),
+                ..Default::default()
             },
             started_unix: 0,
             index_build_ms: 12000,

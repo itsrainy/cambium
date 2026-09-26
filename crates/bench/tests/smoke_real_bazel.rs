@@ -2,7 +2,7 @@
 //!
 //! Ignored by default, and deliberately so: it wants bazelisk on disk, it
 //! downloads a Bazel release the first time, and each change set costs two
-//! whole-repository `bazel query` runs per tool — tens of seconds even for
+//! whole-repository `bazel query` runs per tool; tens of seconds even for
 //! a five-target workspace. Run it explicitly:
 //!
 //! ```text
@@ -18,7 +18,7 @@
 //! What it is actually for: the unit tests pin the arithmetic and the parsing,
 //! but only a real Bazel can tell you whether the three tools are being asked
 //! the *same question*. Both of the bugs this file was written to catch were
-//! of that kind — bazel-diff and Tango report file targets, and `rdeps`
+//! of that kind: bazel-diff and Tango report file targets, and `rdeps`
 //! returns them too, while cambium's walk emits rules only.
 
 use std::path::{Path, PathBuf};
@@ -319,9 +319,7 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
             bazel_version_used: version.clone().unwrap_or_default(),
             cambi_version: cambi.version().to_string(),
             tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,
@@ -357,8 +355,8 @@ fn the_three_tools_agree_on_a_real_bazel_workspace() {
 /// A second workspace, written for the oracle alone: `defs/defs.bzl` is both a
 /// macro other packages load *and* a source of a filegroup in its own package.
 ///
-/// That is the shape of the miss 11ae8e0 fixed — `utils.bzl` in the `srcs` of
-/// fifteen filegroups in `bazel/bazel` — and it is the shape the sampled
+/// That is the shape of the miss 11ae8e0 fixed (`utils.bzl` in the `srcs` of
+/// fifteen filegroups in `bazel/bazel`) and it is the shape the sampled
 /// oracle could not see, because its roots came from cambium's own direct set.
 fn write_bzl_filegroup_repo(root: &Path) -> Vec<String> {
     std::fs::create_dir_all(root).unwrap();
@@ -451,7 +449,7 @@ cat_rule(
 /// enough to compute it by hand.
 ///
 /// The unit tests pin how the answer is scored; this pins that the question is
-/// the right one — that a changed path really does become a label Bazel
+/// the right one: that a changed path really does become a label Bazel
 /// accepts, and that the set that comes back is the set a person reading the
 /// BUILD files would write down. No other tool runs: the oracle is what is
 /// under test, so bazel-diff and Tango being absent must not skip it.
@@ -527,9 +525,7 @@ fn the_full_oracle_matches_hand_computed_rdeps() {
             bazel_version_used: version.clone().unwrap_or_default(),
             cambi_version: cambi.version().to_string(),
             tool_sha: String::new(),
-            engine_id: String::new(),
-            config_hash: String::new(),
-            output_bases: Default::default(),
+            ..Default::default()
         },
         publish: true,
         resume: false,

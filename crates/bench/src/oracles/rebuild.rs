@@ -1,9 +1,9 @@
 //! The incremental-equals-full oracle on real input.
 //!
-//! After a history has brought an index forward commit by commit, a cold build
+//! After a walk has brought an index forward commit by commit, a cold build
 //! at the same commit must describe the same graph. Ids are not comparable
 //! across lineages, so the comparison is by label: the live nodes, their
-//! kinds, their rule hashes, and the forward edges as label change sets.
+//! kinds, their rule hashes, and the forward edges as label pairs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,9 +29,9 @@ pub struct GraphDiff {
     /// input map, the per-repository path mapping and its `target_only`
     /// flags, the `.bzl` and package external-label rows. These decide how
     /// wide a diff goes before any query happens, and none of them is a node,
-    /// an edge or a rule hash — an index that lost one describes the same
+    /// an edge or a rule hash: an index that lost one describes the same
     /// graph and answers a different question. Absent from records written
-    /// before the field existed; `bench report` reads every history file.
+    /// before the field existed, which read as agreeing here.
     #[serde(default)]
     pub externals_mismatch: Vec<String>,
     /// The Skyframe loading layer, node by node and edge by edge, where the
@@ -137,7 +137,9 @@ pub struct SkyName {
 }
 
 impl SkyName {
-    fn of(v: SkyRef<'_>, id: u32) -> Self {
+    /// Node `id` of a loading layer, by the identity that survives across
+    /// lineages.
+    pub(crate) fn of(v: SkyRef<'_>, id: u32) -> Self {
         SkyName {
             kind: v.kind_of(id),
             root: v.root_name(id).into_owned(),

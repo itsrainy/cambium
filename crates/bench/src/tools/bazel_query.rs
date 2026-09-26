@@ -1,8 +1,8 @@
 //! `bazel query` under `--keep_going`, with one exit-3 policy.
 //!
-//! Every query the harness makes — the oracles, the rule universe, the
-//! classifier's rule lookups — goes through here, so the flags and the exit
-//! code rule below have one definition.
+//! Every query the harness makes (the oracles and the classifier's rule
+//! lookups) goes through here, so the flags and the exit code rule below have
+//! one definition.
 //!
 //! **Why exit 3 is accepted.** Under `--keep_going` Bazel exits 3 when it
 //! finished but hit errors, which on a real subject is routine: `bazel/bazel`

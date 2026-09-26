@@ -10,13 +10,13 @@
 //!
 //! Two ways in, because half the verbs measure nothing:
 //!
-//! - [`Session::subject`] reads files a run left behind — `labels`, `report`,
-//!   `replay` — on a laptop that need not have a Bazel or a `cambi` at all.
+//! - [`Session::subject`] reads files a run left behind (`labels`, `report`,
+//!   `replay`) on a laptop that need not have a Bazel or a `cambi` at all.
 //!   It resolves no binary and creates no directory.
 //! - [`Session::run_subject`] is a workload: it resolves the Bazel binary and
 //!   creates the subject's results directory, absolute, so that every child
-//!   process the workload spawns — in the subject's worktree, in a scratch
-//!   worktree — names the same directory.
+//!   process the workload spawns (in the subject's worktree, in a scratch
+//!   worktree) names the same directory.
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -151,7 +151,7 @@ impl Session {
         // Absolute, always. Tools and Bazel run as child processes with a
         // different working directory (the subject's worktree, a scratch
         // worktree), so a relative `--results-dir bench-results` would name a
-        // different directory in each of them — which is exactly how
+        // different directory in each of them, which is exactly how
         // bazel-diff came to be handed a base worktree that did not exist.
         std::fs::create_dir_all(&run.results)?;
         run.results = absolute(&run.results);
@@ -271,7 +271,7 @@ impl SubjectRun<'_> {
         ))
     }
 
-    /// `<stem>[-<version>].<ext>` — one result file per Bazel version, since
+    /// `<stem>[-<version>].<ext>`: one result file per Bazel version, since
     /// the whole point of naming one is that two can disagree.
     pub fn result_path(&self, dir: &Path, stem: &str, ext: &str) -> PathBuf {
         dir.join(versioned_name(stem, self.version(), ext))
@@ -280,33 +280,6 @@ impl SubjectRun<'_> {
     /// The cold index at `sha`: `bench-results/<subject>/index-<sha>.bin`.
     pub fn index_path(&self, sha: &str) -> PathBuf {
         self.result_path(&self.results, &format!("index-{sha}"), "bin")
-    }
-
-    /// The recorded change sets: `changes/change-sets-<pin>.json`.
-    pub fn change_sets_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("changes"),
-            &format!("change-sets-{}", self.entry.pin),
-            "json",
-        )
-    }
-
-    /// The change-set result: `changes/changes-<pin>.json`.
-    pub fn changes_result_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("changes"),
-            &format!("changes-{}", self.entry.pin),
-            "json",
-        )
-    }
-
-    /// The history result: `history/history-<pin>.json`.
-    pub fn history_result_path(&self) -> PathBuf {
-        self.result_path(
-            &self.workload_path("history"),
-            &format!("history-{}", self.entry.pin),
-            "json",
-        )
     }
 
     /// The walk result: `walk/walk-<pin>.json`.
@@ -324,8 +297,8 @@ impl SubjectRun<'_> {
         self.result_path(&self.results, &format!("paths-{}", self.entry.pin), "json")
     }
 
-    /// The packages of the index's busiest targets, for the stress change
-    /// sets. Needs the cold index at the pin, which is a `subjects build`.
+    /// The packages of the index's busiest targets, for the walk's `hub` tag.
+    /// Needs the cold index at the pin, which is a `subjects build`.
     pub fn hub_packages(&self) -> Result<Vec<String>> {
         let state = self.state()?;
         let path = state
@@ -343,6 +316,22 @@ impl SubjectRun<'_> {
         let pkgs = crate::walk::steps::hub_packages(data.view());
         tracing::info!(hubs = pkgs.len(), "hub packages from the index");
         Ok(pkgs)
+    }
+
+    /// What the walk's step tagger reads besides the commits: the hub
+    /// packages and the configured invalidators. The walk and the Skyframe
+    /// runner both tag through this, so they see the same steps.
+    ///
+    /// The hubs are best effort: three of the four content tags need no
+    /// index, and a fresh subject has none. Missing hubs cost the `hub` tag
+    /// its steps and nothing else.
+    pub fn probes(&self) -> crate::walk::Probes {
+        let (paths, globs) = self.entry.invalidator_rules();
+        crate::walk::Probes {
+            hub_packages: self.hub_packages().unwrap_or_default(),
+            invalidator_paths: paths,
+            invalidator_globs: globs,
+        }
     }
 }
 
@@ -457,17 +446,11 @@ mod tests {
         );
         assert_eq!(run.results, s.results_root.join("bazel"));
         assert!(run
-            .changes_result_path()
-            .ends_with(format!("bazel/changes/changes-{pin}-7.4.1.json")));
-        assert!(run
-            .history_result_path()
-            .ends_with(format!("bazel/history/history-{pin}-7.4.1.json")));
+            .walk_result_path()
+            .ends_with(format!("bazel/walk/walk-{pin}-7.4.1.json")));
         assert!(run
             .paths_cache_path()
             .ends_with(format!("bazel/paths-{pin}-7.4.1.json")));
-        assert!(run
-            .change_sets_path()
-            .ends_with(format!("bazel/changes/change-sets-{pin}-7.4.1.json")));
         assert!(run.index_path("abc").ends_with("bazel/index-abc-7.4.1.bin"));
         assert!(!run.results.exists(), "an offline subject creates nothing");
         assert!(s.subject("nope").is_err());

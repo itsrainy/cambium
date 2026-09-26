@@ -1,11 +1,11 @@
 //! The `cambi` binary, as the harness runs it.
 //!
 //! Everything a user would type, the harness types too: `cambi index build`
-//! for a cold index, `cambi index update` to bring one forward, `cambi index
-//! publish` to upload it, `cambi affected --format json` for the answer. The
-//! harness reads the documents back with the engine's own report types — it
+//! for a cold index, `cambi index publish` to upload it, and `cambi affected
+//! --format json --out` for the answer and the index carried forward. The
+//! harness reads the documents back with the engine's own report types: it
 //! links `cambium-engine` for those types, and for the offline tools
-//! ([`crate::replay`], [`crate::stages`]), never to run the product path
+//! ([`crate::replay`], [`crate::precheck`]), never to run the product path
 //! in-process.
 //!
 //! Two consequences, both deliberate:
@@ -13,7 +13,7 @@
 //! - **What is measured is what a user waits for.** A wall time here includes
 //!   process start, the config load, and serialising the answer to JSON. The
 //!   engine's own `timings_ms.total` travels beside it, from the document, so
-//!   a published table can show both and the difference between them is
+//!   a results table can show both and the difference between them is
 //!   visible rather than assumed.
 //! - **A change to the surface shows up here.** If a flag is renamed or an
 //!   exit code changes meaning, the benchmark fails the way a user's script
@@ -71,10 +71,6 @@ impl AffectedRun {
     /// everything the process paid around it.
     pub fn engine_ms(&self) -> u64 {
         self.report.timings_ms.total
-    }
-
-    pub fn wall_ms(&self) -> u64 {
-        self.wall.as_millis() as u64
     }
 }
 
@@ -193,7 +189,7 @@ impl Cambi {
     }
 
     /// An invocation rooted at `ws`, with this run's environment and no stdin
-    /// to prompt on — built exactly as a foil tool's is.
+    /// to prompt on: built exactly as a peer's is.
     pub fn command(&self, ws: &Path) -> Command {
         let mut cmd = crate::tools::noninteractive_command(&self.path, &self.env);
         cmd.arg("-C").arg(ws);
@@ -247,28 +243,6 @@ impl Cambi {
             cmd.arg("--publish");
         }
         self.run(&mut cmd, &format!("cambi index build {rev}"))
-    }
-
-    /// `cambi index update <base>..<head> --out <file>`, timed end
-    /// to end.
-    pub fn index_update(
-        &self,
-        ws: &Path,
-        base: &str,
-        head: &str,
-        out: &Path,
-        publish: bool,
-    ) -> Result<Duration> {
-        let mut cmd = self.command(ws);
-        cmd.arg("index")
-            .arg("update")
-            .arg(format!("{base}..{head}"))
-            .arg("--out")
-            .arg(out);
-        if publish {
-            cmd.arg("--publish");
-        }
-        self.run(&mut cmd, &format!("cambi index update {base}..{head}"))
     }
 
     /// `cambi index publish <file>`.
@@ -422,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn index_build_and_update_and_publish_say_what_a_user_would_type() {
+    fn index_build_and_publish_say_what_a_user_would_type() {
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv");
         let bin = fake(
@@ -432,13 +406,10 @@ mod tests {
         let c = Cambi::at(&bin).unwrap();
         let out = dir.path().join("i.bin");
         c.index_build(dir.path(), "abc", &out, true).unwrap();
-        c.index_update(dir.path(), "abc", "def", &out, false)
-            .unwrap();
         c.index_publish(dir.path(), &out).unwrap();
         let log = std::fs::read_to_string(&argv).unwrap();
         assert!(log.contains("index build abc"), "{log}");
         assert!(log.contains("--publish"), "{log}");
-        assert!(log.contains("index update abc..def"), "{log}");
         assert!(log.contains("index publish"), "{log}");
     }
 }

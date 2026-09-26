@@ -3,14 +3,16 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
-use anyhow::Result;
 use cambium_bazel::{query_word, Bazel};
 use cambium_index::{IndexRef, WalkOptions};
 use cambium_proto::blaze_query::{attribute::Discriminator, Rule};
 
 use super::Facts;
+use crate::oracles::rdeps::{is_external, label_set};
+
+/// A memo of rule protos by label; `None` for a label Bazel did not return.
+type RuleCache = RefCell<HashMap<String, Option<Rule>>>;
 
 /// A [`Facts`] implementation backed by Bazel and the head index.
 ///
@@ -26,7 +28,7 @@ use super::Facts;
 /// populates from *all* attributes including the implicit ones. If none of the
 /// explicit dependency labels is in the direct set but some other `rule_input`
 /// is, the only way the change reaches this target is an implicit attribute.
-/// That is an approximation in one direction — it only looks one hop back — so
+/// That is an approximation in one direction (it only looks one hop back) so
 /// it is conservative: a multi-hop implicit path lands in `unclassified` and
 /// gets a human's attention rather than being waved through.
 pub struct BazelFacts<'a> {
@@ -58,13 +60,13 @@ pub struct BazelFacts<'a> {
     /// that reached it (`--explain`). Lets the `select` test look along the
     /// whole path instead of one hop.
     paths: HashMap<String, Vec<String>>,
-    cache: RefCell<HashMap<String, Option<Rule>>>,
-    base_cache: RefCell<HashMap<String, Option<Rule>>>,
+    cache: RuleCache,
+    base_cache: RuleCache,
     /// Rule protos fetched for [`Facts::has_external_input`]'s closure sweep,
     /// kept apart from `cache` because that one is populated by `prefetch`
     /// from the symmetric difference and this one from whole dependency
     /// closures.
-    implicit_cache: RefCell<HashMap<String, Option<Rule>>>,
+    implicit_cache: RuleCache,
     /// One forward walk per label, memoised: `bazeldiff_extra_external_content`
     /// asks two questions of the same traversal.
     dep_cache: RefCell<HashMap<String, DepFacts>>,
@@ -168,57 +170,7 @@ impl<'a> BazelFacts<'a> {
         self
     }
 
-    /// `git diff --no-renames --name-only base..head` in `repo`.
-    ///
-    /// Without `--no-renames` git's default rename detection lists only the
-    /// new path of a moved file, and the old one reaches neither the
-    /// deleted half of the oracle nor a marker that recorded it.
-    pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::tools::git(
-            repo,
-            &[
-                "diff",
-                "--no-renames",
-                "--name-only",
-                &format!("{base}..{head}"),
-            ],
-        )?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    /// The changed paths git reports as added or deleted (renames count as
-    /// both, since `diff` without `-M` reports them that way): what can
-    /// change a directory listing.
-    pub fn added_or_deleted_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::tools::git(
-            repo,
-            &[
-                "diff",
-                "--no-renames",
-                "--name-only",
-                "--diff-filter=AD",
-                &format!("{base}..{head}"),
-            ],
-        )?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    fn rule(
-        &self,
-        bazel: &Bazel,
-        cache: &RefCell<HashMap<String, Option<Rule>>>,
-        label: &str,
-    ) -> Option<Rule> {
+    fn rule(&self, bazel: &Bazel, cache: &RuleCache, label: &str) -> Option<Rule> {
         if let Some(hit) = cache.borrow().get(label) {
             return hit.clone();
         }
@@ -238,7 +190,7 @@ impl<'a> BazelFacts<'a> {
     /// external". External labels *are* in the index: `rule_input` is interned
     /// unfiltered, so an `@repo//...` dependency of an indexed rule exists as
     /// an [`cambium_index::NodeKind::Unknown`] node with no package and no
-    /// rule class — enough to see it and to walk past it, which is all this
+    /// rule class, enough to see it and to walk past it, which is all this
     /// needs. (Its own dependencies are not there: cambium queries `//...`, so
     /// the external graph stops at its first node.)
     fn dep_facts(&self, label: &str) -> DepFacts {
@@ -265,7 +217,7 @@ impl<'a> BazelFacts<'a> {
                 continue;
             }
             let l = self.index.label(v);
-            if l.starts_with('@') || l.starts_with("//external:") {
+            if is_external(l) {
                 out.has_external = true;
             } else if self.affected.contains(l) {
                 out.touches_affected = true;
@@ -273,9 +225,9 @@ impl<'a> BazelFacts<'a> {
         }
         // A dependency named in the rule but absent from the index still
         // counts: the index is `//...`, so an external label the walk cannot
-        // reach is exactly the case this looks for. The toolchain graph —
-        // `@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
-        // toolchain — is exactly what a tool's two runs disagree about
+        // reach is exactly the case this looks for. The toolchain graph
+        // (`@bazel_tools//tools/jdk:jdk`, `@local_jdk//:jdk`, the C++
+        // toolchain) is exactly what a tool's two runs disagree about
         // most often, and it is reached through implicit attributes; the index
         // now carries those (`cambium_bazel::QUERY_FLAGS`), so the walk above
         // usually settles it and this is the fallback for a label the index
@@ -300,7 +252,7 @@ impl<'a> BazelFacts<'a> {
                 // filegroup's closure would be a Bazel query each for nothing.
                 .filter(|&v| self.index.is_rule(v))
                 .map(|v| self.index.label(v).to_string())
-                .filter(|l| !self.is_external(l))
+                .filter(|l| !is_external(l))
                 .collect();
             closure.sort();
             closure.dedup();
@@ -317,7 +269,7 @@ impl<'a> BazelFacts<'a> {
     /// so the forward walk usually settles it without a Bazel. When the index
     /// does not know the label, or the walk found nothing, the rule protos of
     /// the label and every rule in its closure are asked the same question of
-    /// their `rule_input` — batched and memoised the way
+    /// their `rule_input`: batched and memoised the way
     /// [`Self::any_implicit_external`] is.
     fn compute_source_directory(&self, label: &str) -> bool {
         let under = |l: &str| directory_contains_changed_path(l, &self.changed_paths);
@@ -336,7 +288,7 @@ impl<'a> BazelFacts<'a> {
                 }
             }
         }
-        closure.retain(|l| !self.is_external(l));
+        closure.retain(|l| !is_external(l));
         closure.sort();
         closure.dedup();
         self.any_rule_input(&closure, |input| under(input))
@@ -349,31 +301,7 @@ impl<'a> BazelFacts<'a> {
     /// hundred of them.
     fn any_rule_input(&self, labels: &[String], pred: impl Fn(&str) -> bool) -> bool {
         for chunk in labels.chunks(PREFETCH_CHUNK) {
-            let todo: Vec<&String> = {
-                let c = self.implicit_cache.borrow();
-                chunk
-                    .iter()
-                    .filter(|l| !c.contains_key(l.as_str()))
-                    .collect()
-            };
-            if !todo.is_empty() {
-                let expr = format!(
-                    "set({})",
-                    todo.iter()
-                        .map(|l| query_word(l))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                if let Some(rules) = crate::tools::bazel_query::rules(self.head, &expr) {
-                    let mut c = self.implicit_cache.borrow_mut();
-                    for r in rules {
-                        c.insert(r.name.clone(), Some(r));
-                    }
-                    for l in todo {
-                        c.entry(l.clone()).or_insert(None);
-                    }
-                }
-            }
+            fill_cache(self.head, &self.implicit_cache, chunk);
             let c = self.implicit_cache.borrow();
             if chunk
                 .iter()
@@ -389,9 +317,7 @@ impl<'a> BazelFacts<'a> {
 
     /// Does any rule in `labels` name an external label among its inputs?
     fn any_implicit_external(&self, labels: &[String]) -> bool {
-        self.any_rule_input(labels, |i| {
-            i.starts_with('@') || i.starts_with("//external:")
-        })
+        self.any_rule_input(labels, is_external)
     }
 
     /// Fetches the rule protos for `labels` in bulk, at both revisions.
@@ -399,7 +325,7 @@ impl<'a> BazelFacts<'a> {
     /// Without this the classifier is one `bazel query <label>` per label, and
     /// the first real run on `bazel/bazel` produced symmetric differences of
     /// tens of thousands of labels: at roughly a second per invocation that is
-    /// hours per change set, and it is *all* process startup — one batched
+    /// hours per change set, and it is *all* process startup; one batched
     /// `query 'set(a b c ...)'` answers five hundred labels in the same time.
     /// Labels the batch does not return are cached as `None`, so a target
     /// Bazel will not talk about is not retried one at a time either.
@@ -407,10 +333,7 @@ impl<'a> BazelFacts<'a> {
     /// Best-effort: a batch that fails leaves its labels uncached, and they
     /// fall back to the per-label path.
     pub fn prefetch(&self, labels: impl IntoIterator<Item = String>) {
-        let wanted: Vec<String> = labels
-            .into_iter()
-            .filter(|l| !self.is_external(l))
-            .collect();
+        let wanted: Vec<String> = labels.into_iter().filter(|l| !is_external(l)).collect();
         if wanted.is_empty() {
             return;
         }
@@ -426,35 +349,36 @@ impl<'a> BazelFacts<'a> {
 /// decoded proto stay manageable.
 pub const PREFETCH_CHUNK: usize = 500;
 
-fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, labels: &[String]) {
+fn prefetch_into(bazel: &Bazel, cache: &RuleCache, labels: &[String]) {
     for chunk in labels.chunks(PREFETCH_CHUNK) {
-        let todo: Vec<&String> = {
-            let c = cache.borrow();
-            chunk
-                .iter()
-                .filter(|l| !c.contains_key(l.as_str()))
-                .collect()
-        };
-        if todo.is_empty() {
-            continue;
-        }
-        let expr = format!(
-            "set({})",
-            todo.iter()
-                .map(|l| query_word(l))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let Some(rules) = crate::tools::bazel_query::rules(bazel, &expr) else {
-            continue;
-        };
-        let mut c = cache.borrow_mut();
-        for r in rules {
-            c.insert(r.name.clone(), Some(r));
-        }
-        for l in todo {
-            c.entry(l.clone()).or_insert(None);
-        }
+        fill_cache(bazel, cache, chunk);
+    }
+}
+
+/// Asks Bazel, in one `set(...)` query, for every label in `chunk` the cache
+/// has not seen, and caches the answer: the rules it returned, and `None` for
+/// the rest. A query that fails caches nothing, so those labels are asked
+/// again the next time (or one at a time, by [`BazelFacts::rule`]).
+fn fill_cache(bazel: &Bazel, cache: &RuleCache, chunk: &[String]) {
+    let todo: Vec<&String> = {
+        let c = cache.borrow();
+        chunk
+            .iter()
+            .filter(|l| !c.contains_key(l.as_str()))
+            .collect()
+    };
+    if todo.is_empty() {
+        return;
+    }
+    let Some(rules) = crate::tools::bazel_query::rules(bazel, &label_set(&todo)) else {
+        return;
+    };
+    let mut c = cache.borrow_mut();
+    for r in rules {
+        c.insert(r.name.clone(), Some(r));
+    }
+    for l in todo {
+        c.entry(l.clone()).or_insert(None);
     }
 }
 
@@ -462,9 +386,7 @@ fn prefetch_into(bazel: &Bazel, cache: &RefCell<HashMap<String, Option<Rule>>>, 
 /// inputs. Split out from the walk so the predicate can be tested on a
 /// hand-built proto without a Bazel.
 pub fn names_external_input(rule: &Rule) -> bool {
-    rule.rule_input
-        .iter()
-        .any(|l| l.starts_with('@') || l.starts_with("//external:"))
+    rule.rule_input.iter().any(|l| is_external(l))
 }
 
 /// One rule's proto at a revision, or `None` when Bazel cannot produce it.
@@ -616,7 +538,7 @@ pub fn label_to_path(label: &str) -> Option<String> {
 
 impl Facts for BazelFacts<'_> {
     fn is_external(&self, label: &str) -> bool {
-        label.starts_with('@') || label.starts_with("//external:")
+        is_external(label)
     }
 
     fn reachable_via_select(&self, label: &str) -> bool {
@@ -627,9 +549,9 @@ impl Facts for BazelFacts<'_> {
         // Looking only at the target's own rule (which is all this could do
         // before the comparison carried `--explain` paths) misses the common
         // shape by a mile: on `bazel/bazel` the extra targets are reached
-        // through a `select` several hops down — a `cc_library` picking a
+        // through a `select` several hops down (a `cc_library` picking a
         // platform-specific dep, with plain `java_library` rules stacked above
-        // it — and every one of those landed in `unclassified`, which fails
+        // it) and every one of those landed in `unclassified`, which fails
         // the run for a difference that is exactly what cambium promises to
         // over-approximate.
         let path = self.paths.get(label);
@@ -849,8 +771,8 @@ mod tests {
 
     /// The fourth condition of `bazeldiff_extra_external_content` reads the
     /// rule's inputs; a toolchain edge only shows up there when Bazel is
-    /// asked *with* implicit deps, which is what
-    /// `query_rule_with_implicit` is for.
+    /// asked *with* implicit deps, which every benchmark query is (no
+    /// `--noimplicit_deps`; see [`crate::tools::bazel_query`]).
     #[test]
     fn a_toolchain_input_counts_as_external() {
         let mut rule = Rule {
@@ -877,7 +799,7 @@ mod tests {
     }
 
     /// The substitution reaches an `args` list, a `cmd` string and a `select`
-    /// branch — the three shapes envoy's `@envoy_repo//:path.bzl` constant
+    /// branch: the three shapes envoy's `@envoy_repo//:path.bzl` constant
     /// lands in.
     #[test]
     fn substitution_normalises_every_string_shape() {

@@ -3,16 +3,16 @@
 //! A *subject* is a Bazel repository a workload runs on, and there are two
 //! kinds (docs/METHODOLOGY.md):
 //!
-//! - [`Subject::Real`] — an entry of `subject_repos.toml`: a URL, a pinned
+//! - [`Subject::Real`]: an entry of `subject_repos.toml`: a URL, a pinned
 //!   commit, a history window, and the Bazel version it runs under.
-//! - [`Subject::Synthetic`] — a generated graph, named `synth:<preset>` on the
+//! - [`Subject::Synthetic`]: a generated graph, named `synth:<preset>` on the
 //!   command line, from the presets `cambium-bench synth presets` lists.
 //!
 //! Every workload accepts either, which is only possible because a synthetic
 //! subject is *emitted as a real Bazel workspace with a git history* the first
 //! time one is asked for. Once emitted it is described by the same
-//! [`RepoEntry`] a real subject is — a local `file://`-shaped URL, a pin, a
-//! window — and every step downstream (mirror, worktree, generated
+//! [`RepoEntry`] a real subject is (a local `file://`-shaped URL, a pin, a
+//! window) and every step downstream (mirror, worktree, generated
 //! `cambium.toml`, history, change sets) is the same code path. The alternative,
 //! a second set of workloads that understand in-memory graphs, is how the
 //! synthetic and real numbers came to be incomparable in the first place.
@@ -29,8 +29,8 @@ pub const SYNTH_PREFIX: &str = "synth:";
 
 /// Commits after the base that an emitted synthetic subject carries.
 ///
-/// It bounds the history workload and the change sets that can be drawn from
-/// one: a synthetic subject with no history is a graph, not a subject.
+/// It bounds the window a walk over one can take: a synthetic subject with no
+/// history is a graph, not a subject.
 pub const SYNTH_COMMITS: u64 = 20;
 
 /// The change preset the generated commits are drawn from.
@@ -65,9 +65,10 @@ impl Synthetic {
         }
     }
 
-    /// The filesystem-safe id: `synth-small`.
+    /// The filesystem-safe id: `synth-small`, by the one rule every subject
+    /// name is filed under ([`crate::session::subject_dir_name`]).
     pub fn id(&self) -> String {
-        format!("synth-{}", self.preset)
+        crate::session::subject_dir_name(&self.name())
     }
 
     /// The name a person types: `synth:small`.
@@ -87,7 +88,7 @@ impl Synthetic {
     /// with the shas of its first-parent history, oldest first.
     ///
     /// Idempotent: an existing directory with a git history is reused, so the
-    /// second `cambium-bench changes synth:small` of the day costs nothing.
+    /// second `cambium-bench walk synth:small` of the day costs nothing.
     pub fn emit(&self, subjects: &SubjectsDir) -> Result<(PathBuf, Vec<String>)> {
         let dir = self.source_dir(subjects);
         if dir.join(".git").exists() {

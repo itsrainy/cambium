@@ -14,10 +14,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::Machine;
 
+/// The first line of `bazel --version`, trimmed: `bazel 7.4.1`, or empty when
+/// the binary could not be asked. What a result records as the Bazel that
+/// answered.
+pub fn bazel_version_used(bazel: &cambium_bazel::Bazel) -> String {
+    bazel
+        .version()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// What a walk was run in. Stamped into [`super::walk::model::WalkResult`].
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Environment {
-    /// CPU, cores, RAM, OS+arch — enough to refuse a cross-machine
+    /// CPU, cores, RAM, OS+arch: enough to refuse a cross-machine
     /// comparison.
     pub machine: Machine,
     /// `bazel --version` as it actually answered, e.g. `bazel 7.4.1`. Empty
@@ -37,15 +50,4 @@ pub struct Environment {
     /// directory, a peer's is its own worktree.
     #[serde(default)]
     pub output_bases: BTreeMap<String, String>,
-}
-
-impl Environment {
-    /// Whether two environments are close enough that their walls may be read
-    /// against each other: the same machine and the same Bazel. A different
-    /// cambium or harness sha is the whole point of a comparison, so those do
-    /// not gate it.
-    pub fn comparable_to(&self, other: &Environment) -> bool {
-        self.machine.fingerprint() == other.machine.fingerprint()
-            && self.bazel_version_used == other.bazel_version_used
-    }
 }

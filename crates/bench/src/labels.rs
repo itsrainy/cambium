@@ -2,9 +2,9 @@
 //!
 //! `walk-<pin>.json` records per-step *counts* and a capped handful of
 //! example labels, and that cap is a schema commitment: the file is read by
-//! the report and by published tooling, so it cannot grow to hold thousands
+//! the report and by tooling outside this crate, so it cannot grow to hold thousands
 //! of labels. But the counts are also where an investigation starts and
-//! stops — a change set where the tools named 990 targets cambium lacked was
+//! stops: a change set where the tools named 990 targets cambium lacked was
 //! only ever visible through twenty of them, and a regression that put 165
 //! labels in `unclassified` could not be looked at offline at all, because
 //! the sets themselves were gone the moment the run moved on.
@@ -20,11 +20,11 @@
 //!     classes.tsv.zst        tool \t side \t class \t label, every disagreement
 //! ```
 //!
-//! One label per line, sorted, zstd-compressed — tens of kilobytes a change
+//! One label per line, sorted, zstd-compressed: tens of kilobytes a change
 //! set, which is why none of it is behind a flag: a debugging artifact that
 //! has to be asked for in advance is not there on the run that needed it.
-//! [`crate::compare::driver`] writes them; `cambium-bench labels` reads them
-//! back.
+//! The walk ([`crate::walk::driver`]) writes them; `cambium-bench labels`
+//! reads them back.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -33,9 +33,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::classify::{Class, Side};
+use crate::util::revs_match;
 
-/// The directory under `changes/` that holds every change set's sets.
-pub const DIR: &str = "labels";
+/// The directory under `walk/` that holds every step's sets.
+const DIR: &str = "labels";
 
 /// The file names that are not a tool's.
 pub const CAMBIUM: &str = "cambium";
@@ -49,7 +50,7 @@ const CLASSES_FILE: &str = "classes.tsv.zst";
 /// does not show up next to a Bazel query.
 const LEVEL: i32 = 3;
 
-/// `<changes>/labels/<base>..<head>/`, as named on disk.
+/// `<walk>/labels/<base>..<head>/`, as named on disk.
 pub fn change_set_dir(changes_dir: &Path, base: &str, head: &str) -> PathBuf {
     changes_dir.join(DIR).join(format!("{base}..{head}"))
 }
@@ -124,8 +125,8 @@ pub fn write_classes(dir: &Path, rows: &[ClassRow]) -> Result<PathBuf> {
 
 /// Reads the rows written by [`write_classes`].
 ///
-/// A line this build cannot parse — an unknown class name from a newer
-/// cambium, a truncated write — is skipped rather than raised: the file is
+/// A line this build cannot parse (an unknown class name from a newer
+/// cambium, a truncated write) is skipped rather than raised: the file is
 /// evidence about a run, and refusing to show any of it because one row is
 /// unreadable is the wrong trade for a debugging tool.
 pub fn read_classes(path: &Path) -> Result<Vec<ClassRow>> {
@@ -171,8 +172,8 @@ pub fn stored_sets(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
 
 /// The `classes.tsv.zst` of a change set directory, when it has one.
 ///
-/// A globally invalidated change set has no classification — cambium answered
-/// `//...` and nothing was compared — so the absence is an answer, not an
+/// A globally invalidated change set has no classification (cambium answered
+/// `//...` and nothing was compared) so the absence is an answer, not an
 /// error.
 pub fn classes_path(dir: &Path) -> Option<PathBuf> {
     let p = dir.join(CLASSES_FILE);
@@ -206,7 +207,7 @@ pub fn resolve(changes_dir: &Path, spec: &str) -> Result<PathBuf> {
         else {
             continue;
         };
-        if pre(b, base) && pre(h, head) {
+        if revs_match(b, base) && revs_match(h, head) {
             hits.push(path);
         }
     }
@@ -222,10 +223,6 @@ pub fn resolve(changes_dir: &Path, spec: &str) -> Result<PathBuf> {
             hits.len()
         ),
     }
-}
-
-fn pre(a: &str, b: &str) -> bool {
-    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 /// Which rows a `bench labels` invocation asked for.
