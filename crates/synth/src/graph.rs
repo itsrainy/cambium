@@ -646,8 +646,8 @@ fn gen_deps(
         }
         let pkg_layers = &pkg_layer_members[t.package as usize];
 
-        // Alias rules have exactly one dep. The count is still drawn for
-        // one, so every later target's draws stay where they were.
+        // An alias takes one drawn dep (`attach_hub` may still add a hub).
+        // Its count is sampled anyway, so later draws stay where they were.
         let want = spec.deps_per_target.sample(rng) as usize;
         let want = if kind == Kind::Alias { 1 } else { want };
         let mut deps: Vec<u32> = Vec::with_capacity(want + 2);
