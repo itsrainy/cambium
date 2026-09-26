@@ -152,7 +152,11 @@ use serde::{Deserialize, Serialize};
 ///   this way is counted in `repos_dirty_by_consumer` as before, but only
 ///   its reaching leaves are seeded rather than all of them. Purely
 ///   additive.
-pub const SCHEMA_VERSION: u32 = 18;
+/// - **19** adds `stats.closure_leaves_seeded`: leaves seeded because their
+///   transitive deps closure runs through a repository that moved (index
+///   format 16), and for no other reason. `external_direct_targets` counts
+///   the rules above them as before. Purely additive.
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// What a document with no `schema` field is: version 1 predates the field, so
 /// reading one back must not claim it was written against today's contract.
@@ -349,6 +353,11 @@ pub struct Stats {
     /// does not know. The consumer's other leaves are not seeded.
     #[serde(default)]
     pub consumer_leaves_seeded: usize,
+    /// Leaves seeded because their closure runs through a repository that
+    /// moved (index format 16, `leaf_closure`), and for no other reason:
+    /// envoy's `@grpc//:grpc++` when an input of `@c-ares` moves.
+    #[serde(default)]
+    pub closure_leaves_seeded: usize,
     /// External repositories dirtied because the definition that makes them
     /// loads a `.bzl` from a repository whose `.bzl` files may have moved:
     /// xla's `@llvm-project`, which a module extension defines by calling

@@ -182,12 +182,25 @@ pub fn is_zstd(bytes: &[u8]) -> bool {
 /// moved asks for the edges again. Every index written at format 14 is
 /// unreadable to an engine at this version and is rebuilt rather than read.
 ///
+/// Format 16 records, beside the round-trip rows, which repositories each
+/// leaf's closure runs through outside the universe (`leaf_closure_*`): per
+/// repository, spelled `@name` as Bazel printed it, the leaves whose
+/// transitive deps walk passes through it before it comes back inside. The
+/// same question asks for it (the closure is now asked as a graph, which
+/// also answers the edges). A repository that moves moves those leaves, not
+/// only its own labels: on envoy at `eea2ba5e2911` an edit to
+/// `bazel/c-ares.patch` dirtied `@c-ares`, and every rule that reaches
+/// `@c-ares` only through `@grpc//:grpc++` (145 labels, all of them through
+/// the external route) went missing because nothing said grpc links c-ares.
+/// Every index written at format 15 is unreadable to an engine at this
+/// version and is rebuilt rather than read.
+///
 /// Compression is outside this version. A file holds either the layout
 /// verbatim or one zstd frame containing it (see the module docs); this
 /// version, and every other header field, is of the *decompressed* bytes.
 /// Turning compression on or off, or changing its level, is not a format
 /// change and must not bump this.
-pub const FORMAT_VERSION: u32 = 15;
+pub const FORMAT_VERSION: u32 = 16;
 
 /// What a correct build *derives* into an index, as against how the bytes are
 /// laid out ([`FORMAT_VERSION`]) and what a rule hash means

@@ -415,7 +415,7 @@ mod tests {
         assert!(
             asked.iter().any(|a| a
                 .contains("deps(set(\"@bazel_tools//tools/test:collect_coverage\"))")
-                && a.contains("--output=package")),
+                && a.contains("--output=graph")),
             "{asked:?}"
         );
         assert!(

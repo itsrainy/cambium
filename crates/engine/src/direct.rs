@@ -168,13 +168,16 @@ pub(crate) fn close_over_repository_targets<V: GraphView + ?Sized>(
                 "an external repository is built around a target the change reached"
             );
             let one: BTreeSet<String> = [repo.clone()].into_iter().collect();
-            // Rule (1) only: the empty `load_repos` is what says so.
+            // Rule (1) only: the empty `load_repos` is what says so. With the
+            // leaves whose closure runs through the repository, as for any
+            // repository that moved.
             let r = crate::externals::reach(
                 li.base,
                 &one,
                 &BTreeSet::new(),
                 &BTreeSet::new(),
                 &crate::externals::LeafSeeds::default(),
+                &crate::round_trip::closure_seeds(li.base, &one, None),
             );
             for id in r.nodes {
                 let consumers: Vec<u32> = view.reverse_row(id, &mut scratch).to_vec();

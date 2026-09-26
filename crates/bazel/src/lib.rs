@@ -444,14 +444,68 @@ fn inside_patterns(packages: &str, indexed: &[String]) -> BTreeSet<String> {
     out
 }
 
-/// The second question behind [`Bazel::round_trips`]: the paths from the
-/// leaves into the packages of the universe their closure reached.
-fn round_trip_expr(leaves: &[String], patterns: &BTreeSet<String>) -> String {
-    let inside = patterns.iter().cloned().collect::<Vec<_>>().join(" + ");
-    format!(
-        "let l = {} in allpaths($l, deps($l) intersect ({inside}))",
-        quoted_set(leaves)
-    )
+/// The packages of a graph's nodes, one line each, in the spelling
+/// `--output=package` prints and [`inside_patterns`] reads: `pkg` for the
+/// main repository's, `@R//pkg` (as printed) for any other's.
+fn package_lines(g: &LabelGraph<'_>) -> String {
+    let mut lines: BTreeSet<&str> = BTreeSet::new();
+    for n in &g.names {
+        let pkg = n.split_once(':').map_or(*n, |(p, _)| p);
+        lines.insert(pkg.strip_prefix("//").unwrap_or(pkg));
+    }
+    lines.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+/// Reads the closure graph behind [`Bazel::round_trips`]: per leaf, the
+/// repositories of the nodes outside the universe it reaches through nodes
+/// outside it alone, each `@name` as printed ([`RoundTrips::closure`]).
+///
+/// The walk stops where [`parse_round_trips`] does, at the first node
+/// inside. What lies beyond is the index's own rows, whose external deps are
+/// leaves of their own: a repository the main repository reaches past an
+/// entry is seeded through that leaf, and the reverse walk climbs to the
+/// entry and across the round-trip edge back to this leaf. A leaf the graph
+/// never printed is left out.
+fn parse_closure_repos(
+    g: &LabelGraph<'_>,
+    indexed: &[String],
+    leaves: &[String],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let inside: Vec<bool> = g
+        .names
+        .iter()
+        .map(|n| inside_label(n, indexed).is_some())
+        .collect();
+    let mut out = BTreeMap::new();
+    for leaf in leaves {
+        let starts = g.starts(leaf);
+        if starts.is_empty() {
+            continue;
+        }
+        let mut seen = vec![false; g.names.len()];
+        let mut stack: Vec<usize> = Vec::new();
+        for &s in &starts {
+            seen[s] = true;
+            stack.push(s);
+        }
+        let mut repos = BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            if inside[n] && !starts.contains(&n) {
+                continue;
+            }
+            if let Some(t) = label_repo_token(g.names[n]) {
+                repos.insert(format!("@{t}"));
+            }
+            for &m in &g.edges[n] {
+                if !seen[m] {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        out.insert(leaf.clone(), repos);
+    }
+    out
 }
 
 /// Bazel's answer to [`Bazel::round_trips`]: the edges, and what they were
@@ -468,6 +522,14 @@ pub struct RoundTrips {
     /// `//pkg:file` for the main repository's, `@name` for an indexed
     /// repository's.
     pub via: BTreeSet<String>,
+    /// Leaf -> the repositories its closure runs through outside the
+    /// universe, its own included, each `@name` as Bazel printed the name
+    /// (the spelling of [`RoundTrips::via`]). A repository on the closure
+    /// that moves moves the leaf: Bazel refetches it and rebuilds everything
+    /// above it, the leaf's rules included. On envoy `@grpc//:grpc++` runs
+    /// through `@c-ares`, and the rules above `grpc++` reach `@c-ares` only
+    /// that way. A leaf Bazel could not resolve is left out.
+    pub closure: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The query behind [`Bazel::closure_loads`]: every `.bzl` (and `.scl`) file
@@ -527,11 +589,10 @@ fn closure_loads_via(labels: &str, indexed: &[String]) -> BTreeSet<String> {
 /// the other half of the answer ([`RoundTrips::via`]). A leaf that reaches
 /// nothing, or that the graph never printed, is left out.
 fn parse_round_trips(
-    graph: &str,
+    g: &LabelGraph<'_>,
     indexed: &[String],
     leaves: &[String],
 ) -> BTreeMap<String, BTreeSet<String>> {
-    let g = LabelGraph::parse(graph);
     let inside: Vec<Option<String>> = g.names.iter().map(|n| inside_label(n, indexed)).collect();
     let mut out = BTreeMap::new();
     for leaf in leaves {
@@ -1437,30 +1498,38 @@ impl Bazel {
 
     /// Which targets inside the index's universe each of these leaves
     /// reaches through targets outside it alone: leaf -> the labels, spelled
-    /// as the index spells them, of the first inside node on each such path.
-    /// A leaf that reaches nothing inside, or that Bazel could not resolve,
-    /// is left out; the whole answer is `None` when a query will not run.
+    /// as the index spells them, of the first inside node on each such path;
+    /// and which repositories each leaf's closure runs through on the way
+    /// ([`RoundTrips::closure`]). A leaf that reaches nothing inside, or that
+    /// Bazel could not resolve, is left out of the edges; the whole answer is
+    /// `None` when a query will not run.
     ///
     /// The leaves are the external labels the index holds that no package
     /// of it owns, and the universe is `//...:*` plus `indexed`, the in-tree
-    /// repositories the index holds the packages of. Three questions at most,
-    /// all `--keep_going` (exit 3 is an answer, as it is for
+    /// repositories the index holds the packages of. Two questions, both
+    /// `--keep_going` (exit 3 is an answer, as it is for
     /// [`Bazel::leaf_reaches`]):
     ///
-    /// 1. `deps(set(leaves))` with `--output=package`: which packages the
-    ///    leaves' closure loads. No `//...:*` in it, so a server that has not
-    ///    loaded the repository does not load it for this, and the answer is
-    ///    one line per package however large the closure. Usually no package
-    ///    of the universe is among them, and that is the answer.
+    /// 1. `deps(set(leaves))` with `--output=graph`: the leaves' closure,
+    ///    walked forward from each leaf on its own through the nodes outside
+    ///    the universe. Where a walk meets a node inside it records the node
+    ///    and goes no further ([`parse_round_trips`]); every repository it
+    ///    passes through is the leaf's closure ([`parse_closure_repos`]).
+    ///    No `//...:*` in it, so a server that has not loaded the repository
+    ///    does not load it for this.
     /// 2. `loadfiles` over the same closure less `P`, the packages of the
-    ///    universe among them ([`Bazel::closure_loads`]): which files of the
-    ///    main repository or an indexed one the packages outside load. A
-    ///    rule class or macro defined there decides what an external target
-    ///    depends on, so an edit to one moves the answer with nothing outside
-    ///    moving ([`RoundTrips::via`]).
-    /// 3. When `P` is not empty, `allpaths(set(leaves), deps(set(leaves))
-    ///    intersect (P))` with `--output=graph`, walked per leaf
-    ///    ([`parse_round_trips`]).
+    ///    universe among its nodes ([`Bazel::closure_loads`]): which files
+    ///    of the main repository or an indexed one the packages outside
+    ///    load. A rule class or macro defined there decides what an external
+    ///    target depends on, so an edit to one moves the answer with nothing
+    ///    outside moving ([`RoundTrips::via`]).
+    ///
+    /// The closure was asked with `--output=package` once, and the paths
+    /// into `P` with a third question, `allpaths`, when `P` was not empty.
+    /// The graph answers both, and it is what says which leaf runs through
+    /// which repository: envoy's `@grpc//:grpc++` through `@c-ares`, whose
+    /// patch is a file of the main repository that no main-repo rule's
+    /// closure names by a label.
     ///
     /// On `bazelbuild/rules_shell` at `b1eed28` (Bazel 9.1.1, 29 leaves) the
     /// closure is 47 packages, two of them the main repository's, and the
@@ -1473,49 +1542,45 @@ impl Bazel {
             return Some(RoundTrips::default());
         }
         let started = std::time::Instant::now();
-        let closure = self.text_query(
-            &format!("deps({})", quoted_set(leaves)),
-            &["--output=package"],
-            "round-trip closure",
-        )?;
-        let patterns = inside_patterns(&closure, indexed);
-        // Asked even when nothing comes back in today: an edit to one of
-        // these files is how a leaf that reaches nothing starts to.
-        let via = self.closure_loads(leaves, &patterns, indexed)?;
-        if patterns.is_empty() {
-            tracing::debug!(
-                leaves = leaves.len(),
-                packages = closure.lines().count(),
-                via = via.len(),
-                ms = started.elapsed().as_millis() as u64,
-                "no leaf's closure reaches a package of the universe"
-            );
-            return Some(RoundTrips {
-                reach: BTreeMap::new(),
-                via,
-            });
-        }
         let graph = self.text_query(
-            &round_trip_expr(leaves, &patterns),
+            &format!("deps({})", quoted_set(leaves)),
             &[
                 "--output=graph",
                 "--nograph:factored",
                 "--graph:node_limit=-1",
             ],
-            "round-trip paths",
+            "round-trip closure",
         )?;
-        let reach = parse_round_trips(&graph, indexed, leaves);
+        let g = LabelGraph::parse(&graph);
+        let packages = package_lines(&g);
+        let patterns = inside_patterns(&packages, indexed);
+        // Asked even when nothing comes back in today: an edit to one of
+        // these files is how a leaf that reaches nothing starts to.
+        let via = self.closure_loads(leaves, &patterns, indexed)?;
+        let reach = if patterns.is_empty() {
+            BTreeMap::new()
+        } else {
+            parse_round_trips(&g, indexed, leaves)
+        };
+        let closure = parse_closure_repos(&g, indexed, leaves);
         tracing::debug!(
             leaves = leaves.len(),
-            packages = closure.lines().count(),
+            nodes = g.names.len(),
+            bytes = graph.len(),
+            packages = packages.lines().count(),
             inside_packages = patterns.len(),
             reaching = reach.len(),
             entries = reach.values().map(BTreeSet::len).sum::<usize>(),
+            repositories = closure.values().flatten().collect::<BTreeSet<_>>().len(),
             via = via.len(),
             ms = started.elapsed().as_millis() as u64,
             "round-trip query answered"
         );
-        Some(RoundTrips { reach, via })
+        Some(RoundTrips {
+            reach,
+            via,
+            closure,
+        })
     }
 
     /// The files of the main repository and of the `indexed` repositories
@@ -2451,8 +2516,8 @@ mod consumer_tests {
 #[cfg(test)]
 mod round_trip_tests {
     use super::{
-        closure_loads_via, inside_label, inside_patterns, loads_expr, parse_round_trips,
-        round_trip_expr,
+        closure_loads_via, inside_label, inside_patterns, loads_expr, package_lines,
+        parse_closure_repos, parse_round_trips, LabelGraph,
     };
     use std::collections::BTreeSet;
 
@@ -2527,19 +2592,6 @@ mod round_trip_tests {
         assert!(inside_patterns("@bazel_tools//tools/test\n", &[]).is_empty());
     }
 
-    #[test]
-    fn the_paths_query_names_the_leaves_once() {
-        let e = round_trip_expr(
-            &["@bazel_tools//tools/test:collect_coverage".to_string()],
-            &set(&["//shell/runfiles:*", "//shell:*"]),
-        );
-        assert_eq!(
-            e,
-            "let l = set(\"@bazel_tools//tools/test:collect_coverage\") in \
-             allpaths($l, deps($l) intersect (//shell/runfiles:* + //shell:*))"
-        );
-    }
-
     /// Verbatim from rules_shell at `b1eed28` (Bazel 9.1.1), plus a second
     /// leaf whose only way in runs through the first, and an external hop.
     const GRAPH: &str = r#"digraph mygraph {
@@ -2572,7 +2624,8 @@ mod round_trip_tests {
             "@bazel_tools//tools/test:test_setup".to_string(),
             "@platforms//os:linux".to_string(),
         ];
-        let r = parse_round_trips(GRAPH, &[], &leaves);
+        let g = LabelGraph::parse(GRAPH);
+        let r = parse_round_trips(&g, &[], &leaves);
         assert_eq!(
             r["@bazel_tools//tools/test:collect_coverage"],
             set(&["//shell/runfiles:runfiles", "//shell:toolchain_type"])
@@ -2584,7 +2637,7 @@ mod round_trip_tests {
         // Reaches nothing (never printed): absent.
         assert_eq!(r.len(), 2, "{r:?}");
         // An indexed repository is inside, under the name the index knows.
-        let r = parse_round_trips(GRAPH, &["envoy_api".to_string()], &leaves[1..2]);
+        let r = parse_round_trips(&g, &["envoy_api".to_string()], &leaves[1..2]);
         assert_eq!(
             r["@bazel_tools//tools/test:test_setup"],
             set(&[
@@ -2593,6 +2646,67 @@ mod round_trip_tests {
                 "@envoy_api//envoy/type:pkg"
             ])
         );
+    }
+
+    /// The graph's nodes give the packages `--output=package` printed, and
+    /// so the same patterns: the closure is asked once, as a graph.
+    #[test]
+    fn the_graphs_packages_become_the_same_patterns() {
+        let g = LabelGraph::parse(GRAPH);
+        let lines = package_lines(&g);
+        assert_eq!(
+            inside_patterns(&lines, &[]),
+            set(&["//shell/runfiles:*", "//shell:*"])
+        );
+        assert_eq!(
+            inside_patterns(&lines, &["envoy_api".to_string()]),
+            set(&[
+                "//shell/runfiles:*",
+                "//shell:*",
+                "@@envoy_api+//envoy/type:*"
+            ])
+        );
+    }
+
+    /// envoy's shape at `eea2ba5e2911`, cut down: `@grpc//:grpc++` runs
+    /// through `@c-ares` (the only way the rules above `grpc++` reach it),
+    /// and through `@envoy_api`, which is inside when the index holds it. Each leaf's
+    /// closure is its own walk; a leaf the graph never printed is left out.
+    #[test]
+    fn each_leaf_records_the_repositories_its_closure_runs_through() {
+        const ENVOY: &str = r#"digraph mygraph {
+  node [shape=box];
+  "@grpc//:grpc++" -> "@grpc//:grpc"
+  "@grpc//:grpc" -> "@c-ares//:ares"
+  "@grpc//:grpc" -> "@envoy_api//envoy/service:pkg"
+  "@envoy_api//envoy/service:pkg" -> "@com_google_protobuf//:protobuf"
+  "@c-ares//:ares" -> "@c-ares//:ares.h"
+  "@grpc//:grpc" -> "//bazel:grpc_config"
+  "//bazel:grpc_config" -> "@@zlib//:zlib"
+  "@com_google_absl//absl/strings:strings"
+}
+"#;
+        let g = LabelGraph::parse(ENVOY);
+        let leaves = vec![
+            "@grpc//:grpc++".to_string(),
+            "@com_google_absl//absl/strings:strings".to_string(),
+            "@never//:printed".to_string(),
+        ];
+        let c = parse_closure_repos(&g, &[], &leaves);
+        // The walk stops at the main repository's node: `@zlib` beyond it
+        // is a leaf of the index's own, seeded on its own when it moves.
+        assert_eq!(
+            c["@grpc//:grpc++"],
+            set(&["@c-ares", "@envoy_api", "@com_google_protobuf", "@grpc"])
+        );
+        assert_eq!(
+            c["@com_google_absl//absl/strings:strings"],
+            set(&["@com_google_absl"])
+        );
+        assert_eq!(c.len(), 2, "{c:?}");
+        // With `@envoy_api` indexed, the walk stops there too.
+        let c = parse_closure_repos(&g, &["envoy_api".to_string()], &leaves[..1]);
+        assert_eq!(c["@grpc//:grpc++"], set(&["@c-ares", "@grpc"]));
     }
 
     #[test]
