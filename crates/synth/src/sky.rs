@@ -26,7 +26,7 @@
 //! - `BZL_LOAD` nodes depend on the file and on the `BZL_LOAD` of what they
 //!   load, which is the edge a `.bzl` loaded only by other `.bzl` files needs.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use cambium_index::loads::{resolve_label, scan_loads, Load};
 use cambium_index::{FileText, RepoMapping};
@@ -130,6 +130,7 @@ impl Dump {
         };
         let files = tree.paths();
         let dirs = directories(&files);
+        let exists: HashSet<&str> = files.iter().map(String::as_str).collect();
         let mapping = RepoMapping::identity();
 
         // Every file and directory: the `FILE -> FILE_STATE` pair Bazel keeps,
@@ -167,7 +168,7 @@ impl Dump {
         // repository rules — `KeyForBzlmod` on 8/9, `KeyForWorkspace` on 7 —
         // and it is what the engine reads instead of a flag on a stored
         // closure.
-        for f in workspace_closure(tree, &files, &mapping) {
+        for f in workspace_closure(tree, &exists, &mapping) {
             let key = bzl_key(&f, true);
             d.edge(&key, rooted("FILE", &f));
             for loaded in loads_of(tree, &f, &mapping) {
@@ -189,7 +190,7 @@ impl Dump {
                 // for `a/sub/BUILD` on a tree that has no such file.
                 d.file(&path);
                 d.edge(&lookup, rooted("FILE", &path));
-                if files.contains(&path) {
+                if exists.contains(path.as_str()) {
                     d.edge(&pkg_key, rooted("FILE", &path));
                     for loaded in loads_of(tree, &path, &mapping) {
                         d.edge(&pkg_key, bzl_key(&loaded, false));
@@ -202,19 +203,18 @@ impl Dump {
                  globRequests = [GlobRequest: ** FILES]>"
             );
             d.edge(&pkg_key, glob.clone());
-            for dir in &dirs {
-                if under(p, dir) {
-                    d.edge(&glob, rooted("DIRECTORY_LISTING", dir));
-                    // The lookup that tells Bazel whether the directory has
-                    // become a package of its own: the edge a new `BUILD`
-                    // file carving a sub-package out of its parent travels.
-                    if dir != p {
-                        d.edge(&pkg_key, format!("PACKAGE_LOOKUP:{dir}"));
-                        for name in ["BUILD", "BUILD.bazel"] {
-                            let path = join(dir, name);
-                            d.file(&path);
-                            d.edge(&format!("PACKAGE_LOOKUP:{dir}"), rooted("FILE", &path));
-                        }
+            for dir in dirs_under(p, &dirs) {
+                d.edge(&glob, rooted("DIRECTORY_LISTING", dir));
+                // The lookup that tells Bazel whether the directory has
+                // become a package of its own: the edge a new `BUILD`
+                // file carving a sub-package out of its parent travels.
+                if dir != p {
+                    let lookup = format!("PACKAGE_LOOKUP:{dir}");
+                    d.edge(&pkg_key, lookup.clone());
+                    for name in ["BUILD", "BUILD.bazel"] {
+                        let path = join(dir, name);
+                        d.file(&path);
+                        d.edge(&lookup, rooted("FILE", &path));
                     }
                 }
             }
@@ -276,11 +276,11 @@ fn bzl_key(path: &str, workspace_level: bool) -> String {
 
 /// The main-repository `.bzl` files `MODULE.bazel` / `WORKSPACE` reach,
 /// transitively. These are the ones that can define repository rules.
-fn workspace_closure(tree: &dyn Tree, files: &[String], m: &RepoMapping) -> BTreeSet<String> {
+fn workspace_closure(tree: &dyn Tree, exists: &HashSet<&str>, m: &RepoMapping) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut stack: Vec<String> = Vec::new();
     for name in cambium_index::loads::WORKSPACE_FILES {
-        if !files.contains(&(*name).to_string()) {
+        if !exists.contains(name) {
             continue;
         }
         let Some(text) = tree.text(name) else {
@@ -309,9 +309,25 @@ fn join(pkg: &str, name: &str) -> String {
     }
 }
 
-/// Whether `dir` is `pkg` or below it. The root package is above everything.
-fn under(pkg: &str, dir: &str) -> bool {
-    pkg.is_empty() || dir == pkg || dir.starts_with(&format!("{pkg}/"))
+/// The directories that are `pkg` or below it. The root package is above
+/// everything.
+///
+/// Read as a range of the sorted set rather than a scan of it: the
+/// directories below `pkg` are exactly the ones that sort from `pkg/` while
+/// they keep that prefix, and a scan per package made the dump quadratic in
+/// the size of the tree.
+fn dirs_under<'a>(pkg: &str, dirs: &'a BTreeSet<String>) -> impl Iterator<Item = &'a String> {
+    let prefix = if pkg.is_empty() {
+        String::new()
+    } else {
+        format!("{pkg}/")
+    };
+    // The root's own directory, `""`, sorts first in the range below.
+    let own = dirs.get(pkg).filter(|_| !pkg.is_empty());
+    own.into_iter().chain(
+        dirs.range(prefix.clone()..)
+            .take_while(move |d| d.starts_with(&prefix)),
+    )
 }
 
 /// Every directory the paths imply, the root included as the empty string.
@@ -396,6 +412,22 @@ mod tests {
         // `.bazelignore` reaches every package.
         let w = v.walk(&seeds([(".bazelignore", false)]));
         assert_eq!(w.packages, ["".to_string(), "a".to_string()].into());
+    }
+
+    /// A sibling that shares a prefix is not below a package, whichever side
+    /// of `pkg/` it sorts on.
+    #[test]
+    fn the_directories_under_a_package_are_itself_and_its_descendants() {
+        let dirs: BTreeSet<String> = ["", "a", "a-b", "a/sub", "a/sub/deep", "ab", "b"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let under = |pkg: &str| dirs_under(pkg, &dirs).cloned().collect::<Vec<_>>();
+        assert_eq!(under("a"), ["a", "a/sub", "a/sub/deep"]);
+        assert_eq!(under("a/sub"), ["a/sub", "a/sub/deep"]);
+        assert_eq!(under(""), dirs.iter().cloned().collect::<Vec<_>>());
+        // A package whose directory holds no file has nothing to list.
+        assert_eq!(under("b/none"), Vec::<String>::new());
     }
 
     #[test]
