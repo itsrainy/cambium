@@ -4,9 +4,13 @@
 //! [`columns`] is a vertical column chart, eight rows tall, with each value
 //! printed directly above its own column and the labels centred under an axis
 //! line. [`bars`] is one horizontal block bar per bin with the count after
-//! it. Both stay inside [`crate::row::ROW_CAP`]: past that the column chart drops
-//! to every other value, then every other label, and only then narrows the
-//! bars.
+//! it, its bars as wide as the caller asks.
+//!
+//! The column chart fits itself inside [`crate::row::ROW_CAP`] as bins are
+//! added: first its bars narrow from three columns to two, then it prints
+//! every other value, then every other label, and last it narrows the bars
+//! to one. Past that last step (47 bins, when no value or label is longer
+//! than three characters) it runs wider than the cap.
 
 use crate::row::ROW_CAP;
 
@@ -17,9 +21,10 @@ const COL_INDENT: usize = 2;
 /// Partial column tops, one eighth to seven eighths.
 const EIGHTHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
-/// Column width, bar width, and how often a value and a label are printed.
-/// Labels thin out before the bars do, and the bars only shrink once
-/// thinning is not enough.
+/// Column width, bar width, and how often a value and a label are printed:
+/// the first step that fits inside the cap, or the last step when none does.
+/// The bars narrow to two before anything is thinned, and to one only once
+/// values and labels are both thinned.
 fn layout(n: usize, w_val: usize, w_lab: usize) -> (usize, usize, usize, usize) {
     let budget = ROW_CAP.saturating_sub(COL_INDENT);
     let mut last = (3usize, 3usize, 1usize, 1usize);
@@ -216,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn past_the_cap_the_labels_thin_out_before_the_bars_do() {
+    fn forty_bins_thin_out_the_labels_and_still_draw_the_bars() {
         let counts: Vec<u64> = (0..40).map(|i| (i * 37 % 91) as u64).collect();
         let lines = columns(&counts, &labels(40));
         assert!(width_of(&lines) <= ROW_CAP, "{lines:#?}");
