@@ -38,7 +38,12 @@
 //! [`Tango::DEFAULT_EXTRA_ARGS`] passes `--keep_going` through tango-cli's
 //! `-extra-args`, which places it after the `query` word. The result is the
 //! same universe bazel-diff (run with `-k`) and the `rdeps` oracle see:
-//! everything that loaded. [`Tango::with_extra_args`] replaces the list.
+//! everything that loaded.
+//!
+//! Neither `-max-distance` nor `-exclude-external` is passed. The BFS is left
+//! unlimited because cambium's walk is unlimited too, and an external label
+//! cambium never indexed is part of the answer being compared, so hiding it
+//! inside the tool would hide how much of the answer it is.
 //!
 //! `--keep_going` alone is not enough: upstream Tango's Bazel client treats
 //! *any* non-zero exit as a failed query, and `--keep_going` turns a load
@@ -77,11 +82,6 @@ const INSTALL: Install = Install {
     fetch_script: "tools/tango/fetch.sh",
 };
 
-/// `~/.cache/cambium/tango`, where `tools/tango/fetch.sh` installs.
-pub fn default_dir() -> PathBuf {
-    INSTALL.dir(None)
-}
-
 /// The tag and commit `fetch.sh` recorded, as one line.
 ///
 /// The file is `key=value` per line; the binary itself has no `--version`
@@ -96,16 +96,6 @@ pub fn read_version_file(dir: &Path) -> Option<String> {
 pub struct Tango {
     bin: PathBuf,
     version: String,
-    /// `-max-distance`; `None` leaves the BFS unlimited, which is what the
-    /// comparison wants (cambium's walk is unlimited too).
-    max_distance: Option<u32>,
-    /// `-exclude-external`. Off by default: an external label cambium never
-    /// indexed is a *classified* disagreement (`bazeldiff_extra_external`),
-    /// and hiding it inside the tool would hide how much of the answer it
-    /// is.
-    exclude_external: bool,
-    /// `-extra-args`: extra `bazel query` arguments. See the module docs.
-    extra_args: Vec<String>,
 }
 
 impl Tango {
@@ -135,44 +125,11 @@ impl Tango {
         Ok(Self::at(bin, version))
     }
 
-    /// The `bazel query` arguments every run passes unless told otherwise.
+    /// The `bazel query` arguments every run passes through `-extra-args`.
     pub const DEFAULT_EXTRA_ARGS: &'static [&'static str] = &["--keep_going"];
 
     pub fn at(bin: PathBuf, version: String) -> Self {
-        Self {
-            bin,
-            version,
-            max_distance: None,
-            exclude_external: false,
-            extra_args: Self::DEFAULT_EXTRA_ARGS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        }
-    }
-
-    /// Replaces the `-extra-args` list (default: `--keep_going`).
-    pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
-        self.extra_args = args;
-        self
-    }
-
-    pub fn extra_args(&self) -> &[String] {
-        &self.extra_args
-    }
-
-    pub fn with_max_distance(mut self, d: Option<u32>) -> Self {
-        self.max_distance = d;
-        self
-    }
-
-    pub fn with_exclude_external(mut self, yes: bool) -> Self {
-        self.exclude_external = yes;
-        self
-    }
-
-    pub fn binary(&self) -> &Path {
-        &self.bin
+        Self { bin, version }
     }
 }
 
@@ -226,15 +183,8 @@ impl Tool for Tango {
         if !startup.is_empty() {
             cmd.arg("-startup-options").arg(startup.join(" "));
         }
-        if !self.extra_args.is_empty() {
-            cmd.arg("-extra-args").arg(self.extra_args.join(" "));
-        }
-        if let Some(d) = self.max_distance {
-            cmd.arg("-max-distance").arg(d.to_string());
-        }
-        if self.exclude_external {
-            cmd.arg("-exclude-external");
-        }
+        cmd.arg("-extra-args")
+            .arg(Self::DEFAULT_EXTRA_ARGS.join(" "));
         let c = run_capture(
             &mut cmd,
             &format!("tango-cli {}..{}", short_sha(base), short_sha(head)),
@@ -293,29 +243,6 @@ pub fn parse_output(text: &str) -> Result<(BTreeSet<String>, BTreeMap<String, u3
         labels.insert(label);
     }
     Ok((labels, depths))
-}
-
-/// The fraction of labels both tools reported for which they agree on the
-/// depth, or `None` when they share nothing to compare.
-///
-/// Deliberately over the *shared* labels only: a label one tool never reported
-/// has no depth to disagree about, and folding those in would make the number
-/// a restatement of precision.
-pub fn depth_agreement(
-    cambium: &BTreeMap<String, u32>,
-    tool: &BTreeMap<String, u32>,
-) -> Option<f64> {
-    let mut shared = 0usize;
-    let mut same = 0usize;
-    for (label, d) in tool {
-        if let Some(c) = cambium.get(label) {
-            shared += 1;
-            if c == d {
-                same += 1;
-            }
-        }
-    }
-    (shared > 0).then(|| same as f64 / shared as f64)
 }
 
 #[cfg(test)]
@@ -517,20 +444,5 @@ JSON
         let err = Tango::discover_in(dir.path()).unwrap_err().to_string();
         assert!(err.contains("bin/tango-cli"), "{err}");
         assert!(err.contains("fetch.sh"), "{err}");
-    }
-
-    #[test]
-    fn depth_agreement_is_taken_over_the_shared_labels() {
-        let map = |v: &[(&str, u32)]| -> BTreeMap<String, u32> {
-            v.iter().map(|(l, d)| (l.to_string(), *d)).collect()
-        };
-        let cambium = map(&[("//a:a", 0), ("//b:b", 2), ("//c:c", 1)]);
-        let tool = map(&[("//a:a", 0), ("//b:b", 1), ("//z:z", 5)]);
-        assert_eq!(depth_agreement(&cambium, &tool), Some(0.5));
-        assert_eq!(
-            depth_agreement(&cambium, &map(&[("//z:z", 5)])),
-            None,
-            "nothing shared is not full agreement"
-        );
     }
 }

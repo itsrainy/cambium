@@ -1,8 +1,8 @@
 //! The `cambi` binary, as the harness runs it.
 //!
 //! Everything a user would type, the harness types too: `cambi index build`
-//! for a cold index, `cambi index update` to bring one forward, `cambi index
-//! publish` to upload it, `cambi affected --format json` for the answer. The
+//! for a cold index, `cambi index publish` to upload it, and `cambi affected
+//! --format json --out` for the answer and the index carried forward. The
 //! harness reads the documents back with the engine's own report types — it
 //! links `cambium-engine` for those types, and for the offline tools
 //! ([`crate::replay`], [`crate::precheck`]), never to run the product path
@@ -71,10 +71,6 @@ impl AffectedRun {
     /// everything the process paid around it.
     pub fn engine_ms(&self) -> u64 {
         self.report.timings_ms.total
-    }
-
-    pub fn wall_ms(&self) -> u64 {
-        self.wall.as_millis() as u64
     }
 }
 
@@ -249,28 +245,6 @@ impl Cambi {
         self.run(&mut cmd, &format!("cambi index build {rev}"))
     }
 
-    /// `cambi index update <base>..<head> --out <file>`, timed end
-    /// to end.
-    pub fn index_update(
-        &self,
-        ws: &Path,
-        base: &str,
-        head: &str,
-        out: &Path,
-        publish: bool,
-    ) -> Result<Duration> {
-        let mut cmd = self.command(ws);
-        cmd.arg("index")
-            .arg("update")
-            .arg(format!("{base}..{head}"))
-            .arg("--out")
-            .arg(out);
-        if publish {
-            cmd.arg("--publish");
-        }
-        self.run(&mut cmd, &format!("cambi index update {base}..{head}"))
-    }
-
     /// `cambi index publish <file>`.
     pub fn index_publish(&self, ws: &Path, file: &Path) -> Result<Duration> {
         let mut cmd = self.command(ws);
@@ -422,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn index_build_and_update_and_publish_say_what_a_user_would_type() {
+    fn index_build_and_publish_say_what_a_user_would_type() {
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv");
         let bin = fake(
@@ -432,13 +406,10 @@ mod tests {
         let c = Cambi::at(&bin).unwrap();
         let out = dir.path().join("i.bin");
         c.index_build(dir.path(), "abc", &out, true).unwrap();
-        c.index_update(dir.path(), "abc", "def", &out, false)
-            .unwrap();
         c.index_publish(dir.path(), &out).unwrap();
         let log = std::fs::read_to_string(&argv).unwrap();
         assert!(log.contains("index build abc"), "{log}");
         assert!(log.contains("--publish"), "{log}");
-        assert!(log.contains("index update abc..def"), "{log}");
         assert!(log.contains("index publish"), "{log}");
     }
 }

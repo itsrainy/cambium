@@ -18,9 +18,8 @@
 //! - **No warm mode.** bazel-diff's cold splits into "hash base" and "hash
 //!   head, diff", and the second half is what a CI system that kept yesterday's
 //!   hashes pays. target-determinator is one invocation that does both
-//!   revisions, and its cross-run cache ([`TargetDeterminator::with_cache`]) is
-//!   off here, so there is no honest half to quote as warm and
-//!   [`ToolRun::warm_wall`] is `None`.
+//!   revisions, and its cross-run cache is off here, so there is no honest
+//!   half to quote as warm and [`ToolRun::warm_wall`] is `None`.
 //! - **Its own checkout.** See [`TargetDeterminator::affected`].
 //!
 //! # Flags
@@ -35,11 +34,10 @@
 //!   precision of a global invalidation, rather than as the failure it is.
 //!   `fatal` turns it into a non-zero exit, which [`run_capture`] reports with
 //!   the tail of stderr the way every other foil's failure is reported.
-//! - **`-nocache_results`** ([`TargetDeterminator::with_cache`] turns it back
-//!   on). The cquery result cache persists across invocations, so with it on
-//!   a change set's cost would depend on which change sets ran before it. Its
-//!   key also excludes the environment and the machine, which upstream's own
-//!   README warns about.
+//! - **`-nocache_results`**. The cquery result cache persists across
+//!   invocations, so with it on a change set's cost would depend on which
+//!   change sets ran before it. Its key also excludes the environment and the
+//!   machine, which upstream's own README warns about.
 //!
 //! `-enforce-clean` is left at upstream's `allow-ignored`: the harness writes
 //! an untracked `cambium.toml` into every checkout and excludes it through
@@ -82,11 +80,6 @@ const INSTALL: Install = Install {
     fetch_script: "tools/target-determinator/fetch.sh",
 };
 
-/// `~/.cache/cambium/target-determinator`, where the fetch script installs.
-pub fn default_dir() -> PathBuf {
-    INSTALL.dir(None)
-}
-
 /// The tag and commit `fetch.sh` recorded, as one line.
 ///
 /// Preferred over asking the binary: `go build` leaves upstream's version
@@ -101,31 +94,12 @@ pub fn read_version_file(dir: &Path) -> Option<String> {
 pub struct TargetDeterminator {
     bin: PathBuf,
     version: String,
-    /// `-targets`; the universe to consider.
-    targets: String,
-    /// `-enforce-clean`.
-    enforce_clean: String,
-    /// `-analysis-cache-clear-strategy`.
-    analysis_cache_clear_strategy: String,
-    /// `-before-query-error-behavior`.
-    before_query_error_behavior: String,
-    /// The negation of `-nocache_results`. Off; see the module docs.
-    cache: bool,
-    /// `-verbose`.
-    verbose: bool,
 }
 
 impl TargetDeterminator {
     /// The pattern every run considers unless told otherwise, which is also
     /// upstream's default and the universe cambium's index covers.
     pub const DEFAULT_TARGETS: &'static str = "//...";
-
-    /// `$CAMBIUM_TARGET_DETERMINATOR`, else
-    /// `$CAMBIUM_TARGET_DETERMINATOR_DIR/bin/target-determinator`, else the
-    /// one under `~/.cache/cambium/target-determinator`.
-    pub fn discover() -> Result<Self> {
-        Self::discover_with(&ToolLocations::from_env())
-    }
 
     /// The binary the command line named, else the one under the installation
     /// directory.
@@ -148,53 +122,7 @@ impl TargetDeterminator {
     }
 
     pub fn at(bin: PathBuf, version: String) -> Self {
-        Self {
-            bin,
-            version,
-            targets: Self::DEFAULT_TARGETS.to_string(),
-            enforce_clean: "allow-ignored".to_string(),
-            analysis_cache_clear_strategy: "skip".to_string(),
-            before_query_error_behavior: "fatal".to_string(),
-            cache: false,
-            verbose: false,
-        }
-    }
-
-    /// Replaces `-targets` (default `//...`).
-    pub fn with_targets(mut self, pattern: impl Into<String>) -> Self {
-        self.targets = pattern.into();
-        self
-    }
-
-    /// Replaces `-analysis-cache-clear-strategy`: `skip`, `shutdown`, or
-    /// `discard`.
-    pub fn with_analysis_cache_clear_strategy(mut self, strategy: impl Into<String>) -> Self {
-        self.analysis_cache_clear_strategy = strategy.into();
-        self
-    }
-
-    /// Replaces `-enforce-clean`: `enforce-clean`, `allow-ignored`, or
-    /// `allow-dirty`.
-    pub fn with_enforce_clean(mut self, mode: impl Into<String>) -> Self {
-        self.enforce_clean = mode.into();
-        self
-    }
-
-    /// Whether to let the tool keep and reuse its cquery result cache. Off;
-    /// see the module docs for what it would do to the timings.
-    pub fn with_cache(mut self, yes: bool) -> Self {
-        self.cache = yes;
-        self
-    }
-
-    /// Whether to pass `-verbose`, which appends an explanation to each label.
-    pub fn with_verbose(mut self, yes: bool) -> Self {
-        self.verbose = yes;
-        self
-    }
-
-    pub fn binary(&self) -> &Path {
-        &self.bin
+        Self { bin, version }
     }
 
     /// The command line for one change set, in order.
@@ -210,13 +138,13 @@ impl TargetDeterminator {
             "-bazel".to_string(),
             ctx.bazel_binary.display().to_string(),
             "-targets".to_string(),
-            self.targets.clone(),
+            Self::DEFAULT_TARGETS.to_string(),
             "-enforce-clean".to_string(),
-            self.enforce_clean.clone(),
+            "allow-ignored".to_string(),
             "-analysis-cache-clear-strategy".to_string(),
-            self.analysis_cache_clear_strategy.clone(),
+            "skip".to_string(),
             "-before-query-error-behavior".to_string(),
-            self.before_query_error_behavior.clone(),
+            "fatal".to_string(),
             "-cache-dir".to_string(),
             ctx.scratch_file("target-determinator-cache")
                 .display()
@@ -230,12 +158,8 @@ impl TargetDeterminator {
             args.push("-bazel-startup-opts".to_string());
             args.push(flag);
         }
-        if !self.cache {
-            args.push("-nocache_results".to_string());
-        }
-        if self.verbose {
-            args.push("-verbose".to_string());
-        }
+        // The cquery result cache stays off; see the module docs.
+        args.push("-nocache_results".to_string());
         args.push(base.to_string());
         args
     }
@@ -403,26 +327,6 @@ mod tests {
             .collect();
         assert_eq!(opts, vec!["--bazelrc=/tmp/rc"]);
         assert!(!args.iter().any(|a| a.contains("output_base")), "{args:?}");
-    }
-
-    #[test]
-    fn the_optional_flags_are_only_there_when_asked_for() {
-        let args = td()
-            .with_cache(true)
-            .with_verbose(true)
-            .with_targets("//src/...")
-            .with_enforce_clean("allow-dirty")
-            .with_analysis_cache_clear_strategy("discard")
-            .args(Path::new("/ws"), "abc123", &ctx(Path::new("/tmp/s")));
-        assert!(!args.iter().any(|a| a == "-nocache_results"));
-        assert!(args.iter().any(|a| a == "-verbose"));
-        assert!(args.windows(2).any(|w| w == ["-targets", "//src/..."]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-enforce-clean", "allow-dirty"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-analysis-cache-clear-strategy", "discard"]));
     }
 
     #[test]
