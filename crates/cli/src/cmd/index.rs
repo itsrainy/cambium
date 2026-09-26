@@ -442,7 +442,7 @@ fn counts(index: &cambium_index::IndexData) -> String {
     format!(
         "{} nodes, {} edges, {} packages, lineage {}",
         group(c.nodes as u64),
-        group(c.edges as u64),
+        group(c.edges),
         group(c.packages as u64),
         hex(&index.header.lineage)
     )
