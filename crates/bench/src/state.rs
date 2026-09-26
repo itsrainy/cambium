@@ -154,12 +154,7 @@ impl State {
     }
 
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let path = Self::path(dir);
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_json_atomic(&Self::path(dir), self)
     }
 
     /// Stamps `<step>.<event>` with the current time.

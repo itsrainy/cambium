@@ -126,15 +126,9 @@ impl Progress {
         }
     }
 
-    /// Atomically: a temp file and a rename, so a reader polling every second
-    /// never sees a half-written document.
+    /// Atomically, since a reader polls it every second.
     pub fn write(&self, subject_dir: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(subject_dir)?;
-        let path = Self::path(subject_dir);
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::util::write_json_atomic(&Self::path(subject_dir), self)
     }
 }
 

@@ -196,6 +196,19 @@ struct SchemaProbe {
     schema: u32,
 }
 
+/// Writes `value` to `path` as pretty JSON, atomically: a temp file beside it
+/// and a rename, so a reader polling the file (`watch`, a resumed run) never
+/// sees half a document. The parent directory is created if need be.
+pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Reads a result file, refusing one this binary cannot read.
 ///
 /// Every result carries [`crate::RESULT_SCHEMA`], and the whole point of the
