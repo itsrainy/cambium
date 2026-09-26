@@ -104,15 +104,41 @@ fn the_subcommands_are_the_ones_the_readme_documents() {
     }
 }
 
+/// A caller that mistypes must not have an empty stdout read as "nothing is
+/// affected", nor exit 2, which says "everything is affected" and makes a CI
+/// script test `//...` on a typo. A command line the parser rejects is an
+/// error, exit 1, with the parser's own message and its `--help` hint.
 #[test]
 fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
-    // A caller that mistypes must not have an empty stdout read as "nothing is
-    // affected". clap uses 2 for usage errors; what matters here is that it is
-    // not 0, and that stdout stays empty.
-    let (code, stdout, stderr) = run(&["affected", "--not-a-flag"]);
-    assert_ne!(code, 0, "a usage error must not look like success");
-    assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
-    assert!(!stderr.is_empty(), "the error should say what went wrong");
+    for argv in [
+        &["affected", "--not-a-flag"][..],
+        &["affected", "--max-depth"],
+        &["--format", "nope", "status"],
+        &["no-such-verb"],
+        &["index"],
+    ] {
+        let (code, stdout, stderr) = run(argv);
+        assert_eq!(
+            code,
+            1,
+            "`cambi {}` is an error, exit 1:\n{stderr}",
+            argv.join(" ")
+        );
+        assert!(stdout.is_empty(), "nothing should reach stdout: {stdout:?}");
+        assert!(
+            stderr.contains("error:") || stderr.contains("Usage: cambi"),
+            "the parser says what went wrong:\n{stderr}"
+        );
+    }
+    let (_, _, stderr) = run(&["affected", "--not-a-flag"]);
+    assert!(stderr.contains("--not-a-flag"), "{stderr}");
+    assert!(stderr.contains("--help"), "the hint stays:\n{stderr}");
+    // Help and the version are answers, not errors.
+    for argv in [&["--help"][..], &["affected", "--help"], &["--version"]] {
+        let (code, stdout, _) = run(argv);
+        assert_eq!(code, 0, "`cambi {}`", argv.join(" "));
+        assert!(!stdout.is_empty());
+    }
 }
 
 /// Builds a synthetic index in `dir` and returns its path.

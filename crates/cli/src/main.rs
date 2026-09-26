@@ -227,8 +227,14 @@ fn main() -> ExitCode {
     // came from is still known: `--cache-dir` and `$CAMBIUM_CACHE_DIR` reach
     // the struct as one `Option`, and `cambi config explain` has to say
     // which one set it.
-    let matches = Cli::command().get_matches_from(argv);
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let matches = match Cli::command().try_get_matches_from(argv) {
+        Ok(m) => m,
+        Err(e) => return clap_exit(&e),
+    };
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => return clap_exit(&e),
+    };
     let overrides = overrides(&cli, &matches);
 
     let root = match cli.workspace.clone() {
@@ -296,6 +302,27 @@ fn main() -> ExitCode {
                 .unwrap_or(EXIT_ERROR);
             ExitCode::from(code)
         }
+    }
+}
+
+/// Where clap's own answer goes, and the code it exits with.
+///
+/// `--help` and `--version` are answers: stdout, exit 0. Anything else clap
+/// stops on (an unknown flag or verb, a missing value, a verb with no
+/// subcommand) is a command line that does not parse, and that is an error,
+/// exit 1. Clap's own default is 2, which is this binary's "everything is
+/// affected": a CI script that tests `//...` on exit 2 would test everything
+/// on a typo. Clap's message and its `--help` hint are printed unchanged.
+fn clap_exit(e: &clap::Error) -> ExitCode {
+    let _ = e.print();
+    ExitCode::from(clap_exit_code(e))
+}
+
+fn clap_exit_code(e: &clap::Error) -> u8 {
+    if e.use_stderr() {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
     }
 }
 
@@ -440,6 +467,32 @@ mod tests {
         assert!(!is_closed_stdout(
             "failed printing to stderr: Broken pipe (os error 32)"
         ));
+    }
+
+    #[test]
+    fn a_command_line_clap_rejects_is_an_error_and_help_is_an_answer() {
+        let code = |argv: &[&str]| match Cli::command().try_get_matches_from(argv) {
+            Ok(_) => None,
+            Err(e) => Some(clap_exit_code(&e)),
+        };
+        assert_eq!(
+            code(&["cambi", "affected", "--not-a-flag"]),
+            Some(EXIT_ERROR)
+        );
+        assert_eq!(
+            code(&["cambi", "affected", "--max-depth"]),
+            Some(EXIT_ERROR)
+        );
+        assert_eq!(code(&["cambi", "no-such-verb"]), Some(EXIT_ERROR));
+        assert_eq!(code(&["cambi", "index"]), Some(EXIT_ERROR));
+        assert_eq!(code(&["cambi", "--help"]), Some(EXIT_OK));
+        assert_eq!(code(&["cambi", "affected", "--help"]), Some(EXIT_OK));
+        assert_eq!(code(&["cambi", "--version"]), Some(EXIT_OK));
+        assert_ne!(
+            Some(EXIT_GLOBAL),
+            code(&["cambi", "--format", "nope"]),
+            "a typo must never read as everything affected"
+        );
     }
 
     #[test]

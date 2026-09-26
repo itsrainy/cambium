@@ -160,10 +160,9 @@ the `case` reads the code. What each exit code means here:
 
 Two details the script relies on:
 
-- **A usage error clap rejects exits 2 too.** A mistyped flag prints
-  clap's usage text and exits 2 with nothing on stdout. Running the file
-  on exit 2, rather than `//...`, makes that a failure: the file is empty,
-  and `bazel test --target_pattern_file` on an empty file exits non-zero.
+- **A usage error exits 1.** A mistyped flag prints the parser's message
+  and exits 1 with nothing on stdout, so the `*)` arm fails the job. Exit 2
+  is only ever the global answer, and the file then holds `//...`.
 - **Exit 5 happens only where a store can tell an outage from a miss**: a
   directory store whose path is a file or refused (`CAMBI-E011`), an HTTP
   store answering `5xx` or `401` or not answering (`CAMBI-E010`), and a

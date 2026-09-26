@@ -411,10 +411,9 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   | 5 | the store is there and could not be read |
 
   A command line the argument parser rejects before `cambi` runs (an
-  unknown flag or verb, a missing value) exits 2 with the parser's usage
-  text on stderr and nothing on stdout, so a script should read 2 as
-  "everything" only when stdout says `//...` (docs/CI.md's scripts run the
-  label file on 2, which fails on an empty one).
+  unknown flag or verb, a missing value) exits 1 with the parser's message
+  and its `--help` hint on stderr and nothing on stdout: it is an error,
+  and 2 is only ever the global answer. `--help` and `--version` exit 0.
 
   0-4 keep their numbers. 5 is new: a store that is there and cannot be
   read differs from one with no index; CI retries the first, builds for the
