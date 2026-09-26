@@ -172,9 +172,79 @@ pub fn config_explain(ctx: &Context) -> Result<u8> {
             );
         }
         println!();
+        for line in invalidator_notes(&layered.config) {
+            println!("{line}");
+        }
         println!("# config_hash = {}", hex(&layered.config.hash()));
     })?;
     Ok(crate::EXIT_OK)
+}
+
+/// The comment lines under `config explain`'s table that say how a run reads
+/// each `[invalidators]` entry. The defaults are mostly not the bare rule: a
+/// `MODULE.bazel` comment or a `build`-only `.bazelrc` line affects nothing,
+/// and the list alone reads as if every edit there were global.
+fn invalidator_notes(cfg: &cambium_engine::Config) -> Vec<String> {
+    use cambium_engine::config::InvalidatorPath;
+    let group = |kind: InvalidatorPath| -> Vec<&str> {
+        cfg.invalidators
+            .paths
+            .iter()
+            .filter(|p| cfg.invalidator_path(p) == kind)
+            .map(String::as_str)
+            .collect()
+    };
+    let mut sentences = Vec::new();
+    for (kind, what) in [
+        (
+            InvalidatorPath::Externals,
+            "invalidators.paths read first by the external-repository stage, global only \
+             when it cannot name what moved",
+        ),
+        (
+            InvalidatorPath::Bazelrc,
+            "invalidators.paths read first by the rc screen, global only when it cannot \
+             clear the edit",
+        ),
+        (
+            InvalidatorPath::NotRead,
+            "invalidators.paths Bazel does not read under these startup flags, an ordinary \
+             source change",
+        ),
+        (
+            InvalidatorPath::Invalidator,
+            "invalidators.paths whose change makes everything affected",
+        ),
+    ] {
+        let paths = group(kind);
+        if !paths.is_empty() {
+            sentences.push(format!("{what}: {}", paths.join(", ")));
+        }
+    }
+    if !cfg.invalidators.globs.is_empty() {
+        sentences.push(format!(
+            "invalidators.globs whose match makes everything affected: {}",
+            cfg.invalidators.globs.join(", ")
+        ));
+    }
+    sentences.iter().flat_map(|s| comment_wrap(s, 88)).collect()
+}
+
+/// `text` as `# ` comment lines no wider than `width`, broken at spaces,
+/// continuation lines indented under the first.
+fn comment_wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::from("#");
+    for word in text.split(' ') {
+        let fresh = line == "#" || line == "#  ";
+        if !fresh && line.len() + 1 + word.len() > width {
+            lines.push(std::mem::replace(&mut line, String::from("#  ")));
+        }
+        line.push(' ');
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines
 }
 
 /// Prints one answer the way `--format` asked, for every verb that answers
@@ -295,6 +365,13 @@ pub fn git_short(rev: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comment_wraps_at_spaces_and_indents_what_follows() {
+        let lines = comment_wrap("aaaa bbbb cccc dddd", 12);
+        assert_eq!(lines, vec!["# aaaa bbbb", "#   cccc", "#   dddd"]);
+        assert_eq!(comment_wrap("short", 88), vec!["# short"]);
+    }
 
     #[test]
     fn one_is_singular_and_every_other_count_is_plural() {

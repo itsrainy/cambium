@@ -691,6 +691,87 @@ fn init_writes_a_config_the_engine_loads_and_explain_attributes() {
     assert_eq!(untouched["origin_label"], "default");
 }
 
+/// The comment lines `config explain` prints under its table, unwrapped into
+/// one string.
+fn explain_notes(stdout: &str) -> String {
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('#'))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The default `[invalidators].paths` are not all equal. Most are read by a
+/// model of their own before the rule applies (a `MODULE.bazel` comment, a
+/// `build`-only `.bazelrc` line: nothing affected), and `config explain` says
+/// which, so the list does not read as "every edit here is global".
+#[test]
+fn config_explain_says_which_invalidator_paths_a_model_reads_first() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(
+        notes.contains(
+            "invalidators.paths read first by the external-repository stage, global only \
+             when it cannot name what moved: MODULE.bazel, MODULE.bazel.lock, WORKSPACE, \
+             WORKSPACE.bazel, WORKSPACE.bzlmod"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        notes.contains(
+            "invalidators.paths read first by the rc screen, global only when it cannot \
+             clear the edit: .bazelrc"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        notes.contains(
+            "invalidators.paths whose change makes everything affected: \
+             WORKSPACE.bzlmod.lock, .bazelversion, REPO.bazel"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains('\u{2014}'), "no em-dashes: {stdout}");
+
+    // With the external-repository stage off, nothing reads MODULE.bazel
+    // first: the entry is the rule.
+    std::fs::write(
+        dir.path().join("cambium.toml"),
+        "[externals]\nenabled = false\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(!notes.contains("external-repository stage"), "{stdout}");
+    assert!(
+        notes.contains("whose change makes everything affected: MODULE.bazel, MODULE.bazel.lock"),
+        "{stdout}"
+    );
+
+    // Under `--noworkspace_rc` Bazel never reads the root rc, and its edit is
+    // an ordinary source change.
+    std::fs::write(
+        dir.path().join("cambium.toml"),
+        "[bazel]\nstartup_flags = [\"--noworkspace_rc\"]\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "config", "explain"]);
+    assert_eq!(code, 0, "{stderr}");
+    let notes = explain_notes(&stdout);
+    assert!(
+        notes.contains(
+            "invalidators.paths Bazel does not read under these startup flags, an ordinary \
+             source change: .bazelrc"
+        ),
+        "{stdout}"
+    );
+}
+
 /// `cambium.toml` is checked in, and somebody wrote the rest of it on purpose.
 #[test]
 fn init_on_an_existing_file_preserves_what_it_was_not_asked_about() {

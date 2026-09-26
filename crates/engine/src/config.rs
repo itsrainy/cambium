@@ -141,6 +141,27 @@ pub struct Invalidators {
     pub globs: Vec<String>,
 }
 
+/// What a run does with a changed `[invalidators].paths` entry. Only the
+/// last kind is the bare rule; the others are read by a model of their own
+/// first, and the entry is what answers only when that model is off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidatorPath {
+    /// The external-repository stage reads it (the module diff, the lock
+    /// diff, the `WORKSPACE` statement diff, or an inert file under the other
+    /// mode) and names the repositories that moved. The run is global only
+    /// when that reading cannot, under the stage's own code.
+    Externals,
+    /// The bazelrc screen reads it and drops the edit when every flag it
+    /// changed is one loading cannot see. The run is global only when the
+    /// screen cannot clear it (`CAMBI-W004`).
+    Bazelrc,
+    /// Bazel does not read it under the configured startup flags
+    /// (`--noworkspace_rc`), so its edit is an ordinary source change.
+    NotRead,
+    /// A change makes everything affected (`CAMBI-W013`).
+    Invalidator,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ignore {
@@ -962,6 +983,26 @@ impl Config {
         toml::Value::try_from(self).expect("config is serialisable")
     }
 
+    /// How a run reads a changed `[invalidators].paths` entry: see
+    /// [`InvalidatorPath`]. `config explain` says it per entry, because the
+    /// defaults are mostly not the bare rule and read as if they were.
+    pub fn invalidator_path(&self, path: &str) -> InvalidatorPath {
+        use crate::externals::{LEGACY_WORKSPACE_FILES, MODULE_FILE, MODULE_LOCK};
+        if path == crate::bazelrc::WORKSPACE_RC {
+            return if crate::bazelrc::reads_workspace_rc(&self.bazel.startup_flags) {
+                InvalidatorPath::Bazelrc
+            } else {
+                InvalidatorPath::NotRead
+            };
+        }
+        let externals_file =
+            path == MODULE_FILE || path == MODULE_LOCK || LEGACY_WORKSPACE_FILES.contains(&path);
+        if externals_file && self.externals.enabled {
+            return InvalidatorPath::Externals;
+        }
+        InvalidatorPath::Invalidator
+    }
+
     pub fn rules(&self) -> Rules {
         Rules {
             invalidator_paths: self.invalidators.paths.clone(),
@@ -1123,6 +1164,41 @@ mod tests {
     /// has. A default that still named them would go global on a file under
     /// those directories that moved no toolchain declaration, and would
     /// change the config hash of every workspace for nothing.
+    #[test]
+    fn most_default_invalidator_paths_are_read_by_a_model_first() {
+        use InvalidatorPath::*;
+        let cfg = Config::default();
+        let kinds: Vec<(&str, InvalidatorPath)> = cfg
+            .invalidators
+            .paths
+            .iter()
+            .map(|p| (p.as_str(), cfg.invalidator_path(p)))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("MODULE.bazel", Externals),
+                ("MODULE.bazel.lock", Externals),
+                ("WORKSPACE", Externals),
+                ("WORKSPACE.bazel", Externals),
+                ("WORKSPACE.bzlmod", Externals),
+                ("WORKSPACE.bzlmod.lock", Invalidator),
+                (".bazelrc", Bazelrc),
+                (".bazelversion", Invalidator),
+                ("REPO.bazel", Invalidator),
+            ]
+        );
+
+        let mut off = Config::default();
+        off.externals.enabled = false;
+        assert_eq!(off.invalidator_path("MODULE.bazel"), Invalidator);
+        assert_eq!(off.invalidator_path("WORKSPACE"), Invalidator);
+
+        let mut no_rc = Config::default();
+        no_rc.bazel.startup_flags = vec!["--noworkspace_rc".into()];
+        assert_eq!(no_rc.invalidator_path(".bazelrc"), NotRead);
+    }
+
     #[test]
     fn no_invalidator_glob_is_on_by_default() {
         assert!(Config::default().invalidators.globs.is_empty());

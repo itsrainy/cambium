@@ -333,8 +333,14 @@ still exact, only not incremental):
   A repository dirtied only through a path that a target the repository rule
   *writes* names is spared: nothing the rule wrote, its `BUILD` files
   included, can have moved.
-- `.bazelversion`, `REPO.bazel`, and the `[invalidators]` paths and globs (no
-  glob by default).
+- `.bazelversion`, `REPO.bazel`, `WORKSPACE.bzlmod.lock`, and any other
+  `[invalidators]` path or glob (`CAMBI-W013`; no glob by default). The
+  other default paths are read by a model of their own first and are global
+  only when it cannot answer: `MODULE.bazel`, its lock and the `WORKSPACE`
+  files by the external-repository stage (the module, lock and statement
+  diffs), `.bazelrc` by the rc screen (the first item here). With
+  `[externals] enabled = false` the `MODULE.bazel` and `WORKSPACE` entries
+  are the bare rule again. `cambi config explain` says which is which.
 - A module Bazel autoloads native rules from (`rules_python`, `rules_java`,
   `rules_shell`, `protobuf`, `rules_android`) moving in `MODULE.bazel`, its
   lock or `WORKSPACE`, under a Bazel that autoloads (`CAMBI-W024`): Bazel 8 at
@@ -688,11 +694,16 @@ limits.max_dirty_packages  = 900  (/src/repo/cambium.toml)
 ```
 
 Two keys to know first: `[invalidators].paths` and `.globs` are the paths
-whose change means "everything is affected", and `limits.max_dirty_packages`
-bounds the only part of a run whose cost grows with the diff; past it the run
-asks Bazel for the whole repository once and reports `stats.cold_rebuild` with
-`cold_rebuild_reason`. The answer is exact either way: a cold rebuild is a
-slower route to the same affected set, not a surrender to `//...`.
+whose change means "everything is affected", except that most default paths
+are read by a model of their own first (`MODULE.bazel`, its lock and the
+`WORKSPACE` files by the external-repository stage, `.bazelrc` by the rc
+screen), which names what moved and is global only when it cannot; `config
+explain` says under its table which entries are which. And
+`limits.max_dirty_packages` bounds the only part of a run whose cost grows
+with the diff; past it the run asks Bazel for the whole repository once and
+reports `stats.cold_rebuild` with `cold_rebuild_reason`. The answer is exact
+either way: a cold rebuild is a slower route to the same affected set, not a
+surrender to `//...`.
 
 Every section and default is in [docs/CLI.md](docs/CLI.md#configuration)
 (`cambi config explain` prints them), and the store's syntax for each
