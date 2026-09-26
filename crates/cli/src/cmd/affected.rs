@@ -17,7 +17,7 @@ use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit_json, short, Context};
+use crate::cmd::{emit_json, plural, plural_s, short, Context};
 use crate::Format;
 
 /// How the targets-by-depth distribution is drawn under the answer.
@@ -562,7 +562,7 @@ fn commits_in_range(engine: &cambium_engine::Engine, req: &AffectedRequest) -> S
         return String::new();
     };
     match out.trim().parse::<u64>() {
-        Ok(n) => format!("{} commit{}", group(n), if n == 1 { "" } else { "s" }),
+        Ok(n) => format!("{} commit{}", group(n), plural_s(n)),
         Err(_) => String::new(),
     }
 }
@@ -609,7 +609,7 @@ impl Narrator<'_> {
             } => {
                 let mut about = vec![format!("lineage {}", short(&lineage))];
                 if behind > 0 {
-                    about.insert(0, format!("{} behind", plural_hops(behind)));
+                    about.insert(0, format!("{behind} commit{} behind", plural_s(behind)));
                 }
                 if let Some(age) = age_secs {
                     about.push(format!("{} old", human_age(age)));
@@ -645,7 +645,7 @@ impl Narrator<'_> {
                     name: "splice".into(),
                     detail: Some(format!(
                         "{commits} commit{}  {}..{}",
-                        if commits == 1 { "" } else { "s" },
+                        plural_s(commits),
                         short(&from),
                         short(&to)
                     )),
@@ -668,9 +668,9 @@ impl Narrator<'_> {
                         subject: format!(
                             "{} file{}, {} package{}",
                             step.changed_files,
-                            if step.changed_files == 1 { "" } else { "s" },
+                            plural_s(step.changed_files),
                             step.dirty_packages,
-                            if step.dirty_packages == 1 { "" } else { "s" },
+                            plural_s(step.dirty_packages),
                         ),
                     },
                     Cell::text(human_ms(step.wall_ms)),
@@ -688,7 +688,7 @@ impl Narrator<'_> {
                 result: format!(
                     "{} row{} rewritten, index now at {}",
                     group(rows_rewritten as u64),
-                    if rows_rewritten == 1 { "" } else { "s" },
+                    plural_s(rows_rewritten),
                     short(&at)
                 ),
                 elapsed_ms,
@@ -716,9 +716,9 @@ impl Narrator<'_> {
                 result: format!(
                     "{} changed file{}, {} package{} \u{2192} {} affected ({} tests)",
                     changed_files,
-                    if changed_files == 1 { "" } else { "s" },
+                    plural_s(changed_files),
                     packages,
-                    if packages == 1 { "" } else { "s" },
+                    plural_s(packages),
                     group(affected as u64),
                     group(tests as u64),
                 ),
@@ -748,10 +748,6 @@ fn human_age(secs: u64) -> String {
         7_200..=172_799 => format!("{} h", secs / 3_600),
         _ => format!("{} d", secs / 86_400),
     }
-}
-
-fn plural_hops(n: u32) -> String {
-    format!("{n} commit{}", if n == 1 { "" } else { "s" })
 }
 
 /// The answer as `--format labels` prints it, one per line: what `bazel test
@@ -787,7 +783,7 @@ fn print_answer(report: &cambium_engine::AffectedReport, tests_only: bool, hist_
         paint.bold(&format!(
             "{} affected target{}",
             group(items.len() as u64),
-            if items.len() == 1 { "" } else { "s" }
+            plural_s(items.len())
         )),
         group(report.tests.len() as u64),
         depth,
@@ -886,13 +882,9 @@ pub fn path_line(path: &[String]) -> String {
         "{}  ({} {}, {} package {})",
         path.join(" <- "),
         hops,
-        if hops == 1 { "hop" } else { "hops" },
+        plural(hops, "hop", "hops"),
         boundaries,
-        if boundaries == 1 {
-            "boundary"
-        } else {
-            "boundaries"
-        }
+        plural(boundaries, "boundary", "boundaries"),
     )
 }
 

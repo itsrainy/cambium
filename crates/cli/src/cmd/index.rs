@@ -16,7 +16,7 @@ use cambium_ui::report::{group, human_bytes};
 use cambium_ui::{Event, Level, Sink};
 
 use crate::cmd::narrate::{repo_name, start_indexing};
-use crate::cmd::{hex, short, Context};
+use crate::cmd::{hex, plural_s, short, Context};
 
 #[derive(Subcommand)]
 pub enum Args {
@@ -293,7 +293,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
 /// `1 file`, `3 files`.
 fn files(n: usize) -> String {
-    format!("{n} file{}", if n == 1 { "" } else { "s" })
+    format!("{n} file{}", plural_s(n))
 }
 
 /// The store `[baseline].store` names, or `CAMBI-E008` saying there is none.
@@ -416,11 +416,7 @@ fn emit(
 fn say_published(sink: &mut dyn Sink, names: &[String], started: Instant) {
     sink.emit(Event::PhaseEnd {
         name: "publish".into(),
-        result: format!(
-            "{} key{}",
-            names.len(),
-            if names.len() == 1 { "" } else { "s" }
-        ),
+        result: format!("{} key{}", names.len(), plural_s(names.len())),
         elapsed_ms: ms(started),
     });
     for n in names {

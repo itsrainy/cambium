@@ -10,7 +10,7 @@
 use anyhow::Result;
 use cambium_engine::probe;
 
-use crate::cmd::{emit, human_bytes, Context};
+use crate::cmd::{emit, human_bytes, plural_s, Context};
 
 pub fn run(ctx: &Context) -> Result<u8> {
     let probes = probe::collect(&ctx.probe_options());
@@ -108,7 +108,7 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
                 "  HEAD {} has no index; nearest is {}, {back} commit{} back{}",
                 probe::short(head),
                 probe::short(near),
-                if back == 1 { "" } else { "s" },
+                plural_s(back),
                 lineage_suffix(p, "splice")
             ),
             (Some(head), false, ..) => println!(
@@ -237,7 +237,7 @@ pub fn duration(secs: u64) -> String {
         3600..=86_399 => (secs / 3600, "hour"),
         _ => (secs / 86_400, "day"),
     };
-    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+    format!("{n} {unit}{}", plural_s(n))
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
-use crate::cmd::{emit, short, Context};
+use crate::cmd::{emit, plural, plural_s, short, Context};
 
 /// What lands on stdout above the table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -95,7 +95,7 @@ fn header_note(commits: usize) -> String {
     } else {
         format!(
             "{commits} first-parent commit{}; the oldest is indexed cold first",
-            plural(commits)
+            plural_s(commits)
         )
     }
 }
@@ -255,11 +255,7 @@ impl Renderer<'_> {
                 elapsed_ms,
             } => self.sink.emit(Event::PhaseEnd {
                 name: "cold index".into(),
-                result: format!(
-                    "{} target{}",
-                    group(targets as u64),
-                    plural(targets as usize)
-                ),
+                result: format!("{} target{}", group(targets as u64), plural_s(targets)),
                 elapsed_ms,
             }),
             Progress::ColdFailed {
@@ -286,7 +282,7 @@ impl Renderer<'_> {
                     self.opened = true;
                     self.sink.emit(Event::PhaseStart {
                         name: "commits".into(),
-                        detail: Some(format!("{of} step{}", plural(of))),
+                        detail: Some(format!("{of} step{}", plural_s(of))),
                     });
                     self.sink.emit(Event::RowHeader(commit_columns("commit")));
                 }
@@ -450,7 +446,7 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
                 "at {}, last {} first-parent commit{}",
                 short(&p.head),
                 s.commits,
-                plural(s.commits)
+                plural_s(s.commits)
             ),
         ),
         Pair::new("measured", "", MEASURED),
@@ -458,12 +454,12 @@ fn kv_pairs(p: &Profile, workspace: &std::path::Path) -> Vec<Pair> {
             "targets",
             group(i.targets as u64),
             format!(
-                "{} tests, {} package{}, {} external repositor{}",
+                "{} tests, {} package{}, {} external {}",
                 group(i.tests as u64),
                 group(i.packages as u64),
-                plural(i.packages as usize),
+                plural_s(i.packages),
                 group(i.external_repos as u64),
-                if i.external_repos == 1 { "y" } else { "ies" },
+                plural(i.external_repos, "repository", "repositories"),
             ),
         ),
         Pair::new(
@@ -636,18 +632,18 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
         workspace.display(),
         short(&p.head),
         s.commits,
-        plural(s.commits),
+        plural_s(s.commits),
         short(&p.from),
     );
     println!();
     println!(
         "This build graph has {} targets ({} tests) in {} packages, with {} external \
-         repositor{}.",
+         {}.",
         group(i.targets as u64),
         group(i.tests as u64),
         group(i.packages as u64),
         group(i.external_repos as u64),
-        if i.external_repos == 1 { "y" } else { "ies" },
+        plural(i.external_repos, "repository", "repositories"),
     );
     println!(
         "A full cambium index takes {} to build and {} on disk ({}); loading it takes {}.",
@@ -666,7 +662,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "Based on the last {} commit{}, none was answered incrementally, so there is no \
              incremental time to report.",
             s.commits,
-            plural(s.commits),
+            plural_s(s.commits),
         );
     } else {
         println!(
@@ -675,13 +671,13 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
              incrementally). A typical commit (the median) affects {} of {} targets ({}, \
              manual included) and {} of {} tests ({}).",
             s.commits,
-            plural(s.commits),
+            plural_s(s.commits),
             human_ms(inc.mean_ms),
             human_ms(inc.p50_ms),
             human_ms(inc.p90_ms),
             human_ms(inc.max_ms),
             inc.commits,
-            plural(inc.commits),
+            plural_s(inc.commits),
             group(s.incremental_affected.p50),
             group(p.cold.targets as u64),
             percent(s.affected_share),
@@ -695,7 +691,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
         None => println!(
             "The entire graph never had to be rebuilt in those {} commit{}.",
             s.commits,
-            plural(s.commits)
+            plural_s(s.commits)
         ),
         Some(every) => {
             let reasons: Vec<String> = s
@@ -710,7 +706,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
                 "The entire graph had to be rebuilt {} time{} ({} of commits), once every {:.1} \
                  commits on average, at {} per rebuild ({}).",
                 s.globals,
-                plural(s.globals),
+                plural_s(s.globals),
                 percent(s.global_share),
                 every,
                 human_ms(s.global_rebuild.mean_ms),
@@ -723,7 +719,7 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "{} commit{} exceeded limits.max_dirty_packages and were answered by re-querying \
              the whole repository: exact, at {} each.",
             s.engine_cold_rebuilds,
-            plural(s.engine_cold_rebuilds),
+            plural_s(s.engine_cold_rebuilds),
             human_ms(s.requery.mean_ms),
         );
     }
@@ -732,17 +728,9 @@ fn print_prose(p: &Profile, workspace: &std::path::Path) {
             "{} commit{} failed to build and {} left out of every figure; the commit after \
              each was indexed cold.",
             s.failed,
-            plural(s.failed),
-            if s.failed == 1 { "is" } else { "are" },
+            plural_s(s.failed),
+            plural(s.failed, "is", "are"),
         );
-    }
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
     }
 }
 

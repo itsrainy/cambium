@@ -14,7 +14,7 @@ use cambium_index::IndexFile;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
-use crate::cmd::{emit, human_bytes as human, Context};
+use crate::cmd::{emit, human_bytes as human, plural, Context};
 
 /// Options every query shares.
 #[derive(ClapArgs, Clone)]
@@ -304,14 +304,6 @@ fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
             r.ignored_external,
             plural(r.ignored_external, "target", "targets"),
         );
-    }
-}
-
-fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
-    if n == 1 {
-        one
-    } else {
-        many
     }
 }
 

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use cambium_engine::plan::{PlanMode, RunPlan};
 
-use crate::cmd::{emit, git_short, Context};
+use crate::cmd::{emit, git_short, plural_s, Context};
 
 pub fn run(
     ctx: &Context,
@@ -51,16 +51,16 @@ fn print_human(plan: &RunPlan) {
             },
             match i.distance {
                 Some(0) | None => String::new(),
-                Some(n) => format!(", {n} commit{} back", if n == 1 { "" } else { "s" }),
+                Some(n) => format!(", {n} commit{} back", plural_s(n)),
             }
         ),
     }
     println!(
         "  diff   {} changed file{}, {}",
         plan.changed_files,
-        if plan.changed_files == 1 { "" } else { "s" },
+        plural_s(plan.changed_files),
         match plan.dirty_packages {
-            Some(n) => format!("{n} dirty package{}", if n == 1 { "" } else { "s" }),
+            Some(n) => format!("{n} dirty package{}", plural_s(n)),
             None => "dirty packages unknown until queried".into(),
         }
     );

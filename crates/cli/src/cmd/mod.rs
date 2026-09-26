@@ -210,6 +210,22 @@ pub use cambium_engine::hex;
 /// rows and the report on stdout cannot disagree about what `4.2 s` is.
 pub use cambium_ui::report::human_bytes;
 
+/// `one` after a count of one and `many` after any other, zero included:
+/// `plural(n, "repository", "repositories")`.
+pub fn plural<'a, N: PartialEq + From<u8>>(n: N, one: &'a str, many: &'a str) -> &'a str {
+    if n == N::from(1) {
+        one
+    } else {
+        many
+    }
+}
+
+/// The `s` a regular noun takes after a count:
+/// `format!("{n} file{}", plural_s(n))`.
+pub fn plural_s<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    plural(n, "", "s")
+}
+
 /// A revision as the narration and the long reports name it: a sha cut to
 /// ten digits, a ref name (`origin/main`) whole.
 pub fn short(rev: &str) -> String {
@@ -220,4 +236,17 @@ pub fn short(rev: &str) -> String {
 /// sha cut to the seven digits git abbreviates one to, a ref name whole.
 pub fn git_short(rev: &str) -> String {
     cambium_ui::report::rev(rev, 7)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_is_singular_and_every_other_count_is_plural() {
+        assert_eq!(plural(1usize, "repository", "repositories"), "repository");
+        assert_eq!(plural(0u32, "repository", "repositories"), "repositories");
+        assert_eq!(format!("{} file{}", 2u64, plural_s(2u64)), "2 files");
+        assert_eq!(format!("{} file{}", 1u64, plural_s(1u64)), "1 file");
+    }
 }

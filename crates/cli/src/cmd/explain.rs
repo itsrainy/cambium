@@ -18,7 +18,7 @@ use cambium_engine::{AffectedReport, Diagnostic, Explanation};
 use clap::Args as ClapArgs;
 
 use crate::cmd::affected::Shape;
-use crate::cmd::{emit, git_short, Context};
+use crate::cmd::{emit, git_short, plural_s, Context};
 
 #[derive(ClapArgs)]
 // Both this and `affected::Args` are `Args`, and clap names an argument group
@@ -134,9 +134,9 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
                 "no changed input reached it: {} changed file{} dirtied {} package{}, and \
                  nothing in their reverse closure names it",
                 report.stats.changed_files,
-                plural(report.stats.changed_files),
+                plural_s(report.stats.changed_files),
                 report.stats.dirty_packages,
-                plural(report.stats.dirty_packages),
+                plural_s(report.stats.dirty_packages),
             ),
         }),
     }
@@ -144,14 +144,6 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
 
 fn is_label(s: &str) -> bool {
     s.starts_with("//") || s.starts_with('@') || s.starts_with(':')
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
 }
 
 // --------------------------------------------------------------------- human
