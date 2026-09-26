@@ -200,7 +200,6 @@ fn render_coverage(out: &mut String, r: &WalkResult) {
     let _ = writeln!(out);
 }
 
-/// `parent..head` -> `parent12..head12`.
 /// The first `n` of `items` through `fmt`, comma-separated, then ` and M
 /// more` when there were more than `n`.
 fn listed<'a, I>(items: I, n: usize, fmt: impl Fn(&str) -> String) -> String
@@ -218,6 +217,7 @@ where
     }
 }
 
+/// `parent..head` -> `parent12..head12`.
 fn short_key(key: &str) -> String {
     match key.split_once("..") {
         Some((a, b)) => format!("{}..{}", short(a, 12), short(b, 12)),
