@@ -15,7 +15,7 @@ use cambium_engine::{Code, Diagnostic};
 use cambium_ui::report::{group, human_bytes};
 use cambium_ui::{Event, Level, Sink};
 
-use crate::cmd::narrate::repo_name;
+use crate::cmd::narrate::{repo_name, start_indexing};
 use crate::cmd::{hex, short, Context};
 
 #[derive(Subcommand)]
@@ -128,11 +128,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 range: short(&rev),
                 note: String::new(),
             });
-            sink.emit(Event::PhaseStart {
-                name: "index".into(),
-                detail: Some(format!("bazel query //... at {}", short(&sha))),
-            });
-            sink.emit(Event::Current(format!("indexing {}", short(&sha))));
+            start_indexing(sink.as_mut(), "index", &sha);
             let started = Instant::now();
             let built = engine.full_build(&sha);
             let index = finish_or_say(ctx, &engine, sink.as_mut(), built)?;

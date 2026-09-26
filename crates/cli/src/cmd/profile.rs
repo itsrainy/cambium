@@ -20,7 +20,7 @@ use cambium_ui::report::{group, human_bytes, human_ms, kv, Pair};
 use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
-use crate::cmd::narrate::{commit_columns, index_cell, repo_name};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
 use crate::cmd::{emit, short, Context};
 
 /// What lands on stdout above the table.
@@ -249,14 +249,7 @@ impl Renderer<'_> {
                 result: "ready".into(),
                 elapsed_ms,
             }),
-            Progress::ColdBuild { commit } => {
-                self.sink.emit(Event::PhaseStart {
-                    name: "cold index".into(),
-                    detail: Some(format!("bazel query //... at {}", short(&commit))),
-                });
-                self.sink
-                    .emit(Event::Current(format!("indexing {}", short(&commit))));
-            }
+            Progress::ColdBuild { commit } => start_indexing(self.sink, "cold index", &commit),
             Progress::ColdBuilt {
                 targets,
                 elapsed_ms,

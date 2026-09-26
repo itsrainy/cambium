@@ -1,12 +1,15 @@
 //! The pieces of the stderr narration more than one verb draws.
 //!
-//! Every long-running verb opens with a header naming the repository, and
-//! `affected` and `profile` both lay a commit out as a row; each piece lives
-//! here once, so the verbs read alike and a new [`IndexWork`] variant is
-//! drawn the same way in both.
+//! Every long-running verb opens with a header naming the repository;
+//! `affected`, `profile` and `index build` all announce an index built from
+//! scratch; and `affected` and `profile` both lay a commit out as a row. Each
+//! piece lives here once, so the verbs read alike and a new [`IndexWork`]
+//! variant is drawn the same way in both.
 
 use cambium_engine::profile::IndexWork;
-use cambium_ui::{Align, Cell, Column, Style};
+use cambium_ui::{Align, Cell, Column, Event, Sink, Style};
+
+use crate::cmd::short;
 
 /// The five columns of a commit row, live and in `profile`'s final table
 /// alike, so the two cannot drift. `first` names the flexible column: `commit`
@@ -41,4 +44,15 @@ pub(crate) fn repo_name(engine: &cambium_engine::Engine) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+/// Opens the phase that indexes `commit` from scratch: the query it runs, and
+/// the live line while it runs. `phase` is `cold index` inside a run that
+/// needed one, and `index` for `cambi index build`, whose whole job it is.
+pub(crate) fn start_indexing(sink: &mut dyn Sink, phase: &str, commit: &str) {
+    sink.emit(Event::PhaseStart {
+        name: phase.into(),
+        detail: Some(format!("bazel query //... at {}", short(commit))),
+    });
+    sink.emit(Event::Current(format!("indexing {}", short(commit))));
 }

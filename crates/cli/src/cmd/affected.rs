@@ -16,7 +16,7 @@ use cambium_ui::report::{group, human_ms};
 use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
-use crate::cmd::narrate::{commit_columns, index_cell, repo_name};
+use crate::cmd::narrate::{commit_columns, index_cell, repo_name, start_indexing};
 use crate::cmd::{emit_json, short, Context};
 use crate::Format;
 
@@ -578,24 +578,20 @@ impl Narrator<'_> {
     fn on(&mut self, p: Progress) {
         match p {
             Progress::IndexLookup { base } => {
+                let looking = format!("looking for {}", short(&base));
                 self.sink.emit(Event::PhaseStart {
                     name: "index".into(),
-                    detail: Some(format!("looking for {}", short(&base))),
+                    detail: Some(looking.clone()),
                 });
-                self.sink
-                    .emit(Event::Current(format!("looking for {}", short(&base))));
+                self.sink.emit(Event::Current(looking));
             }
             Progress::SearchStart { base, ancestors } => {
                 // The live line is about to count these off; a pipe gets the
                 // one line that says the search happened at all.
-                self.sink.emit(Event::Milestone(format!(
-                    "none at {}, searching {ancestors} ancestors",
-                    short(&base)
-                )));
-                self.sink.emit(Event::Current(format!(
-                    "none at {}, searching {ancestors} ancestors",
-                    short(&base)
-                )));
+                let searching =
+                    format!("none at {}, searching {ancestors} ancestors", short(&base));
+                self.sink.emit(Event::Milestone(searching.clone()));
+                self.sink.emit(Event::Current(searching));
             }
             Progress::AncestorChecked { checked, of, .. } => {
                 // Live only: `Current` is dropped by every sink without a
@@ -635,14 +631,7 @@ impl Narrator<'_> {
                 result: format!("none within {searched} ancestors"),
                 elapsed_ms,
             }),
-            Progress::ColdBuild { commit } => {
-                self.sink.emit(Event::PhaseStart {
-                    name: "cold index".into(),
-                    detail: Some(format!("bazel query //... at {}", short(&commit))),
-                });
-                self.sink
-                    .emit(Event::Current(format!("indexing {}", short(&commit))));
-            }
+            Progress::ColdBuild { commit } => start_indexing(self.sink, "cold index", &commit),
             Progress::ColdBuilt {
                 targets,
                 elapsed_ms,
