@@ -385,9 +385,14 @@ fn warn_about_gitignore(ctx: &Context, config_path: &Path) {
         None => return,
     };
     let gitignore = root.join(".gitignore");
-    let Ok(text) = std::fs::read_to_string(&gitignore) else {
+    // Bytes, as git reads it: a byte that is not UTF-8 in a comment makes the
+    // file no less a .gitignore, and reading it as a string would skip the
+    // warning for it. A file that cannot be read at all is said nothing about;
+    // this is advice, not a check init can fail on.
+    let Ok(bytes) = std::fs::read(&gitignore) else {
         return;
     };
+    let text = String::from_utf8_lossy(&bytes);
     if text.lines().any(|l| l.trim() == LOCAL_CONFIG_FILE) {
         return;
     }

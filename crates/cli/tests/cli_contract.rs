@@ -802,6 +802,23 @@ fn init_writes_the_config_and_nothing_else() {
     );
 }
 
+/// git reads .gitignore as bytes, so one with a Latin-1 byte in a comment is
+/// an ordinary .gitignore and still gets the local-override warning.
+#[test]
+fn init_warns_about_a_gitignore_that_is_not_utf8() {
+    let dir = bare_workspace();
+    std::fs::write(dir.path().join(".gitignore"), b"# caf\xe9\ntarget/\n").unwrap();
+    let (code, _, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "init",
+        "--yes",
+        "--store-none",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("CAMBI-W020"), "{stderr}");
+}
+
 /// The Position line, end to end: a real git history, a real directory store,
 /// and an index published for an ancestor.
 ///
