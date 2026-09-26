@@ -122,7 +122,7 @@ impl WalkOptions {
     /// `--only` run.
     pub fn result_pin(&self) -> String {
         if self.only {
-            format!("{}-only", self.pin)
+            WalkResult::only_pin(&self.pin)
         } else {
             self.pin.clone()
         }

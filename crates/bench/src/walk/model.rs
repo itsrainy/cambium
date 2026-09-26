@@ -335,6 +335,23 @@ impl WalkResult {
         ))
     }
 
+    /// The name a `--only` run's record is filed under in place of the pin:
+    /// `walk-<pin>-only[-<version>].json`, beside the full walk's and never
+    /// mistaken for it.
+    pub fn only_pin(pin: &str) -> String {
+        format!("{pin}-only")
+    }
+
+    /// Whether `file_name` is a `--only` run's record. Pins are commit shas,
+    /// so the first `-` after `walk-` ends the pin.
+    pub fn is_only_record(file_name: &str) -> bool {
+        file_name
+            .strip_prefix("walk-")
+            .and_then(|n| n.strip_suffix(".json"))
+            .and_then(|n| n.split_once('-'))
+            .is_some_and(|(_, rest)| rest == "only" || rest.starts_with("only-"))
+    }
+
     pub fn read(path: &Path) -> Result<Self> {
         crate::util::read_result(path)
     }
