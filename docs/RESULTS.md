@@ -144,8 +144,10 @@ visits, and 4 are the root `WORKSPACE`, whose reader is not identified; the
 fresh base at `aa90816` holds none of them. Walking the reverse rows up
 from every one of them reaches no `PACKAGE`, `GLOB` or `BZL_LOAD` node
 except those two dead packages, which have no targets. The reference build
-now starts on a fresh Bazel server (docs/METHODOLOGY.md), and until a
-box run measures that, the ⚠ on envoy and xla stands as recorded.
+now starts on a fresh Bazel server (docs/METHODOLOGY.md), and box run F
+measured that: both pins pass with it (below). The ⚠ on envoy and xla stays
+in the tables, which are still runs E and B, until a run's tables replace
+them.
 sourcegraph's (its graph) and apollo's (6690 rows), both from run A, ran
 against the same kind of reference build and have not been read row by row.
 The rows were issue #27. Reading them turned up two real under-reports they
@@ -177,6 +179,38 @@ under `tools/` (`//tools/code:check`, `//tools/code_format:check_format`,
 rebuild oracle on its own, whatever the rows say; why the hashes differ is
 not diagnosed, and whether they survive a fresh reference build is for the
 next run to show.
+
+**Box run F (2026-09-26) is not in the tables.** It walked envoy and xla,
+300 steps each, with the engine at `986aa75` and two changes to the
+harness: the `rdeps` oracle is also rooted at every external repository
+whose recorded input changed (Bazel's marker files say which), and the
+rebuild oracle's reference build starts on a fresh Bazel server. envoy
+failed 3 of its 282 oracle steps, worst recall 0.7599, with the oracle
+rooted at repositories on 21 of them. Step 161 (`bazel/c-ares.patch`)
+missed 145 of 604 labels, every one reaching `@c-ares` only through
+`@grpc//:grpc++`; a repository that moves now seeds every external leaf
+whose deps closure runs through it (`0a0e894`, index format 16). Steps 191
+and 194, in the WORKSPACE-era rename of `io_bazel_rules_go` to `rules_go`,
+each missed `//tools/protojsonschema:protoc_gen_jsonschema_proto_plugin`,
+whose only dep is a repository declared in
+`@envoy_api//bazel:repositories.bzl`, a file the static read never enters;
+a definer that runs code the index never read now also dirties every
+repository the graph names and the consumer table does not (`151f888`).
+xla failed 26 of its 296 oracle steps, worst recall 0.9272, all from one
+tombstoning defect at two LLVM integrate commits (steps 12 and 174). There
+the tree's own patches do not apply to the new LLVM, so `@llvm-raw` and
+`@llvm-project` fail to fetch at head, and the re-query of the 17 main-repo
+packages that load `@llvm-project//mlir:tblgen.bzl` came back empty under
+`--keep_going`, with `ERROR: Skipping` lines the load-error parser did not
+read. The 17 were tombstoned, and the steps after each commit missed their
+consumers until the next global rebuild (steps 13 to 52, and 181 to 197).
+The parser now names a skipped package, and a package Bazel could not load
+keeps its rows and heals when next dirtied (`71d2009`). With the fresh
+reference, the rebuild oracle at the pin passed on both subjects: 0 rows
+missing, so none unexplained (the extra rows, envoy 190 with 178 expected
+and xla 344 with 30 expected, do not fail it). Every fix is on main and was
+checked on a laptop against run F's own oracle answers; a run on the fixed
+main is pending.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
@@ -279,8 +313,9 @@ rebuilds". **worst recall** is the lowest share, over the steps the `rdeps`
 oracle checked, of the targets Bazel named that cambium also reported; 1.0
 means nothing was missed. A **⚠** beside it means the walk failed its
 rebuild oracle at the pin: the index carried through the walk differs from
-one cold-built there (Findings has what the rows were, and a re-measure
-with the reference build on a fresh Bazel server is pending). **tightness
+one cold-built there (Findings has what the rows were; box run F, not yet
+in these tables, re-measured envoy and xla with the reference build on a
+fresh Bazel server, and both passed). **tightness
 p50** is the median of Bazel's count over cambium's, 1.0 being exact and
 lower being wider. The peer columns are each peer's full run per step, on
 a stratified sample of 40 steps. Definitions are in
