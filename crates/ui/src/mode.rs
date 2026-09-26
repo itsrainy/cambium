@@ -4,7 +4,10 @@
 //! an [`OutputMode`] renders the same way from the first event to the last,
 //! even if the terminal is resized or the variables change under it.
 
-/// `--color`.
+/// `--color`. The type is spelled as the flag is, since it stands for the
+/// flag, just as the `no_color` and `clicolor_*` fields are spelled as the
+/// variables they mirror; everything in the crate not named after a flag or
+/// a variable says colour.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ColorChoice {
     Auto,
