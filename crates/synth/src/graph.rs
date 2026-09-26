@@ -95,6 +95,17 @@ pub struct SynthBzl {
     pub loaded_by: Vec<u32>,
 }
 
+/// A source slot's file name, `t<id>_<slot>.src`: the one spelling every
+/// label, path and hash of a source file is built from. Formatting it in
+/// place keeps the hashing path free of a string per file.
+struct SrcName(u32, u32);
+
+impl std::fmt::Display for SrcName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "t{}_{}.src", self.0, self.1)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SynthGraph {
     pub packages: Vec<SynthPackage>,
@@ -113,23 +124,19 @@ impl SynthGraph {
     }
 
     pub fn target_label(&self, id: u32) -> String {
-        format!(
-            "//{}:t{}",
-            self.package_path(self.targets[id as usize].package),
-            id
-        )
+        let mut out = String::new();
+        self.write_target_label(id, &mut out);
+        out
     }
 
     pub fn src_name(target: u32, slot: u32) -> String {
-        format!("t{target}_{slot}.src")
+        SrcName(target, slot).to_string()
     }
 
     pub fn src_label(&self, target: u32, slot: u32) -> String {
-        format!(
-            "//{}:{}",
-            self.package_path(self.targets[target as usize].package),
-            Self::src_name(target, slot)
-        )
+        let mut out = String::new();
+        self.write_src_label(target, slot, &mut out);
+        out
     }
 
     pub fn src_path(&self, target: u32, slot: u32) -> String {
@@ -195,10 +202,9 @@ impl SynthGraph {
         out.clear();
         let _ = write!(
             out,
-            "//{}:t{}_{}.src",
+            "//{}:{}",
             self.package_path(self.targets[target as usize].package),
-            target,
-            slot
+            SrcName(target, slot)
         );
     }
 
