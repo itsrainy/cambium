@@ -215,7 +215,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             ctx.render.warn(d);
         }
     }
-    emit(&doc, ctx.format.data("cambi profile")?, |p| {
+    emit(&doc, ctx.format().data("cambi profile")?, |p| {
         print_human(
             p,
             args.report,

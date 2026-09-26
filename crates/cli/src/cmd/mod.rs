@@ -22,9 +22,8 @@ pub struct Context {
     /// attribute each value to. The highest layer of the configuration
     /// stack, and the only way a flag reaches the engine or a probe.
     pub overrides: Overrides,
-    /// The global `--format`.
-    pub format: crate::Format,
-    /// Where diagnostics go, and in what shape.
+    /// Where diagnostics go, and in what shape. It holds the global
+    /// `--format`, which [`Context::format`] reads for every verb.
     pub render: crate::diag::Renderer,
     /// How a long run narrates itself on stderr: decided once, at startup,
     /// from `--quiet`, `--format`, `--color` and the terminal.
@@ -32,6 +31,11 @@ pub struct Context {
 }
 
 impl Context {
+    /// The global `--format`.
+    pub fn format(&self) -> crate::Format {
+        self.render.format
+    }
+
     pub fn engine(&self) -> Result<Engine> {
         Ok(Engine::open_with(
             &self.root,
@@ -100,7 +104,7 @@ pub fn config(ctx: &Context, args: ConfigArgs) -> Result<u8> {
                 "schema": cambium_engine::report::SCHEMA_VERSION,
                 "config_hash": hash,
             });
-            emit(&doc, ctx.format.data("cambi config hash")?, |_| {
+            emit(&doc, ctx.format().data("cambi config hash")?, |_| {
                 println!("{hash}")
             })?;
             Ok(crate::EXIT_OK)
@@ -118,7 +122,7 @@ pub fn config_show(ctx: &Context) -> Result<u8> {
         "config_hash": hex(&cfg.hash()),
         "toml": cfg.to_toml(),
     });
-    emit(&doc, ctx.format.data("cambi config show")?, |_| {
+    emit(&doc, ctx.format().data("cambi config show")?, |_| {
         print!("{}", cfg.to_toml());
         println!("\n# config_hash = {}", hex(&cfg.hash()));
     })?;
@@ -144,7 +148,7 @@ pub fn config_explain(ctx: &Context) -> Result<u8> {
         "local_file": layered.local_exists().then(|| layered.local_path.clone()),
         "values": values,
     });
-    emit(&doc, ctx.format.data("cambi config explain")?, |_| {
+    emit(&doc, ctx.format().data("cambi config explain")?, |_| {
         let width = values.iter().map(|v| v.key.len()).max().unwrap_or(0);
         for v in &values {
             println!(

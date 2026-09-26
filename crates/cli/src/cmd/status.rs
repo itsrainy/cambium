@@ -26,7 +26,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
         "store": probes.store,
         "diagnostics": diagnostics,
     });
-    emit(&doc, ctx.format.data("cambi status")?, |_| {
+    emit(&doc, ctx.format().data("cambi status")?, |_| {
         print_human(&probes, &diagnostics)
     })?;
     // Reporting is not judging: a workspace that cannot be found, a store that

@@ -46,7 +46,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
     // Before the workspace is opened, like every other usage error: asking
     // `explain` for `--format query` is wrong wherever it is run, and
     // answering it with "no workspace here" would hide that.
-    let fmt = ctx.format.data("cambi explain")?;
+    let fmt = ctx.format().data("cambi explain")?;
 
     let engine = ctx.engine()?;
     // `--dry-run` is one of the flags `explain` shares with `affected`, and it

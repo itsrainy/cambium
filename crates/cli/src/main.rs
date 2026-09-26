@@ -258,7 +258,6 @@ fn main() -> ExitCode {
         root,
         config: cli.config.clone(),
         overrides,
-        format: cli.format,
         render,
         ui,
     };

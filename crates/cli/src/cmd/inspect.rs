@@ -216,7 +216,7 @@ fn run_verify(ctx: &Context, args: Verify) -> Result<u8> {
     let limit = args.limit;
     emit(
         &result,
-        ctx.format.data("cambi inspect verify")?,
+        ctx.format().data("cambi inspect verify")?,
         |r: &inspect::VerifyResult| print_verify(r, limit),
     )?;
     Ok(if result.is_sound() {
@@ -316,7 +316,7 @@ fn run_query(ctx: &Context, args: Query) -> Result<u8> {
     // `--format query` has no meaning for a byte count or a path, and a silent
     // fallback to text would be worse than saying so. Checked before the file
     // is opened: a usage error is the caller's, whatever the file's state.
-    let fmt = ctx.format.data("cambi inspect")?;
+    let fmt = ctx.format().data("cambi inspect")?;
     let f = IndexFile::open(&args.common().file)?;
     let q = IndexQuery::new(f.view());
 
@@ -549,7 +549,7 @@ fn share(part: i64, total: u64) -> f64 {
 /// It lives here because it is the same read of the same file the queries
 /// make, and it was `index inspect` with no selector before the rename.
 pub fn show(ctx: &Context, file: &std::path::Path) -> Result<u8> {
-    let fmt = ctx.format.data("cambi index show")?;
+    let fmt = ctx.format().data("cambi index show")?;
     let f = IndexFile::open(file)?;
     let q = IndexQuery::new(f.view());
     // The JSON forms are the stats document; the text form is the header a

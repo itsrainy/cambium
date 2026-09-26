@@ -101,10 +101,10 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
         cambium_index::format::write_index(path, index)?;
     }
 
-    match ctx.format {
+    match ctx.format() {
         Format::Null => {}
         Format::Json | Format::Jsonl => {
-            let fmt = ctx.format.data("cambi affected")?.expect("json or jsonl");
+            let fmt = ctx.format().data("cambi affected")?.expect("json or jsonl");
             if args.tests_only && !report.global {
                 // `--tests-only` restricts `affected` to test targets; every
                 // other field (including `direct`, which can name non-test
@@ -546,7 +546,7 @@ pub fn narrate(
     // under `json` there is no document to hold them, so stderr it is.
     if out.is_err() {
         let said = engine.diagnostics().drain();
-        match ctx.render.format {
+        match ctx.format() {
             Format::Jsonl => ctx.render.report(&said)?,
             _ => said.iter().for_each(|d| ctx.render.warn(d)),
         }

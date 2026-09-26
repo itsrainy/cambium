@@ -29,7 +29,7 @@ pub fn run(ctx: &Context) -> Result<u8> {
         "schema": cambium_engine::report::SCHEMA_VERSION,
         "checks": checks,
     });
-    emit(&doc, ctx.format.data("cambi doctor")?, |_| {
+    emit(&doc, ctx.format().data("cambi doctor")?, |_| {
         print_human(&checks)
     })?;
     Ok(if worst == Some(Grade::Fail) {

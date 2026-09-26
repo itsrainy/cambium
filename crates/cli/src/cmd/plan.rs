@@ -21,7 +21,7 @@ pub fn run(
         "schema": cambium_engine::report::SCHEMA_VERSION,
         "plan": plan,
     });
-    emit(&doc, ctx.format.data("cambi affected --dry-run")?, |_| {
+    emit(&doc, ctx.format().data("cambi affected --dry-run")?, |_| {
         print_human(&plan)
     })?;
     // The same code the run itself would exit with when it already knows the
