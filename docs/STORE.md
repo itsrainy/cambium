@@ -128,8 +128,8 @@ decompressing on zstd's magic (`28 B5 2F FD`) and otherwise memory-mapping
 and parsing in place as before, so a store warmed before this change keeps
 serving with nothing to republish.
 
-The level is **3**, measured on the subjects' indexes (this machine, release
-build, single-threaded; times are for one whole index):
+The level is **3**, measured on the benchmark subjects' indexes (one
+machine, release build, single-threaded; times are for one whole index):
 
 | subject | raw | zstd 3 | zstd 9 | zstd 19 |
 |---|---|---|---|---|
@@ -185,14 +185,13 @@ Three separate things, not interchangeable:
   repository keeps the old, wider answer.
   **7**: the external labels each BUILD file loads directly (`pkg_ext_*`),
   since `bzl_ext` recorded such labels only for `.bzl` files, dropping a
-  label from a BUILD file that loads `@rules_foo//:defs.bzl` directly
-  (issue #4); `pkg_ext` is the same table per *package*.
+  label from a BUILD file that loads `@rules_foo//:defs.bzl` directly;
+  `pkg_ext` is the same table per *package*.
   **8**: a *target-only* flag per input-map pattern
   (`repo_input_target_only`), set when every derivation was a label
   embedded in generated text rather than resolved by the rule, so marking
   it direct stopped the eleven hundred packages under
-  `@envoy_repo//:compiler.bzl` re-querying on every changelog edit (issue
-  #3).
+  `@envoy_repo//:compiler.bzl` re-querying on every changelog edit.
   **9**: the repository boundaries of the main repository's own tree
   (`repo_boundary_*`), the directories below the root carrying a
   `WORKSPACE`, `WORKSPACE.bazel`, `MODULE.bazel` or `REPO.bazel` of their
@@ -218,6 +217,21 @@ Three separate things, not interchangeable:
   repositories are dropped (they are sinks for this walk, and keeping them
   put the machine's output base in the payload), except `BZL_LOAD`, because
   an external `.bzl` can be a file of this tree.
+  **12**: what each external repository *is* as far as this tree is
+  concerned (`repo_origin_kind`, `repo_origin_dir`,
+  `repo_origin_evidence`, `repo_confirmed`, `repo_indexed`): the
+  repositories whose sources are files of this tree, with the evidence for
+  the claim and whether Bazel's own package list confirmed it; and per
+  repository boundary of the tree, whether the cold query returned a
+  main-repo package under it (`repo_boundary_traversed`), since the marker
+  a directory carries does not settle that (Bazel 8.7 loads packages under
+  xla's `third_party/tsl/REPO.bazel`).
+  **13**: the *external-consumer table* (`repo_consumer_*`): per indexed
+  repository, the external repositories whose rules depend on its targets
+  and the packages of it they depend on, asked of Bazel once at cold build.
+  It routes a change under envoy's `api/` to the tests that link
+  `@grpc//:grpc`, whose xDS client consumes the API's protos; that leaf has
+  no outgoing edges, so without the table there was no path back.
   At each bump, an empty table in an older index would otherwise misread as
   "no mapping needed" rather than "never looked".
 
@@ -269,7 +283,7 @@ recording whichever commit wrote last.
 ## S3 and GCS
 
 No S3-specific backend exists or is needed: `command` covers it exactly,
-with no credential handling of our own and no AWS SDK in the dependency
+with no credential handling in `cambi` and no AWS SDK in the dependency
 tree. `{name}` substitutes the store key (`indexes/<lineage>/<tree>.bin`, or
 a `commits/...` pointer) and `{path}` the local file. Each template is a
 list of arguments run directly, with no shell, from the directory `cambi`
@@ -444,7 +458,7 @@ Every distinct tree gets its own file today, even when the graph didn't
 change. Tree keying folds the no-op cases (an empty commit, a rebase, a
 squash), but on a busy main branch most commits touch no BUILD file and no
 globbed path, so most published indexes are byte-identical to their
-parent's. A repository publishing an index per merge stores the same 260 MB
+parent's. A repository publishing an index per merge stores the same bytes
 over and over.
 
 The non-breaking next step is a pointer and a blob:
