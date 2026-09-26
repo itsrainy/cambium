@@ -228,8 +228,8 @@ things cause one:
   more than `max_ancestor_walk` merges without a post-merge job.
 
 What the pull-request job sees: `CAMBI-W003` lines naming each stored
-index it skipped (each one more than once today), then, under `--no-full-build`, `CAMBI-E006` and exit 4, and the
-job tests `//...`. Without the flag the run builds the base cold instead.
+index it skipped, once each, then, under `--no-full-build`, `CAMBI-E006`
+and exit 4, and the job tests `//...`. Without the flag the run builds the base cold instead.
 `cambi status` on the same checkout also shows `CAMBI-W019`, naming the
 store's lineage that this configuration cannot use. A pull request that
 edits `cambium.toml` itself always sees this, because its own

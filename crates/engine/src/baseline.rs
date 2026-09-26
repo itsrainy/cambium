@@ -26,6 +26,10 @@ pub struct BaselineCache<'a> {
     /// Lineages (hex) of the indexes a fetch refused for their config hash,
     /// so the lineage probe can name them without reading the W003 text.
     refused: std::cell::RefCell<Vec<String>>,
+    /// Keys already fetched and refused. A lookup reaches the same key
+    /// by its tree and again through every `commits/` pointer naming that
+    /// tree; the key is fetched, logged and reported the first time only.
+    skipped: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// Write the lineage-less keys on publish even to a store that can list
     /// (`baseline.lineage_less_copies`).
     lineage_less_copies: bool,
@@ -39,6 +43,7 @@ impl<'a> BaselineCache<'a> {
             config_hash,
             diags: crate::diag::Diagnostics::new(),
             refused: std::cell::RefCell::new(Vec::new()),
+            skipped: Default::default(),
             lineage_less_copies: false,
         }
     }
@@ -156,6 +161,9 @@ impl<'a> BaselineCache<'a> {
     /// skipped, so that a store carrying an older lineage neither wins over a
     /// compatible one nor stops the ancestor walk.
     fn fetch_if_compatible(&self, name: &str) -> Result<Option<PathBuf>> {
+        if self.skipped.borrow().contains(name) {
+            return Ok(None);
+        }
         let dest = self.cache_dir.join(cache_name(name));
         if !self.store.fetch(name, &dest)? {
             return Ok(None);
@@ -176,6 +184,7 @@ impl<'a> BaselineCache<'a> {
             ) => {
                 tracing::warn!(key = name, error = %e, "skipping an index this build cannot read");
                 let _ = std::fs::remove_file(&dest);
+                self.skipped.borrow_mut().insert(name.to_string());
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),
@@ -203,6 +212,7 @@ impl<'a> BaselineCache<'a> {
             self.refused
                 .borrow_mut()
                 .push(crate::inspect::hex(&f.view().lineage));
+            self.skipped.borrow_mut().insert(name.to_string());
             return Ok(None);
         }
         Ok(Some(dest))
@@ -633,6 +643,31 @@ mod tests {
         assert!(c.fetch("sha0", "tree0").unwrap().is_none());
         let said: Vec<_> = diags.drain().iter().map(|d| d.code).collect();
         assert_eq!(said, vec![crate::diag::Code::W007StoreFetchFailed]);
+    }
+
+    /// A refused index is reached by its tree and again through each
+    /// `commits/` pointer naming that tree. It is fetched and reported once.
+    #[test]
+    fn a_refused_index_is_reported_once_however_many_ways_it_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirStore::new(dir.path().join("store"));
+        let cache = dir.path().join("cache");
+        let diags = crate::diag::Diagnostics::new();
+        let c = BaselineCache::new(&store, &cache, HASH).with_diagnostics(diags.clone());
+        // Two stale lineages hold the same tree, each with a pointer to it.
+        for (l, sha) in [(1u8, "sha1"), (2, "sha1")] {
+            let stale = index(sha, [l; 16], [0; 32]);
+            c.publish(&write(dir.path(), &stale), &[l; 16], sha, "tree1")
+                .unwrap();
+        }
+        assert!(c.fetch("sha1", "tree1").unwrap().is_none());
+        let w003: Vec<_> = diags
+            .drain()
+            .into_iter()
+            .filter(|d| d.code == crate::diag::Code::W003IndexConfigMismatch)
+            .collect();
+        assert_eq!(w003.len(), 2, "one per refused index: {w003:#?}");
+        assert_eq!(c.refused_lineages().len(), 2);
     }
 
     /// Publishes `idx` raw (uncompressed), with its format version set to
