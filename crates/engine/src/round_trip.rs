@@ -7,10 +7,11 @@
 //! rules that name it and, until this module, no outgoing edges. A path
 //! `//tests:env_test -> @bazel_tools//tools/test:collect_coverage ->
 //! //shell/runfiles:runfiles` was cut at the leaf, so an edit to
-//! `shell/runfiles/runfiles.bash` reached no test. That is
-//! `bazelbuild/rules_shell`, which is the root module: `@bazel_tools` names
-//! `@rules_shell//shell/runfiles`, and for the root module that is the main
-//! repository. Bazel's `rdeps` has every test; the index had two of 23.
+//! `shell/runfiles/runfiles.bash` reached only the two tests that name the
+//! library themselves. That is `bazelbuild/rules_shell` at `b1eed28`, which
+//! is the root module: `@bazel_tools` names `@rules_shell//shell/runfiles`,
+//! and for the root module that is the main repository. Bazel's `rdeps`
+//! names 24 tests.
 //!
 //! # The idea
 //!
@@ -52,6 +53,16 @@
 //! A leaf the answer leaves out (it reaches nothing inside, or Bazel no
 //! longer knows it) gets an empty row, so a leaf that stops existing, or
 //! stops reaching the universe, has its edges retired rather than carried.
+//!
+//! # Cost
+//!
+//! One `deps` over every leaf, `--output=package`, and an `allpaths` graph
+//! only when that closure reaches back in. At the pins on warm output
+//! bases: envoy, 752 leaves and a closure of 1399 packages, 5.6 s of a 227 s
+//! cold build, 2 leaves with edges; xla, 636 leaves and 488 packages, 1.8 s
+//! of 245 s, 34 leaves with 74 edges. rules_shell, 28 leaves, 0.5 s. On a
+//! machine that has fetched nothing, the closure fetches every repository
+//! the leaves reach, which a build would too; that is not measured.
 //!
 //! # Where the edges live
 //!
