@@ -3,8 +3,8 @@
 //!
 //! `status` reports and `doctor` judges. Keeping the two apart is what keeps
 //! this quiet: every line here is a fact, the Warnings section is whatever the
-//! probes raised, and nothing is graded. It runs no Bazel — the version comes
-//! off `.bazelversion` — and reaches the network only to ask the store for a
+//! probes raised, and nothing is graded. It runs no Bazel (the version comes
+//! off `.bazelversion`) and reaches the network only to ask the store for a
 //! listing and the one index a run would load.
 
 use anyhow::Result;
@@ -232,7 +232,7 @@ fn print_warnings(diagnostics: &[cambium_engine::Diagnostic]) {
     }
 }
 
-/// `(lineage 9f..., splice)` — the lineage a run would splice onto and what it
+/// `(lineage 9f..., splice)`: the lineage a run would splice onto and what it
 /// would have to do.
 fn lineage_suffix(p: &probe::Probes, plan: &str) -> String {
     match p.lineage.as_ref().and_then(|l| l.current.clone()) {

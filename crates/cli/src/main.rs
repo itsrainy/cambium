@@ -1,4 +1,4 @@
-//! `cambi` — incremental changed-target computation for Bazel monorepos.
+//! `cambi`: incremental changed-target computation for Bazel monorepos.
 //!
 //! Nine verbs, and nothing else is in this binary: `init`, `status`,
 //! `doctor`, `affected`, `explain`, `profile`, `index`, `inspect`, `config`.
@@ -381,7 +381,7 @@ fn init_logging(level: &str, colour: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
     // `cli.log` already carries $CAMBIUM_LOG's value via clap's `env =
     // "CAMBIUM_LOG"` (an explicit `--log` still wins over it there), so this
-    // must not consult the environment a second time — doing so let a stale
+    // must not consult the environment a second time: doing so let a stale
     // $CAMBIUM_LOG silently override an explicit `--log`.
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = fmt()

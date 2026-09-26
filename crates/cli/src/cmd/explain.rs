@@ -1,8 +1,8 @@
 //! `cambi explain [LABEL] [BASE..HEAD]`: why is this target affected, or why
 //! did the run go the size it did.
 //!
-//! It is the same computation `affected` runs — the same range, the same
-//! flags, the same `AffectedRequest`, built by `affected::request` — with the
+//! It is the same computation `affected` runs (the same range, the same
+//! flags, the same `AffectedRequest`, built by `affected::request`) with the
 //! explanations turned on. It is a verb rather than a flag because its output
 //! has its own shape and its own audience: someone who already has an answer
 //! and wants to know where it came from.
@@ -79,7 +79,7 @@ pub fn run(ctx: &Context, mut args: Args) -> Result<u8> {
         )
     })?;
     // An unaffected label is an answer, not an error, and a global run is
-    // still the answer to the question asked — `affected` is the verb whose
+    // still the answer to the question asked: `affected` is the verb whose
     // exit code carries the verdict.
     Ok(crate::EXIT_OK)
 }
@@ -215,8 +215,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
 }
 
 /// The diagnostic the engine already emitted for this cause, rendered with its
-/// help line. Its message carries the reason verbatim — the engine's own
-/// tests hold that — so the reason is printed on its own only when there is
+/// help line. Its message carries the reason verbatim (the engine's own
+/// tests hold that), so the reason is printed on its own only when there is
 /// no diagnostic: a run replayed from a document, or a cause older than the
 /// codes.
 fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> String {
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// A global run is not a per-target answer, so the label's line says that
-    /// and the run's own story follows — with the diagnostic the engine
+    /// and the run's own story follows, with the diagnostic the engine
     /// already raised for the cause, its code, and its help line.
     #[test]
     fn a_global_run_names_the_causes_diagnostic_and_its_help_line() {

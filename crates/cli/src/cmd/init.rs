@@ -3,7 +3,7 @@
 //! It builds no index, runs no Bazel, and never asks for or stores a
 //! credential. The store backends are a directory, an HTTP base, or a command
 //! template that drives `aws s3` or `gsutil` under whatever credentials the
-//! environment already has — that is the whole of what `cambi` will ever know
+//! environment already has. That is the whole of what `cambi` will ever know
 //! about authentication, and `init` is where someone would otherwise expect to
 //! be asked for a key.
 //!
@@ -147,7 +147,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
     // Reachability, not the round trip: `init` writes a config file and does
     // not need to prove the store is writable to do it. An unreachable store is
-    // worth saying and is not worth refusing over — the config may well be for
+    // worth saying and is not worth refusing over: the config may well be for
     // a bucket this machine cannot see.
     let configured = !matches!(store, StoreConfig::None);
     if configured {
@@ -316,7 +316,7 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
     Ok(text)
 }
 
-/// The store as an inline table, in the spelling `StoreConfig` parses — by
+/// The store as an inline table, in the spelling `StoreConfig` parses, by
 /// serialising the value itself, so the tag and the field names cannot drift
 /// from the engine's own `serde` attributes.
 fn store_table(store: &StoreConfig) -> Result<toml_edit::InlineTable> {

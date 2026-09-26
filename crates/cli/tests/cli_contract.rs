@@ -2,7 +2,7 @@
 //!
 //! A service is going to shell out to this binary rather than link against the
 //! crates, so its name, the subcommands it answers to, and the exit codes it
-//! returns are as much a published interface as the JSON it prints — and
+//! returns are as much a published interface as the JSON it prints, and
 //! nothing else in the tree would notice if one of them changed.
 //!
 //! `crates/engine/tests/json_contract.rs` pins the document shapes and the
@@ -443,7 +443,7 @@ fn the_old_spellings_still_work_and_name_the_new_one() {
     assert_eq!(old, new);
 
     // `baseline` is `index`. `list` needs no workspace-side work beyond the
-    // store, and a missing store is an error — the deprecation still fires,
+    // store, and a missing store is an error; the deprecation still fires,
     // which is the point.
     let (_, _, stderr) = run(&["baseline", "list"]);
     assert!(
@@ -477,7 +477,7 @@ fn quiet_suppresses_the_deprecation_warning() {
 }
 
 /// The range is positional; `--base` / `--head` stay as aliases of its halves.
-/// Both at once is a contradiction, and it is the command line's own error —
+/// Both at once is a contradiction, and it is the command line's own error,
 /// reported with a code, wherever it is typed, workspace or not.
 #[test]
 fn affected_rejects_a_range_and_the_old_flags_together() {
@@ -493,7 +493,7 @@ fn affected_rejects_a_range_and_the_old_flags_together() {
 }
 
 /// Typing `cambi` and nothing else is the first thing a new user does, and the
-/// question it asks is "where am I" — so it prints `status`, not a usage screen.
+/// question it asks is "where am I", so it prints `status`, not a usage screen.
 /// Outside a workspace too: "there is no workspace here" is the answer, and it
 /// is not an error.
 #[test]
@@ -609,7 +609,7 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
 }
 
 /// A store nobody configured is how a developer with no store works, and
-/// `doctor` must not grade it as broken — it is the difference between "you
+/// `doctor` must not grade it as broken: it is the difference between "you
 /// have not set this up" and "this is set up wrong".
 #[test]
 fn doctor_grades_an_unconfigured_store_ok() {
@@ -642,7 +642,7 @@ fn bare_workspace() -> tempfile::TempDir {
 }
 
 /// What `init` writes has to be what the engine reads, and `config explain` has
-/// to be able to say where every value came from — otherwise the file it wrote
+/// to be able to say where every value came from; otherwise the file it wrote
 /// is a file nothing can account for.
 #[test]
 fn init_writes_a_config_the_engine_loads_and_explain_attributes() {

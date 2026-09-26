@@ -1,4 +1,4 @@
-//! `cambi inspect` — graph questions against one index file.
+//! `cambi inspect`: graph questions against one index file.
 //!
 //! Plumbing: this is how an answer `explain` gave is checked against the graph
 //! it came from. Every subcommand reads one index file and answers one
@@ -310,8 +310,8 @@ fn print_verify(r: &inspect::VerifyResult, limit: Option<usize>) {
 /// One question against the index.
 ///
 /// The query runs under every format, `null` included: the exit code is an
-/// answer — `path` says whether there is a path, and an unknown label is
-/// still an error — and `emit` is what decides whether anything is printed.
+/// answer (`path` says whether there is a path, and an unknown label is
+/// still an error), and `emit` is what decides whether anything is printed.
 fn run_query(ctx: &Context, args: Query) -> Result<u8> {
     // `--format query` has no meaning for a byte count or a path, and a silent
     // fallback to text would be worse than saying so. Checked before the file

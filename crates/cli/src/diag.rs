@@ -52,7 +52,7 @@ impl Renderer {
     ///
     /// Under `--format json` they are already in the document and nothing is
     /// printed; every other form puts them on stderr, where they cannot be
-    /// mistaken for the answer — except `jsonl`, which streams them to stdout
+    /// mistaken for the answer, except under `jsonl`, which streams them to stdout
     /// as `diagnostic` events ahead of the `result`, so a watcher sees them as
     /// the run raised them rather than only at the end.
     pub fn report(&self, diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
@@ -81,7 +81,7 @@ impl Renderer {
 
 /// ANSI, when colour is on: bold yellow for a `warning[CODE]` header, bold red
 /// for an `error[CODE]` one, and the message in bold. The location and the help
-/// line stay plain — a diagnostic is read, not decorated.
+/// line stay plain: a diagnostic is read, not decorated.
 pub fn render_human(d: &Diagnostic, color: bool) -> String {
     let (bold, reset, tint) = if color {
         (
@@ -171,7 +171,7 @@ impl std::error::Error for Raised {}
 /// Whatever went wrong, as a diagnostic.
 ///
 /// An `EngineError` knows its own code; a usage error is `CAMBI-E013`; and
-/// anything else — an index that will not open, a serde failure — is the
+/// anything else (an index that will not open, a serde failure) is the
 /// generic internal code, whose message is the error chain a caller would
 /// otherwise have read off `cambium: {e:#}`.
 pub fn of_error(e: &anyhow::Error) -> Diagnostic {
@@ -188,7 +188,7 @@ pub fn of_error(e: &anyhow::Error) -> Diagnostic {
     Diagnostic::error(Code::E001Internal, chain(e))
 }
 
-/// The error and its causes, joined the way `{e:#}` would — except that a
+/// The error and its causes, joined the way `{e:#}` would, except that a
 /// cause whose text the error above it already carries is not repeated.
 /// `io error on {path}: {source}` names its source in its own message, and
 /// `{e:#}` would print the same "No such file or directory" twice.

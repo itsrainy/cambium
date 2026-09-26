@@ -439,7 +439,7 @@ fn git_detail(e: &cambium_diff::GitError) -> Option<String> {
 
 /// What a run is for, beyond what its flags say: whether it explains itself,
 /// and whether it builds a head index. Only a run that someone will read a
-/// graph out of materialises one — it is the most expensive step there is —
+/// graph out of materialises one (it is the most expensive step there is),
 /// and only a run that will print explanations computes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -477,8 +477,8 @@ impl Shape {
 /// The request both `affected` and `explain` run.
 ///
 /// One construction for the two verbs: `explain` is the same computation with
-/// the explanations on, so anything that changes what a run means — a new
-/// flag, a different default — has to change it for both or for neither.
+/// the explanations on, so anything that changes what a run means (a new
+/// flag, a different default) has to change it for both or for neither.
 pub fn request(engine: &cambium_engine::Engine, args: &Args, shape: Shape) -> Result<Resolved> {
     let Range { base, head, note } = resolve_range(engine, args)?;
     let req = AffectedRequest {

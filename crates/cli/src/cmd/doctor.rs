@@ -2,8 +2,8 @@
 //!
 //! The same probes `status` renders, with an opinion attached to each: `ok`,
 //! `warn` or `fail`, and a diagnostic with a code and a `help:` line for
-//! anything that is not `ok`. Exit 0 if a run can work here — every check `ok`
-//! or `warn` — and 1 if any check failed.
+//! anything that is not `ok`. Exit 0 if a run can work here (every check `ok`
+//! or `warn`) and 1 if any check failed.
 //!
 //! It runs the two probes `status` will not: `bazel --version`, and a publish
 //! plus fetch of a probe object. Those are the two things a user cannot find
