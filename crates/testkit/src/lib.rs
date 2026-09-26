@@ -284,6 +284,9 @@ pub struct Scanning {
     round_trips: Option<BTreeMap<String, BTreeSet<String>>>,
     /// What `round_trips` says its answer was derived through.
     round_trip_via: BTreeSet<String>,
+    /// What `round_trips` says each leaf's closure runs through: leaf ->
+    /// `@name` entries. A leaf with no entry is left out of the answer.
+    round_trip_closure: BTreeMap<String, BTreeSet<String>>,
     /// Every `round_trips` question, as the leaves asked about.
     round_trip_questions: std::sync::Mutex<Vec<Vec<String>>>,
     probed: std::sync::Mutex<Vec<String>>,
@@ -329,6 +332,7 @@ impl Scanning {
             leaf_questions: std::sync::Mutex::new(Vec::new()),
             round_trips: None,
             round_trip_via: BTreeSet::new(),
+            round_trip_closure: BTreeMap::new(),
             round_trip_questions: std::sync::Mutex::new(Vec::new()),
             probed: std::sync::Mutex::new(Vec::new()),
             dumps: std::sync::Mutex::new(Vec::new()),
@@ -459,6 +463,19 @@ impl Scanning {
         self.round_trips.get_or_insert_with(BTreeMap::new);
         self.round_trip_via
             .extend(via.iter().map(|v| v.to_string()));
+        self
+    }
+
+    /// Answer `round_trips` with: the leaf `leaf`'s closure runs through
+    /// these repositories (`@name`, as Bazel prints the name), its own
+    /// among them if the test wants it there
+    /// (`cambium_bazel::RoundTrips::closure`).
+    pub fn with_round_trip_closure(mut self, leaf: &str, repos: &[&str]) -> Self {
+        self.round_trips.get_or_insert_with(BTreeMap::new);
+        self.round_trip_closure
+            .entry(leaf.to_string())
+            .or_default()
+            .extend(repos.iter().map(|r| r.to_string()));
         self
     }
 
@@ -622,6 +639,14 @@ impl PackageQuerier for Scanning {
                 .filter_map(|l| known.get(l).map(|e| (l.clone(), e.clone())))
                 .collect(),
             via: self.round_trip_via.clone(),
+            closure: leaves
+                .iter()
+                .filter_map(|l| {
+                    self.round_trip_closure
+                        .get(l)
+                        .map(|c| (l.clone(), c.clone()))
+                })
+                .collect(),
         })
     }
 
