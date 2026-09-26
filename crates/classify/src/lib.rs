@@ -176,6 +176,12 @@ impl PackageSet {
     /// The nested repository `path` sits in whose files are not this
     /// repository's: a boundary `//...` really did stop at.
     ///
+    /// The main repository has no package there, can never gain one from a
+    /// changed path, and owns none of the files: tensorflow's
+    /// `third_party/xla` is the repository `@xla`, and reading
+    /// `third_party/xla/service/BUILD` as a main-repo BUILD file mints four
+    /// hundred packages Bazel will not load.
+    ///
     /// A boundary Bazel walked into anyway is not one of them. Which markers
     /// stop `//...` differs by Bazel version, and xla's `third_party/tsl`
     /// carries a `REPO.bazel` that Bazel 8.7 walks straight past: its
@@ -227,20 +233,16 @@ impl PackageSet {
             .map(dir_of)
     }
 
-    /// The nested repository `path` sits in, if any: the *outermost* one,
-    /// which is where `//...` stopped, returned without its trailing slash.
+    /// The outermost boundary `path` lies under, traversed or not, without
+    /// its trailing slash.
     ///
-    /// A path under a boundary belongs to some other repository's build, not
-    /// to this one. The main repository has no package there, can never gain
-    /// one from a changed path, and owns none of the files: tensorflow's
-    /// `third_party/xla` is the repository `@xla`, and reading
-    /// `third_party/xla/service/BUILD` as a main-repo BUILD file mints four
-    /// hundred packages Bazel will not load.
+    /// This says whether a path is inside a nested repository's tree at all.
+    /// It does not say whether the main repository owns the path: a boundary
+    /// `//...` walked into anyway (xla's `third_party/tsl`) is answered here
+    /// too, though the packages under it are this repository's. Ownership is
+    /// [`PackageSet::unwalked_boundary_of`], which is what [`classify`] asks.
     pub fn boundary_of(&self, path: &str) -> Option<&str> {
-        self.boundaries
-            .iter()
-            .find(|b| path.starts_with(b.as_str()) || path == dir_of(b))
-            .map(|b| dir_of(b))
+        self.containing_boundaries(path).next().map(dir_of)
     }
 
     /// Live packages recorded in an index.
