@@ -169,7 +169,9 @@ The stored artifact is an index; the chain of them is a lineage. `build
 forward (bare `FROM` means `FROM..HEAD`). Both need `--out <file>`; only a
 run also `--publish`ing may omit it (indexes run gigabytes). `publish`
 uploads one, `list` shows the store's holdings, `show` prints an index's
-header/counts, `gc` applies retention. These were the `baseline` verbs,
+header/counts, `gc` applies retention (`[baseline].retention_days`, by age;
+`--keep <key>` spares one key; a directory store only, see
+[STORE.md](STORE.md#garbage-collection)). These were the `baseline` verbs,
 renamed; `baseline` survives one release as a deprecation alias.
 
 ### `inspect`
@@ -450,7 +452,8 @@ Every earlier spelling keeps working one release, printing a deprecation
 diagnostic naming the new one (`CAMBI-W001: cambi baseline build is now cambi
 index build`). `--output` became `--format`, `baseline` became `index`, old
 `index` queries became `inspect`, `--explain` became `explain`, `text` became
-`human`. `bench`/`synth` were removed outright, never aliased: never part of
+`human`. `affected --write-index` is also still accepted for `--out`,
+without a diagnostic. `bench`/`synth` were removed outright, never aliased: never part of
 the contract, their only caller was the repo's own driver; both live in
 `cambium-bench` now. `cambi bench ...` is an ordinary unknown-subcommand
 error from clap.
