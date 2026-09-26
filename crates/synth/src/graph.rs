@@ -97,7 +97,6 @@ pub struct SynthBzl {
 
 #[derive(Clone, Debug)]
 pub struct SynthGraph {
-    pub spec: GraphSpec,
     pub packages: Vec<SynthPackage>,
     pub targets: Vec<SynthTarget>,
     pub bzl: Vec<SynthBzl>,
@@ -169,14 +168,6 @@ impl SynthGraph {
 
     pub fn num_alive_targets(&self) -> usize {
         self.targets.iter().filter(|t| t.alive).count()
-    }
-
-    pub fn num_edges(&self) -> usize {
-        self.targets
-            .iter()
-            .filter(|t| t.alive)
-            .map(|t| t.deps.len() + t.srcs.len() + t.foreign_srcs.len() + t.ext_deps as usize)
-            .sum()
     }
 
     // ---- hashing ----
@@ -418,7 +409,6 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
     gen_exports(spec, &mut packages, &mut targets);
 
     let mut g = SynthGraph {
-        spec: spec.clone(),
         packages,
         targets,
         bzl,
