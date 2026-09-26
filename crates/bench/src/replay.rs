@@ -104,19 +104,30 @@ pub struct PathsCache {
     pub entries: Vec<PathEntry>,
 }
 
+/// Reads one of this module's JSON files, refusing any schema but
+/// [`REPLAY_SCHEMA`].
+///
+/// Unlike [`crate::util::read_result`] the whole document is parsed before
+/// the schema is looked at, so an unparseable file is reported as one whatever
+/// schema it claims.
+fn read_replay_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    schema_of: impl Fn(&T) -> u32,
+) -> Result<T> {
+    let s = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: T = serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+    let schema = schema_of(&v);
+    anyhow::ensure!(
+        schema == REPLAY_SCHEMA,
+        "{} was written by schema {schema} and this build reads {REPLAY_SCHEMA}",
+        path.display(),
+    );
+    Ok(v)
+}
+
 impl PathsCache {
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        let s =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let c: PathsCache =
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-        anyhow::ensure!(
-            c.schema == REPLAY_SCHEMA,
-            "{} was written by schema {} and this build reads {REPLAY_SCHEMA}",
-            path.display(),
-            c.schema
-        );
-        Ok(c)
+        read_replay_json(path, |c: &Self| c.schema)
     }
 
     /// The diff for one pair, by either revision spelling the results use.
@@ -1394,17 +1405,7 @@ pub struct ReplayRun {
 
 impl ReplayRun {
     pub fn read(path: &std::path::Path) -> Result<Self> {
-        let s =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let r: ReplayRun =
-            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-        anyhow::ensure!(
-            r.schema == REPLAY_SCHEMA,
-            "{} was written by schema {} and this build reads {REPLAY_SCHEMA}",
-            path.display(),
-            r.schema
-        );
-        Ok(r)
+        read_replay_json(path, |r: &Self| r.schema)
     }
 
     pub fn write(&self, path: &std::path::Path) -> Result<()> {
@@ -1509,6 +1510,29 @@ impl ReplayRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paths cache from another schema is refused by name, and one that is
+    /// not JSON at all is reported as unparseable.
+    #[test]
+    fn a_paths_cache_from_another_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paths.json");
+        std::fs::write(
+            &path,
+            r#"{"schema": 0, "repo": "r", "pin": "p", "entries": []}"#,
+        )
+        .unwrap();
+        let err = format!("{:#}", PathsCache::read(&path).unwrap_err());
+        assert!(
+            err.ends_with(&format!(
+                "was written by schema 0 and this build reads {REPLAY_SCHEMA}"
+            )),
+            "{err}"
+        );
+        std::fs::write(&path, "not json").unwrap();
+        let err = format!("{:#}", PathsCache::read(&path).unwrap_err());
+        assert!(err.starts_with("parsing "), "{err}");
+    }
 
     /// The registered-repository escalation reads `MODULE.bazel` at head
     /// whatever the change set named, so an ordinary source edit that moves a
