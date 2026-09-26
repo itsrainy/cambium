@@ -405,77 +405,6 @@ impl RdepsResult {
     }
 }
 
-/// Roll-up over a run's change sets, for the report table: the counts the
-/// `rdeps` section prints, summed over every change set that ran the oracle.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RdepsOracleSummary {
-    /// Change sets that ran the oracle.
-    pub change_sets: usize,
-    /// Source labels queried.
-    pub roots: usize,
-    /// Labels whose batch failed even after bisection.
-    pub skipped_roots: usize,
-    /// Change sets with at least one partial batch.
-    pub partial_change_sets: usize,
-    pub partial_batches: usize,
-    /// Every label some change set's oracle could not resolve, unioned.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub unresolved: BTreeSet<String>,
-    /// Rules Bazel reached that cambium's answer did not contain. Must be
-    /// zero; it is the count that gates the run.
-    pub missing: usize,
-    /// Of those, unsatisfied consumers of a deleted file.
-    pub deleted_missing: usize,
-    /// Of those, reached only by leaving `//...` and coming back.
-    pub external_route: usize,
-    /// Of those, never probed, so neither an external route nor unexplained.
-    pub route_unprobed: usize,
-    /// The `@repo//...` half of the difference, which recall ignores.
-    pub missing_external: usize,
-    /// Change sets on which a repository's recorded inputs added roots that
-    /// reached a main-repository rule the changed paths' labels did not.
-    #[serde(default)]
-    pub repository_change_sets: usize,
-    /// Main-repository rules only those roots reached, summed.
-    #[serde(default)]
-    pub repository_labels: usize,
-}
-
-impl RdepsOracleSummary {
-    pub fn add(&mut self, o: &RdepsResult) {
-        self.change_sets += 1;
-        self.roots += o.roots.len();
-        self.skipped_roots += o.skipped_roots.len();
-        self.missing += o.missing.len();
-        self.missing_external += o.missing_external.len();
-        self.deleted_missing += o.deleted_missing.len();
-        self.external_route += o.external_route.len();
-        self.route_unprobed += o.route_unprobed;
-        if let Some(r) = o.repository_inputs.as_ref().filter(|r| r.labels_added > 0) {
-            self.repository_change_sets += 1;
-            self.repository_labels += r.labels_added;
-        }
-        if o.partial {
-            self.partial_change_sets += 1;
-            self.partial_batches += o.partial_batches;
-            self.unresolved.extend(o.unresolved.iter().cloned());
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.change_sets == 0
-    }
-}
-
-/// `|ours ∩ theirs| / |theirs|`, and 1.0 when there is nothing to recall — an
-/// empty oracle is not evidence of unsoundness.
-pub fn recall(ours: &BTreeSet<String>, theirs: &BTreeSet<String>) -> f64 {
-    if theirs.is_empty() {
-        return 1.0;
-    }
-    ours.intersection(theirs).count() as f64 / theirs.len() as f64
-}
-
 /// The oracle's configuration.
 #[derive(Clone, Debug)]
 pub struct RdepsOracle {
@@ -1285,11 +1214,6 @@ mod tests {
 
     #[test]
     fn recall_is_one_when_the_oracle_is_empty_and_a_fraction_otherwise() {
-        let ours: BTreeSet<String> = ["//a:a".to_string()].into_iter().collect();
-        assert_eq!(recall(&ours, &BTreeSet::new()), 1.0);
-        let theirs = set(&["//a:a", "//b:b"]);
-        assert_eq!(recall(&ours, &theirs), 0.5);
-        assert_eq!(recall(&theirs, &theirs), 1.0);
         let r = RdepsResult {
             oracle_labels: 4,
             matched: 3,
@@ -1880,30 +1804,5 @@ mod tests {
         assert_eq!(ri.failed, vec!["@@base_pip3//...:*"], "{r:#?}");
         assert_eq!(ri.labels_added, 0);
         assert!(r.skipped_roots.contains(&"@@base_pip3//...:*".to_string()));
-        let mut sum = RdepsOracleSummary::default();
-        sum.add(&r);
-        assert_eq!(sum.repository_change_sets, 0, "not counted as rooted");
-    }
-
-    #[test]
-    fn the_summary_counts_the_steps_the_repository_half_added_roots_on() {
-        let mut sum = RdepsOracleSummary::default();
-        let mut o = RdepsResult::default();
-        sum.add(&o);
-        o.repository_inputs = Some(RepositoryRoots {
-            roots: vec!["@@r//...:*".into()],
-            labels_added: 7,
-            ..Default::default()
-        });
-        sum.add(&o);
-        // A pattern that reached nothing new is not a rooted change set.
-        o.repository_inputs = Some(RepositoryRoots {
-            roots: vec!["@@gone//...:*".into()],
-            failed: vec!["@@gone//...:*".into()],
-            ..Default::default()
-        });
-        sum.add(&o);
-        assert_eq!(sum.repository_change_sets, 1);
-        assert_eq!(sum.repository_labels, 7);
     }
 }
