@@ -265,14 +265,6 @@ impl PackageSet {
         self.packages.contains(pkg)
     }
 
-    pub fn len(&self) -> usize {
-        self.packages.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.packages.is_empty()
-    }
-
     /// Records a package, unless the path is inside a nested repository: a
     /// directory `//...` never descended into has no main-repo package, and
     /// minting one from a changed path is what made the phantoms.
@@ -285,10 +277,6 @@ impl PackageSet {
 
     pub fn remove(&mut self, pkg: &str) {
         self.packages.remove(pkg);
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.packages.iter().map(|s| s.as_str())
     }
 
     /// Longest-prefix owner of `path`: walk the path's ancestors and return the
