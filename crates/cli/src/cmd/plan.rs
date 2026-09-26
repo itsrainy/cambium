@@ -36,8 +36,8 @@ pub fn run(
 fn print_human(plan: &RunPlan) {
     println!(
         "plan for {}..{}",
-        cambium_engine::probe::short(&plan.base),
-        cambium_engine::probe::short(&plan.head)
+        cambium_ui::report::rev(&plan.base, 7),
+        cambium_ui::report::rev(&plan.head, 7)
     );
     match &plan.index {
         None => println!("  index  none: cold build"),

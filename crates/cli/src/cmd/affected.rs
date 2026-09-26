@@ -879,8 +879,9 @@ fn package_of(label: &str) -> &str {
     }
 }
 
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(10)]
+/// A sha cut to ten digits; a ref name (`origin/main`) whole.
+fn short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 10)
 }
 
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {

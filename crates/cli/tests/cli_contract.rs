@@ -1367,3 +1367,30 @@ fn diagnostics_colour_by_the_same_rule_as_the_narration() {
         assert!(!plain.contains('\x1b'), "{off:?}:\n{plain:?}");
     }
 }
+
+/// The narration names a ref the way it was typed. Cutting every revision
+/// at ten characters, as a sha is cut, printed `origin/main` as
+/// `origin/mai`.
+#[test]
+fn the_narration_header_prints_a_ref_whole_and_a_sha_short() {
+    let f = published_fixture(1);
+    let base = &f.commits[1];
+    cambium_testkit::git(&f.ws, &["branch", "-q", "release/2026-09-25", base]);
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        &format!("release/2026-09-25..{base}"),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let header = stderr
+        .lines()
+        .find(|l| l.starts_with("cambium affected"))
+        .expect("a header line");
+    assert!(
+        header.contains(&format!("release/2026-09-25..{}", &base[..10])),
+        "{header}"
+    );
+}
