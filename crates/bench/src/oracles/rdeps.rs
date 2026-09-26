@@ -780,10 +780,6 @@ fn deleted_consumers(
         .collect()
 }
 
-/// Is this rule absent from head, or tombstoned there?
-///
-/// The condition on the package-spelling escape hatch: only a rule that no
-/// longer exists may be credited to its package rather than to itself.
 /// The oracle's roots for the changed paths, sorted and deduplicated, and
 /// the paths that no longer exist at head (the deleted half's input).
 ///
@@ -842,6 +838,10 @@ struct RepositoryHalf {
     own: Vec<String>,
 }
 
+/// Is this rule absent from head, or tombstoned there?
+///
+/// The condition on the package-spelling escape hatch: only a rule that no
+/// longer exists may be credited to its package rather than to itself.
 fn gone_at_head(head: IndexRef<'_>, label: &str) -> bool {
     match head.id_of(label) {
         Some(id) => head.is_tombstone(id),
