@@ -3,9 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
-use anyhow::Result;
 use cambium_bazel::{query_word, Bazel};
 use cambium_index::{IndexRef, WalkOptions};
 use cambium_proto::blaze_query::{attribute::Discriminator, Rule};
@@ -166,51 +164,6 @@ impl<'a> BazelFacts<'a> {
     pub fn with_base(mut self, base: Bazel) -> Self {
         self.base = Some(base);
         self
-    }
-
-    /// `git diff --no-renames --name-only base..head` in `repo`.
-    ///
-    /// Without `--no-renames` git's default rename detection lists only the
-    /// new path of a moved file, and the old one reaches neither the
-    /// deleted half of the oracle nor a marker that recorded it.
-    pub fn changed_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::tools::git(
-            repo,
-            &[
-                "diff",
-                "--no-renames",
-                "--name-only",
-                &format!("{base}..{head}"),
-            ],
-        )?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    /// The changed paths git reports as added or deleted (renames count as
-    /// both, since `diff` without `-M` reports them that way): what can
-    /// change a directory listing.
-    pub fn added_or_deleted_paths(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>> {
-        let out = crate::tools::git(
-            repo,
-            &[
-                "diff",
-                "--no-renames",
-                "--name-only",
-                "--diff-filter=AD",
-                &format!("{base}..{head}"),
-            ],
-        )?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect())
     }
 
     fn rule(
