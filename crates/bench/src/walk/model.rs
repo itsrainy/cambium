@@ -962,7 +962,7 @@ mod tests {
         let pkg = |p: &str| cambium_index::PackageUpdate {
             package: p.into(),
             targets: vec![cambium_index::TargetRow::rule(
-                &format!("//{p}:x"),
+                format!("//{p}:x"),
                 "cc_library",
                 vec![],
             )],
