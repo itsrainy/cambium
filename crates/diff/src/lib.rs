@@ -12,18 +12,29 @@ mod worktree;
 
 pub use worktree::Worktree;
 
+/// Why a git operation gave no answer.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
+    /// git could not be started (not installed, not on `PATH`, or the
+    /// directory to run it in is gone). [`Worktree::create`] also reports
+    /// the filesystem errors it meets preparing the directory this way.
     #[error("failed to run git: {0}")]
     Spawn(#[source] std::io::Error),
+    /// git ran and refused. `stderr` is git's own account, kept whole so a
+    /// caller can show the reader the line that explains it (a revision
+    /// this clone does not have, a shallow history that stops short).
     #[error("git {args} failed with {status}: {stderr}")]
     Failed {
         args: String,
         status: String,
         stderr: String,
     },
+    /// git answered in bytes that are not UTF-8. Every answer is read as
+    /// text, paths included, so a non-UTF-8 file name in a diff lands here.
     #[error("git output was not valid UTF-8")]
     NotUtf8,
+    /// A `--name-status` record cut short: a status with fewer paths after
+    /// it than its letter promises.
     #[error("unrecognised diff status {0:?}")]
     BadStatus(String),
 }
@@ -41,6 +52,9 @@ pub enum Status {
     TypeChanged,
 }
 
+/// One path and what happened to it between two revisions: the unit the
+/// classifier and the engine reason about. A rename arrives as two of
+/// these, so nothing downstream has to know renames exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub status: Status,
@@ -73,6 +87,8 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// A repository rooted at `root`. Nothing is checked here: the first
+    /// command run in it is what finds out whether it is one.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -223,6 +239,9 @@ impl Repo {
         Ok(out.lines().map(str::to_string).collect())
     }
 
+    /// The best common ancestor of `a` and `b`: what "the changes on this
+    /// branch" are measured from when no base is given. Fails when there is
+    /// none in this clone, which on CI usually means the history is shallow.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
         run_line(&self.root, &["merge-base", a, b])
     }

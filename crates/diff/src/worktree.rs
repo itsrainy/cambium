@@ -69,10 +69,13 @@ impl Worktree {
         })
     }
 
+    /// The directory holding the checkout at the revision asked for.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// The checkout this worktree was added from, where untracked files the
+    /// worktree does not get (local Bazel config, say) can be copied from.
     pub fn owner(&self) -> &Path {
         &self.owner
     }
