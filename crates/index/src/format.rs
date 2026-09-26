@@ -219,7 +219,17 @@ pub const FORMAT_VERSION: u32 = 14;
 /// before this says nothing of the kind, so a run that spliced onto one
 /// would keep reading xla's `third_party/tsl` as a hole in the graph and
 /// answer the whole world for a change to a package Bazel loaded.
-pub const CONTENT_REVISION: u32 = 4;
+/// 5 --- an external leaf gained its outgoing edges back into the universe:
+/// the targets inside it that the leaf reaches through targets outside it,
+/// asked of Bazel at cold build and stored as the leaf's own forward row
+/// (`cambium_engine`'s `round_trip` module). No column moved, so
+/// [`FORMAT_VERSION`] did not; what a correct index holds did. An index
+/// written before this keeps every leaf edgeless, and a run that spliced
+/// onto one would keep missing the rules above a leaf whose closure comes
+/// back into the main repository: every test of `bazelbuild/rules_shell`,
+/// through `@bazel_tools//tools/test:collect_coverage` and the root module's
+/// own `//shell/runfiles:runfiles`.
+pub const CONTENT_REVISION: u32 = 5;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;

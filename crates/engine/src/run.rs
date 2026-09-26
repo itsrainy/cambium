@@ -250,6 +250,10 @@ pub struct DirtyStage {
     /// The leaf questions this run asked at head for a consumer whose map
     /// was suspect ([`ask_at_head`]), for the splice to reuse.
     pub leaf_answers: crate::consumers::Asked,
+    /// The round-trip edges at head, asked because a repository outside the
+    /// index's universe moved (`crate::round_trip::at_head`); the splice
+    /// writes them over the base's rows.
+    pub round_trip: Option<crate::round_trip::Answer>,
     /// Set when the answer is `//...`; the other fields are then irrelevant.
     pub global: Option<GlobalReason>,
 }
@@ -749,6 +753,9 @@ impl<'a> Run<'a> {
             stale = stale_leaf_maps(self.base, &ext.repos, &settled, &dirty.dirty);
         }
         let leaf_answers = ask_at_head(self.base, self.querier, &stale, &ext.repos);
+        let round_trip = (!dirty.global && self.engine.config().externals.enabled)
+            .then(|| crate::round_trip::at_head(self.base, self.querier, ext))
+            .flatten();
         if !dirty.global && !ext.repos.is_empty() {
             self.stats.repos_settled = settled.len();
             let mut seeds = LeafSeeds::default();
@@ -797,6 +804,7 @@ impl<'a> Run<'a> {
             settled,
             stale_leaf_maps: stale.repos,
             leaf_answers,
+            round_trip,
             global,
         })
     }
@@ -1394,6 +1402,23 @@ impl<'a> Run<'a> {
                 builder.set_bzl_closure(c);
             }
         }
+
+        // The leaves' edges back into the universe: Bazel's answer at head
+        // when a repository outside moved, and for an index this run writes,
+        // the leaves an overflow's re-query or this splice's rows put in.
+        // After the rows, so that the leaves are the head's.
+        let want = match (self.req.materialize, queried.cold_reason.is_some()) {
+            (false, _) => crate::round_trip::Want::Nothing,
+            (true, true) => crate::round_trip::Want::All,
+            (true, false) => crate::round_trip::Want::AddedSince(base.num_nodes()),
+        };
+        crate::round_trip::refresh(
+            self.querier,
+            &mut builder,
+            &base.indexed_repos(),
+            stage.round_trip.as_ref(),
+            want,
+        );
 
         // Resolve changed source files to node ids while the builder still has
         // its interner: rebuilding a label map over a finished index costs
