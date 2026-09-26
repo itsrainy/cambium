@@ -55,16 +55,16 @@ pub struct Args {
     /// from help, and warned about by `compat`.
     #[arg(long, hide = true)]
     pub explain: bool,
-    /// Print the plan — which index would be loaded, what the diff classifies
-    /// as, what the run would do — and exit before any Bazel query.
+    /// Print the plan (which index would be loaded, what the diff classifies
+    /// as, what the run would do) and exit before any Bazel query.
     #[arg(long)]
     pub dry_run: bool,
     /// Fail instead of falling back to a cold full build.
     #[arg(long)]
     pub no_full_build: bool,
-    /// If this run had to compute the base index — because the store had none
-    /// for --base and one was replayed forward from an ancestor, or built cold
-    /// — publish it under the base revision, so the next run finds it. The
+    /// If this run had to compute the base index (the store had none for the
+    /// base, and one was replayed forward from an ancestor or built cold),
+    /// publish it under the base revision, so the next run finds it. The
     /// head-side index is never published from `affected`.
     #[arg(long)]
     pub publish_base: bool,

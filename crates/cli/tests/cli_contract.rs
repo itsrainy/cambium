@@ -598,6 +598,18 @@ fn doctor_json_is_a_checks_array_and_a_failure_exits_one() {
             .any(|c| c["name"] == "workspace" && c["level"] == "fail"),
         "the missing workspace should be the failure:\n{stdout}"
     );
+
+    // The human verdict counts its failures in words, not `check(s)`.
+    let failed = checks.iter().filter(|c| c["level"] == "fail").count();
+    let (code, stdout, _) = run(&["-C", outside, "doctor"]);
+    assert_eq!(code, 1);
+    let noun = if failed == 1 { "check" } else { "checks" };
+    assert!(
+        stdout.contains(&format!(
+            "{failed} {noun} must be fixed before a run can work here"
+        )),
+        "{stdout}"
+    );
 }
 
 /// A store nobody configured is how a developer with no store works, and
@@ -844,7 +856,14 @@ fn status_names_the_nearest_index_and_how_far_back_it_is() {
         stdout.lines().any(|l| l.trim() == expected),
         "the Position line should read\n  {expected}\nand status printed\n{stdout}"
     );
-    assert!(stdout.contains("reachable, 1 indexes"), "{stdout}");
+    assert!(stdout.contains("reachable, 1 index\n"), "{stdout}");
+    // The kind is said once: `dir  /path/to/store`, not `dir  dir:/path`.
+    assert!(
+        stdout.lines().any(|l| l.starts_with("  dir  /")),
+        "the store line names its kind once:\n{stdout}"
+    );
+    assert!(!stdout.contains("dir:"), "{stdout}");
+    assert!(!stdout.contains("bazel bazel"), "{stdout}");
     assert!(
         stdout.contains("packages") && stdout.contains("format     version"),
         "the Index section should describe the index a run would load:\n{stdout}"
@@ -1330,7 +1349,7 @@ fn a_relative_directory_store_is_read_from_the_workspace_root() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(
-        stdout.contains("reachable, 1 indexes"),
+        stdout.contains("reachable, 1 index\n"),
         "the store should be found from another working directory:\n{stdout}"
     );
 }
@@ -1960,4 +1979,59 @@ fn inspect_takes_a_package_with_or_without_its_slashes() {
             "`inspect {verb} --help` leaves <PACKAGE> blank:\n{stdout}"
         );
     }
+}
+
+/// No em-dash in anything the binary writes for a person to read: every
+/// verb's `--help` and every subcommand's, and the `cambium.toml` that
+/// `init` writes.
+#[test]
+fn help_and_the_generated_config_carry_no_em_dash() {
+    let mut argvs: Vec<Vec<&str>> = vec![vec!["--help"]];
+    for verb in [
+        "init", "status", "doctor", "affected", "explain", "profile", "index", "inspect", "config",
+    ] {
+        argvs.push(vec![verb, "--help"]);
+    }
+    for sub in ["build", "update", "publish", "list", "show", "gc"] {
+        argvs.push(vec!["index", sub, "--help"]);
+    }
+    for sub in [
+        "target",
+        "package",
+        "rdeps",
+        "deps",
+        "path",
+        "consumers",
+        "owner",
+        "targets",
+        "stats",
+        "externals",
+        "verify",
+    ] {
+        argvs.push(vec!["inspect", sub, "--help"]);
+    }
+    for sub in ["show", "explain", "hash"] {
+        argvs.push(vec!["config", sub, "--help"]);
+    }
+    for argv in &argvs {
+        let (code, stdout, stderr) = run(argv);
+        assert_eq!(code, 0, "`cambi {}`:\n{stderr}", argv.join(" "));
+        assert!(
+            !stdout.contains('\u{2014}'),
+            "`cambi {}` prints an em-dash:\n{stdout}",
+            argv.join(" ")
+        );
+    }
+
+    let dir = bare_workspace();
+    let (code, _, stderr) = run(&[
+        "-C",
+        dir.path().to_str().unwrap(),
+        "init",
+        "--yes",
+        "--store-none",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let written = std::fs::read_to_string(dir.path().join("cambium.toml")).unwrap();
+    assert!(!written.contains('\u{2014}'), "{written}");
 }

@@ -902,7 +902,11 @@ pub fn judge(p: &Probes) -> Vec<Check> {
         (true, Some(true)) => Check::ok(
             "store",
             match p.store.indexes {
-                Some(n) => format!("{}, {n} indexes", p.store.kind),
+                Some(n) => format!(
+                    "{}, {n} index{}",
+                    p.store.kind,
+                    if n == 1 { "" } else { "es" }
+                ),
                 None => format!("{}, reachable", p.store.kind),
             },
         ),
