@@ -12,10 +12,6 @@ impl Paint {
         Self { on }
     }
 
-    pub fn is_on(&self) -> bool {
-        self.on
-    }
-
     fn wrap(&self, code: &str, s: &str) -> String {
         if self.on {
             format!("\x1b[{code}m{s}\x1b[0m")
