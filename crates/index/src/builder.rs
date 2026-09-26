@@ -456,6 +456,58 @@ impl<'a> IndexBuilder<'a> {
         self.nodes.get(id).flags & flags::TOMBSTONE != 0
     }
 
+    /// Whether `id` is a leaf: a label some rule names that no package of
+    /// this index owns (an `Unknown` node), which for an external label means
+    /// a target of a repository the index does not hold.
+    pub fn is_leaf(&self, id: u32) -> bool {
+        self.nodes.get(id).kind == NodeKind::Unknown as u8
+    }
+
+    /// Replaces the forward row of the leaf `id` with edges to `dsts`: the
+    /// targets inside the index's universe it reaches through targets outside
+    /// it (a main -> external -> main round trip), so the reverse walk from
+    /// one of them reaches the leaf and the rules that name it.
+    ///
+    /// No package owns a leaf, so no splice rebuilds its row: `apply_packages`
+    /// replaces the rows of the packages it is given and `delete_package` the
+    /// rows of the package it retires, and a leaf is in neither. The row set
+    /// here is carried verbatim by every later splice until the next call for
+    /// the same leaf replaces it. A label that becomes a package's target
+    /// (a repository the universe starts to include) gets that package's row
+    /// instead, which is the real one.
+    ///
+    /// Returns `false`, changing nothing, for a node that is not a leaf.
+    pub fn set_leaf_row(&mut self, id: u32, dsts: &[u32]) -> bool {
+        if !self.is_leaf(id) {
+            return false;
+        }
+        if self.rebuilt.contains(id as usize) {
+            self.pairs.retain(|&(src, _)| src != id);
+        }
+        self.mark_rebuilt(id);
+        self.pairs
+            .extend(dsts.iter().filter(|&&d| d != id).map(|&d| (id, d)));
+        true
+    }
+
+    /// The forward row `id` will have: the one staged this generation for a
+    /// row it rebuilt, the base's otherwise.
+    pub fn forward_row(&self, id: u32) -> Vec<u32> {
+        if self.rebuilt.contains(id as usize) {
+            let mut row: Vec<u32> = self
+                .pairs
+                .iter()
+                .filter(|&&(src, _)| src == id)
+                .map(|&(_, d)| d)
+                .collect();
+            row.sort_unstable();
+            row.dedup();
+            row
+        } else {
+            self.base_forward_row(id).to_vec()
+        }
+    }
+
     /// Forward row of `id` in the base, or empty for a node this generation
     /// created.
     fn base_forward_row(&self, id: u32) -> &[u32] {

@@ -932,3 +932,78 @@ fn a_consumer_leaf_run_past_its_table_fails_the_open() {
     let err = IndexFile::open(&path).err().expect("the open fails");
     assert!(format!("{err:#}").contains("repo_consumer_leaf_ranges"), "{err:#}");
 }
+
+/// A leaf's round-trip row (`IndexBuilder::set_leaf_row`) is a forward row
+/// like any other: it survives the file format, reverses into the rows the
+/// walk reads, and no splice rebuilds it, since no package owns the leaf.
+/// Neither a re-query of an unrelated package nor one of the package whose
+/// rule names the leaf touches it, in a materialised index or an overlay; a
+/// second call replaces it, and a node a package owns refuses one.
+#[test]
+fn a_leafs_round_trip_row_survives_the_format_and_every_splice() {
+    const LEAF: &str = "@bazel_tools//tools/test:collect_coverage";
+    let mut b = IndexBuilder::new(new_lineage());
+    b.apply_packages(&[
+        pkg(
+            "a",
+            vec![
+                rule("a", "a", &[], &["//a:a.src"]),
+                TargetRow::source_file("//a:a.src"),
+            ],
+        ),
+        pkg("t", vec![rule("t", "t", &[LEAF], &[])]),
+        pkg("u", vec![rule("u", "u", &[], &[])]),
+    ]);
+    let leaf = b.label_id(LEAF).unwrap();
+    let a = b.label_id("//a:a").unwrap();
+    assert!(b.is_leaf(leaf));
+    assert!(!b.set_leaf_row(a, &[leaf]), "a package owns //a:a");
+    assert!(b.set_leaf_row(leaf, &[a]));
+    assert_eq!(b.forward_row(leaf), vec![a]);
+    let d = b.finish("c0");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(index_file_name(&d.header.lineage, "c0"));
+    format::write_index(&path, &d).unwrap();
+    let f = IndexFile::open(&path).unwrap();
+    let v = f.view();
+    assert_eq!(v.forward.row(leaf), &[a]);
+    assert!(v.reverse.row(a).contains(&leaf));
+    // The walk from the source file reaches the rule above the leaf.
+    let src = v.id_of("//a:a.src").unwrap();
+    let r = walk::walk(v, &[src], &walk::WalkOptions::default());
+    let t = v.id_of("//t:t").unwrap();
+    assert!(r.affected.contains(&t), "{:?}", r.affected);
+
+    for package in ["u", "t"] {
+        let rows = match package {
+            "u" => pkg("u", vec![rule("u", "u", &[], &[])]),
+            _ => pkg("t", vec![rule("t", "t", &[LEAF], &[])]),
+        };
+        let mut s = IndexBuilder::from_view(v);
+        s.apply_packages(std::slice::from_ref(&rows));
+        assert_eq!(s.forward_row(leaf), vec![a], "{package}");
+        let spliced = s.finish("c1");
+        assert_eq!(spliced.view().forward.row(leaf), &[a], "{package}");
+
+        let mut o = IndexBuilder::from_view(v);
+        o.apply_packages(&[rows]);
+        let overlay = o.finish_overlay();
+        let mut scratch = Vec::new();
+        assert!(
+            overlay.reverse_row(a, &mut scratch).contains(&leaf),
+            "{package}: the overlay keeps the reverse edge"
+        );
+    }
+
+    // Replaced, not appended; and emptied.
+    let mut s = IndexBuilder::from_view(v);
+    let u = s.label_id("//u:u").unwrap();
+    assert!(s.set_leaf_row(leaf, &[u]));
+    assert!(s.set_leaf_row(leaf, &[u, a]));
+    let mut want = vec![u, a];
+    want.sort_unstable();
+    assert_eq!(s.forward_row(leaf), want);
+    assert!(s.set_leaf_row(leaf, &[]));
+    assert_eq!(s.finish("c2").view().forward.row(leaf), &[] as &[u32]);
+}
