@@ -57,7 +57,9 @@ pub struct SynthTarget {
     pub select_deps: u16,
     /// Number of `@synth_ext//...` deps; their labels are derived from the id.
     pub ext_deps: u16,
-    /// Source file slots owned by this target: `t<id>_<slot>.src`.
+    /// Source file slots owned by this target: `t<id>_<slot>.src`. Kept in
+    /// ascending order: generation numbers them from 0, `AddSource` appends
+    /// one past the largest, and removal keeps the rest in place.
     pub srcs: Vec<u32>,
     /// Content version per entry of `srcs`, bumped by `ModifySource`. Not part
     /// of the target hash: editing a file's contents cannot change the graph,
@@ -227,11 +229,10 @@ impl SynthGraph {
                 h.update(scratch.as_bytes());
             }
         }
-        // Slots are kept sorted, so hashing them in order is order-independent
-        // with respect to the order files were added.
-        let mut slots: Vec<u32> = t.srcs.clone();
-        slots.sort_unstable();
-        for s in slots {
+        // Slots are kept sorted, so hashing them in order is independent of
+        // the order files were added in.
+        debug_assert!(t.srcs.is_sorted(), "t{id}'s slots are out of order");
+        for &s in &t.srcs {
             self.write_src_label(id, s, scratch);
             h.update(scratch.as_bytes());
         }
