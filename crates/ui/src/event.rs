@@ -23,10 +23,7 @@ pub enum Event {
         elapsed_ms: u64,
     },
     /// A phase that did not have to run, and why.
-    PhaseSkipped {
-        name: String,
-        reason: String,
-    },
+    PhaseSkipped { name: String, reason: String },
     /// The column layout for the rows that follow, and their header line.
     RowHeader(Vec<Column>),
     /// One row, one cell per column.
@@ -46,11 +43,16 @@ pub enum Event {
     /// What the live line should say it is working on. Live only: a renderer
     /// without a live line drops it.
     Current(String),
+    /// A line for the reader that is not tied to a phase name. Every text
+    /// sink prints it, live line or not: a warning in yellow, anything else
+    /// dim.
     Log(Level, String),
     /// The run is over; the live line is erased.
     Done,
 }
 
+/// How loud an [`Event::Log`] line is. [`Level::as_str`] is the `level`
+/// field of its jsonl object.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Level {
     Info,
@@ -66,6 +68,8 @@ impl Level {
     }
 }
 
+/// Which edge of its column a cell sits against. Numbers go right, so their
+/// digits line up down the column.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Align {
     Left,
@@ -81,6 +85,9 @@ pub enum Width {
     Flex,
 }
 
+/// One column of the rows after an [`Event::RowHeader`]. Its title is the
+/// header line's text on a terminal and the key its cell is written under
+/// in jsonl.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Column {
     pub title: String,
