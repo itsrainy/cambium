@@ -452,6 +452,37 @@ precision item:
   `@envoy_api` rule hashes; nothing on this branch writes rule rows. No
   box run has been done on it.
 
+**Round trips through repositories fetched from elsewhere, 2026-09-25**
+(branch `engine-external-round-trip`, not merged). Item 4's "a
+declared-only repository can still round trip" is now modelled: every
+external label the index holds carries a forward edge to each target of
+the universe it reaches through targets outside it, Bazel's answer at cold
+build (`crates/engine/src/round_trip.rs`), so the ordinary reverse walk
+closes the loop. The walk stops at the first inside node, which makes the
+answer a function of the repositories outside the universe alone: it is
+asked again at head in a run that moves one, for every leaf after an
+overflow, and for a leaf a splice adds; a main-repo `BUILD` edit never
+makes it stale. No column moved (format stays 14); `CONTENT_REVISION` 4 to
+5 retires the indexes written without the edges. `bazelbuild/rules_shell`
+at `b1eed28`, the root module, where every test depends on
+`@bazel_tools//tools/test:collect_coverage` and so on
+`//shell/runfiles:runfiles`: an edit to `runfiles.bash` answered 5 labels
+(2 tests) on main and answers 27 (24 tests) on the branch, equal to
+`kind(rule, rdeps(//..., //shell/runfiles:runfiles.bash))`; `inspect
+verify` went from 3 unsound samples (69 round-trip misses) to 0 of 71.
+Cost at the pins, warm output bases, one query each: envoy 752 leaves, a
+closure of 1399 packages, 5.6 s of a 227 s cold build, 2 leaves with
+edges (`@grpc//:grpc++` into 36 `@envoy_api` packages, which the consumer
+table also covers, and `@envoy_repo//:project` into `//:VERSION.txt` and
+`//changelogs`); xla
+636 leaves, 488 packages, 1.8 s of 245 s, 34 leaves with 74 edges
+(`@local_config_rocm//rocm:*` into `//third_party/libdrm`, `@nanobind`
+into `//third_party/python_runtime`, `@transformer_engine` into
+`//xla/ffi/api`, `select()` keys into `//xla/tsl:*` config settings among
+them), each a route the index could not see before. What the closure query
+costs on a cold machine, where it fetches every repository the leaves
+reach, is not measured.
+
 ### Box run B: phase 5, and phase 6 if it is ready
 
 envoy and xla only, 300 steps, unless the change touched the loading

@@ -275,6 +275,17 @@ rebuild.
 - A repository rule reading the main repository (`local_path_override`,
   `local_repository`, a `repository_ctx.symlink` of a literal path): the index
   records which main-repo paths feed which repository.
+- A dependency path that leaves through an external target and comes back
+  in. `bazelbuild/rules_shell` is the root module, and every test it declares
+  depends on `@bazel_tools//tools/test:collect_coverage`, which depends on
+  `//shell/runfiles:runfiles`. Each external label the index holds carries
+  an edge to every target of the index it reaches through targets outside
+  it, Bazel's answer at cold build (`deps` over every such label, then
+  `allpaths` only when that closure reaches back in), and again at head in
+  a run that moves an external repository. An edit to
+  `shell/runfiles/runfiles.bash` reaches all 27 rules `rdeps` names (24
+  tests), where the index without those edges reached 5 (2 tests), counted
+  with `--include-manual`.
 - `select()`: every branch's inputs are edges, so the branch a configuration
   picks cannot matter.
 - A source file whose *contents* changed: consumers are direct and nothing is
@@ -369,23 +380,16 @@ still exact, only not incremental):
 Routes on which an answer can miss a target today, each tracked in a
 maintainer document:
 
-- **A round trip through an external repository cambium does not
-  expand.** The index holds `//...` and the external repositories whose
-  sources are files of this tree; any other external target is a leaf with
-  no outgoing edges, so a dependency path that leaves the main repository
-  through one and comes back is invisible to the reverse walk. On
-  `bazelbuild/rules_shell`, which is the root module, every test depends
-  on `@bazel_tools//tools/test:collect_coverage`, which depends back on
-  `//shell/runfiles`; an edit to `shell/runfiles/runfiles.bash` is reported
-  as reaching 2 tests where Bazel's `rdeps` names 23. The same shape on
-  xla (`@tsl`, whose BUILD files name `@xla//xla/...` back in the tree)
-  and on envoy (`@envoy_api`, built from the tree's `api/` directory) was
-  closed by indexing the repositories whose sources are files of the tree,
-  and envoy's route from `@grpc` into `@envoy_api` by the index's table of
-  which external repositories consume an indexed one. A repository fetched
-  from elsewhere stays a leaf. `cambi inspect verify` lists misses of this kind
-  apart, as round trips. docs/ROADMAP.md (Phase 5) and
-  docs/XLA_MAIN_REPO_MISSES.md track the class.
+- **A round trip Bazel could not load.** The route back in from an
+  external target is Bazel's answer to one `--keep_going` query over the
+  closure of every external label the index holds (see "Where the
+  invariant stops" above). A label whose closure fails to load (a
+  repository that will not fetch on this machine, a package with errors)
+  is recorded with the paths Bazel could load, and when the question cannot
+  be asked at all every label keeps the edges it had, none at a cold build.
+  Nothing reports either beyond the `debug` log. `cambi inspect verify`
+  lists a miss of this kind apart, as a round trip. docs/ROADMAP.md (Phase
+  5) tracks the class.
 - **Repository inputs Bazel's markers do not record.** A patch, a
   `build_file` or a lock file is an input of the repository built from it,
   not a target anything depends on, so the benchmark's `rdeps` check roots

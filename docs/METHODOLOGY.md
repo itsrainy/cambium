@@ -395,6 +395,13 @@ yardstick. Only the oracle is.
   declared version is not. The hash-diffing peers fetch and hash
   externals, so on such a change they are right and cambium is wrong,
   filed under `cambium_missing`. None observed in the subjects' histories.
+- **Round-trip edges against a cold build.** The rebuild oracle compares
+  the two indexes by label and skips unknown nodes, which are the external
+  leaves, so the edges a leaf carries back into the index's universe
+  (`crates/engine/src/round_trip.rs`) are not held against the cold
+  build's. A walk that carried a stale one is still caught where it
+  matters: the rdeps oracle's answer is Bazel's whole graph, so a target
+  reached only through a missing edge is a miss there.
 - **Configured builds.** cambium and the loading-phase peers work on the
   unconfigured target graph, keeping `select()` branches: cambium's largest
   over-approximation class.
