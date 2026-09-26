@@ -138,7 +138,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
                 elapsed_ms: ms(started),
             });
             let said = engine.diagnostics().drain();
-            emit(ctx, &engine, sink, &index, out.as_deref(), publish, said)?;
+            write_and_publish(ctx, &engine, sink, &index, out.as_deref(), publish, said)?;
             Ok(crate::EXIT_OK)
         }
         Args::Update {
@@ -217,7 +217,7 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
             });
             let mut said = updated.diagnostics.clone();
             cambium_engine::diag::extend_unique(&mut said, engine.diagnostics().drain());
-            emit(
+            write_and_publish(
                 ctx,
                 &engine,
                 sink,
@@ -342,7 +342,7 @@ fn finish_or_say<T>(
 
 /// Writes the index to `out`, and publishes it when `publish` says how,
 /// narrating both through `sink`; then says the run's diagnostics, `said`.
-fn emit(
+fn write_and_publish(
     ctx: &Context,
     engine: &cambium_engine::Engine,
     mut sink: Box<dyn Sink>,
