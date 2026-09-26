@@ -92,13 +92,30 @@ pub struct StepRecord {
     /// Every tool that ran, cambium first. Scored against the oracle above.
     pub tools: Vec<ToolStep>,
     /// Whether the step is sound: the oracle found nothing cambium missed,
-    /// and every tool that was asked to run did.
+    /// could see every changed path (it is not blind, see
+    /// [`StepRecord::oracle_blind`]), and every tool that was asked to run
+    /// did.
     pub pass: bool,
 }
 
 impl StepRecord {
     pub fn key(&self) -> String {
         crate::state::State::change_set_key(&self.parent, &self.head)
+    }
+
+    /// The oracle found nothing missing only because it could not look: a
+    /// changed path's package did not load at head, so what that path
+    /// reaches is unknown ([`RdepsResult::blind_roots`]). Such a step does
+    /// not pass, and it does not fail the walk either: the summary counts it
+    /// apart ([`Soundness::steps_blind`]) and the report names it. A step
+    /// the oracle found a miss on is a miss, blind or not.
+    pub fn oracle_blind(&self) -> bool {
+        self.oracle.as_ref().is_some_and(|o| o.ok() && o.blind())
+    }
+
+    /// Every tool beside cambium that was asked to run did.
+    pub fn peers_ran(&self) -> bool {
+        self.tools.iter().skip(1).all(|t| !t.failed)
     }
 
     /// cambium's own recall against the oracle, or 1.0 when the oracle did
@@ -196,6 +213,15 @@ pub struct Soundness {
     pub steps_sound: usize,
     /// Steps the oracle found cambium missed something on.
     pub steps_missing: usize,
+    /// Steps the oracle found nothing missing on but could not see some
+    /// changed path's reach, because the path's package did not load at
+    /// head. Neither sound nor missing, and excluded from the pass verdict;
+    /// `blind_steps` names them.
+    #[serde(default)]
+    pub steps_blind: usize,
+    /// Those steps, `parent..head`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blind_steps: Vec<String>,
     /// The worst recall any step achieved; below 1.0 fails the run.
     pub worst_recall: f64,
     /// The step that achieved it.
@@ -495,7 +521,10 @@ pub fn summarise(
             s.soundness.worst_recall = recall;
             s.soundness.worst_step = st.key();
         }
-        if st.oracle.as_ref().is_some_and(|o| o.ok()) {
+        if st.oracle_blind() {
+            s.soundness.steps_blind += 1;
+            s.soundness.blind_steps.push(st.key());
+        } else if st.oracle.as_ref().is_some_and(|o| o.ok()) {
             s.soundness.steps_sound += 1;
         } else {
             s.soundness.steps_missing += 1;
@@ -541,9 +570,14 @@ pub fn summarise(
         oracle_wall: wall_stats(oracle_wall),
     };
 
+    // A blind step does not pass, and it does not fail the walk: the
+    // verdict is over the steps the oracle could see, and the blind ones are
+    // counted beside it.
     s.pass = s.soundness.steps_missing == 0
         && s.soundness.worst_recall >= 1.0
-        && steps.iter().all(|st| st.pass);
+        && steps
+            .iter()
+            .all(|st| st.pass || (st.oracle_blind() && st.peers_ran()));
     s
 }
 
@@ -685,6 +719,46 @@ mod tests {
         r.summarise();
         assert!(!r.summary.pass);
         assert_eq!(r.summary.soundness.steps_missing, 0, "the steps were sound");
+    }
+
+    /// Box run F, xla step 41: the changed file's package had been
+    /// tombstoned, the oracle rooted the file under the wrong package, Bazel
+    /// could not resolve it, and the oracle's empty answer scored recall 1.0.
+    /// Blind, the step does not pass; it is counted and named apart, and it
+    /// neither fails the walk nor counts as sound. A blind step with a miss
+    /// is a miss.
+    #[test]
+    fn an_oracle_blind_step_is_not_a_pass_and_is_counted_apart() {
+        let mut blind = step("h2", true, 1.0);
+        let root = "//xla/python/ifrt:ir/ifrt_ir_loaded_executable_test_lib.cc".to_string();
+        let o = blind.oracle.as_mut().unwrap();
+        o.oracle_labels = 0;
+        o.matched = 0;
+        o.roots = vec![root.clone()];
+        o.unresolved = vec![root.clone()];
+        o.blind_roots = vec![root];
+        blind.pass = false;
+        assert!(blind.oracle_blind());
+        let steps = vec![step("h1", true, 1.0), blind.clone()];
+        let sum = summarise(&steps, &Sample::default(), &Sample::default(), 0);
+        assert_eq!(sum.soundness.steps_sound, 1);
+        assert_eq!(sum.soundness.steps_blind, 1);
+        assert_eq!(sum.soundness.steps_missing, 0);
+        assert_eq!(sum.soundness.blind_steps, vec![blind.key()]);
+        assert!(sum.pass, "a blind step does not fail the walk");
+
+        let mut missed = blind.clone();
+        missed.oracle.as_mut().unwrap().missing = vec!["//x:y".into()];
+        assert!(!missed.oracle_blind(), "a miss is a miss");
+        let sum = summarise(&[missed], &Sample::default(), &Sample::default(), 0);
+        assert_eq!(sum.soundness.steps_missing, 1);
+        assert!(!sum.pass);
+
+        // A blind step whose peer failed still fails the walk.
+        let mut peer_failed = blind;
+        peer_failed.tools[1].failed = true;
+        let sum = summarise(&[peer_failed], &Sample::default(), &Sample::default(), 0);
+        assert!(!sum.pass);
     }
 
     #[test]

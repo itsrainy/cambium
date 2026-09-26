@@ -86,6 +86,37 @@ the patterns and those that `failed`, how many main-repository rules only
 they reached (`labels_added`), each read's marker count, and what the reads
 and the pattern queries cost.
 
+*Blind roots.* A changed path's root can go unanswered, and the empty
+answer means two different things. A file no rule names (a patch, a README)
+is `no such target`: nothing depends on it, and 0 of 0 is the truth. A file
+whose package did not load at head is a different case: Bazel skips the
+root with the load failure as the reason (`Skipping
+'//xla/mosaic:dialect/tpu/tpu_ops.cc': error loading package
+'xla/mosaic': ...`), or, when the head index lacks the file's package
+altogether, the oracle roots it under the nearest ancestor package the
+index has (`//xla/python/ifrt:ir/x.cc` for a file of `xla/python/ifrt/ir`)
+and Bazel answers `no such target` for a label that crosses a package
+boundary. Either way what the path reaches is unknown, not empty. Box run F
+hid four real xla misses this way (steps 41, 45, 193 and 195: the head
+index had tombstoned the file's package, the oracle answered 0 of 0, the
+step scored recall 1.0). A root is *blind* when Bazel skipped it for any
+reason but `no such target`, or when it is unresolved and a `BUILD` file on
+disk at head sits between its package and the file; the step record lists
+them in `oracle.blind_roots`. Applied to run F's xla record, the second
+test alone marks steps 12, 41, 45, 174, 175, 193 and 195 blind, of the 37
+steps with an unresolved root.
+
+A step with a blind root and nothing missing is *oracle-blind*: it is not a
+pass (the step's `pass` is false), it is not counted as sound or as missing
+(`soundness.steps_blind`, named in `soundness.blind_steps`), and it does not
+fail the walk. A step with a miss is a miss whether or not it is also
+blind. Scoring it as a miss would claim one nobody observed, and scoring it
+as a pass is what hid run F's four; so the walk's verdict is over the steps
+the oracle could see, and the report prints the blind count beside it in
+the soundness line and in the subject table (`1.0000 (7 blind)`). A PASS
+with blind steps is a PASS about fewer steps than the walk took, and reads
+as one.
+
 *The loading-layer rows.* The rebuild oracle also compares the Skyframe
 loading layer (the `FILE`, `DIRECTORY_LISTING`, `PACKAGE`, `GLOB` and
 `BZL_LOAD` nodes and reverse edges the dirty stage walks), restricted on
@@ -313,7 +344,8 @@ is a row in the per-tool tables, never the denominator.
 against the rdeps oracle. Anything under 1.0 fails the run. cambium's own
 recall is what the soundness verdict is built from: a step where the oracle
 found cambium missed something is a missing step, and any missing step
-fails the run.
+fails the run. An oracle-blind step (above) is neither: it is counted
+apart and left out of the verdict.
 
 **Tightness.** `|oracle| / |answer|`: how tight the answer is around the
 truth. 1.0 is exact; below 1.0 is over-approximation. Reported per tool as

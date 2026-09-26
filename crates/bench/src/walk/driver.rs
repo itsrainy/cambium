@@ -690,7 +690,9 @@ fn record(
     rebuild_step: bool,
 ) -> StepRecord {
     let r = &answer.run.report;
-    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok());
+    // A blind oracle found nothing missing because it could not look at
+    // every changed path; that is not a pass (`StepRecord::oracle_blind`).
+    let cambium_ok = oracle.as_ref().is_none_or(|o| o.ok() && !o.blind());
     let peers_ran = tools.iter().skip(1).all(|t| !t.failed);
     StepRecord {
         parent: step.parent.clone(),

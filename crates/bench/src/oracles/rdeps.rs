@@ -181,7 +181,7 @@
 //! every recorded number must come from. The walk always passes `0`
 //! (`BazelChecks::oracle_k`); its `--oracle-sample` samples steps, not roots.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -330,6 +330,22 @@ pub struct RdepsResult {
     /// How many distinct unresolved labels there were, before the cap.
     #[serde(default)]
     pub unresolved_total: usize,
+    /// Roots the oracle could not answer for because their package did not
+    /// load: Bazel skipped the root for a reason other than "no such target"
+    /// (the package failed to load, or a repository its loads reach would
+    /// not fetch), or the root is unresolved and a `BUILD` file on disk at
+    /// head sits between its package and the file, so the head index gave
+    /// it the wrong package (the file's own package is missing from the
+    /// index, as a tombstoned one is). For such a root the answer is not
+    /// empty but unknown, and recall 1.0 over the rest proves nothing about
+    /// it. A step with any is oracle-blind, which is not a pass
+    /// ([`RdepsResult::blind`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blind_roots: Vec<String>,
+    /// Every pattern a batch skipped, with Bazel's reason. Not serialised:
+    /// what a reader needs is `blind_roots`, which is read from it.
+    #[serde(default, skip)]
+    pub skipped_patterns: BTreeMap<String, String>,
     /// The second root source: repositories with a changed path among their
     /// recorded inputs, from Bazel's marker files. `None` when no output base
     /// was given, so the markers were not read.
@@ -388,6 +404,13 @@ pub struct RepositoryRoots {
 impl RdepsResult {
     pub fn ok(&self) -> bool {
         self.missing.is_empty()
+    }
+
+    /// The oracle could not see what some changed path reaches
+    /// ([`RdepsResult::blind_roots`]). A blind step found nothing missing
+    /// only because it could not look, so it is neither sound nor a miss.
+    pub fn blind(&self) -> bool {
+        !self.blind_roots.is_empty()
     }
 
     /// Fraction of the oracle's answer cambium reproduces. 1.0 is required.
@@ -526,6 +549,15 @@ impl RdepsOracle {
                 .retain(|l| !own.iter().any(|repo| repo_inputs::label_in_repo(l, repo)));
             r.own_labels = before - result.missing_external.len();
         }
+        result.blind_roots = blind_roots(&result.roots, &result.skipped_patterns, &unresolved, ws);
+        if !result.blind_roots.is_empty() {
+            tracing::warn!(
+                roots = result.blind_roots.len(),
+                first = %result.blind_roots[0],
+                "the oracle could not resolve changed paths whose package did not load; \
+                 this step is oracle-blind"
+            );
+        }
         result.unresolved_total = unresolved.len();
         result.unresolved = unresolved.into_iter().take(MAX_UNRESOLVED).collect();
         // A miss only the repository patterns reached depends on a target of
@@ -655,12 +687,14 @@ impl RdepsOracle {
                 labels,
                 partial,
                 unresolved: u,
+                skipped,
             }) => {
                 answer.extend(labels);
                 if partial {
                     result.partial = true;
                     result.partial_batches += 1;
                     unresolved.extend(u);
+                    result.skipped_patterns.extend(skipped);
                 }
             }
             Err(e) if batch.len() > 1 => {
@@ -819,6 +853,56 @@ fn roots_of<'a>(
     roots.sort();
     roots.dedup();
     (roots, deleted)
+}
+
+/// The roots the oracle could not answer for ([`RdepsResult::blind_roots`]),
+/// sorted.
+///
+/// Box run F's xla walk is the case: at step 12 the index tombstoned the 17
+/// packages that load `@llvm-project//mlir:tblgen.bzl`, and on steps 41,
+/// 45, 193 and 195 the changed file's package was one of them, so
+/// [`roots_of`] rooted it at the nearest surviving ancestor
+/// (`//xla/python/ifrt:ir/ifrt_ir_loaded_executable_test_lib.cc` for a file
+/// of `xla/python/ifrt/ir`). Bazel answered `no such target` for that label,
+/// the oracle's answer was empty, and each step scored recall 1.0 while
+/// cambium missed what the file reached.
+pub(crate) fn blind_roots(
+    roots: &[String],
+    skipped: &BTreeMap<String, String>,
+    unresolved: &BTreeSet<String>,
+    ws: &Path,
+) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|r| {
+            let why = skipped.get(*r);
+            let package_failed = why.is_some_and(|w| !w.starts_with("no such target"));
+            let unanswered = why.is_some() || unresolved.contains(*r);
+            package_failed || (unanswered && crosses_a_package(ws, r))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether a main-repository label `//pkg:a/b/c` names a file under a
+/// directory of `pkg` that is a package of its own at head (it has a
+/// `BUILD` or `BUILD.bazel` file on disk), so the label spells the file
+/// with the wrong package. An external label answers no.
+pub(crate) fn crosses_a_package(ws: &Path, label: &str) -> bool {
+    let Some((pkg, rel)) = label.strip_prefix("//").and_then(|l| l.split_once(':')) else {
+        return false;
+    };
+    let mut dir = ws.join(pkg);
+    let Some((dirs, _file)) = rel.rsplit_once('/') else {
+        return false;
+    };
+    for seg in dirs.split('/') {
+        dir.push(seg);
+        if dir.join("BUILD").is_file() || dir.join("BUILD.bazel").is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 /// The first marker read, taken before the oracle's own queries touch the
@@ -1030,6 +1114,7 @@ struct Batch {
     labels: BTreeSet<String>,
     partial: bool,
     unresolved: BTreeSet<String>,
+    skipped: BTreeMap<String, String>,
 }
 
 /// Runs one batched `rdeps` query.
@@ -1061,6 +1146,7 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
         labels: a.labels,
         partial: a.partial,
         unresolved: a.unresolved,
+        skipped: a.skipped,
     })
 }
 
@@ -1294,6 +1380,60 @@ mod tests {
         assert!(batches(&[], 10, 10).is_empty());
         // A label alone over the cap still gets asked about.
         assert_eq!(batches(&labels(1), 10, 1).len(), 1);
+    }
+
+    /// The three kinds of unanswered root, on a tree where `xla/python/ifrt`
+    /// and `xla/python/ifrt/ir` are both packages. Box run F step 41's root
+    /// spelled a file of `ir` under `ifrt` (the head index had tombstoned
+    /// `ir`): blind. A root skipped because its package did not load: blind.
+    /// A patch no rule names, `no such target`: its empty answer is the true
+    /// one.
+    #[test]
+    fn a_root_whose_package_did_not_load_is_blind_and_an_undeclared_file_is_not() {
+        let ws = tempfile::tempdir().unwrap();
+        for d in ["xla/python/ifrt", "xla/python/ifrt/ir", "third_party/llvm"] {
+            std::fs::create_dir_all(ws.path().join(d)).unwrap();
+            std::fs::write(ws.path().join(d).join("BUILD"), "").unwrap();
+        }
+        let crossing = "//xla/python/ifrt:ir/ifrt_ir_loaded_executable_test_lib.cc".to_string();
+        let failed = "//xla/mosaic:dialect/tpu/tpu_ops.cc".to_string();
+        let patch = "//third_party/llvm:generated.patch".to_string();
+        let fine = "//xla/python/ifrt:array.cc".to_string();
+        let roots = vec![crossing.clone(), failed.clone(), patch.clone(), fine];
+        let skipped: BTreeMap<String, String> = [
+            (
+                failed.clone(),
+                "error loading package 'xla/mosaic': Encountered error while reading \
+                 extension file 'mlir/tblgen.bzl': no such package \
+                 '@@+llvm_extension+llvm-project//mlir': ..."
+                    .to_string(),
+            ),
+            (
+                patch.clone(),
+                "no such target '//third_party/llvm:generated.patch': target \
+                 'generated.patch' not declared in package 'third_party/llvm'"
+                    .to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let unresolved: BTreeSet<String> = [crossing.clone(), patch].into_iter().collect();
+        assert_eq!(
+            blind_roots(&roots, &skipped, &unresolved, ws.path()),
+            vec![crossing, failed]
+        );
+    }
+
+    #[test]
+    fn a_label_crosses_a_package_only_through_a_directory_with_a_build_file() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("a/b/c")).unwrap();
+        std::fs::write(ws.path().join("a/BUILD"), "").unwrap();
+        std::fs::write(ws.path().join("a/b/c/BUILD.bazel"), "").unwrap();
+        assert!(crosses_a_package(ws.path(), "//a:b/c/x.cc"));
+        assert!(!crosses_a_package(ws.path(), "//a:b/x.cc"));
+        assert!(!crosses_a_package(ws.path(), "//a:x.cc"));
+        assert!(!crosses_a_package(ws.path(), "@r//a:b/c/x.cc"));
     }
 
     #[test]

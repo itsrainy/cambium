@@ -48,11 +48,16 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "{} steps, {} with the oracle. {} sound, {} missing; worst recall {:.4}{}.",
+        "{} steps, {} with the oracle. {} sound, {} missing{}; worst recall {:.4}{}.",
         s.steps,
         s.steps_with_oracle,
         s.soundness.steps_sound,
         s.soundness.steps_missing,
+        if s.soundness.steps_blind > 0 {
+            format!(", {} oracle-blind", s.soundness.steps_blind)
+        } else {
+            String::new()
+        },
         s.soundness.worst_recall,
         if s.soundness.worst_step.is_empty() {
             String::new()
@@ -60,6 +65,19 @@ fn render_soundness(out: &mut String, r: &WalkResult) {
             format!(" at {}", short_key(&s.soundness.worst_step))
         },
     );
+    if s.soundness.steps_blind > 0 {
+        let _ = writeln!(
+            out,
+            "Oracle-blind on {} steps ({}): a changed path's package did not load at head, so \
+             the oracle could not see what it reaches. They are not scored as sound, they do \
+             not fail the verdict, and each step's `oracle.blind_roots` names the paths.",
+            s.soundness.steps_blind,
+            listed(&s.soundness.blind_steps, 6, |k| format!(
+                "`{}`",
+                short_key(k)
+            )),
+        );
+    }
     if s.oracle_partial_steps > 0 {
         let _ = writeln!(
             out,
