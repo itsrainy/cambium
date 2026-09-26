@@ -293,6 +293,13 @@ mod tests {
         assert_eq!(format!("{} file{}", 1u64, plural_s(1u64)), "1 file");
     }
 
+    #[test]
+    fn an_age_is_singular_when_it_is_one() {
+        assert_eq!(duration(3600), "1 hour");
+        assert_eq!(duration(7200 * 2), "4 hours");
+        assert_eq!(duration(86_400 * 3), "3 days");
+    }
+
     /// A watcher reads the kind off `event` and the rest off the same
     /// object, so a document's fields sit beside the tag rather than under it.
     #[test]

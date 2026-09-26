@@ -133,7 +133,7 @@ fn print_human(p: &probe::Probes, diagnostics: &[cambium_engine::Diagnostic]) {
             println!("  externals  {} repositories", i.external_repos);
             println!(
                 "  built      {} by bazel {}",
-                unix_time(i.built_at_unix),
+                age_since(i.built_at_unix),
                 if i.bazel_version.is_empty() {
                     "(unrecorded)"
                 } else {
@@ -215,9 +215,9 @@ fn lineage_suffix(p: &probe::Probes, plan: &str) -> String {
     }
 }
 
-/// A unix timestamp as an age, which is what someone reading `status` wants:
-/// "how stale is this index", not "what time was it in UTC".
-fn unix_time(unix: u64) -> String {
+/// How long ago a unix timestamp was, which is what someone reading `status`
+/// wants: "how stale is this index", not "what time was it in UTC".
+fn age_since(unix: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -234,17 +234,6 @@ mod tests {
 
     #[test]
     fn an_unrecorded_build_time_does_not_print_as_the_epoch() {
-        assert_eq!(unix_time(0), "at an unrecorded time");
-    }
-
-    #[test]
-    fn an_age_is_singular_when_it_is_one() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert_eq!(unix_time(now - 3600), "1 hour ago");
-        assert_eq!(unix_time(now - 7200 * 2), "4 hours ago");
-        assert_eq!(unix_time(now - 86_400 * 3), "3 days ago");
+        assert_eq!(age_since(0), "at an unrecorded time");
     }
 }
