@@ -373,12 +373,14 @@ fn check_destination(out: Option<&std::path::Path>, publish: Option<PublishPolic
 }
 
 /// `--publish` with no store configured is `CAMBI-E008` before the header,
-/// as `index publish` does: the build would run to the end and then have
-/// nowhere to put the index, and a cold build of a large repository is the
-/// most expensive way to learn that.
+/// as `index publish` does, and a store that does not answer is its store
+/// error (`CAMBI-E010`, `CAMBI-E011`) there too: the build would run to the
+/// end and then have nowhere to put the index, and a cold build of a large
+/// repository is the most expensive way to learn that.
 fn check_store(engine: &cambium_engine::Engine, publish: Option<PublishPolicy>) -> Result<()> {
     if publish.is_some() {
-        configured_store(engine)?;
+        let store = configured_store(engine)?;
+        cambium_engine::probe::answers(store).map_err(EngineError::from)?;
     }
     Ok(())
 }

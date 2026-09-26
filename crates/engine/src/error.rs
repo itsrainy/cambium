@@ -36,8 +36,12 @@ pub enum EngineError {
         source: std::io::Error,
     },
     #[error(
-        "no index is available for {base}, in the store or within the ancestor walk, and \
-         --no-full-build was given"
+        "no index is available for {base}{}, and --no-full-build was given",
+        if *.store_configured {
+            ", in the store or within the ancestor walk"
+        } else {
+            " within the ancestor walk, no store is configured"
+        }
     )]
     BaselineUnavailable {
         base: String,

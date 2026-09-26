@@ -350,19 +350,14 @@ pub fn store(cfg: &Config, store: Option<&dyn ArtifactStore>) -> StoreProbe {
         Err(crate::store::StoreError::Unsupported(_)) => {
             // A fetch of a name no publisher writes: reachable iff the
             // backend can tell us it is absent.
-            let dest = std::env::temp_dir().join(format!(
-                "cambium-probe.{}",
-                cambium_index::format::temp_suffix()
-            ));
-            match s.fetch(&absent_probe_name(), &dest) {
-                Ok(_) => p.reachable = Some(true),
+            match answers(s) {
+                Ok(()) => p.reachable = Some(true),
                 Err(e) => {
                     p.reachable = Some(false);
                     p.error = Some(e.to_string());
                     p.diagnostics.push(unreachable_diagnostic(&e.to_string()));
                 }
             }
-            let _ = std::fs::remove_file(&dest);
         }
         Err(e) => {
             p.reachable = Some(false);
@@ -371,6 +366,19 @@ pub fn store(cfg: &Config, store: Option<&dyn ArtifactStore>) -> StoreProbe {
         }
     }
     p
+}
+
+/// Whether `store` answers at all: a fetch of a name no publisher writes,
+/// where a miss is an answer and an error is not. Cheaper than a listing on
+/// every backend, so a verb about to pay for a build can ask it first.
+pub fn answers(store: &dyn ArtifactStore) -> Result<(), crate::store::StoreError> {
+    let dest = std::env::temp_dir().join(format!(
+        "cambium-probe.{}",
+        cambium_index::format::temp_suffix()
+    ));
+    let r = store.fetch(&absent_probe_name(), &dest).map(|_| ());
+    let _ = std::fs::remove_file(&dest);
+    r
 }
 
 fn unreachable_diagnostic(detail: &str) -> Diagnostic {

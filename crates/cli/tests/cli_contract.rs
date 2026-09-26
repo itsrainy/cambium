@@ -1878,6 +1878,39 @@ fn publishing_with_no_store_fails_before_anything_is_built() {
     }
 }
 
+/// A store that is configured but cannot be reached fails `--publish` the
+/// same way, before Bazel starts: a directory store under a regular file is
+/// `CAMBI-E011`, where it used to be found only after the build.
+#[test]
+fn publishing_to_an_unreachable_store_fails_before_anything_is_built() {
+    let (dir, stub, marker) = storeless_workspace();
+    let ws = dir.path().join("ws");
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, "").unwrap();
+    point_store_at(&ws, blocker.join("store").to_str().unwrap());
+    let w = ws.to_str().unwrap();
+    let cache = dir.path().join("cache");
+    let (code, stdout, stderr) = run(&[
+        "-C",
+        w,
+        "--bazel-binary",
+        stub.to_str().unwrap(),
+        "--cache-dir",
+        cache.to_str().unwrap(),
+        "index",
+        "build",
+        "--publish",
+    ]);
+    assert!(stdout.is_empty(), "{stdout:?}");
+    assert!(stderr.contains("error[CAMBI-E011]"), "{stderr}");
+    assert_eq!(code, 5, "{stderr}");
+    assert!(
+        !marker.exists(),
+        "`index build --publish` started Bazel before finding the store unreachable: {:?}",
+        std::fs::read_to_string(&marker)
+    );
+}
+
 /// `CAMBI-E006`'s help names the fix that works here: with no store, a
 /// published index has nowhere to go, so the help does not send the reader
 /// to `cambi index build --publish` alone.
@@ -1898,7 +1931,14 @@ fn no_index_with_no_store_says_to_configure_one() {
         "--no-full-build",
     ]);
     assert_eq!(code, 4, "{stderr}");
-    assert!(stderr.contains("error[CAMBI-E006]"), "{stderr}");
+    let message = stderr
+        .lines()
+        .find(|l| l.contains("error[CAMBI-E006]"))
+        .unwrap_or_else(|| panic!("an E006 line:\n{stderr}"));
+    assert!(
+        !message.contains("in the store"),
+        "no store was looked in: {message}"
+    );
     let help = stderr
         .lines()
         .find(|l| l.contains("= help:"))
