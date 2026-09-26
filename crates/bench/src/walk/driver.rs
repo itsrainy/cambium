@@ -18,7 +18,7 @@ use cambium_index::IndexFile;
 
 use super::cambi::{cold_build, Driver};
 use crate::oracles::rdeps::RdepsResult;
-use crate::oracles::rebuild::{compare_by_label_with_sky, SkyDiff};
+use crate::oracles::rebuild::{compare_by_label_with_sky, GraphDiff, SkyDiff};
 use crate::state::{HistoryState, State};
 use crate::util::now_unix;
 
@@ -608,18 +608,27 @@ impl<'a> Runner<'a> {
         Ok(())
     }
 
+    /// The comparison both rebuild oracles make: a reference build at `rev`
+    /// into `fresh` ([`Self::reference_build`]), diffed node by node against
+    /// the walk's carried index, with the loading-layer rows classified.
+    /// `fresh` is left for the caller, which archives or deletes it.
+    fn rebuild_at(&self, rev: &str, fresh: &Path) -> Result<(GraphDiff, SkyDiff, RebuildRows)> {
+        self.reference_build(rev, fresh)?;
+        let applied = IndexFile::open(&self.index_path)?;
+        let rebuilt = IndexFile::open(fresh)?;
+        let (diff, sky) =
+            compare_by_label_with_sky(applied.view(), rebuilt.view(), self.opts.diff_cap);
+        let rows = self.layer_rows(&sky, rev, applied.view(), rebuilt.view());
+        Ok((diff, sky, rows))
+    }
+
     /// A mid-walk rebuild oracle: cold-build at the step's head on a fresh
     /// server and compare, without publishing (that would overwrite the
     /// walk's own carried index). The rows go beside the step's label sets.
     fn mid_walk_rebuild(&mut self, step: &Step) -> Result<()> {
         let head = step.head.as_str();
         let fresh = self.index_path.with_extension("rebuild.bin");
-        self.reference_build(head, &fresh)?;
-        let applied = IndexFile::open(&self.index_path)?;
-        let rebuilt = IndexFile::open(&fresh)?;
-        let (diff, sky) =
-            compare_by_label_with_sky(applied.view(), rebuilt.view(), self.opts.diff_cap);
-        let rows = self.layer_rows(&sky, head, applied.view(), rebuilt.view());
+        let (diff, sky, rows) = self.rebuild_at(head, &fresh)?;
         let dir = crate::labels::change_set_dir(&self.opts.results_dir, &step.parent, head);
         rows.write(&dir.join(rebuild_rows::MID_WALK_FILE))?;
         let unexplained = rows.counts.missing_unexplained;
@@ -642,12 +651,7 @@ impl<'a> Runner<'a> {
             p.item(self.result.steps.len(), "rebuild oracle");
         }
         let fresh_path = self.index_path.with_extension("rebuild.bin");
-        self.reference_build(to, &fresh_path)?;
-        let applied = IndexFile::open(&self.index_path)?;
-        let fresh = IndexFile::open(&fresh_path)?;
-        let (diff, sky) =
-            compare_by_label_with_sky(applied.view(), fresh.view(), self.opts.diff_cap);
-        let rows = self.layer_rows(&sky, to, applied.view(), fresh.view());
+        let (diff, sky, rows) = self.rebuild_at(to, &fresh_path)?;
         let rows_path = RebuildRows::path(
             &self.opts.results_dir,
             &self.opts.pin,
