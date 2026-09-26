@@ -186,20 +186,22 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 
     // The worktree outlives one `profile` call, so the CLI creates it and
     // reports it in the same vocabulary the walk uses for its own phases.
-    let mut render = Renderer {
+    let mut narrator = Narrator {
         sink: sink.as_mut(),
-        opened: false,
+        rows_open: false,
     };
-    render.on(Progress::Worktree {
+    narrator.on(Progress::Worktree {
         commit: head.clone(),
     });
     let sw = Stopwatch::start();
     let revs = WorktreeRevisions::create(&engine, &head)?;
-    render.on(Progress::WorktreeReady {
+    narrator.on(Progress::WorktreeReady {
         elapsed_ms: sw.elapsed_ms(),
     });
 
-    let doc = profile::profile(&engine, &revs, &head, commits, &out, &mut |p| render.on(p));
+    let doc = profile::profile(&engine, &revs, &head, commits, &out, &mut |p| {
+        narrator.on(p)
+    });
     sink.emit(Event::Done);
     drop(revs);
     let doc = doc?;
@@ -230,13 +232,13 @@ pub fn run(ctx: &Context, args: Args) -> Result<u8> {
 }
 
 /// Turns the walk's progress into the grammar the sink draws.
-struct Renderer<'a> {
+struct Narrator<'a> {
     sink: &'a mut dyn Sink,
-    /// The `commits` phase has printed its header.
-    opened: bool,
+    /// The `commits` phase has printed its header and its row header.
+    rows_open: bool,
 }
 
-impl Renderer<'_> {
+impl Narrator<'_> {
     fn on(&mut self, p: Progress) {
         match p {
             Progress::Range { .. } => {}
@@ -278,8 +280,8 @@ impl Renderer<'_> {
                 ));
             }
             Progress::Step { index, of, commit } => {
-                if !self.opened {
-                    self.opened = true;
+                if !self.rows_open {
+                    self.rows_open = true;
                     self.sink.emit(Event::PhaseStart {
                         name: "commits".into(),
                         detail: Some(format!("{of} step{}", plural_s(of))),
@@ -342,7 +344,7 @@ impl Renderer<'_> {
                 globals,
                 elapsed_ms,
             } => {
-                if self.opened {
+                if self.rows_open {
                     self.sink.emit(Event::PhaseEnd {
                         name: "commits".into(),
                         result: if globals == 0 {

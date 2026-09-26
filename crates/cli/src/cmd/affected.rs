@@ -533,11 +533,11 @@ pub fn narrate(
     if let Some(note) = &resolved.note {
         sink.emit(Event::Log(Level::Info, note.clone()));
     }
-    let mut render = Narrator {
+    let mut narrator = Narrator {
         sink: sink.as_mut(),
         rows_open: false,
     };
-    let out = engine.affected_narrated(req, &mut |p| render.on(p));
+    let out = engine.affected_narrated(req, &mut |p| narrator.on(p));
     sink.emit(Event::Done);
     // A run that fails still said things on the way (a store read as empty,
     // an index refused for its configuration), and they are what explain the
