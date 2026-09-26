@@ -13,7 +13,7 @@ pub mod reference;
 pub mod sky;
 pub mod spec;
 
-pub use emit::{emit_git_history, emit_workspace, force_clear, EmitError, EmittedRepo, SynthFiles};
+pub use emit::{emit_git_history, emit_workspace, EmitError, EmittedRepo, SynthFiles};
 pub use graph::{generate, Kind, SynthBzl, SynthGraph, SynthPackage, SynthTarget};
 pub use mutate::{apply_one, commit, ChangeSpec, Commit, Mutation, MutationWeights};
 pub use reference::{deep_hashes, reference_affected};

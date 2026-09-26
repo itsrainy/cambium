@@ -1,4 +1,4 @@
-//! Mutations and commits (spec 13.3).
+//! Mutations and commits.
 //!
 //! A `Commit` is a set of mutations plus the `git diff --name-status` the same
 //! edit would have produced. Applying one to a `SynthGraph` yields the graph at
@@ -7,7 +7,6 @@
 
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use serde::{Deserialize, Serialize};
 
 use cambium_diff::{Change, Status};
 
@@ -66,7 +65,7 @@ pub enum Mutation {
 }
 
 /// Relative frequencies for the mutation kinds.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MutationWeights {
     pub modify_source: u32,
     pub add_source: u32,
@@ -139,7 +138,7 @@ enum MutKind {
     Global,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChangeSpec {
     pub seed: u64,
     /// Mutations per commit.
@@ -166,7 +165,8 @@ impl Default for ChangeSpec {
 }
 
 impl ChangeSpec {
-    /// Named presets from spec 13.3.
+    /// Named presets, one per kind of change a benchmark wants to measure.
+    /// [`Self::PRESETS`] lists them.
     pub fn preset(name: &str) -> Option<ChangeSpec> {
         let mut c = ChangeSpec::default();
         match name {
@@ -298,8 +298,13 @@ fn pick_target<R: Rng>(g: &SynthGraph, spec: &ChangeSpec, rng: &mut R) -> Option
     if g.targets.is_empty() {
         return None;
     }
-    // Hubs are the layer-0 targets everything depends on; biasing towards them
-    // is how the `hub-touch` and `pathological` presets get their blast radius.
+    // Biasing towards layer 0, which everything may depend on, is how the
+    // `hub-touch` and `pathological` presets get their blast radius. This
+    // takes the first 64 live layer-0 targets by id, while the generator's
+    // hubs are the first `hub_count` of them, live or not: the two start as
+    // a shared prefix and drift apart once a layer-0 target is deleted. The
+    // graph does not record the generator's, and using them here would move
+    // these draws.
     if rng.gen::<f64>() < spec.hub_bias {
         let hubs: Vec<u32> = (0..g.targets.len() as u32)
             .filter(|&i| g.targets[i as usize].alive && g.targets[i as usize].layer == 0)
@@ -353,16 +358,11 @@ fn generate<R: Rng>(
         MutKind::EditRuleAttr => {
             // An alias or a test_suite has no attribute the emitted BUILD file
             // carries the salt in, so editing one would move the in-memory
-            // hash without changing anything git can see — an edit no real
+            // hash without changing anything git can see: an edit no real
             // repository can make. Pick a rule that has attributes.
             let target = (0..8)
                 .filter_map(|_| pick_target(g, spec, rng))
-                .find(|&t| {
-                    !matches!(
-                        g.targets[t as usize].kind,
-                        crate::graph::Kind::Alias | crate::graph::Kind::TestSuite
-                    )
-                })?;
+                .find(|&t| !matches!(g.targets[t as usize].kind, Kind::Alias | Kind::TestSuite))?;
             Mutation::EditRuleAttr { target }
         }
         MutKind::AddDep => {
@@ -674,7 +674,7 @@ fn move_targets(g: &mut SynthGraph, moved: &[u32], dest: u32, changes: &mut Vec<
     }
 }
 
-/// Drops `target`'s exported files — one slot, or all of them — from its
+/// Drops `target`'s exported files (one slot, or all of them) from its
 /// package's `exports_files` and from every consumer's `srcs`, recording the
 /// BUILD edits that implies.
 fn unexport(g: &mut SynthGraph, target: u32, slot: Option<u32>, changes: &mut Vec<Change>) {
@@ -821,16 +821,18 @@ mod tests {
     #[test]
     fn splitting_a_package_moves_targets_and_files() {
         let mut g = graph();
-        let pkg = g.targets[0].package;
-        let live: Vec<u32> = g.packages[pkg as usize]
-            .targets
-            .iter()
-            .copied()
-            .filter(|&t| g.targets[t as usize].alive)
-            .collect();
-        if live.len() < 2 {
-            return;
-        }
+        let (pkg, live) = (0..g.packages.len() as u32)
+            .map(|p| {
+                let live: Vec<u32> = g.packages[p as usize]
+                    .targets
+                    .iter()
+                    .copied()
+                    .filter(|&t| g.targets[t as usize].alive)
+                    .collect();
+                (p, live)
+            })
+            .find(|(_, live)| live.len() >= 2)
+            .expect("the small preset has a package with two live targets");
         let moved = live[..1].to_vec();
         let changes = apply_one(
             &mut g,
@@ -1063,10 +1065,27 @@ mod tests {
         }
     }
 
+    /// Every listed preset resolves, to a spec no other name gives, and a
+    /// name that is not listed does not.
     #[test]
-    fn presets_resolve() {
-        for p in ChangeSpec::PRESETS {
-            assert!(ChangeSpec::preset(p).is_some(), "{p}");
+    fn every_listed_preset_resolves_and_nothing_else_does() {
+        let specs: Vec<ChangeSpec> = ChangeSpec::PRESETS
+            .iter()
+            .map(|p| ChangeSpec::preset(p).unwrap_or_else(|| panic!("{p} does not resolve")))
+            .collect();
+        for (i, a) in specs.iter().enumerate() {
+            for (j, b) in specs.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    a,
+                    b,
+                    "{} and {} are the same preset",
+                    ChangeSpec::PRESETS[i],
+                    ChangeSpec::PRESETS[j]
+                );
+            }
         }
+        assert!(ChangeSpec::preset("nope").is_none());
+        assert!(ChangeSpec::preset("").is_none());
+        assert!(ChangeSpec::preset("typical-pr-2").is_none());
     }
 }

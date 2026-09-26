@@ -1,8 +1,8 @@
 //! The emitted workspace against the in-memory graph.
 //!
 //! Three things have to agree: the index built straight from the graph, the
-//! files `emit-bazel` writes, and the files `SynthFiles` serves the engine from
-//! memory. A disagreement between any two would let a property test pass on a
+//! files `emit_workspace` writes, and the files `SynthFiles` serves the engine
+//! from memory. A disagreement between any two would let a property test pass on a
 //! graph Bazel itself would reject.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,7 +36,7 @@ fn build_index_is_byte_identical_across_runs() {
 }
 
 /// Every file the emitter writes that the in-memory server also answers for
-/// must come back with the same text — or, for a BUILD file, with the prologue
+/// must come back with the same text or, for a BUILD file, with the prologue
 /// the emitted file starts with, which is the part the engine's `.bzl` scan
 /// reads.
 #[test]

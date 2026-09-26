@@ -1,4 +1,4 @@
-//! Emitting a synthetic graph as `blaze_query` protos (spec 13.5).
+//! Emitting a synthetic graph as `blaze_query` protos.
 //!
 //! Lets the proto parsing and rule hashing stages be benchmarked at any scale
 //! without Bazel in the loop.
@@ -8,6 +8,7 @@ use cambium_proto::blaze_query::{
     Target,
 };
 
+use crate::emit::RULES_BZL_PATH;
 use crate::graph::SynthGraph;
 
 fn string_list(name: &str, values: Vec<String>) -> Attribute {
@@ -32,12 +33,13 @@ fn string_attr(name: &str, value: String) -> Attribute {
 
 /// The `.bzl` files a package's BUILD file loads, as instantiation frames.
 ///
-/// Mirrors what `emit_package` writes: a package with generated `.bzl` loads
-/// those, and a package with none loads the shared `//rules:synth.bzl`.
+/// Mirrors the loads [`crate::emit::build_file_loads`] writes: a package
+/// with generated `.bzl` loads those, and a package with none loads the
+/// shared rules file.
 fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
     let bzl = &g.packages[pkg as usize].bzl;
     if bzl.is_empty() {
-        return vec!["rules/synth.bzl:1:1".to_string()];
+        return vec![format!("{RULES_BZL_PATH}:1:1")];
     }
     bzl.iter()
         .map(|&b| format!("{}:1:1", g.bzl[b as usize].path))
@@ -50,7 +52,7 @@ fn instantiation_stack(g: &SynthGraph, pkg: u32) -> Vec<String> {
 /// macro-instantiated rule, and its value is a function of *position in the
 /// file*, so inserting or deleting a target shifts every later target's value
 /// without changing anything those targets build. Reproducing that here is what
-/// lets the synthetic sweeps exercise the attribute — `canonical_rule` drops
+/// lets the synthetic sweeps exercise the attribute: `canonical_rule` drops
 /// it, so a shift must move no hash.
 ///
 /// `LINES_PER_TARGET` is a plausible stanza height; the column is 1 because a
@@ -127,8 +129,8 @@ pub fn to_targets(g: &SynthGraph) -> Vec<Target> {
                     // The macro frames a real `--proto:instantiation_stack`
                     // query reports. cambium's canonical hash strips them, but
                     // they are how a consumer of this dump learns which `.bzl`
-                    // defined a rule — bazel-diff seeds each rule's digest from
-                    // exactly these paths — so a dump without them would hide
+                    // defined a rule (bazel-diff seeds each rule's digest from
+                    // exactly these paths), so a dump without them would hide
                     // every `.bzl` edit from anything measured against it.
                     instantiation_stack: instantiation_stack(g, pkg),
                     attribute,

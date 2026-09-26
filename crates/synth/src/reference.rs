@@ -1,7 +1,7 @@
-//! The naive O(graph) reference algorithm (spec 12.4).
+//! The naive O(graph) reference algorithm.
 //!
 //! For every target, hash its own definition together with the transitive
-//! closure of its inputs — the thing the whole incremental design exists to
+//! closure of its inputs: the thing the whole incremental design exists to
 //! avoid computing. Diffing those hashes between two revisions gives the ground
 //! truth the engine's answer is checked against.
 
@@ -44,11 +44,12 @@ pub fn deep_hashes(g: &SynthGraph) -> BTreeMap<String, [u8; 32]> {
             if !g.targets[d as usize].alive {
                 continue;
             }
-            match memo[d as usize] {
-                Some(dh) => h.update(&dh),
-                // Only possible if a mutation broke the layering invariant.
-                None => h.update(&g.target_hash(d)),
-            };
+            // A missing entry means a mutation broke the layering invariant.
+            // Falling back to the dep's own hash would quietly weaken the
+            // ground truth, so it stops the test instead.
+            let dh = memo[d as usize]
+                .unwrap_or_else(|| panic!("t{id} depends on t{d}, which is not on a lower layer"));
+            h.update(&dh);
         }
         let digest = *h.finalize().as_bytes();
         memo[id as usize] = Some(digest);
@@ -77,6 +78,21 @@ mod tests {
 
     fn graph() -> SynthGraph {
         crate::generate(&GraphSpec::preset("small").unwrap())
+    }
+
+    #[test]
+    #[should_panic(expected = "which is not on a lower layer")]
+    fn a_dep_on_a_higher_layer_stops_the_test() {
+        let mut g = graph();
+        let live = |g: &SynthGraph, i: u32| g.targets[i as usize].alive;
+        let low = (0..g.targets.len() as u32)
+            .find(|&i| live(&g, i) && g.targets[i as usize].layer == 0)
+            .unwrap();
+        let high = (0..g.targets.len() as u32)
+            .find(|&i| live(&g, i) && g.targets[i as usize].layer > 0)
+            .unwrap();
+        g.targets[low as usize].deps.push(high);
+        deep_hashes(&g);
     }
 
     #[test]

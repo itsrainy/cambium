@@ -1,7 +1,7 @@
-//! Emitting a synthetic graph as a real Bazel workspace (spec 13.4).
+//! Emitting a synthetic graph as a real Bazel workspace, with a git history.
 //!
-//! The rules do no real work — each action just writes a file listing its
-//! inputs — so `bazel build //...` succeeds on any machine with no compilers or
+//! The rules do no real work (each action just writes a file listing its
+//! inputs), so `bazel build //...` succeeds on any machine with no compilers or
 //! toolchains. That makes the same graph usable three ways: differential
 //! correctness against `bazel query`, end-to-end timing that includes real
 //! Bazel loading cost, and a like-for-like comparison with the "dump the whole
@@ -47,10 +47,10 @@ fn write(path: &Path, contents: &str) -> Result<()> {
 
 /// Writes the whole workspace, replacing whatever was there (except `.git`).
 ///
-/// `out` must be empty, missing, or a workspace this emitter wrote earlier —
+/// `out` must be empty, missing, or a workspace this emitter wrote earlier,
 /// recognised by its `MODULE.bazel` naming the `synth` module. Anything else is
-/// refused with [`EmitError::NotSynthetic`]; a caller that really means it can
-/// [`force_clear`] first.
+/// refused with [`EmitError::NotSynthetic`]; a caller that means to replace it
+/// removes the directory first.
 pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
     if !is_synthetic_workspace(out)? {
         return Err(EmitError::NotSynthetic {
@@ -61,7 +61,7 @@ pub fn emit_workspace(g: &SynthGraph, out: &Path) -> Result<()> {
     write(&out.join("MODULE.bazel"), &module_bazel())?;
     write(&out.join(".bazelversion"), "7.4.1\n")?;
     write(&out.join("rules/BUILD.bazel"), "")?;
-    write(&out.join("rules/synth.bzl"), RULES_BZL)?;
+    write(&out.join(RULES_BZL_PATH), RULES_BZL)?;
     write(&out.join("tools/synth/BUILD.bazel"), TOOLS_BUILD)?;
     for (i, b) in g.bzl.iter().enumerate() {
         write(&out.join(&b.path), &generated_bzl(i as u32, b.version))?;
@@ -103,14 +103,8 @@ fn is_synthetic_workspace(out: &Path) -> Result<bool> {
     }
 }
 
-/// Deletes everything under `out` except `.git`, whatever wrote it.
-///
-/// This is the `--force` path; [`emit_workspace`] on its own only clears a
-/// directory it recognises as its own.
-pub fn force_clear(out: &Path) -> Result<()> {
-    clear(out)
-}
-
+/// Deletes everything under `out` except `.git`. Only called once
+/// [`is_synthetic_workspace`] has said the directory is ours.
 fn clear(out: &Path) -> Result<()> {
     if !out.exists() {
         return std::fs::create_dir_all(out).map_err(|source| EmitError::Io {
@@ -143,8 +137,8 @@ fn clear(out: &Path) -> Result<()> {
 ///
 /// Shared by the emitter and by [`SynthFiles`], which is what makes the
 /// property tests exercise the real `load()` parser: the text the engine scans
-/// in memory is the text `emit-bazel` would have written to disk.
-pub fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
+/// in memory is the text [`emit_workspace`] writes to disk.
+pub(crate) fn build_file_loads(g: &SynthGraph, pkg: u32) -> String {
     let p = &g.packages[pkg as usize];
     let mut build = String::new();
     // Each generated .bzl exposes macros suffixed with its index, so a package
@@ -176,15 +170,15 @@ impl cambium_index::FileText for SynthFiles<'_> {
         if path == "MODULE.bazel" {
             return Some(module_bazel());
         }
-        if path == "rules/synth.bzl" {
+        if path == RULES_BZL_PATH {
             return Some(RULES_BZL.to_string());
         }
         if let Some(&b) = g.bzl_by_path.get(path) {
             return Some(generated_bzl(b, g.bzl[b as usize].version));
         }
         let dir = path.strip_suffix("/BUILD.bazel").or_else(|| {
-            // The root package, and the `BUILD` spelling, neither of which the
-            // emitter writes.
+            // The root package's BUILD file has no `/` to strip. A `BUILD`
+            // spelling, which the emitter never writes, is not served.
             (path == "BUILD.bazel").then_some("")
         })?;
         let &pkg = g.pkg_by_path.get(dir)?;
@@ -203,138 +197,134 @@ fn emit_package(g: &SynthGraph, pkg: u32, out: &Path) -> Result<()> {
         let files: Vec<String> = p
             .exported
             .iter()
-            .map(|&(t, s)| format!("\"{}\"", SynthGraph::src_name(t, s)))
+            .map(|&(t, s)| quoted(&SynthGraph::src_name(t, s)))
             .collect();
         build.push_str(&format!("exports_files([{}])\n\n", files.join(", ")));
     }
 
     let suffix = p.bzl.first().map(|b| b.to_string()).unwrap_or_default();
     for &tid in &p.targets {
-        let t = &g.targets[tid as usize];
-        if !t.alive {
+        if !g.targets[tid as usize].alive {
             continue;
         }
-        // Source files: written empty, picked up by a per-target glob so that
-        // adding a file really does change the target's inputs.
-        for &slot in &t.srcs {
-            let name = SynthGraph::src_name(tid, slot);
-            let mut f = std::fs::File::create(dir.join(&name))
-                .or_else(|_| {
-                    std::fs::create_dir_all(&dir)
-                        .and_then(|_| std::fs::File::create(dir.join(&name)))
-                })
-                .map_err(|source| EmitError::Io {
-                    path: dir.join(&name),
-                    source,
-                })?;
-            // Content version goes in the file so that a ModifySource commit
-            // produces a real diff.
-            let version = t
-                .srcs
-                .iter()
-                .position(|&s| s == slot)
-                .map(|i| t.src_versions[i])
-                .unwrap_or(0);
-            writeln!(f, "// v{version}").map_err(|source| EmitError::Io {
-                path: dir.join(&name),
-                source,
-            })?;
-        }
-
-        let name = format!("t{tid}");
-        let (macro_name, is_suite) = match t.kind {
-            Kind::TestSuite => ("test_suite".to_string(), true),
-            Kind::Alias => ("alias".to_string(), false),
-            k => (format!("{}{}", k.rule_class(), suffix), false),
-        };
-
-        if is_suite {
-            let tests: Vec<String> = t
-                .deps
-                .iter()
-                .filter(|&&d| g.targets[d as usize].alive)
-                .map(|&d| format!("\"{}\"", g.target_label(d)))
-                .collect();
-            build.push_str(&format!(
-                "test_suite(\n    name = \"{name}\",\n    tests = [{}],\n)\n\n",
-                tests.join(", ")
-            ));
-            continue;
-        }
-        if t.kind == Kind::Alias {
-            match t.deps.iter().find(|&&d| g.targets[d as usize].alive) {
-                Some(&d) => {
-                    build.push_str(&format!(
-                        "alias(\n    name = \"{name}\",\n    actual = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
-                        g.target_label(d)
-                    ));
-                }
-                // An alias whose target was deleted still has to exist, or the
-                // emitted repo would disagree with the in-memory graph about
-                // which labels are present.
-                None => build.push_str(&format!(
-                    "synth_lib{suffix}(\n    name = \"{name}\",\n    salt = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
-                    t.attr_salt
-                )),
-            }
-            continue;
-        }
-
-        let live_deps: Vec<u32> = t
-            .deps
-            .iter()
-            .copied()
-            .filter(|&d| g.targets[d as usize].alive)
-            .collect();
-        let split = live_deps.len().saturating_sub(t.select_deps as usize);
-        let plain: Vec<String> = live_deps[..split]
-            .iter()
-            .map(|&d| format!("\"{}\"", g.target_label(d)))
-            .collect();
-        let selected: Vec<String> = live_deps[split..]
-            .iter()
-            .map(|&d| format!("\"{}\"", g.target_label(d)))
-            .collect();
-        let mut ext: Vec<String> = (0..t.ext_deps)
-            .map(|k| format!("\"{}\"", SynthGraph::ext_label(tid, k)))
-            .collect();
-        let mut dep_expr = format!(
-            "[{}]",
-            plain
-                .into_iter()
-                .chain(ext.drain(..))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        if !selected.is_empty() {
-            // The union over select branches is what --proto:flatten_selects
-            // reports, and that union is the over-approximation we want.
-            dep_expr.push_str(&format!(
-                " + select({{\n        \"//tools/synth:opt\": [{}],\n        \"//conditions:default\": [{}],\n    }})",
-                selected.join(", "),
-                selected.join(", ")
-            ));
-        }
-
-        let mut srcs = format!("glob([\"t{tid}_*.src\"], allow_empty = True)");
-        if !t.foreign_srcs.is_empty() {
-            let f: Vec<String> = t
-                .foreign_srcs
-                .iter()
-                .map(|&(_, ft, fs)| format!("\"{}\"", g.src_label(ft, fs)))
-                .collect();
-            srcs.push_str(&format!(" + [{}]", f.join(", ")));
-        }
-
-        let tags = if t.is_manual() { "[\"manual\"]" } else { "[]" };
-        build.push_str(&format!(
-            "{macro_name}(\n    name = \"{name}\",\n    srcs = {srcs},\n    deps = {dep_expr},\n    \
-             salt = \"{}\",\n    tags = {tags},\n    visibility = [\"//visibility:public\"],\n)\n\n",
-            t.attr_salt
-        ));
+        write_sources(g, tid, &dir)?;
+        build.push_str(&target_stanza(g, tid, &suffix));
     }
 
     write(&dir.join("BUILD.bazel"), &build)
+}
+
+/// A target's source files. Each holds its content version, so that a
+/// `ModifySource` commit produces a real diff, and a per-target glob picks
+/// them up, so that adding a file really does change the target's inputs.
+fn write_sources(g: &SynthGraph, tid: u32, dir: &Path) -> Result<()> {
+    let t = &g.targets[tid as usize];
+    for (&slot, version) in t.srcs.iter().zip(&t.src_versions) {
+        let path = dir.join(SynthGraph::src_name(tid, slot));
+        let mut f = std::fs::File::create(&path)
+            .or_else(|_| std::fs::create_dir_all(dir).and_then(|_| std::fs::File::create(&path)))
+            .map_err(|source| EmitError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        writeln!(f, "// v{version}").map_err(|source| EmitError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+/// One live target's BUILD stanza. `suffix` names the generated `.bzl` whose
+/// macros the package calls.
+fn target_stanza(g: &SynthGraph, tid: u32, suffix: &str) -> String {
+    let t = &g.targets[tid as usize];
+    let mut live_deps = t
+        .deps
+        .iter()
+        .copied()
+        .filter(|&d| g.targets[d as usize].alive);
+    match t.kind {
+        Kind::TestSuite => {
+            let tests: Vec<String> = live_deps.map(|d| quoted(&g.target_label(d))).collect();
+            format!(
+                "test_suite(\n    name = \"t{tid}\",\n    tests = [{}],\n)\n\n",
+                tests.join(", ")
+            )
+        }
+        Kind::Alias => match live_deps.next() {
+            Some(d) => format!(
+                "alias(\n    name = \"t{tid}\",\n    actual = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
+                g.target_label(d)
+            ),
+            // An alias whose target was deleted still has to exist, or the
+            // emitted repo would disagree with the in-memory graph about
+            // which labels are present.
+            None => format!(
+                "synth_lib{suffix}(\n    name = \"t{tid}\",\n    salt = \"{}\",\n    visibility = [\"//visibility:public\"],\n)\n\n",
+                t.attr_salt
+            ),
+        },
+        Kind::Lib | Kind::Test | Kind::Bin => {
+            rule_stanza(g, tid, &format!("{}{suffix}", t.kind.rule_class()))
+        }
+    }
+}
+
+/// The stanza of a `synth_lib`, `synth_test` or `synth_bin`: its own files by
+/// glob plus the ones it consumes from other packages, and its deps with the
+/// last `select_deps` of them behind a `select()`.
+fn rule_stanza(g: &SynthGraph, tid: u32, macro_name: &str) -> String {
+    let t = &g.targets[tid as usize];
+    let live_deps: Vec<u32> = t
+        .deps
+        .iter()
+        .copied()
+        .filter(|&d| g.targets[d as usize].alive)
+        .collect();
+    let (plain, selected) =
+        live_deps.split_at(live_deps.len().saturating_sub(t.select_deps as usize));
+    let label = |&d: &u32| quoted(&g.target_label(d));
+    let ext = (0..t.ext_deps).map(|k| quoted(&SynthGraph::ext_label(tid, k)));
+    let mut dep_expr = format!(
+        "[{}]",
+        plain
+            .iter()
+            .map(label)
+            .chain(ext)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !selected.is_empty() {
+        // The union over select branches is what --proto:flatten_selects
+        // reports, and that union is the over-approximation we want.
+        let selected = selected.iter().map(label).collect::<Vec<_>>().join(", ");
+        dep_expr.push_str(&format!(
+            " + select({{\n        \"//tools/synth:opt\": [{selected}],\n        \"//conditions:default\": [{selected}],\n    }})"
+        ));
+    }
+
+    // This pattern matches every name `SynthGraph::src_name` gives the
+    // target's slots, so the two change together.
+    let mut srcs = format!("glob([\"t{tid}_*.src\"], allow_empty = True)");
+    if !t.foreign_srcs.is_empty() {
+        let f: Vec<String> = t
+            .foreign_srcs
+            .iter()
+            .map(|&(_, ft, fs)| quoted(&g.src_label(ft, fs)))
+            .collect();
+        srcs.push_str(&format!(" + [{}]", f.join(", ")));
+    }
+
+    let tags = if t.is_manual() { "[\"manual\"]" } else { "[]" };
+    format!(
+        "{macro_name}(\n    name = \"t{tid}\",\n    srcs = {srcs},\n    deps = {dep_expr},\n    \
+         salt = \"{}\",\n    tags = {tags},\n    visibility = [\"//visibility:public\"],\n)\n\n",
+        t.attr_salt
+    )
+}
+
+/// `s` as a Starlark string literal. Labels and file names never hold a quote
+/// or a backslash, so nothing needs escaping.
+fn quoted(s: &str) -> String {
+    format!("\"{s}\"")
 }
 
 fn module_bazel() -> String {
@@ -386,6 +376,10 @@ globs = [\"rules/**\", \"external/**\"]\n\n\
 [ignore]\n\
 globs = [\"**/*.md\"]\n";
 
+/// Where [`RULES_BZL`] lives in the workspace: loaded by every generated
+/// `.bzl`, and directly by a package that loads none of them.
+pub(crate) const RULES_BZL_PATH: &str = "rules/synth.bzl";
+
 const RULES_BZL: &str = r##""""Rules that do no real work, so `bazel build //...` runs anywhere."""
 
 def _synth_impl(ctx):
@@ -419,10 +413,6 @@ pub struct EmittedRepo {
     pub dir: PathBuf,
     /// Commit shas, oldest first.
     pub commits: Vec<String>,
-    /// The graph after the last commit.
-    pub graph: SynthGraph,
-    /// The commit applied at each step, aligned with `commits[1..]`.
-    pub steps: Vec<crate::mutate::Commit>,
     /// Graph snapshot per commit, when the caller asked for them. Aligned with
     /// `commits`, so `graphs[i]` is the graph at `commits[i]`.
     pub graphs: Vec<SynthGraph>,
@@ -443,20 +433,18 @@ pub fn emit_git_history(
     git(out, &["config", "user.email", "synth@example.com"])?;
     git(out, &["config", "user.name", "cambi synth"])?;
     let mut commits = vec![commit_all(out, "synthetic base")?];
-    let mut steps = Vec::new();
     let mut graphs = Vec::new();
     if keep_graphs {
         graphs.push(graph.clone());
     }
 
     for rev in 0..revisions {
-        let c = crate::mutate::commit(&mut graph, change_spec, rev);
-        if c.changes.is_empty() {
+        let changes = crate::mutate::commit(&mut graph, change_spec, rev).changes;
+        if changes.is_empty() {
             continue;
         }
         emit_workspace(&graph, out)?;
         commits.push(commit_all(out, &format!("synthetic revision {rev}"))?);
-        steps.push(c);
         if keep_graphs {
             graphs.push(graph.clone());
         }
@@ -465,8 +453,6 @@ pub fn emit_git_history(
     Ok(EmittedRepo {
         dir: out.to_path_buf(),
         commits,
-        graph,
-        steps,
         graphs,
     })
 }
@@ -507,7 +493,7 @@ mod tests {
         emit_workspace(&g, dir.path()).unwrap();
 
         assert!(dir.path().join("MODULE.bazel").exists());
-        assert!(dir.path().join("rules/synth.bzl").exists());
+        assert!(dir.path().join(RULES_BZL_PATH).exists());
         assert!(dir
             .path()
             .join("external/synth_ext/ext/BUILD.bazel")
@@ -536,12 +522,6 @@ mod tests {
         std::fs::write(dir.path().join("MODULE.bazel"), "module(name = \"real\")\n").unwrap();
         assert!(emit_workspace(&g, dir.path()).is_err());
         assert!(precious.exists());
-
-        // --force is the only way through, and it takes everything.
-        force_clear(dir.path()).unwrap();
-        emit_workspace(&g, dir.path()).unwrap();
-        assert!(!precious.exists());
-        assert!(dir.path().join("MODULE.bazel").exists());
     }
 
     #[test]
