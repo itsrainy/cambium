@@ -146,7 +146,7 @@ impl SynthGraph {
         if p.is_empty() {
             Self::src_name(target, slot)
         } else {
-            format!("{}/{}", p, Self::src_name(target, slot))
+            format!("{p}/{}", SrcName(target, slot))
         }
     }
 
