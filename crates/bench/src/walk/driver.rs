@@ -147,38 +147,18 @@ pub fn walk(
         commits.len() - 1,
         steps.len()
     );
-    let from = commits[0].clone();
-    let to = commits[commits.len() - 1].clone();
-    let engine_id = State::engine_id(&engine.config().hash());
-    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
-    std::fs::create_dir_all(&opts.state_dir)?;
-    let index_path = opts.state_dir.join(crate::util::versioned_name(
-        &format!("index-{}", opts.pin),
-        Some(&opts.bazel_version),
-        "bin",
-    ));
-
-    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
-        Resume::Done(prev) => return Ok(prev),
-        Resume::From(prev, at) => (prev, at),
-        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    let from = &commits[0];
+    let to = &commits[commits.len() - 1];
+    let stem = format!("index-{}", opts.pin);
+    let (mut w, start_at) = match Runner::open(engine, driver, live, opts, from, to, &stem)? {
+        Opened::Finished(prev) => return Ok(prev),
+        Opened::Ready(w, start_at) => (w, start_at),
     };
-
-    let mut w = Runner {
-        engine,
-        driver,
-        live,
-        opts,
-        path: opts.result_path(),
-        index_path,
-        result,
-        state,
-    };
-    w.begin(steps.len(), &from, &to)?;
+    w.begin(steps.len(), from, to)?;
     for (i, step) in steps.iter().enumerate().skip(start_at) {
         w.step(i + 1, steps.len(), step)?;
     }
-    w.rebuild_oracle(&to)?;
+    w.rebuild_oracle(to)?;
     w.finish()
 }
 
@@ -203,51 +183,15 @@ pub fn walk_only(
     opts: &WalkOptions,
 ) -> Result<WalkResult> {
     anyhow::ensure!(!steps.is_empty(), "a walk needs at least one step");
-    let from = steps[0].parent.clone();
-    let to = steps[steps.len() - 1].head.clone();
-    let engine_id = State::engine_id(&engine.config().hash());
-    let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
-    std::fs::create_dir_all(&opts.state_dir)?;
-    let index_path = opts.state_dir.join(crate::util::versioned_name(
-        &format!("index-{}-only", opts.pin),
-        Some(&opts.bazel_version),
-        "bin",
-    ));
-
-    let (result, start_at) = match resume(engine, &from, &to, opts, &engine_id)? {
-        Resume::Done(prev) => return Ok(prev),
-        // A `--only` walk cold-builds at every step's own parent, so the
-        // index the last completed step left in the store is not the base the
-        // next one wants; `resume` looked for it anyway, and an answer either
-        // way is one this walk can continue from.
-        Resume::From(prev, at) => (prev, at),
-        Resume::Fresh => start(driver, &from, &to, &index_path, opts, &engine_id)?,
+    let from = &steps[0].parent;
+    let to = &steps[steps.len() - 1].head;
+    let stem = format!("index-{}-only", opts.pin);
+    let (mut w, start_at) = match Runner::open(engine, driver, live, opts, from, to, &stem)? {
+        Opened::Finished(prev) => return Ok(prev),
+        Opened::Ready(w, start_at) => (w, start_at),
     };
-    if start_at >= steps.len() {
-        let mut w = Runner {
-            engine,
-            driver,
-            live,
-            opts,
-            path: opts.result_path(),
-            index_path,
-            result,
-            state,
-        };
-        w.begin(steps.len(), &from, &to)?;
-        return w.finish();
-    }
-    let mut w = Runner {
-        engine,
-        driver,
-        live,
-        opts,
-        path: opts.result_path(),
-        index_path,
-        result,
-        state,
-    };
-    w.begin(steps.len(), &from, &to)?;
+    w.begin(steps.len(), from, to)?;
+    // A resume past the last step takes none and only finishes the record.
     for (i, step) in steps.iter().enumerate().skip(start_at) {
         // `start` already cold-built at the first step's parent; a resumed
         // walk starts at a step nothing has built for.
@@ -263,8 +207,25 @@ pub fn walk_only(
 
 enum Resume {
     Done(WalkResult),
+    /// A record to continue, and the index of the first step it is missing.
+    ///
+    /// A `--only` walk cold-builds at every step's own parent, so the index
+    /// the last completed step left in the store is not the base the next one
+    /// wants; `resume` does not look for it, and an answer either way is one
+    /// such a walk can continue from.
     From(WalkResult, usize),
     Fresh,
+}
+
+/// A walk ready to take its steps from the one named, or the record of one
+/// that had already finished.
+///
+/// There is one of these per walk and it is moved once, so the size gap
+/// between the variants costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
+enum Opened<'a> {
+    Finished(WalkResult),
+    Ready(Runner<'a>, usize),
 }
 
 fn resume(
@@ -334,7 +295,46 @@ struct Runner<'a> {
     state: State,
 }
 
-impl Runner<'_> {
+impl<'a> Runner<'a> {
+    /// The setup a full walk and a `--only` walk share: the state file, the
+    /// index path (`<index_stem>[-<ver>].bin` beside it), and either the
+    /// record `--resume` continues or a cold build at `from` that starts a
+    /// fresh one.
+    fn open(
+        engine: &'a Engine,
+        driver: &'a dyn Driver,
+        live: &'a dyn LiveChecks,
+        opts: &'a WalkOptions,
+        from: &str,
+        to: &str,
+        index_stem: &str,
+    ) -> Result<Opened<'a>> {
+        let engine_id = State::engine_id(&engine.config().hash());
+        let state = State::load_for(&opts.state_dir, &opts.repo_id, &opts.pin, &engine_id)?;
+        std::fs::create_dir_all(&opts.state_dir)?;
+        let index_path = opts.state_dir.join(crate::util::versioned_name(
+            index_stem,
+            Some(&opts.bazel_version),
+            "bin",
+        ));
+        let (result, start_at) = match resume(engine, from, to, opts, &engine_id)? {
+            Resume::Done(prev) => return Ok(Opened::Finished(prev)),
+            Resume::From(prev, at) => (prev, at),
+            Resume::Fresh => start(driver, from, to, &index_path, opts, &engine_id)?,
+        };
+        let runner = Runner {
+            engine,
+            driver,
+            live,
+            opts,
+            path: opts.result_path(),
+            index_path,
+            result,
+            state,
+        };
+        Ok(Opened::Ready(runner, start_at))
+    }
+
     fn progress(&self) -> Option<&crate::progress::Reporter> {
         self.opts.progress.as_deref()
     }
@@ -789,7 +789,6 @@ fn start(
         done: false,
     };
     result.write(&opts.result_path())?;
-    let _ = to;
     Ok((result, 0))
 }
 
