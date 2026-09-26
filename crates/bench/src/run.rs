@@ -340,7 +340,10 @@ pub fn run_walk(
 /// seven steps of a gate are read off a table of short hashes. A spec that
 /// names no step in the window is an error rather than a silent skip, since
 /// the whole point of the flag is to run exactly those steps.
-fn select_only(steps: &[crate::walk::Step], specs: &[String]) -> Result<Option<Vec<crate::walk::Step>>> {
+fn select_only(
+    steps: &[crate::walk::Step],
+    specs: &[String],
+) -> Result<Option<Vec<crate::walk::Step>>> {
     if specs.is_empty() {
         return Ok(None);
     }
@@ -582,7 +585,10 @@ mod tests {
     #[test]
     fn only_picks_the_named_steps_in_the_order_they_were_typed() {
         let all = window();
-        assert!(select_only(&all, &[]).unwrap().is_none(), "no flag walks the range");
+        assert!(
+            select_only(&all, &[]).unwrap().is_none(),
+            "no flag walks the range"
+        );
 
         let picked = select_only(
             &all,

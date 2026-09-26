@@ -479,7 +479,10 @@ fn every_reference_build_and_only_those_starts_on_a_fresh_server() {
         .filter(|st| st.rebuild_step)
         .map(|st| st.head.as_str())
         .collect();
-    assert!(!mid_walk.is_empty(), "the schedule asked for mid-walk rebuilds");
+    assert!(
+        !mid_walk.is_empty(),
+        "the schedule asked for mid-walk rebuilds"
+    );
     assert_eq!(restarts.len(), mid_walk.len() + 1, "{events:#?}");
     // Each restart is followed by the reference build it was for, which is
     // never published.
@@ -666,7 +669,10 @@ fn only_answers_the_named_steps_the_way_the_full_walk_does() {
     )
     .unwrap();
     assert!(full.done);
-    assert!(s.len() >= 4, "the fixture needs steps between the named two");
+    assert!(
+        s.len() >= 4,
+        "the fixture needs steps between the named two"
+    );
 
     let named = vec![s[1].clone(), s[3].clone()];
     let mut o = opts(&f);
@@ -703,7 +709,10 @@ fn only_answers_the_named_steps_the_way_the_full_walk_does() {
     assert!(mine.exists(), "no record at {}", mine.display());
     let theirs = walk::WalkResult::path(&f.results.join("walk"), &o.pin, Some("synth"));
     assert!(theirs.exists(), "the full walk's record was overwritten");
-    assert_eq!(walk::WalkResult::read(&theirs).unwrap().steps.len(), s.len());
+    assert_eq!(
+        walk::WalkResult::read(&theirs).unwrap().steps.len(),
+        s.len()
+    );
 }
 
 /// `--only` with `--resume` continues the record it left, rather than

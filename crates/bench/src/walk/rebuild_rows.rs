@@ -556,7 +556,13 @@ fn missing_node_class(
 fn is_boundary_probe(p: &str) -> bool {
     matches!(
         p.rsplit_once('/').map_or(p, |(_, f)| f),
-        "WORKSPACE" | "WORKSPACE.bazel" | "WORKSPACE.bzlmod" | "REPO.bazel" | "MODULE.bazel" | "BUILD" | "BUILD.bazel"
+        "WORKSPACE"
+            | "WORKSPACE.bazel"
+            | "WORKSPACE.bzlmod"
+            | "REPO.bazel"
+            | "MODULE.bazel"
+            | "BUILD"
+            | "BUILD.bazel"
     )
 }
 
@@ -785,7 +791,10 @@ mod tests {
             ]
         );
         let c = counts(&m, &[]);
-        assert_eq!((c.missing, c.missing_expected, c.missing_unexplained), (4, 2, 2));
+        assert_eq!(
+            (c.missing, c.missing_expected, c.missing_unexplained),
+            (4, 2, 2)
+        );
     }
 
     #[test]

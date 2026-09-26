@@ -111,7 +111,11 @@ pub struct WalkOptions {
 
 impl WalkOptions {
     fn result_path(&self) -> PathBuf {
-        WalkResult::path(&self.results_dir, &self.result_pin(), Some(&self.bazel_version))
+        WalkResult::path(
+            &self.results_dir,
+            &self.result_pin(),
+            Some(&self.bazel_version),
+        )
     }
 
     /// The name the record is filed under: the pin, or the pin marked as a
@@ -816,11 +820,21 @@ mod tests {
         // They are not in the oracle's main-repo set and must not be charged
         // as extras, or a tool reads as looser the more vocabulary it carries.
         let (recall, tightness) = score(
-            &set(&["//a:a", "//b:b", "@quiche//:x", "@quiche//:y", "//external:z"]),
+            &set(&[
+                "//a:a",
+                "//b:b",
+                "@quiche//:x",
+                "@quiche//:y",
+                "//external:z",
+            ]),
             Some(&o),
         );
         assert_eq!(recall, Some(1.0));
-        assert_eq!(tightness, Some(1.0), "external rows are neither matched nor charged");
+        assert_eq!(
+            tightness,
+            Some(1.0),
+            "external rows are neither matched nor charged"
+        );
 
         // A genuine main-repo extra still costs tightness.
         let (_, tightness) = score(&set(&["//a:a", "//b:b", "//c:c"]), Some(&o));
