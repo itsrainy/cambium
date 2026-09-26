@@ -14,7 +14,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use cambium_engine::config::{StoreConfig, CONFIG_FILE, LOCAL_CONFIG_FILE};
+use cambium_engine::config::{ConfigError, StoreConfig, CONFIG_FILE, LOCAL_CONFIG_FILE};
 use cambium_engine::probe;
 use clap::Args as ClapArgs;
 
@@ -278,7 +278,21 @@ fn prompt_required(message: &str) -> Result<String> {
 /// parse-merge-serialise through `Config` would silently reformat the whole
 /// file and drop every comment in it.
 fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) -> Result<String> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // Only a missing file starts empty. Any other read error (a byte that is
+    // not UTF-8, a permission) is the config-read error `Config::load` gives,
+    // because rewriting a file init could not read would replace everything
+    // in it with the two keys init was asked about.
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(cambium_engine::EngineError::Config(ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+            .into())
+        }
+    };
     let mut doc: toml_edit::DocumentMut = existing.parse().map_err(|e| {
         anyhow::anyhow!(
             "{} does not parse, so init will not rewrite it: {e}",
@@ -296,7 +310,8 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
         // means "stop using it", and a config that says nothing about a store
         // is the one the defaults describe.
         StoreConfig::None => {
-            if let Some(baseline) = doc.get_mut("baseline").and_then(|i| i.as_table_mut()) {
+            if doc.contains_key("baseline") {
+                let baseline = section(&mut doc, "baseline", path)?;
                 baseline.remove("store");
                 if baseline.is_empty() {
                     doc.remove("baseline");
@@ -304,15 +319,19 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
             }
         }
         other => {
-            table(&mut doc, "baseline")["store"] = toml_edit::value(store_table(other)?);
+            section(&mut doc, "baseline", path)?
+                .insert("store", toml_edit::value(store_table(other)?));
         }
     }
     if let Some(branch) = default_branch {
-        table(&mut doc, "git")["default_branch"] = toml_edit::value(branch);
+        section(&mut doc, "git", path)?.insert("default_branch", toml_edit::value(branch));
     }
 
     let text = doc.to_string();
-    std::fs::write(path, &text)?;
+    std::fs::write(path, &text).map_err(|source| cambium_engine::EngineError::IoAt {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(text)
 }
 
@@ -335,12 +354,26 @@ fn store_table(store: &StoreConfig) -> Result<toml_edit::InlineTable> {
     Ok(table.into_inline_table())
 }
 
-/// The named top-level table, created if the file does not have one yet.
-fn table<'a>(doc: &'a mut toml_edit::DocumentMut, name: &str) -> &'a mut toml_edit::Table {
+/// The named top-level section, created as a `[name]` table if the file does
+/// not have one yet.
+///
+/// `name = { ... }` is the same section to the engine, so it is edited where
+/// it is. A section that is not a table at all is a file the engine would
+/// refuse, and init refuses it too rather than guess what was meant.
+fn section<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+    path: &Path,
+) -> Result<&'a mut dyn toml_edit::TableLike> {
     doc.entry(name)
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("a top-level section is a table")
+        .as_table_like_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: `{name}` is not a table, so init will not rewrite it",
+                path.display()
+            )
+        })
 }
 
 /// `cambium.local.toml` is machine-local by convention and by nothing else, so
@@ -352,9 +385,14 @@ fn warn_about_gitignore(ctx: &Context, config_path: &Path) {
         None => return,
     };
     let gitignore = root.join(".gitignore");
-    let Ok(text) = std::fs::read_to_string(&gitignore) else {
+    // Bytes, as git reads it: a byte that is not UTF-8 in a comment makes the
+    // file no less a .gitignore, and reading it as a string would skip the
+    // warning for it. A file that cannot be read at all is said nothing about;
+    // this is advice, not a check init can fail on.
+    let Ok(bytes) = std::fs::read(&gitignore) else {
         return;
     };
+    let text = String::from_utf8_lossy(&bytes);
     if text.lines().any(|l| l.trim() == LOCAL_CONFIG_FILE) {
         return;
     }
@@ -465,6 +503,123 @@ mod tests {
             cambium_engine::Config::default(),
             "no store and no branch is the default configuration"
         );
+    }
+
+    /// A file init cannot read is not an empty file. Treating it as one
+    /// replaced every key somebody wrote with the header and the two keys
+    /// init was asked about, and said "only the keys init was asked about
+    /// changed".
+    #[test]
+    fn an_unreadable_file_is_refused_and_left_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        // `caf\xe9` is Latin-1, so reading it as UTF-8 is `InvalidData`.
+        let before = b"# caf\xe9 notes\n[limits]\nmax_dirty_packages = 900\n".to_vec();
+        std::fs::write(&path, &before).unwrap();
+        let store = StoreConfig::Dir {
+            path: PathBuf::from("/srv/idx"),
+        };
+        let err = write_config(&path, &store, Some("trunk"))
+            .expect_err("a file that cannot be read must not be rewritten");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the file init could not read was changed"
+        );
+        let d = crate::diag::of_error(&err);
+        assert_eq!(
+            d.code,
+            cambium_engine::Code::E002Config,
+            "the config-read code Config::load uses: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains(&path.display().to_string()),
+            "the path is not named: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("UTF-8"),
+            "the cause is not named: {}",
+            d.message
+        );
+    }
+
+    /// A write that fails says which file it was writing.
+    #[test]
+    fn a_failed_write_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // No parent directory: the read is `NotFound`, so the write is what
+        // fails.
+        let path = dir.path().join("no-such-dir").join(CONFIG_FILE);
+        let err = write_config(&path, &StoreConfig::None, None)
+            .expect_err("the parent directory does not exist");
+        let d = crate::diag::of_error(&err);
+        assert!(
+            d.message.contains(&path.display().to_string()),
+            "the path is not named: {}",
+            d.message
+        );
+    }
+
+    /// `baseline = { ... }` and `git = { ... }` are the same sections as
+    /// `[baseline]` and `[git]`, and the engine reads them the same way, so
+    /// init edits them in place.
+    #[test]
+    fn inline_sections_are_edited_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(
+            &path,
+            "baseline = { store = { kind = \"dir\", path = \"/old\" } }\ngit = { default_branch = \"main\" }\n",
+        )
+        .unwrap();
+        let store = StoreConfig::Dir {
+            path: PathBuf::from("/srv/idx"),
+        };
+        write_config(&path, &store, Some("trunk")).unwrap();
+        let cfg = cambium_engine::Config::load_from(&path).unwrap();
+        assert_eq!(cfg.baseline.store, store);
+        assert_eq!(cfg.git.default_branch, "trunk");
+    }
+
+    /// `--store-none` on an inline `baseline` table removes the store it
+    /// names; leaving it would report the file updated while every run went on
+    /// using the store.
+    #[test]
+    fn store_none_removes_a_store_from_an_inline_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(
+            &path,
+            "baseline = { store = { kind = \"dir\", path = \"/old\" } }\n",
+        )
+        .unwrap();
+        write_config(&path, &StoreConfig::None, None).unwrap();
+        assert_eq!(
+            cambium_engine::Config::load_from(&path)
+                .unwrap()
+                .baseline
+                .store,
+            StoreConfig::None,
+            "{}",
+            std::fs::read_to_string(&path).unwrap()
+        );
+    }
+
+    /// A section that is not a table at all is refused with the path and the
+    /// key, not a panic, and the file is left as it was.
+    #[test]
+    fn a_section_that_is_not_a_table_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, "git = \"main\"\n").unwrap();
+        let err =
+            write_config(&path, &StoreConfig::None, Some("trunk")).expect_err("`git` is a string");
+        let message = crate::diag::of_error(&err).message;
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.contains("`git`"), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "git = \"main\"\n");
     }
 
     #[test]
