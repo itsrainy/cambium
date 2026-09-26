@@ -1,4 +1,4 @@
-//! Path classification and the dirty set (spec 6.1, 6.2).
+//! Path classification and the dirty set.
 //!
 //! This is where a list of changed paths becomes "this file marks its
 //! consumers direct", "no package owns this", or "everything is affected". It
@@ -128,7 +128,7 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ClassifyError> {
 }
 
 /// The set of packages that exist, with the diff's BUILD file additions and
-/// deletions overlaid (spec 6.1).
+/// deletions overlaid.
 pub struct PackageSet {
     packages: FxHashSet<String>,
     /// Directories that are Bazel repositories of their own, each with a
@@ -386,7 +386,7 @@ pub enum Classification {
 }
 
 pub fn classify(path: &str, packages: &PackageSet, m: &Matchers) -> Classification {
-    // Invalidators win over everything, including ignores (spec 9).
+    // Invalidators win over everything, including ignores.
     if m.is_invalidator(path) {
         return Classification::Invalidator;
     }
@@ -500,7 +500,7 @@ impl DirtySet {
     }
 }
 
-/// Applies spec 6.2 to a diff: the path-shaped half of it.
+/// Classifies a diff: the path-shaped half of the dirty set.
 ///
 /// `packages` must be the package set from the base index; this function
 /// overlays the diff's BUILD file additions and deletions itself, because a
@@ -604,10 +604,10 @@ pub fn dirty_set(
                     out.direct_files.insert(c.path.clone());
                 }
             }
-            // Content-only edits mark the file's consumers direct (spec
-            // section 2). An add or a delete moves no file row that exists at
-            // base; what it moves is the package's own edges, and the loading
-            // layer is what says whether it did.
+            // Content-only edits mark the file's consumers direct. An add or
+            // a delete moves no file row that exists at base; what it moves is
+            // the package's own edges, and the loading layer is what says
+            // whether it did.
             Classification::Source(_) => {
                 if matches!(c.status, Status::Modified | Status::TypeChanged) {
                     out.direct_files.insert(c.path.clone());
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn build_files_are_never_ignored() {
-        // Ignore globs apply only to non-BUILD, non-.bzl paths (spec 9).
+        // Ignore globs apply only to non-BUILD, non-.bzl paths.
         let p = packages();
         let m = Matchers::compile(&Rules {
             ignore_globs: vec!["lib/**".into()],
