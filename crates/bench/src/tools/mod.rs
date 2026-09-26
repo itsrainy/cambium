@@ -501,8 +501,7 @@ pub struct BaseWorktree {
 /// change set while cambium (whose base index was built in a tree that had the file)
 /// sees nothing. That surfaced as `//:srcs` in `cambium_missing` on a change set
 /// whose only changed files were `.github/workflows/*.yml`, which no rule
-/// consumes at all: a disagreement manufactured entirely by the harness, in
-/// the same family as the case-collision one above.
+/// consumes at all: a disagreement manufactured entirely by the harness.
 ///
 /// A tracked `cambium.toml` is left alone — the checkout already has the right
 /// version of it.
@@ -530,8 +529,8 @@ pub(crate) fn mirror_untracked_config(repo_worktree: &Path, base: &Path) -> Resu
 
 impl BaseWorktree {
     /// Adds (or reuses) a worktree of `repo_worktree` at `base_sha`, under
-    /// `scratch`. Reuse matters: consecutive change sets in an adjacent-change set sweep
-    /// share revisions, and re-adding a worktree per change set would dominate.
+    /// `scratch`. Reuse matters: consecutive walk steps share revisions, and
+    /// re-adding a worktree per step would dominate.
     pub fn create(repo_worktree: &Path, base_sha: &str, scratch: &Path) -> Result<Self> {
         std::fs::create_dir_all(scratch)?;
         let path = scratch.join("base-worktree");

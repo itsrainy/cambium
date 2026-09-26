@@ -35,7 +35,7 @@ use anyhow::{Context as _, Result};
 use crate::classify::{Class, Side};
 use crate::util::revs_match;
 
-/// The directory under `changes/` that holds every change set's sets.
+/// The directory under `walk/` that holds every step's sets.
 const DIR: &str = "labels";
 
 /// The file names that are not a tool's.
@@ -50,7 +50,7 @@ const CLASSES_FILE: &str = "classes.tsv.zst";
 /// does not show up next to a Bazel query.
 const LEVEL: i32 = 3;
 
-/// `<changes>/labels/<base>..<head>/`, as named on disk.
+/// `<walk>/labels/<base>..<head>/`, as named on disk.
 pub fn change_set_dir(changes_dir: &Path, base: &str, head: &str) -> PathBuf {
     changes_dir.join(DIR).join(format!("{base}..{head}"))
 }

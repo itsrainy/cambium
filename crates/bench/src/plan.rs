@@ -1,10 +1,10 @@
 //! A run plan: which `cambium-bench` invocations a run is, in order.
 //!
-//! One definition of the published run. The launcher screen composes a
-//! [`Plan`] and shows its command lines; `cambium-bench run` takes the same
-//! plan from flags and executes it; `tools/bench/run-published.sh` builds the
-//! binaries and calls `run`. Nothing else knows the flags a published `history`
-//! or `changes` step takes, so the three cannot drift.
+//! One definition of the full run. The launcher screen composes a [`Plan`]
+//! and shows its command lines; `cambium-bench run` takes the same plan from
+//! flags and executes it; `tools/bench/run-published.sh` builds the binaries
+//! and calls `run`. Nothing else knows the flags a `walk` step takes, so the
+//! three cannot drift.
 //!
 //! Every step is a child `cambium-bench` process — the same one a person
 //! would type — so a step that fails leaves its result files and its
@@ -108,7 +108,7 @@ impl StepKind {
 
     /// A step the rest of the subject cannot run without: a subject that
     /// cannot fetch must not cost the other four their run, but neither may
-    /// its history be attempted on a worktree that is not there.
+    /// its walk be attempted on a worktree that is not there.
     pub fn gates_subject(self) -> bool {
         matches!(self, StepKind::Fetch | StepKind::Build)
     }
@@ -118,8 +118,9 @@ impl StepKind {
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub subjects: Vec<String>,
-    /// Tool names as `--tools` takes them. `cambium` is always in the list it
-    /// passes, because it is what the others are compared against.
+    /// Tool names as `--tools` takes them. The walk step passes them on as
+    /// `--peers` with cambium left out ([`Self::peer_flag`]): cambium is the
+    /// walk's driver and runs whatever this list says.
     pub tools: Vec<String>,
     /// Which steps to take, per subject. The order is [`StepKind::ALL`]'s
     /// whatever order they are named in.
@@ -136,7 +137,8 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// The published run over `subjects`: every step, both foils.
+    /// The full run over `subjects`: every step, and bazel-diff and Tango as
+    /// the peers.
     pub fn published(subjects: Vec<String>) -> Self {
         Self {
             subjects,
@@ -172,7 +174,7 @@ impl Plan {
     }
 
     /// The results this plan's workloads would run over, one line per
-    /// subject: `envoy: history, changes`.
+    /// subject: `envoy: walk`.
     pub fn existing_results(&self) -> Vec<String> {
         let root = self.results();
         let mut out = Vec::new();
@@ -586,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn one_workload_runs_one_workload_and_cambium_is_always_a_tool() {
+    fn each_step_is_its_own_invocation_and_no_tools_passes_no_peers() {
         let p = Plan {
             steps: vec![
                 StepKind::Fetch,

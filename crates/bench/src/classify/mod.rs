@@ -3,8 +3,8 @@
 //! A raw symmetric difference between cambium's answer and bazel-diff's is not
 //! actionable: on a real repository it is thousands of labels, almost all of
 //! them explained by a handful of known, *expected* differences in what the
-//! two tools model. The spec named seven classes; the real runs turned up the
-//! rest. Thirteen of the seventeen are benign and three fail the run — plus
+//! two tools model. Seven classes were planned up front; the real runs turned
+//! up the rest. Thirteen of the seventeen are benign and three fail the run — plus
 //! `tool_missing`, which is a fact about the foil and gates nothing:
 //!
 //! | class | side | meaning |

@@ -24,12 +24,12 @@ pub struct State {
     #[serde(default)]
     pub built: BTreeMap<String, PathBuf>,
     #[serde(default)]
+    /// The walk's window and how far it got, under the name the history
+    /// workload that preceded it gave the field.
     pub history: Option<HistoryState>,
-    /// ChangeSet keys (`<base>..<head>`) the comparison has finished. This is
-    /// what makes a killed `bench changes` resumable, and the only record of
-    /// what a run has already done -- there is no separate "reported" flag,
-    /// because `bench report` is a pure function of the result files and
-    /// re-running it is free.
+    /// Change-set keys (`<base>..<head>`) the retired change-set comparison
+    /// finished. Nothing adds to it since the walk replaced that workload; it
+    /// stays so that `state.json` keeps its shape.
     #[serde(default)]
     pub compared: BTreeSet<String>,
     /// Which cambium wrote the rest of this file: the index format version and
@@ -54,7 +54,7 @@ pub struct State {
 pub struct HistoryState {
     pub from: String,
     pub to: String,
-    /// Bazel version string the history ran under.
+    /// Bazel version string the walk ran under.
     #[serde(default)]
     pub bazel_version: String,
     /// The newest commit whose index was materialised and published.

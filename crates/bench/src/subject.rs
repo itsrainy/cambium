@@ -29,8 +29,8 @@ pub const SYNTH_PREFIX: &str = "synth:";
 
 /// Commits after the base that an emitted synthetic subject carries.
 ///
-/// It bounds the history workload and the change sets that can be drawn from
-/// one: a synthetic subject with no history is a graph, not a subject.
+/// It bounds the window a walk over one can take: a synthetic subject with no
+/// history is a graph, not a subject.
 pub const SYNTH_COMMITS: u64 = 20;
 
 /// The change preset the generated commits are drawn from.
@@ -87,7 +87,7 @@ impl Synthetic {
     /// with the shas of its first-parent history, oldest first.
     ///
     /// Idempotent: an existing directory with a git history is reused, so the
-    /// second `cambium-bench changes synth:small` of the day costs nothing.
+    /// second `cambium-bench walk synth:small` of the day costs nothing.
     pub fn emit(&self, subjects: &SubjectsDir) -> Result<(PathBuf, Vec<String>)> {
         let dir = self.source_dir(subjects);
         if dir.join(".git").exists() {

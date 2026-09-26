@@ -2,8 +2,8 @@
 //!
 //! cambium works out which packages a changed `.bzl` reaches by scanning
 //! `load()` statements at index time (`cambium_index::loads`). That is a
-//! reimplementation of something Bazel already knows, so on every change set whose
-//! change set contains a `.bzl` the suite asks Bazel the same question —
+//! reimplementation of something Bazel already knows, so on every change set
+//! that contains a `.bzl` the oracle asks Bazel the same question —
 //! `rbuildfiles(<paths>)`, the call the engine used to make — and requires
 //! cambium's dirty set to be a **superset** of the packages Bazel names.
 //!
@@ -267,16 +267,16 @@ pub fn run<'a>(
 /// Roll-up over a run's change sets, for the summary document and the report table.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadOracleSummary {
-    /// ChangeSets whose change set contained a `.bzl`.
+    /// Change sets that contained a `.bzl`.
     pub change_sets: usize,
     /// `.bzl` files asked about, over those change sets.
     pub checked: usize,
-    /// ChangeSets where Bazel's answer was partial (exit 3).
+    /// Change sets where Bazel's answer was partial (exit 3).
     pub partial: usize,
     /// Packages Bazel named that cambium did not dirty, on the change sets
     /// where the answer was a load closure. Must be zero.
     pub missing_packages: usize,
-    /// ChangeSets whose `rbuildfiles` answer named a package that loads
+    /// Change sets whose `rbuildfiles` answer named a package that loads
     /// nothing, so it came through repository evaluation and the containment
     /// check did not apply. Reported, not failed.
     #[serde(default)]

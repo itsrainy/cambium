@@ -44,12 +44,13 @@ pub struct SubjectSnapshot {
     pub subject: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pin: String,
-    /// `history`, `changes`, `subjects`, or empty when only results are there.
+    /// `walk`, `subjects`, or empty when only results are there (a progress
+    /// file the retired workloads wrote says `history` or `changes`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workload: String,
-    /// The step's name: `fetch`, `build`, `history`, `changes`, `done`,
-    /// `failed`, `idle` for a subject with results and no progress file, or
-    /// `stale` for a finished or idle subject another engine build wrote.
+    /// The step's name: `fetch`, `build`, `walk`, `done`, `failed`, `idle`
+    /// for a subject with results and no progress file, or `stale` for a
+    /// finished or idle subject another engine build wrote.
     pub step: String,
     pub index: usize,
     pub of: usize,
@@ -66,20 +67,19 @@ pub struct SubjectSnapshot {
     /// Remaining items times the p50 of the ones that are done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta_secs: Option<u64>,
-    /// The p50 the ETA is taken from: a commit's whole-process wall time for
-    /// the history, a change set's measured total for the comparison.
+    /// The p50 the ETA is taken from: cambium's per-step wall in the walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p50_ms: Option<u64>,
-    /// Globally invalidated commits or change sets so far, over how many are
-    /// recorded.
+    /// Globally invalidated steps so far, over how many are recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub globals: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded: Option<usize>,
-    /// The worst recall any change set has reached; `None` until one has.
+    /// The worst recall any step has reached; `None` until the oracle has
+    /// run on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_recall: Option<f64>,
-    /// Change sets that passed the three-way comparison, over how many ran.
+    /// Steps that passed, over how many the oracle ran on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,16 +96,19 @@ pub struct SubjectSnapshot {
     pub change_sets: Vec<ChangeSetRow>,
 }
 
-/// One change set of one subject, for the expanded view.
+/// One walk step of one subject, for the expanded view.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChangeSetRow {
+    /// The step's tags, comma-separated.
     pub kind: String,
     pub change_set: String,
     pub changed_files: usize,
     pub dirty_packages: usize,
     /// Wall milliseconds per tool, cambium included.
     pub tool_ms: Vec<(String, u64)>,
-    /// The disagreement classes this change set produced, largest first.
+    /// Each oracle-scored tool's recall, times 1000 and truncated, lowest
+    /// first: the field kept its name from when it listed disagreement
+    /// classes.
     pub classes: Vec<(String, usize)>,
     pub global: bool,
     pub pass: bool,

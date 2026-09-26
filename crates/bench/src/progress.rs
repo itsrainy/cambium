@@ -27,7 +27,9 @@ pub const PROGRESS_FILE: &str = "progress.json";
 pub const PROGRESS_SCHEMA: u32 = 1;
 
 /// What a run is doing. `Fetch` and `Build` are the per-subject preparation
-/// steps; `History` and `Changes` are the workloads.
+/// steps and `Walk` is the workload; `History` and `Changes` are the
+/// workloads the walk replaced, kept so a progress file they wrote still
+/// reads.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
@@ -75,7 +77,8 @@ pub struct ToolProgress {
 pub struct Progress {
     #[serde(default)]
     pub schema: u32,
-    /// `history`, `changes`, or the preparation verb (`subjects`).
+    /// `walk`, or the preparation verb (`subjects`). A file the retired
+    /// workloads wrote says `history` or `changes`.
     pub workload: String,
     pub subject: String,
     pub pin: String,

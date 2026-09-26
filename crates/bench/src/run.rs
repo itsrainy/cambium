@@ -1,7 +1,7 @@
 //! What each verb does once its arguments are parsed.
 //!
 //! The clap files marshal arguments; this is where a `subjects fetch`, a
-//! `history` or a `changes` actually happens, against a [`SubjectRun`] the
+//! `walk` or a `report` actually happens, against a [`SubjectRun`] the
 //! session resolved. Nothing here prints: every function answers with the
 //! paths and documents it produced, and the binary decides how to show them
 //! (`--format`, exit codes). That is what lets the launcher, the `run` verb
@@ -489,9 +489,9 @@ pub fn read_labels(run: &SubjectRun<'_>, q: &LabelsQuery) -> Result<Labels> {
 
 // ------------------------------------------------------------------ report
 
-/// `report`: each subject's section, plus the top table and the synthetic
-/// headline, rebuilt from every subject that has results. Answers with the
-/// document and how many subjects it rendered.
+/// `report`: each subject's section, plus the top table, rebuilt from every
+/// subject that has results. Answers with the document and how many subjects
+/// it rendered.
 pub fn regenerate_report(
     session: &Session,
     subject: Option<&str>,
@@ -502,8 +502,8 @@ pub fn regenerate_report(
         .unwrap_or_else(|| session.root.join("docs/RESULTS.md"));
     let parent = &session.results_root;
     // Every subject at once, not just the named one: a per-subject nightly job
-    // rewrites the top table and the synthetic headline wholesale, and must not
-    // drop its neighbours' rows on the way.
+    // rewrites the top table wholesale, and must not drop its neighbours' rows
+    // on the way.
     let results = report::SubjectResults::collect(&session.manifest, parent, &session.subjects)?;
     anyhow::ensure!(
         !results.is_empty(),

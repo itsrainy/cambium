@@ -14,7 +14,7 @@
 //! - **Oracle** — an independent check named by what it proves
 //!   ([`oracles`]): `rdeps` (did a tool miss a target?), `rebuild` (is the
 //!   incremental updater exact?) and `load` (is the static `.bzl` load closure
-//!   complete?).
+//!   complete?). No workload runs `load` at present.
 //! - **Workload** — what the tools are run on. There is one, the [`walk`]: it
 //!   cold-builds an index at the start of a subject's first-parent window and
 //!   carries it forward one commit at a time to the pin, asking cambium and

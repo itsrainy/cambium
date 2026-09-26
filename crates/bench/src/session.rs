@@ -297,8 +297,8 @@ impl SubjectRun<'_> {
         self.result_path(&self.results, &format!("paths-{}", self.entry.pin), "json")
     }
 
-    /// The packages of the index's busiest targets, for the stress change
-    /// sets. Needs the cold index at the pin, which is a `subjects build`.
+    /// The packages of the index's busiest targets, for the walk's `hub` tag.
+    /// Needs the cold index at the pin, which is a `subjects build`.
     pub fn hub_packages(&self) -> Result<Vec<String>> {
         let state = self.state()?;
         let path = state

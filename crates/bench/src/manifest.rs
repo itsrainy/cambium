@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_spec_example() {
+    fn parses_a_full_entry() {
         let m: Manifest = toml::from_str(
             r#"
 [[repo]]

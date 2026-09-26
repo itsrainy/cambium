@@ -771,8 +771,8 @@ mod tests {
 
     /// The fourth condition of `bazeldiff_extra_external_content` reads the
     /// rule's inputs; a toolchain edge only shows up there when Bazel is
-    /// asked *with* implicit deps, which is what
-    /// `query_rule_with_implicit` is for.
+    /// asked *with* implicit deps, which every benchmark query is (no
+    /// `--noimplicit_deps`; see [`crate::tools::bazel_query`]).
     #[test]
     fn a_toolchain_input_counts_as_external() {
         let mut rule = Rule {

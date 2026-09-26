@@ -29,12 +29,13 @@
 //!   `//...`. The replay reports *that the fallback would fire*, which is the
 //!   decision under test; what it would then answer needs Bazel.
 //! - **The base index**, when the run did not leave its own behind. A run
-//!   splices onto whatever the store served for the change set's base, and the
-//!   change-set driver archives that index at
-//!   `bench-results/<subject>/bases/<base>.bin`; a replay that finds one there
-//!   walks the graph the run walked, and the drift below does not apply to it
-//!   ([`BaseKind::RunsOwn`]). Without one the only stored index is the one at
-//!   the pin, and a change set's base is an ancestor of it. Package and
+//!   splices onto whatever the store served for the change set's base. The
+//!   retired change-set driver archived that index at
+//!   `bench-results/<subject>/bases/<base>.bin`, and a replay that finds one
+//!   there walks the graph the run walked, so the drift below does not apply
+//!   to it ([`BaseKind::RunsOwn`]); the walk archives none. Without one the
+//!   only stored index is the one at the pin, and a change set's base is an
+//!   ancestor of it. Package and
 //!   repository sets then reflect the graph at the pin, not the graph the run
 //!   walked.
 //!   That is why a divergence from a recorded answer is a *lead*, not a
@@ -242,8 +243,9 @@ pub struct PackageDirty {
 // which is why replaying against the pin is worth anything at all -- but not
 // all of it did. An inert `MODULE.bazel` read in WORKSPACE mode was invisible
 // against the pin and reproduced immediately against the base the run itself
-// used. So the driver archives that base beside the results, and a replay
-// prefers it when it is there.
+// used. So the change-set driver archived that base beside the results, and a
+// replay prefers one when it is there. The walk does not archive bases, so a
+// replay of a walk's steps runs against the pin.
 
 /// Which index a change set was replayed against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,9 +255,10 @@ pub enum BaseKind {
     /// the far end, and the reason for every drift guard in [`replay_with`].
     #[default]
     Pin,
-    /// The base index the run itself spliced onto, archived by the change-set
-    /// driver at `<results>/<subject>/bases/<base>.bin`. At the base by
-    /// construction, so the drift guards have nothing to guard against.
+    /// The base index the run itself spliced onto, as the retired change-set
+    /// driver archived it at `<results>/<subject>/bases/<base>.bin`. At the
+    /// base by construction, so the drift guards have nothing to guard
+    /// against.
     RunsOwn,
     /// Whatever `--index` named. The replay is told to use it and cannot know
     /// which revision it is at, so it is treated as the pin's case.
@@ -279,8 +282,8 @@ impl BaseKind {
     }
 }
 
-/// `<results>/<subject>/bases/<base sha>.bin`, where the change-set driver
-/// archives the base index each change set actually ran against.
+/// `<results>/<subject>/bases/<base sha>.bin`, where the retired change-set
+/// driver archived the base index each change set actually ran against.
 pub fn archived_base_path(subject_results: &std::path::Path, base: &str) -> std::path::PathBuf {
     subject_results.join("bases").join(format!("{base}.bin"))
 }
@@ -291,8 +294,8 @@ pub fn archived_base(subject_results: &std::path::Path, base: &str) -> Option<st
     p.exists().then_some(p)
 }
 
-/// `<results>/<subject>/heads/<pin sha>.bin`, where the history's rebuild
-/// oracle archives the index Bazel cold-built at the pin.
+/// `<results>/<subject>/heads/<pin sha>.bin`, where the walk's rebuild oracle
+/// archives the index Bazel cold-built at the pin.
 ///
 /// That index is the oracle's truth half: the graph and the externals tables
 /// as a real `bazel query` at the pin established them. Keeping it is what
@@ -1256,8 +1259,9 @@ fn lower_bound(base: IndexRef<'_>, changes: &[Change], external_nodes: &[u32]) -
 
 /// The part of a recorded result a replay can be held against.
 ///
-/// Both `changes-<pin>.json` and `history-<pin>.json` collapse onto this, so
-/// the comparison is written once and tested without either file.
+/// A walk step's record collapses onto this ([`crate::precheck`] reads
+/// `walk-<pin>.json`), so the comparison is written once and tested without
+/// the file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecordedAnswer {
     pub base: String,
