@@ -426,7 +426,7 @@ shapes and exit codes are a versioned contract. Every document carries the
 version it was written against:
 
 ```json
-{ "schema": 19, "base": "...", "head": "...", ... }
+{ "schema": 20, "base": "...", "head": "...", ... }
 ```
 
 Bump `SCHEMA_VERSION` (`crates/engine/src/report.rs`) whenever a consumer could
@@ -441,7 +441,7 @@ affected report's shape and fails with instructions if it moves without a bump;
 |---:|---|
 | 0 | success |
 | 1 | error, or a usage error: one `cambi` diagnoses (`CAMBI-E013`), or a command line the argument parser rejects (an unknown flag or verb, a missing value), which prints the parser's message on stderr and nothing on stdout |
-| 2 | global invalidation: everything is affected; stdout is `//...` |
+| 2 | global invalidation: everything is affected; stdout is `//...`. Also a run whose index is short of packages Bazel could not load that `baseline.publish_partial` does not name (`CAMBI-W006`, or `CAMBI-W028` for packages the run carried): the answer cannot be trusted to include what the change reaches through them; `--allow-partial` answers from the index instead |
 | 3 | Bazel failed, or no Bazel workspace was found (`CAMBI-E004`), or the Bazel binary could not be started (`CAMBI-E015`) |
 | 4 | no index available and `--no-full-build` was given |
 | 5 | the store is there and could not be read (as against holding no index, which is 4): a CI job can retry this one. A directory store whose directory does not exist holds no index; the `aws s3 cp`/`gsutil cp` templates cannot tell an outage from a miss ([docs/STORE.md](docs/STORE.md#misses-and-outages)) |
@@ -502,7 +502,7 @@ not also show:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "workspace": { "root": "/src/repo", "mode": "bzlmod", "markers": ["MODULE.bazel"],
                  "inert_module_bazel": false, "inert_workspace": false,
                  "bazelversion": "7.4.1", "bazelversion_major": 7,
@@ -540,7 +540,7 @@ failed, 0 otherwise, so a `warn` is a run that works:
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "checks": [
     { "name": "workspace", "level": "ok", "detail": "/src/repo (bzlmod)" },
     { "name": "bazel", "level": "fail", "detail": "bazel",
@@ -564,7 +564,7 @@ label was asked about.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "base": "e5ac543...", "head": "ca7fa29...",
   "global": false,
   "diagnostics": [],
@@ -599,7 +599,7 @@ label that exists and is not affected is an answer, and exits 0.
 
 ```json
 {
-  "schema": 19,
+  "schema": 20,
   "plan": { "base": "e5ac543...", "head": "ca7fa29...",
             "index": { "revision": "e5ac543...", "lineage": "f901cd...", "distance": 3,
                        "age_seconds": 7200, "packages": 4120, "targets": 38211 },
@@ -638,6 +638,7 @@ tell the answer is `//...`, which is also exit code 2.
 | 17 | `cambi profile`: a commit that fails no longer ends the profile. Its step carries `failed` (the error as a diagnostic) and `index: {"kind": "failed"}`, the next commit is indexed cold (`cold_after_failure`), three failures in a row stop the walk (`stopped`), and `from_failed` says when the cold index moved off the range's first commit. Also `repository`; `cold.targets` and `cold.tests`; per step `subject` and `global_cause`; `code` and `help` on `summary.global_reasons[]`; and in `summary`, `global_rebuild` and `requery` (the two halves of `rebuild`), `incremental_affected` and `incremental_tests` (`mean`, `p50`, `p90`), `affected_share`, `tests_share`, `global_share`, `index_spliced`, `index_unchanged`, `failed` and `rebuilt_after_failure`. The jsonl `row` event gains `step`, the raw step, beside its display strings. Existing fields keep their meaning: a global step is still `affected: 0` with `global: true` |
 | 18 | `stats.consumer_leaves_seeded`: leaves of external repositories seeded because the consumer table's leaf map (index format 14) says their transitive deps reach a package of an indexed repository that moved, or does not know the leaf; a consumer seeded this way is still counted in `repos_dirty_by_consumer`, but only its reaching leaves are seeded rather than all of them |
 | 19 | `stats.closure_leaves_seeded`: leaves seeded because their transitive deps closure runs through an external repository that moved (index format 16), and for no other reason: envoy's `@grpc//:grpc++` when an input of `@c-ares` moves |
+| 20 | What `global` covers, not the shape: a run whose index is short of packages Bazel could not load, and that `baseline.publish_partial` does not name, is global (exit 2, stdout `//...`) with `CAMBI-W006` (the index is partial) or `CAMBI-W028` (this run carried the packages forward) as its cause, naming them in `global_reason`. Such a run used to answer from the partial index with `global: false`. `--allow-partial` on `affected` and `explain` answers from it as before |
 
 Also at 9, on the same terms: `cambi profile --format json`, the document
 behind what `profile` prints. As of 17 it holds `repository`, `from` and

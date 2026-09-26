@@ -144,7 +144,7 @@ fn a_bad_invocation_exits_nonzero_rather_than_printing_an_answer() {
 
 /// The `schema` every JSON document carries. Pinned here, not read from
 /// `SCHEMA_VERSION`, so a bump is a deliberate edit to this file as well.
-const SCHEMA: u64 = 19;
+const SCHEMA: u64 = 20;
 
 /// Builds a synthetic index in `dir` and returns its path.
 ///
@@ -2020,4 +2020,106 @@ fn every_spelling_of_a_range_compares_from_the_merge_base() {
     assert_eq!(code, 1, "{stderr}{stdout}");
     assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
     assert!(stderr.contains("no merge base"), "{stderr}");
+}
+
+/// An index Bazel could not fully load (a `WORKSPACE`-only tree under Bazel
+/// 9 loads a fraction of it) knows nothing about the packages it is short
+/// of, so an answer from it can leave out every target in them the change
+/// reaches: the stranger's run said "0 affected targets" where Bazel 7 found
+/// 92 tests. Such a run answers `//...`, exit 2, under `CAMBI-W006` naming
+/// the packages, unless `baseline.publish_partial` names them as expected
+/// here or `--allow-partial` asks for the answer anyway. Here the partial
+/// index is the one the store already holds, which is where one comes from
+/// on every run after the first.
+#[test]
+fn an_answer_from_a_partial_index_is_everything() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let base = &f.commits[1];
+    let file = f.cache.join("published.cmbx");
+    let mut index = cambium_index::IndexFile::open(&file)
+        .unwrap()
+        .deserialize()
+        .unwrap();
+    index.provenance.partial = true;
+    index.provenance.packages_in_error = 1;
+    index.provenance.error_packages = vec!["tests/copy_file".into()];
+    let partial = f.cache.join("partial.cmbx");
+    cambium_index::format::write_index(&partial, &index).unwrap();
+    // The store's index for the base is now the partial one.
+    let (code, _, stderr) = run(&[
+        "-C",
+        ws,
+        "index",
+        "publish",
+        "--allow-partial",
+        partial.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let _ = std::fs::remove_dir_all(f.cache.join("indexes"));
+
+    // A change on the base the index would answer from.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--detach", base]);
+    std::fs::create_dir_all(f.ws.join("notes")).unwrap();
+    std::fs::write(f.ws.join("notes/README.md"), "notes\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", "notes"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "notes"]);
+    let range = format!("{base}..HEAD");
+    let affected = |extra: &[&str]| {
+        let mut a = vec![
+            "-C",
+            ws,
+            "--cache-dir",
+            cache,
+            "--format",
+            "labels",
+            "affected",
+            &range,
+        ];
+        a.extend_from_slice(extra);
+        run(&a)
+    };
+
+    let (code, stdout, stderr) = affected(&[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(stdout, "//...\n", "{stderr}");
+    assert!(stderr.contains("warning[CAMBI-W006]"), "{stderr}");
+    assert!(stderr.contains("tests/copy_file"), "{stderr}");
+    assert!(stderr.contains("--allow-partial"), "{stderr}");
+
+    // The JSON says why, as for any global run.
+    let (code, stdout, _) = run(&[
+        "-C",
+        ws,
+        "--cache-dir",
+        cache,
+        "--format",
+        "json",
+        "affected",
+        &range,
+    ]);
+    assert_eq!(code, 2);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["global"], true);
+    assert!(
+        doc["global_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("tests/copy_file")),
+        "{stdout}"
+    );
+
+    // Asked for, the answer is the partial index's.
+    let (code, stdout, stderr) = affected(&["--allow-partial"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "", "{stderr}");
+
+    // Expected here, it is the answer without asking.
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.baseline.publish_partial =
+        cambium_engine::config::PartialPolicy::Expected(vec!["//tests/...".into()]);
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    let (code, _, stderr) = affected(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("everything is affected"), "{stderr}");
 }

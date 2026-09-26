@@ -69,6 +69,13 @@ pub struct Args {
     /// head-side index is never published from `affected`.
     #[arg(long)]
     pub publish_base: bool,
+    /// Answer from an index Bazel could not fully load, and let
+    /// --publish-base publish one. Without it, a run whose index is short of
+    /// packages that baseline.publish_partial does not name answers `//...`
+    /// (exit 2) under CAMBI-W006 or CAMBI-W028, since what the change
+    /// reaches through those packages cannot be reported.
+    #[arg(long)]
+    pub allow_partial: bool,
     /// Report only targets within this many reverse-dependency hops of the
     /// change (0 = the direct set).
     #[arg(long)]
@@ -535,8 +542,9 @@ pub fn request(engine: &cambium_engine::Engine, args: &Args, shape: Shape) -> Re
         materialize: shape.materialize,
         no_full_build: args.no_full_build,
         publish_base: args.publish_base,
-        // `--publish-base` follows the config's `baseline.publish_partial`.
-        allow_partial: false,
+        // Without the flag, both the answer and `--publish-base` follow the
+        // config's `baseline.publish_partial`.
+        allow_partial: args.allow_partial,
         max_depth: args.max_depth,
     };
     Ok(Resolved { req, note })

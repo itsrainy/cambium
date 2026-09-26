@@ -319,6 +319,8 @@ pub(crate) struct Queried {
 /// The splice, before the builder is finished one way or the other.
 struct Spliced<'a> {
     builder: IndexBuilder<'a>,
+    /// What the answer is short of: see [`crate::engine::PartialAnswer`].
+    partial: Option<crate::engine::PartialAnswer>,
     splice: SpliceReport,
     deleted_by_package: Vec<(String, Vec<u32>)>,
     changed_file_ids: Vec<(u32, String)>,
@@ -1206,17 +1208,44 @@ impl<'a> Run<'a> {
             .map(|u| u.package.clone())
             .collect();
         let (was_partial, was_count, was_named) = builder.partial_state();
+        let whole = queried.cold_reason.is_some();
+        let base_state = || PartialState {
+            partial: was_partial,
+            count: was_count,
+            named: was_named,
+        };
         let state = splice_partial(
-            PartialState {
-                partial: was_partial,
-                count: was_count,
-                named: was_named,
-            },
+            base_state(),
             queried.rows.partial.as_ref(),
             &carried,
             &reloaded,
-            queried.cold_reason.is_some(),
+            whole,
         );
+        // What the answer is short of, which is not quite what the index
+        // records: a dirty package this head failed to load and tombstoned
+        // (its BUILD file is gone, or is the edit that broke it) reaches its
+        // consumers as a deletion, so the answer covers it. What it cannot
+        // cover is a package whose rows are missing or stale: one the base
+        // was already short of and this splice did not reload, one carried
+        // forward because it failed to load here, and, when an overflow
+        // re-queried the whole repository, every one that query could not
+        // load, as for a cold build.
+        let partial = splice_partial(
+            base_state(),
+            queried.rows.partial.as_ref().filter(|_| whole),
+            &carried,
+            &reloaded,
+            whole,
+        )
+        .map(|(count, packages)| crate::engine::PartialAnswer {
+            unnamed: count.saturating_sub(packages.len() as u32),
+            carried: packages
+                .iter()
+                .filter(|p| carried.contains(p))
+                .cloned()
+                .collect(),
+            packages,
+        });
         builder.replace_partial(state);
         // A nested repository can appear or vanish in any commit, so the
         // boundary list is re-walked from the checkout these rows came from
@@ -1536,6 +1565,7 @@ impl<'a> Run<'a> {
 
         Ok(Spliced {
             builder,
+            partial,
             splice,
             deleted_by_package,
             changed_file_ids,
@@ -1692,6 +1722,7 @@ impl<'a> Run<'a> {
     ) -> RunOutcome {
         let Spliced {
             builder,
+            partial,
             splice,
             deleted_by_package,
             changed_file_ids,
@@ -1716,6 +1747,7 @@ impl<'a> Run<'a> {
                 report,
                 index: Some(head_index),
                 base_index: None,
+                partial,
             }
         } else {
             let overlay = builder.finish_overlay();
@@ -1732,6 +1764,7 @@ impl<'a> Run<'a> {
                 report,
                 index: None,
                 base_index: None,
+                partial,
             }
         }
     }
@@ -1855,6 +1888,7 @@ impl<'a> Run<'a> {
             },
             index: None,
             base_index: None,
+            partial: None,
         }
     }
 }

@@ -32,6 +32,23 @@ impl PackageQuerier for PartialUniverse<'_> {
             unloaded: Vec::new(),
         })
     }
+    // The rest is the synthetic tree's own, so an index built through this
+    // has the loading layer and closure a run needs to splice onto it.
+    fn load_source(&self) -> Option<&dyn cambium_index::FileText> {
+        self.0.load_source()
+    }
+    fn starlark_files(&self) -> Option<Vec<String>> {
+        self.0.starlark_files()
+    }
+    fn can_dump_loading_layer(&self) -> bool {
+        self.0.can_dump_loading_layer()
+    }
+    fn dump_loading_layer(
+        &self,
+        filter: &str,
+    ) -> Result<(String, cambium_index::sky::Paths), EngineError> {
+        self.0.dump_loading_layer(filter)
+    }
 }
 
 fn load_errors() -> LoadErrors {
@@ -409,4 +426,97 @@ fn a_splice_over_a_declared_deleted_package_publishes() {
     cambium_index::format::write_index(&path, &index).unwrap();
     e.publish_index(&path, &index.header.lineage, "head")
         .expect("nothing is missing, so nothing stops the publish");
+}
+
+// ------------------------------------------- answering from a partial index
+
+/// A WORKSPACE-only tree under Bazel 9: the cold `//...` loads a fraction of
+/// the packages, and a run spliced onto that index answers about the rest as
+/// if they did not exist. The stranger's run said "0 affected targets" where
+/// Bazel 7 found 92 tests, with exit 0. As an answer, it is everything,
+/// under `CAMBI-W006` naming the packages the index is short of.
+#[test]
+fn an_answer_from_a_cold_partial_index_is_everything() {
+    use cambium_synth::Mutation;
+
+    let g = generate(&GraphSpec {
+        packages: 20,
+        seed: 7,
+        ..Default::default()
+    });
+    let e = engine();
+    let base = e
+        .full_build_with(
+            "base",
+            &PartialUniverse(SynthQuerier::new(&g), load_errors()),
+        )
+        .unwrap();
+    let t = (0..g.targets.len() as u32)
+        .find(|&i| !g.targets[i as usize].srcs.is_empty())
+        .unwrap();
+    let slot = g.targets[t as usize].srcs[0];
+    let mut after = g.clone();
+    let changes = cambium_synth::apply_one(&mut after, &Mutation::ModifySource { target: t, slot });
+    let req = AffectedRequest::new("base", "head");
+    let run = |e: &Engine, req: &AffectedRequest| {
+        let out = e
+            .compute(base.view(), &changes, &SynthQuerier::new(&after), req)
+            .unwrap();
+        e.trust_partial(req, out)
+    };
+
+    let out = run(&e, &req);
+    assert!(out.report.global, "the answer is everything");
+    let reason = out.report.global_reason.clone().unwrap();
+    assert!(
+        reason.contains("modules/planning") && reason.contains("third_party/bazel"),
+        "{reason}"
+    );
+    let cause = e
+        .diagnostics()
+        .drain()
+        .into_iter()
+        .find(|d| cambium_engine::GlobalReason::explains(d, Some(&reason)))
+        .expect("the cause is said");
+    assert_eq!(cause.code, cambium_engine::Code::W006PartialQuery);
+    assert!(cause.help.unwrap().contains("--allow-partial"));
+
+    // `--allow-partial` answers from it.
+    let allowed = AffectedRequest {
+        allow_partial: true,
+        ..req.clone()
+    };
+    assert!(!run(&e, &allowed).report.global);
+
+    // Naming one of the two is not enough; naming both is.
+    let with_policy = |p: cambium_engine::config::PartialPolicy| {
+        let mut cfg = Config::default();
+        cfg.baseline.publish_partial = p;
+        cambium_testkit::engine_with(cfg)
+    };
+    let expect = |names: &[&str]| {
+        with_policy(cambium_engine::config::PartialPolicy::Expected(
+            names.iter().map(|s| s.to_string()).collect(),
+        ))
+    };
+    let e = expect(&["//modules/planning"]);
+    let out = run(&e, &req);
+    assert!(out.report.global);
+    let reason = out.report.global_reason.unwrap();
+    assert!(
+        reason.contains("third_party/bazel") && !reason.contains("modules/planning"),
+        "only the unexpected one is named: {reason}"
+    );
+    let e = expect(&["//modules/...", "//third_party/bazel"]);
+    assert!(!run(&e, &req).report.global);
+
+    // The blanket `true` publishes such an index, and expects nothing.
+    let e = with_policy(cambium_engine::config::PartialPolicy::Blanket(true));
+    assert!(run(&e, &req).report.global);
+
+    // Nothing changed: nothing is affected, whatever the index lacks.
+    let out = e
+        .compute(base.view(), &[], &SynthQuerier::new(&g), &req)
+        .unwrap();
+    assert!(!e.trust_partial(&req, out).report.global);
 }

@@ -94,8 +94,19 @@ script, `--format labels` prints the labels alone, one per line (see the
 output contract below).
 
 Also takes: `--tests-only`, `--include-manual`, `--max-depth`, `--hist`,
-`--no-full-build`, `--publish-base`, `--out`. `--explain` is kept one
-release; the verb below replaces it.
+`--no-full-build`, `--publish-base`, `--allow-partial`, `--out`. `--explain`
+is kept one release; the verb below replaces it.
+
+An index Bazel could not fully load (a cold one, one the store held, or a
+splice that carried a dirty package forward because it failed to load) is
+short of targets and edges, and an answer from it can leave out whatever the
+change reaches through them. So unless `baseline.publish_partial` names every
+package it is short of, the run answers `//...` (exit 2) under `CAMBI-W006`,
+or `CAMBI-W028` when this run carried them, naming the packages.
+`--allow-partial` answers from the index anyway, and lets `--publish-base`
+publish a partial base; `publish_partial = true` publishes such indexes but
+names nothing, so it does not make their answers stand. A range with no
+changed files affects nothing either way.
 
 `--out FILE` writes the head index the run built. A global run builds none
 (the answer is `//...` and nothing is spliced to keep), and `affected` does

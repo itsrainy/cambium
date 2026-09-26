@@ -258,6 +258,30 @@ pub enum GlobalReason {
         class: String,
         change: RuleChange,
     },
+    /// The index the answer came from is short of packages Bazel could not
+    /// load, and `baseline.publish_partial` names none of them (see
+    /// [`crate::engine::Engine::trust_partial`]). Decided after the query,
+    /// over the rows it read back.
+    PartialIndex {
+        /// The packages, as Bazel names them.
+        packages: Vec<String>,
+        /// Error lines no name stands for.
+        unnamed: u32,
+        /// Every one of `packages` was carried forward by this run, so the
+        /// cause is this head's load failure rather than the index's.
+        carried_only: bool,
+    },
+}
+
+/// `a, b and c`, or the first five and how many more.
+fn package_list(packages: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let shown: Vec<&str> = packages.iter().take(SHOWN).map(String::as_str).collect();
+    match packages.len() {
+        0 => String::new(),
+        n if n <= SHOWN => shown.join(", "),
+        n => format!("{} and {} more", shown.join(", "), n - SHOWN),
+    }
 }
 
 /// What every [`GlobalReason::ToolchainRule`] sentence ends with, after the
@@ -304,6 +328,28 @@ impl fmt::Display for GlobalReason {
                 class,
                 change,
             } => write!(f, "{label} ({class}) was {change}{TOOLCHAIN_RULE_TAIL}"),
+            GlobalReason::PartialIndex {
+                packages, unnamed, ..
+            } => {
+                let named = match packages.len() {
+                    0 => String::new(),
+                    1 => format!("1 package ({})", package_list(packages)),
+                    n => format!("{n} packages ({})", package_list(packages)),
+                };
+                let lost = match (*unnamed, named.is_empty()) {
+                    (0, _) => String::new(),
+                    (n, true) => format!("{n} load error line(s) bazel named no package for"),
+                    (n, false) => {
+                        format!(", and {n} load error line(s) bazel named no package for")
+                    }
+                };
+                write!(
+                    f,
+                    "the index this run answered from is short of {named}{lost} that failed \
+                     to load and baseline.publish_partial does not expect, so a target in them \
+                     the change reaches cannot be reported"
+                )
+            }
         }
     }
 }
@@ -323,6 +369,10 @@ impl GlobalReason {
             GlobalReason::Externals(c) if c.is_registration() => Code::W023ToolchainMoved,
             GlobalReason::Externals(_) => Code::W014ExternalsGlobal,
             GlobalReason::ToolchainRule { .. } => Code::W023ToolchainMoved,
+            GlobalReason::PartialIndex {
+                carried_only: true, ..
+            } => Code::W028PackageLoadFailed,
+            GlobalReason::PartialIndex { .. } => Code::W006PartialQuery,
         }
     }
 
@@ -353,6 +403,18 @@ impl GlobalReason {
         !label.is_empty()
             && cambium_index::is_toolchain_rule_class(class)
             && ["added", "changed", "removed"].contains(&change)
+    }
+
+    /// Whether `d` is the diagnostic that explains a global run whose
+    /// `global_reason` is `reason`: one of the codes [`GlobalReason::is_cause`]
+    /// lists, or a partial index's code carrying that reason verbatim.
+    /// `CAMBI-W006` and `CAMBI-W028` also fire on runs they did not make
+    /// global (a cold build that loaded short, a package carried under an
+    /// allowed policy), so their code alone does not say they are the cause.
+    pub fn explains(d: &Diagnostic, reason: Option<&str>) -> bool {
+        Self::is_cause(d.code)
+            || (matches!(d.code, Code::W006PartialQuery | Code::W028PackageLoadFailed)
+                && reason.is_some_and(|r| d.message.ends_with(r)))
     }
 
     /// Whether a diagnostic with this code is the one that explains a global
@@ -485,6 +547,16 @@ impl GlobalReason {
             .with_help(
                 "the message names the file; [externals].enabled = false turns the stage off \
                  if its precision is not wanted here",
+            ),
+            GlobalReason::PartialIndex { .. } => Diagnostic::warning(
+                self.code(),
+                format!("the answer cannot be trusted, so everything is affected: {reason}"),
+            )
+            .with_help(
+                "fix the load errors bazel reported (a tree with only a WORKSPACE file needs a \
+                 Bazel that reads it: pin one in .bazelversion); name the packages whose \
+                 absence is expected here in baseline.publish_partial; or pass \
+                 --allow-partial to answer from the partial index for this run",
             ),
             GlobalReason::ToolchainRule { .. } => Diagnostic::warning(
                 self.code(),
