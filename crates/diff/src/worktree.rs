@@ -20,9 +20,10 @@ pub struct Worktree {
     /// The worktree (or mirror) the new one was registered against; `git
     /// worktree remove` has to run from there.
     owner: PathBuf,
-    /// Set when the directory already existed and we only moved it, so `Drop`
-    /// does not delete something the caller owns.
-    borrowed: bool,
+    /// Set when `Drop` must leave the directory alone: either it was already
+    /// a worktree when `create` was called, so it belongs to whoever made it,
+    /// or the caller asked to [`keep`](Worktree::keep) it.
+    keep_on_drop: bool,
 }
 
 impl Worktree {
@@ -42,7 +43,7 @@ impl Worktree {
             return Ok(Self {
                 path: path.to_path_buf(),
                 owner: owner.to_path_buf(),
-                borrowed: true,
+                keep_on_drop: true,
             });
         }
         // A stale directory with no `.git` would make `worktree add` fail.
@@ -64,7 +65,7 @@ impl Worktree {
         Ok(Self {
             path: path.to_path_buf(),
             owner: owner.to_path_buf(),
-            borrowed: false,
+            keep_on_drop: false,
         })
     }
 
@@ -76,11 +77,6 @@ impl Worktree {
         &self.owner
     }
 
-    /// True when this handle will leave the directory behind on drop.
-    pub fn borrowed(&self) -> bool {
-        self.borrowed
-    }
-
     /// Leaves the directory registered and on disk when this handle drops,
     /// for a caller that wants the next run to reuse it.
     ///
@@ -90,7 +86,7 @@ impl Worktree {
     /// made. [`Worktree::create`] reuses a directory that is already a
     /// worktree, so keeping it is all the next run needs.
     pub fn keep(mut self) {
-        self.borrowed = true;
+        self.keep_on_drop = true;
     }
 
     /// Moves this worktree to another revision, losing local changes to
@@ -117,7 +113,7 @@ impl Worktree {
 
 impl Drop for Worktree {
     fn drop(&mut self) {
-        if self.borrowed {
+        if self.keep_on_drop {
             return;
         }
         if let Err(e) = self.remove() {
