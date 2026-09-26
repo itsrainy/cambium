@@ -603,18 +603,12 @@ pub fn dirty_set(
             // consumers the way every other changed source does, on top of
             // whatever the layer and the external-repository stage make of it.
             Classification::Bzl(_) => {
-                if packages.owner_of(&c.path).is_some()
-                    && matches!(c.status, Status::Modified | Status::TypeChanged)
-                {
+                if packages.owner_of(&c.path).is_some() && is_content_edit(c.status) {
                     out.direct_files.insert(c.path.clone());
                 }
             }
-            // Content-only edits mark the file's consumers direct. An add or
-            // a delete moves no file row that exists at base; what it moves is
-            // the package's own edges, and the loading layer is what says
-            // whether it did.
             Classification::Source(_) => {
-                if matches!(c.status, Status::Modified | Status::TypeChanged) {
+                if is_content_edit(c.status) {
                     out.direct_files.insert(c.path.clone());
                 }
             }
@@ -623,7 +617,7 @@ pub fn dirty_set(
             // tarball from `glob(["**"])`, so `CHANGELOG.md` really is an
             // input of `//:changelog-file`.
             Classification::IgnoredSource(pkg) => {
-                if matches!(c.status, Status::Modified | Status::TypeChanged) {
+                if is_content_edit(c.status) {
                     if consumed.is_consumed(&pkg, &c.path) {
                         out.direct_files.insert(c.path.clone());
                     } else {
@@ -658,6 +652,16 @@ pub fn dirty_set(
     }
 
     out
+}
+
+/// Whether a change edited a file's content in place, which is the only
+/// change that marks the file's consumers direct.
+///
+/// An add or a delete moves no file row that exists at base; what it moves
+/// is the package's own edges, and the loading layer is what says whether it
+/// did.
+fn is_content_edit(status: Status) -> bool {
+    matches!(status, Status::Modified | Status::TypeChanged)
 }
 
 #[cfg(test)]
