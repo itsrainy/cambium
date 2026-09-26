@@ -237,7 +237,7 @@ pub struct PackageDirty {
 // ------------------------------------------------------------ the base index
 //
 // A run does not splice onto the index at the pin. It asks the store for the
-// change set's own base and gets back whatever the history walk left there, and
+// change set's own base and gets back whatever the walk left there, and
 // the two are not the same graph: the pin is ahead of every base by as many
 // commits as the window is long. Most of what a replay computes survives that,
 // which is why replaying against the pin is worth anything at all -- but not
@@ -356,7 +356,7 @@ pub fn archive_index(
 
 /// The rebuild oracle's externals half, offline.
 ///
-/// `archived` is the index Bazel cold-built at `rev` and the history archived
+/// `archived` is the index Bazel cold-built at `rev` and the walk archived
 /// (see [`archived_head_path`]); this rebuilds its externals side tables from
 /// the repository text at `rev` with *this* build's derivation and compares
 /// the two by label. The nodes, the edges and the rule hashes are the
@@ -657,10 +657,10 @@ pub struct RederiveCache {
 /// How many re-derived indexes to hold at once.
 ///
 /// A re-derived index is the whole index in memory, a few hundred megabytes at
-/// envoy's size, and `--all --history` walks three hundred bases; holding them
+/// envoy's size, and `--all` over a walk replays three hundred bases; holding them
 /// all would be tens of gigabytes for no gain. Replays are driven in recorded
-/// order, where a repeated base is a *consecutive* repeat (a change set and
-/// the history commit that shares its parent) so a handful of slots catch
+/// order, where a repeated base is a *consecutive* repeat (two recorded
+/// answers that share a parent) so a handful of slots catch
 /// every reuse there is. A base that recurs later is simply rebuilt.
 const REDERIVE_CACHE_SLOTS: usize = 4;
 

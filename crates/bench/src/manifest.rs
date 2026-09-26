@@ -48,8 +48,8 @@ pub struct RepoEntry {
     /// Extra Bazel *startup* options, before the command word, on top of the
     /// `--output_base` and `--bazelrc` the suite always passes. The reason
     /// this exists is `--noworkspace_rc`: a repository's own `.bazelrc` is
-    /// written for the Bazel of its day, and running the history 300 commits walks back
-    /// into flags a pinned Bazel no longer recognises, which fails the query
+    /// written for the Bazel of its day, and a walk 300 commits back reaches
+    /// flags a pinned Bazel no longer recognises, which fails the query
     /// outright rather than degrading. Use it only where the repo's rc is the
     /// obstacle, and note what it costs: `--deleted_packages` and friends
     /// live in those files and do change the graph.
