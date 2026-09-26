@@ -155,7 +155,7 @@ impl Repo {
                 // gpg's verdict on stdout among the formatted lines.
                 "--no-show-signature",
                 "--first-parent",
-                &format!("--max-count={max}"),
+                &max_count(max),
                 "--date=format:%m-%d %H:%M",
                 "--format=%H%x1f%cd%x1f%s",
                 rev,
@@ -224,7 +224,7 @@ impl Repo {
         if max == 0 {
             return Ok(Vec::new());
         }
-        let walk = self.first_parent_walk(rev, max + 1)?;
+        let walk = self.first_parent_walk(rev, max.saturating_add(1))?;
         Ok(walk.into_iter().skip(1).collect())
     }
 
@@ -234,12 +234,7 @@ impl Repo {
     fn first_parent_walk(&self, rev: &str, count: usize) -> Result<Vec<String>> {
         let out = run(
             &self.root,
-            &[
-                "rev-list",
-                "--first-parent",
-                &format!("--max-count={count}"),
-                rev,
-            ],
+            &["rev-list", "--first-parent", &max_count(count), rev],
         )?;
         Ok(out.lines().map(str::to_string).collect())
     }
@@ -311,6 +306,15 @@ fn parse_name_status_z(out: &str) -> Result<Vec<Change>> {
         }
     }
     Ok(changes)
+}
+
+/// `--max-count=n` as git will take it.
+///
+/// git reads the count as an `int` and refuses anything larger, so a larger
+/// `n` is sent as the largest it accepts, which no history reaches: a limit
+/// that high means all of it.
+fn max_count(n: usize) -> String {
+    format!("--max-count={}", n.min(i32::MAX as usize))
 }
 
 /// Runs a git command whose answer is one line, and returns that line.
@@ -534,6 +538,24 @@ mod tests {
                 .first_parent_ancestors("HEAD", 5)
                 .unwrap(),
             vec![f.first]
+        );
+    }
+
+    #[test]
+    fn a_walk_limit_beyond_what_git_counts_walks_everything() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert_eq!(
+            repo.first_parent_ancestors("HEAD", usize::MAX).unwrap(),
+            vec![f.first.clone()]
+        );
+        assert_eq!(
+            repo.first_parent_log("HEAD", usize::MAX).unwrap(),
+            vec![f.first.clone(), f.second]
+        );
+        assert_eq!(
+            repo.first_parent_log_meta("HEAD", usize::MAX).unwrap()[0].sha,
+            f.first
         );
     }
 
