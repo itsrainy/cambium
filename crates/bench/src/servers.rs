@@ -110,6 +110,19 @@ fn running(s: &Server) -> bool {
         .contains(&format!("--output_base={}", s.output_base.display()))
 }
 
+/// The output base a `--output_base=<dir>` startup flag names, or `None` for
+/// any other flag.
+fn output_base_flag(flag: &str) -> Option<&Path> {
+    flag.strip_prefix("--output_base=").map(Path::new)
+}
+
+/// The output base the run's startup flags pin Bazel to, if they do: the one
+/// place the harness reads it, so the oracle, the rebuild's server restart
+/// and the cleanup agree about which server is the subject's.
+pub fn configured_output_base(startup_flags: &[String]) -> Option<&Path> {
+    startup_flags.iter().find_map(|f| output_base_flag(f))
+}
+
 /// The pid of the server running on `output_base`, if one is: its pid file
 /// names a live process whose arguments name that output base.
 pub fn running_on(output_base: &Path) -> Option<u32> {
@@ -162,10 +175,7 @@ impl StopOnDrop {
     pub fn subject(worktree: &Path, scratch: &Path, startup_flags: &[String]) -> Self {
         let mut search = vec![output_user_root()];
         for f in startup_flags {
-            if let Some(parent) = f
-                .strip_prefix("--output_base=")
-                .and_then(|ob| Path::new(ob).parent())
-            {
+            if let Some(parent) = output_base_flag(f).and_then(Path::parent) {
                 search.push(parent.to_path_buf());
             }
         }
@@ -214,6 +224,16 @@ mod tests {
         )
         .unwrap();
         child
+    }
+
+    #[test]
+    fn the_configured_output_base_is_read_off_the_startup_flags() {
+        let flags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            configured_output_base(&flags(&["--bazelrc=/rc", "--output_base=/ob/envoy"])),
+            Some(Path::new("/ob/envoy"))
+        );
+        assert_eq!(configured_output_base(&flags(&["--bazelrc=/rc"])), None);
     }
 
     #[test]

@@ -155,14 +155,9 @@ pub fn stop_server(bazel: &cambium_bazel::Bazel, wait: Duration) -> Result<()> {
         out.status,
         String::from_utf8_lossy(&out.stderr).trim()
     );
-    let Some(base) = bazel
-        .startup_flags()
-        .iter()
-        .find_map(|f| f.strip_prefix("--output_base="))
-    else {
+    let Some(base) = crate::servers::configured_output_base(bazel.startup_flags()) else {
         return Ok(());
     };
-    let base = Path::new(base);
     let deadline = Instant::now() + wait;
     while let Some(pid) = crate::servers::running_on(base) {
         anyhow::ensure!(

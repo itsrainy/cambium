@@ -472,11 +472,8 @@ pub fn label_in_repo(label: &str, canonical: &str) -> bool {
 /// startup flag when there is one (the bench always passes it), else what
 /// `bazel info output_base` says.
 pub fn output_base(bazel: &cambium_bazel::Bazel) -> Option<PathBuf> {
-    bazel
-        .startup_flags()
-        .iter()
-        .find_map(|f| f.strip_prefix("--output_base="))
-        .map(PathBuf::from)
+    crate::servers::configured_output_base(bazel.startup_flags())
+        .map(Path::to_path_buf)
         .or_else(|| bazel.output_base().map(PathBuf::from))
 }
 
