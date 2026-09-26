@@ -318,10 +318,10 @@ pub enum ArchiveSource<'a> {
 
 /// Puts one index at `dest`, unless something is already there.
 ///
-/// The shared half of [`crate::compare::driver::archive_base_index`] and the
-/// history's head archive: both leave an index beside the results for a later
-/// offline replay to open, and both must leave an existing file alone (an
-/// archive is megabytes, and the same base or pin recurs).
+/// What [`crate::walk::cambi::archive_head_index`] calls: it leaves an index
+/// beside the results for a later offline replay to open, and must leave an
+/// existing file alone (an archive is megabytes, and the same base or pin
+/// recurs).
 pub fn archive_index(
     dest: &std::path::Path,
     src: ArchiveSource<'_>,
@@ -510,7 +510,8 @@ fn repos_declared_at(base_rev: &str, texts: &dyn WorkspaceText) -> Option<BTreeS
 // `--rederive` closes that by rebuilding those tables from the repository text
 // at the change set's base, with the code in this build, before replaying.
 
-/// One revision of a [`WorkspaceText`], as the index's [`FileText`].
+/// One revision of a [`WorkspaceText`], as the index's
+/// [`FileText`](cambium_index::FileText).
 ///
 /// The git layer stays behind [`WorkspaceText`] so a test can re-derive from
 /// strings with no git anywhere; the CLI passes the same `git show`-backed
@@ -536,7 +537,8 @@ impl cambium_index::FileText for RevisionText<'_> {
 /// and no amount of reading text can recover them; see the module docs.
 ///
 /// The `.bzl` ids are the stored index's, because the package closures are
-/// expressed in them. The fresh walk gets its own [`LoadGraph`] and its
+/// expressed in them. The fresh walk gets its own
+/// [`LoadGraph`](cambium_index::LoadGraph) and its
 /// workspace closure is mapped back onto the stored ids by path, so a `.bzl`
 /// in the base's workspace closure that the pin's index has never heard of is
 /// dropped here — which is the drift the `indeterminate` guard already names.

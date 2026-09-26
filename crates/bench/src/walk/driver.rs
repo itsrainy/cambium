@@ -1,7 +1,7 @@
 //! Running one walk: the cold build, the forward steps, the oracle and peers
 //! where the schedule calls for them, and the rebuild oracle at the pin.
 //!
-//! The cambium side is driven through [`crate::history::Driver`], the same
+//! The cambium side is driven through [`crate::walk::Driver`], the same
 //! trait the offline synthetic test uses, so the walk's loop — resume, the
 //! carried index, the per-step record — is exercised with no Bazel and no
 //! product binary. The live checks (the `rdeps` oracle and the peers) need a

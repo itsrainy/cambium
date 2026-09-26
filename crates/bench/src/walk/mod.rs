@@ -17,12 +17,12 @@
 //! step, the peers on a stratified sample, the periodic rebuild oracle for
 //! drift — is the box run.
 //!
-//! The pieces: [`steps`] turns the window into tagged `(parent, head)` pairs;
+//! The pieces: [`steps`](mod@steps) turns the window into tagged `(parent, head)` pairs;
 //! [`sampling`] draws the seeded, prefix-stable, stratified sample the
 //! expensive checks run on; [`tier`] resolves a tier and its flags into a
 //! schedule; [`model`] is what a walk is (every type in the result JSON) and
-//! the pure arithmetic that rolls it up. The driver that runs it lives in
-//! `driver` once the loop is ported off [`crate::history`].
+//! the pure arithmetic that rolls it up. [`driver`] runs it: the cold build,
+//! the carried index, and the checks the schedule calls for at each step.
 
 pub mod cambi;
 pub mod driver;

@@ -5,7 +5,7 @@
 //! publish` to upload it, `cambi affected --format json` for the answer. The
 //! harness reads the documents back with the engine's own report types — it
 //! links `cambium-engine` for those types, and for the offline tools
-//! ([`crate::replay`], [`crate::stages`]), never to run the product path
+//! ([`crate::replay`], [`crate::precheck`]), never to run the product path
 //! in-process.
 //!
 //! Two consequences, both deliberate:

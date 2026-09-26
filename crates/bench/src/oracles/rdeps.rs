@@ -517,7 +517,7 @@ pub struct OracleInputs<'a> {
     /// package deleted outright: every rule in it is tombstoned, so cambium
     /// rightly emits no label carrying that package, and the package name
     /// survives nowhere else in the report. Without this the escape hatch in
-    /// [`deleted_consumers`] — "the rule, or its package" — is unsatisfiable
+    /// `deleted_consumers` — "the rule, or its package" — is unsatisfiable
     /// by construction for exactly the case it was written for.
     pub dirty_packages: &'a BTreeSet<String>,
     /// The output base the queries run on, whose `external/@*.marker` files
@@ -1084,7 +1084,7 @@ fn query_rdeps(bazel: &Bazel, roots: &[String]) -> Result<Batch> {
 /// ([`crate::tools::ToolRun::restrict_to_rule_set`]), so the one query
 /// serves both and the two sides stay in one vocabulary.
 ///
-/// Exit 3 is accepted for the reason [`query_rdeps`] gives: a partial universe
+/// Exit 3 is accepted for the reason `query_rdeps` gives: a partial universe
 /// under `--keep_going` under-counts N, which understates cambium's
 /// over-approximation rather than flattering it.
 pub fn rule_universe(bazel: &Bazel) -> Result<BTreeSet<String>> {

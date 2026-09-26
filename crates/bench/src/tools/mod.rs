@@ -5,8 +5,8 @@
 //! long did it take to say it? Anything that can answer that — bazel-diff's
 //! Rust binary, its Kotlin jar, Uber's Tango, bazel-contrib's
 //! target-determinator, a shell script — plugs in here
-//! by implementing [`Tool`], and [`crate::compare`] compares whatever it
-//! is handed against cambium and against the `rdeps` oracle without knowing
+//! by implementing [`Tool`], and [`crate::walk`] scores whatever it is
+//! handed against the `rdeps` oracle, as it scores cambium, without knowing
 //! which tool it is talking to.
 //!
 //! Two things every such tool needs, and which is why they live in
@@ -442,7 +442,7 @@ impl RunContext {
     ///
     /// Stdin is always `/dev/null` and `CI=1` rides along unless the caller's
     /// own environment already sets `CI` — see
-    /// [`Self::apply_noninteractive`] for why.
+    /// [`noninteractive_command`] for why.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         noninteractive_command(program, &self.env)
     }
@@ -487,8 +487,8 @@ pub fn noninteractive_command(
 
 /// A tool that answers "what is affected between base and head".
 ///
-/// Object-safe on purpose: [`crate::compare`] takes `&[&dyn Tool]` so a
-/// run can compare against several tools at once.
+/// Object-safe on purpose: [`crate::walk::BazelChecks`] holds `&[&dyn Tool]`
+/// so a walk can run several peers at every sampled step.
 pub trait Tool {
     /// Stable identifier used in JSON keys and report columns
     /// (`bazel-diff-rust`, `bazel-diff-kotlin`, `tango`).
@@ -785,7 +785,7 @@ mod tests {
     }
 
     /// A tool's stdin must never be a terminal a prompt could wait on —
-    /// see [`RunContext::apply_noninteractive`]. `cat` on a null stdin sees
+    /// see [`noninteractive_command`]. `cat` on a null stdin sees
     /// EOF immediately and produces no output.
     #[test]
     fn a_tool_command_gets_no_stdin() {

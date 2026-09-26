@@ -3,7 +3,7 @@
 //!
 //! Everything a strategy sees is decided here, so two strategies on a subject
 //! see the same steps in the same order under the same Bazel. The step choice
-//! is the walk's own ([`crate::walk::steps`] tagged, [`crate::walk::sample`]
+//! is the walk's own ([`crate::walk::steps()`] tagged, [`crate::walk::sample`]
 //! drawn at a fixed seed with at least one step per tag), which also means a
 //! step measured here is a step the walk measures, and the two numbers are
 //! about the same commit.

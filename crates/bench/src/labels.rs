@@ -23,8 +23,8 @@
 //! One label per line, sorted, zstd-compressed — tens of kilobytes a change
 //! set, which is why none of it is behind a flag: a debugging artifact that
 //! has to be asked for in advance is not there on the run that needed it.
-//! [`crate::compare::driver`] writes them; `cambium-bench labels` reads them
-//! back.
+//! The walk ([`crate::walk::driver`]) writes them; `cambium-bench labels`
+//! reads them back.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;

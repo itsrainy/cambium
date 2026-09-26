@@ -15,13 +15,14 @@
 //!   ([`oracles`]): `rdeps` (did a tool miss a target?), `rebuild` (is the
 //!   incremental updater exact?) and `load` (is the static `.bzl` load closure
 //!   complete?).
-//! - **Workload** — what the tools are run on. [`history`] applies a subject's
-//!   last N first-parent commits one at a time to an index built at the start
-//!   of the window; [`changes`] selects `(base, head)` change sets shaped like
-//!   the question a CI job asks, and [`compare`] runs every tool and both
-//!   incremental oracles over them. [`classify`] files each disagreement,
-//!   [`report`] renders `docs/RESULTS.md`, and [`state`] is what makes a
-//!   killed run resumable.
+//! - **Workload** — what the tools are run on. There is one, the [`walk`]: it
+//!   cold-builds an index at the start of a subject's first-parent window and
+//!   carries it forward one commit at a time to the pin, asking cambium and
+//!   the peers the question a CI job asks at each step and scoring every
+//!   answer against the `rdeps` oracle. [`skyframe`] measures the Skyframe
+//!   prototypes on the walk's own steps. [`classify`] names the kinds of
+//!   disagreement, [`report`] renders `docs/RESULTS.md`, and [`state`] is
+//!   what makes a killed run resumable.
 //!
 //! Beside the workloads sits [`labels`], which is not part of a run's
 //! result: it is the label sets a walk step compared, written whole beside
@@ -68,7 +69,7 @@ pub mod walk;
 pub mod watch;
 
 // No root re-exports. Every one of these types is named by the module it
-// belongs to -- `compare::ChangesResult`, `classify::Class`,
+// belongs to -- `walk::WalkResult`, `classify::Class`,
 // `tools::tango::Tango` -- and a second name for it at the crate root only
 // hides which of the four nouns above a thing is.
 
