@@ -79,7 +79,10 @@ detecting `.bazelversion`, WORKSPACE versus bzlmod, the `.bazelrc`
 `try-import`s and the default branch, and asking only for the store. A
 relative store path is read from the workspace root, so
 `.cambium-store/` goes in `.gitignore` beside the `cambium.local.toml` line
-`init` asks for.
+`init` asks for. A WORKSPACE repository wants a `.bazelversion` too: Bazel 7
+and later write an untracked `MODULE.bazel` stub into it the first time they
+run there, cambi's own queries included, and with both files present and no
+pin the mode is ambiguous (`CAMBI-W016`). Pinning is the fix that sticks.
 
 ```console
 $ cambi doctor
