@@ -48,6 +48,22 @@
 //! to it in turn; see [`defined_through_loads`]. xla's `@llvm-project`, which
 //! `llvm_configure` from `@llvm-raw` generates, is the case that found it.
 //!
+//! # A repository the table cannot name
+//!
+//! Every route above names repositories through the index's repository
+//! table, which is what the static read of the workspace closure found
+//! declared. That read stops at external labels, so a repository declared by
+//! a function the closure loads from another repository is a label in the
+//! graph and a name in no table: envoy's WORKSPACE era declares
+//! `com_github_chrusty_protoc_gen_jsonschema` and `googleapis` in
+//! `@envoy_api//bazel:repositories.bzl`, and `@rules_go` declares `go_sdk`.
+//! No route could put one of them among the dirty repositories, so the rules
+//! that name them were reached by nothing when their declaration moved (box
+//! run F, envoy steps 191 and 194). A definition that runs code the index
+//! did not read (a definer [`defined_through_loads`] follows, a changed
+//! workspace `.bzl` that loads from another repository) therefore moves every
+//! repository the table cannot name as well; see [`unattributed_repos`].
+//!
 //! # Why (2) does not always fire
 //!
 //! A repository built from a main-repo directory is the common case, and it is
@@ -1045,6 +1061,10 @@ pub fn defined_through_loads(
     if definers.is_empty() {
         return 0;
     }
+    // A definer that fires runs code from the moved repository, which the
+    // index never read, so what it defines is not only its row: see
+    // [`unattributed_repos`].
+    let unattributed = unattributed_repos(base);
     let mut named = 0;
     let mut todo: Vec<String> = ext.load_repos.iter().cloned().collect();
     let mut done: BTreeSet<String> = BTreeSet::new();
@@ -1056,7 +1076,7 @@ pub fn defined_through_loads(
             if !from.iter().any(|t| owns(t, &moved)) {
                 continue;
             }
-            for g in defines {
+            for g in defines.iter().chain(&unattributed) {
                 if g == &moved {
                     continue;
                 }
@@ -1078,6 +1098,107 @@ pub fn defined_through_loads(
     }
     ext.by_loader += named;
     named
+}
+
+/// Bazel's own repository, which no code in a tree can define or redefine:
+/// it moves only with the Bazel version, which is an invalidator of its own.
+const RESERVED_REPOS: &[&str] = &["bazel_tools"];
+
+/// The repositories the index names in labels but not in its repository
+/// table: the repositories whose definitions the index never read.
+///
+/// The table is what the static read of the workspace closure found
+/// declared, and that read stops at every external label. A declaration in
+/// a `.bzl` of another repository is invisible to it: envoy's WORKSPACE era
+/// declares `com_github_chrusty_protoc_gen_jsonschema`, `googleapis`,
+/// `protoc-gen-validate`, `xds` and a dozen more in
+/// `@envoy_api//bazel:repositories.bzl` (the in-tree `api/`), and `go_sdk`
+/// and `io_bazel_rules_nogo` come from `@rules_go`'s own
+/// `go_rules_dependencies()`. The graph still names them, as leaves the
+/// main repository's rules depend on and as `.bzl` labels its loads stopped
+/// at, and no route could ever put one of them among the dirty
+/// repositories: every route names repositories through the table. At
+/// envoy's `c99b0017689c` that was 44 repositories and 134 leaves.
+///
+/// Which file defines such a repository the index cannot say, so the sound
+/// reading is the one the table's fallback already takes for a file it
+/// cannot attribute: any definition that runs code the index did not read may
+/// define it. [`defined_through_loads`] and the changed workspace `.bzl` route
+/// (`crate::run`, through [`reads_unread_code`]) add these to what such a
+/// definition moves. `@bazel_tools` is left out ([`RESERVED_REPOS`]), and so
+/// is a token that is not a repository name at all (Bazel's
+/// `@@[unknown repo 'x' requested from @@]` placeholder).
+pub fn unattributed_repos(base: IndexRef<'_>) -> BTreeSet<String> {
+    let mut canon: BTreeMap<&str, &str> = BTreeMap::new();
+    for r in 0..base.num_repos() {
+        canon.insert(base.repo_name(r), base.repo_canonical.get(r));
+    }
+    let known = |token: &str| {
+        canon
+            .iter()
+            .any(|(apparent, canonical)| repo_token_matches(token, apparent, canonical))
+    };
+    let mut tokens: BTreeSet<&str> = BTreeSet::new();
+    let start = base
+        .label_sorted
+        .partition_point(|&id| base.label(id) < "@");
+    for &id in &base.label_sorted[start..] {
+        let label = base.label(id);
+        if !label.starts_with('@') {
+            break;
+        }
+        if base.is_tombstone(id) {
+            continue;
+        }
+        tokens.extend(label_repo(label));
+    }
+    for e in 0..base.bzl_ext_labels.len() as u32 {
+        tokens.extend(label_repo(base.bzl_ext_labels.get(e)));
+    }
+    for p in 0..base.num_packages() {
+        for l in base.package_external(p) {
+            tokens.extend(label_repo(l));
+        }
+    }
+    tokens
+        .into_iter()
+        .filter(|t| is_repo_name(t) && !RESERVED_REPOS.contains(t) && !known(t))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `token` can be a repository name, as against the placeholder
+/// Bazel writes for a name it could not resolve.
+fn is_repo_name(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '~' | '+'))
+}
+
+/// Whether the workspace `.bzl` `bzl_id`, or a main-repo `.bzl` it loads
+/// transitively, loads from a repository other than Bazel's own: code the
+/// index did not read, which may declare repositories the table cannot name.
+/// A file that loads only from this tree and `@bazel_tools` declares exactly
+/// what the static read found.
+pub fn reads_unread_code(base: IndexRef<'_>, bzl_id: u32) -> bool {
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut stack = vec![bzl_id];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let unread = base
+            .bzl_external(id)
+            .into_iter()
+            .filter_map(label_repo)
+            .any(|t| !RESERVED_REPOS.contains(&t));
+        if unread {
+            return true;
+        }
+        stack.extend(base.bzl_loads(id).iter().copied());
+    }
+    false
 }
 
 // ------------------------------------------------- repositories to targets
