@@ -1427,3 +1427,31 @@ fn index_publish_narrates_through_the_renderer() {
     assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
     assert!(stderr.contains("--out <file>"), "{stderr}");
 }
+
+/// Under `--no-full-build` with no index in reach, the narration says what
+/// the search found and stops there: it does not announce a cold build the
+/// run is about to refuse. The error says index, not baseline.
+#[test]
+fn no_index_under_no_full_build_narrates_no_cold_build() {
+    let f = published_fixture(1);
+    point_store_at(&f.ws, "never-published");
+    let range = format!("{}..{}", f.commits[2], f.commits[3]);
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--no-full-build",
+        &range,
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("none within"), "{stderr}");
+    assert!(!stderr.contains("building cold"), "{stderr}");
+    assert!(!stderr.contains("cold index"), "{stderr}");
+    assert!(
+        stderr.contains("error[CAMBI-E006]: no index is available for"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("baseline index"), "{stderr}");
+}

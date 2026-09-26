@@ -62,7 +62,8 @@ rebuild` plan can still end as a `//...` run, exit 2.
 While it runs it narrates itself on stderr in the shared grammar below: an
 `index` phase (where it looked for an index, and what it found: `found at
 <sha>  (N commits behind, lineage <hex>, 2 d old)`, or `none within N
-ancestors, building cold`), a `splice` phase for the replay up to the base
+ancestors`, after which a `cold index` phase builds one, or `CAMBI-E006`
+ends the run under `--no-full-build`), a `splice` phase for the replay up to the base
 with a row in `profile`'s five columns, or `skipped (index already at base)`
 / `skipped (cold index is at base)` when there was nothing to replay, and a
 `query` phase with the changed files, the packages they dirtied and what the

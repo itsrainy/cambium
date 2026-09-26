@@ -579,12 +579,15 @@ impl Narrator<'_> {
                     elapsed_ms,
                 });
             }
+            // What happens next is not this phase's to say: the engine
+            // decides it after, and says it with a `cold index` phase, or
+            // with `CAMBI-E006` under `--no-full-build`.
             Progress::IndexAbsent {
                 searched,
                 elapsed_ms,
             } => self.sink.emit(Event::PhaseEnd {
                 name: "index".into(),
-                result: format!("none within {searched} ancestors, building cold"),
+                result: format!("none within {searched} ancestors"),
                 elapsed_ms,
             }),
             Progress::ColdBuild { commit } => {
