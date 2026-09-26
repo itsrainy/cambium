@@ -48,8 +48,9 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 
 use crate::tools::{
-    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+    normalise_label, run_capture, Install, RunContext, Tool, ToolLocations, ToolRun,
 };
+use crate::util::short;
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_TANGO";
@@ -138,8 +139,8 @@ impl Tool for Tango {
         std::fs::create_dir_all(&ctx.scratch)?;
         let out = ctx.scratch_file(&format!(
             "tango-{}-{}.json",
-            short_sha(base),
-            short_sha(head)
+            short(base, 12),
+            short(head, 12)
         ));
         let worktrees = ctx.scratch_file("tango-worktrees");
         // Left over from a killed run, the worktrees are stale checkouts of
@@ -171,7 +172,7 @@ impl Tool for Tango {
             .arg(Self::DEFAULT_EXTRA_ARGS.join(" "));
         let c = run_capture(
             &mut cmd,
-            &format!("tango-cli {}..{}", short_sha(base), short_sha(head)),
+            &format!("tango-cli {}..{}", short(base, 12), short(head, 12)),
         )?;
         let _ = std::fs::remove_dir_all(&worktrees);
 

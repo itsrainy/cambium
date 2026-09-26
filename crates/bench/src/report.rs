@@ -198,7 +198,7 @@ pub fn render_top_table(repos: &[SubjectResults]) -> String {
     }
     let _ = writeln!(s);
     for r in &rows {
-        let short = &r.pin[..r.pin.len().min(12)];
+        let short = crate::util::short(&r.pin, 12);
         let tight = r
             .tightness_p50
             .map(|t| format!("{t:.3}"))

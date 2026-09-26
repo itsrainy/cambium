@@ -33,8 +33,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::tools::{
-    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+    normalise_label, run_capture, Install, RunContext, Tool, ToolLocations, ToolRun,
 };
+use crate::util::short;
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_BAZEL_DIFF";
@@ -258,13 +259,13 @@ impl Tool for BazelDiff {
 
     fn affected(&self, ws: &Path, base: &str, head: &str, ctx: &RunContext) -> Result<ToolRun> {
         std::fs::create_dir_all(&ctx.scratch)?;
-        let base_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short_sha(base)));
-        let head_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short_sha(head)));
+        let base_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short(base, 12)));
+        let head_hashes = ctx.scratch_file(&format!("{}-{}.json", self.name, short(head, 12)));
         let out = ctx.scratch_file(&format!(
             "{}-{}-{}.txt",
             self.name,
-            short_sha(base),
-            short_sha(head)
+            short(base, 12),
+            short(head, 12)
         ));
 
         // The base hash runs against the second worktree; the head hash

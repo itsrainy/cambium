@@ -42,8 +42,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::tools::{
-    normalise_label, run_capture, short_sha, Install, RunContext, Tool, ToolLocations, ToolRun,
+    normalise_label, run_capture, Install, RunContext, Tool, ToolLocations, ToolRun,
 };
+use crate::util::short;
 
 /// Environment overrides, in the order they are consulted.
 pub const BIN_ENV: &str = "CAMBIUM_TARGET_DETERMINATOR";
@@ -187,7 +188,7 @@ impl Tool for TargetDeterminator {
         cmd.args(self.args(wt.path(), base, ctx));
         let c = run_capture(
             &mut cmd,
-            &format!("{NAME} {}..{}", short_sha(base), short_sha(head)),
+            &format!("{NAME} {}..{}", short(base, 12), short(head, 12)),
         )?;
         wt.keep();
 
@@ -195,8 +196,8 @@ impl Tool for TargetDeterminator {
         // answer is only inspectable after the fact if we write it down.
         let out = ctx.scratch_file(&format!(
             "{NAME}-{}-{}.txt",
-            short_sha(base),
-            short_sha(head)
+            short(base, 12),
+            short(head, 12)
         ));
         std::fs::write(&out, &c.stdout)
             .with_context(|| format!("writing {NAME} output {}", out.display()))?;
@@ -419,8 +420,8 @@ mod tests {
         // The raw answer is written down, since the tool only prints it.
         let raw = std::fs::read_to_string(scratch.join(format!(
             "{NAME}-{}-{}.txt",
-            short_sha(&base),
-            short_sha(&head)
+            short(&base, 12),
+            short(&head, 12)
         )))
         .unwrap();
         assert!(raw.contains("//pkg:t"), "{raw}");

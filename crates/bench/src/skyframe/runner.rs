@@ -16,6 +16,7 @@ use cambium_index::IndexFile;
 
 use crate::oracles::rdeps::{OracleInputs, RdepsOracle};
 use crate::session::SubjectRun;
+use crate::util::short;
 
 use super::{
     changed_paths, score, CambiStrategy, RunResult, StepContext, StepMeasurement, Strategy,
@@ -94,8 +95,8 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
         let tags: Vec<&str> = s.tags.iter().map(|t| t.name()).collect();
         println!(
             "  {}..{}  [{}]",
-            short(&s.parent),
-            short(&s.head),
+            short(&s.parent, 12),
+            short(&s.head, 12),
             tags.join(",")
         );
     }
@@ -118,7 +119,7 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
     let path = RunResult::path(&run.session.results_root, strategy.name(), &run.entry.id);
 
     for (n, step) in chosen.iter().enumerate() {
-        let scratch = scratch_root.join(format!("{}-{}", strategy.name(), short(&step.head)));
+        let scratch = scratch_root.join(format!("{}-{}", strategy.name(), short(&step.head, 12)));
         std::fs::create_dir_all(&scratch)?;
         let changed = changed_paths(&checkout.dir, &step.parent, &step.head)?;
         let cx = StepContext {
@@ -133,8 +134,8 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
         tracing::info!(
             step = n + 1,
             of = chosen.len(),
-            parent = %short(&step.parent),
-            head = %short(&step.head),
+            parent = %short(&step.parent, 12),
+            head = %short(&step.head, 12),
             changed = changed.len(),
             "preparing"
         );
@@ -183,8 +184,8 @@ pub fn run_skyframe(run: &SubjectRun<'_>, req: &SkyframeRequest) -> Result<Measu
         };
         println!(
             "  {}..{}  prepare {} ms, answer {} ms, {} targets, oracle {}, missed {}, extra {}",
-            short(&step.parent),
-            short(&step.head),
+            short(&step.parent, 12),
+            short(&step.head, 12),
             m.prepare_wall_ms,
             m.answer_wall_ms,
             m.answer_size,
@@ -273,10 +274,6 @@ fn open<'a>(
             super::strategies().join(", ")
         ),
     }
-}
-
-fn short(sha: &str) -> &str {
-    &sha[..12.min(sha.len())]
 }
 
 /// Reads result files and renders the comparison table.

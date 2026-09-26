@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::progress::Progress;
 use crate::state::State;
-use crate::util::{duration, parse_rfc3339, rfc3339_now};
+use crate::util::{duration, parse_rfc3339, rfc3339_now, short};
 use crate::walk::{StepRecord, WalkResult};
 
 /// The snapshot document's version, carried by `--once --format json`.
@@ -287,7 +287,7 @@ fn step_row(st: &StepRecord) -> ChangeSetRow {
         .join(",");
     ChangeSetRow {
         kind: tags,
-        change_set: format!("{}..{}", short(&st.parent), short(&st.head)),
+        change_set: format!("{}..{}", short(&st.parent, 7), short(&st.head, 7)),
         changed_files: st.changed_files,
         dirty_packages: st.dirty_packages,
         tool_ms,
@@ -353,10 +353,6 @@ fn since(stamp: &str) -> Option<u64> {
 
 fn elapsed_between(from: &str, to: &str) -> Option<u64> {
     Some(parse_rfc3339(to)?.saturating_sub(parse_rfc3339(from)?))
-}
-
-fn short(rev: &str) -> &str {
-    &rev[..rev.len().min(7)]
 }
 
 // --------------------------------------------------------------- the drawing
@@ -515,7 +511,7 @@ fn progress_cell(r: &SubjectSnapshot) -> String {
 fn current_cell(r: &SubjectSnapshot) -> String {
     let current = match r.current.is_empty() {
         true => dash(),
-        false => short(&r.current).to_string(),
+        false => short(&r.current, 7).to_string(),
     };
     match (&r.tool, r.tool_elapsed_secs) {
         (Some(t), Some(secs)) => format!("{current} {t} {}", duration(secs)),

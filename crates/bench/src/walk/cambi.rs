@@ -258,7 +258,7 @@ impl Driver for EngineDriver<'_> {
         let out_run = self
             .engine
             .compute(base_index.view(), &changes, &*q, &req)
-            .with_context(|| format!("update {} -> {head}", &base[..12.min(base.len())]))?;
+            .with_context(|| format!("update {} -> {head}", crate::util::short(base, 12)))?;
         let wall = t.elapsed();
         let wrote_index = match &out_run.index {
             Some(i) => {

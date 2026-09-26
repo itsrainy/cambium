@@ -196,6 +196,19 @@ struct SchemaProbe {
     schema: u32,
 }
 
+/// The first `n` characters of a revision, for a file name, a log line or a
+/// table cell.
+///
+/// Each caller keeps its own width: 12 where a sha names a file or a row, 7
+/// where it sits beside a tag the way git abbreviates. A revision shorter
+/// than `n` comes back whole.
+pub fn short(rev: &str, n: usize) -> &str {
+    match rev.char_indices().nth(n) {
+        Some((i, _)) => &rev[..i],
+        None => rev,
+    }
+}
+
 /// Two revisions name the same commit when one is a prefix of the other.
 ///
 /// Result files, the paths cache and a binary's `--version` all carry full
@@ -243,6 +256,14 @@ pub fn read_result<T: DeserializeOwned>(path: &Path) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_revision_is_a_prefix_and_a_shorter_one_comes_back_whole() {
+        assert_eq!(short("0123456789abcdef", 12), "0123456789ab");
+        assert_eq!(short("0123456789abcdef", 7), "0123456");
+        assert_eq!(short("abc", 12), "abc");
+        assert_eq!(short("", 7), "");
+    }
 
     #[test]
     fn a_short_revision_matches_the_full_one_either_way_round() {

@@ -10,14 +10,16 @@
 
 use std::fmt::Write as _;
 
+use crate::util::short;
+
 use super::model::{Tightness, WalkResult, WallStats};
 use super::steps::Tag;
 
 /// The whole per-subject section.
 pub fn render(r: &WalkResult) -> String {
     let mut out = String::new();
-    let short = &r.pin[..r.pin.len().min(12)];
-    let _ = writeln!(out, "### {} — {} ({})", r.repo, short, r.tier.name());
+    let pin = short(&r.pin, 12);
+    let _ = writeln!(out, "### {} — {} ({})", r.repo, pin, r.tier.name());
     let _ = writeln!(out);
     let e = &r.environment;
     let _ = writeln!(
@@ -31,7 +33,7 @@ pub fn render(r: &WalkResult) -> String {
         },
         e.cambi_version,
         e.tool_sha,
-        &e.engine_id[..e.engine_id.len().min(12)],
+        short(&e.engine_id, 12),
     );
     let _ = writeln!(out);
     render_soundness(&mut out, r);
@@ -232,7 +234,7 @@ fn render_coverage(out: &mut String, r: &WalkResult) {
 /// `parent..head` -> `parent12..head12`.
 fn short_key(key: &str) -> String {
     match key.split_once("..") {
-        Some((a, b)) => format!("{}..{}", &a[..a.len().min(12)], &b[..b.len().min(12)]),
+        Some((a, b)) => format!("{}..{}", short(a, 12), short(b, 12)),
         None => key.to_string(),
     }
 }

@@ -150,15 +150,10 @@ impl Install {
         }
         let tag = fields.get("tag").copied()?;
         Some(match fields.get("commit") {
-            Some(c) => format!("{tag} {}", &c[..c.len().min(7)]),
+            Some(c) => format!("{tag} {}", crate::util::short(c, 7)),
             None => tag.to_string(),
         })
     }
-}
-
-/// The first twelve characters of a sha, for a scratch file name.
-pub fn short_sha(s: &str) -> String {
-    s.chars().take(12).collect()
 }
 
 // ------------------------------------------------------------ naming them
