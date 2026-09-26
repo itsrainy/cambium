@@ -318,7 +318,12 @@ fn a_generated_header_chain_reaches_the_tests_that_consume_it() {
             vec![
                 TargetRow::source_file("//ir:vector_ops.h"),
                 rule("ir", "ll_lib", &[], &["//ir:vector_ops.h"]),
-                rule("ir", "ll_extract_bc", &["//ir:ll_lib"], &["//ir:vector_ops.h"]),
+                rule(
+                    "ir",
+                    "ll_extract_bc",
+                    &["//ir:ll_lib"],
+                    &["//ir:vector_ops.h"],
+                ),
                 rule("ir", "ll_gen", &["//ir:ll_extract_bc"], &[]),
                 generated("//ir:ll.o", "//ir:ll_gen"),
                 generated("//ir:ll.h", "//ir:ll_gen"),
@@ -803,7 +808,10 @@ fn whether_the_universe_walked_into_a_boundary_round_trips() {
     // universe query and has nothing newer to say.
     let mut b = IndexBuilder::from_view(f.view());
     b.apply_packages(&[pkg("e", vec![rule("e", "e", &[], &[])])]);
-    assert!(b.finish("f00d").view().boundary_is_traversed("third_party/tsl"));
+    assert!(b
+        .finish("f00d")
+        .view()
+        .boundary_is_traversed("third_party/tsl"));
 }
 
 #[test]
@@ -849,12 +857,20 @@ fn the_consumer_leaf_map_round_trips_and_survives_a_splice() {
         leaves: Some(
             [
                 ("@grpc//:grpc++".to_string(), set(&["envoy/admin/v3", ""])),
-                ("@grpc//src/proto/grpc/health/v1:health_cc_proto".to_string(), set(&[])),
+                (
+                    "@grpc//src/proto/grpc/health/v1:health_cc_proto".to_string(),
+                    set(&[]),
+                ),
             ]
             .into_iter()
             .collect(),
         ),
-        via: set(&["//", "//source/common/quic/platform", "@grpc", "@@abseil-cpp+"]),
+        via: set(&[
+            "//",
+            "//source/common/quic/platform",
+            "@grpc",
+            "@@abseil-cpp+",
+        ]),
     };
     let quiche = Consumer::of_packages(set(&["envoy/admin/v3"]));
     let bare = Consumer {
@@ -864,14 +880,17 @@ fn the_consumer_leaf_map_round_trips_and_survives_a_splice() {
     };
     closure.inputs.consumers.insert(
         "envoy_api".into(),
-        [("grpc".to_string(), grpc.clone()), ("quiche".to_string(), quiche.clone())]
-            .into_iter()
-            .collect(),
+        [
+            ("grpc".to_string(), grpc.clone()),
+            ("quiche".to_string(), quiche.clone()),
+        ]
+        .into_iter()
+        .collect(),
     );
-    closure
-        .inputs
-        .consumers
-        .insert("tsl".into(), [("xla".to_string(), bare.clone())].into_iter().collect());
+    closure.inputs.consumers.insert(
+        "tsl".into(),
+        [("xla".to_string(), bare.clone())].into_iter().collect(),
+    );
     let mut b = IndexBuilder::new(new_lineage());
     b.apply_packages(&[pkg("a", vec![rule("a", "a", &[], &[])])]);
     b.set_bzl_closure(closure);
@@ -881,9 +900,15 @@ fn the_consumer_leaf_map_round_trips_and_survives_a_splice() {
         let id = |n: &str| (0..v.num_repos()).find(|&r| v.repo_name(r) == n).unwrap();
         assert_eq!(
             v.repo_consumers(id("envoy_api")),
-            vec![("grpc".to_string(), grpc.clone()), ("quiche".to_string(), quiche.clone())]
+            vec![
+                ("grpc".to_string(), grpc.clone()),
+                ("quiche".to_string(), quiche.clone())
+            ]
         );
-        assert_eq!(v.repo_consumers(id("tsl")), vec![("xla".to_string(), bare.clone())]);
+        assert_eq!(
+            v.repo_consumers(id("tsl")),
+            vec![("xla".to_string(), bare.clone())]
+        );
         assert!(v.repo_consumers(id("unconsumed")).is_empty());
     };
     check(d.view());
@@ -927,10 +952,15 @@ fn a_consumer_leaf_run_past_its_table_fails_the_open() {
     let mut d = b.finish("deadbeef");
     *d.repo_consumer_leaf_ranges.last_mut().unwrap() += 7;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(index_file_name(&d.header.lineage, "deadbeef"));
+    let path = dir
+        .path()
+        .join(index_file_name(&d.header.lineage, "deadbeef"));
     format::write_index(&path, &d).unwrap();
     let err = IndexFile::open(&path).err().expect("the open fails");
-    assert!(format!("{err:#}").contains("repo_consumer_leaf_ranges"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("repo_consumer_leaf_ranges"),
+        "{err:#}"
+    );
 }
 
 /// A leaf's round-trip row (`IndexBuilder::set_leaf_row`) is a forward row

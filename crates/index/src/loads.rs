@@ -898,7 +898,10 @@ pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::
         } else {
             base.join(&rel)
         };
-        if ["BUILD", "BUILD.bazel"].iter().any(|b| marker_file(&here, b)) {
+        if ["BUILD", "BUILD.bazel"]
+            .iter()
+            .any(|b| marker_file(&here, b))
+        {
             out.insert(rel.clone());
         }
         let Ok(entries) = std::fs::read_dir(&here) else {
@@ -925,7 +928,10 @@ pub fn build_dirs_under(root: &std::path::Path, dir: &str) -> std::collections::
             }
             // A repository of its own, nested inside this one: its packages
             // are its own, not this repository's.
-            if REPO_MARKERS.iter().any(|m| marker_file(&here.join(&name), m)) {
+            if REPO_MARKERS
+                .iter()
+                .any(|m| marker_file(&here.join(&name), m))
+            {
                 continue;
             }
             stack.push(child);

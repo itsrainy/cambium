@@ -379,12 +379,7 @@ impl Scanning {
 
     /// Answer the repository probe for `repo` with these packages (`""` is
     /// the repository root), and say whether one of them failed to load.
-    pub fn with_repo_probe(
-        mut self,
-        repo: &str,
-        packages: &[&str],
-        load_error: bool,
-    ) -> Self {
+    pub fn with_repo_probe(mut self, repo: &str, packages: &[&str], load_error: bool) -> Self {
         self.repo_probes.insert(
             repo.to_string(),
             cambium_bazel::RepoProbe {

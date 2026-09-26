@@ -1269,9 +1269,9 @@ pub struct MapSeeds {
 impl LeafSeeds {
     fn seeds(&self, consumer: &str, label: &str) -> bool {
         self.by_consumer.get(consumer).is_some_and(|entries| {
-            entries.iter().any(|m| {
-                m.seeded.contains(label) || (m.unknown && !m.known.contains(label))
-            })
+            entries
+                .iter()
+                .any(|m| m.seeded.contains(label) || (m.unknown && !m.known.contains(label)))
         })
     }
 }

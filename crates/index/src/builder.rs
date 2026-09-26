@@ -1321,7 +1321,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
                             entry.push('\0');
                             entry.push_str(v);
                         }
-                        t.repo_consumer_leaf_bytes.extend_from_slice(entry.as_bytes());
+                        t.repo_consumer_leaf_bytes
+                            .extend_from_slice(entry.as_bytes());
                         t.repo_consumer_leaf_offsets
                             .push(t.repo_consumer_leaf_bytes.len() as u32);
                     }
@@ -1331,7 +1332,8 @@ fn finish_bzl(c: Option<BzlClosure>, pkg_names: &Interner) -> BzlTables {
                             entry.push('\0');
                             entry.push_str(p);
                         }
-                        t.repo_consumer_leaf_bytes.extend_from_slice(entry.as_bytes());
+                        t.repo_consumer_leaf_bytes
+                            .extend_from_slice(entry.as_bytes());
                         t.repo_consumer_leaf_offsets
                             .push(t.repo_consumer_leaf_bytes.len() as u32);
                     }

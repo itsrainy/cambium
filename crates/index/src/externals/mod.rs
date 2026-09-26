@@ -222,7 +222,9 @@ pub use module_facts::{
 };
 pub use module_parser::{scan_module, MODULE_SEGMENT_SUFFIX};
 pub use path_maps::{scan_bzl_path_maps, BzlPathMaps};
-pub use pattern::{Consumer, DirCandidate, LeafReach, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin};
+pub use pattern::{
+    Consumer, DirCandidate, LeafReach, OriginKind, PathMap, Pattern, RepoInputs, RepoOrigin,
+};
 
 use crate::loads::{FileText, RepoMapping};
 

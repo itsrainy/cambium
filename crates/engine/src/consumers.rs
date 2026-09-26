@@ -112,7 +112,11 @@ pub(crate) fn with_leaves(
             .map(|(c, packages)| {
                 let known: Vec<(&String, &LeafReach)> = answer
                     .iter()
-                    .flat_map(|a| own[c.as_str()].iter().filter_map(|l| a.get(l).map(|r| (l, r))))
+                    .flat_map(|a| {
+                        own[c.as_str()]
+                            .iter()
+                            .filter_map(|l| a.get(l).map(|r| (l, r)))
+                    })
                     .collect();
                 let leaves = answer.as_ref().map(|_| {
                     known
@@ -122,7 +126,10 @@ pub(crate) fn with_leaves(
                 });
                 // Pooled over the consumer's leaves: what any of them was
                 // derived through moving makes the whole map suspect.
-                let via = known.iter().flat_map(|(_, r)| r.via.iter().cloned()).collect();
+                let via = known
+                    .iter()
+                    .flat_map(|(_, r)| r.via.iter().cloned())
+                    .collect();
                 (
                     c.clone(),
                     Consumer {

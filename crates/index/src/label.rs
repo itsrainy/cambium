@@ -352,7 +352,10 @@ mod tests {
     fn a_package_key_carries_its_repository_and_goes_back_out_as_a_pattern() {
         let repos = vec!["tsl".to_string()];
         // The main repository keeps the bare path it has always had.
-        assert_eq!(package_key("//lib/core:core", &repos).as_deref(), Some("lib/core"));
+        assert_eq!(
+            package_key("//lib/core:core", &repos).as_deref(),
+            Some("lib/core")
+        );
         assert_eq!(package_key("//:root", &repos).as_deref(), Some(""));
         // An indexed repository's target gets Bazel's own spelling.
         assert_eq!(

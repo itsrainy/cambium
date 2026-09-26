@@ -17,8 +17,8 @@ use cambium_diff::{Change, Status};
 use cambium_engine::diag::Code;
 use cambium_engine::externals::FixedText;
 use cambium_engine::AffectedReport;
-use cambium_index::{IndexData, PackageUpdate, TargetRow};
 use cambium_engine::PackageQuerier;
+use cambium_index::{IndexData, PackageUpdate, TargetRow};
 use cambium_testkit::{engine, req, Files, Scanning};
 
 const DIR: &str = "third_party/tsl";
@@ -97,7 +97,10 @@ fn scanning(root: &std::path::Path, packages: &[&str], load_error: bool) -> Scan
 }
 
 fn run(index: &IndexData, root: &std::path::Path, packages: &[&str]) -> AffectedReport {
-    let changes = vec![Change::new(Status::Modified, "third_party/tsl/tsl/platform/x.cc")];
+    let changes = vec![Change::new(
+        Status::Modified,
+        "third_party/tsl/tsl/platform/x.cc",
+    )];
     engine()
         .compute_with_texts(
             index.view(),
@@ -119,7 +122,9 @@ fn a_claim_bazels_own_package_list_agrees_with_maps_the_directory() {
     // The probe ran, for the repository the claim names.
     assert_eq!(q.probed(), vec!["tsl".to_string()]);
     let v = index.view();
-    let repo = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+    let repo = (0..v.num_repos())
+        .find(|&r| v.repo_name(r) == "tsl")
+        .unwrap();
     let origin = v.repo_origin(repo);
     assert_eq!(origin.dir, "third_party/tsl/");
     assert!(origin.confirmed, "{origin:?}");
@@ -199,7 +204,9 @@ fn a_consumer_of_a_moved_indexed_repository_is_reached_through_its_leaf() {
         let q = scanning(consumed);
         let index = engine().full_build_with("c0", &q).unwrap();
         let v = index.view();
-        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        let tsl = (0..v.num_repos())
+            .find(|&r| v.repo_name(r) == "tsl")
+            .unwrap();
         assert_eq!(
             v.repo_consumers(tsl),
             vec![(
@@ -217,7 +224,11 @@ fn a_consumer_of_a_moved_indexed_repository_is_reached_through_its_leaf() {
         assert!(!r.global, "{:?}", r.global_reason);
         assert_eq!(r.stats.repos_settled, 1);
         assert_eq!(r.stats.dirty_packages, 0, "{:?}", r.dirty_packages);
-        assert_eq!(r.stats.repos_dirty_by_consumer, usize::from(reached), "{consumed:?}");
+        assert_eq!(
+            r.stats.repos_dirty_by_consumer,
+            usize::from(reached),
+            "{consumed:?}"
+        );
         let affected = r.affected_labels();
         assert_eq!(
             affected.contains(&"//gapp:gapp".to_string()),
@@ -256,11 +267,17 @@ fn a_repository_is_settled_only_by_modified_source_files_of_its_packages() {
     for (why, changes) in [
         (
             "a BUILD edit",
-            vec![Change::new(Status::Modified, "third_party/tsl/tsl/platform/BUILD")],
+            vec![Change::new(
+                Status::Modified,
+                "third_party/tsl/tsl/platform/BUILD",
+            )],
         ),
         (
             "an added source file",
-            vec![Change::new(Status::Added, "third_party/tsl/tsl/platform/y.cc")],
+            vec![Change::new(
+                Status::Added,
+                "third_party/tsl/tsl/platform/y.cc",
+            )],
         ),
         (
             "a source edit beside a .bzl edit",
@@ -293,7 +310,13 @@ fn a_claim_bazel_disagrees_with_is_refused_and_the_directory_stays_global() {
         repo.is_none_or(|r| !v.repo_origin(r).confirmed && v.repo_path_maps(r).is_empty()),
         "an unconfirmed claim minted a mapping"
     );
-    let codes: Vec<Code> = q.diagnostics().unwrap().drain().iter().map(|d| d.code).collect();
+    let codes: Vec<Code> = q
+        .diagnostics()
+        .unwrap()
+        .drain()
+        .iter()
+        .map(|d| d.code)
+        .collect();
     assert!(
         codes.contains(&Code::W026RepoOriginUnconfirmed),
         "{codes:?}"
@@ -314,7 +337,13 @@ fn a_repository_that_did_not_load_is_not_indexed_and_says_so() {
     let v = index.view();
     let repo = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl");
     assert!(repo.is_none_or(|r| !v.repo_origin(r).confirmed));
-    let codes: Vec<Code> = q.diagnostics().unwrap().drain().iter().map(|d| d.code).collect();
+    let codes: Vec<Code> = q
+        .diagnostics()
+        .unwrap()
+        .drain()
+        .iter()
+        .map(|d| d.code)
+        .collect();
     assert!(codes.contains(&Code::W025RepoNotIndexed), "{codes:?}");
 }
 
@@ -334,7 +363,13 @@ fn a_repository_over_the_cap_keeps_the_wide_answer() {
     let v = index.view();
     let repo = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl");
     assert!(repo.is_none_or(|r| !v.repo_origin(r).confirmed));
-    let codes: Vec<Code> = q.diagnostics().unwrap().drain().iter().map(|d| d.code).collect();
+    let codes: Vec<Code> = q
+        .diagnostics()
+        .unwrap()
+        .drain()
+        .iter()
+        .map(|d| d.code)
+        .collect();
     assert!(codes.contains(&Code::W025RepoNotIndexed), "{codes:?}");
 }
 
@@ -457,12 +492,16 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
     }
     let consumer_of = |index: &IndexData| -> Vec<String> {
         let v = index.view();
-        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        let tsl = (0..v.num_repos())
+            .find(|&r| v.repo_name(r) == "tsl")
+            .unwrap();
         v.repo_consumers(tsl).into_iter().map(|(c, _)| c).collect()
     };
     let leaf_map_of = |index: &IndexData| -> Vec<(String, Vec<String>)> {
         let v = index.view();
-        let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+        let tsl = (0..v.num_repos())
+            .find(|&r| v.repo_name(r) == "tsl")
+            .unwrap();
         v.repo_consumers(tsl)
             .into_iter()
             .flat_map(|(_, used)| used.leaves.expect("a leaf map"))
@@ -503,10 +542,18 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
             &FixedText(BTreeMap::new()),
         )
         .unwrap();
-    assert!(out.report.stats.cold_rebuild, "{:?}", out.report.cold_rebuild_reason);
+    assert!(
+        out.report.stats.cold_rebuild,
+        "{:?}",
+        out.report.cold_rebuild_reason
+    );
     assert!(!out.report.global, "{:?}", out.report.global_reason);
     let head = out.index.expect("the spliced index");
-    assert_eq!(consumer_of(&head), vec!["grpc".to_string()], "re-derived on the overflow");
+    assert_eq!(
+        consumer_of(&head),
+        vec!["grpc".to_string()],
+        "re-derived on the overflow"
+    );
     // And its leaves under the head's spelling, which exists only once the
     // re-queried packages are spliced in: derived before the splice, the
     // index held no `@grpc//` label and the map would be empty.
@@ -531,14 +578,23 @@ fn an_overflow_re_query_re_derives_the_consumer_table() {
         "third_party/tsl/tsl/platform/x.cc",
     )];
     let r = engine()
-        .compute_with_texts(head.view(), &edit, &renamed, &req(), &FixedText(BTreeMap::new()))
+        .compute_with_texts(
+            head.view(),
+            &edit,
+            &renamed,
+            &req(),
+            &FixedText(BTreeMap::new()),
+        )
         .unwrap()
         .report;
     assert!(!r.global, "{:?}", r.global_reason);
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 1, "seeded by the map");
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
 }
 
 // ------------------------------------------------ the consumer's leaf map
@@ -642,7 +698,9 @@ fn leaf_scanning(
 
 fn leaves_of(index: &IndexData) -> Option<BTreeMap<String, std::collections::BTreeSet<String>>> {
     let v = index.view();
-    let tsl = (0..v.num_repos()).find(|&r| v.repo_name(r) == "tsl").unwrap();
+    let tsl = (0..v.num_repos())
+        .find(|&r| v.repo_name(r) == "tsl")
+        .unwrap();
     let cs = v.repo_consumers(tsl);
     assert_eq!(cs.len(), 1, "{cs:?}");
     assert_eq!(cs[0].0, "grpc");
@@ -658,7 +716,13 @@ fn map(entries: &[(&str, &[&str])]) -> BTreeMap<String, std::collections::BTreeS
 
 fn run_leaves(index: &IndexData, q: &Scanning, changes: Vec<Change>) -> AffectedReport {
     let r = engine()
-        .compute_with_texts(index.view(), &changes, q, &req(), &FixedText(BTreeMap::new()))
+        .compute_with_texts(
+            index.view(),
+            &changes,
+            q,
+            &req(),
+            &FixedText(BTreeMap::new()),
+        )
         .unwrap()
         .report;
     assert!(!r.global, "{:?}", r.global_reason);
@@ -699,8 +763,14 @@ fn only_the_leaf_whose_closure_reaches_what_moved_is_seeded() {
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 1);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
     assert!(affected.contains(&"//app:app".to_string()), "{affected:?}");
 }
 
@@ -723,8 +793,14 @@ fn a_leaf_keyed_to_another_package_is_not_seeded() {
     assert_eq!(r.stats.consumer_leaves_seeded, 0);
     assert_eq!(r.stats.repos_dirty_by_consumer, 0);
     let affected = r.affected_labels();
-    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        !affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// The map is the cold build's answer, and an edge inside the repository can
@@ -746,8 +822,14 @@ fn an_edge_inside_the_repository_carries_a_change_to_the_leaf_above_it() {
     assert_eq!(r.stats.repos_settled, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 1);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// The walk inside the repository starts from the changed file: `z.cc` is
@@ -769,8 +851,14 @@ fn the_walk_inside_the_repository_starts_from_the_changed_file() {
     assert_eq!(r.stats.repos_settled, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 0);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"@tsl//tsl/base:other".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"@tsl//tsl/base:other".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// A `BUILD` edit under the repository unsettles it, and what moved is then
@@ -790,8 +878,14 @@ fn an_unsettled_repository_seeds_every_leaf_that_reaches_it() {
     assert_eq!(r.stats.repos_settled, 0);
     assert_eq!(r.stats.consumer_leaves_seeded, 1);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// A leaf the map does not know is seeded whenever the repository moves: it
@@ -808,7 +902,10 @@ fn a_leaf_named_after_the_map_was_derived_is_seeded() {
         .full_build_with("c0", &leaf_scanning(root, BEFORE, leaves))
         .unwrap();
     // Only `@grpc//:grpc` was a label then, so only it is known.
-    assert_eq!(leaves_of(&base), Some(map(&[("@grpc//:grpc", &["tsl/base"])])));
+    assert_eq!(
+        leaves_of(&base),
+        Some(map(&[("@grpc//:grpc", &["tsl/base"])]))
+    );
 
     // The commit that adds `//happ:happ` and with it the label
     // `@grpc//:health`, spliced without an overflow, so the map is carried.
@@ -828,13 +925,23 @@ fn a_leaf_named_after_the_map_was_derived_is_seeded() {
     assert!(!out.report.stats.cold_rebuild);
     let head = out.index.expect("the spliced index");
     assert!(head.view().id_of("@grpc//:health").is_some());
-    assert_eq!(leaves_of(&head), leaves_of(&base), "carried, not re-derived");
+    assert_eq!(
+        leaves_of(&head),
+        leaves_of(&base),
+        "carried, not re-derived"
+    );
 
     let r = run_leaves(&head, &q, edit("third_party/tsl/tsl/platform/x.cc"));
     assert_eq!(r.stats.consumer_leaves_seeded, 1);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// A consumer with no map is the answer before the map: every leaf seeded.
@@ -851,8 +958,14 @@ fn a_consumer_with_no_leaf_map_seeds_every_leaf() {
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
     assert_eq!(r.stats.consumer_leaves_seeded, 0);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// [`leaf_scanning`], each leaf also naming what outside the repository its
@@ -869,7 +982,11 @@ fn leaf_scanning_via(
     q
 }
 
-fn materialized(index: &IndexData, q: &Scanning, changes: Vec<Change>) -> cambium_engine::RunOutcome {
+fn materialized(
+    index: &IndexData,
+    q: &Scanning,
+    changes: Vec<Change>,
+) -> cambium_engine::RunOutcome {
     engine()
         .compute_with_texts(
             index.view(),
@@ -908,7 +1025,10 @@ fn a_build_edit_on_a_leafs_closure_re_derives_the_map() {
     let base = engine().full_build_with("c0", &before).unwrap();
     assert_eq!(
         leaves_of(&base),
-        Some(map(&[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &[])]))
+        Some(map(&[
+            ("@grpc//:grpc", &["tsl/platform"]),
+            ("@grpc//:health", &[])
+        ]))
     );
 
     let after = leaf_scanning_via(
@@ -922,17 +1042,28 @@ fn a_build_edit_on_a_leafs_closure_re_derives_the_map() {
     let out = materialized(&base, &after, edit("lib/BUILD"));
     assert!(!out.report.stats.cold_rebuild);
     assert!(!out.report.global, "{:?}", out.report.global_reason);
-    assert_eq!(after.leaf_questions().len(), 1, "{:?}", after.leaf_questions());
+    assert_eq!(
+        after.leaf_questions().len(),
+        1,
+        "{:?}",
+        after.leaf_questions()
+    );
     let head = out.index.expect("the spliced index");
     assert_eq!(
         leaves_of(&head),
-        Some(map(&[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &["tsl/base"])])),
+        Some(map(&[
+            ("@grpc//:grpc", &["tsl/platform"]),
+            ("@grpc//:health", &["tsl/base"])
+        ])),
         "asked for again, not carried"
     );
 
     let r = run_leaves(&head, &after, edit("third_party/tsl/tsl/base/y.cc"));
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
     // The base's map, which the splice used to carry, misses it.
     let stale = run_leaves(&base, &after, edit("third_party/tsl/tsl/base/y.cc"));
     assert!(
@@ -973,14 +1104,31 @@ fn a_build_edit_on_a_leafs_closure_is_answered_at_head_in_its_own_run() {
     let out = materialized(&base, &after, both.clone());
     let r = &out.report;
     assert!(!r.global, "{:?}", r.global_reason);
-    assert_eq!(r.stats.consumer_leaves_seeded, 2, "narrowed by the map at head, not dirty");
+    assert_eq!(
+        r.stats.consumer_leaves_seeded, 2,
+        "narrowed by the map at head, not dirty"
+    );
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert_eq!(after.leaf_questions().len(), 1, "asked once: {:?}", after.leaf_questions());
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert_eq!(
+        after.leaf_questions().len(),
+        1,
+        "asked once: {:?}",
+        after.leaf_questions()
+    );
     assert_eq!(
         leaves_of(out.index.as_ref().expect("the spliced index")),
-        Some(map(&[("@grpc//:grpc", &["tsl/platform"]), ("@grpc//:health", &["tsl/base"])]))
+        Some(map(&[
+            ("@grpc//:grpc", &["tsl/platform"]),
+            ("@grpc//:health", &["tsl/base"])
+        ]))
     );
     // Without the `BUILD` edit the map stands, `//lib` did not move, and
     // nothing is asked.
@@ -1000,13 +1148,19 @@ fn a_suspect_leaf_is_held_against_what_it_reached_at_base_as_well() {
     let before = leaf_scanning_via(
         root,
         LEAF_UNIVERSE,
-        &[("@grpc//:grpc", &[], &["@grpc"]), ("@grpc//:health", &["tsl/base"], &["//lib"])],
+        &[
+            ("@grpc//:grpc", &[], &["@grpc"]),
+            ("@grpc//:health", &["tsl/base"], &["//lib"]),
+        ],
     );
     let base = engine().full_build_with("c0", &before).unwrap();
     let after = leaf_scanning_via(
         root,
         LEAF_UNIVERSE,
-        &[("@grpc//:grpc", &[], &["@grpc"]), ("@grpc//:health", &[], &["//lib"])],
+        &[
+            ("@grpc//:grpc", &[], &["@grpc"]),
+            ("@grpc//:health", &[], &["//lib"]),
+        ],
     );
     let r = run_leaves(
         &base,
@@ -1018,8 +1172,14 @@ fn a_suspect_leaf_is_held_against_what_it_reached_at_base_as_well() {
     );
     assert_eq!(r.stats.consumer_leaves_seeded, 1);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
-    assert!(!affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        !affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// A suspect map Bazel will not answer for at head is no map: the pooled
@@ -1049,10 +1209,19 @@ fn a_suspect_map_with_no_answer_at_head_is_read_as_no_map() {
     );
     assert_eq!(silent.leaf_questions().len(), 1);
     assert_eq!(r.stats.repos_dirty_by_consumer, 1);
-    assert_eq!(r.stats.consumer_leaves_seeded, 0, "the consumer is dirty, not narrowed");
+    assert_eq!(
+        r.stats.consumer_leaves_seeded, 0,
+        "the consumer is dirty, not narrowed"
+    );
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
 }
 
 /// A `.bzl` under the repository unsettles it, and a consumer whose `BUILD`
@@ -1082,11 +1251,20 @@ fn a_starlark_edit_under_the_repository_seeds_every_leaf() {
         .unwrap()
         .report;
     if r.global {
-        panic!("a .bzl under the repository went global: {:?}", r.global_reason);
+        panic!(
+            "a .bzl under the repository went global: {:?}",
+            r.global_reason
+        );
     }
     assert_eq!(r.stats.repos_settled, 0);
     assert_eq!(r.stats.consumer_leaves_seeded, 2);
     let affected = r.affected_labels();
-    assert!(affected.contains(&"//gapp:gapp".to_string()), "{affected:?}");
-    assert!(affected.contains(&"//happ:happ".to_string()), "{affected:?}");
+    assert!(
+        affected.contains(&"//gapp:gapp".to_string()),
+        "{affected:?}"
+    );
+    assert!(
+        affected.contains(&"//happ:happ".to_string()),
+        "{affected:?}"
+    );
 }

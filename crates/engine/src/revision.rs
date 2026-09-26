@@ -403,7 +403,9 @@ mod tests {
         assert_eq!(leaves, Some(std::collections::BTreeMap::new()));
         let asked = recorder.0.lock().unwrap().clone();
         assert!(
-            asked.iter().any(|a| a.contains("query") && a.contains("rdeps(//...")),
+            asked
+                .iter()
+                .any(|a| a.contains("query") && a.contains("rdeps(//...")),
             "{asked:?}"
         );
         assert!(

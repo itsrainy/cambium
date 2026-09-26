@@ -304,7 +304,10 @@ fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     // The pre-pass the cold build runs before its universe query finds the
     // same claim from the workspace files alone.
     let pre = cambium_index::dir_candidates(&files, &m, &b);
-    assert_eq!(pre.get("tsl").map(|c| c.dir.as_str()), Some("third_party/tsl/"));
+    assert_eq!(
+        pre.get("tsl").map(|c| c.dir.as_str()),
+        Some("third_party/tsl/")
+    );
 
     // Confirmation is what turns it into the exhaustive mapping the engine
     // reads back to route a change under the directory.
@@ -312,7 +315,9 @@ fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     let mut other = ri.clone();
     assert!(ri.confirm_dir("tsl", "third_party/tsl"));
     assert_eq!(
-        ri.path_maps.get("tsl").map(|s| s.iter().cloned().collect::<Vec<_>>()),
+        ri.path_maps
+            .get("tsl")
+            .map(|s| s.iter().cloned().collect::<Vec<_>>()),
         Some(vec![PathMap::exhaustive_dir("third_party/tsl/".into())])
     );
     assert!(ri.origins["tsl"].confirmed);
@@ -322,6 +327,10 @@ fn a_candidate_is_recorded_only_for_a_repository_the_module_graph_names() {
     // the probe asked Bazel about `third_party/tsl`, and a closure that has
     // been rescanned since can hold any other `path =` under the same name.
     assert!(!other.confirm_dir("tsl", "third_party/tsl_new"));
-    assert!(!other.path_maps.contains_key("tsl"), "{:?}", other.path_maps);
+    assert!(
+        !other.path_maps.contains_key("tsl"),
+        "{:?}",
+        other.path_maps
+    );
     assert!(other.origins.get("tsl").is_none_or(|o| !o.confirmed));
 }

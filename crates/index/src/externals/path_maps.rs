@@ -101,10 +101,14 @@ pub(crate) fn scan_path_maps(
                     if let (Some(n), Some(d)) =
                         (a.first("name"), a.first("path").and_then(local_dir))
                     {
-                        let is_known = matches!(&callee.kind, ExprKind::Name(k) if is_local_repo_rule(k));
+                        let is_known =
+                            matches!(&callee.kind, ExprKind::Name(k) if is_local_repo_rule(k));
                         if !is_known && boundaries.iter().any(|b| trimmed(b) == trimmed(&d)) {
-                            out.boundary_dirs
-                                .push((n.to_string(), d, module.line_of(x.span.start)));
+                            out.boundary_dirs.push((
+                                n.to_string(),
+                                d,
+                                module.line_of(x.span.start),
+                            ));
                         }
                     }
                 }

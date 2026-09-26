@@ -236,13 +236,12 @@ fn map_nested_repositories(
             // the directory itself, which is the strongest evidence a
             // candidate can carry; a static reader's candidate for the same
             // repository, if there is one, stands.
-            inputs
-                .dir_candidates
-                .entry(repo.clone())
-                .or_insert(cambium_index::externals::DirCandidate {
+            inputs.dir_candidates.entry(repo.clone()).or_insert(
+                cambium_index::externals::DirCandidate {
                     dir: format!("{dir}/"),
                     evidence: EVIDENCE.to_string(),
-                });
+                },
+            );
             cambium_index::externals::RepoOrigin::claim(
                 &mut inputs.origins,
                 &repo,

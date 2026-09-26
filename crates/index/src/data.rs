@@ -580,7 +580,11 @@ impl<'a> IndexRef<'a> {
         // would panic at the first lookup rather than fail the open.
         for (what, ranges, t) in [
             ("repo_map_ranges", self.repo_map_ranges, self.repo_maps),
-            ("repo_consumer_ranges", self.repo_consumer_ranges, self.repo_consumers),
+            (
+                "repo_consumer_ranges",
+                self.repo_consumer_ranges,
+                self.repo_consumers,
+            ),
             (
                 "repo_consumer_leaf_ranges",
                 self.repo_consumer_leaf_ranges,
@@ -589,7 +593,9 @@ impl<'a> IndexRef<'a> {
         ] {
             let len = t.len() as u32;
             if ranges.windows(2).any(|w| w[0] > w[1]) || ranges.iter().any(|&r| r > len) {
-                return Err(format!("{what}: a run is out of order or past its table of {len}"));
+                return Err(format!(
+                    "{what}: a run is out of order or past its table of {len}"
+                ));
             }
         }
         // One row per repository, over the leaves; read by slicing too.
@@ -1052,7 +1058,12 @@ impl<'a> IndexRef<'a> {
     pub fn boundary_is_traversed(&self, dir: &str) -> bool {
         (0..self.repo_boundaries.len())
             .find(|i| self.repo_boundaries.get(*i as u32) == dir)
-            .is_some_and(|i| self.repo_boundary_traversed.get(i).copied().unwrap_or(false))
+            .is_some_and(|i| {
+                self.repo_boundary_traversed
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+            })
     }
 
     /// The repositories a workspace-closure `.bzl` can define.

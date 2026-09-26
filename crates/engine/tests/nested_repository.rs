@@ -295,17 +295,22 @@ fn a_workspace_mode_claim_bazel_answers_for_is_confirmed_and_indexed() {
         );
         m.insert("app/BUILD".to_string(), String::new());
         m.insert("lib/BUILD".to_string(), String::new());
-        Scanning::new(&["app", "lib", "@envoy_api//envoy/service/ext_proc/v3"], rows)
-            .with_files(Files(m))
-            .with_workspace(root)
-            .with_external_rules(ENVOY_EXTERNAL_RULES)
-            .with_repo_probe("envoy_api", &["envoy/service/ext_proc/v3"], false)
+        Scanning::new(
+            &["app", "lib", "@envoy_api//envoy/service/ext_proc/v3"],
+            rows,
+        )
+        .with_files(Files(m))
+        .with_workspace(root)
+        .with_external_rules(ENVOY_EXTERNAL_RULES)
+        .with_repo_probe("envoy_api", &["envoy/service/ext_proc/v3"], false)
     };
     let q = scanning();
     let index = engine().full_build_with("c0", &q).unwrap();
     assert_eq!(q.probed(), vec!["envoy_api".to_string()]);
     let v = index.view();
-    let repo = (0..v.num_repos()).find(|&r| v.repo_name(r) == "envoy_api").unwrap();
+    let repo = (0..v.num_repos())
+        .find(|&r| v.repo_name(r) == "envoy_api")
+        .unwrap();
     let origin = v.repo_origin(repo);
     assert!(origin.confirmed, "{origin:?}");
     assert!(origin.indexed, "{origin:?}");
@@ -319,7 +324,13 @@ fn a_workspace_mode_claim_bazel_answers_for_is_confirmed_and_indexed() {
         "api/envoy/service/ext_proc/v3/external_processor.proto",
     )];
     let r = engine()
-        .compute_with_texts(v, &changes, &scanning(), &req(), &FixedText(BTreeMap::new()))
+        .compute_with_texts(
+            v,
+            &changes,
+            &scanning(),
+            &req(),
+            &FixedText(BTreeMap::new()),
+        )
         .unwrap()
         .report;
     assert!(!r.global, "{:?}", r.global_reason);

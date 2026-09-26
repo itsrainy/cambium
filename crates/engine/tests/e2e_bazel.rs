@@ -739,7 +739,11 @@ fn a_nested_repository_marker_is_inert_and_its_package_is_re_queried_anyway() {
     require_bazel();
     let g = golden();
     let r = g.scenario("add a nested WORKSPACE", |root| {
-        write(root, "lib/nested/WORKSPACE", "workspace(name = \"carved\")\n");
+        write(
+            root,
+            "lib/nested/WORKSPACE",
+            "workspace(name = \"carved\")\n",
+        );
     });
     assert!(
         r.dirty_packages.contains(&"lib".to_string()),

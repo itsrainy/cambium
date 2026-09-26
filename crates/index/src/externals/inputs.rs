@@ -163,7 +163,9 @@ pub fn repo_setting_inputs(src: &dyn FileText, m: &RepoMapping) -> Vec<RepoSetti
         if !seen.insert(path.clone()) {
             continue;
         }
-        let Some(text) = src.text(&path) else { continue };
+        let Some(text) = src.text(&path) else {
+            continue;
+        };
         queue.extend(crate::externals::rc_imports(&text));
         out.extend(repo_settings(&text).into_iter().filter(|s| {
             Label::parse(&s.flag).is_some_and(|l| !l.is_main(m))
@@ -206,7 +208,9 @@ pub fn dir_candidates(
         let Some(text) = src.text(&path) else {
             continue;
         };
-        for (repo, dir, line) in super::path_maps::scan_bzl_path_maps(&text, m, boundaries).boundary_dirs {
+        for (repo, dir, line) in
+            super::path_maps::scan_bzl_path_maps(&text, m, boundaries).boundary_dirs
+        {
             out.entry(repo).or_insert(DirCandidate {
                 dir,
                 evidence: format!("{path}:{line}"),

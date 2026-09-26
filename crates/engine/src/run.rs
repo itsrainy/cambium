@@ -1397,7 +1397,9 @@ impl<'a> Run<'a> {
                     );
                     rederived.insert(
                         r.clone(),
-                        cs.iter().map(|(c, u)| (c.clone(), u.packages.clone())).collect(),
+                        cs.iter()
+                            .map(|(c, u)| (c.clone(), u.packages.clone()))
+                            .collect(),
                     );
                 }
             }
@@ -2123,8 +2125,12 @@ fn dirty_consumers(
             // reaches only at head is one the change can have moved it
             // through, and one it reached only at base is one whose move it
             // can have been cut from. With no answer at head, no map.
-            let merged: Option<BTreeMap<String, BTreeSet<String>>> = if suspects.contains(&consumer) {
-                match (&used.leaves, at_head.get(name).and_then(|(_, a)| a.as_ref())) {
+            let merged: Option<BTreeMap<String, BTreeSet<String>>> = if suspects.contains(&consumer)
+            {
+                match (
+                    &used.leaves,
+                    at_head.get(name).and_then(|(_, a)| a.as_ref()),
+                ) {
                     (Some(base_map), Some(head)) => {
                         let canonical = (0..base.num_repos())
                             .find(|&r| base.repo_name(r) == consumer)
@@ -2132,7 +2138,9 @@ fn dirty_consumers(
                         let mut m = base_map.clone();
                         for (leaf, reach) in head {
                             if crate::consumers::is_leaf_of(leaf, &consumer, canonical) {
-                                m.entry(leaf.clone()).or_default().extend(reach.packages.iter().cloned());
+                                m.entry(leaf.clone())
+                                    .or_default()
+                                    .extend(reach.packages.iter().cloned());
                             }
                         }
                         Some(m)
@@ -2368,7 +2376,10 @@ fn stale_leaf_maps(
                      not trusted as it stands, and asked for again"
                 );
                 out.repos.insert(name.to_string());
-                out.suspect.entry(name.to_string()).or_default().insert(consumer);
+                out.suspect
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert(consumer);
             }
         }
     }
@@ -2623,7 +2634,11 @@ mod stale_tests {
         let mut c = BzlClosure::default();
         c.inputs.repos = set(&["envoy_api", "tsl"]);
         let leaf = |l: &str| -> Option<BTreeMap<String, BTreeSet<String>>> {
-            Some([(l.to_string(), set(&["envoy/type/v3"]))].into_iter().collect())
+            Some(
+                [(l.to_string(), set(&["envoy/type/v3"]))]
+                    .into_iter()
+                    .collect(),
+            )
         };
         let grpc = Consumer {
             packages: set(&["envoy/type/v3"]),
@@ -2637,13 +2652,18 @@ mod stale_tests {
         };
         c.inputs.consumers.insert(
             "envoy_api".into(),
-            [("grpc".to_string(), grpc), ("quiche".to_string(), quiche)].into_iter().collect(),
+            [("grpc".to_string(), grpc), ("quiche".to_string(), quiche)]
+                .into_iter()
+                .collect(),
         );
         c.inputs.consumers.insert(
             "tsl".into(),
-            [("xla".to_string(), Consumer::of_packages(set(&["tsl/platform"])))]
-                .into_iter()
-                .collect(),
+            [(
+                "xla".to_string(),
+                Consumer::of_packages(set(&["tsl/platform"])),
+            )]
+            .into_iter()
+            .collect(),
         );
         let mut b = IndexBuilder::new(new_lineage());
         b.set_bzl_closure(c);

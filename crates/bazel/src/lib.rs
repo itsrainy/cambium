@@ -198,7 +198,6 @@ fn package_of_repo(line: &str, repo: &str) -> Option<String> {
     })
 }
 
-
 /// Whether a repository token as Bazel printed it (`grpc`, `grpc+`,
 /// `+xla_extension+tsl`, Bazel 7's `grpc~`) names the repository `repo`
 /// goes by: the token itself, or the last segment of its canonical form.
@@ -256,7 +255,9 @@ fn leaf_expr(repo: &str, leaves: &[String]) -> String {
 /// 7's separator) and `@grpc//:grpc++` are one key; a main-repo label keeps
 /// an empty name.
 fn spelling_key(label: &str) -> Option<(&str, &str)> {
-    let rest = label.strip_prefix('@').map_or(label, |r| r.strip_prefix('@').unwrap_or(r));
+    let rest = label
+        .strip_prefix('@')
+        .map_or(label, |r| r.strip_prefix('@').unwrap_or(r));
     let (repo, target) = rest.split_once("//")?;
     let apparent = repo
         .trim_end_matches(['+', '~'])
@@ -275,7 +276,10 @@ fn via_of(label: &str) -> Option<String> {
         .or_else(|| label.strip_prefix("@//"))
         .or_else(|| label.strip_prefix("//"));
     match main {
-        Some(rest) => Some(format!("//{}", rest.split_once(':').map_or(rest, |(p, _)| p))),
+        Some(rest) => Some(format!(
+            "//{}",
+            rest.split_once(':').map_or(rest, |(p, _)| p)
+        )),
         None => label_repo_token(label).map(|t| format!("@{t}")),
     }
 }
@@ -1487,7 +1491,11 @@ impl Bazel {
             leaves = leaves.len(),
             resolved = out.len(),
             reaching = out.values().filter(|r| !r.packages.is_empty()).count(),
-            via = out.values().flat_map(|r| &r.via).collect::<BTreeSet<_>>().len(),
+            via = out
+                .values()
+                .flat_map(|r| &r.via)
+                .collect::<BTreeSet<_>>()
+                .len(),
             loads = loads.len(),
             bytes = graph.len(),
             ms = started.elapsed().as_millis() as u64,
@@ -2264,9 +2272,18 @@ mod tests {
     /// one with no packages at all.
     #[test]
     fn a_probe_reads_both_spellings_of_a_repository_name() {
-        assert_eq!(package_of_repo("@tsl//tsl/platform", "tsl"), Some("tsl/platform".into()));
-        assert_eq!(package_of_repo("@@tsl+//tsl/platform", "tsl"), Some("tsl/platform".into()));
-        assert_eq!(package_of_repo("@@tsl~//tsl/platform", "tsl"), Some("tsl/platform".into()));
+        assert_eq!(
+            package_of_repo("@tsl//tsl/platform", "tsl"),
+            Some("tsl/platform".into())
+        );
+        assert_eq!(
+            package_of_repo("@@tsl+//tsl/platform", "tsl"),
+            Some("tsl/platform".into())
+        );
+        assert_eq!(
+            package_of_repo("@@tsl~//tsl/platform", "tsl"),
+            Some("tsl/platform".into())
+        );
         assert_eq!(
             package_of_repo("@@+xla_extension+tsl//tsl/platform", "tsl"),
             Some("tsl/platform".into())
@@ -2429,21 +2446,34 @@ mod consumer_tests {
         // Transitive, and packages rather than labels.
         assert_eq!(
             r["@grpc//:grpc++"].packages,
-            set(&["envoy/extensions/filters/http/fault/v3", "envoy/type/metadata/v3"])
+            set(&[
+                "envoy/extensions/filters/http/fault/v3",
+                "envoy/type/metadata/v3"
+            ])
         );
         // What it passes through outside the repository: its own repository,
         // another, and the main repository's root package.
-        assert_eq!(r["@grpc//:grpc++"].via, set(&["//", "@abseil-cpp", "@grpc"]));
+        assert_eq!(
+            r["@grpc//:grpc++"].via,
+            set(&["//", "@abseil-cpp", "@grpc"])
+        );
         // Resolved, no path: known to reach nothing, and known to do so
         // through two main-repo packages whose `BUILD` files could change it.
         let health = &r["@grpc//src/proto/grpc/health/v1:health_cc_proto"];
         assert_eq!(health.packages, set(&[]));
         assert_eq!(
             health.via,
-            set(&["//source/common/common", "//source/common/quic/platform", "@grpc"])
+            set(&[
+                "//source/common/common",
+                "//source/common/quic/platform",
+                "@grpc"
+            ])
         );
         // Never printed: not known, and so not in the map at all.
-        assert!(!r.contains_key("@grpc//src/compiler:grpc_cpp_plugin"), "{r:?}");
+        assert!(
+            !r.contains_key("@grpc//src/compiler:grpc_cpp_plugin"),
+            "{r:?}"
+        );
         assert_eq!(r.len(), 2);
     }
 
@@ -2467,8 +2497,12 @@ mod consumer_tests {
     /// separator included.
     #[test]
     fn a_leaf_is_matched_whichever_way_the_graph_spells_its_repository() {
-        let plus = GRAPH.replace("@grpc//", "@@grpc+//").replace("@envoy_api//", "@@envoy_api+//");
-        let tilde = GRAPH.replace("@grpc//", "@@grpc~//").replace("@envoy_api//", "@@envoy_api~//");
+        let plus = GRAPH
+            .replace("@grpc//", "@@grpc+//")
+            .replace("@envoy_api//", "@@envoy_api+//");
+        let tilde = GRAPH
+            .replace("@grpc//", "@@grpc~//")
+            .replace("@envoy_api//", "@@envoy_api~//");
         for g in [GRAPH.to_string(), plus, tilde] {
             for leaf in ["@grpc//:grpc++", "@@grpc+//:grpc++", "@@grpc~//:grpc++"] {
                 let r = parse_leaf_reach(&g, "envoy_api", &[leaf.to_string()]);
@@ -2509,7 +2543,10 @@ mod consumer_tests {
         assert_eq!(apparent_of_canonical("grpc+"), "grpc");
         assert_eq!(apparent_of_canonical("grpc"), "grpc");
         assert_eq!(apparent_of_canonical("+xla_extension+tsl"), "tsl");
-        assert_eq!(apparent_of_canonical("envoy_toolshed++llvm_ext+llvm"), "llvm");
+        assert_eq!(
+            apparent_of_canonical("envoy_toolshed++llvm_ext+llvm"),
+            "llvm"
+        );
     }
 }
 

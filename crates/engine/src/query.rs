@@ -463,14 +463,20 @@ impl PackageQuerier for BazelQuerier {
     }
 
     fn probe_repos(&self, repos: &[String]) -> Vec<cambium_bazel::RepoProbe> {
-        repos.iter().filter_map(|r| self.bazel.probe_repo(r)).collect()
+        repos
+            .iter()
+            .filter_map(|r| self.bazel.probe_repo(r))
+            .collect()
     }
 
     fn consumer_repos(
         &self,
         indexed: &[String],
     ) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
-        tracing::debug!(?indexed, "asking bazel who consumes each indexed repository");
+        tracing::debug!(
+            ?indexed,
+            "asking bazel who consumes each indexed repository"
+        );
         indexed
             .iter()
             .filter_map(|r| {
