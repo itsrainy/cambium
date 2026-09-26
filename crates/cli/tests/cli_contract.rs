@@ -1455,3 +1455,32 @@ fn no_index_under_no_full_build_narrates_no_cold_build() {
     );
     assert!(!stderr.contains("baseline index"), "{stderr}");
 }
+
+/// One refused index is one `CAMBI-W003`, and one log line, though the
+/// lookup reaches it by its tree and again through its `commits/` pointer.
+#[test]
+fn a_refused_index_is_one_w003() {
+    let f = published_fixture(1);
+    let mut cfg = cambium_engine::Config::load(&f.ws).unwrap();
+    cfg.externals.index_max_packages += 1;
+    std::fs::write(f.ws.join("cambium.toml"), cfg.to_toml()).unwrap();
+    let base = &f.commits[1];
+    let (code, _, stderr) = run(&[
+        "-C",
+        f.ws.to_str().unwrap(),
+        "--cache-dir",
+        f.cache.to_str().unwrap(),
+        "affected",
+        "--no-full-build",
+        &format!("{base}..{base}"),
+    ]);
+    assert_eq!(code, 4, "{stderr}");
+    assert_eq!(stderr.matches("warning[CAMBI-W003]").count(), 1, "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("skipping an index built with a different cambium.toml")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
