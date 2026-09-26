@@ -715,6 +715,37 @@ fn init_on_an_existing_file_preserves_what_it_was_not_asked_about() {
     assert!(written.contains("kind = \"http\""), "{written}");
 }
 
+/// A file init cannot read is refused, not rewritten as if it were empty: a
+/// Latin-1 byte once cost a checked-in cambium.toml every key but the two init
+/// was asked about, under an exit 0 that said only those had changed.
+#[test]
+fn init_refuses_a_file_it_cannot_read_and_leaves_it_alone() {
+    let dir = bare_workspace();
+    let ws = dir.path().to_str().unwrap();
+    let path = dir.path().join("cambium.toml");
+    let before = b"# caf\xe9 notes\n[limits]\nmax_dirty_packages = 900\n".to_vec();
+    std::fs::write(&path, &before).unwrap();
+    let (code, stdout, stderr) = run(&["-C", ws, "init", "--yes", "--store-dir", "/srv/idx"]);
+    assert_eq!(
+        code, 1,
+        "an unreadable config is an error:\n{stdout}\n{stderr}"
+    );
+    assert!(stderr.contains("error[CAMBI-E002]"), "{stderr}");
+    assert!(
+        stderr.contains("cambium.toml"),
+        "the path is not named:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("only the keys init was asked about changed"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the file init could not read was changed"
+    );
+}
+
 /// A script with no flags on a pipe cannot be prompted, and must be told which
 /// flags exist rather than handed a store it did not choose.
 #[test]

@@ -14,7 +14,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use cambium_engine::config::{StoreConfig, CONFIG_FILE, LOCAL_CONFIG_FILE};
+use cambium_engine::config::{ConfigError, StoreConfig, CONFIG_FILE, LOCAL_CONFIG_FILE};
 use cambium_engine::probe;
 use clap::Args as ClapArgs;
 
@@ -278,7 +278,21 @@ fn prompt_required(message: &str) -> Result<String> {
 /// parse-merge-serialise through `Config` would silently reformat the whole
 /// file and drop every comment in it.
 fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) -> Result<String> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // Only a missing file starts empty. Any other read error (a byte that is
+    // not UTF-8, a permission) is the config-read error `Config::load` gives,
+    // because rewriting a file init could not read would replace everything
+    // in it with the two keys init was asked about.
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(cambium_engine::EngineError::Config(ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+            .into())
+        }
+    };
     let mut doc: toml_edit::DocumentMut = existing.parse().map_err(|e| {
         anyhow::anyhow!(
             "{} does not parse, so init will not rewrite it: {e}",
@@ -312,7 +326,10 @@ fn write_config(path: &Path, store: &StoreConfig, default_branch: Option<&str>) 
     }
 
     let text = doc.to_string();
-    std::fs::write(path, &text)?;
+    std::fs::write(path, &text).map_err(|source| cambium_engine::EngineError::IoAt {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(text)
 }
 
@@ -464,6 +481,63 @@ mod tests {
             cambium_engine::Config::load_from(&path).unwrap(),
             cambium_engine::Config::default(),
             "no store and no branch is the default configuration"
+        );
+    }
+
+    /// A file init cannot read is not an empty file. Treating it as one
+    /// replaced every key somebody wrote with the header and the two keys
+    /// init was asked about, and said "only the keys init was asked about
+    /// changed".
+    #[test]
+    fn an_unreadable_file_is_refused_and_left_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        // `caf\xe9` is Latin-1, so reading it as UTF-8 is `InvalidData`.
+        let before = b"# caf\xe9 notes\n[limits]\nmax_dirty_packages = 900\n".to_vec();
+        std::fs::write(&path, &before).unwrap();
+        let store = StoreConfig::Dir {
+            path: PathBuf::from("/srv/idx"),
+        };
+        let err = write_config(&path, &store, Some("trunk"))
+            .expect_err("a file that cannot be read must not be rewritten");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the file init could not read was changed"
+        );
+        let d = crate::diag::of_error(&err);
+        assert_eq!(
+            d.code,
+            cambium_engine::Code::E002Config,
+            "the config-read code Config::load uses: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains(&path.display().to_string()),
+            "the path is not named: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("UTF-8"),
+            "the cause is not named: {}",
+            d.message
+        );
+    }
+
+    /// A write that fails says which file it was writing.
+    #[test]
+    fn a_failed_write_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // No parent directory: the read is `NotFound`, so the write is what
+        // fails.
+        let path = dir.path().join("no-such-dir").join(CONFIG_FILE);
+        let err = write_config(&path, &StoreConfig::None, None)
+            .expect_err("the parent directory does not exist");
+        let d = crate::diag::of_error(&err);
+        assert!(
+            d.message.contains(&path.display().to_string()),
+            "the path is not named: {}",
+            d.message
         );
     }
 
