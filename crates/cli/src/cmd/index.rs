@@ -15,7 +15,7 @@ use cambium_engine::{Code, Diagnostic};
 use cambium_ui::report::{group, human_bytes};
 use cambium_ui::{Event, Level, Sink};
 
-use crate::cmd::{hex, Context};
+use crate::cmd::{hex, short, Context};
 
 #[derive(Subcommand)]
 pub enum Args {
@@ -454,11 +454,6 @@ fn counts(index: &cambium_index::IndexData) -> String {
 
 fn ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
-}
-
-/// A sha cut to ten digits; a ref name whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 10)
 }
 
 /// The two revisions `index update` moves between: the positional range, or

@@ -18,7 +18,7 @@ use cambium_engine::{AffectedReport, Diagnostic, Explanation};
 use clap::Args as ClapArgs;
 
 use crate::cmd::affected::Shape;
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, git_short, Context};
 
 #[derive(ClapArgs)]
 // Both this and `affected::Args` are `Args`, and clap names an argument group
@@ -120,12 +120,12 @@ fn about_label(outcome: &cambium_engine::RunOutcome, label: &str) -> Result<Abou
     let cambium_engine::LabelPresence { at_head, at_base } = outcome.label_presence(label);
     match (at_head, at_base) {
         (Some(false), Some(true)) => Ok(About::NotAffected {
-            note: format!("it no longer exists at {}", short(&report.head)),
+            note: format!("it no longer exists at {}", git_short(&report.head)),
         }),
         (Some(false), Some(false)) => Err(crate::diag::UsageError::raised(format!(
             "{label} is in neither index: it exists at neither {} nor {}",
-            short(&report.base),
-            short(&report.head)
+            git_short(&report.base),
+            git_short(&report.head)
         ))),
         // Either the head index was not materialised or the base could not be
         // read back; the answer about the change still holds.
@@ -152,11 +152,6 @@ fn plural(n: usize) -> &'static str {
     } else {
         "s"
     }
-}
-
-/// A sha cut to seven digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 7)
 }
 
 // --------------------------------------------------------------------- human
@@ -201,8 +196,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
     if report.stats.cold_rebuild {
         return format!(
             "{}..{} re-indexed the whole repository at head; the answer is still exact\n{}",
-            short(&report.base),
-            short(&report.head),
+            git_short(&report.base),
+            git_short(&report.head),
             cause(
                 report.cold_rebuild_cause(),
                 report.cold_rebuild_reason.as_deref(),
@@ -217,8 +212,8 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
          direct targets     {}\n  \
          affected targets   {}\n  \
          {}\n",
-        short(&report.base),
-        short(&report.head),
+        git_short(&report.base),
+        git_short(&report.head),
         report.stats.changed_files,
         report.stats.dirty_packages,
         report.stats.direct_targets,
@@ -245,7 +240,7 @@ fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> Strin
 fn spliced_onto(report: &AffectedReport) -> String {
     format!(
         "spliced onto       {} ({} nodes at base)",
-        short(&report.base),
+        git_short(&report.base),
         report.stats.base_nodes
     )
 }

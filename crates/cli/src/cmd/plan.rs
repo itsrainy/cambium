@@ -6,7 +6,7 @@
 use anyhow::Result;
 use cambium_engine::plan::{PlanMode, RunPlan};
 
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, git_short, Context};
 
 pub fn run(
     ctx: &Context,
@@ -36,8 +36,8 @@ pub fn run(
 fn print_human(plan: &RunPlan) {
     println!(
         "plan for {}..{}",
-        cambium_ui::report::rev(&plan.base, 7),
-        cambium_ui::report::rev(&plan.head, 7)
+        git_short(&plan.base),
+        git_short(&plan.head)
     );
     match &plan.index {
         None => println!("  index  none: cold build"),

@@ -209,3 +209,15 @@ pub use cambium_engine::hex;
 /// Units every verb says a number in. They live in `cambium_ui` so the live
 /// rows and the report on stdout cannot disagree about what `4.2 s` is.
 pub use cambium_ui::report::human_bytes;
+
+/// A revision as the narration and the long reports name it: a sha cut to
+/// ten digits, a ref name (`origin/main`) whole.
+pub fn short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 10)
+}
+
+/// A revision as the one-screen answers name it (`explain`, `--dry-run`): a
+/// sha cut to the seven digits git abbreviates one to, a ref name whole.
+pub fn git_short(rev: &str) -> String {
+    cambium_ui::report::rev(rev, 7)
+}

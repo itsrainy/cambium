@@ -21,7 +21,7 @@ use cambium_ui::{row, Cell, Event, Paint, Sink, Style};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell};
-use crate::cmd::{emit, Context};
+use crate::cmd::{emit, short, Context};
 
 /// What lands on stdout above the table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -372,11 +372,6 @@ impl Renderer<'_> {
             }
         }
     }
-}
-
-/// A sha cut to ten digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 10)
 }
 
 fn print_human(

@@ -17,7 +17,7 @@ use cambium_ui::{hist, Cell, Event, Level, Paint, Sink};
 use clap::Args as ClapArgs;
 
 use crate::cmd::narrate::{commit_columns, index_cell};
-use crate::cmd::{emit_json, Context};
+use crate::cmd::{emit_json, short, Context};
 use crate::Format;
 
 /// How the targets-by-depth distribution is drawn under the answer.
@@ -917,11 +917,6 @@ fn package_of(label: &str) -> &str {
         Some(i) => &label[..i],
         None => label,
     }
-}
-
-/// A sha cut to ten digits; a ref name (`origin/main`) whole.
-fn short(rev: &str) -> String {
-    cambium_ui::report::rev(rev, 10)
 }
 
 fn print_explanations(report: &cambium_engine::AffectedReport, tests_only: bool) {
