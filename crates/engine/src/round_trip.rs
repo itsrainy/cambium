@@ -77,11 +77,42 @@
 //! longer knows it) gets an empty row, so a leaf that stops existing, or
 //! stops reaching the universe, has its edges retired rather than carried.
 //!
+//! # The repositories a leaf's closure runs through
+//!
+//! The same walk says which repositories outside the universe each leaf's
+//! closure passes through before it comes back in
+//! ([`cambium_bazel::RoundTrips::closure`], stored per repository as
+//! `IndexRef::leaf_closure`, format 16). That is the other half of what a
+//! leaf means: rule (1) of `crate::externals` seeds the labels of a
+//! repository that moved, and a rule that reaches the repository only
+//! through another one is above none of them. envoy's rules name
+//! `@grpc//:grpc++`, grpc links `@c-ares`, and an edit to
+//! `bazel/c-ares.patch` (box run F, step 161) moved `@c-ares` alone: the
+//! rules naming `@c-ares//:ares` were seeded, and 145 of the oracle's
+//! labels, rules that reach `@c-ares` only through `grpc++`, were missing. A run now
+//! seeds every leaf whose closure runs through a repository that moved
+//! ([`closure_seeds`]), which is what Bazel rebuilds. The sets are Bazel's
+//! answer wherever the edges are (cold build, overflow, at head, a leaf a
+//! splice added), are carried by every splice beside them, and a run that
+//! asked at head seeds by the union of the base's and the head's.
+//!
+//! The consumer table's `Consumer::via` records the same repositories, per
+//! consumer and pooled over its leaves, and only for the consumers of an
+//! indexed repository; it answers whether that leaf map is still fresh, not
+//! what to seed, so it stays where it is. The spelling is shared: a closure
+//! entry is `@name` as Bazel printed the name, read by `crate::via::Moved`
+//! like every other via entry.
+//!
 //! # Cost
 //!
-//! One `deps` over every leaf, `--output=package`; one `loadfiles` over the
-//! same closure less the universe's packages, `--output=label`; and an
-//! `allpaths` graph only when the closure reaches back in. At the pins, on
+//! One `deps` over every leaf, `--output=graph`, which answers the edges and
+//! the closures both; and one `loadfiles` over the same closure less the
+//! universe's packages, `--output=label`. The graph replaced an
+//! `--output=package` listing and an `allpaths` graph asked only when the
+//! closure reached back in. On envoy at `eea2ba5e2911` (728 leaves, a
+//! WORKSPACE-mode output base the somepath queries had warmed, the laptop
+//! loaded) the graph is 95828 nodes and 23.9 MB, 14 s the first time and
+//! 8 s again. Before the graph, at the pins, on
 //! the output bases the cold builds warmed, with the laptop's load average
 //! near 100: envoy, 752 leaves and a closure of 1399 packages, 13.1 s of a
 //! 482 s cold build, 2 leaves with edges and nothing loaded from the main
@@ -130,14 +161,18 @@ use crate::query::PackageQuerier;
 use crate::via::Moved;
 
 /// One round-trip question and Bazel's answer: the leaves asked about, for
-/// each that reaches the universe the inside labels it reaches, and what the
-/// answer was derived through ([`cambium_bazel::RoundTrips::via`]). An asked
-/// leaf missing from `reach` reaches nothing inside.
+/// each that reaches the universe the inside labels it reaches, what the
+/// answer was derived through ([`cambium_bazel::RoundTrips::via`]), and the
+/// repositories each leaf's closure runs through
+/// ([`cambium_bazel::RoundTrips::closure`]). An asked leaf missing from
+/// `reach` reaches nothing inside; one missing from `closure` is one Bazel
+/// could not resolve.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answer {
     pub leaves: Vec<String>,
     pub reach: BTreeMap<String, BTreeSet<String>>,
     pub via: BTreeSet<String>,
+    pub closure: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Which leaves a splice asks for, beyond any answer the run already has.
@@ -208,6 +243,7 @@ pub(crate) fn ask(
         leaves,
         reach: a.reach,
         via: a.via,
+        closure: a.closure,
     })
 }
 
@@ -227,10 +263,12 @@ fn missing_via(label: &str) -> Option<String> {
 }
 
 /// Writes an answer into the index being built: each asked leaf's row
-/// becomes the entries it reaches, empty for one that reaches nothing.
-/// Returns how many rows changed, and the via entries that stand for the
-/// entries the index has no node for ([`missing_via`]): a target of a
-/// package that failed to load, or one the index does not hold yet.
+/// becomes the entries it reaches, empty for one that reaches nothing, and
+/// its closure the repositories the answer says it runs through, none for
+/// one Bazel could not resolve. Returns how many rows changed, and the via
+/// entries that stand for the entries the index has no node for
+/// ([`missing_via`]): a target of a package that failed to load, or one the
+/// index does not hold yet.
 pub(crate) fn apply(b: &mut IndexBuilder<'_>, answer: &Answer) -> (usize, BTreeSet<String>) {
     let mut changed = 0;
     let mut missing = BTreeSet::new();
@@ -238,6 +276,10 @@ pub(crate) fn apply(b: &mut IndexBuilder<'_>, answer: &Answer) -> (usize, BTreeS
         let Some(id) = b.label_id(leaf) else {
             continue;
         };
+        // A label that has become a package's target is not a leaf any
+        // more, and runs through nothing here.
+        let closure = answer.closure.get(leaf).filter(|_| b.is_leaf(id));
+        b.set_leaf_closure(id, closure.into_iter().flatten().map(String::as_str));
         let mut dsts: Vec<u32> = Vec::new();
         for e in answer.reach.get(leaf).into_iter().flatten() {
             match b.label_id(e) {
@@ -273,6 +315,73 @@ pub(crate) fn moved_outside(ext: &Externals, indexed: &[String]) -> BTreeSet<Str
         .filter(|r| !indexed.contains(r))
         .cloned()
         .collect()
+}
+
+/// The leaves whose closure runs through one of `moved`, the repositories
+/// that moved in this run, for `externals::reach` rule (1) to seed beside
+/// the moved repositories' own labels.
+///
+/// Rule (1) seeds a repository's labels, which are the leaves of it that a
+/// main-repo rule names. A repository no main-repo rule names, or one named
+/// only on some paths, is reached on the others through another
+/// repository: envoy's rules name `@grpc//:grpc++`, grpc links `@c-ares`,
+/// and an edit to `bazel/c-ares.patch` moves `@c-ares` alone. A few envoy
+/// rules name `@c-ares//:ares` and rule (1) seeds them; the rest reach it
+/// only through `grpc++`. Bazel refetches it, rebuilds grpc and every rule
+/// above `grpc++`; the index holds no edge from the leaf into `@c-ares`, so
+/// run F's step 161 missed 145 labels. The table ([`IndexRef::leaf_closure`]) is what says the leaf
+/// runs through it. Seeding every leaf a moved repository is on the closure
+/// of is exactly what Bazel rebuilds; a repository every leaf runs through
+/// seeds every leaf, which is the answer.
+///
+/// `moved` less the indexed repositories: their nodes are inside, and a
+/// change to one is walked through its rows, the leaves' round-trip edges
+/// and the consumer table. `head`, when the run asked at head
+/// ([`at_head`]), adds the leaves whose closure runs through a moved
+/// repository there: the same commit can put the repository on a closure
+/// and move it. A leaf the table does not know (never asked about, or one
+/// Bazel could not resolve) is seeded by its own labels alone, which is the
+/// answer before the table.
+pub(crate) fn closure_seeds(
+    base: IndexRef<'_>,
+    moved: &BTreeSet<String>,
+    head: Option<&Answer>,
+) -> BTreeSet<u32> {
+    let indexed = base.indexed_repos();
+    let outside: BTreeSet<String> = moved
+        .iter()
+        .filter(|r| !indexed.contains(r))
+        .cloned()
+        .collect();
+    let mut out = BTreeSet::new();
+    if outside.is_empty() {
+        return out;
+    }
+    let none = BTreeSet::new();
+    let through = Moved::new(base, &none, &none, &outside);
+    let live = |id: &u32| *id < base.num_nodes() && !base.is_tombstone(*id);
+    for (repo, leaves) in base.leaf_closure() {
+        if through.hit([repo], None).is_some() {
+            out.extend(leaves.iter().copied().filter(live));
+        }
+    }
+    for (leaf, repos) in head.map(|a| &a.closure).into_iter().flatten() {
+        if through
+            .hit(repos.iter().map(String::as_str), None)
+            .is_some()
+        {
+            out.extend(base.id_of(leaf).filter(live));
+        }
+    }
+    if !out.is_empty() {
+        tracing::debug!(
+            ?outside,
+            leaves = out.len(),
+            first = ?out.iter().take(5).map(|&id| base.label(id)).collect::<Vec<_>>(),
+            "leaves whose closure runs through a repository that moved are seeded"
+        );
+    }
+    out
 }
 
 /// Asks Bazel at head for every leaf's edges when something they were

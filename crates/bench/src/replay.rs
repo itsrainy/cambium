@@ -841,6 +841,7 @@ pub fn replay_with(inputs: ReplayInputs<'_>) -> ReplayOutcome {
             &ext.load_repos,
             &stage.settled,
             &externals::LeafSeeds::default(),
+            &BTreeSet::new(),
         )
         .packages
     } else {

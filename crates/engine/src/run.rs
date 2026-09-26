@@ -777,14 +777,20 @@ impl<'a> Run<'a> {
                 &leaf_answers,
                 &mut seeds,
             );
+            // After `dirty_consumers`: a consumer it dirtied moved as well,
+            // and so did every leaf whose closure runs through it.
+            let closure =
+                crate::round_trip::closure_seeds(self.base, &ext.repos, round_trip.as_ref());
             let r = crate::externals::reach(
                 self.base,
                 &ext.repos,
                 &ext.load_repos,
                 &settled,
                 &seeds,
+                &closure,
             );
             self.stats.consumer_leaves_seeded = r.consumer_leaves;
+            self.stats.closure_leaves_seeded = r.closure_leaves;
             tracing::debug!(
                 repos = ?ext.repos,
                 load_repos = ?ext.load_repos,

@@ -512,6 +512,7 @@ fn the_overflow_diagnostic_names_every_route_and_counts_packages_once() {
         &repos,
         &BTreeSet::new(),
         &cambium_engine::externals::LeafSeeds::default(),
+        &BTreeSet::new(),
     );
     assert_eq!(r.packages, ["app".to_string()].into_iter().collect());
     assert_eq!(r.packages_by_repo["mod"], 1);

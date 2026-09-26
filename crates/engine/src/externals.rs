@@ -1164,6 +1164,10 @@ pub struct RepoReach {
     /// leaf map ([`LeafSeeds`]) rather than because their repository is
     /// dirty.
     pub consumer_leaves: usize,
+    /// Of [`RepoReach::nodes`], how many were seeded because their closure
+    /// runs through a repository that moved (`crate::round_trip::closure_seeds`)
+    /// and for no other reason.
+    pub closure_leaves: usize,
     /// Packages whose `.bzl` closure loads from one of the repositories.
     pub packages: BTreeSet<String>,
     /// How many of [`RepoReach::packages`] each repository accounted for.
@@ -1187,16 +1191,21 @@ pub struct RepoReach {
 /// of 300 steps in box run B, for an answer the file edge already had.
 /// `seeds` are the leaves of consumers whose leaf map narrowed them
 /// (`run::dirty_consumers`), which rule (1) seeds as well without the
-/// consumer being dirty.
+/// consumer being dirty. `closure` are the leaves whose closure runs through
+/// a repository that moved (`crate::round_trip::closure_seeds`), which rule
+/// (1) seeds too: `@grpc//:grpc++` links `@c-ares`, so a patch of `@c-ares`
+/// rebuilds every rule above it, and no label of `@c-ares` is on that path
+/// in the index.
 pub fn reach(
     base: IndexRef<'_>,
     repos: &BTreeSet<String>,
     load_repos: &BTreeSet<String>,
     settled: &BTreeSet<String>,
     seeds: &LeafSeeds,
+    closure: &BTreeSet<u32>,
 ) -> RepoReach {
     let mut out = RepoReach::default();
-    if repos.is_empty() && seeds.by_consumer.is_empty() {
+    if repos.is_empty() && seeds.by_consumer.is_empty() && closure.is_empty() {
         return out;
     }
     // Rules (0) and (1) act on what is dirty and not settled; rule (2) keeps
@@ -1263,7 +1272,8 @@ pub fn reach(
                 repo_token_matches(token, c, canon.get(c.as_str()).copied().unwrap_or(""))
                     && seeds.seeds(c, label)
             });
-        if !matches(token) && !by_map {
+        let by_closure = !matches(token) && !by_map && closure.contains(&id);
+        if !matches(token) && !by_map && !by_closure {
             continue;
         }
         // Phase 5 stage 3. A label whose package rule (0) re-queries is not
@@ -1286,6 +1296,7 @@ pub fn reach(
             continue;
         }
         out.consumer_leaves += usize::from(by_map);
+        out.closure_leaves += usize::from(by_closure);
         out.nodes.push(id);
     }
     out.nodes.sort_unstable();
