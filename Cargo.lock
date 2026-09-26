@@ -249,9 +249,7 @@ dependencies = [
  "cambium-index",
  "globset",
  "rustc-hash",
- "serde",
  "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]
