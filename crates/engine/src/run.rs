@@ -1780,6 +1780,20 @@ impl<'a> Run<'a> {
             );
         }
         self.stats.direct_targets = direct.len();
+        // The walk's own filter, applied to the direct set: a rule a tag in
+        // `output.exclude_tags` marked is in `direct` and not in `affected`.
+        self.stats.direct_excluded_by_tag = if wopts.include_manual {
+            0
+        } else {
+            direct
+                .iter()
+                .filter(|&&id| {
+                    view.kind_of(id) == cambium_index::NodeKind::Rule
+                        && !view.is_tombstone(id)
+                        && view.is_manual(id)
+                })
+                .count()
+        };
         self.stats.affected_targets = result.affected.len();
         self.timings.walk = self.sw.lap();
         let affected = direct::affected_targets(view, &result);

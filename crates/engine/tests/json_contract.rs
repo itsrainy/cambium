@@ -160,6 +160,8 @@ fn fixture() -> AffectedReport {
             dirty_packages: 4,
             queried_targets: 5,
             direct_targets: 6,
+            // Not serialised: the document must not change for it.
+            direct_excluded_by_tag: 99,
             affected_targets: 7,
             changed_files: 8,
             ignored_files: 9,

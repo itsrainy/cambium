@@ -108,8 +108,11 @@ published from `affected`.
 With a label: the shortest path back to the change, its length in hops and in
 package boundaries crossed, and the direct reason at the end, in the `reason`
 shape the JSON contract defines. With no label: why
-the run went global or cold, which file/flag did it, and a `help:` line. A
-label just narrows the same shape.
+the run went global or cold, which file/flag did it, and a `help:` line; or,
+for a run that was neither, its counts (changed files, dirty packages,
+direct and affected targets, the base index), with how many direct targets
+`output.exclude_tags` dropped from `affected` when any were. A label just
+narrows the same shape.
 
 `explain` shares `affected`'s computation, range and flags, but isn't a flag
 on it: output shape and audience differ. It narrates the same three phases on

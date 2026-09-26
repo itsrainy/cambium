@@ -201,7 +201,7 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
         "{}..{} was answered incrementally\n  \
          changed files      {}\n  \
          dirty packages     {}\n  \
-         direct targets     {}\n  \
+         direct targets     {}{}\n  \
          affected targets   {}\n  \
          {}\n",
         git_short(&report.base),
@@ -209,6 +209,7 @@ fn run_story(report: &AffectedReport, color: bool) -> String {
         report.stats.changed_files,
         report.stats.dirty_packages,
         report.stats.direct_targets,
+        excluded_by_tag(report.stats.direct_excluded_by_tag),
         report.stats.affected_targets,
         base_index(report),
     )
@@ -224,6 +225,16 @@ fn cause(found: Option<&Diagnostic>, reason: Option<&str>, color: bool) -> Strin
         (Some(d), _) => format!("{}\n", crate::diag::render_human(d, color)),
         (None, Some(r)) => format!("  because {r}\n"),
         (None, None) => String::new(),
+    }
+}
+
+/// Why `direct` can hold more targets than `affected`: the ones a tag in
+/// `output.exclude_tags` dropped, said beside the count they are part of.
+fn excluded_by_tag(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(", {n} of them dropped by output.exclude_tags")
     }
 }
 
@@ -417,6 +428,22 @@ mod tests {
              base index         e5ac543 (120 nodes)\n"
         );
         assert!(!out.contains("splic"), "{out}");
+    }
+
+    /// `affected` is `direct` plus its reverse closure less what
+    /// `output.exclude_tags` drops, so a run where direct targets were
+    /// dropped says how many, beside the number they are missing from.
+    #[test]
+    fn direct_targets_dropped_by_tag_are_said() {
+        let mut r = report();
+        r.stats.direct_targets = 172;
+        r.stats.affected_targets = 167;
+        r.stats.direct_excluded_by_tag = 8;
+        let out = render(&r, None, &About::Run, false);
+        assert!(
+            out.contains("  direct targets     172, 8 of them dropped by output.exclude_tags\n"),
+            "{out}"
+        );
     }
 
     #[test]
