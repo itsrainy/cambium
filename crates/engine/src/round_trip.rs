@@ -81,13 +81,19 @@
 //!
 //! One `deps` over every leaf, `--output=package`; one `loadfiles` over the
 //! same closure less the universe's packages, `--output=label`; and an
-//! `allpaths` graph only when the closure reaches back in. At the pins on
-//! warm output bases, before the `loadfiles` question was added: envoy, 752
-//! leaves and a closure of 1399 packages, 5.6 s of a 227 s cold build, 2
-//! leaves with edges; xla, 636 leaves and 488 packages, 1.8 s of 245 s, 34
-//! leaves with 74 edges. rules_shell, 28 leaves, 0.5 s. On a machine that
-//! has fetched nothing, the closure fetches every repository the leaves
-//! reach, which a build would too; that is not measured.
+//! `allpaths` graph only when the closure reaches back in. At the pins, on
+//! the output bases the cold builds warmed, with the laptop's load average
+//! near 100: envoy, 752 leaves and a closure of 1399 packages, 13.1 s of a
+//! 482 s cold build, 2 leaves with edges and nothing loaded from the main
+//! repository; xla, 636 leaves and 488 packages, 6.3 s of 174 s, 34 leaves
+//! with 74 edges and 14 main-repo `.bzl` files loaded outside (`tsl.bzl`,
+//! `py_strict.bzl`, `third_party/rules_python`'s); rules_shell, 28 leaves,
+//! 1.3 s, four `.bzl` files. Timed alone on a warm xla server the `deps` is
+//! 0.9 s and the `loadfiles` 0.8 s. On an output base that has fetched
+//! nothing (the repository cache warm) the `deps` alone took 952 s on xla:
+//! it fetches and loads every repository the leaves reach. A cold build's
+//! universe query has fetched most of those by then, which that number does
+//! not subtract.
 
 //! # Where the edges live
 //!
