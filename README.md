@@ -142,9 +142,17 @@ An empty file is skipped, because `bazel test` with no targets fails. Exit
 there and could not be read. A mistyped flag exits 1, with the parser's
 message on stderr and nothing on stdout, so the `*)` arm fails the job.
 
-The range is spelled as `git diff` spells it; a single ref means `<ref>..HEAD`,
-no range means the merge base of `[git].default_branch` with `HEAD` (or with
-`origin/<branch>` in a CI checkout that has no local branch).
+The range answers one question: what did `HEAD` change since it forked from
+the base. `origin/main..HEAD`, `origin/main...HEAD` and a single ref
+(`origin/main`, meaning `origin/main..HEAD`) all compare from the merge base
+of the two, which is the base itself whenever `HEAD` descends from it. On a
+branch behind `origin/main` it is not, and the run says so (`origin/main is
+not an ancestor of HEAD; comparing from their merge base <sha>`) rather than
+reading every commit `main` gained since as a change the branch reverted.
+Two commits with no merge base in the clone (a shallow clone cut above it)
+are `CAMBI-E013`, whose help says to deepen. No range means the merge base
+of `[git].default_branch` with `HEAD` (or with `origin/<branch>` in a CI
+checkout that has no local branch).
 `--dry-run` prints the plan (which index would load, how the diff classifies,
 whether the run would splice, cold-rebuild or go global) and exits before any
 Bazel query. One verdict is pending that query: the toolchain check reads rule

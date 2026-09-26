@@ -42,6 +42,12 @@ what it's for.
 The range is positional, like `git diff`: `cambi affected
 origin/main..HEAD`. A single ref means `<ref>..HEAD`; no ref means the
 default branch's merge base to `HEAD`. `--base`/`--head` remain aliases.
+Every spelling compares `HEAD` with where it forked from the base: the merge
+base of the two, which is the base itself when `HEAD` descends from it, so
+`A..B` and `A...B` are the same range. When the base is not an ancestor (a
+branch behind `origin/main`), the narration says so and names the merge base
+it compares from; with no merge base in the clone the run is `CAMBI-E013`,
+whose help says to deepen a shallow clone.
 When `[git].default_branch` has no local branch here (a CI checkout
 usually makes none), its remote-tracking branch `origin/<branch>` stands in,
 and the narration says so. A revision the clone does not have is

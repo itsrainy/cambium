@@ -248,7 +248,8 @@ pub fn plural_s<N: PartialEq + From<u8>>(n: N) -> &'static str {
 /// empty side is HEAD, so `main..` is `main..HEAD` and `..feature` is
 /// `HEAD..feature`. `None` when there is no `..` at all, which each verb
 /// reads its own way (a base for `affected`, the walk's end for `profile`).
-/// A three-dot range is each verb's usage error, checked before this.
+/// A three-dot range is read before this by the verbs that take one
+/// (`affected`, `explain`) and is a usage error for the others.
 pub fn two_dot(range: &str) -> Option<(String, String)> {
     let (from, to) = range.split_once("..")?;
     let side = |s: &str| if s.is_empty() { "HEAD" } else { s }.to_string();

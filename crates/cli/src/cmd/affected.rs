@@ -33,9 +33,10 @@ pub enum Hist {
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// The range, spelled as `git diff` spells it: `BASE..HEAD`, or a single
-    /// revision for `<rev>..HEAD`. With no range, the merge base of
-    /// `[git].default_branch` with HEAD.
+    /// The range: `BASE..HEAD`, `BASE...HEAD`, or a single revision for
+    /// `<rev>..HEAD`. Every spelling compares HEAD with where it forked from
+    /// BASE: their merge base, which is BASE itself when HEAD descends from
+    /// it. With no range, the merge base of `[git].default_branch` with HEAD.
     #[arg(value_name = "BASE..HEAD")]
     pub range: Option<String>,
     /// Revision to compare from (typically the merge base). The old spelling
@@ -177,12 +178,6 @@ pub fn check_usage(args: &Args) -> Result<()> {
             "`cambi affected {range}` already says which revisions to compare; drop {flag}"
         )));
     }
-    if range.contains("...") {
-        return Err(crate::diag::UsageError::raised(format!(
-            "`{range}`: cambi takes a two-dot range (BASE..HEAD); a bare revision already \
-             means <rev>..HEAD"
-        )));
-    }
     Ok(())
 }
 
@@ -206,10 +201,20 @@ pub struct Range {
 /// `rev-list` three calls into the run. A CI checkout is where this happens:
 /// `actions/checkout` makes no local branch, and a shallow fetch of a branch
 /// by bare name can leave it only in `FETCH_HEAD`.
+///
+/// Every spelling answers one question: what did HEAD change since it forked
+/// from BASE. `BASE..HEAD`, `BASE...HEAD`, a bare `BASE` and the old flags
+/// all compare from the merge base of the two, which is BASE itself when
+/// BASE is an ancestor of HEAD; when it is not (a branch behind
+/// `origin/main`), the note says which commit the run compares from. Git
+/// reads `BASE..HEAD` as the two tips, and on a branch behind its base that
+/// reads every commit the base gained since as a change HEAD reverted.
 pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<Range> {
     let repo = engine.repo();
     let (base, head) = if let Some(range) = &args.range {
-        two_dot(range).unwrap_or_else(|| (range.clone(), "HEAD".to_string()))
+        three_dot(range)
+            .or_else(|| two_dot(range))
+            .unwrap_or_else(|| (range.clone(), "HEAD".to_string()))
     } else {
         let head = args.head.clone().unwrap_or_else(|| "HEAD".to_string());
         match &args.base {
@@ -239,10 +244,51 @@ pub fn resolve_range(engine: &cambium_engine::Engine, args: &Args) -> Result<Ran
     };
     require_commit(repo, &base)?;
     require_commit(repo, &head)?;
+    fork_point(repo, base, head)
+}
+
+/// `A...B` as `git diff` reads it: an empty side is HEAD. `None` when there
+/// is no `...`.
+fn three_dot(range: &str) -> Option<(String, String)> {
+    let (from, to) = range.split_once("...")?;
+    let side = |s: &str| if s.is_empty() { "HEAD" } else { s }.to_string();
+    Some((side(from), side(to)))
+}
+
+/// The range from where `head` forked off `base`: `base` itself when it is
+/// an ancestor of `head`, and their merge base, with a note saying so, when
+/// it is not.
+fn fork_point(repo: &cambium_diff::Repo, base: String, head: String) -> Result<Range> {
+    let merge_base = repo.merge_base(&base, &head).map_err(|e| {
+        let why = git_detail(&e)
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default();
+        crate::diag::UsageError::raised_with_help(
+            format!(
+                "no merge base between {base} and {head} in this clone{why}, so there is no \
+                 commit {head} forked from to compare with"
+            ),
+            format!(
+                "a shallow clone can stop short of it: fetch more history (`git fetch \
+                 --deepen=N`, or `--unshallow`); otherwise pass a base {head} descends from"
+            ),
+        )
+    })?;
+    if repo.rev_parse(&base).is_ok_and(|b| b == merge_base) {
+        return Ok(Range {
+            base,
+            head,
+            note: None,
+        });
+    }
+    let note = format!(
+        "{base} is not an ancestor of {head}; comparing from their merge base {}",
+        &merge_base[..merge_base.len().min(7)]
+    );
     Ok(Range {
-        base,
+        base: merge_base,
         head,
-        note: None,
+        note: Some(note),
     })
 }
 
@@ -1389,9 +1435,15 @@ mod tests {
         assert!(d.help.expect("a help line").contains("check the spelling"));
     }
 
+    /// `A...B` is git's own spelling of the merge base, which is what every
+    /// spelling of the range compares from, so it is taken, not refused.
     #[test]
-    fn a_three_dot_range_says_what_to_type_instead() {
-        let err = super::check_usage(&parse(&["a...b"])).expect_err("a usage error");
-        assert!(err.to_string().contains("two-dot range"), "{err}");
+    fn a_three_dot_range_is_a_range() {
+        assert!(super::check_usage(&parse(&["a...b"])).is_ok());
+        let read = |r: &str| super::three_dot(r).unwrap();
+        assert_eq!(read("a...b"), ("a".to_string(), "b".to_string()));
+        assert_eq!(read("a..."), ("a".to_string(), "HEAD".to_string()));
+        assert_eq!(read("...b"), ("HEAD".to_string(), "b".to_string()));
+        assert!(super::three_dot("a..b").is_none());
     }
 }

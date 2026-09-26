@@ -1959,3 +1959,65 @@ fn an_unpinned_workspace_only_tree_is_warned_about() {
         "{stdout}{stderr}"
     );
 }
+
+/// A branch behind `main`: every spelling of the range compares HEAD with
+/// where it forked, the merge base, and says so when that is not the base
+/// that was typed. `main..HEAD` used to diff main's tip against HEAD, which
+/// for a branch 127 commits behind reads as reverting all of them; `main...HEAD`,
+/// which is git's own spelling of the merge base, was refused.
+#[test]
+fn every_spelling_of_a_range_compares_from_the_merge_base() {
+    let f = published_fixture(1);
+    let ws = f.ws.to_str().unwrap();
+    let cache = f.cache.to_str().unwrap();
+    let fork = &f.commits[1];
+    // `main` is at the last commit; the branch forks two commits back.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "-b", "feature", fork]);
+    std::fs::create_dir_all(f.ws.join("notes")).unwrap();
+    std::fs::write(f.ws.join("notes/README.md"), "notes\n").unwrap();
+    cambium_testkit::git(&f.ws, &["add", "notes"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "notes"]);
+    let head = cambium_testkit::git(&f.ws, &["rev-parse", "HEAD"]);
+    let expected = format!("plan for {}..{}", &fork[..7], &head[..7]);
+
+    let plan = |argv: &[&str]| {
+        let mut a = vec!["-C", ws, "--cache-dir", cache, "affected", "--dry-run"];
+        a.extend_from_slice(argv);
+        let (code, stdout, stderr) = run(&a);
+        assert_eq!(code, 0, "{argv:?}: {stderr}{stdout}");
+        (
+            stdout.lines().next().unwrap_or_default().to_string(),
+            stderr,
+        )
+    };
+    for argv in [
+        &["main..HEAD"][..],
+        &["main...HEAD"],
+        &["main"],
+        &["--base", "main"],
+    ] {
+        let (first, stderr) = plan(argv);
+        assert_eq!(first, expected, "{argv:?}");
+        assert!(
+            stderr.contains(&format!("comparing from their merge base {}", &fork[..7])),
+            "{argv:?}: the moved base is said:\n{stderr}"
+        );
+        assert!(!stderr.contains("CAMBI-E013"), "{argv:?}: {stderr}");
+    }
+    // No range at all already meant this; it still does.
+    let (first, _) = plan(&[]);
+    assert_eq!(first, expected);
+    // A base HEAD descends from is the base, and nothing is said about it.
+    let (first, stderr) = plan(&[&format!("{fork}..HEAD")]);
+    assert_eq!(first, expected);
+    assert!(!stderr.contains("merge base"), "{stderr}");
+
+    // A range that cannot be anchored is an error that says why, not a diff
+    // against an unrelated tip.
+    cambium_testkit::git(&f.ws, &["checkout", "-q", "--orphan", "island"]);
+    cambium_testkit::git(&f.ws, &["commit", "-q", "-m", "unrelated"]);
+    let (code, stdout, stderr) = run(&["-C", ws, "affected", "--dry-run", "main..HEAD"]);
+    assert_eq!(code, 1, "{stderr}{stdout}");
+    assert!(stderr.contains("error[CAMBI-E013]"), "{stderr}");
+    assert!(stderr.contains("no merge base"), "{stderr}");
+}

@@ -198,10 +198,11 @@ $ git fetch --no-tags --depth=20 origin main:refs/remotes/origin/main
 $ cambi affected origin/main..HEAD --tests-only --no-full-build --format labels
 ```
 
-Prefer `HEAD^1` on a merge commit: `origin/main` fetched during the job
-can already be ahead of the commit GitHub merged onto, and the range then
-starts from a different commit than the one the change was merged with.
-With no range at all, `cambi affected` compares from the merge base of
+`HEAD^1` on a merge commit needs no remote-tracking branch at all.
+`origin/main` fetched during the job can already be ahead of the commit
+GitHub merged onto; the range still compares from the merge base of the
+two, which is that commit (`HEAD^1`), and the narration names it. With no
+range at all, `cambi affected` compares from the merge base of
 `[git].default_branch` with `HEAD`, using `origin/<branch>` when the clone
 has no local branch; in a shallow clone that merge base may be missing
 (`CAMBI-E013`, whose help says to deepen).
