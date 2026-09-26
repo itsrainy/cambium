@@ -385,6 +385,21 @@ impl SynthGraph {
         c.workspace = c.graph.workspace_closure(&files, &mapping);
         c
     }
+
+    /// Rebuilds `pkg_by_path` (live packages only) and `bzl_by_path` from the
+    /// vectors they index.
+    fn rebuild_path_indexes(&mut self) {
+        self.pkg_by_path.clear();
+        for (i, p) in self.packages.iter().enumerate() {
+            if p.alive {
+                self.pkg_by_path.insert(p.path.clone(), i as u32);
+            }
+        }
+        self.bzl_by_path.clear();
+        for (i, b) in self.bzl.iter().enumerate() {
+            self.bzl_by_path.insert(b.path.clone(), i as u32);
+        }
+    }
 }
 
 /// Generates a graph from a spec.
@@ -396,7 +411,7 @@ impl SynthGraph {
 /// `exports_files` relationships.
 pub fn generate(spec: &GraphSpec) -> SynthGraph {
     let mut rng = ChaCha8Rng::seed_from_u64(spec.seed);
-    let (mut packages, pkg_by_path) = gen_packages(spec, &mut rng);
+    let mut packages = gen_packages(spec, &mut rng);
     let bzl = gen_bzl(spec, &mut rng, &mut packages);
     let layout = gen_targets(spec, &mut rng, &mut packages);
     let mut targets = layout.targets;
@@ -414,19 +429,16 @@ pub fn generate(spec: &GraphSpec) -> SynthGraph {
         packages,
         targets,
         bzl,
-        pkg_by_path,
+        pkg_by_path: FxHashMap::default(),
         bzl_by_path: FxHashMap::default(),
     };
-    g.rebuild_pkg_index();
+    g.rebuild_path_indexes();
     g
 }
 
 /// The packages: as many as the spec names, or enough to hold the targets at
 /// the mean package size, with paths whose ancestor segments are shared.
-fn gen_packages(
-    spec: &GraphSpec,
-    rng: &mut ChaCha8Rng,
-) -> (Vec<SynthPackage>, FxHashMap<String, u32>) {
+fn gen_packages(spec: &GraphSpec, rng: &mut ChaCha8Rng) -> Vec<SynthPackage> {
     let per_pkg = spec.targets_per_package.mean_hint().max(1.0);
     let n_pkgs = if spec.packages > 0 {
         spec.packages
@@ -435,7 +447,6 @@ fn gen_packages(
     };
 
     let mut packages: Vec<SynthPackage> = Vec::with_capacity(n_pkgs as usize);
-    let mut pkg_by_path = FxHashMap::default();
     for i in 0..n_pkgs {
         let depth = spec.path_depth.sample(rng).max(1);
         let mut path = String::new();
@@ -455,7 +466,6 @@ fn gen_packages(
         } else {
             path.push_str(&format!("/p{i}"));
         }
-        pkg_by_path.insert(path.clone(), i as u32);
         packages.push(SynthPackage {
             path,
             targets: Vec::new(),
@@ -464,7 +474,7 @@ fn gen_packages(
             alive: true,
         });
     }
-    (packages, pkg_by_path)
+    packages
 }
 
 /// The `.bzl` files, and which packages load which.
@@ -848,21 +858,6 @@ fn gen_exports(spec: &GraphSpec, packages: &mut [SynthPackage], targets: &mut [S
         targets[ct as usize]
             .foreign_srcs
             .push((exporter as u32, et, slot));
-    }
-}
-
-impl SynthGraph {
-    pub(crate) fn rebuild_pkg_index(&mut self) {
-        self.pkg_by_path.clear();
-        for (i, p) in self.packages.iter().enumerate() {
-            if p.alive {
-                self.pkg_by_path.insert(p.path.clone(), i as u32);
-            }
-        }
-        self.bzl_by_path.clear();
-        for (i, b) in self.bzl.iter().enumerate() {
-            self.bzl_by_path.insert(b.path.clone(), i as u32);
-        }
     }
 }
 
