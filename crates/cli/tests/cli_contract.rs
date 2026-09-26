@@ -1332,3 +1332,38 @@ fn gc_removes_a_lineage_the_configuration_moved_away_from() {
     );
     assert!(!listed().contains(&f.lineage));
 }
+
+/// Diagnostics colour by the narration's rule: `CLICOLOR_FORCE` colours a
+/// pipe, and `TERM=dumb` and `CLICOLOR=0` keep even that plain.
+#[test]
+fn diagnostics_colour_by_the_same_rule_as_the_narration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.cmbx");
+    let stderr_under = |env: &[(&str, &str)]| {
+        let mut cmd = Command::new(CAMBI);
+        cmd.args(["inspect", "stats", missing.to_str().unwrap()]);
+        for k in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "TERM", "CI"] {
+            cmd.env_remove(k);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("the binary should be runnable");
+        assert_eq!(out.status.code(), Some(1));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let forced = stderr_under(&[("CLICOLOR_FORCE", "1")]);
+    assert!(
+        forced.contains("\x1b[1;31merror[CAMBI-E"),
+        "CLICOLOR_FORCE colours the diagnostic down a pipe:\n{forced:?}"
+    );
+    for off in [
+        &[("CLICOLOR_FORCE", "1"), ("TERM", "dumb")][..],
+        &[("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")],
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+        &[],
+    ] {
+        let plain = stderr_under(off);
+        assert!(!plain.contains('\x1b'), "{off:?}:\n{plain:?}");
+    }
+}

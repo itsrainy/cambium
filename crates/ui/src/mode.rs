@@ -43,6 +43,17 @@ impl OutputMode {
         Self::decide(quiet, jsonl, colour, &Env::read())
     }
 
+    /// Whether text on stderr takes colour, by the rule the narration uses:
+    /// `--color`, then `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM=dumb`
+    /// and whether stderr is a terminal.
+    ///
+    /// For what is printed whatever [`Kind`] the run got: a diagnostic, or
+    /// an error under `--quiet`. The narration's own `colour` is this and
+    /// also off for the kinds that draw no text.
+    pub fn stderr_colour(colour: ColorChoice) -> bool {
+        colour_for(colour, &Env::read())
+    }
+
     pub fn silent() -> Self {
         Self {
             kind: Kind::Null,
@@ -65,20 +76,25 @@ impl OutputMode {
         } else {
             Kind::Plain
         };
-        let colour = match colour {
-            ColorChoice::Never => false,
-            ColorChoice::Always => true,
-            // NO_COLOR and CLICOLOR=0 turn it off whatever the terminal is;
-            // CLICOLOR_FORCE turns it on even down a pipe.
-            ColorChoice::Auto => {
-                !env.no_color && !env.clicolor_off && !env.dumb && (env.clicolor_force || env.tty)
-            }
-        } && !matches!(kind, Kind::Jsonl | Kind::Null);
+        let colour = colour_for(colour, env) && !matches!(kind, Kind::Jsonl | Kind::Null);
         Self {
             kind,
             live: matches!(kind, Kind::Stream),
             colour,
             width: crate::row::terminal_width(),
+        }
+    }
+}
+
+/// The one colour rule, for the narration and the diagnostics alike.
+fn colour_for(colour: ColorChoice, env: &Env) -> bool {
+    match colour {
+        ColorChoice::Never => false,
+        ColorChoice::Always => true,
+        // NO_COLOR and CLICOLOR=0 turn it off whatever the terminal is;
+        // CLICOLOR_FORCE turns it on even down a pipe.
+        ColorChoice::Auto => {
+            !env.no_color && !env.clicolor_off && !env.dumb && (env.clicolor_force || env.tty)
         }
     }
 }
@@ -181,5 +197,28 @@ mod tests {
         };
         let m = OutputMode::decide(false, false, ColorChoice::Auto, &forced);
         assert!(m.colour && m.kind == Kind::Plain);
+    }
+
+    /// The diagnostics' rule is the narration's, minus the kinds: an error
+    /// printed under `--quiet` still colours on a terminal.
+    #[test]
+    fn stderr_colour_is_the_same_rule_whatever_the_kind() {
+        let dumb = Env {
+            dumb: true,
+            ..tty()
+        };
+        assert!(!colour_for(ColorChoice::Auto, &dumb));
+        let zero = Env {
+            clicolor_off: true,
+            ..tty()
+        };
+        assert!(!colour_for(ColorChoice::Auto, &zero));
+        let forced = Env {
+            clicolor_force: true,
+            ..Env::default()
+        };
+        assert!(colour_for(ColorChoice::Auto, &forced));
+        assert!(colour_for(ColorChoice::Auto, &tty()));
+        assert!(!OutputMode::decide(true, false, ColorChoice::Auto, &tty()).colour);
     }
 }

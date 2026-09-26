@@ -373,12 +373,10 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   consumer succeeded.
 - Results to stdout; progress and diagnostics to stderr, and nothing at all
   on stderr on success under `--quiet`. A non-TTY stderr is not silent: it
-  loses the live line, not the run. The narration below and `--log` lines
-  are coloured only when stderr is a TTY, never under `NO_COLOR`,
-  `CLICOLOR=0` or `TERM=dumb`, always under `--color always` or
-  `CLICOLOR_FORCE`. Diagnostics read only `--color` and `NO_COLOR`: colour
-  on a TTY unless `NO_COLOR` is set, never down a pipe unless `--color
-  always`.
+  loses the live line, not the run. The narration below, `--log` lines
+  and the diagnostics are coloured by one rule: only when stderr is a TTY,
+  never under `NO_COLOR`, `CLICOLOR=0` or `TERM=dumb`, always under
+  `--color always` or `CLICOLOR_FORCE`.
 - A long run narrates itself on stderr in one grammar, the same for every
   verb that has one (`profile` is the first on it): a
   header line `cambium <verb>  <repo>  <range>  <note>`, a phase line per

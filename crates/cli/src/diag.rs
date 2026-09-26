@@ -24,7 +24,8 @@ pub struct Renderer {
     /// `--quiet`: nothing on stderr on success. An error still speaks, because
     /// an exit code with no message is not a diagnosis.
     pub quiet: bool,
-    /// Resolved from `--color`, `$NO_COLOR` and whether stderr is a TTY.
+    /// Resolved from `--color` and the environment by the narration's rule
+    /// ([`cambium_ui::OutputMode::stderr_colour`]).
     pub color: bool,
 }
 

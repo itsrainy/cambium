@@ -87,7 +87,9 @@ struct Cli {
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 
-    /// Colour on stderr. `auto` means: a TTY, and `$NO_COLOR` unset.
+    /// Colour on stderr. `auto` means: a TTY, `$NO_COLOR` unset,
+    /// `$CLICOLOR` not 0 and `$TERM` not dumb; `$CLICOLOR_FORCE` colours a
+    /// pipe.
     #[arg(long, value_enum, global = true, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
 
@@ -201,18 +203,12 @@ pub enum ColorChoice {
     Never,
 }
 
-impl ColorChoice {
-    /// Whether to colour stderr. `$NO_COLOR` wins over `auto` and loses to an
-    /// explicit `--color always`, which is what a caller asking for colour in
-    /// a pipe means.
-    fn resolve(self) -> bool {
-        use std::io::IsTerminal;
-        match self {
-            ColorChoice::Always => true,
-            ColorChoice::Never => false,
-            ColorChoice::Auto => {
-                std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
-            }
+impl From<ColorChoice> for cambium_ui::ColorChoice {
+    fn from(c: ColorChoice) -> Self {
+        match c {
+            ColorChoice::Auto => cambium_ui::ColorChoice::Auto,
+            ColorChoice::Always => cambium_ui::ColorChoice::Always,
+            ColorChoice::Never => cambium_ui::ColorChoice::Never,
         }
     }
 }
@@ -247,19 +243,18 @@ fn main() -> ExitCode {
             }
         },
     };
+    // One colour rule for the diagnostics and the narration (the ui crate's):
+    // a diagnostic that ignored CLICOLOR or TERM=dumb would paint escapes
+    // into a log the narration beside it kept plain.
     let render = diag::Renderer {
         format: cli.format,
         quiet: cli.quiet,
-        color: cli.color.resolve(),
+        color: cambium_ui::OutputMode::stderr_colour(cli.color.into()),
     };
     let ui = cambium_ui::OutputMode::detect(
         cli.quiet,
         cli.format == Format::Jsonl,
-        match cli.color {
-            ColorChoice::Auto => cambium_ui::ColorChoice::Auto,
-            ColorChoice::Always => cambium_ui::ColorChoice::Always,
-            ColorChoice::Never => cambium_ui::ColorChoice::Never,
-        },
+        cli.color.into(),
     );
     // After the output mode, because the log lines go to the same stderr and
     // colour by the same rule: escape codes on a terminal, plain bytes in a
