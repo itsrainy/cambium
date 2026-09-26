@@ -385,6 +385,27 @@ mod tests {
     }
 
     #[test]
+    fn a_record_cut_short_is_an_error() {
+        for out in ["M\0", "R100\0a\0", "C75\0"] {
+            assert!(
+                matches!(parse_name_status_z(out), Err(GitError::BadStatus(_))),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmerged_and_unknown_records_read_as_modifications() {
+        assert_eq!(
+            parse_name_status_z("U\0a.cc\0X\0b.cc\0").unwrap(),
+            vec![
+                Change::new(Status::Modified, "a.cc"),
+                Change::new(Status::Modified, "b.cc"),
+            ]
+        );
+    }
+
+    #[test]
     fn diff_lists_each_path_that_changed() {
         let f = TwoCommits::new();
         let repo = Repo::new(&f.root);
@@ -393,6 +414,20 @@ mod tests {
             vec![
                 Change::new(Status::Modified, "lib/a.cc"),
                 Change::new(Status::Added, "lib/b.cc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_reads_a_rename_as_a_delete_and_an_add() {
+        let f = TwoCommits::new();
+        f.git(&["mv", "lib/b.cc", "lib/c.cc"]);
+        f.git(&["commit", "-qm", "rename"]);
+        assert_eq!(
+            Repo::new(&f.root).diff(&f.second, "HEAD").unwrap(),
+            vec![
+                Change::new(Status::Deleted, "lib/b.cc"),
+                Change::new(Status::Added, "lib/c.cc"),
             ]
         );
     }
@@ -446,6 +481,13 @@ mod tests {
                 .unwrap(),
             vec![f.first]
         );
+    }
+
+    #[test]
+    fn no_ancestors_are_walked_when_none_are_allowed() {
+        let f = TwoCommits::new();
+        let repo = Repo::new(&f.root);
+        assert!(repo.first_parent_ancestors("HEAD", 0).unwrap().is_empty());
     }
 
     #[test]

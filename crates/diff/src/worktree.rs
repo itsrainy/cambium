@@ -158,4 +158,55 @@ mod tests {
         }
         assert!(!wt_path.exists(), "the worktree should be gone");
     }
+
+    #[test]
+    fn a_kept_worktree_stays_on_disk_and_registered() {
+        let f = TwoCommits::new();
+        let wt_path = f.dir.path().join("wt");
+        Worktree::create(&f.root, &f.first, &wt_path)
+            .unwrap()
+            .keep();
+        assert_eq!(std::fs::read(wt_path.join("lib/a.cc")).unwrap(), b"one");
+        let listed = f.git(&["worktree", "list", "--porcelain"]);
+        assert!(
+            listed
+                .lines()
+                .any(|l| l.starts_with("worktree ") && l.ends_with("/wt")),
+            "{listed}"
+        );
+    }
+
+    #[test]
+    fn an_existing_worktree_is_reused_at_the_new_revision_and_left_behind() {
+        let f = TwoCommits::new();
+        let wt_path = f.dir.path().join("wt");
+        Worktree::create(&f.root, &f.first, &wt_path)
+            .unwrap()
+            .keep();
+        // A local edit the reuse has to discard, not carry over.
+        std::fs::write(wt_path.join("lib/a.cc"), "edited").unwrap();
+        {
+            let wt = Worktree::create(&f.root, &f.second, &wt_path).unwrap();
+            assert_eq!(std::fs::read(wt.path().join("lib/a.cc")).unwrap(), b"two");
+            assert_eq!(
+                crate::testrepo::git(wt.path(), &["rev-parse", "HEAD"]),
+                f.second
+            );
+        }
+        assert!(
+            wt_path.join("lib/a.cc").exists(),
+            "a reused worktree belongs to whoever made it"
+        );
+    }
+
+    #[test]
+    fn a_stale_directory_that_is_not_a_worktree_is_replaced() {
+        let f = TwoCommits::new();
+        let wt_path = f.dir.path().join("wt");
+        std::fs::create_dir_all(&wt_path).unwrap();
+        std::fs::write(wt_path.join("leftover"), "x").unwrap();
+        let wt = Worktree::create(&f.root, &f.first, &wt_path).unwrap();
+        assert!(!wt.path().join("leftover").exists());
+        assert_eq!(std::fs::read(wt.path().join("lib/a.cc")).unwrap(), b"one");
+    }
 }
