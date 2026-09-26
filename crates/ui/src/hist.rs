@@ -4,7 +4,7 @@
 //! [`columns`] is a vertical column chart, eight rows tall, with each value
 //! printed directly above its own column and the labels centred under an axis
 //! line. [`bars`] is one horizontal block bar per bin with the count after
-//! it. Both stay inside [`crate::ROW_CAP`]: past that the column chart drops
+//! it. Both stay inside [`crate::row::ROW_CAP`]: past that the column chart drops
 //! to every other value, then every other label, and only then narrows the
 //! bars.
 

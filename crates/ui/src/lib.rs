@@ -36,5 +36,4 @@ mod sink;
 pub use event::{Align, Cell, Column, Event, Level, Style, Width};
 pub use mode::{ColorChoice, Kind, OutputMode};
 pub use paint::Paint;
-pub use row::{terminal_width, ROW_CAP};
 pub use sink::{boxed, Jsonl, Null, Plain, Sink, Stream};

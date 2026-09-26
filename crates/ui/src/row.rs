@@ -11,14 +11,14 @@ use crate::paint::Paint;
 /// A row never grows past this many columns.
 pub const ROW_CAP: usize = 96;
 /// Rows sit inside their phase.
-pub const INDENT: usize = 4;
+pub(crate) const INDENT: usize = 4;
 /// The narrowest a flexible column is ever squeezed to.
 const FLEX_MIN: usize = 24;
 /// The width assumed when there is no terminal to measure.
 const PIPE_WIDTH: usize = 80;
 
 /// Terminal width, or the 80 columns a pipe is assumed to have.
-pub fn terminal_width() -> usize {
+pub(crate) fn terminal_width() -> usize {
     crossterm::terminal::size()
         .ok()
         .map(|(w, _)| w as usize)
@@ -27,7 +27,7 @@ pub fn terminal_width() -> usize {
 }
 
 /// Pads `s` to `n` columns, or truncates it to `n` with a trailing ellipsis.
-pub fn fit(s: &str, n: usize, align: Align) -> String {
+pub(crate) fn fit(s: &str, n: usize, align: Align) -> String {
     let count = s.chars().count();
     if count > n {
         let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
