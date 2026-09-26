@@ -488,23 +488,16 @@ mod tests {
         // The parser, over what `git diff --name-status` prints.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let git = |args: &[&str]| crate::tools::git(dir, args).unwrap();
-        git(&["init", "--quiet", "-b", "main", "."]);
-        git(&["config", "user.email", "t@example.com"]);
-        git(&["config", "user.name", "t"]);
-        std::fs::write(dir.join("a"), "one").unwrap();
-        std::fs::write(dir.join("b"), "two").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "--quiet", "-m", "one"]);
-        let parent = crate::tools::git(dir, &["rev-parse", "HEAD"]).unwrap();
+        cambium_testkit::init_repo(dir);
+        cambium_testkit::write(dir, "a", "one");
+        cambium_testkit::write(dir, "b", "two");
+        let parent = cambium_testkit::commit_all(dir, "one");
         std::fs::rename(dir.join("a"), dir.join("c")).unwrap();
         std::fs::remove_file(dir.join("b")).unwrap();
-        std::fs::write(dir.join("d"), "new").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "--quiet", "-m", "two"]);
-        let head = crate::tools::git(dir, &["rev-parse", "HEAD"]).unwrap();
+        cambium_testkit::write(dir, "d", "new");
+        let head = cambium_testkit::commit_all(dir, "two");
 
-        let changed = changed_paths(dir, parent.trim(), head.trim()).unwrap();
+        let changed = changed_paths(dir, &parent, &head).unwrap();
         let by_path: BTreeMap<&str, &str> = changed
             .iter()
             .map(|c| (c.path.as_str(), c.status.as_str()))

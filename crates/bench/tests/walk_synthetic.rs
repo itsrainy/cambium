@@ -204,22 +204,7 @@ fn append_loose_commit(f: &mut Fixture, paths: &[&str]) -> String {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "notes\n").unwrap();
     }
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
-    git(&["add", "-A"]);
-    git(&["commit", "-q", "-m", "loose files"]);
-    let sha = git(&["rev-parse", "HEAD"]);
+    let sha = cambium_testkit::commit_all(root, "loose files");
     let graph = f.driver.graphs.last().unwrap().clone();
     f.driver.graphs.push(graph);
     f.driver.commits.push(sha.clone());

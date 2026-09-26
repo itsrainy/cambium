@@ -711,23 +711,11 @@ mod tests {
     fn a_base_worktree_is_created_moved_and_removed() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
-        git(&repo, &["config", "user.email", "t@example.com"]).unwrap();
-        git(&repo, &["config", "user.name", "t"]).unwrap();
-        std::fs::write(repo.join("a.txt"), "one").unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["commit", "--quiet", "-m", "one"]).unwrap();
-        let first = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
-        std::fs::write(repo.join("a.txt"), "two").unwrap();
-        git(&repo, &["commit", "--quiet", "-am", "two"]).unwrap();
-        let second = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
+        cambium_testkit::init_repo(&repo);
+        cambium_testkit::write(&repo, "a.txt", "one");
+        let first = cambium_testkit::commit_all(&repo, "one");
+        cambium_testkit::write(&repo, "a.txt", "two");
+        let second = cambium_testkit::commit_all(&repo, "two");
 
         let scratch = dir.path().join("scratch");
         let path = {

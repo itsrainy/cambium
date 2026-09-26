@@ -244,7 +244,6 @@ pub fn parse_output(text: &str) -> Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::git;
 
     fn ctx(scratch: &Path) -> RunContext {
         RunContext {
@@ -390,23 +389,11 @@ mod tests {
         // worktree's registered path already resolved.
         let dir_path = dir.path().canonicalize().unwrap();
         let repo = dir_path.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--quiet", "-b", "main"]).unwrap();
-        git(&repo, &["config", "user.email", "t@example.com"]).unwrap();
-        git(&repo, &["config", "user.name", "t"]).unwrap();
-        std::fs::write(repo.join("a.txt"), "one").unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["commit", "--quiet", "-m", "one"]).unwrap();
-        let base = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
-        std::fs::write(repo.join("a.txt"), "two").unwrap();
-        git(&repo, &["commit", "--quiet", "-am", "two"]).unwrap();
-        let head = git(&repo, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string();
+        cambium_testkit::init_repo(&repo);
+        cambium_testkit::write(&repo, "a.txt", "one");
+        let base = cambium_testkit::commit_all(&repo, "one");
+        cambium_testkit::write(&repo, "a.txt", "two");
+        let head = cambium_testkit::commit_all(&repo, "two");
 
         let scratch = dir_path.join("scratch");
         let stub = write_stub(&dir_path);
