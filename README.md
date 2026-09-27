@@ -215,31 +215,39 @@ exact S3 and GCS command templates.
 `cambium-bench` walked the first-parent history of five open-source Bazel
 repositories, bazel, envoy, sourcegraph, apollo and xla, 300 commits each
 and 74 for apollo, carrying one index forward a commit at a time the way a
-CI job would, and checked each step's answer against Bazel's own `rdeps`
-query. On every step the check ran on (288, 288, 297, 73 and 296 of them),
-cambium's answer held every target Bazel named: worst recall 1.0000 on all
-five. At the median step the answer was exact on bazel, sourcegraph and xla
-(tightness p50 1.000, Bazel's count over cambium's) and a little wider on
-envoy (0.973) and apollo (0.969). A step cost 96 ms to 3.1 s at the median
-across the five (p90 0.8 to 14.3 s), against 7.0 to 24.8 s for bazel-diff
-and 19.1 to 225.5 s for Tango, which recompute the whole graph every time
-and ran on a stratified sample of 40 steps. All of it is from one 16 vCPU
-Linux machine, with Bazel's server warm across steps and no index store,
-so a CI runner pays more ([docs/CI.md](docs/CI.md#what-a-cold-runner-pays)).
+CI job would. Every step's answer was checked against Bazel's own `rdeps`
+query; at the last commit the carried index was compared row by row with
+one built from scratch (the rebuild oracle); and two peers, bazel-diff and
+Tango, ran on a stratified sample of 40 steps. envoy and xla are from box
+run G (2026-09-27, `9655ce3`), the other three from box run A
+(2026-09-19/20).
 
-The ⚠ beside envoy, sourcegraph, apollo and xla in
-[docs/RESULTS.md](docs/RESULTS.md) is a second, stricter check: the index
-carried through the whole walk is compared row by row with one built from
-scratch at the last commit, and on those four they differ. On envoy and
-xla every differing row was read, and they trace to the reference build's
-own Bazel server, which had run every earlier step, rather than to rows
-the carried index should have; envoy also has 11 rules whose hash differs
-from the reference build's, not yet diagnosed. The reference build now
-starts on a fresh Bazel server, and a re-measure with it is pending;
-sourcegraph's and apollo's rows have not been read. envoy's `rdeps` answer
-is also a lower bound on 123 of its 288 steps, where Bazel cannot resolve
-some targets and drops what depends on them, and [Known gaps](#known-gaps)
-names routes the check cannot see. docs/RESULTS.md has every number and
+On every step the check ran on (288, 282, 297, 73 and 296 of them),
+cambium's answer held every target Bazel named: 0 missing labels, worst
+recall 1.0000 on all five. The rebuild oracle held on bazel, envoy and xla.
+At the median step the answer was exact on bazel, sourcegraph and xla
+(tightness p50 1.000, Bazel's count over cambium's) and a little wider on
+envoy (0.986) and apollo (0.969). A step cost 96 ms to 3.1 s at the median
+across the five (p90 0.8 to 17.4 s), against 7.0 to 24.8 s for bazel-diff
+and 19.1 to 217.8 s for Tango, which recompute the whole graph every time.
+All of it is from one 16 vCPU Linux machine with Bazel's server warm across
+steps and no index store, so a CI runner pays more
+([docs/CI.md](docs/CI.md#what-a-cold-runner-pays)); envoy's and xla's
+index builds (121 s and 174 s) were on cold output bases.
+
+The check has limits, and the tables say where. The `rdeps` answer is a
+lower bound wherever Bazel cannot resolve a target and drops what depends
+on it (112 of envoy's 282 steps, 295 of xla's 296). Three xla steps, at
+and just after two LLVM upgrades whose patches do not apply, are
+oracle-blind: the changed packages cannot load, so Bazel cannot say what
+they reach, and they count as neither sound nor missing. The ⚠ beside sourcegraph and apollo in
+[docs/RESULTS.md](docs/RESULTS.md) is run A's rebuild oracle, which ran on
+the walk's own Bazel server; on envoy and xla the same kind of failure
+traced to that server's leftovers, and it passed once the reference build
+had a fresh server, but sourcegraph's and apollo's rows have not been read.
+xla's index is partial on 296 of its 300 steps by two Windows toolchain
+packages that cannot load on Linux. [Known gaps](#known-gaps) names routes
+the check cannot see; docs/RESULTS.md has every number and
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) what each one can claim.
 
 ## How it works

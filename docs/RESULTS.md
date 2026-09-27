@@ -16,7 +16,7 @@ subject with a history and no change-set run still gets its cold-build and
 latency tables, and a result file written before a field existed says so.
 
 For a first reading, [Summary](#summary) has one row per subject and a
-legend for its columns, and the README's "How it did" says the same in two
+legend for its columns, and the README's "How it did" says the same in three
 paragraphs. **Findings**, next, is the maintainers' account of the runs,
 with the commits and machines they ran on.
 
@@ -58,8 +58,8 @@ whose sources live in the tree (Phase 5 of docs/ROADMAP.md) is the answer,
 and box run B measures it: the universe is widened by `@tsl` on xla and
 `@envoy_api` on envoy, an external package's key is Bazel's own spelling
 (`@tsl//tsl/platform`), and all four steps are sound, worst recall 1.0000
-over 296 oracle steps. The rebuild oracle still fails at both pins, and
-what its rows were is further down this section.
+over 296 oracle steps. The rebuild oracle failed at both pins in that run;
+what its rows were, and why run G's passes, is further down this section.
 
 Where the changed side of the round trip is a nameable path an invalidator is
 the sound fix, which is how `subject_repos.toml` came to list
@@ -68,149 +68,140 @@ stage derives both from `MODULE.bazel` and the workspace `.bzl` closure and maps
 them onto `@envoy_api` / `@envoy_repo`, so envoy's invalidator list is now empty
 and the mapping is what the rebuild oracle checks.
 
-**The runs these tables are from.** bazel, sourcegraph and apollo are box
-run A, 2026-09-19 to 2026-09-20; xla is box run B, 2026-09-23, the engine at
-`7a4abfd` with in-tree external repositories indexed; envoy is box run E,
-2026-09-25, the engine at `a1606bf` with the consumer table and the oracle
-rooted at in-tree labels. Only the subjects a change can reach were re-run.
-Both runs: 300 first-parent steps each except apollo's 74, the recall oracle
-on every step, the bazel-diff and tango peers on a stratified sample of 40,
-every subject cold-building its own index at the start of its window (and
-again at the pin for the rebuild oracle), no index store in play. Run A
-was the first clean five-subject measurement with a fresh index throughout
-and the first to run the whole loading layer.
+**The runs these tables are from.** envoy and xla are box run G,
+2026-09-27, the engine and harness at `9655ce3` (index format 16, report
+schema 21); bazel, sourcegraph and apollo are box run A, 2026-09-19 to
+2026-09-20. Only the subjects a change since run A can reach were re-run.
+Both runs: 300 first-parent steps each except apollo's 74, the recall
+oracle on every step, the bazel-diff and tango peers on a stratified sample
+of 40, every subject cold-building its own index at the start of its window
+(and again at the pin for the rebuild oracle), no index store in play. Run
+A was the first clean five-subject measurement with a fresh index
+throughout and the first to run the whole loading layer. Run G's harness
+also roots the `rdeps` oracle at every external repository whose recorded
+input changed (Bazel's marker files say which), starts the rebuild
+oracle's reference build on a fresh Bazel server, and scores a step whose
+changed paths' packages did not load at head as oracle-blind rather than
+sound. Its Bazel output bases were deleted before the run, so envoy's and
+xla's index builds (121.1 s and 173.7 s) are what a cold machine pays, not
+the warm-server figures earlier runs recorded (20 s and 29 s).
 
-**envoy's section below is box run E (2026-09-25): 288 oracle steps, 0
-missing, worst recall 1.0.** Three runs got it there. Run B's envoy line
-read recall 1.0 because its `rdeps` oracle rooted only main-repo labels, and
-a `.proto` under `api/` has none (`//...` stops at the boundary); the engine
-it measured also joined such a path to nothing at every base before envoy's
-bzlmod migration, so a proto edit reached no consumer and nothing noticed.
-Both were fixed (`74a124a`, `fa524b6`), and run C (2026-09-24, `a07bad7`)
-then failed at 0.2142: four steps, 510, 164, 12 and 1 labels short, every
-one reached by Bazel through `@grpc`. grpc's xDS client consumes
-`@envoy_api` protos (101 rules at the pin, the only external repository
-that does), and a test that links `@grpc//:grpc` depends on `fault.proto`
-through `@grpc//src/core:grpc_xds_client`; cambium indexes `//...` and the
-in-tree repositories, so `@grpc//:grpc` was a leaf with no outgoing edges
-and the path back into `@envoy_api` invisible. The fix is a table the cold
-build asks Bazel for, once per indexed repository: which external
-repositories consume it and which of its packages (`b11c1b1`, format 13);
-a change to a consumed package dirties the consumer and its leaves seed the
-walk. Run D (2026-09-25, `ec2421a`) closed those four and missed one label
-on one step, the same label run C had also missed there:
-`//source/extensions/transport_sockets/alts:handshaker_cc_grpc`, whose only
-route into `@envoy_api` is a `@grpc` proto. The table is built at the
-walk's first commit, where the repository is named `com_github_grpc_grpc`;
-step 32 renames it to `grpc`, every package re-queried after that spells
-its deps `@grpc//...`, and the carried table kept naming a repository no
-label spelled, so nothing was seeded. A run that overflows the dirty limit
-re-queries `//...` on a server that has just loaded everything, and now
-asks for the table again there (`a1606bf`). Run E is that engine. Its
-answer is coarse where the route is: a change to a consumed `@envoy_api`
-package seeds every `@grpc` leaf, so the step whose oracle is 649 labels
-answers 5035, which is the tightness p50 of 0.973 against run C's 0.986.
+**Run G: envoy and xla pass, and so does the rebuild oracle at both
+pins.** envoy: 282 oracle steps, 282 sound, 0 missing, worst recall 1.0,
+the oracle rooted at repositories on 21 of them. The rebuild oracle held:
+0 loading-layer rows missing, 190 extra (178 for paths deleted in the
+window), and no rule-hash mismatches, so the 11 `//tools/` hashes run E
+named were the shared server's leftovers too. Globals went from run E's 12
+to 18 and engine cold rebuilds from 46 to 47, the WORKSPACE-era cost of the
+closure seeding and definer fixes below; tightness p50 still rose, 0.973 to
+0.986. xla: 296 oracle steps, 293 sound, 0 missing, worst recall 1.0, and
+3 oracle-blind (`cc39fef7cae0..e5dd39c1c9dc`,
+`73ea5a41eb21..63167797070d`, `63167797070d..72ea00739113`, steps 12, 174
+and 175: the two LLVM integrate commits and the step after the second).
+At those commits the tree's own patches do not apply to the new LLVM, so
+`@llvm-raw` and `@llvm-project` fail to fetch at head, the changed paths'
+packages cannot load, and the oracle cannot see what they reach; a blind
+step is neither sound nor missing and does not fail the verdict
+(docs/METHODOLOGY.md). The rebuild oracle held: 0 missing, 39 extra. 8
+steps carried the 17 packages that load `@llvm-project//mlir:tblgen.bzl`
+instead of tombstoning them, each healing when next dirtied. 296 of xla's
+300 steps name an index partial by two packages,
+`tools/toolchains/win_1803/py38` and `py39`, Windows toolchain packages
+that cannot load on Linux at this pin: a property of the subject, present
+in every earlier run and recorded from schema 21 on.
 
-**What the rebuild oracle's rows were.** Every walk in the table except
-bazel's fails its rebuild oracle (the ⚠). On envoy (run E) and xla (run B)
-the failure is loading-layer rows the reference build at the pin holds and
-the walked index does not: 306 unexplained on envoy, beside 13449 counted
-as `boundary_probe`, and 314 on xla. Read row by row, they are the
-reference build's and not the lineage's. The reference build ran
-`cambi index build` in the walk's own checkout on the walk's own output
-base, so it dumped the Skyframe graph of the one Bazel server that every
-step's queries had run on, and every `rdeps(//..., ...)` of the oracle too,
-which fetches every external repository `//...` reaches; the lineage's base
-had been cold-built on a fresh server (envoy at `b6e7e12`, xla at
-`aa90816`, the heads of their last global steps). envoy ran
-`--enable_workspace` until step 293 (steps in these paragraphs are indices
-into the walk record, counted from 0), and Bazel probes for a `WORKSPACE`
-file in a package directory only in that mode. 298 of the 306 are rows no
-build at the pin writes (patches and `build_file` inputs of WORKSPACE-era
-repository rules, most of them deleted inside the window and the oldest at
-step 10; `WORKSPACE` probes; probes of package directories deleted in the
-window), and the other 8 only a dependency traversal writes. The 13449 are
-the same leftovers, every one a `WORKSPACE`, `WORKSPACE.bazel` or
-`WORKSPACE.bzlmod` probe: the reference layer held 1737 `FILE` rows for a
-`WORKSPACE` against the walked layer's 25. xla has never enabled WORKSPACE.
-280 of its 314 are inputs of external repositories (244 rows for 61
-`patch_file` patches under `third_party/**`, which the fetch watches; 32
-for `build_file` files, which it does not watch and which were statted
-through the external repository's `BUILD.bazel` symlink when its root
-package loaded; 4 for a pip lock file the module extension reads), 30
-are two main-repo packages (`tsl/platform`, `tsl/profiler/protobuf`) that
-dead labels in xla's own Starlark name and only a dependency traversal
-visits, and 4 are the root `WORKSPACE`, whose reader is not identified; the
-fresh base at `aa90816` holds none of them. Walking the reverse rows up
-from every one of them reaches no `PACKAGE`, `GLOB` or `BZL_LOAD` node
-except those two dead packages, which have no targets. The reference build
-now starts on a fresh Bazel server (docs/METHODOLOGY.md), and box run F
-measured that: both pins pass with it (below). The ⚠ on envoy and xla stays
-in the tables, which are still runs E and B, until a run's tables replace
-them.
-sourcegraph's (its graph) and apollo's (6690 rows), both from run A, ran
-against the same kind of reference build and have not been read row by row.
-The rows were issue #27. Reading them turned up two real under-reports they
-did not cause, an `@llvm-raw` route on xla and two WORKSPACE-era patches on
-envoy (docs/ROADMAP.md, Phase 5).
+**How envoy got there (runs B to F).** Run B's envoy line read recall 1.0
+because its `rdeps` oracle rooted only main-repo labels, and a `.proto`
+under `api/` has none (`//...` stops at the boundary); the engine it
+measured also joined such a path to nothing at every base before envoy's
+bzlmod migration. Both were fixed (`74a124a`, `fa524b6`), and run C
+(2026-09-24, `a07bad7`) then failed at 0.2142: four steps, 510, 164, 12 and
+1 labels short, every one reached by Bazel through `@grpc`, whose xDS
+client consumes `@envoy_api` protos while cambium held `@grpc//:grpc` as a
+leaf with no outgoing edges. The fix is a table the cold build asks Bazel
+for, once per indexed repository: which external repositories consume it
+and which of its packages (`b11c1b1`, format 13); a change to a consumed
+package dirties the consumer and its leaves seed the walk. Run D
+(2026-09-25, `ec2421a`) missed one label on one step because the table,
+built where the repository was still `com_github_grpc_grpc`, was carried
+past step 32's rename to `grpc`; a run that overflows the dirty limit now
+asks for the table again (`a1606bf`). Run E, at that engine, was sound on
+all 288 oracle steps and coarse where the route is (a consumed
+`@envoy_api` package seeds every `@grpc` leaf, so the step whose oracle is
+649 labels answered 5035; tightness p50 0.973). Run F (2026-09-26,
+`986aa75`), the first with the oracle rooted at changed repositories,
+failed 3 of 282 oracle steps, worst recall 0.7599. Step 161
+(`bazel/c-ares.patch`) missed 145 of 604 labels, every one reaching
+`@c-ares` only through `@grpc//:grpc++`; a repository that moves now seeds
+every external leaf whose deps closure runs through it (`0a0e894`, index
+format 16). Steps 191 and 194, in the WORKSPACE-era rename of
+`io_bazel_rules_go` to `rules_go`, each missed
+`//tools/protojsonschema:protoc_gen_jsonschema_proto_plugin`, whose only
+dep is a repository declared in `@envoy_api//bazel:repositories.bzl`, a
+file the static read never enters; a definer that runs code the index
+never read now also dirties every repository the graph names and the
+consumer table does not (`151f888`). All three are sound in run G.
 
-**What else runs C to E measured.** The oracle's own answer is
-short on 123 of envoy's 288 steps by a class the harness names
-(`oracle_unresolved`, `2868471`): `bazel query` evaluates every `select`
-branch, envoy names `@perfetto//:perfetto` under `//bazel:enable_perf_tracing`
-and the perfetto module's overlay `BUILD.bazel` shadows the `BUILD` that
-defines it, so the target does not exist, and under `--keep_going` every
-target that transitively depends on an unresolvable one leaves the `rdeps`
-universe. `source/common/common` is under most of the tree. The same holds
-for `@libbpf//:libbpf`, `@openssl//:ssl`, `@libpfm//` and two tools packages
-that name repositories envoy's `MODULE.bazel` does not declare. `cquery`
-would resolve the `select` and crashes Bazel with an internal error on one of
-those unknown repositories, so the oracle stays a lower bound and the report
-says by what. The rebuild oracle at the pin was vacuous in run B (its last
-step was a cold rebuild, so the pin was compared with itself); run C's real
-comparison found 13755 missing loading-layer rows, most of them `WORKSPACE`
-and `WORKSPACE.bazel` probes in package directories where no such file
-exists. `2868471` made those a class (`boundary_probe`, 13449 of run E's
-13755) on the reading that a cold dump carries such probes and a refresh
-dump does not; the paragraph above has what they were instead. The same
-comparison names 11 rules whose hash differs from the cold rebuild, all
-under `tools/` (`//tools/code:check`, `//tools/code_format:check_format`,
-`//tools/coverage:report_generator_script` and eight more). Each fails the
-rebuild oracle on its own, whatever the rows say; why the hashes differ is
-not diagnosed, and whether they survive a fresh reference build is for the
-next run to show.
-
-**Box run F (2026-09-26) is not in the tables.** It walked envoy and xla,
-300 steps each, with the engine at `986aa75` and two changes to the
-harness: the `rdeps` oracle is also rooted at every external repository
-whose recorded input changed (Bazel's marker files say which), and the
-rebuild oracle's reference build starts on a fresh Bazel server. envoy
-failed 3 of its 282 oracle steps, worst recall 0.7599, with the oracle
-rooted at repositories on 21 of them. Step 161 (`bazel/c-ares.patch`)
-missed 145 of 604 labels, every one reaching `@c-ares` only through
-`@grpc//:grpc++`; a repository that moves now seeds every external leaf
-whose deps closure runs through it (`0a0e894`, index format 16). Steps 191
-and 194, in the WORKSPACE-era rename of `io_bazel_rules_go` to `rules_go`,
-each missed `//tools/protojsonschema:protoc_gen_jsonschema_proto_plugin`,
-whose only dep is a repository declared in
-`@envoy_api//bazel:repositories.bzl`, a file the static read never enters;
-a definer that runs code the index never read now also dirties every
-repository the graph names and the consumer table does not (`151f888`).
-xla failed 26 of its 296 oracle steps, worst recall 0.9272, all from one
-tombstoning defect at two LLVM integrate commits (steps 12 and 174). There
-the tree's own patches do not apply to the new LLVM, so `@llvm-raw` and
-`@llvm-project` fail to fetch at head, and the re-query of the 17 main-repo
+**How xla got there (runs B and F).** Run B (2026-09-23, `7a4abfd`)
+closed run A's four `@tsl` misses (above). Run F failed 26 of its 296
+oracle steps, worst recall 0.9272, all from one tombstoning defect at the
+two LLVM integrate commits (steps 12 and 174): the re-query of the 17
 packages that load `@llvm-project//mlir:tblgen.bzl` came back empty under
 `--keep_going`, with `ERROR: Skipping` lines the load-error parser did not
-read. The 17 were tombstoned, and the steps after each commit missed their
-consumers until the next global rebuild (steps 13 to 52, and 181 to 197).
-The parser now names a skipped package, and a package Bazel could not load
-keeps its rows and heals when next dirtied (`71d2009`). With the fresh
-reference, the rebuild oracle at the pin passed on both subjects: 0 rows
-missing, so none unexplained (the extra rows, envoy 190 with 178 expected
-and xla 344 with 30 expected, do not fail it). Every fix is on main and was
-checked on a laptop against run F's own oracle answers; a run on the fixed
-main is pending.
+read, so the 17 were tombstoned and the steps after each commit missed
+their consumers until the next global rebuild (steps 13 to 52, and 181 to
+197). The parser now names a skipped package, and a package Bazel could
+not load keeps its rows and heals when next dirtied (`71d2009`); those are
+run G's 8 carried steps. Run F's scoring also hid four more xla misses
+(steps 41, 45, 193 and 195), where the head index had tombstoned a changed
+file's package and the oracle answered 0 of 0; the oracle-blind class
+exists so that such a step no longer reads as sound (docs/METHODOLOGY.md).
+
+**What the rebuild oracle's rows were (runs B to E).** Every earlier walk
+of envoy and xla failed its rebuild oracle on loading-layer rows the
+reference build at the pin held and the walked index did not: 306
+unexplained on envoy in run E, beside 13449 counted as `boundary_probe`,
+and 314 on xla in run B. Read row by row, they were the reference build's
+and not the lineage's. The reference build ran `cambi index build` in the
+walk's own checkout on the walk's own output base, so it dumped the
+Skyframe graph of the one Bazel server every step's queries (and every
+oracle `rdeps(//..., ...)`, which fetches every external repository
+`//...` reaches) had run on. On envoy, which ran `--enable_workspace` until
+step 293, 298 of the 306 were rows no build at the pin writes (inputs of
+WORKSPACE-era repository rules, most deleted inside the window;
+`WORKSPACE` probes; probes of deleted package directories) and the other 8
+only a dependency traversal writes; the 13449 were the same leftovers,
+every one a `WORKSPACE`, `WORKSPACE.bazel` or `WORKSPACE.bzlmod` probe. On
+xla, 280 of the 314 were inputs of external repositories (`patch_file`
+patches, `build_file` files, a pip lock file), 30 were two dead main-repo
+packages only a dependency traversal visits, and 4 the root `WORKSPACE`; a
+fresh base at the head of xla's last global step held none of them. The
+reference build now starts on a fresh Bazel server (docs/METHODOLOGY.md),
+and runs F and G both passed at both pins with it. The ⚠ left in the
+tables is sourcegraph's (its graph) and apollo's (6690 rows), both run A,
+against the old kind of reference build and not read row by row. The rows
+were issue #27. Reading them turned up two real under-reports they did not
+cause: an `@llvm-raw` route on xla (inputs consumed only through a
+module-extension repository), fixed in `7c8f017` and sound in run G, and
+two WORKSPACE-era patches on envoy (issue #28), which the definer fix from
+run F should cover but no walk step has exercised alone.
+
+**The oracle is a lower bound, and the report says by what.** The `rdeps`
+answer was short on 112 of envoy's 282 oracle steps in run G (123 of 288 in
+run E) and on 295 of xla's 296, by a class the harness names
+(`oracle_unresolved`, `2868471`): under `--keep_going` every target that
+transitively depends on one Bazel cannot resolve leaves the `rdeps`
+universe, and each subject's section lists the labels. Run E's envoy rows
+were read: `bazel query` evaluates every `select` branch, envoy names
+`@perfetto//:perfetto` under `//bazel:enable_perf_tracing` and the perfetto
+module's overlay `BUILD.bazel` shadows the `BUILD` that defines it, so the
+target does not exist, and `source/common/common`, under most of the tree,
+depends on it. The same holds for `@libbpf//:libbpf`, `@openssl//:ssl`,
+`@libpfm//` and two tools packages that name repositories envoy's
+`MODULE.bazel` does not declare. `cquery` would resolve the `select` and
+crashes Bazel with an internal error on one of those unknown repositories,
+so the oracle stays a lower bound and recall is measured against what was
+left.
 
 The numbers are the generated tables above and below this section, and only
 those. An earlier revision of this page carried a second, hand-copied set
@@ -298,10 +289,10 @@ below.
 | subject | pin | bazel | targets | index build | walk p50 | walk p90 | rebuilds | worst recall | tightness p50 | bazel-diff-rust p50 | tango p50 |
 |---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | bazel | 948b8c70e281 | 9.2.0 | 24805 | 3.0 s | 96 ms | 826 ms | 0 | 1.0000 | 1.000 | 6954 ms | 19094 ms |
-| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 20.3 s | 3107 ms | 10436 ms | 0 | 1.0000 ⚠ | 0.973 | 9041 ms | 99621 ms |
+| envoy | 7ba51266cc60 | 8.7.0 | 34097 | 121.1 s | 3052 ms | 17429 ms | 0 | 1.0000 | 0.986 | 9097 ms | 106178 ms |
 | sourcegraph | c864f15af264 | 7.2.0 | 70450 | 10.5 s | 459 ms | 14302 ms | 0 | 1.0000 ⚠ | 1.000 | 12802 ms | 57231 ms |
 | apollo | d53aa3da47a0 | 7.4.1 | 25973 | 5.4 s | 274 ms | 1671 ms | 0 | 1.0000 ⚠ | 0.969 | 13409 ms | 27346 ms |
-| xla | 076fe93fad26 | 8.7.0 | 35050 | 28.9 s | 232 ms | 1188 ms | 0 | 1.0000 ⚠ | 1.000 | 24817 ms | 225536 ms |
+| xla | 076fe93fad26 | 8.7.0 | 35050 | 173.7 s | 146 ms | 3408 ms | 0 | 1.0000 (3 blind) | 1.000 | 24794 ms | 217838 ms |
 <!-- bench:top:end -->
 
 Reading the table: **walk p50** and **walk p90** are cambium's wall time
@@ -313,9 +304,12 @@ rebuilds". **worst recall** is the lowest share, over the steps the `rdeps`
 oracle checked, of the targets Bazel named that cambium also reported; 1.0
 means nothing was missed. A **⚠** beside it means the walk failed its
 rebuild oracle at the pin: the index carried through the walk differs from
-one cold-built there (Findings has what the rows were; box run F, not yet
-in these tables, re-measured envoy and xla with the reference build on a
-fresh Bazel server, and both passed). **tightness
+one cold-built there. The two left are sourcegraph and apollo, from box run
+A, whose reference build ran on the walk's own Bazel server; Findings has
+what such rows were on envoy and xla before the reference build moved to a
+fresh server. **(3 blind)** counts oracle-blind steps, where a changed
+path's package did not load at head and the oracle could not see what it
+reaches; they are neither sound nor missing. **tightness
 p50** is the median of Bazel's count over cambium's, 1.0 being exact and
 lower being wider. The peer columns are each peer's full run per step, on
 a stratified sample of 40 steps. Definitions are in
@@ -494,31 +488,34 @@ Index build: 2963 ms.
 <!-- bench:envoy:begin -->
 ### envoy — 7ba51266cc60 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (a1606bf) · tool a1606bf · engine f13/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (9655ce3) · tool 9655ce3 · engine f16/a8e0ff64
 
 **Soundness**
 
-300 steps, 288 with the oracle. 288 sound, 0 missing; worst recall 1.0000.
-The oracle's answer was a lower bound on 123 of 288 steps: Bazel could not resolve `//:.bazelci/presubmit.yml`, `//:.bazelrc`, `//:.github/workflows/_check_build.yml`, `//:.github/workflows/_check_build_openssl.yml`, `//:.github/workflows/_check_coverage.yml`, `//:.github/workflows/_check_runtime.yml`, `//:.github/workflows/_check_san.yml`, `//:.github/workflows/_cve_fetch.yml` and 153 more, and under `--keep_going` every target that depends on an unresolvable one leaves the `rdeps` universe, so recall is measured against what was left.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 11; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 13755 (extra: 0); loading layer unexplained: 306. Loading layer: 13755 missing rows (13449 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 306 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json. Rule hashes differ from the cold rebuild for 11: `//tools/clang-tidy:collect_fixes`, `//tools/code:check`, `//tools/code:checked`, `//tools/code_format:check_format`, `//tools/coverage:report_generator_script`, `//tools/dependency:cve_update` and 5 more.
-Globals: 12. Engine cold rebuilds: 46.
+300 steps, 282 with the oracle. 282 sound, 0 missing; worst recall 1.0000.
+The oracle's answer was a lower bound on 112 of 282 steps: Bazel could not resolve `//:.bazelci/presubmit.yml`, `//:.bazelrc`, `//:.github/workflows/_check_build.yml`, `//:.github/workflows/_check_build_openssl.yml`, `//:.github/workflows/_check_coverage.yml`, `//:.github/workflows/_check_runtime.yml`, `//:.github/workflows/_check_san.yml`, `//:.github/workflows/_cve_fetch.yml` and 138 more, and under `--keep_going` every target that depends on an unresolvable one leaves the `rdeps` universe, so recall is measured against what was left.
+Repository-rule inputs rooted the oracle on 21 of 282 steps: Bazel's marker files named a changed path among the inputs of `@@+envoy_module_graph_extension+envoy_mod_graph`, `@@+wasm_cargo+cu`, `@@+wasm_cargo+cu__protobuf-2.28.0`, `@@base_pip3`, `@@bazel_gazelle_go_repository_config`, `@@bazel_gazelle_go_repository_tools`, `@@c-ares`, `@@com_envoyproxy_protoc_gen_validate` and 141 more, and rooting the oracle at each of them as `@@R//...:*` reached 53646 main-repository rules that the changed paths' own labels did not.
+Steps on which the marker files named a changed path but the repository roots added no rule: 2 (a pattern that did not resolve at head, or one that reached nothing the changed paths' labels had not). They are as vacuous as they were without the markers; `oracle.repository_inputs` on each says which.
+Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 0 unexplained), 190 extra (178 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-7ba51266cc60cd560c37ea9cb3e2adf70676b6cf.json.
+Globals: 18. Engine cold rebuilds: 47.
 
 **Tightness against the oracle** (1.0 is exact)
 
 | tool | p50 | p90 | steps |
 |---|--:|--:|--:|
-| cambium | 0.973 | 1.000 | 243 |
-| bazel-diff-rust | 0.950 | 1.255 | 33 |
-| tango | 0.831 | 0.997 | 33 |
+| cambium | 0.986 | 1.000 | 243 |
+| bazel-diff-rust | 1.002 | 1.397 | 34 |
+| tango | 0.899 | 0.997 | 34 |
 
 **Cost** (the two populations kept apart)
 
-Index build: 20330 ms.
+Index build: 121092 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 3107 ms | 10436 ms | 40275 ms | 288 |
-| bazel-diff-rust (full run per step) | 9041 ms | 11510 ms | 47026 ms | 40 |
-| tango (full run per step) | 99621 ms | 166573 ms | 364186 ms | 40 |
+| cambium walk (incremental) | 3052 ms | 17429 ms | 151075 ms | 282 |
+| bazel-diff-rust (full run per step) | 9097 ms | 11073 ms | 45829 ms | 40 |
+| tango (full run per step) | 106178 ms | 186340 ms | 263202 ms | 40 |
+| rdeps oracle | 901 ms | 1636 ms | 89967 ms | 282 |
 
 **Coverage per tag**
 
@@ -621,30 +618,37 @@ Index build: 5356 ms.
 <!-- bench:xla:begin -->
 ### xla — 076fe93fad26 (full)
 
-Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (7a4abfd) · tool 7a4abfd · engine f12/a8e0ff64
+Environment: Intel(R) Xeon(R) Platinum 8488C|16c|31g|linux x86_64 · bazel 8.7.0 · cambi cambi 0.1.0 (9655ce3) · tool 9655ce3 · engine f16/a8e0ff64
 
 **Soundness**
 
-300 steps, 296 with the oracle. 296 sound, 0 missing; worst recall 1.0000.
-Rebuild oracle at the pin: nodes only in applied: 0, only in rebuilt: 0; kind mismatches: 0; rule hash mismatches: 0; edges only in applied: 0, only in rebuilt: 0; externals mismatches: 0; loading layer rows missing: 314 (extra: 0); loading layer unexplained: 314. Loading layer: 314 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 314 unexplained), 0 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
+300 steps, 296 with the oracle. 293 sound, 0 missing, 3 oracle-blind; worst recall 1.0000.
+Oracle-blind on 3 steps (`cc39fef7cae0..e5dd39c1c9dc`, `73ea5a41eb21..63167797070d`, `63167797070d..72ea00739113`): a changed path's package did not load at head, so the oracle could not see what it reaches. They are not scored as sound, they do not fail the verdict, and each step's `oracle.blind_roots` names the paths.
+The oracle's answer was a lower bound on 295 of 296 steps: Bazel could not resolve `//:.bazelrc`, `//:.github/workflows/clang_format.yml`, `//:.github/workflows/nightly_benchmarks.yml`, `//:.github/workflows/rocm_ci.yml`, `//:.github/workflows/run_benchmarks.yml`, `//:.github/workflows/scorecards-analysis.yml`, `//:.github/workflows/zizmor.yml`, `//:MODULE.bazel` and 60 more, and under `--keep_going` every target that depends on an unresolvable one leaves the `rdeps` universe, so recall is measured against what was left.
+Repository-rule inputs rooted the oracle on 14 of 296 steps: Bazel's marker files named a changed path among the inputs of `@@+llvm_extension+llvm-project`, `@@+rocm_configure_ext+local_config_rocm`, `@@+third_party_ext+cuda_tile`, `@@+third_party_ext+llvm-raw`, `@@+third_party_ext+stablehlo`, `@@+third_party_ext+tensor_ir`, `@@+third_party_ext+triton`, and rooting the oracle at each of them as `@@R//...:*` reached 85039 main-repository rules that the changed paths' own labels did not.
+Steps on which the marker files named a changed path but the repository roots added no rule: 2 (a pattern that did not resolve at head, or one that reached nothing the changed paths' labels had not). They are as vacuous as they were without the markers; `oracle.repository_inputs` on each says which.
+Rebuild oracle at the pin: held. Loading layer: 0 missing rows (0 expected: created in the window, a probe for a boundary or build file that does not exist, or a package that failed to load; 0 unexplained), 39 extra (0 for paths deleted in the window or a package that failed to load); rows in walk/rebuild-076fe93fad26cb2555e3bb86defa6a772d11cf35.json.
 Globals: 4. Engine cold rebuilds: 0.
+Steps whose index carried packages that failed to load: 8 of 300 (`xla/backends/cpu/codegen/emitters/ir`, `xla/backends/cpu/codegen/emitters/transforms`, `xla/backends/cpu/codegen/tiled/transforms`, `xla/backends/gpu/codegen/emitters/ir`, `xla/backends/gpu/codegen/emitters/transforms`, `xla/backends/gpu/codegen/triton/ir`, `xla/backends/gpu/codegen/triton/transforms`, `xla/codegen/emitters/ir` and 9 more). They were walked, scored and published to the walk's own store; the carried rows are as old as the last query that loaded each package.
+Steps whose index was partial for any reason: 296 of 300. Packages it named that it held no rows for (missing from the answer, not carried): `tools/toolchains/win_1803/py38`, `tools/toolchains/win_1803/py39`.
 
 **Tightness against the oracle** (1.0 is exact)
 
 | tool | p50 | p90 | steps |
 |---|--:|--:|--:|
-| cambium | 1.000 | 1.000 | 264 |
+| cambium | 1.000 | 1.000 | 272 |
 | bazel-diff-rust | 1.000 | 1.000 | 29 |
-| tango | 1.000 | 1.000 | 29 |
+| tango | 1.000 | 1.000 | 31 |
 
 **Cost** (the two populations kept apart)
 
-Index build: 28907 ms.
+Index build: 173745 ms.
 | population | p50 | p90 | max | samples |
 |---|--:|--:|--:|--:|
-| cambium walk (incremental) | 232 ms | 1188 ms | 11431 ms | 296 |
-| bazel-diff-rust (full run per step) | 24817 ms | 83274 ms | 128665 ms | 40 |
-| tango (full run per step) | 225536 ms | 279492 ms | 651853 ms | 40 |
+| cambium walk (incremental) | 146 ms | 3408 ms | 380004 ms | 296 |
+| bazel-diff-rust (full run per step) | 24794 ms | 67454 ms | 121876 ms | 40 |
+| tango (full run per step) | 217838 ms | 254640 ms | 938375 ms | 40 |
+| rdeps oracle | 899 ms | 1151 ms | 143906 ms | 296 |
 
 **Coverage per tag**
 
