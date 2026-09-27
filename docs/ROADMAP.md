@@ -132,7 +132,7 @@ missing link was assumed to be a generated-file edge) predates the
 measurement and is superseded by it. Both candidates were wrong.
 
 Measured 2026-09-19, on the box, at the six named pairs
-(docs/salvage/2026-09-18/xla-six-pairs-20260919.md). What it found:
+(docs/notes/xla-six-pairs-20260919.md). What it found:
 
 - All six pairs are unsound. Every oracle query exited 3 under
   `--keep_going`, so each oracle answer is a lower bound: it can disprove
@@ -148,7 +148,7 @@ Measured 2026-09-19, on the box, at the six named pairs
   not have named them; `cambi explain` on representative misses says
   uniformly that no changed input reached them.
 - Why the index was partial is answered
-  (docs/salvage/2026-09-18/xla-partial-index-cause.md): the packages it
+  (docs/notes/xla-partial-index-cause.md): the packages it
   lacks are exactly the consumers of `@llvm-project`'s tblgen rules, so one
   repository that did not fetch explains all of them. The same tree loaded
   those packages for the rdeps oracle on the same box the same day. It was a

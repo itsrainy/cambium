@@ -13,3 +13,5 @@ bench-precheck/
 bench-results*.tar.gz
 # Release tarballs from scripts/package-release.sh.
 /dist/
+# Session handoff notes stay local.
+/HANDOFF.md

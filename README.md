@@ -932,11 +932,8 @@ may claim), [docs/OPERATIONS.md](docs/OPERATIONS.md) (running it at full
 size), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/ENGINE_COSTS.md](docs/ENGINE_COSTS.md),
 [docs/SKYFRAME_PROTOTYPES.md](docs/SKYFRAME_PROTOTYPES.md),
 [docs/XLA_MAIN_REPO_MISSES.md](docs/XLA_MAIN_REPO_MISSES.md), the
-Findings section of docs/RESULTS.md, and
-[docs/salvage/2026-09-18/](docs/salvage/2026-09-18/), the scratch files,
-uncommitted edits, workflow journals and review findings of a 2026-09-18
-roadmap session, copied out before its scratch directory was lost and kept
-as found (records, not instructions).
+Findings section of docs/RESULTS.md, and the two investigation notes
+under [docs/notes/](docs/notes/) that those documents cite.
 
 ## License
 

@@ -224,7 +224,7 @@ none of them. Unset means the default.
   index of 2026-09-18 was short seventeen packages because `@llvm-project`
   was absent when it was built, and a blanket `true` published it and handed
   every later run a base that under-reported in silence
-  (docs/salvage/2026-09-18/xla-partial-index-cause.md). An entry is a package
+  (docs/notes/xla-partial-index-cause.md). An entry is a package
   name, `//pkg` or `@repo//pkg`, exact or with a trailing `/...` for a
   prefix.
 - The pin index is not the index a change set ran against: envoy's pin is

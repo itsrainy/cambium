@@ -212,14 +212,14 @@ re-query nothing. A cold index built at either end of a pair does not reproduce
 that mechanism, so the 300-step walk is its measurement, and that is box run A.
 
 A pair-by-pair run measures something else, and one was done on 2026-09-19
-(docs/salvage/2026-09-18/xla-six-pairs-20260919.md): `cambi index build <base>`
+(docs/notes/xla-six-pairs-20260919.md): `cambi index build <base>`
 then `cambi affected <base>..<head> --include-manual`, scored against a
 `bazel query rdeps` oracle, on all six pairs. Every pair came back unsound, so
 the route does measure these pairs; it just does not measure this mechanism.
 What it found was a different fault. The base index those runs loaded was short
 seventeen packages because `@llvm-project` was absent when it was built, so the
 engine held no rows for them either to carry forward or to tombstone
-(docs/salvage/2026-09-18/xla-partial-index-cause.md). A freshly built index of
+(docs/notes/xla-partial-index-cause.md). A freshly built index of
 the same revision, the same day, had an error set of exactly the two expected
 `tools/toolchains/win_1803` packages.
 

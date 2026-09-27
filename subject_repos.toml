@@ -126,7 +126,7 @@ invalidators = []
 # told the absence is understood. Naming them rather than saying `true` is
 # what would have stopped the 2026-09-18 index, which was short seventeen
 # packages because `@llvm-project` was absent when it was built and published
-# anyway (docs/salvage/2026-09-18/xla-partial-index-cause.md).
+# anyway (docs/notes/xla-partial-index-cause.md).
 publish_partial = ["//tools/toolchains/win_1803/..."]
 notes = "very large, most complex Starlark; brings up the hard cases; ~1 h loading, large fetch"
 
