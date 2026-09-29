@@ -21,15 +21,17 @@ index carried between runs. Done is:
 4. **The benchmark is the gate.** A change merges only after the walk on
    the box passes at the same soundness as before, and the rebuild oracle
    holds: no unexplained loading-layer row, and no node, edge, rule hash
-   or externals row that differs from its reference build. Not met today.
-   The oracle fails at four of the five recorded pins: envoy on 306 rows
-   and 11 rule hashes, xla on 314 rows, sourcegraph on 10231 nodes and
-   1873 edges only in the walked index and 280 rows, apollo on 6690
-   rows. All four were measured against a reference build that ran on the
-   walk's own Bazel server rather than a fresh one, and envoy's and xla's
-   rows turned out to be that server's history (docs/METHODOLOGY.md). No
-   run has measured any of the four against a fresh reference build yet,
-   and envoy's rule hashes are not diagnosed.
+   or externals row that differs from its reference build. Met at three
+   of the five recorded pins. bazel held in box run A, and envoy and xla
+   in box run G (2026-09-27, `9655ce3`), whose reference build, as in run
+   F, started on a fresh Bazel server: 0 missing rows at both pins and no
+   rule-hash mismatch on envoy. Earlier runs had failed envoy on 306
+   rows and 11 rule hashes and xla on 314 rows, all of it the history of
+   the walk's own server, which the reference build then ran on
+   (docs/METHODOLOGY.md). sourcegraph (10231 nodes and 1873 edges only in
+   the walked index, 280 rows) and apollo (6690 rows) still fail, from
+   run A, against that older kind of reference build, and no run has
+   measured either against a fresh one.
 5. **A CI operator can trust the output without reading the code.** The
    diagnostics and the docs are enough to decide whether a `//...` answer
    was reasonable.
@@ -46,9 +48,9 @@ prototype measured the price of chasing them (docs/SKYFRAME_PROTOTYPES.md).
 | | status |
 |---|---|
 | bazel, sourcegraph, apollo | box run A: 300 steps each (apollo 74), recall 1.0; bazel PASS, sourcegraph and apollo fail on the rebuild oracle (principle 4) |
-| envoy | box run E (`a1606bf`): 288 oracle steps, 0 missing, worst recall 1.0, the oracle rooted at in-tree labels; the walk fails on the rebuild oracle (306 loading-layer rows, 11 rule hashes) |
-| xla | box run B (`7a4abfd`): 296 oracle steps, 0 missing, worst recall 1.0; the walk fails on the rebuild oracle (314 loading-layer rows). Three `@llvm-raw` patch edits answered 0 and so did the oracle (Phase 5, open) |
-| rebuild oracle | loading-layer rows named and classified in `walk/rebuild-<pin>.json`, and an unexplained row fails the walk (#24). envoy's and xla's rows are the history of the walk's Bazel server, on which the reference build ran; a reference build on a fresh server is in progress and unmeasured on the box (Phase 1) |
+| envoy | box run G (`9655ce3`): 282 oracle steps, 0 missing, worst recall 1.0, the oracle rooted at in-tree labels and at every repository whose recorded inputs changed; the rebuild oracle held (0 unexplained rows, no rule-hash mismatch). Tightness p50 0.986, 18 globals, 47 engine cold rebuilds |
+| xla | box run G (`9655ce3`): 296 oracle steps, 0 missing, worst recall 1.0, 3 oracle-blind (steps 12, 174 and 175, where the LLVM patches do not apply at head); the rebuild oracle held. The `@llvm-raw` patch edits (steps 13, 29, 181) are sound |
+| rebuild oracle | loading-layer rows named and classified in `walk/rebuild-<pin>.json`, and an unexplained row fails the walk (#24). The reference build starts on a fresh Bazel server, and with it envoy and xla held in run G; the rows earlier runs reported there were the walk's server's history (Phase 1) |
 | known gaps without a subject step | declined cases (#27). Autoload (#25) and toolchain rule class (#26) are no longer gaps: both have a rule on this branch and a code of their own (`CAMBI-W024`, `CAMBI-W023`), each with synthetic tests. Neither has a subject step that exercises it, so the rules are tested and unmeasured on a real history |
 | over-reporting | inventoried in docs/OVER_REPORTING.md; the `.bazelrc` screen is the dominant global |
 
@@ -112,17 +114,18 @@ sidecar is `walk/rebuild-<pin>.json`, written row by row
 pin are classified `deleted_in_window` rather than counted. The exit gate
 is met on the 40-step bazel walk: `missing 0`, `missing_expected 0`,
 `missing_unexplained 0` (docs/XLA_MAIN_REPO_MISSES.md, last section). Box
-run A then produced the sidecar on the other four subjects, and later runs
-replaced envoy's (run E) and xla's (run B); each tally is the "Rebuild
-oracle at the pin" sentence in that subject's section of docs/RESULTS.md,
-and none of the four is zero. A non-zero count still fails the walk, the
+run A then produced the sidecar on the other four subjects, and box run G
+replaced envoy's and xla's; each tally is the "Rebuild oracle at the pin"
+sentence in that subject's section of docs/RESULTS.md. envoy's and xla's
+are zero unexplained in run G, and sourcegraph's and apollo's (run A) are
+not. A non-zero count still fails the walk, the
 first choice of the decision above, and the one class added since,
 `boundary_probe` (`2868471`), is documented in docs/METHODOLOGY.md as the
 second requires. What runs A through E counted on envoy and xla was mostly
 the history of the walk's own Bazel server, which the reference build ran
 on while the lineage's base had been built on a fresh one
-(docs/METHODOLOGY.md, the reference build). The reference build is being
-moved onto a fresh server, and no box run has measured that yet.
+(docs/METHODOLOGY.md, the reference build). The reference build now starts
+on a fresh server, and with it runs F and G held at both pins.
 
 ### Phase 2: the xla main-repo misses (#23), local only
 
@@ -352,21 +355,25 @@ the third cannot be evaluated.
 
 - xla at its four: met in box run B (2026-09-23, `7a4abfd`). The four
   external-route steps go from 4, 4, 48 and 48 missing labels to 0, worst
-  recall 1.0 over 296 oracle steps. xla has not been walked since, so
-  every engine change after `7a4abfd` is unmeasured on it.
+  recall 1.0 over 296 oracle steps. Held again in box run G (2026-09-27,
+  `9655ce3`): 0 missing over 296 oracle steps, 3 of them oracle-blind.
 - envoy: met in box run E (2026-09-25, `a1606bf`), on all 288 oracle
   steps rather than three: 0 missing, worst recall 1.0, the oracle rooted
   at every label a changed path has (`fa524b6`). The `@quiche` steps were
   already sound in box run A, against an oracle blind to `api/`; the route
   that took three more runs was `@grpc` back into `@envoy_api`, which
-  failed run C at 0.2142 and run D on one label. RESULTS.md was
-  regenerated from run E and landed as `c096403`.
+  failed run C at 0.2142 and run D on one label. Held again in box run G
+  (2026-09-27, `9655ce3`) on all 282 oracle steps, the oracle also rooted
+  at every repository whose recorded inputs changed, after run F had
+  failed 3 of them (docs/RESULTS.md). RESULTS.md was regenerated from run
+  G (`3bf3686`).
 - Profile cost within budget: not evaluable. No budget was ever written
   (the Phase 0 item), so this part is neither met nor failed. The Phase 0
   item records the measured numbers a budget would be set against.
 
-Neither walk's verdict is PASS: the rebuild oracle fails at both pins
-(principle 4, and docs/METHODOLOGY.md on what the rows were).
+Both walks pass in run G, the rebuild oracle included: it held at both
+pins once the reference build started on a fresh server (principle 4, and
+docs/METHODOLOGY.md on what the earlier rows were).
 
 The last piece of step 2, the loading layer's key filter, is deferred.
 `is_main_package` (`crates/index/src/sky/mod.rs`) still drops every
@@ -379,16 +386,21 @@ moved, over `limits.max_dirty_packages`. The settled-repositories change
 (`36b9613`) answers a modified source file of an indexed repository by its
 label, which removed 29 of the 35 on replay against run B, and runs C, D
 and E, all with that change, each recorded 46 (the consumer table, first in
-run D, left the count where run C had it). What the filter would still
-buy is precision on a `BUILD` or `.bzl` edit inside an indexed repository,
-the six of the 35 that stay wide. Lifting it needs the
+run D, left the count where run C had it). Run G recorded 47. What the
+filter would still buy is precision on a `BUILD` or `.bzl` edit inside an
+indexed repository, the six of the 35 that stay wide. Lifting it needs the
 canonical-to-apparent join (`@@tsl+//pkg` against `@tsl//pkg`), and a
 change to it makes the next box run all five subjects.
 
 **Open after the exit.** Two under-reports found after run E, and the next
-precision item:
+precision item. The first is fixed and the third merged, both measured
+in box run G; the second is open.
 
-- The `@llvm-raw` route on xla. Steps 13, 29 and 181 of box run B
+- The `@llvm-raw` route on xla, fixed in `7c8f017` and sound in box run
+  G, where steps 13, 29 and 181 answer 10203, 10202 and 10615 labels
+  against oracles of 9560, 9559 and 9970, the oracle rooted at the
+  repositories whose recorded inputs moved. As found: steps 13, 29 and
+  181 of box run B
   (indices into the walk record, counted from 0;
   `e5dd39c1c9dc..97370e2accee`, `5af974627851..5244879ec449`,
   `6fda17ebbac0..0fdc404c1278`) edit only `third_party/llvm/*.patch`
@@ -399,8 +411,7 @@ precision item:
   `@llvm-raw` label and no edge from it to `@llvm-project`, so no rule of
   the externals stage reaches a consumer, where Bazel refetches
   `@llvm-raw`, regenerates `@llvm-project` and rebuilds its consumers
-  (read from the rules; not yet confirmed with a Bazel run). A fix is in
-  progress on its own branch.
+  (read from the rules; not confirmed with a Bazel run at the time).
 - envoy's WORKSPACE-era `bazel/pgv.patch` and `bazel/googleapis.patch`,
   `patches` of repositories declared in `api/bazel/repositories.bzl`. The
   externals tables never recorded them, because the load walk that
@@ -412,7 +423,12 @@ precision item:
   pin, under bzlmod, that `.bzl` declares nothing Bazel reads. The walk
   touched `pgv.patch` only on steps that also overflowed into a cold
   rebuild, and an oracle rooted at the patch's label cannot see the route.
-- Tightness on the `@grpc` route, the next precision item. The consumer
+  Issue #28. The definer fix from run F (`151f888`) should cover it, and
+  no walk step has exercised it alone.
+- Tightness on the `@grpc` route, merged (`b95e886`) and measured in box
+  run G: step 121 answers 662 against an oracle of 649, step 244 answers
+  2489 against 652, and envoy's tightness p50 is back to 0.986. As
+  designed: the consumer
   table dirties by consumer repository and seeds every leaf of it, so step
   121 (`4939d6c3f48c..381031deeb62`), whose oracle is 649 labels, answers
   5035, and envoy's tightness p50 went from 0.986 in run C to 0.973 in run
@@ -449,11 +465,13 @@ precision item:
   run E) or by its own `api/bazel/*.bzl`, which seeds every leaf; main at
   `0a4a001` gives the same 14303 labels on one of them (`964cf8c2`). The
   walk's rebuild oracle differs from a cold index at the pin in 1634
-  `@envoy_api` rule hashes; nothing on this branch writes rule rows. No
-  box run has been done on it.
+  `@envoy_api` rule hashes; nothing on this branch writes rule rows. Box
+  runs F and G both ran with it merged, and run G's rebuild oracle found
+  no rule-hash mismatch.
 
 **Round trips through repositories fetched from elsewhere, 2026-09-25**
-(branch `engine-external-round-trip`, not merged). Item 4's "a
+(branch `engine-external-round-trip`, merged in `986aa75`, so in the
+engine box runs F and G measured). Item 4's "a
 declared-only repository can still round trip" is now modelled: every
 external label the index holds carries a forward edge to each target of
 the universe it reaches through targets outside it, Bazel's answer at cold
@@ -508,7 +526,10 @@ branch before run B starts it rides along; otherwise it waits for run C.
 Ran 2026-09-23 at `7a4abfd`, envoy and xla only (the key filter was left
 alone), with Phase 6 already merged. Three envoy-only runs followed while
 Phase 5 was fixed: C (2026-09-24, `a07bad7`), then D and E (2026-09-25,
-`ec2421a` and `a1606bf`).
+`ec2421a` and `a1606bf`). Two more envoy-and-xla runs followed: F
+(2026-09-26, `986aa75`), which failed 3 envoy and 26 xla oracle steps, and
+G (2026-09-27, `9655ce3`), sound on every oracle step of both with the
+rebuild oracle held. docs/RESULTS.md carries run G for both.
 
 ### Phase 6: the `.bazelrc` screen
 
@@ -581,9 +602,9 @@ which is box run B or C.
 All five subjects, once, from main, after everything above is merged.
 This is the run the external write-up quotes. If run B already covered
 every phase, this is the nightly's first run instead of a separate one.
-It has not run. The envoy-only runs lettered C, D and E fixed Phase 5 and
-are not it: bazel, sourcegraph and apollo were last measured in box run A
-and xla in box run B.
+It has not run. The runs lettered B to G fixed Phase 5 on envoy and xla
+and are not it: bazel, sourcegraph and apollo were last measured in box
+run A, and envoy and xla in box run G.
 
 ### Phase 0, running throughout: the benchmark
 
@@ -598,14 +619,17 @@ when they block a phase.
   cost exit is recorded as not evaluable. What follows is measured, and is
   what a budget would be set against, not a budget. On the box
   (docs/RESULTS.md: the walk's cold index at the window start, then
-  cambium's per-step p50 and p90): envoy 20.3 s, 3107 ms and 10436 ms
-  (run E); xla 28.9 s, 232 ms and 1188 ms (run B); bazel 3.0 s, 96 ms and
+  cambium's per-step p50 and p90): envoy 121.1 s, 3052 ms and 17429 ms,
+  xla 173.7 s, 146 ms and 3408 ms (run G, on cold output bases); bazel
+  3.0 s, 96 ms and
   826 ms, sourcegraph 10.5 s, 459 ms and 14302 ms, apollo 5.4 s, 274 ms
   and 1671 ms (run A). envoy's per-step p50 was 1945 ms in run A, 1874 ms
   in run B and 1935 ms in run C, then 3113 ms in run D and 3107 ms in run
-  E, the last two with the consumer table; its cold index read 121.0 s in
-  run D and 20.3 s in run E over the same window, so one run's figure is
-  a sample, not a bound. On the laptop, `cambi profile --commits 30` on
+  E, the last two with the consumer table, and 3052 ms in run G; its cold
+  index read 121.0 s in run D, 20.3 s in run E and 121.1 s in run G over
+  the same window, so one run's figure is a sample, not a bound (run G's
+  output bases were deleted before the run). xla's read 28.9 s in run B
+  and 173.7 s in run G. On the laptop, `cambi profile --commits 30` on
   envoy at `bef01bb`, with the universe widened: a full index in 2 min
   26 s over 16125 targets, 1744 packages and 59 external repositories;
   per commit p50 1.8 s, p90 2.2 s, max 2.6 s; 2 rebuilds from a
@@ -619,8 +643,8 @@ when they block a phase.
 - The precheck corpus in `bench-precheck/` kept current: every box run's
   recorded change sets and stored indexes are added, so the next
   precheck replays more of what the box would.
-- Regenerate RESULTS.md for the layer. Done: its tables are box runs A,
-  B and E (`c096403`), and the paragraphs about the 2026-09-10 run are
+- Regenerate RESULTS.md for the layer. Done: its tables are box runs A
+  and G (`3bf3686`), and the paragraphs about the 2026-09-10 run are
   kept in Findings, marked as history.
 
 ## After the engine is done

@@ -198,8 +198,9 @@ compared commit: the nearest `BUILD` or `BUILD.bazel` above it), and a
   `--noenable_workspace`, so those were not probes a build at the pin
   makes: they were left on the reference build's server by the walk's
   WORKSPACE-era steps (the reference build, below). A pin in bzlmod mode
-  built on a fresh server is expected to put no `WORKSPACE` row in this
-  class; no box run has measured that yet.
+  built on a fresh server was expected to put no `WORKSPACE` row in this
+  class, and box run G, the reference build on a fresh server, measured
+  it: envoy's rebuild oracle counted 0 missing rows, none in this class.
 - `deleted_in_window` (extra, expected): the row's path is gone at the
   compared commit. A refresh cannot remove a node, so a file, package or
   `.bzl` that stopped existing leaves its row behind.
@@ -243,13 +244,15 @@ pin. The descent is not pure: a step that overflows into a re-query, or
 refreshes more than 500 packages or the root package, dumps the walk's
 server with the full key filter and merges what it holds into the applied
 layer, which can only add rows the reference lacks. Those are extras,
-which never fail. The runs in RESULTS.md up to box run E built their
-reference on another server. It ran in the walk's checkout on the walk's
-output base, on the one server every step's queries had used and every
-rdeps oracle query had run on, and `rdeps(//..., ...)` loads the
-transitive closure of `//...` and fetches every external repository it
-reaches. What those runs report as loading-layer rows missing from the
-applied index is mostly that server's history. On envoy (box run E) the
+which never fail. The runs up to box run E built their reference on
+another server; runs F and G built it on a fresh one, and G is the run
+RESULTS.md carries for envoy and xla. The earlier reference ran in the
+walk's checkout on the walk's output base, on the one server every step's
+queries had used and every rdeps oracle query had run on, and
+`rdeps(//..., ...)` loads the transitive closure of `//...` and fetches
+every external repository it reaches. What those runs reported as
+loading-layer rows missing from the applied index was mostly that
+server's history. On envoy (box run E) the
 reference build held 13755 rows the applied index did not, 13449 of them
 classed `boundary_probe` and 306 unexplained, none extra, and its layer
 had 1737 `FILE` rows for a `WORKSPACE` against the applied layer's 25.
@@ -269,9 +272,15 @@ only dead labels name (`tsl/platform`, `tsl/profiler/protobuf`), which
 only a dependency traversal visits, and 4 for the root `WORKSPACE`, whose
 reader is not identified. xla's lineage base, cold-built on a fresh server
 at the head of step 233, holds none of them. RESULTS.md has the rows in
-more detail. The classes and the pass rule above are unchanged by this: a
-row the fresh reference build holds and the applied index lacks still
-needs a class, and a non-zero `unexplained` count still fails the walk.
+more detail. With the reference on a fresh server, box run G's rebuild
+oracle held at both pins: envoy 0 missing rows and 190 extra (178 for
+paths deleted in the window), with no rule-hash mismatch, so run E's 11
+`//tools/` hashes were the shared server's too; xla 0 missing and 39
+extra. sourcegraph's and apollo's rows in RESULTS.md are still run A's,
+against a reference on the walk's server, and have not been read. The
+classes and the pass rule above are unchanged by this: a row the fresh
+reference build holds and the applied index lacks still needs a class,
+and a non-zero `unexplained` count still fails the walk.
 
 **Workload.** What tools are run on. There is one: the walk.
 
