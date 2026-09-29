@@ -423,8 +423,9 @@ in box run G; the second is open.
   pin, under bzlmod, that `.bzl` declares nothing Bazel reads. The walk
   touched `pgv.patch` only on steps that also overflowed into a cold
   rebuild, and an oracle rooted at the patch's label cannot see the route.
-  Issue #28. The definer fix from run F (`151f888`) should cover it, and
-  no walk step has exercised it alone.
+  Issue #28, open. The definer fix from run F (`151f888`) widens only
+  for a changed `.bzl`, so a patch-only edit likely still answers 0; the
+  crafted gate commit has not been re-run.
 - Tightness on the `@grpc` route, merged (`b95e886`) and measured in box
   run G: step 121 answers 662 against an oracle of 649, step 244 answers
   2489 against 652, and envoy's tightness p50 is back to 0.986. As

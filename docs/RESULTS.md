@@ -183,8 +183,9 @@ against the old kind of reference build and not read row by row. The rows
 were issue #27. Reading them turned up two real under-reports they did not
 cause: an `@llvm-raw` route on xla (inputs consumed only through a
 module-extension repository), fixed in `7c8f017` and sound in run G, and
-two WORKSPACE-era patches on envoy (issue #28), which the definer fix from
-run F should cover but no walk step has exercised alone.
+two WORKSPACE-era patches on envoy (issue #28, open), which the definer fix
+from run F likely does not cover (it widens only for a changed `.bzl`); no
+walk step has exercised a patch-only edit.
 
 **The oracle is a lower bound, and the report says by what.** The `rdeps`
 answer was short on 112 of envoy's 282 oracle steps in run G (123 of 288 in
