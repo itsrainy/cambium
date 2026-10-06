@@ -117,7 +117,7 @@ none of them. Unset means the default.
 | `CAMBIUM_REDERIVE_DUMP` | `replay --rederive-dump` | off | keep each re-derived index at `<dir>/rederived-<base>.bin` |
 | `CAMBIUM_LOG` | `--log` | `warn` | log level |
 | `AWS_REGION` | `pull-results --region`; `launch.sh` | `us-east-2` | where the box is |
-| `CAMBIUM_REQUIRE_TOOLS` | the real-tool tests | unset | `1` fails (not skips) a "tool not installed" (CI nightly) |
+| `CAMBIUM_REQUIRE_TOOLS` | the real-tool tests | unset | `1` fails (not skips) a "tool not installed" (CI weekly) |
 | `CAMBIUM_SMOKE_SCRATCH` | `crates/bench/tests/smoke_real_bazel.rs` | fresh temp dir | keep smoke test subjects between runs |
 | `SUBJECTS` | `run-published.sh`, `precheck.sh` | the five subjects | which subjects, space-separated |
 | `STEPS` | `run-published.sh` | `fetch build walk report` | which steps |

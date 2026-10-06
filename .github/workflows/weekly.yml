@@ -1,15 +1,16 @@
-name: nightly
+name: weekly
 
 # The slow tiers: end-to-end against real Bazel, the Bazel version matrix,
 # the soundness sweeps, the synthetic correctness walk against
 # bazel-diff, the stage benchmarks, and clippy on the next toolchain. Every
-# push runs only ci.yml; these run once a night, and from the Actions tab
-# (`gh workflow run nightly`) when a change to the engine or the harness
-# needs them before the night.
+# push runs only ci.yml; these run once a week, and only when main moved
+# in that week, and from the Actions tab (`gh workflow run weekly`) when a
+# change to the engine or the harness needs them sooner. The real-subject
+# walks are box runs (tools/ec2/), not Actions jobs.
 
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 5 * * 0"
   workflow_dispatch:
 
 env:
@@ -17,7 +18,28 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changed:
+    name: did main move this week
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      # A dispatch always runs; the schedule runs only when main has a commit
+      # from the last eight days (a day of slack over the weekly cron).
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ] || [ -n "$(git log --since='8 days ago' --format=%h -1)" ]; then
+            echo run=true >> "$GITHUB_OUTPUT"
+          else
+            echo run=false >> "$GITHUB_OUTPUT"
+          fi
+
   lint-next:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: clippy on the next toolchain (advisory)
     runs-on: ubuntu-latest
     # Never blocks. Its job is to say "the next stable adds a lint" while the
@@ -35,6 +57,8 @@ jobs:
       - run: cargo +stable clippy --workspace --all-targets -- -D warnings
 
   soundness:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: soundness sweep (small)
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +74,8 @@ jobs:
           CAMBIUM_SOUNDNESS_REVISIONS: "10"
 
   e2e:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: end-to-end against Bazel
     runs-on: ubuntu-latest
     steps:
@@ -68,6 +94,8 @@ jobs:
           CAMBIUM_E2E: "1"
 
   bazel-version-matrix:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: bazel version matrix (${{ matrix.bazel }})
     runs-on: ubuntu-latest
     strategy:
@@ -120,8 +148,10 @@ jobs:
           CAMBIUM_E2E: "1"
 
   synthetic-walk:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: correctness walk on synth:small, vs bazel-diff
-    # The nightly run of the real benchmark, on a synthetic subject:
+    # The weekly run of the real benchmark, on a synthetic subject:
     # the same `cambium-bench walk` a person points at envoy, over a generated
     # workspace small enough to emit, load and diff on a hosted runner. Tango
     # is left out because it costs 30-500 s a step; the weekly job on the real
@@ -160,6 +190,8 @@ jobs:
           path: bench-results/
 
   large:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     name: medium soundness
     runs-on: ubuntu-latest
     steps:

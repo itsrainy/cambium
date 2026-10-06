@@ -19,9 +19,9 @@ and the walk accepts either.
   WORKSPACE-only repository, runs under 7.4.1 since Bazel 9 can't load
   it). A subject is never pinned twice for another Bazel major; Bazel
   7/8/9 coverage of cambium itself is CI's synthetic version matrix.
-  Today: `bazel` and `envoy` on demand, `sourcegraph`, `apollo` and `xla`
-  weekly, `tensorflow` (`skip = true`) monthly or by hand
-  (`.github/workflows/bench-weekly.yml`).
+  Real subjects run on the benchmark box by hand (`tools/ec2/`,
+  `tools/bench/run-published.sh`), not on a schedule; `tensorflow` is
+  `skip = true`.
 - *Synthetic*: a generated graph from a preset, `synth:<preset>`
   (`synth:medium` is 4 551 packages, 50 167 rule targets, 250 507 index
   nodes counting source files), emitted as a real Bazel workspace with git

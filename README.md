@@ -819,7 +819,7 @@ $ cargo test --workspace                     # unit, integration, oracles; no Ba
 $ CAMBIUM_E2E=1 cargo test -p cambium-engine --test e2e_bazel -- --ignored   # needs Bazel
 $ cargo test -p cambium-bench --test smoke_real_bazel -- --ignored            # needs bazelisk
 $ CAMBIUM_SOUNDNESS_SIZE=medium CAMBIUM_SOUNDNESS_SEEDS=50 \
-    cargo test --release -p cambium-engine --test soundness      # nightly
+    cargo test --release -p cambium-engine --test soundness      # weekly
 ```
 
 `cargo test --workspace` needs no Bazel: every engine a test opens points at a
@@ -832,7 +832,7 @@ tests and nothing else. Tests needing a real Bazel, a network fetch, or a
 subject checkout are `#[ignore]`d, so a plain run reports them as ignored
 rather than as passes that ran nothing; each is opted into with `-- --ignored`
 and says what it is missing when run without it (`CAMBIUM_REQUIRE_TOOLS=1`
-turns a missing tool from a skip into a failure, which the nightly job sets).
+turns a missing tool from a skip into a failure, which the weekly CI job sets).
 
 Four oracles, in increasing order of cost:
 

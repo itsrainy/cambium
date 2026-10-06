@@ -1,14 +1,21 @@
 name: ci
 
-# The gate on every push and pull request: format, lints, and the unit and
-# integration tests that need no Bazel. Everything that needs Bazel, a
-# release build, or more than a few minutes runs nightly instead
-# (nightly.yml), or on demand from the Actions tab.
+# The gate on every push and pull request that touches code: format, lints,
+# and the unit and integration tests that need no Bazel. A docs-only push
+# runs nothing, and a newer push to the same ref cancels the older run.
+# Everything that needs Bazel, a release build, or more than a few minutes
+# runs weekly instead (weekly.yml), or on demand from the Actions tab.
 
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
