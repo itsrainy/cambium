@@ -36,7 +36,12 @@
 //!    repository's contents cannot change without `MODULE.bazel`/`WORKSPACE`
 //!    moving (an invalidator) or a lockfile moving (an invalidator), and the
 //!    external labels are recorded anyway so a future MODULE-diffing pass can
-//!    map them.
+//!    map them. The one exception is an in-tree repository Bazel confirmed is
+//!    exactly a directory of this tree that `//...` stops at
+//!    ([`RepoMapping::with_in_tree`]): its files are files of this checkout,
+//!    so the walk follows the label into the directory (keeping the external
+//!    label as well) and reads the files there in that repository's context,
+//!    `//x` meaning the repository's own root (issue #28).
 //! 4. A `.bzl` reachable only from `MODULE.bazel`/`WORKSPACE` (through
 //!    `load`, `use_extension` or `use_repo_rule`) defines repository rules.
 //!    Changing it can change the contents of an external repository, which is
@@ -122,6 +127,17 @@ impl<F: Fn(&str) -> Option<String>> FileText for F {
 #[derive(Clone, Debug, Default)]
 pub struct RepoMapping {
     map: FxHashMap<String, String>,
+    /// Canonical name -> the directory of this tree the repository is, for
+    /// every in-tree repository whose claim Bazel confirmed and whose
+    /// directory `//...` does not walk into. Without a trailing slash.
+    ///
+    /// A load into one of these is a load of a file this tree has, and the
+    /// closure walk follows it; see [`RepoMapping::with_in_tree`].
+    in_tree: Vec<(String, String)>,
+    /// The directory `//` means for the file being read: empty for a file of
+    /// the main repository, the repository's directory for a file of an
+    /// in-tree one. Set by [`RepoMapping::scoped`].
+    here: String,
 }
 
 impl RepoMapping {
@@ -155,6 +171,7 @@ impl RepoMapping {
                 .filter(|(a, c)| !c.is_empty() || a.is_empty())
                 .map(|(a, c)| (a.to_string(), c.to_string()))
                 .collect(),
+            ..Self::default()
         }
     }
 
@@ -182,7 +199,10 @@ impl RepoMapping {
             return Err("dump_repo_mapping output had no JSON object".to_string());
         };
         serde_json::from_str::<FxHashMap<String, String>>(&s[start..=end])
-            .map(|map| Self { map })
+            .map(|map| Self {
+                map,
+                ..Self::default()
+            })
             .map_err(|e| format!("dump_repo_mapping output was not valid JSON ({e})"))
     }
 
@@ -227,6 +247,74 @@ impl RepoMapping {
             .unwrap_or(apparent)
     }
 
+    /// Adds an in-tree repository: `apparent` is the directory `dir` of this
+    /// tree, exactly, and nothing else.
+    ///
+    /// Only for a repository whose `path =` claim Bazel confirmed against its
+    /// own package list ([`crate::externals::RepoInputs::confirm_dir`]) and
+    /// whose directory `//...` stops at. Then every file under `dir` is a
+    /// file of that repository and of no other, so a label into it names a
+    /// file of this tree, and a file under it is read in its context: `//x`
+    /// in `api/bazel/repositories.bzl` is `api/x` in envoy, where `@envoy_api`
+    /// is `api/`. A boundary `//...` walks into (xla's `third_party/tsl`
+    /// under Bazel 8.7) is both a main-repo directory and a repository, so a
+    /// file there has no single context and is not added.
+    ///
+    /// Issue #28: envoy's `api/bazel/repositories.bzl` declares
+    /// `com_envoyproxy_protoc_gen_validate` with `patches =
+    /// ["@envoy//bazel:pgv.patch"]`, and the walk stopped at the
+    /// `@envoy_api//bazel:repositories.bzl` label that reaches it, so the
+    /// patch was the input of nothing and an edit to it answered 0 against
+    /// an oracle of 6550.
+    pub fn with_in_tree(mut self, apparent: &str, dir: &str) -> Self {
+        let dir = dir.trim_end_matches('/');
+        if dir.is_empty() || self.is_main(apparent) {
+            return self;
+        }
+        let canonical = self.canonical(apparent).to_string();
+        if !self.in_tree.iter().any(|(c, _)| *c == canonical) {
+            self.in_tree.push((canonical, dir.to_string()));
+        }
+        self
+    }
+
+    /// The directory of this tree an in-tree repository is, by canonical
+    /// name; `None` for every other repository.
+    pub fn in_tree_dir(&self, canonical: &str) -> Option<&str> {
+        self.in_tree
+            .iter()
+            .find(|(c, _)| c == canonical)
+            .map(|(_, d)| d.as_str())
+    }
+
+    /// The directory `//` means for a file at `path`: the in-tree repository
+    /// directory `path` lies under, or empty for the main repository.
+    pub fn root_of(&self, path: &str) -> &str {
+        self.in_tree
+            .iter()
+            .map(|(_, d)| d.as_str())
+            .filter(|d| {
+                path == *d || (path.starts_with(*d) && path.as_bytes().get(d.len()) == Some(&b'/'))
+            })
+            .max_by_key(|d| d.len())
+            .unwrap_or("")
+    }
+
+    /// This mapping, read from the file at `path`: `//` means the directory
+    /// of the in-tree repository the file is in, if it is in one. See
+    /// [`RepoMapping::with_in_tree`].
+    pub fn scoped(&self, path: &str) -> RepoMapping {
+        let mut m = self.clone();
+        m.here = self.root_of(path).to_string();
+        m
+    }
+
+    /// The directory `//` means for the file this mapping was
+    /// [`scoped`](Self::scoped) to; empty for the main repository.
+    pub fn here(&self) -> &str {
+        &self.here
+    }
+
     /// True if an apparent name refers to the main repository. The dump maps
     /// the root module's own name (and 7.4.1's `__main__`) to the empty
     /// canonical name; `@//foo` writes it directly.
@@ -238,10 +326,27 @@ impl RepoMapping {
 /// Where a `load()` label points.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Load {
-    /// A repo-relative path in the main repository. Walked.
+    /// A repo-relative path in the main repository, or in an in-tree
+    /// repository written from inside it (`//x` in a file of `@envoy_api`).
+    /// Walked.
     Main(String),
     /// A canonical `@@repo//pkg:file.bzl` label. Recorded, never walked.
     External(String),
+    /// A label into an in-tree repository ([`RepoMapping::with_in_tree`]),
+    /// written with its repository: both a file of this tree, which is
+    /// walked, and the external label it always was, which is recorded as
+    /// before so that every route reading external labels sees it unchanged.
+    InTree { path: String, external: String },
+}
+
+impl Load {
+    /// The tree path a walked load reaches, if it reaches one.
+    pub fn tree_path(&self) -> Option<&str> {
+        match self {
+            Load::Main(p) | Load::InTree { path: p, .. } => Some(p),
+            Load::External(_) => None,
+        }
+    }
 }
 
 /// Resolves a `load()` label written inside package `from_pkg`.
@@ -256,21 +361,34 @@ pub fn resolve_label(label: &str, from_pkg: &str, m: &RepoMapping) -> Option<Loa
     // `//pkg/file.bzl` is not valid, and `//pkg` with an implicit target name
     // never names a `.bzl`: a file label always writes its `:`.
     let name = l.explicit_name()?;
-    // An external repository: name it canonically and stop.
+    // An external repository: name it canonically, and stop unless it is a
+    // directory of this tree.
     let repo = l.canonical_repo(m);
     if !repo.is_empty() {
-        return Some(Load::External(format!("@@{repo}//{}:{name}", l.package())));
+        let external = format!("@@{repo}//{}:{name}", l.package());
+        return Some(match m.in_tree_dir(repo) {
+            Some(dir) if !name.is_empty() => Load::InTree {
+                path: join_path(&join_dirs(dir, l.package()), name),
+                external,
+            },
+            _ => Load::External(external),
+        });
     }
     if name.is_empty() {
         return None;
     }
-    // A relative label resolves against the loading file's own package.
+    // A relative label resolves against the loading file's own package, and
+    // a `//` one against the root of the repository the loading file is in:
+    // for a file of an in-tree repository, that repository's directory.
+    // `@//` and the main repository's own names always mean the main root.
     let pkg = if l.is_relative() {
-        from_pkg
+        from_pkg.to_string()
+    } else if matches!(l.repo(), crate::label::Repo::Main) {
+        join_dirs(m.root_of(from_pkg), l.package())
     } else {
-        l.package()
+        l.package().to_string()
     };
-    Some(Load::Main(join_path(pkg, name)))
+    Some(Load::Main(join_path(&pkg, name)))
 }
 
 // ------------------------------------------------------------------ the lexer
@@ -573,6 +691,10 @@ impl LoadGraph {
             match resolve_label(l, from_pkg, m) {
                 Some(Load::Main(p)) => main.push(self.intern(&p)),
                 Some(Load::External(l)) => ext.push(l),
+                Some(Load::InTree { path, external }) => {
+                    main.push(self.intern(&path));
+                    ext.push(external);
+                }
                 None => {}
             }
         }
@@ -672,6 +794,15 @@ pub fn owning_dir(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[..i].to_string(),
         None => String::new(),
+    }
+}
+
+/// Two repo-relative directories joined, either of which may be the root.
+pub fn join_dirs(a: &str, b: &str) -> String {
+    match (a.is_empty(), b.is_empty()) {
+        (true, _) => b.to_string(),
+        (_, true) => a.to_string(),
+        _ => format!("{a}/{b}"),
     }
 }
 

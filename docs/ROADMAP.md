@@ -423,9 +423,17 @@ in box run G; the second is open.
   pin, under bzlmod, that `.bzl` declares nothing Bazel reads. The walk
   touched `pgv.patch` only on steps that also overflowed into a cold
   rebuild, and an oracle rooted at the patch's label cannot see the route.
-  Issue #28, open. The definer fix from run F (`151f888`) widens only
-  for a changed `.bzl`, so a patch-only edit likely still answers 0; the
-  crafted gate commit has not been re-run.
+  Issue #28. The definer fix from run F (`151f888`) widens only for a
+  changed `.bzl`, and the crafted gate commit (`337ae02955f2`, an edit to
+  `pgv.patch` alone over `142e91ef2e97`) still answered 0 against an
+  oracle of 6550 on 2026-09-29. Fixed by following the load closure into
+  an in-tree repository Bazel confirmed is exactly a directory `//...`
+  stops at (`RepoMapping::with_in_tree`, index content revision 5): the
+  walk enters `api/bazel/repositories.bzl` and reads it in `@envoy_api`'s
+  context (`//x` is `api/x`, `@envoy//x` and `@//x` the main root), so the
+  patch is an input of `@com_envoyproxy_protoc_gen_validate`. The same
+  gate now answers 12491 labels against an oracle of 6550, 0 missing (laptop, 2026-10-06; tightness 0.80, an engine cold rebuild). Not yet
+  measured on the box.
 - Tightness on the `@grpc` route, merged (`b95e886`) and measured in box
   run G: step 121 answers 662 against an oracle of 649, step 244 answers
   2489 against 652, and envoy's tightness p50 is back to 0.986. As

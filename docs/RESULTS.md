@@ -183,9 +183,14 @@ against the old kind of reference build and not read row by row. The rows
 were issue #27. Reading them turned up two real under-reports they did not
 cause: an `@llvm-raw` route on xla (inputs consumed only through a
 module-extension repository), fixed in `7c8f017` and sound in run G, and
-two WORKSPACE-era patches on envoy (issue #28, open), which the definer fix
-from run F likely does not cover (it widens only for a changed `.bzl`); no
-walk step has exercised a patch-only edit.
+two WORKSPACE-era patches on envoy (issue #28), which the definer fix from
+run F did not cover (it widens only for a changed `.bzl`): no walk step
+exercised a patch-only edit, and a crafted one answered 0 against an oracle
+of 6550. The load closure now follows a load into a confirmed in-tree
+repository such as `@envoy_api`, so the patches are inputs of the
+repositories declared there; the crafted step answers 12491 labels against
+6550 on the laptop, 0 missing. The runs in these tables predate
+the fix.
 
 **The oracle is a lower bound, and the report says by what.** The `rdeps`
 answer was short on 112 of envoy's 282 oracle steps in run G (123 of 288 in

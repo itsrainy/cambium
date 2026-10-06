@@ -334,6 +334,37 @@ impl<'a> Label<'a> {
     pub fn is_main(&self, m: &RepoMapping) -> bool {
         self.canonical_repo(m).is_empty()
     }
+
+    /// The directory of this checkout the label's repository is rooted at,
+    /// read from the file `m` is [scoped](RepoMapping::scoped) to: `//` is
+    /// that file's own repository, `@//` and the main repository's names are
+    /// the main root (empty), and an in-tree repository is its directory.
+    /// `None` for a repository whose files this checkout does not have.
+    ///
+    /// A relative `:name` is the caller's: it has no repository of its own.
+    pub fn tree_root<'m>(&self, m: &'m RepoMapping) -> Option<&'m str>
+    where
+        'a: 'm,
+    {
+        match self.repo {
+            Repo::Main => Some(m.here()),
+            _ => {
+                let c = self.canonical_repo(m);
+                if c.is_empty() {
+                    Some("")
+                } else {
+                    m.in_tree_dir(c)
+                }
+            }
+        }
+    }
+
+    /// The path in this checkout of the file the label names, under
+    /// [`Label::tree_root`]; `None` where that is `None`.
+    pub fn tree_path(&self, m: &RepoMapping) -> Option<String> {
+        let root = self.tree_root(m)?;
+        Some(crate::loads::join_dirs(root, &self.path()))
+    }
 }
 
 #[cfg(test)]

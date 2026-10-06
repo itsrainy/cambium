@@ -60,20 +60,105 @@ pub(crate) struct InTreeRepos<'a> {
 /// index without a closure and makes the next `.bzl` change global.
 pub(crate) fn rescan_closure(
     querier: &dyn PackageQuerier,
+    mut prior: Option<cambium_index::BzlClosure>,
+    packages: &[String],
+    changed_bzl: &BTreeSet<String>,
+    deleted: &BTreeSet<String>,
+    all_boundaries: &[cambium_index::Boundary],
+    repos: InTreeRepos<'_>,
+) -> Option<cambium_index::BzlClosure> {
+    if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
+        return prior;
+    }
+    let boundaries = &dirs(all_boundaries);
+    let src = querier.load_source()?;
+    // With the main repository's own apparent names: `@envoy//...` in a
+    // repository rule's `.bzl` is a main-repo input under either name source.
+    // And with the in-tree repositories whose files are this tree's to read
+    // (issue #28): the closure walk follows a load into one, and reads the
+    // repository rules declared there. Which ones is a fact about the
+    // lineage, and it has to read back the same at every splice, where it is
+    // the confirmed origins the base recorded (`confirmed_repos`). Those are
+    // the confirmations that landed: a probe answer with no candidate to land
+    // on (a WORKSPACE tree whose `//external:*` query failed) maps nothing,
+    // and is then not followed either, so the derivation is run again
+    // without it and the cold build and its splices agree.
+    let mut follow = stopping(repos.confirmed, all_boundaries);
+    let mut pass = 0;
+    loop {
+        pass += 1;
+        let mapping = in_tree_mapping(
+            main_alias_mapping(querier.repo_mapping(), src),
+            &follow,
+            all_boundaries,
+        );
+        let base = if pass == 1 && follow.is_empty() {
+            prior.take()
+        } else {
+            prior.clone()
+        };
+        let (c, facts, landed) = derive(
+            querier,
+            src,
+            &mapping,
+            base,
+            packages,
+            changed_bzl,
+            deleted,
+            boundaries,
+            repos,
+        );
+        let landed = stopping(&landed, all_boundaries);
+        if landed == follow || pass > 1 {
+            report_repo_settings(querier, src, &mapping, &facts);
+            return Some(c);
+        }
+        tracing::debug!(
+            followed = ?follow,
+            ?landed,
+            "an in-tree repository Bazel confirmed did not map its directory; reading the \
+             closure again without following it"
+        );
+        follow = landed;
+    }
+}
+
+/// The confirmed in-tree repositories whose directory `//...` stops at.
+fn stopping(
+    confirmed: &BTreeSet<(String, String)>,
+    boundaries: &[cambium_index::Boundary],
+) -> BTreeSet<(String, String)> {
+    confirmed
+        .iter()
+        .filter(|(_, dir)| {
+            let dir = dir.trim_end_matches('/');
+            boundaries
+                .iter()
+                .any(|b| b.dir.trim_end_matches('/') == dir && !b.traversed)
+        })
+        .map(|(r, d)| (r.clone(), d.trim_end_matches('/').to_string()))
+        .collect()
+}
+
+/// One derivation of the closure under `mapping`: the closure, the module
+/// facts it read, and the confirmations that landed on a candidate.
+#[allow(clippy::too_many_arguments)]
+fn derive(
+    querier: &dyn PackageQuerier,
+    src: &dyn cambium_index::FileText,
+    mapping: &cambium_index::RepoMapping,
     prior: Option<cambium_index::BzlClosure>,
     packages: &[String],
     changed_bzl: &BTreeSet<String>,
     deleted: &BTreeSet<String>,
     boundaries: &[String],
     repos: InTreeRepos<'_>,
-) -> Option<cambium_index::BzlClosure> {
-    if packages.is_empty() && changed_bzl.is_empty() && deleted.is_empty() {
-        return prior;
-    }
-    let src = querier.load_source()?;
-    // With the main repository's own apparent names: `@envoy//...` in a
-    // repository rule's `.bzl` is a main-repo input under either name source.
-    let mapping = main_alias_mapping(querier.repo_mapping(), src);
+) -> (
+    cambium_index::BzlClosure,
+    cambium_index::ModuleFacts,
+    BTreeSet<(String, String)>,
+) {
+    let mut landed = BTreeSet::new();
     let mut c = prior.unwrap_or_default();
     for p in changed_bzl {
         c.graph.invalidate(p);
@@ -90,7 +175,7 @@ pub(crate) fn rescan_closure(
         // throughout, so a relative `load(":x.bzl")` in one of those BUILD
         // files resolves to the file that really backs it.
         let dir = package_dir(p, repos.confirmed);
-        let pc = c.graph.package_closure(&dir, src, &mapping);
+        let pc = c.graph.package_closure(&dir, src, mapping);
         c.packages.insert(p.clone(), pc.bzl);
         if pc.external.is_empty() {
             c.package_external.remove(p);
@@ -98,16 +183,16 @@ pub(crate) fn rescan_closure(
             c.package_external.insert(p.clone(), pc.external);
         }
     }
-    c.workspace = c.graph.workspace_closure(src, &mapping);
+    c.workspace = c.graph.workspace_closure(src, mapping);
     // The workspace closure just moved, so what the main repository feeds its
     // external repositories may have moved with it. Which world Bazel reads
     // `MODULE.bazel` in is decided for the tree `src` reads — the head — not
     // taken from the externals stage, whose answer is about the base: the
     // two trees can disagree, and this closure describes the head.
-    let mode = cambium_index::Mode::detect(src, &mapping);
+    let mode = cambium_index::Mode::detect(src, mapping);
     let facts = cambium_index::read_module_facts_in(src, mode);
     c.inputs =
-        cambium_index::build_repo_inputs(src, &mapping, &c.graph, &c.workspace, &facts, boundaries);
+        cambium_index::build_repo_inputs(src, mapping, &c.graph, &c.workspace, &facts, boundaries);
     // No text this reader has says who consumes an indexed repository; the
     // table is Bazel's answer at cold build, carried through every splice.
     c.inputs.consumers = repos.consumers.clone();
@@ -131,6 +216,7 @@ pub(crate) fn rescan_closure(
     // declaration that made it is an invalidator.
     for (r, dir) in repos.confirmed {
         if c.inputs.confirm_dir(r, dir) {
+            landed.insert((r.clone(), dir.clone()));
             // Whether the universe query was actually widened by it is a
             // separate fact, and the caller's: an index built before Phase 5
             // stage 2 can hold confirmed claims and none of their packages,
@@ -151,8 +237,7 @@ pub(crate) fn rescan_closure(
             );
         }
     }
-    report_repo_settings(querier, src, &mapping, &facts);
-    Some(c)
+    (c, facts, landed)
 }
 
 /// Says once, per closure rebuild, that a `.bazelrc` line makes a target of
@@ -300,6 +385,30 @@ pub fn main_alias_mapping(
             .and_then(cambium_index::loads::workspace_name)
         {
             m = m.with_main_alias(&n);
+        }
+    }
+    m
+}
+
+/// `m` plus every confirmed in-tree repository whose directory `//...` stops
+/// at ([`cambium_index::RepoMapping::with_in_tree`]): the closure walk then
+/// follows a load into that directory, and reads the repository rules
+/// declared there (issue #28, envoy's `api/bazel/repositories.bzl`). A
+/// confirmed claim is Bazel's own package list agreeing with the directory;
+/// a traversed boundary is also a main-repo directory, so its files have no
+/// single context and are left to the external label they always were.
+pub fn in_tree_mapping(
+    mut m: cambium_index::RepoMapping,
+    confirmed: &BTreeSet<(String, String)>,
+    boundaries: &[cambium_index::Boundary],
+) -> cambium_index::RepoMapping {
+    for (repo, dir) in confirmed {
+        let dir = dir.trim_end_matches('/');
+        let stops = boundaries
+            .iter()
+            .any(|b| b.dir.trim_end_matches('/') == dir && !b.traversed);
+        if stops {
+            m = m.with_in_tree(repo, dir);
         }
     }
     m

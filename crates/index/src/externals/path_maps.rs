@@ -219,7 +219,7 @@ fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
     }
     let dst = dst.trim_start_matches("./").trim_end_matches('/');
     let from = if src.contains("//") {
-        main_repo_target(src, m)?.path()
+        main_repo_target(src, m)?
     } else if src.starts_with('/') || src.split('/').any(|s| s == ".." || s == ".") {
         return None;
     } else {
@@ -248,14 +248,18 @@ fn symlink_map(src: &str, dst: &str, m: &RepoMapping) -> Option<PathMap> {
     }
 }
 
-/// `//pkg:name` in the main repository, with its target written out. `None`
-/// for any other label: another repository, a relative `:name`, the `//pkg`
+/// The path in this checkout of `//pkg:name`, with its target written out,
+/// in the main repository or an in-tree one (`Label::tree_path`). `None` for
+/// any other label: a fetched repository, a relative `:name`, the `//pkg`
 /// shorthand, or a package that starts with `/`.
-fn main_repo_target<'a>(label: &'a str, m: &RepoMapping) -> Option<Label<'a>> {
+fn main_repo_target(label: &str, m: &RepoMapping) -> Option<String> {
     let l = Label::parse(label)?;
-    if l.is_relative() || !l.is_main(m) {
+    if l.is_relative() {
         return None;
     }
     let name = l.explicit_name()?;
-    (!name.is_empty() && !l.package().starts_with('/')).then_some(l)
+    if name.is_empty() || l.package().starts_with('/') {
+        return None;
+    }
+    l.tree_path(m)
 }

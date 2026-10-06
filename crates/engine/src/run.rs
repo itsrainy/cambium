@@ -1468,7 +1468,7 @@ impl<'a> Run<'a> {
                 &scanned,
                 &stage.changed_bzl,
                 &gone,
-                &crate::bzl::dirs(&boundaries),
+                &boundaries,
                 bzl::InTreeRepos {
                     confirmed: &confirmed_repos(base),
                     consumers: &consumers,

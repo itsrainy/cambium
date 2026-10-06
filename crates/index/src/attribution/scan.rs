@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::loads::{resolve_label, Load, RepoMapping};
+use crate::loads::{resolve_label, RepoMapping};
 use crate::starlark::{
     stmt_exprs, Arg, ArgKind, Clause, Expr, ExprKind, Module, ParamKind, Span, Stmt,
 };
@@ -177,7 +177,9 @@ impl<'a> Attribution<'a> {
                 // `load("//pkg:f.bzl", "sym", alias = "sym")`
                 Stmt::Load(l) => {
                     let Some(label) = l.label() else { continue };
-                    let Some(Load::Main(p)) = resolve_label(label, &pkg, m) else {
+                    let Some(p) = resolve_label(label, &pkg, m)
+                        .and_then(|l| l.tree_path().map(str::to_string))
+                    else {
                         continue;
                     };
                     for (alias, orig) in l.items() {

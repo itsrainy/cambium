@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::attribution::Attribution;
 use crate::label::{rule_label, Label};
-use crate::loads::{FileText, LoadGraph, RepoMapping};
+use crate::loads::{join_dirs, FileText, LoadGraph, RepoMapping};
 use crate::starlark::{stmt_exprs, walk_stmts, ArgKind, ExprKind, Module, Stmt};
 
 use super::bazelrc::{repo_settings, RepoSetting};
@@ -46,11 +46,18 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     let Some(l) = Label::parse(label) else {
         return Vec::new();
     };
-    // Another repository's file is not a main-repo input, and a relative
-    // `:name` in a `.bzl` is not a label a repository rule resolves.
-    if l.is_relative() || !l.is_main(m) {
+    // A fetched repository's file is not a file of this tree, and a relative
+    // `:name` in a `.bzl` is not a label a repository rule resolves. A label
+    // of an in-tree repository is a file of this tree: written as `//x` in
+    // one of that repository's own files, or as `@envoy_api//x` anywhere
+    // (`RepoMapping::with_in_tree`, issue #28). `root` is the directory its
+    // repository is: empty for the main repository.
+    if l.is_relative() {
         return Vec::new();
     }
+    let Some(root) = l.tree_root(m) else {
+        return Vec::new();
+    };
     let rest = l.rest();
     // `rest` is `pkg:name` or `pkg`, without the leading `//`. A format
     // placeholder cuts the label short: `Label("//third_party/gpus/%s.tpl" %
@@ -79,7 +86,7 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
         if dir.is_empty() || dir.starts_with("__") {
             return Vec::new();
         }
-        return vec![Pattern::Prefix(head.replace(':', "/"))];
+        return vec![Pattern::Prefix(join_dirs(root, &head.replace(':', "/")))];
     }
     if !rest.bytes().all(is_label_byte) {
         return Vec::new();
@@ -95,10 +102,16 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
     // A source-file label is covered both ways at once, and harmlessly: its
     // `Label` pattern resolves to the file's own node, whose reverse row is
     // the rules that consume it.
-    vec![
-        Pattern::Exact(l.path()),
-        Pattern::Label(rule_label(pkg, name)),
-    ]
+    //
+    // A label of an in-tree repository gets the file alone. Its target is a
+    // node of that repository (`@envoy_api//pkg:name`), which a stored label
+    // pattern cannot spell, and a change under the directory already moves
+    // the whole repository through its exhaustive mapping.
+    let file = Pattern::Exact(join_dirs(root, &l.path()));
+    if !root.is_empty() {
+        return vec![file];
+    }
+    vec![file, Pattern::Label(rule_label(pkg, name))]
 }
 
 /// The repo-relative path of a main-repo label naming a *file*, for the one
@@ -110,9 +123,10 @@ pub fn main_repo_patterns(label: &str, m: &RepoMapping) -> Vec<Pattern> {
 /// guess would put a path map on the wrong file.
 fn main_repo_file(label: &str, m: &RepoMapping) -> Option<String> {
     let l = Label::parse(label)?;
-    if l.is_relative() || !l.is_main(m) {
+    if l.is_relative() {
         return None;
     }
+    let root = l.tree_root(m)?;
     let rest = l.rest();
     if rest.is_empty() || !rest.bytes().all(is_label_byte) {
         return None;
@@ -122,7 +136,7 @@ fn main_repo_file(label: &str, m: &RepoMapping) -> Option<String> {
         return None;
     }
     let path = l.path();
-    (!path.is_empty()).then_some(path)
+    (!path.is_empty()).then(|| join_dirs(root, &path))
 }
 
 /// What an `Overlay` claim records besides the origin: the BUILD file lands
@@ -476,6 +490,9 @@ pub fn build_repo_inputs(
     let mut origins_from_bzl: BTreeMap<String, RepoOrigin> = BTreeMap::new();
     for (path, module) in att.modules() {
         let path = path.to_string();
+        // A file of an in-tree repository reads `//x` as that repository's
+        // own `x`, which is a file of this tree under its directory.
+        let fm = &m.scoped(&path);
         let mut file_repos = att.file_repos(&path).repos;
         for (offset, l) in string_literals(module) {
             // The BUILD text a repository rule writes with
@@ -491,7 +508,7 @@ pub fn build_repo_inputs(
                     }
                 }
             }
-            let pats = main_repo_patterns(&l.text, m);
+            let pats = main_repo_patterns(&l.text, fm);
             if pats.is_empty() {
                 continue;
             }
@@ -533,7 +550,8 @@ pub fn build_repo_inputs(
     // that position is unattributable, rather than being handed to every
     // repository the main repository defines.
     for (path, module) in att.modules() {
-        let maps = scan_path_maps(module, m, boundaries);
+        let fm = &m.scoped(path);
+        let maps = scan_path_maps(module, fm, boundaries);
         for (repo, pm) in maps.named {
             if out.repos.contains(&repo) {
                 let pat = Pattern::Prefix(pm.from.clone());
@@ -552,7 +570,7 @@ pub fn build_repo_inputs(
             }
             out.repos.insert(repo.clone());
             let file = (!label.is_empty())
-                .then(|| main_repo_file(&label, m))
+                .then(|| main_repo_file(&label, fm))
                 .flatten();
             let evidence = format!("{path}:{line}");
             RepoOrigin::claim(
@@ -714,12 +732,14 @@ fn generated_origin(evidence: &str) -> RepoOrigin {
 /// The repo-relative path of a `.bzl` label in the main repository, under
 /// the run's repository mapping: `@envoy//bazel:repo.bzl` resolves here when
 /// `envoy` is a main alias. The `WORKSPACE` diff has no mapping and reads
-/// only the literal spellings; see `workspace::literal_main_bzl_path`.
+/// only the literal spellings; see `workspace::literal_main_bzl_path`. A
+/// `.bzl` of an in-tree repository is a file of this tree too, and resolves
+/// to its path under the repository's directory.
 fn main_bzl_path(label: &str, m: &RepoMapping) -> Option<String> {
-    match crate::loads::resolve_label(label, "", m) {
-        Some(crate::loads::Load::Main(p)) => Some(p),
-        _ => None,
-    }
+    crate::loads::resolve_label(label, "", m)
+        .as_ref()
+        .and_then(crate::loads::Load::tree_path)
+        .map(str::to_string)
 }
 
 /// Every label-shaped token inside a Starlark file's string literals.

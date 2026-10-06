@@ -253,7 +253,18 @@ pub const FORMAT_VERSION: u32 = 16;
 /// before this says nothing of the kind, so a run that spliced onto one
 /// would keep reading xla's `third_party/tsl` as a hole in the graph and
 /// answer the whole world for a change to a package Bazel loaded.
-pub const CONTENT_REVISION: u32 = 4;
+/// 5 --- the `.bzl` load closure follows a load into an in-tree repository
+/// Bazel confirmed is exactly a directory of this tree that `//...` stops at
+/// (issue #28). `@R//pkg:f.bzl` is an edge to that file's tree path as well
+/// as the external label it was, and the files there are read in `R`'s
+/// context, so `//x` is `R`'s own `x`. The layout is unchanged, but the rows
+/// say more: the workspace closure holds envoy's `api/bazel/*.bzl`, their
+/// repository declarations have `bzl_repos` rows, and the pattern table
+/// holds the main-repo files they name. An edit to envoy's
+/// `bazel/pgv.patch`, named only by `@envoy_api//bazel:repositories.bzl`,
+/// answered 0 against an oracle of 6550 without them, so a run that spliced
+/// onto an index written before this would keep answering 0.
+pub const CONTENT_REVISION: u32 = 5;
 
 pub const PREFIX_LEN: usize = 64;
 const ENDIAN_MARKER: u32 = 0x0403_0201;

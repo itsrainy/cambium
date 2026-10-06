@@ -588,7 +588,7 @@ impl Engine {
             &packages,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &crate::bzl::dirs(&boundaries),
+            &boundaries,
             crate::bzl::InTreeRepos {
                 confirmed: &confirmed,
                 indexed: &indexed,
@@ -1336,4 +1336,4 @@ fn narrate_found_at_base(
     });
 }
 
-pub use crate::bzl::main_alias_mapping;
+pub use crate::bzl::{in_tree_mapping, main_alias_mapping};

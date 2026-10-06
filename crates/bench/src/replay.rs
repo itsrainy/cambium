@@ -576,6 +576,29 @@ pub fn rederive_externals(
         ),
         &src,
     );
+    // And the in-tree repositories the index recorded as confirmed, under
+    // the boundaries it recorded as stopping `//...`: the closure follows a
+    // load into them, as the engine's rescan does (issue #28).
+    let confirmed: std::collections::BTreeSet<(String, String)> = (0..base.num_repos())
+        .filter_map(|r| {
+            let o = base.repo_origin(r);
+            (o.confirmed && o.kind == cambium_index::externals::OriginKind::Dir).then(|| {
+                (
+                    base.repo_name(r).to_string(),
+                    o.dir.trim_end_matches('/').to_string(),
+                )
+            })
+        })
+        .collect();
+    let recorded: Vec<cambium_index::Boundary> = base
+        .repo_boundaries()
+        .map(|d| cambium_index::Boundary {
+            dir: d.to_string(),
+            bazelignored: false,
+            traversed: base.boundary_is_traversed(d),
+        })
+        .collect();
+    let mapping = cambium_engine::engine::in_tree_mapping(mapping, &confirmed, &recorded);
     let facts = cambium_index::read_live_module_facts(&src, &mapping);
 
     let mut graph = cambium_index::LoadGraph::new();
