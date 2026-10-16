@@ -784,13 +784,13 @@ fn config_explain_says_which_invalidator_paths_a_model_reads_first() {
     );
 }
 
-/// The profile's `--out` is one path everywhere a reader meets it: the one
+/// The CI guide's profile `--out` is the path
 /// `init`'s `next:` line names, in the checkout, so it is this repository's
 /// index and no other's. A fixed `/tmp` path is shared by every repository on
 /// the machine, and publishing the wrong one uploads another repository's
 /// index.
 #[test]
-fn the_readme_and_the_ci_guide_seed_the_store_from_the_path_init_names() {
+fn the_ci_guide_seeds_the_store_from_the_path_init_names() {
     let dir = bare_workspace();
     let ws = dir.path().to_str().unwrap();
     let store = dir.path().join("store");
@@ -815,7 +815,7 @@ fn the_readme_and_the_ci_guide_seed_the_store_from_the_path_init_names() {
         "{next}"
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["README.md", "docs/CI.md"] {
+    for name in ["docs/CI.md"] {
         let text = std::fs::read_to_string(root.join(name)).unwrap();
         assert!(
             text.contains(&format!("cambi profile --commits 30 --out {out}")),

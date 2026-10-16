@@ -264,7 +264,7 @@ fn affected_report_shape_is_pinned() {
          added:   {added:?}\n  removed: {removed:?}\n\n\
          This is a contract change: bump SCHEMA_VERSION in crates/engine/src/report.rs, \
          update AFFECTED_SCHEMA here, and update the JSON contract \
-         table in the README."
+         table in docs/CONTRACT.md."
     );
 }
 
@@ -311,7 +311,7 @@ fn optional_fields_are_omitted_rather_than_null() {
 }
 
 /// Exit codes are as much a contract as the field names, and are documented in
-/// the same README table.
+/// the same docs/CONTRACT.md table.
 #[test]
 fn exit_codes_are_pinned() {
     use std::path::PathBuf;

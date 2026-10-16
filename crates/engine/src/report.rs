@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Every JSON document any subcommand emits carries this as its `schema` field.
 /// The contract covers the field names and shapes of those documents *and* the
 /// CLI's exit codes: callers parse both, and both are documented together in
-/// the README. Bump it whenever either changes in a way a consumer could
+/// docs/CONTRACT.md. Bump it whenever either changes in a way a consumer could
 /// notice — a renamed or removed field, a changed type, a repurposed exit code.
 /// Adding an optional field is still a bump, because a consumer validating the
 /// document against a known shape will see it.

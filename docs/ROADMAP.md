@@ -218,8 +218,8 @@ review found, each with its own synthetic test:
   names.
 
 The rule-class half is decided after the query, over the rows it read back,
-so it is the one verdict `affected --dry-run` cannot reach; the plan, the
-README and docs/CLI.md say so rather than promising the plan is final.
+so it is the one verdict `affected --dry-run` cannot reach; the plan, docs/DESIGN.md
+and docs/CLI.md say so rather than promising the plan is final.
 
 Exit: met, both halves. The globs are gone from the default config, and
 `cambi profile 948b8c70e28 --commits 5` on the local bazel mirror answers

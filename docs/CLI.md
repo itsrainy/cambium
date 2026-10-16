@@ -2,7 +2,7 @@
 
 The reference for `cambi`'s command line: verbs, rules each follows, and
 what a caller may rely on. JSON field tables and contract history are in
-the README; this is the surface a caller types.
+[CONTRACT.md](CONTRACT.md); this is the surface a caller types.
 
 ## What the tool is for
 
@@ -441,8 +441,8 @@ Every verb takes the same global options, declared once on `cambi`: `-C,
   printed; `--format jsonl` gets one JSON object per event on stderr
   instead; `--quiet` gets nothing.
 - Every `--format json` document carries `schema`, the contract version,
-  17 today. It is shared by every verb's document, so one bump moves all;
-  the README's JSON contract has the field tables and says what each
+  21 today. It is shared by every verb's document, so one bump moves all;
+  [CONTRACT.md](CONTRACT.md) has the field tables and says what each
   version added (`affected[].depth` and `depth_histogram` in 3 and 10,
   their package-boundary twins `package_depth` and
   `package_depth_histogram` in 11, and so on).

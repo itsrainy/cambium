@@ -250,7 +250,7 @@ fn base_index(report: &AffectedReport) -> String {
 
 // ---------------------------------------------------------------------- json
 
-/// The one `explain` document, in both scopes (README, "The JSON contract").
+/// The one `explain` document, in both scopes (docs/CONTRACT.md).
 fn document(
     report: &AffectedReport,
     label: Option<&str>,

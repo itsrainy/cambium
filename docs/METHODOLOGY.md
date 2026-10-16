@@ -472,7 +472,7 @@ yardstick. Only the oracle is.
   an unchanged declaration (the declarations themselves escalate, by rule
   class, wherever they live), `.bazelignore` and symlinked directories
   aren't modelled, and a bump of a module the Bazel here autoloads native
-  rules from is escalated rather than followed (`CAMBI-W024`); the README's
+  rules from is escalated rather than followed (`CAMBI-W024`); DESIGN.md's
   "Where the invariant stops" section is the authoritative list, with each
   case's status.
 

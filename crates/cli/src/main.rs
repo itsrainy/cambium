@@ -20,7 +20,7 @@ mod diag;
 /// an error's, from [`cambium_engine::EngineError::exit_code`], and the tests
 /// below pin all six.
 ///
-/// Part of the versioned contract in the README's "Exit codes" table,
+/// Part of the versioned contract in docs/CONTRACT.md's "Exit codes" table,
 /// alongside the JSON field names: callers branch on these, so a value never
 /// changes meaning without a `SCHEMA_VERSION` bump.
 pub const EXIT_OK: u8 = 0;
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn exit_codes_are_pinned() {
         // Changing any of these is a contract break: bump SCHEMA_VERSION and
-        // update the JSON contract table in the README.
+        // update the JSON contract table in docs/CONTRACT.md.
         assert_eq!(EXIT_OK, 0);
         assert_eq!(EXIT_ERROR, 1);
         assert_eq!(EXIT_GLOBAL, 2);

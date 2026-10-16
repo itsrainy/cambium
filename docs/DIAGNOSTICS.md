@@ -37,7 +37,7 @@ Every warning and error carries a stable code, assigned once and never reused; r
 
 ## Errors
 
-An error ends the run; exit codes are in the README's table.
+An error ends the run; exit codes are in [CONTRACT.md](CONTRACT.md#exit-codes).
 
 | code | when it fires | what to do |
 |---|---|---|
