@@ -13,30 +13,32 @@ cambium would cost and save there. It needs no config and leaves your
 checkout alone:
 
 ```console
-$ cambi profile --commits 20
-repository  abseil-cpp  at 022aad06b9, last 20 first-parent commits
-targets     575         255 tests, 26 packages, 1 external repository
-full index  21.1 s      at 2c256e7395 (572 targets, 254 tests); 86.9 KiB on disk (zstd-3), loads in 1 ms
-per commit  556 ms      mean of 20 incremental, p50 64 ms, p90 2.5 s, max 2.6 s; 556 ms mean over all 20 with rebuilds
-affected    302         targets on a typical commit (p50), 53% of 575 (manual included); mean 318, p90 524
-tests       248         tests on a typical commit (p50), 97% of 255; mean 224, p90 253
-global      0/20        no commit invalidated the whole graph
-rebuilds    0/20        the whole graph was never rebuilt
+$ cambi profile --commits 30 b8b50a4ab8
+repository  cockroach   at b8b50a4ab8, last 30 first-parent commits
+targets     14,082      932 tests, 1,567 packages, 1,220 external repositories
+full index  1 min 50 s  at 11100921a1 (14,076 targets, 930 tests); 1.9 MiB on disk (zstd-3), loads in 19 ms
+per commit  4.6 s       mean of 30 incremental, p50 421 ms, p90 5.8 s, max 58.9 s; 4.6 s mean over all 30 with rebuilds
+affected    543         targets on a typical commit (p50), 4% of 14,082 (manual included); mean 868, p90 1,413
+tests       346         tests on a typical commit (p50), 37% of 932; mean 291, p90 602
+global      0/30        no commit invalidated the whole graph
+rebuilds    0/30        the whole graph was never rebuilt
 
     commit                                time affected  tests index
-    f573cfb 09-21 12:23 Mark ABSL_D…     63 ms      524    253 = unchanged
-    ef643ec 09-22 10:47 Speed up sh…     2.5 s        1      1 ~     1 rewritten
-    7f008af 09-22 20:49 Split btree…     2.5 s        2      2 ~     2 rewritten
-    d2d44c6 09-23 14:04 Update Tran…     64 ms      344    250 = unchanged
-    583556e 09-26 02:07 PR #2172: T…     2.5 s      455    252 ~     3 rewritten
+    b2b88b1 06-01 14:27 changefeedc…    443 ms      202    126 = unchanged
+    3eb7ff1 06-01 15:16 build/roach…    367 ms        0      0 = unchanged
+    14bf541 06-01 19:11 sql,util/ad…     8.2 s    1,763    707 ~     7 rewritten
+    ff2117a 06-01 19:11 opt: genera…    361 ms      556    352 = unchanged
+    afd1b1a 06-01 21:19 kvserver: a…     5.6 s      688    401 ~     1 rewritten
+    94b5e9e 06-02 02:43 go.mod: bum…    58.9 s   11,329    929 = unchanged
+    b8b50a4 06-02 08:58 kvserver: d…    382 ms      465    328 = unchanged
     …
 ```
 
-That's abseil-cpp. Most commits only touch source files, so they're
-answered from the index in about 60 ms. The few that change the graph itself (a
-`BUILD` file, an added or deleted file) re-query just the packages they
-touched, which takes a couple of seconds. abseil is small and tightly
-connected, so a typical commit still reaches most of its tests.
+That's 30 commits of cockroach. Most only edit source files, which changes
+nothing in the build graph, so they're answered from the index in under
+half a second. The ones that change a `BUILD` file re-query just the
+packages they touched, in 4 to 8 seconds. The `go.mod` bump reaches
+almost everything, and took about a minute.
 
 After that, ask what a branch affects, and why:
 
