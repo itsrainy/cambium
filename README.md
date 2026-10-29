@@ -106,10 +106,8 @@ $ cambi doctor                              # checks Bazel, config and store
 
 ## Design philosophy
 
-![A shelf under a sign reading {Fast, Correct}, choose two. cambi walks off holding two boxes labeled Fast, leaving Correct on the shelf.](docs/fast-correct.svg)
-
-That's the joke. The actual rule is the opposite: **it should never miss an
-affected target.** Reporting a few extra targets is fine (and measured);
+The rule I care most about: **it should never miss an affected
+target.** Reporting a few extra targets is fine (and measured);
 leaving one out is a bug. When cambium can't be sure, it says "everything"
 (`//...`) rather than guessing.
 
