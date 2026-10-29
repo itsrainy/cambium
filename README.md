@@ -106,12 +106,14 @@ $ cambi doctor                              # checks Bazel, config and store
 
 ## Design philosophy
 
-The rule I care most about: **it should never miss an affected
-target.** Reporting a few extra targets is fine (and measured);
-leaving one out is a bug. When cambium can't be sure, it says "everything"
-(`//...`) rather than guessing.
+cambium gives up strict correctness for speed, on purpose. bazel-diff and
+Tango hash the whole graph at both commits, which is about as correct as
+you can get, and costs the same whether you changed one line or a
+thousand. cambium only looks at what a change could have touched and
+trusts its index for everything else. That's where the speed comes from,
+and it's also where a miss can come from.
 
-Speed comes from not looking at what didn't change. A target's dependencies
+The trust is well-founded most of the time. A target's dependencies
 are determined entirely by its `BUILD` file, the `.bzl` files it loads,
 which files exist in its package, and a handful of repository-wide inputs
 (`MODULE.bazel`, lockfiles, `.bazelrc`). Starlark can't read the clock or
@@ -125,8 +127,15 @@ package's part of the graph didn't either. So a run goes:
 4. Walk reverse dependencies from everything that changed.
 
 Some changes can't be answered incrementally, like a toolchain or platform
-definition moving. Those fall back to re-indexing the whole repository
-(still exact, just slower) or answer `//...`.
+definition moving. Those fall back to re-indexing the whole repository or
+answer "everything" (`//...`).
+
+The places where it can miss today are mostly at the edges of the main
+repository: an external repository that won't fetch or load on the machine
+running cambium, and repository inputs Bazel doesn't record well (a module
+extension reading a lock file, a repository's own definition changing in a
+`.bzl`). On the benchmark it never missed a target Bazel's `rdeps` check
+could see, but that check is blind to some of those same routes.
 [docs/DESIGN.md](docs/DESIGN.md) goes through every case, including the
 known gaps.
 
