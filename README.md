@@ -1,5 +1,19 @@
 # cambium
 
+**TL;DR:** cambium tells you which Bazel targets a set of file changes
+affected, in time that follows the size of the change rather than the size
+of your build graph. To try it on your own repository:
+
+```console
+$ git clone https://github.com/itsrainy/cambium && cd cambium
+$ cargo install --path crates/cli --locked
+$ cd /path/to/your/bazel/repo && cambi profile
+```
+
+`cambi profile` replays your last 30 commits and reports what cambium would
+cost there. It needs no config and leaves your checkout alone. The rest of
+this README is why it exists, how it works and how it compares.
+
 A common need for any sufficiently large build graph is determining which
 build targets are affected by a given set of file changes. I just put up a
 PR: which targets should I build, and which tests should I run?
