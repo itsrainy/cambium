@@ -1,87 +1,94 @@
 # cambium
 
-**Which Bazel targets did this change affect, answered in about the time it
-takes to look at the change.**
+cambium is a Bazel changed-targets and graph analysis tool, similar to
+bazel-diff, Tango and target-determinator. Its goal is to go from a set of
+file changes to the targets they affected in time proportional to the size
+of the change, not the size of the build graph.
 
-If you run CI on a big Bazel monorepo, you've probably wanted to test only
-what a pull request could actually affect, rather than `bazel test //...`
-every time. Tools for this exist (bazel-diff, Tango, target-determinator),
-and they work by looking at the whole build graph at both commits and
-comparing. That's reliable, but on a large repository it can take tens of
-seconds to a few minutes per commit, and that cost grows with the
-repository, not with the change.
+## Trying it
 
-cambium tries a different approach. It keeps an index of the build graph,
-and when a commit comes in, it asks Bazel only about the packages that
-commit could have touched, patches those into the index, and walks the
-reverse dependencies from there. The goal is a cost that follows the size
-of the change and the size of the answer, not the size of the repository.
+The command is `cambi`. The first thing to run on your repository is
+`cambi profile`, which replays your recent history and tells you what
+cambium would cost and save there. It needs no config and leaves your
+checkout alone:
 
-The command is `cambi`:
+```console
+$ cambi profile --commits 20
+repository  abseil-cpp  at 022aad06b9, last 20 first-parent commits
+targets     575         255 tests, 26 packages, 1 external repository
+full index  21.1 s      at 2c256e7395 (572 targets, 254 tests); 86.9 KiB on disk (zstd-3), loads in 1 ms
+per commit  556 ms      mean of 20 incremental, p50 64 ms, p90 2.5 s, max 2.6 s; 556 ms mean over all 20 with rebuilds
+affected    302         targets on a typical commit (p50), 53% of 575 (manual included); mean 318, p90 524
+tests       248         tests on a typical commit (p50), 97% of 255; mean 224, p90 253
+global      0/20        no commit invalidated the whole graph
+rebuilds    0/20        the whole graph was never rebuilt
+
+    commit                                time affected  tests index
+    f573cfb 09-21 12:23 Mark ABSL_D…     63 ms      524    253 = unchanged
+    ef643ec 09-22 10:47 Speed up sh…     2.5 s        1      1 ~     1 rewritten
+    7f008af 09-22 20:49 Split btree…     2.5 s        2      2 ~     2 rewritten
+    d2d44c6 09-23 14:04 Update Tran…     64 ms      344    250 = unchanged
+    583556e 09-26 02:07 PR #2172: T…     2.5 s      455    252 ~     3 rewritten
+    …
+```
+
+That's abseil-cpp. Most commits only touch source files, so they're
+answered from the index in about 60 ms. The few that change the graph itself (a
+`BUILD` file, an added or deleted file) re-query just the packages they
+touched, which takes a couple of seconds.
+
+After that, ask what a branch affects, and why:
 
 ```console
 $ cambi affected origin/main..HEAD --tests-only --format labels
 //app:main_test
 //lib/core:core_test
+$ cambi explain //app:main_test origin/main..HEAD
 ```
 
-The rule I care most about: **it should never miss an affected target.**
-Reporting a few extra targets is fine (and measured); leaving one out is a
-bug. When cambium can't be sure, it says "everything" (`//...`) rather than
-guessing.
+`explain` prints the shortest path from that target back to the change.
+[docs/CI.md](docs/CI.md) covers running it in a pipeline.
 
-> **Status:** early and still changing. There's no release yet, so you'll be
-> building from source. Linux and macOS only.
+## Performance on large monorepos
 
-## How well does it work?
+I ran it on five open-source Bazel repositories, walking about 300 commits
+of each one's history (74 for apollo) with one index carried forward a
+commit at a time, the way a CI job would.
 
-To find out, I ran it on five open-source Bazel repositories: bazel, envoy,
-sourcegraph, apollo and xla. For each, it walked about 300 commits of
-history (74 for apollo), carrying one index forward a commit at a time,
-the way a CI job would. Every step's answer was checked against Bazel's own
-`rdeps` query.
+Here's how quickly it answers, as the median time per commit:
 
-- **Nothing missed.** On every step the check could run on, cambium's
-  answer included every target Bazel named.
-- **Usually tight.** At the median step the answer was exactly Bazel's on
-  bazel, sourcegraph and xla, and a few percent wider on envoy and apollo.
-- **Fast.** A typical step took between 96 ms and 3.1 s depending on the
-  repository, compared with 7 to 25 s for bazel-diff and 19 to 218 s for
-  Tango on the same steps. The slowest 10% of steps went up to 17 s.
+| repository | targets | cambium | bazel-diff | Tango |
+|---|--:|--:|--:|--:|
+| bazel | 24,805 | 96 ms | 7.0 s | 19.1 s |
+| envoy | 34,097 | 3.1 s | 9.1 s | 106 s |
+| sourcegraph | 70,450 | 459 ms | 12.8 s | 57.2 s |
+| apollo | 25,973 | 274 ms | 13.4 s | 27.3 s |
+| xla | 35,050 | 146 ms | 24.8 s | 218 s |
 
-Some honest caveats: these numbers come from one 16-core Linux machine with
-Bazel's server kept warm between steps, so a fresh CI runner will pay more
-(fetching the index, starting Bazel). The `rdeps` check has blind spots of
-its own, too. [docs/RESULTS.md](docs/RESULTS.md) has every number and
-where each one falls short.
+And here's how precise it is. Every answer was checked against Bazel's own
+`rdeps` query: cambium never missed a target Bazel named. The table is the
+median of Bazel's count over the tool's count, where 1.0 is exact and lower
+means extra targets reported:
 
-## How it works, briefly
+| repository | cambium | bazel-diff | Tango |
+|---|--:|--:|--:|
+| bazel | 1.000 | 1.000 | 1.000 |
+| envoy | 0.986 | 1.002 | 0.899 |
+| sourcegraph | 1.000 | 1.000 | 1.000 |
+| apollo | 0.969 | 1.000 | 0.784 |
+| xla | 1.000 | 1.000 | 1.000 |
 
-The whole thing leans on one observation about Bazel's loading phase: a
-target's dependencies are determined entirely by its `BUILD` file, the
-`.bzl` files it loads, which files exist in its package, and a handful of
-repository-wide inputs (`MODULE.bazel`, lockfiles, `.bazelrc`). Starlark
-can't read the clock or the network during loading, so if none of those
-inputs changed, the package's part of the graph didn't change either.
+Caveats: this is one 16-core Linux machine with Bazel's server kept warm,
+so a fresh CI runner pays more (fetching the index, starting Bazel). The
+peers ran once per commit on a sample of 40 commits from the same range.
+target-determinator isn't benchmarked yet. The slowest 10% of cambium's
+steps went up to 17 s. [docs/RESULTS.md](docs/RESULTS.md) has every number
+and where each one falls short.
 
-So a run goes like this:
+## Installing
 
-1. Load the index from the most recent commit that has one.
-2. Turn `git diff` into the set of packages whose inputs moved. cambium
-   gets this from Bazel's own loading graph (Skyframe), saved alongside the
-   index, rather than guessing from paths.
-3. Re-query just those packages with real Bazel and splice the results in.
-4. Walk reverse dependencies from everything that changed.
-
-Some changes can't be answered incrementally, like a toolchain or platform
-definition moving or certain `.bazelrc` flags changing. Those either fall
-back to re-indexing the whole repository (still exact, just slower) or
-answer `//...`. [docs/DESIGN.md](docs/DESIGN.md) goes through every case,
-including the known gaps where an answer can still miss something today.
-
-## Trying it out
-
-You'll need Rust 1.98+, a C compiler, `git`, and `bazel` or `bazelisk`.
+There's no release yet, so you'll build from source. You'll need Rust
+1.98+, a C compiler, `git`, and `bazel` or `bazelisk`. Linux and macOS only.
 
 ```console
 $ git clone https://github.com/itsrainy/cambium && cd cambium
@@ -95,44 +102,35 @@ $ cambi init --store-dir .cambium-store     # writes cambium.toml
 $ cambi doctor                              # checks Bazel, config and store
 ```
 
-`cambi profile` is a good first thing to run. It replays your last 30
-commits and tells you what cambium would cost and save on your repository.
-`--out` keeps the index it builds so you can use it as your first one:
+[docs/INSTALL.md](docs/INSTALL.md) has the details.
 
-```console
-$ cambi profile --commits 30 --out ./cambium-index.bin
-$ cambi index publish ./cambium-index.bin
-```
+## Design philosophy
 
-After that you can ask what a branch affects, and why:
+![A shelf under a sign reading {Fast, Correct}, choose two. cambi walks off holding two boxes labeled Fast, leaving Correct on the shelf.](docs/fast-correct.svg)
 
-```console
-$ cambi affected origin/main..HEAD --tests-only
-$ cambi explain //app:main_test origin/main..HEAD
-```
+That's the joke. The actual rule is the opposite: **it should never miss an
+affected target.** Reporting a few extra targets is fine (and measured);
+leaving one out is a bug. When cambium can't be sure, it says "everything"
+(`//...`) rather than guessing.
 
-`explain` prints the shortest path from that target back to the change. If
-a run went global, `explain` with no label tells you what caused it and
-how to fix it.
+Speed comes from not looking at what didn't change. A target's dependencies
+are determined entirely by its `BUILD` file, the `.bzl` files it loads,
+which files exist in its package, and a handful of repository-wide inputs
+(`MODULE.bazel`, lockfiles, `.bazelrc`). Starlark can't read the clock or
+the network during loading, so if none of those inputs changed, the
+package's part of the graph didn't either. So a run goes:
 
-## In CI
+1. Load the index from the most recent commit that has one.
+2. Turn `git diff` into the set of packages whose inputs moved, using
+   Bazel's own loading graph (Skyframe), saved alongside the index.
+3. Re-query just those packages with real Bazel and splice the results in.
+4. Walk reverse dependencies from everything that changed.
 
-The setup is two jobs. One runs after each merge to your main branch and
-keeps an index at its tip (`cambi index update HEAD --publish`). The other
-runs on each pull request and tests what it affects:
-
-```sh
-rc=0; cambi affected origin/main --tests-only --no-full-build --format labels > targets.txt || rc=$?
-case $rc in
-  0) [ ! -s targets.txt ] || bazel test --target_pattern_file=targets.txt ;;
-  2) bazel test --target_pattern_file=targets.txt ;;  # everything affected; the file holds //...
-  4|5) bazel test //... ;;                             # no index found, or the store is unreachable
-  *) exit "$rc" ;;
-esac
-```
-
-[docs/CI.md](docs/CI.md) walks through the full setup, with GitHub Actions
-workflows you can copy from [docs/ci/](docs/ci/).
+Some changes can't be answered incrementally, like a toolchain or platform
+definition moving. Those fall back to re-indexing the whole repository
+(still exact, just slower) or answer `//...`.
+[docs/DESIGN.md](docs/DESIGN.md) goes through every case, including the
+known gaps.
 
 ## More docs
 
