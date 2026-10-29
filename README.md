@@ -35,7 +35,8 @@ rebuilds    0/20        the whole graph was never rebuilt
 That's abseil-cpp. Most commits only touch source files, so they're
 answered from the index in about 60 ms. The few that change the graph itself (a
 `BUILD` file, an added or deleted file) re-query just the packages they
-touched, which takes a couple of seconds.
+touched, which takes a couple of seconds. abseil is small and tightly
+connected, so a typical commit still reaches most of its tests.
 
 After that, ask what a branch affects, and why:
 
