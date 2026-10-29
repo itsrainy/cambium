@@ -106,14 +106,14 @@ $ cambi doctor                              # checks Bazel, config and store
 
 ## Design philosophy
 
-cambium gives up strict correctness for speed, on purpose. bazel-diff and
-Tango hash the whole graph at both commits, which is about as correct as
-you can get, and costs the same whether you changed one line or a
-thousand. cambium only looks at what a change could have touched and
-trusts its index for everything else. That's where the speed comes from,
-and it's also where a miss can come from.
+cambium gives up strict correctness for speed, on purpose, and always errs
+on the side of reporting too much. Running a few extra tests is cheap;
+skipping one that a change broke is not. So it never tries to be exact
+when exact would be slow: when it can't cheaply tell whether a target was
+affected, it says it was, and when it can't answer at all, it says
+"everything" (`//...`). The precision table above is what that costs.
 
-The trust is well-founded most of the time. A target's dependencies
+Speed comes from not looking at what didn't change. A target's dependencies
 are determined entirely by its `BUILD` file, the `.bzl` files it loads,
 which files exist in its package, and a handful of repository-wide inputs
 (`MODULE.bazel`, lockfiles, `.bazelrc`). Starlark can't read the clock or
@@ -130,14 +130,11 @@ Some changes can't be answered incrementally, like a toolchain or platform
 definition moving. Those fall back to re-indexing the whole repository or
 answer "everything" (`//...`).
 
-The places where it can miss today are mostly at the edges of the main
-repository: an external repository that won't fetch or load on the machine
-running cambium, and repository inputs Bazel doesn't record well (a module
-extension reading a lock file, a repository's own definition changing in a
-`.bzl`). On the benchmark it never missed a target Bazel's `rdeps` check
-could see, but that check is blind to some of those same routes.
-[docs/DESIGN.md](docs/DESIGN.md) goes through every case, including the
-known gaps.
+A missed target is a bug. There are a few known places it can still
+happen, mostly at the edges of the main repository (an external repository
+that won't load on the machine running cambium, or a repository input Bazel
+doesn't record). [docs/DESIGN.md](docs/DESIGN.md) goes through every case,
+including those gaps.
 
 ## More docs
 
