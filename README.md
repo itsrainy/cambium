@@ -1,8 +1,8 @@
 # cambium
 
 **TL;DR:** cambium tells you which Bazel targets a set of file changes
-affected, in time that follows the size of the change rather than the size
-of your build graph. To try it on your own repository:
+affected, in time proportional to the size of the change. To try it on your
+own repository:
 
 ```console
 $ git clone https://github.com/itsrainy/cambium && cd cambium
